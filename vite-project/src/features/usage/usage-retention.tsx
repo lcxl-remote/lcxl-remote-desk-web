@@ -137,6 +137,11 @@ export function UsageRetentionPage() {
                                     disabled={update.isPending}
                                     onChange={(e) => setAgentSessionDays(e.target.value)}
                                 />
+                                {data?.data && Number(agentSessionDays) < data.data.agent_session_days && (
+                                    <p role="alert" className="text-sm text-amber-700 dark:text-amber-300">
+                                        {t('pages.usageRetention.agentSessionShrinkWarning')}
+                                    </p>
+                                )}
                             </div>
                             <div>
                                 <Button onClick={onSave} disabled={update.isPending}>

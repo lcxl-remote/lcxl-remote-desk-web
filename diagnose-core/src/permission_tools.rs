@@ -4,6 +4,7 @@
 //! provider/tool/effect against the compiled registry and only persists a
 //! `PermissionRequest`. This module cannot create a grant or dispatch work.
 
+use crate::command_confirmation::CommandConfirmation;
 use std::collections::BTreeSet;
 
 use desk_agent_protocol::browser_control::{BrowserNavigationTarget, BrowserPageRef};
@@ -828,6 +829,7 @@ pub fn build_permission_request(
         ));
     }
 
+    let request_item_count = params.items.len();
     let mut items = Vec::with_capacity(params.items.len());
     for item in params.items {
         let capability = registry
@@ -1227,6 +1229,15 @@ pub fn build_permission_request(
                 |scope| scope.resources.clone(),
             )
         };
+        if command_confirmation
+            .as_ref()
+            .is_some_and(CommandConfirmation::is_interactive)
+            && request_item_count != 1
+        {
+            return Err(invalid(
+                "an interactive (PTY) command must be requested alone: its approval binds the owner's live terminal",
+            ));
+        }
         items.push(GrantRequestItem {
             item_id: item.item_id.trim().to_string(),
             provider_id: provider.wire.provider_id.clone(),
@@ -2056,6 +2067,128 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.message.contains("command rejected by current policy"));
+    }
+
+    #[test]
+    fn interactive_commands_must_be_requested_alone() {
+        let registry = crate::ai_assistant::ai_assistant_provider_registry()
+            .with_command_policy(crate::command_confirmation::test_policy());
+        let item = |id: &str, command: &str, io_mode: &str| serde_json::json!({"item_id":id,"provider_id":"system.command","tool_name":"exec_command","expected_effect":"execute_command","exact_input":{"schema_version":1,"shell":"bash","command":command,"timeout_ms":10000,"io_mode":io_mode},"suggested_ttl_seconds":60,"suggested_max_uses":1,"reason":"Run it"});
+        let build = |items: Vec<serde_json::Value>| {
+            build_permission_request(
+                &call(&serde_json::json!({ "items": items }).to_string()),
+                &registry,
+                "permission-pty".into(),
+                1,
+                "2026-08-26T00:00:00Z".into(),
+            )
+        };
+        let alone = build(vec![item("pty", "top", "pty")]).unwrap();
+        assert!(
+            alone.items[0]
+                .command_confirmation
+                .as_ref()
+                .unwrap()
+                .is_interactive()
+        );
+        for mixed in [
+            vec![
+                item("pty", "top", "pty"),
+                item("plain", "df -h", "non_interactive"),
+            ],
+            vec![item("pty-1", "top", "pty"), item("pty-2", "htop", "pty")],
+        ] {
+            let error = build(mixed).unwrap_err();
+            assert!(
+                error.message.contains("requested alone"),
+                "{}",
+                error.message
+            );
+        }
+        // Several non-interactive commands may still share one request.
+        assert!(
+            build(vec![
+                item("a", "df -h", "non_interactive"),
+                item("b", "uptime", "non_interactive")
+            ])
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn an_interactive_approval_requires_exactly_its_carrier() {
+        use crate::command_confirmation::{CarrierUsageError, interactive_approval};
+        use crate::dynamic_run::{PermissionDecisionItem, PermissionItemDecision};
+        let registry = crate::ai_assistant::ai_assistant_provider_registry()
+            .with_command_policy(crate::command_confirmation::test_policy());
+        let request_for = |io_mode: &str| {
+            build_permission_request(
+                &call(&serde_json::json!({"items":[{"item_id":"command","provider_id":"system.command","tool_name":"exec_command","expected_effect":"execute_command","exact_input":{"schema_version":1,"shell":"bash","command":"top","timeout_ms":10000,"io_mode":io_mode},"suggested_ttl_seconds":60,"suggested_max_uses":1,"reason":"Run it"}]}).to_string()),
+                &registry,
+                "permission-pty".into(),
+                1,
+                "2026-08-26T00:00:00Z".into(),
+            )
+            .unwrap()
+        };
+        let approve = vec![PermissionDecisionItem {
+            item_id: "command".into(),
+            decision: PermissionItemDecision::Approve {
+                resource_scope: vec![],
+                operation_scope: vec![],
+                export_destinations: vec![],
+                ttl_seconds: 60,
+                max_uses: 1,
+            },
+        }];
+        let deny = vec![PermissionDecisionItem {
+            item_id: "command".into(),
+            decision: PermissionItemDecision::Deny,
+        }];
+        let pty = request_for("pty");
+        let approval = interactive_approval("run", &pty, &approve, Some("carrier"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            approval.exec_request_id,
+            crate::command_confirmation::interactive_exec_request_id(
+                "run",
+                "permission-pty",
+                &pty.items[0]
+                    .command_confirmation
+                    .as_ref()
+                    .unwrap()
+                    .canonical_input_digest_sha256
+            )
+        );
+        assert_eq!(approval.target_connection_id, "host");
+        assert_eq!(
+            interactive_approval("run", &pty, &approve, None),
+            Err(CarrierUsageError::CarrierRequired)
+        );
+        // Rejecting needs no carrier and must not carry one.
+        assert_eq!(interactive_approval("run", &pty, &deny, None), Ok(None));
+        assert_eq!(
+            interactive_approval("run", &pty, &deny, Some("carrier")),
+            Err(CarrierUsageError::CarrierNotAllowed)
+        );
+        // An ordinary command never takes a carrier.
+        let plain = request_for("non_interactive");
+        assert_eq!(
+            interactive_approval("run", &plain, &approve, None),
+            Ok(None)
+        );
+        assert_eq!(
+            interactive_approval("run", &plain, &approve, Some("carrier")),
+            Err(CarrierUsageError::CarrierNotAllowed)
+        );
+        // A replay of a committed decision consumes nothing.
+        let mut decided = pty.clone();
+        decided.state = crate::dynamic_run::PermissionRequestState::Approved;
+        assert_eq!(
+            interactive_approval("run", &decided, &approve, Some("carrier")),
+            Ok(None)
+        );
     }
 
     #[test]

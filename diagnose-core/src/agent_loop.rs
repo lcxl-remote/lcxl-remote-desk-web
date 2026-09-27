@@ -4596,6 +4596,23 @@ async fn run_inner_impl(
                                     safe_for_model: false,
                                     error_code: None,
                                 })?;
+                                // An interactive command needs the owner's live terminal
+                                // at approval time; unattended turns cannot provide one.
+                                if session.trigger_origin != crate::session::TriggerOrigin::User
+                                    && request.items.iter().any(|item| {
+                                        item.command_confirmation
+                                            .as_ref()
+                                            .is_some_and(|confirmation| confirmation.is_interactive())
+                                    })
+                                {
+                                    return Err(AgentError {
+                                        kind: AgentErrorKind::PermissionDenied,
+                                        message: "interactive (PTY) commands need the owner's live terminal and cannot be requested from a goal or scheduled run; use a non-interactive command".into(),
+                                        retryable: false,
+                                        safe_for_model: true,
+                                        error_code: None,
+                                    });
+                                }
                                 crate::application_ui::bind_request(&mut request, &session.conversation)?;
                                 crate::permission_tools::include_desktop_action_reads(&mut request, providers)?;
                                 validate_permission_request_availability(

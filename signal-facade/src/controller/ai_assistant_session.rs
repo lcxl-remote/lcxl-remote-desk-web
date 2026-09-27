@@ -85,6 +85,11 @@ pub struct PermissionDecisionBody {
     pub expected_run_request_id: Option<String>,
     pub request_id: String,
     pub items: Vec<PermissionDecisionItemBody>,
+    /// Ready terminal carrier of the approving client. Required to approve an
+    /// interactive (PTY) command, which is always requested alone; rejected
+    /// for any other approval. Rejecting a PTY command needs no carrier.
+    #[serde(default)]
+    pub carrier_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, ToSchema)]
@@ -1376,10 +1381,29 @@ impl PermissionRequestDto {
         self
     }
 
+    /// Projects a stored request for the owner. `run_id` binds interactive
+    /// commands to their derived execution id.
     pub fn with_file_evidence(
         request: desk_diagnose_core::dynamic_run::PermissionRequest,
+        run_id: &str,
         messages: &[desk_diagnose_core::chat::ChatMessage],
     ) -> Self {
+        let interactive_ids = request
+            .items
+            .iter()
+            .map(|item| {
+                item.command_confirmation
+                    .as_ref()
+                    .filter(|confirmation| confirmation.is_interactive())
+                    .map(|confirmation| {
+                        desk_diagnose_core::command_confirmation::interactive_exec_request_id(
+                            run_id,
+                            &request.request_id,
+                            &confirmation.canonical_input_digest_sha256,
+                        )
+                    })
+            })
+            .collect::<Vec<_>>();
         let reviews = request
             .items
             .iter()
@@ -1399,6 +1423,16 @@ impl PermissionRequestDto {
         let mut dto = Self::from(request);
         for (item, review) in dto.items.iter_mut().zip(reviews) {
             item.text_file_confirmation = review;
+        }
+        for (item, exec_request_id) in dto.items.iter_mut().zip(interactive_ids) {
+            if let (Some(interactive), Some(exec_request_id)) = (
+                item.command_confirmation
+                    .as_mut()
+                    .and_then(|confirmation| confirmation.interactive.as_mut()),
+                exec_request_id,
+            ) {
+                interactive.exec_request_id = exec_request_id;
+            }
         }
         dto
     }
@@ -1432,6 +1466,22 @@ pub struct CommandConfirmationDto {
     pub max_stderr_bytes: u32,
     pub execution_basis: desk_agent_protocol::exec::ExecExecutionBasis,
     pub one_shot: bool,
+    /// Present for an interactive (PTY) command: the client opens a terminal
+    /// carrier for exactly this execution before approving.
+    pub interactive: Option<InteractiveCommandDto>,
+}
+
+/// Binding a client needs to prepare the terminal carrier of a pending
+/// interactive command.
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct InteractiveCommandDto {
+    /// Server-derived execution id the carrier is prepared for.
+    pub exec_request_id: String,
+    /// Host connection the command runs on.
+    pub target_connection_id: String,
+    /// The command runs `sudo`/`doas`; the owner may be asked for a password.
+    pub elevated: bool,
 }
 
 fn external_send_confirmation(
@@ -1620,6 +1670,20 @@ impl From<desk_diagnose_core::dynamic_run::PermissionRequest> for PermissionRequ
                                 max_stderr_bytes: confirmation.plan.max_stderr_bytes,
                                 execution_basis: confirmation.plan.execution_basis,
                                 one_shot: true,
+                                interactive: confirmation.is_interactive().then(|| {
+                                    InteractiveCommandDto {
+                                        exec_request_id: String::new(),
+                                        target_connection_id: confirmation
+                                            .target_session_id
+                                            .rsplit_once(':')
+                                            .map_or(
+                                                confirmation.target_session_id.as_str(),
+                                                |(connection, _)| connection,
+                                            )
+                                            .to_owned(),
+                                        elevated: confirmation.is_elevated(),
+                                    }
+                                }),
                             });
                     let application_scope = desk_diagnose_core::application_ui::from_canonical(
                         &item.tool_name,

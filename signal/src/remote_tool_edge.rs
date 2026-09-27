@@ -1953,10 +1953,18 @@ impl SignalAiAssistantTools {
                 false,
             )
         })?;
-        let server_call_id = format!(
-            "capability-call-{:x}",
-            Sha256::digest(format!("{}:{}:{}", self.run_id, self.turn_id, call.id).as_bytes())
-        );
+        // An interactive command runs under the id its approved permission
+        // derived: the owner's carrier was prepared and consumed for that id.
+        let server_call_id = desk_diagnose_core::command_confirmation::CommandConfirmation::interactive_exec_request_id_for_call(
+            &session,
+            &canonical_input_json,
+        )?
+        .unwrap_or_else(|| {
+            format!(
+                "capability-call-{:x}",
+                Sha256::digest(format!("{}:{}:{}", self.run_id, self.turn_id, call.id).as_bytes())
+            )
+        });
         let call_authority = CapabilityGrantCall {
             actor_id: &self.actor_id,
             run_id: &self.run_id,

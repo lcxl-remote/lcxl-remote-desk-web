@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
-import { useConfirmExec } from './use-confirm-exec';
+import { terminalOutcomeFromStateReport, useConfirmExec } from './use-confirm-exec';
 import type {
     ExecLifecyclePayload,
     ExecPreview,
@@ -467,5 +467,58 @@ describe('useConfirmExec', () => {
         );
         expect(hook.result.current.entries[0].phase).toBe('running');
         expect(hook.result.current.entries[0].runningMs).toBe(1500);
+    });
+
+    it('settles from the recorded outcome of a terminal state report', () => {
+        const { hook, feed } = render();
+        const generation = approved(hook, feed);
+        const recorded = {
+            status: 'ok',
+            data: {
+                kind: 'exec',
+                params: {
+                    exit_code: 0,
+                    streams: { type: 'pty_combined', terminal: 'done\r\n', truncated: false },
+                    duration_ms: 5,
+                    redactions: [],
+                },
+            },
+        };
+        act(() =>
+            feed(
+                stateReplyFrame({
+                    execution_generation: generation,
+                    state: 'terminal',
+                    containment_identity: null,
+                    running_ms: null,
+                    detail: null,
+                    result_json: JSON.stringify(recorded),
+                }),
+            ),
+        );
+        expect(hook.result.current.entries[0].phase).toBe('done');
+        const streams = hook.result.current.entries[0].output?.streams;
+        expect(streams?.type === 'pty_combined' ? streams.terminal : null).toBe('done\r\n');
+        // The late live result of the same execution does not reopen the row.
+        act(() => feed(resultFrame({ exec_request_id: 'exec-1', outcome: { status: 'err', data: { kind: 'internal', message: 'late', retryable: false, safe_for_model: true } as never } })));
+        expect(hook.result.current.entries[0].phase).toBe('done');
+    });
+
+    it('keeps waiting on a terminal report without a recorded result', () => {
+        expect(terminalOutcomeFromStateReport({
+            execution_generation: 'g',
+            state: 'terminal',
+            containment_identity: null,
+            running_ms: null,
+            detail: null,
+        })).toBeNull();
+        expect(terminalOutcomeFromStateReport({
+            execution_generation: 'g',
+            state: 'terminal',
+            containment_identity: null,
+            running_ms: null,
+            detail: null,
+            result_json: '{not json',
+        })).toBeNull();
     });
 });

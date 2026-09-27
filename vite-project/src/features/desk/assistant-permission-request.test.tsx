@@ -145,4 +145,42 @@ describe('shared permission review', () => {
         expect(screen.getByText('Inspect selected device')).toBeInTheDocument();
         expect(screen.queryByRole('button')).not.toBeInTheDocument();
     });
+    describe('interactive command', () => {
+        const pty = () => request([item({
+            itemId: 'command', toolName: 'exec_command', providerId: 'system.command',
+            expectedEffect: 'execute_command', resourceScope: ['command_input:sha256:x'],
+            operationScope: ['exec_command'], suggestedMaxUses: 1,
+            commandConfirmation: {
+                command: 'sudo docker ps', shell: 'bash', cwd: null, targetDeviceId: 'd',
+                targetSessionId: 'host:1', timeoutMs: 1000, maxStdoutBytes: 1, maxStderrBytes: 1,
+                executionBasis: 'template', oneShot: true,
+                interactive: { execRequestId: 'exec_pty_1', targetConnectionId: 'host', elevated: true },
+            },
+        })]);
+        it('replaces the ordinary approval with open-terminal approval', () => {
+            render(<AssistantPermissionRequest request={pty()} canDecide
+                interactive={{ runId: 'run', browserConnectionId: 'browser' }} onDecide={vi.fn()} />);
+            expect(screen.queryByRole('button', { name: 'pages.aiAssistant.permissionSubmitSelection' })).not.toBeInTheDocument();
+            expect(screen.getByRole('button', { name: 'pages.aiAssistant.interactiveCommand.openAndApprove' })).toBeEnabled();
+            expect(screen.getByText('pages.aiAssistant.interactiveCommand.elevated')).toBeInTheDocument();
+        });
+        it('cannot open a terminal before the client connection is known', () => {
+            render(<AssistantPermissionRequest request={pty()} canDecide
+                interactive={{ runId: 'run', browserConnectionId: null }} onDecide={vi.fn()} />);
+            expect(screen.getByRole('button', { name: 'pages.aiAssistant.interactiveCommand.openAndApprove' })).toBeDisabled();
+        });
+        it('denies without a carrier', () => {
+            const onDecide = vi.fn().mockResolvedValue(true);
+            render(<AssistantPermissionRequest request={pty()} canDecide
+                interactive={{ runId: 'run', browserConnectionId: 'browser' }} onDecide={onDecide} />);
+            fireEvent.click(screen.getByRole('button', { name: 'pages.aiAssistant.permissionDeny' }));
+            expect(onDecide).toHaveBeenCalledWith(expect.anything(), [{ itemId: 'command', decision: 'deny' }]);
+        });
+        it('is never approvable where no terminal can be opened', () => {
+            render(<AssistantPermissionRequest request={pty()} canDecide onDecide={vi.fn()} />);
+            expect(screen.queryByRole('button', { name: 'pages.aiAssistant.interactiveCommand.openAndApprove' })).not.toBeInTheDocument();
+            expect(screen.queryByRole('button', { name: 'pages.aiAssistant.permissionSubmitSelection' })).not.toBeInTheDocument();
+            expect(screen.getByText('pages.aiAssistant.interactiveCommand.unsupportedHere')).toBeInTheDocument();
+        });
+    });
 });

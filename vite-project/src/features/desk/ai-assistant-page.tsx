@@ -975,7 +975,13 @@ export function AiAssistantWorkspace({
                                 <AssistantPermissionRequest key={`${permissionHistoryKey}:${request.requestId}:${request.inputRevision}`}
                                     request={request} canDecide={featureProfile.permission_decision && request.inputRevision === chat.inputRevision}
                                     disabled={!assistantEnabled || !isConnected || chat.hydrating || chat.turnRunning}
-                                    busy={chat.permissionUpdating} waitingForTurn={chat.turnRunning} onDecide={chat.decidePermissionItems} />
+                                    busy={chat.permissionUpdating} waitingForTurn={chat.turnRunning}
+                                    interactive={featureProfile.exec_pty ? {
+                                        runId: chat.runId,
+                                        browserConnectionId: chat.browserConnectionId,
+                                        deviceId: stableDeviceId,
+                                    } : undefined}
+                                    onDecide={chat.decidePermissionItems} />
                             )}
                     </AssistantPermissionRecords>
                     </div>

@@ -2167,7 +2167,7 @@ fn exec_command_tool() -> RegisteredTool {
     RegisteredTool {
         spec: ToolSpec {
             name: "exec_command".into(),
-            description: "Execute one exact owner-confirmed command on the current device. Owner policy allows non-blacklisted template-free commands, pipelines and multi-line scripts, classified as Critical and potentially mutating. If its parameter format is not already available, obtain it with describe_tools before preparing exact_input. Request an R3 one-shot grant with exact_input containing shell, command, timeout_ms and optional cwd; do not provide schema_version. Use a shell available on this device. Request the grant for the identical complete structured input and wait for owner approval. The server freezes the plan; the shell interprets the approved script. This is not a sandbox and does not grant elevation. Managed child processes are reclaimed when the command finishes normally, times out, is cancelled or fails. Use launch_application for applications or long-running tasks that must survive the tool call; its permission is independent. System-mediated external effects may survive command cleanup. An Exec receipt is not proof of success: check started, failure, nullable exit_code, termination_signal and diagnostics. Failed commands retain captured stdout/stderr or combined PTY output; explain the native creation error separately from a nonzero process exit or capture/cleanup failure. A missing exit status is unknown, never exit zero; do not automatically retry a started command with unknown outcome.".into(),
+            description: "Execute one exact owner-confirmed command on the current device. Owner policy allows non-blacklisted template-free commands, pipelines and multi-line scripts, classified as Critical and potentially mutating. If its parameter format is not already available, obtain it with describe_tools before preparing exact_input. Request an R3 one-shot grant with exact_input containing shell, command, timeout_ms, optional cwd and optional io_mode; do not provide schema_version. Use a shell available on this device. Request the grant for the identical complete structured input and wait for owner approval. The server freezes the plan; the shell interprets the approved script. This is not a sandbox. Elevation (sudo/doas of one exact allowed command) is only possible with io_mode pty on a host that enables interactive elevation, and the owner answers any password prompt in the terminal. Managed child processes are reclaimed when the command finishes normally, times out, is cancelled or fails. Use launch_application for applications or long-running tasks that must survive the tool call; its permission is independent. System-mediated external effects may survive command cleanup. An Exec receipt is not proof of success: check started, failure, nullable exit_code, termination_signal and diagnostics. Failed commands retain captured stdout/stderr or combined PTY output; explain the native creation error separately from a nonzero process exit or capture/cleanup failure. A missing exit status is unknown, never exit zero; do not automatically retry a started command with unknown outcome.".into(),
             parameters_schema: json!({
                 "type": "object",
                 "properties": {
@@ -2191,6 +2191,11 @@ fn exec_command_tool() -> RegisteredTool {
                         "type": "integer",
                         "minimum": 1,
                         "maximum": 7200000
+                    },
+                    "io_mode": {
+                        "type": "string",
+                        "enum": ["non_interactive", "pty"],
+                        "description": "Omit or use non_interactive by default. Use pty only when the command genuinely needs a terminal (prompts, TTY checks, sudo/doas password entry). A pty command must be requested alone; the owner keeps a live terminal open, types any input and can stop it. Output is merged into one stream."
                     }
                 },
                 "required": ["schema_version", "shell", "command", "timeout_ms"],

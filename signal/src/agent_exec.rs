@@ -113,7 +113,7 @@ impl SignalAgentExecPending {
                 };
                 if !crate::exec_pty_carrier::global_exec_pty_carriers().consume_for_approval(
                     carrier_id,
-                    browser_connection_id,
+                    Some(browser_connection_id),
                     &entry.target_connection_id,
                     &data.exec_request_id.0,
                 ) {
@@ -772,14 +772,6 @@ impl SignalAgentTools {
                 reason: Some(classified.classification.impact),
             });
         };
-        if draft.requires_root_pty_containment() {
-            return Ok(ExecOutcome::Rejected {
-                reason: Some(
-                    "interactive elevation is unavailable until the Linux ServiceDaemon containment supervisor is ready"
-                        .into(),
-                ),
-            });
-        }
         if classified.classification.decision != ExecDecision::ConfirmRequired
             || draft.risk > self.max_risk
             || draft != confirmation.plan
@@ -826,6 +818,26 @@ impl SignalAgentTools {
         )
         .await?
         .revalidate(confirmation, canonical_input, confirmation.input_revision)?;
+        // An approved interactive command dispatches with the carrier its
+        // owner consumed at approval; without it nothing is sent. Interactive
+        // elevation was admitted by the policy revalidation above.
+        let carrier_id = if draft.io_mode.is_pty() {
+            match crate::exec_pty_carrier::global_exec_pty_carriers()
+                .consumed_carrier_for(&self.target_connection_id, &exec_request_id.0)
+            {
+                Some(carrier_id) => Some(carrier_id),
+                None => {
+                    return Ok(ExecOutcome::Rejected {
+                        reason: Some(
+                            "the owner's interactive terminal is no longer open; the command was not executed"
+                                .into(),
+                        ),
+                    });
+                }
+            }
+        } else {
+            None
+        };
         let plan = ExecPlan::from_draft(exec_request_id, execution_generation, approval_id, draft);
         let actor_user_id = ctx.actor_id.parse::<i32>().map_err(|_| {
             safe(
@@ -841,7 +853,7 @@ impl SignalAgentTools {
                 refreshed_scope,
                 plan,
                 validation_input,
-                None,
+                carrier_id,
                 ctx,
                 true,
             )

@@ -60,6 +60,8 @@ export type ExecPtyPrepare = {
     targetConnectionId: string;
     execRequestId: string;
     deviceId?: string;
+    /** Pending AI Assistant permission this carrier is prepared for. */
+    permission?: { runId: string; requestId: string };
 };
 
 function websocketUrl(deviceId?: string): string {
@@ -210,6 +212,12 @@ export class ExecPtyClient {
                         browser_connection_id: request.browserConnectionId,
                         target_connection_id: request.targetConnectionId,
                         exec_request_id: request.execRequestId,
+                        ...(request.permission ? {
+                            permission: {
+                                run_id: request.permission.runId,
+                                request_id: request.permission.requestId,
+                            },
+                        } : {}),
                     }));
                 } catch {
                     settleError('PTY carrier preparation failed');

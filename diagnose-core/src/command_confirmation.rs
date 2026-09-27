@@ -3,7 +3,9 @@
 use desk_agent_protocol::authz::ExecAdmissionPolicy;
 use desk_agent_protocol::command_blocklist::BlocklistRule;
 use desk_agent_protocol::command_template::SyncedCommandTemplate;
-use desk_agent_protocol::exec::{CommandDraft, ExecDecision, ExecIoMode, ExecPlanDraft};
+use desk_agent_protocol::exec::{
+    CommandDraft, CommandIoMode, ExecDecision, ExecIoMode, ExecPlanDraft,
+};
 use desk_agent_protocol::{
     AgentError, AgentErrorKind, ExecInput, ExecTarget, ExecutionMode, RiskLevel,
 };
@@ -29,6 +31,11 @@ pub struct CommandPolicyContext {
     pub effective_blocklist: Vec<BlocklistRule>,
     /// Stable policy axes; heartbeat timestamps are deliberately excluded.
     pub policy_version: String,
+    /// The target host reports that interactive (PTY) execution is enabled.
+    pub exec_pty: bool,
+    /// The target host reports that interactive elevation (`sudo`/`doas`
+    /// inside a PTY) is enabled.
+    pub exec_pty_elevation: bool,
 }
 
 #[cfg(test)]
@@ -46,6 +53,8 @@ pub(crate) fn test_policy() -> CommandPolicyContext {
         operator_templates: vec![],
         effective_blocklist: desk_agent_protocol::exec_policy::builtin_blocklist().to_vec(),
         policy_version: "test:1".into(),
+        exec_pty: true,
+        exec_pty_elevation: true,
     }
 }
 
@@ -53,14 +62,71 @@ pub(crate) fn test_policy() -> CommandPolicyContext {
 mod tests {
     use super::*;
     fn input(command: &str) -> String {
+        input_with(command, CommandIoMode::NonInteractive)
+    }
+
+    fn input_with(command: &str, io_mode: CommandIoMode) -> String {
         serde_json::to_string(&CommandDraft {
             schema_version: 1,
             shell: "bash".into(),
             command: command.into(),
             cwd: None,
             timeout_ms: 30_000,
+            io_mode,
         })
         .unwrap()
+    }
+
+    #[test]
+    fn interactive_commands_seal_a_pty_plan_only_when_the_host_allows_it() {
+        let canonical = input_with("top", CommandIoMode::Pty);
+        let confirmation = test_policy().prepare(&canonical, 1).unwrap();
+        assert!(confirmation.plan.io_mode.is_pty());
+        assert!(confirmation.is_interactive());
+        assert!(!confirmation.is_elevated());
+        test_policy()
+            .revalidate(&confirmation, &canonical, 1)
+            .unwrap();
+        // The PTY mode is part of the plan fingerprint and of the proposal.
+        let mut downgraded = confirmation.clone();
+        downgraded.plan.io_mode = ExecIoMode::NonInteractive;
+        assert!(downgraded.validate(&canonical).is_err());
+        let mut policy = test_policy();
+        policy.exec_pty = false;
+        assert!(policy.prepare(&canonical, 1).is_err());
+        assert!(policy.revalidate(&confirmation, &canonical, 1).is_err());
+        // Non-interactive commands never need the PTY capability.
+        assert!(policy.prepare(&input("df -h"), 1).is_ok());
+    }
+
+    #[test]
+    fn interactive_elevation_requires_the_elevation_capability() {
+        let canonical = input_with("sudo docker ps", CommandIoMode::Pty);
+        let confirmation = test_policy().prepare(&canonical, 1).unwrap();
+        assert!(confirmation.is_elevated());
+        let mut policy = test_policy();
+        policy.exec_pty_elevation = false;
+        assert!(policy.prepare(&canonical, 1).is_err());
+        // Elevation outside a PTY stays blocked.
+        assert!(test_policy().prepare(&input("sudo df -h"), 1).is_err());
+    }
+
+    #[test]
+    fn interactive_execution_ids_are_stable_per_permission_item() {
+        let first = interactive_exec_request_id("run", "request", "digest");
+        assert_eq!(
+            first,
+            interactive_exec_request_id("run", "request", "digest")
+        );
+        assert!(first.starts_with("exec_pty_"));
+        assert!(first.len() <= desk_agent_protocol::exec_pty::MAX_PTY_STREAM_ID_BYTES);
+        for other in [
+            interactive_exec_request_id("run2", "request", "digest"),
+            interactive_exec_request_id("run", "request2", "digest"),
+            interactive_exec_request_id("run", "request", "digest2"),
+        ] {
+            assert_ne!(first, other);
+        }
     }
 
     #[test]
@@ -190,6 +256,11 @@ impl CommandPolicyContext {
                 &format!("Invalid exact command input: {e}"),
             ))
         })?;
+        if proposal.io_mode == CommandIoMode::Pty && !self.exec_pty {
+            return Err(denied(
+                "interactive (PTY) execution is not enabled on this device",
+            ));
+        }
         let shell = crate::exec_tools::canonical_exec_shell(&proposal.shell)
             .ok_or_else(|| denied("exact command shell is not supported"))?;
         if !crate::exec_tools::exec_shell_is_available(shell, &self.available_shells) {
@@ -201,7 +272,7 @@ impl CommandPolicyContext {
             },
             command: proposal.command.clone(),
             cwd: proposal.cwd.clone(),
-            io_mode: ExecIoMode::NonInteractive,
+            io_mode: proposal.io_mode.exec_io_mode(),
             timeout_ms: proposal.timeout_ms,
             max_stdout_bytes: 65_536,
             max_stderr_bytes: 65_536,
@@ -222,9 +293,12 @@ impl CommandPolicyContext {
         let plan = classified
             .draft
             .ok_or_else(|| denied("command has no executable plan"))?;
-        if plan.risk > self.max_risk || plan.io_mode.is_pty() {
+        if plan.risk > self.max_risk {
+            return Err(denied("command exceeds the current risk policy"));
+        }
+        if plan.requires_root_pty_containment() && !self.exec_pty_elevation {
             return Err(denied(
-                "command exceeds the current risk or non-interactive execution policy",
+                "interactive elevation is not enabled on this device",
             ));
         }
         let confirmation = CommandConfirmation {
@@ -260,7 +334,181 @@ impl CommandPolicyContext {
     }
 }
 
+/// Stable execution id of an interactive command, derived from the permission
+/// item that approves it. The owner's terminal carrier is prepared for this id
+/// while the permission is still pending, and the approved execution reuses it,
+/// so the host's stream-opened report matches the carrier it was bound to.
+/// Prefix of every permission-derived interactive execution id.
+pub const INTERACTIVE_EXEC_REQUEST_PREFIX: &str = "exec_pty_";
+
+/// Whether an execution id was derived from an owner-approved PTY permission.
+/// Such an execution binds the carrier consumed by that approval, whichever
+/// client connection later runs the approved turn.
+pub fn is_permission_bound_exec_request_id(exec_request_id: &str) -> bool {
+    exec_request_id.starts_with(INTERACTIVE_EXEC_REQUEST_PREFIX)
+}
+
+pub fn interactive_exec_request_id(
+    run_id: &str,
+    permission_request_id: &str,
+    canonical_input_digest_sha256: &str,
+) -> String {
+    let digest = Sha256::digest(
+        [
+            "pty-permission",
+            run_id,
+            permission_request_id,
+            canonical_input_digest_sha256,
+        ]
+        .join("\0")
+        .as_bytes(),
+    );
+    format!(
+        "{INTERACTIVE_EXEC_REQUEST_PREFIX}{}",
+        &format!("{digest:x}")[..32]
+    )
+}
+
+/// The interactive command a permission decision approves, and the carrier
+/// binding it needs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InteractiveApproval {
+    pub exec_request_id: String,
+    pub target_connection_id: String,
+}
+
+/// How a decision may use the client's `carrierId`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CarrierUsageError {
+    /// Approving an interactive command needs the owner's ready carrier.
+    CarrierRequired,
+    /// A carrier was supplied for a decision that approves no interactive
+    /// command (a denial, or an ordinary request).
+    CarrierNotAllowed,
+}
+
+/// Validates the carrier of one pending permission decision. Returns the
+/// interactive approval that must consume the carrier, or `None` when the
+/// decision involves no carrier. A request that is no longer pending (a
+/// replay of a committed decision) never consumes one.
+pub fn interactive_approval(
+    run_id: &str,
+    request: &crate::dynamic_run::PermissionRequest,
+    decisions: &[crate::dynamic_run::PermissionDecisionItem],
+    carrier_id: Option<&str>,
+) -> Result<Option<InteractiveApproval>, CarrierUsageError> {
+    use crate::dynamic_run::{PermissionItemDecision, PermissionRequestState};
+    let carrier_id = carrier_id.filter(|value| !value.is_empty());
+    let approved = request
+        .items
+        .iter()
+        .filter_map(|item| {
+            let confirmation = item
+                .command_confirmation
+                .as_ref()
+                .filter(|confirmation| confirmation.is_interactive())?;
+            decisions
+                .iter()
+                .any(|decision| {
+                    decision.item_id == item.item_id
+                        && matches!(decision.decision, PermissionItemDecision::Approve { .. })
+                })
+                .then(|| InteractiveApproval {
+                    exec_request_id: interactive_exec_request_id(
+                        run_id,
+                        &request.request_id,
+                        &confirmation.canonical_input_digest_sha256,
+                    ),
+                    target_connection_id: confirmation
+                        .target_session_id
+                        .rsplit_once(':')
+                        .map_or(
+                            confirmation.target_session_id.as_str(),
+                            |(connection, _)| connection,
+                        )
+                        .to_owned(),
+                })
+        })
+        .next();
+    match (approved, carrier_id) {
+        (None, Some(_)) => Err(CarrierUsageError::CarrierNotAllowed),
+        (None, None) => Ok(None),
+        (Some(_), _) if request.state != PermissionRequestState::Pending => Ok(None),
+        (Some(_), None) => Err(CarrierUsageError::CarrierRequired),
+        (Some(approval), Some(_)) => Ok(Some(approval)),
+    }
+}
+
 impl CommandConfirmation {
+    pub fn is_interactive(&self) -> bool {
+        self.plan.io_mode.is_pty()
+    }
+
+    pub fn is_elevated(&self) -> bool {
+        self.plan.requires_root_pty_containment()
+    }
+
+    /// The approved confirmation for this exact call together with the id of
+    /// the permission request that approved it.
+    pub fn approved_request_for_call<'a>(
+        session: &'a crate::session::PersistedAgentSession,
+        canonical: &str,
+    ) -> Result<(&'a str, &'a Self), AgentError> {
+        use crate::dynamic_run::PermissionRequestState;
+        let digest = format!("{:x}", Sha256::digest(canonical.as_bytes()));
+        session
+            .permission_requests
+            .iter()
+            .rev()
+            .filter(|request| {
+                request.input_revision == session.input_revision
+                    && matches!(
+                        request.state,
+                        PermissionRequestState::Approved
+                            | PermissionRequestState::PartiallyApproved
+                    )
+            })
+            .flat_map(|request| {
+                request
+                    .items
+                    .iter()
+                    .map(move |item| (request.request_id.as_str(), item))
+            })
+            .filter(|(_, item)| {
+                item.tool_name == COMMAND_TOOL
+                    && item.canonical_input_digest_sha256.as_deref() == Some(digest.as_str())
+            })
+            .filter_map(|(request_id, item)| {
+                item.command_confirmation
+                    .as_ref()
+                    .map(|confirmation| (request_id, confirmation))
+            })
+            .find(|(_, confirmation)| {
+                confirmation.actor_id == session.actor_id
+                    && confirmation.target_device_id == session.device_id
+                    && confirmation.input_revision == session.input_revision
+                    && confirmation.policy_revision == session.policy_revision
+                    && confirmation.validate(canonical).is_ok()
+            })
+            .ok_or_else(|| denied("command has no approved exact plan; request permission first"))
+    }
+
+    /// Execution id for this approved call: the permission-derived id for an
+    /// interactive command, `None` otherwise.
+    pub fn interactive_exec_request_id_for_call(
+        session: &crate::session::PersistedAgentSession,
+        canonical: &str,
+    ) -> Result<Option<String>, AgentError> {
+        let (request_id, confirmation) = Self::approved_request_for_call(session, canonical)?;
+        Ok(confirmation.is_interactive().then(|| {
+            interactive_exec_request_id(
+                &session.conversation_id,
+                request_id,
+                &confirmation.canonical_input_digest_sha256,
+            )
+        }))
+    }
+
     pub fn approved_for_call<'a>(
         session: &'a crate::session::PersistedAgentSession,
         canonical: &str,
@@ -300,7 +548,7 @@ impl CommandConfirmation {
             || self.actor_id.is_empty()
             || self.target_session_id.is_empty()
             || self.policy_version.is_empty()
-            || self.plan.io_mode != ExecIoMode::NonInteractive
+            || self.plan.io_mode != self.proposal.io_mode.exec_io_mode()
             || serde_json::from_str::<CommandDraft>(canonical)
                 .ok()
                 .as_ref()

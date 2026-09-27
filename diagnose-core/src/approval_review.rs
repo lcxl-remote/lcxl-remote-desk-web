@@ -914,6 +914,17 @@ pub struct PermissionReviewInput<'a> {
 
 /// Freeze one item of a durable permission request for independent review.
 /// Missing or oversized causal evidence fails closed without a reviewer verdict.
+/// Whether only the owner may decide this request. An interactive (PTY)
+/// command is approved together with the owner's live terminal carrier, which
+/// an AI reviewer cannot provide.
+pub fn requires_owner_decision(request: &crate::dynamic_run::PermissionRequest) -> bool {
+    request.items.iter().any(|item| {
+        item.command_confirmation
+            .as_ref()
+            .is_some_and(|confirmation| confirmation.is_interactive())
+    })
+}
+
 pub fn permission_review_candidate(
     input: PermissionReviewInput<'_>,
 ) -> Result<ApprovalReviewCandidate, ApprovalReviewError> {
@@ -941,6 +952,9 @@ pub fn permission_review_candidate(
             .any(|stored| stored == request)
         || input_kind == ApprovalInputKind::ConcreteCall
     {
+        return Err(ApprovalReviewError::InvalidCandidate);
+    }
+    if requires_owner_decision(request) {
         return Err(ApprovalReviewError::InvalidCandidate);
     }
     let item = request

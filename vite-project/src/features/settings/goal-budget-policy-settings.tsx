@@ -15,7 +15,23 @@ export type GoalBudgetLimits = {
     stalledSlices: number | null;
 };
 
-export type GoalBudgetPolicy = { schemaVersion: number; revision: number; limits: GoalBudgetLimits };
+export type GoalBudgetPolicy = {
+    schemaVersion: number;
+    revision: number;
+    limits: GoalBudgetLimits;
+    /** How long a goal may wait for an unavailable device; always enforced. */
+    deviceUnavailableMaxMs: number;
+};
+
+const HOUR_MS = 3_600_000;
+const DEVICE_UNAVAILABLE_MIN_HOURS = 1;
+const DEVICE_UNAVAILABLE_MAX_HOURS = 720;
+
+function validDeviceUnavailableMax(value: number): boolean {
+    return Number.isSafeInteger(value)
+        && value >= DEVICE_UNAVAILABLE_MIN_HOURS * HOUR_MS
+        && value <= DEVICE_UNAVAILABLE_MAX_HOURS * HOUR_MS;
+}
 
 const fields = [
     { key: 'activeTimeMs', label: 'goalBudgetActiveHours', scale: 3_600_000, maximum: 24, defaultValue: 2 },
@@ -29,6 +45,7 @@ const fields = [
 
 function validPolicy(value: GoalBudgetPolicy): boolean {
     return value.schemaVersion === 1 && Number.isSafeInteger(value.revision)
+        && validDeviceUnavailableMax(value.deviceUnavailableMaxMs)
         && fields.every(({ key, scale, maximum }) => value.limits[key] === null
             || (Number.isSafeInteger(value.limits[key]) && value.limits[key]! >= scale
                 && value.limits[key]! <= scale * maximum));
@@ -48,6 +65,7 @@ export default function GoalBudgetPolicySettings() {
     const [current, setCurrent] = useState<GoalBudgetPolicy | null>(null);
     const [draft, setDraft] = useState<GoalBudgetLimits | null>(null);
     const [input, setInput] = useState<Record<keyof GoalBudgetLimits, string> | null>(null);
+    const [deviceHours, setDeviceHours] = useState('');
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState('');
     const [saved, setSaved] = useState(false);
@@ -56,6 +74,7 @@ export default function GoalBudgetPolicySettings() {
         setDraft(policy.limits);
         setInput(Object.fromEntries(fields.map(({ key, scale, defaultValue }) => [key,
             String(policy.limits[key] === null ? defaultValue : policy.limits[key]! / scale)])) as Record<keyof GoalBudgetLimits, string>);
+        setDeviceHours(String(policy.deviceUnavailableMaxMs / HOUR_MS));
     };
     const reload = async () => {
         setBusy(true); setError(''); setSaved(false);
@@ -68,9 +87,11 @@ export default function GoalBudgetPolicySettings() {
         const number = Number(input[key]);
         return [key, draft[key] === null ? null : number * scale];
     })) as GoalBudgetLimits : null;
-    const valid = next !== null && fields.every(({ key, scale, maximum }) =>
+    const nextDeviceMax = Number(deviceHours) * HOUR_MS;
+    const valid = next !== null && validDeviceUnavailableMax(nextDeviceMax) && fields.every(({ key, scale, maximum }) =>
         next[key] === null || (Number.isSafeInteger(next[key]) && next[key]! >= scale && next[key]! <= scale * maximum));
-    const dirty = !!current && !!next && fields.some(({ key }) => current.limits[key] !== next[key]);
+    const dirty = !!current && !!next && (fields.some(({ key }) => current.limits[key] !== next[key])
+        || current.deviceUnavailableMaxMs !== nextDeviceMax);
     const save = async () => {
         if (!current || !next || !valid || !dirty || busy) return;
         setBusy(true); setError(''); setSaved(false);
@@ -78,7 +99,11 @@ export default function GoalBudgetPolicySettings() {
             const response = await fetch('/api/admin/system/goal-budget-policy', {
                 method: 'PUT', credentials: 'include',
                 headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
-                body: JSON.stringify({ expectedRevision: current.revision, limits: next }),
+                body: JSON.stringify({
+                    expectedRevision: current.revision,
+                    limits: next,
+                    deviceUnavailableMaxMs: nextDeviceMax,
+                }),
             });
             const body = await response.json();
             if (!response.ok || !body?.success || !validPolicy(body.data)) throw new Error(body?.message ?? 'Save failed');
@@ -106,6 +131,16 @@ export default function GoalBudgetPolicySettings() {
                     onChange={(event) => setInput(previous => previous && ({ ...previous, [key]: event.target.value }))} />
                 {draft?.[key] === null && <span className="text-sm text-muted-foreground">{t('pages.aiAssistant.goalBudgetDisabled')}</span>}
             </div>)}
+            <div className="space-y-1 border-t pt-4">
+                <div className="flex flex-wrap items-center gap-3">
+                    <span className="min-w-56">{t('pages.aiAssistant.goalBudgetDeviceUnavailableHours')}</span>
+                    <Input className="w-32" type="number" min={DEVICE_UNAVAILABLE_MIN_HOURS}
+                        max={DEVICE_UNAVAILABLE_MAX_HOURS} step={1} value={deviceHours}
+                        disabled={!draft || busy} aria-label={t('pages.aiAssistant.goalBudgetDeviceUnavailableHours')}
+                        onChange={(event) => setDeviceHours(event.target.value)} />
+                </div>
+                <p className="text-sm text-muted-foreground">{t('pages.aiAssistant.goalBudgetDeviceUnavailableDescription')}</p>
+            </div>
             {error && <p role="alert" className="text-destructive">{error}</p>}
             {draft && !valid && <p role="alert" className="text-destructive">{t('pages.aiAssistant.goalBudgetInvalid')}</p>}
             {saved && <p role="status">{t('pages.aiAssistant.goalBudgetSaved')}</p>}

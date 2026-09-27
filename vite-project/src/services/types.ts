@@ -1221,6 +1221,27 @@ export type ExecExecutionBasisEnumKey = (typeof execExecutionBasisEnum)[keyof ty
 export type ExecExecutionBasis = ExecExecutionBasisEnumKey;
 
 /**
+ * @description Binding a client needs to prepare the terminal carrier of a pending\ninteractive command.
+*/
+export type InteractiveCommandDto = {
+    /**
+     * @description The command runs `sudo`/`doas`; the owner may be asked for a password.
+     * @type boolean
+    */
+    elevated: boolean;
+    /**
+     * @description Server-derived execution id the carrier is prepared for.
+     * @type string
+    */
+    execRequestId: string;
+    /**
+     * @description Host connection the command runs on.
+     * @type string
+    */
+    targetConnectionId: string;
+};
+
+/**
  * @description Owner-visible projection of the exact persisted command plan.
 */
 export type CommandConfirmationDto = {
@@ -1237,6 +1258,7 @@ export type CommandConfirmationDto = {
      * @type string
     */
     executionBasis: ExecExecutionBasis;
+    interactive?: (null | InteractiveCommandDto);
     /**
      * @minLength 0
      * @type integer, int32
@@ -3843,6 +3865,8 @@ export const deskErrorCodeEnum = {
     SESSION_SELECTION_REQUIRED: 104,
     SESSION_TARGET_STALE: 105,
     SCHEDULE_MODEL_BUDGET_EXCEEDED: 106,
+    SCHEDULE_EXCEEDS_SESSION_RETENTION: 107,
+    EXEC_PTY_CARRIER_UNAVAILABLE: 108,
     CONNECTION_UNREACHABLE: 64,
     CONNECTION_NOT_SIGNALING: 65,
     CONNECTION_AUTH_FAILED: 66,
@@ -5121,6 +5145,12 @@ export type GoalBudgetLimits = {
 
 export type GoalBudgetPolicy = {
     /**
+     * @description How long a goal may keep waiting for an unavailable device (offline,\ndisabled or remote-access locked) before the system cancels it. Unlike\n`limits`, this bound cannot be disabled and is independent of the goal\ndeadline, so every waiting goal eventually ends.
+     * @minLength 0
+     * @type integer, int64
+    */
+    deviceUnavailableMaxMs: number;
+    /**
      * @description `None` disables only that goal budget. Transport, storage and permission\nsafety limits remain in force.
      * @type object
     */
@@ -5948,6 +5978,11 @@ export type PermissionDecisionItemBody = (PermissionItemDecisionBody & {
 });
 
 export type PermissionDecisionBody = {
+    /**
+     * @description Ready terminal carrier of the approving client. Required to approve an\ninteractive (PTY) command, which is always requested alone; rejected\nfor any other approval. Rejecting a PTY command needs no carrier.
+     * @type string,null
+    */
+    carrierId?: string | null;
     /**
      * @type string
     */
@@ -8215,6 +8250,12 @@ export type RestResponseGoalBudgetPolicy = {
     */
     data?: {
         /**
+         * @description How long a goal may keep waiting for an unavailable device (offline,\ndisabled or remote-access locked) before the system cancels it. Unlike\n`limits`, this bound cannot be disabled and is independent of the goal\ndeadline, so every waiting goal eventually ends.
+         * @minLength 0
+         * @type integer, int64
+        */
+        deviceUnavailableMaxMs: number;
+        /**
          * @description `None` disables only that goal budget. Transport, storage and permission\nsafety limits remain in force.
          * @type object
         */
@@ -10233,7 +10274,8 @@ export const scheduledTaskStatusEnum = {
     triggered: "triggered",
     paused: "paused",
     completed: "completed",
-    deleted: "deleted"
+    deleted: "deleted",
+    expired: "expired"
 } as const;
 
 export type ScheduledTaskStatusEnumKey = (typeof scheduledTaskStatusEnum)[keyof typeof scheduledTaskStatusEnum];
@@ -12565,6 +12607,11 @@ export type UpdateCredentialsRequest = {
 };
 
 export type UpdateGoalBudgetPolicy = {
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    deviceUnavailableMaxMs: number;
     /**
      * @minLength 0
      * @type integer, int64

@@ -314,6 +314,50 @@ pub struct CommandDraft {
     pub command: String,
     pub cwd: Option<String>,
     pub timeout_ms: u32,
+    /// Whether the command needs an interactive terminal. `pty` commands run
+    /// attached to the approving owner's live terminal carrier.
+    #[serde(default, skip_serializing_if = "CommandIoMode::is_non_interactive")]
+    pub io_mode: CommandIoMode,
+}
+
+/// Model-facing terminal mode of a [`CommandDraft`].
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    SchemaWrite,
+    SchemaRead,
+    ToSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandIoMode {
+    #[default]
+    NonInteractive,
+    Pty,
+}
+
+impl CommandIoMode {
+    pub fn is_non_interactive(&self) -> bool {
+        *self == Self::NonInteractive
+    }
+
+    /// The sealed execution mode. A PTY starts at the default size; the owner's
+    /// terminal resizes it once the stream opens.
+    pub fn exec_io_mode(self) -> ExecIoMode {
+        match self {
+            Self::NonInteractive => ExecIoMode::NonInteractive,
+            Self::Pty => ExecIoMode::Pty {
+                initial_rows: ExecIoMode::DEFAULT_PTY_ROWS,
+                initial_cols: ExecIoMode::DEFAULT_PTY_COLS,
+            },
+        }
+    }
 }
 
 impl CommandDraft {
@@ -799,8 +843,20 @@ mod tests {
             command: "Get-Service -Name Spooler".into(),
             cwd: None,
             timeout_ms: 10_000,
+            io_mode: CommandIoMode::NonInteractive,
         };
         draft.validate().unwrap();
+        // The default mode is omitted on the wire and restored on decode.
+        let encoded = serde_json::to_value(&draft).unwrap();
+        assert!(encoded.get("io_mode").is_none());
+        assert_eq!(
+            serde_json::from_value::<CommandDraft>(encoded).unwrap(),
+            draft
+        );
+        draft.io_mode = CommandIoMode::Pty;
+        let encoded = serde_json::to_value(&draft).unwrap();
+        assert_eq!(encoded["io_mode"], "pty");
+        assert!(draft.io_mode.exec_io_mode().is_pty());
 
         draft.command = "x".repeat(MAX_COMMAND_DRAFT_BYTES + 1);
         assert_eq!(

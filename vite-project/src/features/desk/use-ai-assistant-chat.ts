@@ -454,6 +454,7 @@ export function useAiAssistantChat({
     const [capabilityGrants, setCapabilityGrants] = useState<CapabilityGrantDto[]>([]);
     const [outcomeDisposing, setOutcomeDisposing] = useState(false);
     const [permissionUpdating, setPermissionUpdating] = useState(false);
+    const [browserConnectionId, setBrowserConnectionId] = useState<string | null>(null);
     const permissionSubmission = useRef<{ epoch: number } | null>(null);
     useEffect(() => {
         permissionSubmission.current = null;
@@ -491,6 +492,18 @@ export function useAiAssistantChat({
     const rehearsalSent = useRef(false);
     const snapshotEpoch = useRef(0);
     const snapshotRequestOrder = useRef(0);
+    /**
+     * The local request the server has acknowledged, with the snapshot order
+     * current at that moment. Only a snapshot requested after the
+     * acknowledgement can prove that request ended; an older one may predate it.
+     */
+    const activeRequestAck = useRef<{ requestId: string; order: number } | null>(null);
+    const stoppingRequest = useRef<string | null>(null);
+    const acknowledgeActiveRequest = (requestId: string) => {
+        if (activeRequestAck.current?.requestId !== requestId) {
+            activeRequestAck.current = { requestId, order: snapshotRequestOrder.current };
+        }
+    };
     const snapshotWatermark = useRef<{
         conversationId: string;
         sessionId: string;
@@ -613,6 +626,18 @@ export function useAiAssistantChat({
                 inputRevision: snapshot.inputRevision,
             };
             snapshotActiveRequest.current = snapshot.active ? snapshot.requestId ?? null : null;
+            const local = activeRequest.current;
+            if (local && snapshot.active && snapshot.requestId === local) acknowledgeActiveRequest(local);
+            const ack = activeRequestAck.current;
+            if (local && ack?.requestId === local && expectedRequestOrder > ack.order
+                && (!snapshot.active || snapshot.requestId !== local)) {
+                // A snapshot newer than the acknowledgement shows the local
+                // request is over (its terminal event was lost). Stop targeting
+                // it: the server's active request, if any, is the current one.
+                activeRequest.current = null;
+                activeRequestAck.current = null;
+                if (stoppingRequest.current === local) clearStopping();
+            }
             if (!snapshot.active) {
                 clearStopping();
                 // An expired server lease also settles a locally bound request
@@ -909,6 +934,9 @@ export function useAiAssistantChat({
     }, []);
 
     useEffect(() => subscribe((message: SignalingMessage) => {
+        // Inbound frames name this client's own signaling connection; an
+        // interactive command's terminal carrier is bound to it.
+        if (message.to_connection_id) setBrowserConnectionId(message.to_connection_id);
         if (message.signaling_type === SIGNALING_TYPE_CODE_DOCUMENT_PREVIEW_PAGE_UPDATED) {
             if (!message.request_id) return;
             const pending = documentPreviewPageRequests.current.get(message.request_id);
@@ -982,6 +1010,7 @@ export function useAiAssistantChat({
         const event = message.signaling_data as AiAssistantEvent;
         if (event.seq <= lastSeq.current) return;
         lastSeq.current = event.seq;
+        acknowledgeActiveRequest(message.request_id);
 
         if (event.kind === 'status' && event.status === 'accepted') acknowledgeDelivery();
         if (event.kind === 'error' && event.seq === 1 && pendingDelivery.current && !stopPending.current) {
@@ -1301,6 +1330,7 @@ export function useAiAssistantChat({
     const submitPermissionDecision = useCallback(async (
         request: PermissionRequestDto,
         items: PermissionDecisionBody['items'],
+        carrierId?: string,
     ) => {
         const currentConversationId = conversationId.current;
         if (!currentConversationId || connected === false || hydrating || remoteActive || activeRequest.current
@@ -1320,6 +1350,7 @@ export function useAiAssistantChat({
             conversation: currentConversationId,
             requestId: request.requestId,
             items,
+            ...(carrierId ? { carrierId } : {}),
         };
         setPermissionUpdating(true);
         setError(null);
@@ -1376,7 +1407,8 @@ export function useAiAssistantChat({
     const decidePermissionItems = useCallback((
         request: PermissionRequestDto,
         items: PermissionDecisionBody['items'],
-    ) => submitPermissionDecision(request, items), [submitPermissionDecision]);
+        carrierId?: string,
+    ) => submitPermissionDecision(request, items, carrierId), [submitPermissionDecision]);
 
     const setAutomaticApproval = useCallback(async (enabled: boolean) => {
         const selected = conversationId.current;
@@ -1570,6 +1602,7 @@ export function useAiAssistantChat({
         const requestId = activeRequest.current ?? snapshotActiveRequest.current;
         if (connected === false || !requestId || stopPending.current) return;
         stopPending.current = true;
+        stoppingRequest.current = requestId;
         setStopping(true);
         try {
             sendMessage(SIGNALING_TYPE_CODE_CANCEL_AI_ASSISTANT, null, deskId, requestId);
@@ -1721,6 +1754,8 @@ export function useAiAssistantChat({
         detachAttachment,
         decidePermission,
         decidePermissionItems,
+        browserConnectionId,
+        runId: snapshotWatermark.current?.sessionId ?? null,
         revokeCapabilityGrant,
         loadOlderMessages,
         selectSessionTarget,

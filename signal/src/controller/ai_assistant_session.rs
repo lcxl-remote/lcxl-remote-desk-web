@@ -460,8 +460,12 @@ pub async fn get_ai_assistant_session(
                     None
                 };
                 permission_requests.push(
-                    PermissionRequestDto::with_file_evidence(request, &snapshot.messages)
-                        .with_decision(decision.as_ref()),
+                    PermissionRequestDto::with_file_evidence(
+                        request,
+                        &session_id,
+                        &snapshot.messages,
+                    )
+                    .with_decision(decision.as_ref()),
                 );
             }
             let visual_evidence = desk_diagnose_core::visual_evidence::durable_projection(
@@ -751,6 +755,70 @@ pub(crate) async fn decide_permission_on(
             &format!("invalid target capability inventory: {error}"),
         )
     })?;
+    // An approved interactive command binds the owner's ready terminal carrier,
+    // reserved before the decision is written and released if it fails. A
+    // replay of a committed decision returned above and consumes nothing.
+    let pending_request = store
+        .read_snapshot_for_subject(&session_id, &actor_id, &target_audience)
+        .await
+        .map_err(|error| {
+            DeskSignalError::new_custom_error(DeskErrorCode::SYSTEM_ERROR, &error.message)
+        })?
+        .and_then(|snapshot| {
+            snapshot
+                .permission_requests
+                .into_iter()
+                .find(|request| request.request_id == body.request_id)
+        });
+    let interactive = match pending_request.as_ref().map(|request| {
+        desk_diagnose_core::command_confirmation::interactive_approval(
+            &session_id,
+            request,
+            &decisions,
+            body.carrier_id.as_deref(),
+        )
+    }) {
+        None if body.carrier_id.is_some() => {
+            return Ok(HttpResponse::Ok().json(RestResponse::<()>::failed(
+                DeskErrorCode::INVALID_PARAMS,
+                "carrierId is only valid when approving an interactive command".into(),
+            )));
+        }
+        None | Some(Ok(None)) => None,
+        Some(Ok(Some(approval))) => Some(approval),
+        Some(Err(
+            desk_diagnose_core::command_confirmation::CarrierUsageError::CarrierNotAllowed,
+        )) => {
+            return Ok(HttpResponse::Ok().json(RestResponse::<()>::failed(
+                DeskErrorCode::INVALID_PARAMS,
+                "carrierId is only valid when approving an interactive command".into(),
+            )));
+        }
+        Some(Err(desk_diagnose_core::command_confirmation::CarrierUsageError::CarrierRequired)) => {
+            return Ok(HttpResponse::Ok().json(RestResponse::<()>::failed(
+                DeskErrorCode::EXEC_PTY_CARRIER_UNAVAILABLE,
+                "open the interactive terminal before approving this command".into(),
+            )));
+        }
+    };
+    let consumed = match (&interactive, body.carrier_id.as_deref()) {
+        (Some(approval), Some(carrier_id)) => {
+            if !crate::exec_pty_carrier::global_exec_pty_carriers().consume_for_approval(
+                carrier_id,
+                None,
+                &approval.target_connection_id,
+                &approval.exec_request_id,
+            ) {
+                return Ok(HttpResponse::Ok().json(RestResponse::<()>::failed(
+                    DeskErrorCode::EXEC_PTY_CARRIER_UNAVAILABLE,
+                    "the interactive terminal is no longer ready; reopen it and approve again"
+                        .into(),
+                )));
+            }
+            Some((carrier_id.to_owned(), approval.exec_request_id.clone()))
+        }
+        _ => None,
+    };
     let now = now_dt.to_rfc3339();
     let decision = store
         .decide_permission_request_with_expected_request(
@@ -774,6 +842,10 @@ pub(crate) async fn decide_permission_on(
         )
         .await
         .map_err(|error| {
+            if let Some((carrier_id, exec_request_id)) = &consumed {
+                crate::exec_pty_carrier::global_exec_pty_carriers()
+                    .release_failed_approval(carrier_id, exec_request_id);
+            }
             DeskSignalError::new_custom_error(DeskErrorCode::PRECONDITION_FAILED, &error.message)
         })?;
     let goal_wake = if decision.newly_recorded {

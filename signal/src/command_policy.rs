@@ -40,6 +40,8 @@ pub(crate) async fn current(
         .filter(|id| !id.is_empty())
         .ok_or_else(denied)?;
     let shells = target.model.version_info.available_exec_shell_list();
+    let exec_pty = target.model.version_info.exec_pty;
+    let exec_pty_elevation = exec_pty && target.model.version_info.exec_pty_elevation;
     let max_runtime_ms = target
         .model
         .version_info
@@ -69,6 +71,8 @@ pub(crate) async fn current(
         operator_templates: vec![],
         effective_blocklist: desk_agent_protocol::exec_policy::builtin_blocklist().to_vec(),
         policy_version: format!("oss-owner:{}", readiness.readiness.local_ceiling_revision),
+        exec_pty,
+        exec_pty_elevation,
     })
 }
 
@@ -101,6 +105,8 @@ mod tests {
             operator_templates: vec![],
             effective_blocklist: desk_agent_protocol::exec_policy::builtin_blocklist().to_vec(),
             policy_version: "fixture-owner-policy".into(),
+            exec_pty: false,
+            exec_pty_elevation: false,
         };
         let script = "du -k -d 1 . | sort -n\ndf -k .";
         let input = serde_json::json!({"schema_version":1, "shell":"bash", "command":script,

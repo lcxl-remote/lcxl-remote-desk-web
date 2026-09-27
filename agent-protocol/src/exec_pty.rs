@@ -24,6 +24,18 @@ pub struct PtyCarrierPrepare {
     pub browser_connection_id: String,
     pub target_connection_id: String,
     pub exec_request_id: String,
+    /// The pending AI Assistant permission request this carrier is prepared
+    /// for. The server checks that it still awaits the owner's decision, holds
+    /// one interactive command, and derives exactly `exec_request_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission: Option<PtyPermissionBinding>,
+}
+
+/// Identifies one pending interactive command permission.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct PtyPermissionBinding {
+    pub run_id: String,
+    pub request_id: String,
 }
 
 impl PtyCarrierPrepare {
@@ -35,6 +47,13 @@ impl PtyCarrierPrepare {
         ] {
             if value.is_empty() || value.len() > MAX_PTY_STREAM_ID_BYTES {
                 return Err("PTY carrier binding id length is outside the allowed range");
+            }
+        }
+        if let Some(permission) = &self.permission {
+            for value in [&permission.run_id, &permission.request_id] {
+                if value.is_empty() || value.len() > 256 {
+                    return Err("PTY permission binding id length is outside the allowed range");
+                }
             }
         }
         Ok(())

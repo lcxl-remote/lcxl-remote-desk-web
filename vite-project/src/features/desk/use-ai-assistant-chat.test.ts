@@ -1522,6 +1522,36 @@ describe('useAiAssistantChat', () => {
         vi.useRealTimers();
     });
 
+    it('stops the server active request after a newer snapshot proves the local one ended', async () => {
+        vi.useFakeTimers();
+        let snapshot: Record<string, unknown> = {
+            sessionId: 'switch-session', requestId: 'request-a', seq: 5, active: true,
+            messages: [{ id: 'user-1', role: 'user', text: 'work on it' }],
+        };
+        vi.stubGlobal('fetch', vi.fn().mockImplementation(async () => ({ ok: true, json: async () => ({ data: snapshot }) })));
+        let subscriber: SignalingSubscriber | null = null;
+        const sendMessage = vi.fn().mockReturnValue('request-a');
+        const { result, unmount } = renderHook(() => useAiAssistantChat({ deskId: 'switch-local',
+            subscribe: handler => { subscriber = handler; return () => undefined; }, sendMessage }));
+        act(() => { result.current.start('work on it'); });
+        // The server accepted A, then A's terminal event was lost while a goal
+        // or timer started B on the same conversation.
+        act(() => subscriber?.({ request_id: 'request-a', signaling_type: SIGNALING_TYPE_CODE_AI_ASSISTANT_UPDATED,
+            signaling_data: { seq: 1, kind: 'status', status: 'accepted' } }));
+        snapshot = { ...snapshot, requestId: 'request-b', seq: 9 };
+        await act(async () => { await vi.advanceTimersByTimeAsync(2500); });
+        act(() => { result.current.stop(); });
+        expect(sendMessage).toHaveBeenLastCalledWith(
+            SIGNALING_TYPE_CODE_CANCEL_AI_ASSISTANT, null, 'switch-local', 'request-b');
+        expect(result.current.stopping).toBe(true);
+        // B's end releases the stopping gate.
+        snapshot = { ...snapshot, active: false, seq: 12 };
+        await act(async () => { await vi.advanceTimersByTimeAsync(2500); });
+        expect(result.current.stopping).toBe(false);
+        unmount();
+        vi.useRealTimers();
+    });
+
     it('stops a restored active turn using its server request id', async () => {
         localStorage.setItem('ai-assistant-conversation:stop-restored', 'saved-conversation');
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: {

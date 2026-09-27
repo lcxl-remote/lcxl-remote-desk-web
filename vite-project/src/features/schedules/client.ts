@@ -40,10 +40,33 @@ const expectedResults: Record<ScheduleManagementRequest['operation'], ScheduleMa
 };
 export class ScheduleRequestError extends Error {
     readonly reason: 'offline' | 'timeout' | 'closed' | 'invalid' | 'server';
-    constructor(reason: ScheduleRequestError['reason'], message?: string) {
+    /** Server business code of a `server` failure. */
+    readonly code?: number;
+    /** Longest accepted continuation delay, for `SCHEDULE_EXCEEDS_SESSION_RETENTION`. */
+    readonly maxDelaySeconds?: number;
+    constructor(reason: ScheduleRequestError['reason'], message?: string, code?: number, maxDelaySeconds?: number) {
         super(message ?? reason);
         this.reason = reason;
+        this.code = code;
+        this.maxDelaySeconds = maxDelaySeconds;
     }
+}
+
+/** Owner-facing text for a failed task request. */
+export function scheduleErrorMessage(
+    error: unknown,
+    t: (key: string, options?: Record<string, unknown>) => string,
+    fallbackKey = 'schedules.requestFailed',
+): string {
+    if (!(error instanceof ScheduleRequestError) || error.reason !== 'server') return t(fallbackKey);
+    if (error.code === deskErrorCodeEnum.SCHEDULE_EXCEEDS_SESSION_RETENTION) {
+        const seconds = error.maxDelaySeconds ?? 0;
+        return t('schedules.retentionExceeded', {
+            days: Math.floor(seconds / 86_400),
+            hours: Math.floor((seconds % 86_400) / 3_600),
+        });
+    }
+    return error.message;
 }
 
 type Pending = { resolve: (value: ScheduleManagementResponse) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout>; result: string };
@@ -59,7 +82,13 @@ export class ScheduleClient {
         this.pending.delete(message.request_id);
         clearTimeout(pending.timer);
         if (!message.response_state || message.response_state.error_code !== deskErrorCodeEnum.SUCCESS) {
-            pending.reject(new ScheduleRequestError('server', message.response_state?.message ?? undefined));
+            const detail = message.signaling_data as { maxDelaySeconds?: unknown } | null | undefined;
+            pending.reject(new ScheduleRequestError(
+                'server',
+                message.response_state?.message ?? undefined,
+                message.response_state?.error_code,
+                typeof detail?.maxDelaySeconds === 'number' ? detail.maxDelaySeconds : undefined,
+            ));
         } else if (message.signaling_data?.result !== pending.result) {
             pending.reject(new ScheduleRequestError('invalid'));
         } else {

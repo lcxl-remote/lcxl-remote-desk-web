@@ -4,7 +4,7 @@ import { Check, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import type { ScheduleView } from '@/services/types';
-import { ScheduleClient, ScheduleRequestError } from './client';
+import { ScheduleClient, ScheduleRequestError, scheduleErrorMessage } from './client';
 import { ContractReview } from './contract-review';
 import { RehearsalDetails } from './rehearsal-details';
 import { formatTime, validTimezone } from './time';
@@ -43,7 +43,7 @@ export function ProposalReview({ client, scheduleId, connected, zone, assistantP
             if (response.result !== 'task' || response.task.schedule_id !== scheduleId) throw new ScheduleRequestError('invalid');
             setTask(response.task); onChanged(response.task);
         } catch (reason) {
-            if (current === epoch.current) setError(reason instanceof ScheduleRequestError && reason.reason === 'server' ? reason.message : t('schedules.requestFailed'));
+            if (current === epoch.current) setError(scheduleErrorMessage(reason, t));
         } finally { if (current === epoch.current) { pending.current = false; setBusy(false); } }
     };
     if (approvalCard && task && !['draft', 'pending_review'].includes(task.status)) return null;

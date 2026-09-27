@@ -107,7 +107,23 @@ export type ExecStateReplyPayload = {
     containment_identity: string | null;
     running_ms: number | null;
     detail: string | null;
+    /** The host's recorded outcome of a terminal execution, when it still holds it. */
+    result_json?: string | null;
 };
+
+/**
+ * The recorded outcome carried by a terminal state report. It is the answer the
+ * host gave, replayed when the live result frame was lost.
+ */
+export function terminalOutcomeFromStateReport(payload: ExecStateReplyPayload): ExecOutcome | null {
+    if (payload.state !== 'terminal' || !payload.result_json) return null;
+    try {
+        const outcome = JSON.parse(payload.result_json) as ExecOutcome;
+        return outcome && (outcome.status === 'ok' || outcome.status === 'err') ? outcome : null;
+    } catch {
+        return null;
+    }
+}
 
 /** Browser wire shape of the flattened Rust `ExecControlPayload`. */
 export type ExecControlPayload =
@@ -546,6 +562,14 @@ export function useConfirmExec({
                 if (!payload) return;
                 const rowIndex = generationToRow.current[payload.execution_generation];
                 if (rowIndex === undefined) return;
+                const recorded = terminalOutcomeFromStateReport(payload);
+                if (recorded) {
+                    for (const [execId, row] of Object.entries(execIdToRow.current)) {
+                        if (row === rowIndex) delete execIdToRow.current[execId];
+                    }
+                    settle(rowIndex, recorded);
+                    return;
+                }
                 setEntries((prev) => {
                     const entry = prev[rowIndex];
                     if (!entry || entry.phase === 'done' || entry.phase === 'error') {
@@ -583,26 +607,36 @@ export function useConfirmExec({
                 const rowIndex = execIdToRow.current[payload.exec_request_id];
                 if (rowIndex === undefined) return;
                 delete execIdToRow.current[payload.exec_request_id];
-                const output = execOutputFromOutcome(payload.outcome);
-                ptyClients.current.get(rowIndex)?.dispose();
-                ptyClients.current.delete(rowIndex);
-                // The dispatch is over, so stop routing its lifecycle frames.
-                for (const [generation, row] of Object.entries(generationToRow.current)) {
-                    if (row === rowIndex) delete generationToRow.current[generation];
-                }
-                setEntries((prev) => ({
+                settle(rowIndex, payload.outcome);
+            }
+        };
+        // Settle a row from its outcome, delivered live or replayed from the
+        // host's terminal state report; whichever arrives first wins.
+        const settle = (rowIndex: number, outcome: ExecOutcome) => {
+            const output = execOutputFromOutcome(outcome);
+            ptyClients.current.get(rowIndex)?.dispose();
+            ptyClients.current.delete(rowIndex);
+            // The dispatch is over, so stop routing its lifecycle frames.
+            for (const [generation, row] of Object.entries(generationToRow.current)) {
+                if (row === rowIndex) delete generationToRow.current[generation];
+            }
+            setEntries((prev) => {
+                const entry = prev[rowIndex];
+                // A result supersedes an earlier "no answer" error, never another result.
+                if (!entry || entry.phase === 'done') return prev;
+                return {
                     ...prev,
                     [rowIndex]: {
-                        ...prev[rowIndex],
+                        ...entry,
                         phase: output ? 'done' : 'error',
                         output,
                         error:
-                            output || payload.outcome.status !== 'err'
+                            output || outcome.status !== 'err'
                                 ? null
-                                : payload.outcome.data.message,
+                                : outcome.data.message,
                     },
-                }));
-            }
+                };
+            });
         };
         return subscribe(handle);
     }, [acceptUnsolicitedPreviews, subscribe]);

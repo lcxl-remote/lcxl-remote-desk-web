@@ -11,6 +11,7 @@ import { AssistantPermissionDisclosure } from './assistant-permission-disclosure
 import { CommandConfirmationCard, validCommandReview } from './ai-assistant-command';
 import { LaunchConfirmationCard, validLaunchReview } from './ai-assistant-launch';
 import { TextFileConfirmationCard, validTextFileReview, fileApprovalBlocked } from './ai-assistant-file-confirmation';
+import { AssistantInteractiveCommand, interactiveCommandItem, type InteractiveCommandContext } from './assistant-interactive-command';
 
 function needsApplicationScope(tool: string) {
     return ['execute_ui_actions', 'send_background_input'].includes(tool);
@@ -40,14 +41,17 @@ type PermissionDecisionView = {
     items: { itemId: string; approved: boolean; reasonCode?: string | null; reason?: string | null }[];
 };
 
-export function AssistantPermissionRequest({ request, canDecide, disabled = false, busy = false, waitingForTurn = false, onDecide }: {
+export function AssistantPermissionRequest({ request, canDecide, disabled = false, busy = false, waitingForTurn = false, interactive, onDecide }: {
     request: PermissionRequestDto;
     canDecide: boolean;
     disabled?: boolean;
     busy?: boolean;
     waitingForTurn?: boolean;
-    onDecide: (request: PermissionRequestDto, items: PermissionDecisionBody['items']) => Promise<boolean>;
+    /** Where an interactive command's terminal can be opened; absent where it cannot. */
+    interactive?: InteractiveCommandContext;
+    onDecide: (request: PermissionRequestDto, items: PermissionDecisionBody['items'], carrierId?: string) => Promise<boolean>;
 }) {
+    const interactiveItem = interactiveCommandItem(request);
     const { t } = useTranslation();
     const decision = (request as PermissionRequestDto & { decision?: PermissionDecisionView | null }).decision;
     const [permissionSelections, setPermissionSelections] = useState<Record<string, string[]>>({});
@@ -365,14 +369,29 @@ export function AssistantPermissionRequest({ request, canDecide, disabled = fals
                     );
                 })}
             </div>
+            {interactiveItem && (interactive ? (
+                <AssistantInteractiveCommand request={request} item={interactiveItem} context={interactive}
+                    canDecide={canDecide} disabled={disabled || busy || waitingForTurn}
+                    onApprove={(carrierId) => onDecide(request, [{
+                        itemId: interactiveItem.itemId,
+                        decision: 'approve',
+                        resource_scope: interactiveItem.resourceScope,
+                        operation_scope: interactiveItem.operationScope,
+                        export_destinations: [],
+                        ttl_seconds: interactiveItem.suggestedTtlSeconds,
+                        max_uses: 1,
+                    }], carrierId)} />
+            ) : request.state === 'pending' && (
+                <p className="text-xs text-muted-foreground">{t('pages.aiAssistant.interactiveCommand.unsupportedHere')}</p>
+            ))}
             {canDecide
                 && request.state === 'pending' && (
                 <div className="space-y-2">
-                    <p className="text-xs text-muted-foreground">
+                    {!interactiveItem && <p className="text-xs text-muted-foreground">
                         {t('pages.aiAssistant.permissionSelectionDescription')}
-                    </p>
+                    </p>}
                     <div className="flex flex-wrap gap-2">
-                    <Button
+                    {!interactiveItem && <Button
                         type="button"
                         size="sm"
                         className="gap-1.5 px-2.5"
@@ -421,7 +440,7 @@ export function AssistantPermissionRequest({ request, canDecide, disabled = fals
                     >
                         <Check className="h-4 w-4" />
                         {t('pages.aiAssistant.permissionSubmitSelection')}
-                    </Button>
+                    </Button>}
                     <Button
                         type="button"
                         size="sm"

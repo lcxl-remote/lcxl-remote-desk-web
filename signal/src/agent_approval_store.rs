@@ -1128,6 +1128,12 @@ pub async fn prepare_permission_review_batch(
         .iter()
         .find(|request| request.request_id == request_id)
         .ok_or_else(invalid)?;
+    // An interactive command needs the owner's live terminal at approval time,
+    // so AI auto-approval never decides it; the request stays with the owner.
+    if desk_diagnose_core::approval_review::requires_owner_decision(request) {
+        txn.commit().await?;
+        return Ok(Vec::new());
+    }
     let delegation_row = delegation_row::Entity::find()
         .filter(delegation_row::Column::ConversationId.eq(conversation_id))
         .filter(delegation_row::Column::ActorId.eq(owner_id))

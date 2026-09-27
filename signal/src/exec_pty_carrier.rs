@@ -100,11 +100,15 @@ impl SignalExecPtyCarriers {
         request
             .validate()
             .map_err(|_| CarrierError::InvalidPrepare)?;
-        if !crate::agent_exec::global_agent_exec_pending().can_prepare_carrier(
-            &request.browser_connection_id,
-            &request.target_connection_id,
-            &request.exec_request_id,
-        ) {
+        let pending = match &request.permission {
+            Some(permission) => pending_permission_matches(request, permission).await,
+            None => crate::agent_exec::global_agent_exec_pending().can_prepare_carrier(
+                &request.browser_connection_id,
+                &request.target_connection_id,
+                &request.exec_request_id,
+            ),
+        };
+        if !pending {
             return Err(CarrierError::ApprovalNotPending);
         }
         {
@@ -158,10 +162,13 @@ impl SignalExecPtyCarriers {
         Ok(carrier_id)
     }
 
+    /// `browser_connection_id` is the approving signaling connection; a REST
+    /// approval has none and is authenticated by the unguessable carrier id,
+    /// which only the preparing browser received, plus the exact binding.
     pub fn consume_for_approval(
         &self,
         carrier_id: &str,
-        browser_connection_id: &str,
+        browser_connection_id: Option<&str>,
         target_connection_id: &str,
         exec_request_id: &str,
     ) -> bool {
@@ -169,16 +176,38 @@ impl SignalExecPtyCarriers {
         let Some(entry) = inner.get_mut(carrier_id) else {
             return false;
         };
-        if entry.consumed
-            || entry.output_tx.is_closed()
-            || entry.browser_connection_id != browser_connection_id
+        if entry.output_tx.is_closed()
+            || browser_connection_id.is_some_and(|browser| entry.browser_connection_id != browser)
             || entry.target_connection_id != target_connection_id
             || entry.exec_request_id != exec_request_id
         {
             return false;
         }
+        // Idempotent for the same approval until the carrier is dispatched.
+        if entry.consumed {
+            return entry.execution_generation.is_none();
+        }
         entry.consumed = true;
         true
+    }
+
+    /// The consumed, not yet dispatched carrier reserved for `exec_request_id`.
+    pub fn consumed_carrier_for(
+        &self,
+        target_connection_id: &str,
+        exec_request_id: &str,
+    ) -> Option<String> {
+        let inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        inner
+            .iter()
+            .find(|(_, entry)| {
+                entry.consumed
+                    && !entry.output_tx.is_closed()
+                    && entry.execution_generation.is_none()
+                    && entry.target_connection_id == target_connection_id
+                    && entry.exec_request_id == exec_request_id
+            })
+            .map(|(carrier_id, _)| carrier_id.clone())
     }
 
     /// Roll back a carrier consumed by an approval whose waiting tool call has
@@ -605,6 +634,59 @@ impl BinaryFrameObserver for SignalExecPtyCarriers {
     }
 }
 
+/// A carrier for an AI Assistant permission card: the named request must still
+/// await the owner's decision and hold exactly one interactive command whose
+/// derived execution id and target are the ones being prepared.
+async fn pending_permission_matches(
+    request: &PtyCarrierPrepare,
+    permission: &desk_agent_protocol::exec_pty::PtyPermissionBinding,
+) -> bool {
+    use desk_diagnose_core::dynamic_run::PermissionRequestState;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    let Some(db) = crate::db::try_get_db() else {
+        return false;
+    };
+    let Ok(Some(row)) = crate::entity::agent_session::Entity::find()
+        .filter(crate::entity::agent_session::Column::ConversationId.eq(&permission.run_id))
+        .one(db)
+        .await
+    else {
+        return false;
+    };
+    let Ok(session) =
+        desk_diagnose_core::session::PersistedAgentSession::decode_json(&row.state_json)
+    else {
+        return false;
+    };
+    let Some(pending) = session.permission_requests.iter().find(|pending| {
+        pending.request_id == permission.request_id
+            && pending.state == PermissionRequestState::Pending
+            && pending.input_revision == session.input_revision
+    }) else {
+        return false;
+    };
+    let [item] = pending.items.as_slice() else {
+        return false;
+    };
+    let Some(confirmation) = item
+        .command_confirmation
+        .as_ref()
+        .filter(|confirmation| confirmation.is_interactive())
+    else {
+        return false;
+    };
+    let target = confirmation.target_session_id.rsplit_once(':').map_or(
+        confirmation.target_session_id.as_str(),
+        |(connection, _)| connection,
+    );
+    target == request.target_connection_id
+        && desk_diagnose_core::command_confirmation::interactive_exec_request_id(
+            &permission.run_id,
+            &permission.request_id,
+            &confirmation.canonical_input_digest_sha256,
+        ) == request.exec_request_id
+}
+
 pub fn global_exec_pty_carriers() -> Arc<SignalExecPtyCarriers> {
     static REGISTRY: OnceLock<Arc<SignalExecPtyCarriers>> = OnceLock::new();
     REGISTRY
@@ -622,9 +704,44 @@ mod tests {
             browser_connection_id: "browser".into(),
             target_connection_id: "target".into(),
             exec_request_id: "exec".into(),
+            permission: None,
         };
         assert_eq!(prepare.validate(), Ok(()));
         prepare.exec_request_id = "x".repeat(129);
         assert!(prepare.validate().is_err());
+    }
+
+    #[tokio::test]
+    async fn a_rest_approval_consumes_idempotently_and_dispatch_finds_the_carrier() {
+        let registry = SignalExecPtyCarriers::new();
+        let (tx, _rx) = mpsc::channel(1);
+        let carrier_id = "carrier-1".to_string();
+        registry.inner.lock().unwrap().insert(
+            carrier_id.clone(),
+            CarrierEntry {
+                browser_connection_id: "browser".into(),
+                target_connection_id: "target".into(),
+                exec_request_id: "exec_pty_1".into(),
+                output_tx: tx,
+                consumed: false,
+                execution_generation: None,
+                opened: None,
+                next_input_sequence: 0,
+                next_output_sequence: 0,
+            },
+        );
+        assert_eq!(registry.consumed_carrier_for("target", "exec_pty_1"), None);
+        assert!(!registry.consume_for_approval(&carrier_id, None, "target", "exec_pty_2"));
+        assert!(!registry.consume_for_approval(&carrier_id, Some("other"), "target", "exec_pty_1"));
+        assert!(registry.consume_for_approval(&carrier_id, None, "target", "exec_pty_1"));
+        assert!(registry.consume_for_approval(&carrier_id, None, "target", "exec_pty_1"));
+        assert_eq!(
+            registry.consumed_carrier_for("target", "exec_pty_1"),
+            Some(carrier_id.clone())
+        );
+        assert!(registry.bind_for_dispatch(&carrier_id, "target", "exec_pty_1", "generation"));
+        // After dispatch neither another approval nor another dispatch can use it.
+        assert!(!registry.consume_for_approval(&carrier_id, None, "target", "exec_pty_1"));
+        assert_eq!(registry.consumed_carrier_for("target", "exec_pty_1"), None);
     }
 }

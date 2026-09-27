@@ -18,7 +18,7 @@ import { Label } from '@/components/ui/label';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { useDeskSignaling } from '@/features/desk/use-desk-signaling';
 import type { ScheduleManagementRequest, ScheduleSpec, ScheduleView, ScheduleTimeConversion } from '@/services/types';
-import { ScheduleClient, ScheduleRequestError } from './client';
+import { ScheduleClient, ScheduleRequestError, scheduleErrorMessage } from './client';
 import { formatTime, ruleTimes, validTimezone, projectRule } from './time';
 import { RunHistory } from './run-history';
 import { RehearsalDetails } from './rehearsal-details';
@@ -72,7 +72,7 @@ export default function SchedulePage({ devices, loadingDevices = false }: { devi
     const generation = useRef(0);
     const mounted = useRef(true);
     const report = useCallback((err: unknown) => {
-        if (mounted.current) setError(err instanceof ScheduleRequestError && err.reason === 'server' ? err.message : t('schedules.requestFailed'));
+        if (mounted.current) setError(scheduleErrorMessage(err, t));
     }, [t]);
     useEffect(() => {
         mounted.current = true;
@@ -157,7 +157,7 @@ export default function SchedulePage({ devices, loadingDevices = false }: { devi
             <label className="space-y-1">{t('schedules.filters.status')}
                 <ScheduleSelect className={selectClass} value={filterStatus} onValueChange={value => setFilterStatus(value as ScheduleView['status'] | '')}>
                     <SelectItem value="__empty__">{t('schedules.filters.allStatuses')}</SelectItem>
-                    {(['draft', 'rehearsing', 'awaiting_authorization', 'active', 'paused', 'triggered', 'completed'] as const).map(status =>
+                    {(['draft', 'rehearsing', 'awaiting_authorization', 'active', 'paused', 'triggered', 'completed', 'expired'] as const).map(status =>
                         <SelectItem key={status} value={status}>{t(`schedules.status.${status}`)}</SelectItem>)}
                 </ScheduleSelect>
             </label>
@@ -168,6 +168,7 @@ export default function SchedulePage({ devices, loadingDevices = false }: { devi
             {!visible.length && <p className="py-8 text-muted-foreground">{t(busy ? 'schedules.loading' : 'schedules.empty')}</p>}
             {visible.map(task => <article key={task.schedule_id} className="space-y-3 rounded-xl border p-4">
                 <div className="flex flex-wrap justify-between gap-2"><h2 className="font-semibold">{task.title}</h2><Badge variant="secondary">{t(`schedules.status.${task.status}`)}</Badge></div>
+                {task.status === 'expired' && <p className="text-sm text-muted-foreground">{t('schedules.expiredReason')}</p>}
                 <p className="whitespace-pre-wrap text-sm">{task.prompt}</p>
                 <p className="text-sm text-muted-foreground">{allDevices.find(d => d.id === task.target_device_id)?.name ?? t('schedules.targetUnavailable')}</p>
                 {validZone && <p className="text-sm">{task.spec.rule.kind === 'after_confirmation' ? t('schedules.proposal.afterConfirmation', { seconds: task.spec.rule.delay_seconds }) : task.spec.rule.kind === 'interval' ? t('schedules.everySeconds', { count: task.spec.rule.every_seconds }) : `${t(`schedules.rule.${task.spec.rule.kind}`)} · ${ruleTimes(task.spec, zone, i18n.language, task.next_run_at ? new Date(task.next_run_at) : undefined).join(' / ')}`}</p>}
@@ -196,11 +197,11 @@ export default function SchedulePage({ devices, loadingDevices = false }: { devi
                                 && !task.pause_reasons.includes('authorization_invalid') && <Button variant="outline" disabled={!available}
                                     onClick={() => setEditor({ kind: 'revoke', task, key: v4() })}>{t('schedules.revoke')}</Button>}
 
-                            {!['completed', 'deleted'].includes(task.status) && <Button variant="outline" disabled={!available || !!task.active_run_id}
+                            {!['completed', 'deleted', 'expired'].includes(task.status) && <Button variant="outline" disabled={!available || !!task.active_run_id}
                                 onClick={() => setEditor({ kind: 'failureThreshold', task, key: v4() })}>{t('schedules.failureThreshold')}</Button>}
-                            {!['completed', 'deleted'].includes(task.status) && <Button variant="outline" disabled={!available || (task.kind === 'conversation_resume' && !!task.active_run_id)}
+                            {!['completed', 'deleted', 'expired'].includes(task.status) && <Button variant="outline" disabled={!available || (task.kind === 'conversation_resume' && !!task.active_run_id)}
                                 onClick={() => setEditor({ kind: 'editPrompt', task, key: v4() })}>{t('schedules.editPrompt')}</Button>}
-                            {(['rename', 'time', 'delete'] as const).filter(kind => kind !== 'time' || !['completed', 'deleted'].includes(task.status)).map(kind => <Button key={kind} variant="outline" disabled={!available} onClick={() => setEditor({ kind, task, key: v4() })}>{t(`schedules.${kind}`)}</Button>)}
+                            {(['rename', 'time', 'delete'] as const).filter(kind => kind !== 'time' || !['completed', 'deleted', 'expired'].includes(task.status)).map(kind => <Button key={kind} variant="outline" disabled={!available} onClick={() => setEditor({ kind, task, key: v4() })}>{t(`schedules.${kind}`)}</Button>)}
                         </CollapsibleContent>
                     </Collapsible>
                 </div>
@@ -315,7 +316,7 @@ function ScheduleEditor({ editor, devices, zone, disabled, client, submit, repor
             await submit(request);
         } catch (err) {
             if (alive.current) {
-                setError(err instanceof ScheduleRequestError && err.reason === 'server' ? err.message : t('schedules.requestFailed'));
+                setError(scheduleErrorMessage(err, t));
                 report(err);
             }
         }
