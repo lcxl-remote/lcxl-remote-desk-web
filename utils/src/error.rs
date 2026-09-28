@@ -520,7 +520,7 @@ desk_error_codes! {
     /// operator reading the console sees an infrastructure dependency being down
     /// rather than an opaque internal failure, and so the UI can say which
     /// dependency. Carried in `RestResponse.code`, never an HTTP status.
-    SHARED_STORE_UNAVAILABLE = 70,
+    SHARED_STORE_UNAVAILABLE = 109,
 
     ACTION_NEED_RETRY = 1001,
 
@@ -850,6 +850,7 @@ mod tests {
         assert_eq!(DeskErrorCode::AI_ASSISTANT_TURN_BUSY.code(), 60);
         assert_eq!(DeskErrorCode::AI_ASSISTANT_SUBJECT_MISMATCH.code(), 61);
         assert_eq!(DeskErrorCode::AGENT_SAME_TOOL_REPEAT_LIMIT.code(), 70);
+        assert_eq!(DeskErrorCode::SHARED_STORE_UNAVAILABLE.code(), 109);
         assert_eq!(DeskErrorCode::AI_MODEL_IMAGE_INPUT_UNSUPPORTED.code(), 85);
         let codes = [
             DeskErrorCode::DEVICE_QUOTA_EXCEEDED.code(),
