@@ -1731,6 +1731,7 @@ export default {
   'pages.fileManager.cancel': '取消',
   'pages.fileManager.cancelled': '已取消',
   'pages.fileManager.myComputer': '我的电脑',
+  'pages.fileManager.userHome': '用户主目录',
   'pages.fileManager.totalItems': '共 {{count}} 项',
   'pages.fileManager.remaining': '剩余',
   'pages.fileManager.delete': '删除',

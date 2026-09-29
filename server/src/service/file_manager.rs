@@ -49,6 +49,37 @@ pub fn get_logical_driver_list() -> Result<Vec<FileInfo>, DeskError> {
 }
 
 pub async fn list_files(query_list: FileListParams) -> Result<FileListResponse, DeskError> {
+    let home = if query_list.prefer_user_home && query_list.path.is_empty() {
+        tokio::task::spawn_blocking(crate::user_home::current)
+            .await
+            .unwrap_or(None)
+    } else {
+        None
+    };
+    list_files_with_home(query_list, home).await
+}
+
+async fn list_files_with_home(
+    query_list: FileListParams,
+    home: Option<String>,
+) -> Result<FileListResponse, DeskError> {
+    if query_list.prefer_user_home
+        && query_list.path.is_empty()
+        && let Some(home) = home
+    {
+        let mut preferred = query_list.clone();
+        preferred.path = home;
+        match list_files_at_path(preferred).await {
+            Ok(response) => return Ok(response),
+            Err(error) => {
+                warn!("Initial user home listing failed; falling back to root: {error}");
+            }
+        }
+    }
+    list_files_at_path(query_list).await
+}
+
+async fn list_files_at_path(query_list: FileListParams) -> Result<FileListResponse, DeskError> {
     if query_list.directories_only {
         return directory_listing::list_directories(&query_list).await;
     }
@@ -57,6 +88,7 @@ pub async fn list_files(query_list: FileListParams) -> Result<FileListResponse, 
         let file_info_list = get_logical_driver_list()?;
         let total_count = file_info_list.len() as i64;
         return Ok(FileListResponse {
+            path: query_list.path,
             file_info_list,
             total_count,
         });
@@ -117,12 +149,15 @@ pub async fn list_files(query_list: FileListParams) -> Result<FileListResponse, 
     }
     info!("List path: {}, total count: {}", path_str, total_count);
     Ok(FileListResponse {
+        path: query_list.path,
         file_info_list,
         total_count,
     })
 }
 
 mod directory_listing;
+#[cfg(test)]
+mod initial_directory_tests;
 
 pub async fn delete_file(delete_file_request: DeleteFileRequest) -> Result<(), DeskError> {
     let file_path = PathBuf::from(delete_file_request.file_path.as_str());

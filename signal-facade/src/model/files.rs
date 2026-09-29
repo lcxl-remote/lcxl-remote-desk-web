@@ -23,6 +23,11 @@ pub struct FileListParams {
     pub page_no: i64,
     pub page_count: i64,
 
+    /// Prefer the selected worker user's home for an empty initial path.
+    /// If it cannot be resolved or listed, use the normal root entry instead.
+    #[serde(default)]
+    pub prefer_user_home: bool,
+
     /// Return only directories, filtered and sorted before pagination.
     #[serde(default)]
     pub directories_only: bool,
@@ -159,6 +164,8 @@ impl FileInfo {
     Serialize, Deserialize, ToSchema, Debug, Clone, wincode::SchemaWrite, wincode::SchemaRead,
 )]
 pub struct FileListResponse {
+    /// Effective path used for this listing; empty denotes the root entry.
+    pub path: String,
     pub file_info_list: Vec<FileInfo>,
     pub total_count: i64,
 }
@@ -201,10 +208,13 @@ mod wincode_tests {
         let value = serde_json::json!({"path":"/","page_no":1,"page_count":100});
         let mut params: FileListParams = serde_json::from_value(value).unwrap();
         assert!(!params.directories_only);
+        assert!(!params.prefer_user_home);
         params.directories_only = true;
+        params.prefer_user_home = true;
         let restored: FileListParams =
             serde_json::from_str(&serde_json::to_string(&params).unwrap()).unwrap();
         assert!(restored.directories_only);
+        assert!(restored.prefer_user_home);
     }
 
     #[test]
@@ -213,6 +223,7 @@ mod wincode_tests {
             path: r"C:\Users".to_string(),
             page_no: 2,
             page_count: 50,
+            prefer_user_home: true,
             directories_only: true,
             min_file_size: Some(1024),
             max_file_size: None,
@@ -243,6 +254,7 @@ mod wincode_tests {
         let bytes = wincode::config::serialize(&original, config).expect("encode");
         let back: FileListParams = wincode::config::deserialize(&bytes, config).expect("decode");
         assert_eq!(back.path, original.path);
+        assert!(back.prefer_user_home);
         assert_eq!(back.page_no, original.page_no);
         assert_eq!(back.page_count, original.page_count);
         assert_eq!(back.directories_only, original.directories_only);
@@ -317,6 +329,7 @@ mod wincode_tests {
             err_msg: None,
         };
         let original = FileListResponse {
+            path: "/home/user".to_string(),
             file_info_list: vec![make_info("a.txt", 100), make_info("b.txt", 200)],
             total_count: 2,
         };
@@ -324,6 +337,7 @@ mod wincode_tests {
         let bytes = wincode::config::serialize(&original, config).expect("encode");
         let back: FileListResponse = wincode::config::deserialize(&bytes, config).expect("decode");
         assert_eq!(back.total_count, 2);
+        assert_eq!(back.path, original.path);
         assert_eq!(back.file_info_list.len(), 2);
         assert_eq!(back.file_info_list[0].name, "a.txt");
         assert_eq!(back.file_info_list[1].size, 200);

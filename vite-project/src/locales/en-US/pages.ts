@@ -1733,6 +1733,7 @@ export default {
   'pages.fileManager.cancel': 'Cancel',
   'pages.fileManager.cancelled': 'Cancelled',
   'pages.fileManager.myComputer': 'My Computer',
+  'pages.fileManager.userHome': 'User home',
   'pages.fileManager.totalItems': '{{count}} items',
   'pages.fileManager.remaining': 'ETA',
   'pages.fileManager.delete': 'Delete',

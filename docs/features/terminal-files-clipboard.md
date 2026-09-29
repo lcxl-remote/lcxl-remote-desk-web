@@ -27,7 +27,14 @@ model-supplied image URLs are not loaded.
 
 ## File Management
 
-Manage files on the remote device directly from the browser:
+Manage files on the remote device directly from the browser.
+
+The file manager initially opens the home directory of the user in the selected
+remote desktop session. If that directory cannot be resolved or read, it falls
+back to the Windows drive list or the filesystem root on other platforms.
+The house icon (**User home**) opens the user directory again. The separate
+disk icon (**My Computer**) returns directly to the root entry; refreshing or changing pages
+keeps the current directory. Android, iOS, and the Manager console behave the same way.
 
 - **Upload** files to the remote machine.
 - **Download** files back to the controller.

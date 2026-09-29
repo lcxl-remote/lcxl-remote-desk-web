@@ -13,7 +13,7 @@ mod linux_output;
 #[cfg(target_os = "linux")]
 pub use linux_input_control::LinuxInputControlReceipt;
 mod ui_platform;
-mod user_home;
+use crate::user_home;
 #[cfg(windows)]
 mod windows_excel;
 #[cfg(windows)]

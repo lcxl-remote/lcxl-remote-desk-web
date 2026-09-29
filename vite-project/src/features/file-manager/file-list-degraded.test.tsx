@@ -75,6 +75,7 @@ describe("FileList with an unavailable transfer channel", () => {
     beforeEach(() => {
         h.listFiles.mockReset()
         h.listFiles.mockResolvedValue({
+            path: "",
             file_info_list: [{ name: "a.txt", path: "/a.txt", is_dir: false, size: 12, modified: 0 }],
             total_count: 1,
         })

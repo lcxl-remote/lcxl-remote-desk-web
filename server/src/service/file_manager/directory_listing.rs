@@ -39,6 +39,7 @@ pub(super) async fn list_directories(
     directories.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.path.cmp(&b.path)));
     let total_count = directories.len() as i64;
     Ok(FileListResponse {
+        path: params.path.clone(),
         file_info_list: directories
             .into_iter()
             .skip(offset)

@@ -830,6 +830,7 @@ fn list_files_round_trips_wincode() {
         path: "C:\\Users".to_string(),
         page_no: 2,
         page_count: 50,
+        prefer_user_home: true,
         file_name: Some("readme".to_string()),
         ..Default::default()
     };
@@ -845,6 +846,7 @@ fn list_files_round_trips_wincode() {
             assert_eq!(p.params.path, "C:\\Users");
             assert_eq!(p.params.page_no, 2);
             assert_eq!(p.params.page_count, 50);
+            assert!(p.params.prefer_user_home);
             assert_eq!(p.params.file_name.as_deref(), Some("readme"));
         }
         other => panic!("unexpected: {other:?}"),
@@ -1670,6 +1672,7 @@ fn worker_to_service_all_variants_round_trip() {
             request_id: "r".to_string(),
             connection_id: Some("c".to_string()),
             response: FileListResponse {
+                path: "/home/user".to_string(),
                 file_info_list: vec![],
                 total_count: 0,
             },

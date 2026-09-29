@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from "react"
 import { useParams, useNavigate } from "react-router-dom"
 import { useTranslation } from "react-i18next"
-import { FileIcon, FolderIcon, ArrowUp, RefreshCw, Home, ArrowLeft, Download, Upload, Loader2, CheckCircle2, XCircle, X, ChevronLeft, ChevronRight, Trash2, Info } from "lucide-react"
+import { FileIcon, FolderIcon, ArrowUp, RefreshCw, Home, HardDrive, ArrowLeft, Download, Upload, Loader2, CheckCircle2, XCircle, X, ChevronLeft, ChevronRight, Trash2, Info } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
@@ -71,11 +71,20 @@ function formatRemainingTime(seconds: number): string {
 }
 
 export default function FileList({ orgId }: { orgId?: number } = {}) {
+    const { id } = useParams<{ id: string }>()
+    return <FileListContent key={`${orgId ?? ''}:${id ?? ''}`} orgId={orgId} />
+}
+
+function FileListContent({ orgId }: { orgId?: number }) {
     const { id: connectionId } = useParams<{ id: string }>()
     const navigate = useNavigate()
     const { t } = useTranslation()
-    // Empty path: Windows shows drive letters, others show root "/"
-    const [currentPath, setCurrentPath] = useState<string>("")
+    // A fresh request also reloads Home when the previous request was Home.
+    // Null resolves the user's home; an explicit empty path opens root.
+    const [directoryRequest, setDirectoryRequest] = useState<{ path: string | null }>({ path: null })
+    const requestedPath = directoryRequest.path
+    const resolvedRequestPath = useRef<string | null>(null)
+    const currentPath = requestedPath ?? resolvedRequestPath.current ?? ""
     const [page, setPage] = useState(1)
     const pageSize = 100
     const fileInputRef = useRef<HTMLInputElement>(null)
@@ -146,11 +155,13 @@ export default function FileList({ orgId }: { orgId?: number } = {}) {
         setIsLoading(true)
         try {
             const response = await listFiles({
-                path: currentPath,
+                path: requestedPath ?? resolvedRequestPath.current ?? "",
+                prefer_user_home: requestedPath === null && resolvedRequestPath.current === null,
                 page_no: page,
                 page_count: pageSize,
             })
             if (generation === listGeneration.current) {
+                if (requestedPath === null) resolvedRequestPath.current = response.path
                 setData(response)
             }
         } catch (error) {
@@ -166,7 +177,7 @@ export default function FileList({ orgId }: { orgId?: number } = {}) {
                 setIsLoading(false)
             }
         }
-    }, [connectionId, currentPath, page, listFiles, toast, t, describeError])
+    }, [connectionId, directoryRequest, requestedPath, page, listFiles, toast, t, describeError])
 
     useEffect(() => {
         void loadFiles()
@@ -208,8 +219,9 @@ export default function FileList({ orgId }: { orgId?: number } = {}) {
     const totalPages = Math.max(1, Math.ceil(totalCount / pageSize))
 
 
-    const handleNavigate = (path: string) => {
-        setCurrentPath(path)
+    const handleNavigate = (path: string | null) => {
+        if (path === null) resolvedRequestPath.current = null
+        setDirectoryRequest({ path })
         setPage(1)
     }
 
@@ -343,8 +355,11 @@ export default function FileList({ orgId }: { orgId?: number } = {}) {
                     <Button variant="outline" size="icon" onClick={() => navigate(`/desk/${connectionId}`)} title={t('pages.fileManager.backToDashboard')}>
                         <ArrowLeft className="h-4 w-4" />
                     </Button>
-                    <Button variant="ghost" size="icon" onClick={() => handleNavigate("")}>
+                    <Button variant="ghost" size="icon" onClick={() => handleNavigate(null)} aria-label={t('pages.fileManager.userHome')} title={t('pages.fileManager.userHome')}>
                         <Home className="h-4 w-4" />
+                    </Button>
+                    <Button variant="ghost" size="icon" onClick={() => handleNavigate("")} aria-label={t('pages.fileManager.myComputer')} title={t('pages.fileManager.myComputer')}>
+                        <HardDrive className="h-4 w-4" />
                     </Button>
                     <Breadcrumb>
                         <BreadcrumbList>
@@ -374,7 +389,7 @@ export default function FileList({ orgId }: { orgId?: number } = {}) {
                         variant="outline"
                         size="sm"
                         onClick={handleUploadClick}
-                        disabled={transfersUnavailable}
+                        disabled={transfersUnavailable || isLoading || (requestedPath === null && resolvedRequestPath.current === null)}
                         title={transfersUnavailable ? t('pages.fileManager.transferUnavailable.title') : undefined}
                     >
                         <Upload className="h-4 w-4 mr-1" />

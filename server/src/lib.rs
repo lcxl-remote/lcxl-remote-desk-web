@@ -27,6 +27,7 @@ pub mod terminal_ai_assistant;
 pub mod terminal_complete;
 pub mod transport_guard;
 pub mod typst_sandbox;
+pub(crate) mod user_home;
 pub mod version;
 #[cfg(windows)]
 pub mod windows_application_host;
