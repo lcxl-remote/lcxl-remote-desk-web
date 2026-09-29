@@ -29,7 +29,7 @@ use crate::entity::{
     agent_capability_grant, agent_exec_task, agent_goal_open_request, agent_goal_run,
     agent_grant_reservation, agent_run_event, agent_schedule, agent_session,
 };
-use desk_diagnose_core::session_reclaim::{PROTECTING_GOAL_STATUS_CODES, session_reclaim_blockers};
+use desk_diagnose_core::session_reclaim::{TERMINAL_GOAL_STATUS_CODES, session_reclaim_blockers};
 
 /// Action work whose outcome is still being reconciled keeps its session and
 /// evidence, matching Manager's reclaim rule.
@@ -276,7 +276,23 @@ async fn cleanup_agent_sessions(
                     agent_goal_run::Entity::find()
                         .select_only()
                         .column(agent_goal_run::Column::ConversationId)
-                        .filter(agent_goal_run::Column::Status.is_in(PROTECTING_GOAL_STATUS_CODES))
+                        .filter(
+                            agent_goal_run::Column::Status.is_not_in(TERMINAL_GOAL_STATUS_CODES),
+                        )
+                        .into_query(),
+                ),
+            )
+            .filter(
+                // An in-flight conversation timer run keeps its session only
+                // until it settles; leaving it out here keeps such sessions from
+                // filling a batch that the deletion transaction would skip.
+                agent_session::Column::ConversationId.not_in_subquery(
+                    agent_schedule::Entity::find()
+                        .select_only()
+                        .column(agent_schedule::Column::SourceConversationId)
+                        .filter(agent_schedule::Column::Kind.eq("conversation_resume"))
+                        .filter(agent_schedule::Column::SourceConversationId.is_not_null())
+                        .filter(agent_schedule::Column::ActiveRunId.is_not_null())
                         .into_query(),
                 ),
             )
@@ -340,7 +356,7 @@ async fn purge_sessionless_records(
         .exec(&txn)
         .await?;
     agent_goal_run::Entity::delete_many()
-        .filter(agent_goal_run::Column::Status.is_not_in(PROTECTING_GOAL_STATUS_CODES))
+        .filter(agent_goal_run::Column::Status.is_in(TERMINAL_GOAL_STATUS_CODES))
         .filter(agent_goal_run::Column::UpdatedAt.lt(cutoff_ms))
         .filter(agent_goal_run::Column::ConversationId.not_in_subquery(live()))
         .exec(&txn)
@@ -394,13 +410,13 @@ async fn delete_expired_session_candidates(
                     .one(&txn)
                     .await?
                     .is_some();
-            let goals = agent_goal_run::Entity::find()
+            let goal_status_codes: Vec<String> = agent_goal_run::Entity::find()
+                .select_only()
+                .column(agent_goal_run::Column::Status)
                 .filter(agent_goal_run::Column::ConversationId.eq(&row.conversation_id))
+                .into_tuple()
                 .all(&txn)
-                .await?
-                .iter()
-                .map(|goal| crate::agent_goal_store::decode(goal).map(|goal| goal.state))
-                .collect::<Result<Vec<_>, _>>()?;
+                .await?;
             let in_flight_timer = agent_schedule::Entity::find()
                 .filter(agent_schedule::Column::SourceConversationId.eq(&row.conversation_id))
                 .filter(agent_schedule::Column::Kind.eq("conversation_resume"))
@@ -408,7 +424,10 @@ async fn delete_expired_session_candidates(
                 .one(&txn)
                 .await?
                 .is_some();
-            if session_reclaim_blockers(unresolved, goals).is_empty() && !in_flight_timer {
+            if session_reclaim_blockers(unresolved, goal_status_codes.iter().map(String::as_str))
+                .is_empty()
+                && !in_flight_timer
+            {
                 kept.push(row);
             }
         }
@@ -981,6 +1000,85 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn reclaim_reads_goal_status_codes_and_skips_in_flight_timers() {
+        use desk_agent_protocol::schedule::{ScheduleRule, ScheduledTaskKind};
+        use sea_orm::ActiveModelTrait;
+        let db = cleanup_db().await;
+        let old = days_ago(40);
+        let old_ms = old.timestamp_millis() as u64;
+        for id in ["corrupt-finished", "unknown-status", "timer-running"] {
+            seed_session(&db, id, old, false, None).await;
+        }
+        // A finished goal whose stored state no longer decodes must not stop
+        // the sweep; its status column already says it ended.
+        let mut finished = goal_for("corrupt-finished", old_ms);
+        finished
+            .cancel_for_removal(
+                desk_diagnose_core::goal::GoalRemovalReason::OwnerDisabled,
+                old_ms,
+            )
+            .unwrap();
+        insert_goal(&db, &finished).await;
+        // A status this build does not recognize keeps its session.
+        insert_goal(&db, &goal_for("unknown-status", old_ms)).await;
+        for (conversation, status, state_json) in [
+            ("corrupt-finished", None, Some("{not json")),
+            ("unknown-status", Some("some_future_state"), None),
+        ] {
+            let row = agent_goal_run::Entity::find()
+                .filter(agent_goal_run::Column::ConversationId.eq(conversation))
+                .one(&db)
+                .await
+                .unwrap()
+                .unwrap();
+            let mut row: agent_goal_run::ActiveModel = row.into();
+            if let Some(status) = status {
+                row.status = Set(status.into());
+            }
+            if let Some(state_json) = state_json {
+                row.state_json = Set(state_json.into());
+            }
+            row.update(&db).await.unwrap();
+        }
+        let store = crate::schedule_store::ScheduleStore::new(db.clone());
+        let mut draft = crate::schedule_store::tests::draft();
+        draft.kind = ScheduledTaskKind::ConversationResume;
+        draft.source_conversation_id = Some("timer-running".into());
+        draft.requirement_revision = Some(1);
+        draft.spec.rule = ScheduleRule::Once {
+            at: (now() + chrono::Duration::days(1))
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        };
+        let timer = store
+            .create_draft(1, &draft, now().timestamp_millis())
+            .await
+            .unwrap();
+        let row = agent_schedule::Entity::find()
+            .filter(agent_schedule::Column::ScheduleId.eq(&timer.schedule_id))
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut row: agent_schedule::ActiveModel = row.into();
+        row.active_run_id = Set(Some("run-in-flight".into()));
+        row.update(&db).await.unwrap();
+
+        let (_, deleted) = cleanup_agent_sessions(&db, days_ago(30), now())
+            .await
+            .unwrap();
+        assert_eq!(deleted, 1);
+        let mut remaining: Vec<_> = agent_session::Entity::find()
+            .all(&db)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| row.conversation_id)
+            .collect();
+        remaining.sort();
+        assert_eq!(remaining, ["timer-running", "unknown-status"]);
     }
 
     #[tokio::test]

@@ -333,10 +333,6 @@ impl CommandPolicyContext {
     }
 }
 
-/// Stable execution id of an interactive command, derived from the permission
-/// item that approves it. The owner's terminal carrier is prepared for this id
-/// while the permission is still pending, and the approved execution reuses it,
-/// so the host's stream-opened report matches the carrier it was bound to.
 /// Prefix of every permission-derived interactive execution id.
 pub const INTERACTIVE_EXEC_REQUEST_PREFIX: &str = "exec_pty_";
 
@@ -347,6 +343,10 @@ pub fn is_permission_bound_exec_request_id(exec_request_id: &str) -> bool {
     exec_request_id.starts_with(INTERACTIVE_EXEC_REQUEST_PREFIX)
 }
 
+/// Stable execution id of an interactive command, derived from the permission
+/// item that approves it. The owner's terminal carrier is prepared for this id
+/// while the permission is still pending, and the approved execution reuses it,
+/// so the host's stream-opened report matches the carrier it was bound to.
 pub fn interactive_exec_request_id(
     run_id: &str,
     permission_request_id: &str,
