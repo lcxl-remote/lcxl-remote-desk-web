@@ -10,6 +10,7 @@ use crate::{
         file_transfer_dispatcher::FileTransferDispatcher,
         input_dispatcher::InputDispatcher,
         media_producer::{MediaProducer, StartMediaResult},
+        physical_display,
         policy_mirror::PolicyMirror,
         shared_capture::CaptureKey,
         virtual_display::{

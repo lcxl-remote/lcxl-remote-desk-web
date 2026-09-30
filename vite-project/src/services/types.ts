@@ -6017,6 +6017,21 @@ export type PermissionDecisionResponse = {
     state: PermissionRequestStateDto;
 };
 
+export type PhysicalDisplayCapability = {
+    /**
+     * @type boolean
+    */
+    available: boolean;
+    /**
+     * @type string,null
+    */
+    current_selector?: string | null;
+    /**
+     * @type string,null
+    */
+    reason?: string | null;
+};
+
 /**
  * @description Result of a successful provider connectivity test. The `api_key` stays\nserver-side; only latency and a bounded reply snippet are returned.
 */
@@ -6605,6 +6620,23 @@ export type RemoteAccessInitializedData = {
      * @type string | undefined
     */
     operation_system?: OperationSystemEnum;
+    /**
+     * @type object
+    */
+    physical_display_capabilities: {
+        [key: string]: {
+            [key: string]: PhysicalDisplayCapability;
+        };
+    };
+    /**
+     * @type array
+    */
+    physical_display_external_changes: string[];
+    /**
+     * @description The host has a physical-display mode provider for this OS. Each\nselected display is rechecked in the interactive worker before use.
+     * @type boolean
+    */
+    physical_display_mode_supported: boolean;
     /**
      * @type object
     */

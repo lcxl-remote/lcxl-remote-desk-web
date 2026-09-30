@@ -173,6 +173,10 @@ pub enum SignalingType {
     #[wincode(tag = 223)]
     MediaPipelineRetryCompleted = 223,
 
+    /// Host → controller refresh of display capture targets and mode support.
+    #[wincode(tag = 224)]
+    MediaCapabilitiesStateChanged = 224,
+
     /// Controller → host request to apply settings to one admitted remote
     /// desktop connection.
     #[wincode(tag = 301)]

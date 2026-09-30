@@ -472,6 +472,7 @@ fn caps_with_display(display_name: &str) -> desk_ipc_protocol::message::MediaCap
         video_encoder_capabilities: vec![],
         audio_encoders: vec![],
         video_device_list,
+        physical_display_capabilities: std::collections::BTreeMap::new(),
         audio_device_list: std::collections::BTreeMap::new(),
         has_tauri: false,
         is_admin: false,

@@ -67,11 +67,17 @@ export function formatDisplayLabel(device: DisplayInfo): string {
 export function canEnableAdaptiveResolution(
     selectedDeviceName: string | undefined | null,
     virtualDisplayDeviceName: string | undefined | null,
+    physicalDisplayModeSupported = false,
+    physicalDisplayAvailable = false,
 ): boolean {
-    return (
-        !!virtualDisplayDeviceName
-        && selectedDeviceName === virtualDisplayDeviceName
+    return !!selectedDeviceName && (
+        selectedDeviceName === virtualDisplayDeviceName
+        || (physicalDisplayModeSupported && physicalDisplayAvailable)
     )
+}
+
+export function adaptiveSelectionKey(captureBackend: string, deviceName: string): string {
+    return `${captureBackend}\u0000${deviceName}`
 }
 
 export function hasNoDisplaysForMode(

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { useForm } from "react-hook-form"
 import { useTranslation } from "react-i18next"
 import {
@@ -39,6 +39,7 @@ import { DeskConfigAudioTab } from "./desk-config-audio-tab"
 import {
     canConnectCaptureTarget,
     canEnableAdaptiveResolution,
+    adaptiveSelectionKey,
     DESK_CONFIG_DEFAULTS,
     formatDisplayLabel,
     hasNoDisplaysForMode,
@@ -72,6 +73,7 @@ interface DeskConfigDialogProps {
         preferences: DeskDevicePreferencesV1,
     ) => void
     onCancel: () => void
+    onRestorePhysicalDisplay: (deviceName: string) => void
     /**
      * Browser-side adaptive video quality toggle. Owned by the parent
      * (persisted in localStorage there) and surfaced in this dialog so
@@ -101,6 +103,7 @@ export function DeskConfigDialog({
     preferences,
     onSubmit,
     onCancel,
+    onRestorePhysicalDisplay,
     adaptiveQualityEnabled,
     onAdaptiveQualityChange,
     adaptiveBitrateEnabled,
@@ -124,25 +127,53 @@ export function DeskConfigDialog({
     const [staleSavedDeviceName, setStaleSavedDeviceName] = useState<string | null>(null)
     const [staleSavedCaptureMode, setStaleSavedCaptureMode] = useState<string | null>(null)
 
-    // Auto-resolution semantically targets the IDD; if the captured
-    // display is not the IDD, the request would silently change the
-    // IDD resolution while WGC keeps capturing a physical screen.
-    // Watch the selected device and force-uncheck the adaptive toggle
-    // whenever the selection drifts off the IDD, so the user can never
-    // submit a misconfiguration. The toggle is also visually disabled
-    // by the render path; this effect handles the data side.
+    // Keep one visible toggle, with a separate in-memory choice for each
+    // capture target. Only the virtual target writes the persisted preference.
+    const adaptiveByTarget = useRef(new Map<string, boolean>())
+    const adaptiveSessionEpoch = useRef<string | null>(null)
     const watchedDeviceName = form.watch("video_device_name")
+    const watchedCaptureBackend = form.watch("image_capture")
     const watchedAdaptive = form.watch("adaptive_web_page_resolution")
     const virtualDisplayName = initData?.virtual_display_device_name ?? null
+    const physicalSupported = initData?.physical_display_mode_supported ?? false
+    const physicalAvailable = initData?.physical_display_capabilities
+        ?.[watchedCaptureBackend]?.[watchedDeviceName]?.available ?? false
+    useEffect(() => {
+        const changed = initData?.physical_display_external_changes ?? []
+        if (changed.length === 0) return
+        for (const key of adaptiveByTarget.current.keys()) {
+            if (changed.some((device) => key.endsWith(`\u0000${device}`))) {
+                adaptiveByTarget.current.delete(key)
+            }
+        }
+        if (changed.includes(watchedDeviceName)) {
+            form.setValue("adaptive_web_page_resolution", false)
+        }
+    }, [initData?.physical_display_external_changes, watchedDeviceName, form])
     useEffect(() => {
         const canEnable = canEnableAdaptiveResolution(
             watchedDeviceName,
             virtualDisplayName,
+            physicalSupported,
+            physicalAvailable,
         )
         if (!canEnable && watchedAdaptive) {
             form.setValue("adaptive_web_page_resolution", false)
         }
-    }, [watchedDeviceName, watchedAdaptive, virtualDisplayName, form])
+    }, [watchedDeviceName, watchedAdaptive, virtualDisplayName, physicalSupported, physicalAvailable, form])
+
+    const switchAdaptiveTarget = (captureBackend: string, deviceName: string) => {
+        const previousKey = adaptiveSelectionKey(
+            form.getValues("image_capture"),
+            form.getValues("video_device_name"),
+        )
+        adaptiveByTarget.current.set(previousKey, !!form.getValues("adaptive_web_page_resolution"))
+        const nextKey = adaptiveSelectionKey(captureBackend, deviceName)
+        const defaultValue = deviceName === virtualDisplayName
+            ? preferences?.adaptiveWebPageResolution ?? DEFAULT_DESK_DEVICE_PREFERENCES.adaptiveWebPageResolution
+            : false
+        form.setValue("adaptive_web_page_resolution", adaptiveByTarget.current.get(nextKey) ?? defaultValue)
+    }
 
     useEffect(() => {
         if (!initData?.suggested_session_settings) {
@@ -152,6 +183,13 @@ export function DeskConfigDialog({
         const capabilities = initData.session_settings_capabilities
         const hasSavedPreferences = preferences !== null
         const intent = preferences ?? DEFAULT_DESK_DEVICE_PREFERENCES
+        if (adaptiveSessionEpoch.current === initData.connection_epoch && form.formState.isDirty) {
+            return
+        }
+        if (adaptiveSessionEpoch.current !== initData.connection_epoch) {
+            adaptiveByTarget.current.clear()
+            adaptiveSessionEpoch.current = initData.connection_epoch
+        }
         const target = normalizeCaptureTarget(
             capabilities.image_capture === "unsupported"
                 ? suggested.image_capture
@@ -221,7 +259,11 @@ export function DeskConfigDialog({
             show_mouse: capabilities.show_mouse === "unsupported"
                 ? suggested.show_mouse
                 : preferSavedDeskValue(preferences, intent.showMouse, suggested.show_mouse),
-            adaptive_web_page_resolution: intent.adaptiveWebPageResolution,
+            adaptive_web_page_resolution: adaptiveByTarget.current.get(
+                adaptiveSelectionKey(target.effectiveMode, target.effectiveDeviceName),
+            ) ?? (target.effectiveDeviceName === initData.virtual_display_device_name
+                ? intent.adaptiveWebPageResolution
+                : false),
             video_encoder: resolveVideoEncoder(
                 hasSavedPreferences ? intent.videoEncoder : null,
                 suggested.video_encoder,
@@ -287,6 +329,12 @@ export function DeskConfigDialog({
         )) {
             return
         }
+        const nextPreferences = toDeskDevicePreferences(values)
+        if (values.video_device_name !== virtualDisplayName) {
+            nextPreferences.adaptiveWebPageResolution =
+                preferences?.adaptiveWebPageResolution
+                ?? DEFAULT_DESK_DEVICE_PREFERENCES.adaptiveWebPageResolution
+        }
         onSubmit(
             toRemoteSessionSettings(
                 executableValues,
@@ -294,7 +342,7 @@ export function DeskConfigDialog({
                     ? initData.suggested_session_settings.adaptive_bitrate
                     : adaptiveBitrateEnabled,
             ),
-            toDeskDevicePreferences(values),
+            nextPreferences,
         )
     }
 
@@ -345,7 +393,6 @@ export function DeskConfigDialog({
                                                 disabled={initData?.session_settings_capabilities.image_capture === "unsupported"}
                                                 key={`image-capture-${currentValue || "empty"}`}
                                                 onValueChange={(value: string) => {
-                                                    field.onChange(value)
                                                     // Reset device selection to the new
                                                     // backend's primary monitor: the saved
                                                     // device_name is only meaningful for the
@@ -355,10 +402,10 @@ export function DeskConfigDialog({
                                                     const next = initData?.video_device_list
                                                         ? initData.video_device_list[value] ?? []
                                                         : []
-                                                    form.setValue(
-                                                        "video_device_name",
-                                                        pickDefaultDeviceName(next),
-                                                    )
+                                                    const deviceName = pickDefaultDeviceName(next)
+                                                    switchAdaptiveTarget(value, deviceName)
+                                                    field.onChange(value)
+                                                    form.setValue("video_device_name", deviceName)
                                                     setStaleSavedDeviceName(null)
                                                     setStaleSavedCaptureMode(null)
                                                 }}
@@ -454,23 +501,6 @@ export function DeskConfigDialog({
                                                 </AlertDescription>
                                             </Alert>
                                         )}
-                                        {/* Hint surfaced only when the daemon reports an
-                                            attached IDD that also appears in the current
-                                            backend's enumeration. Without the
-                                            `.some(...)` check, switching to a non-IDD-aware
-                                            backend (e.g. legacy DXGI builds) would still
-                                            show the hint even though no entry in the
-                                            dropdown can satisfy the adaptive toggle. */}
-                                        {initData?.virtual_display_device_name &&
-                                            videoDeviceList.some(
-                                                (d) => d.device_name === initData.virtual_display_device_name,
-                                            ) && (
-                                                <p className="text-xs text-muted-foreground">
-                                                    {t(
-                                                        "pages.desk.virtualDisplayHint",
-                                                    )}
-                                                </p>
-                                            )}
                                         <FormField
                                             control={form.control}
                                             name="video_device_name"
@@ -493,6 +523,7 @@ export function DeskConfigDialog({
                                                     <Select
                                                         disabled={initData?.session_settings_capabilities.video_device_name === "unsupported"}
                                                         onValueChange={(value: string) => {
+                                                            switchAdaptiveTarget(selectedImageCapture, value)
                                                             field.onChange(value)
                                                             setStaleSavedDeviceName(null)
                                                         }}
@@ -575,13 +606,21 @@ export function DeskConfigDialog({
                                         const canEnable = canEnableAdaptiveResolution(
                                             watchedDeviceName,
                                             virtualDisplayName,
+                                            physicalSupported,
+                                            physicalAvailable,
                                         )
                                         return (
                                             <FormItem className="flex flex-row items-start space-x-3 space-y-0 p-2 rounded-md border">
                                                 <FormControl>
                                                     <Checkbox
                                                         checked={!!field.value}
-                                                        onCheckedChange={field.onChange}
+                                                        onCheckedChange={(checked) => {
+                                                            field.onChange(checked)
+                                                            adaptiveByTarget.current.set(
+                                                                adaptiveSelectionKey(selectedImageCapture, watchedDeviceName),
+                                                                checked === true,
+                                                            )
+                                                        }}
                                                         disabled={!canEnable}
                                                     />
                                                 </FormControl>
@@ -589,11 +628,25 @@ export function DeskConfigDialog({
                                                     <FormLabel>
                                                         {t('pages.desk.adaptiveResolution')}
                                                     </FormLabel>
+                                                    {canEnable && watchedDeviceName !== virtualDisplayName && (
+                                                        <>
+                                                            <p className="text-xs text-muted-foreground">
+                                                                {t('pages.desk.adaptiveResolutionPhysicalHint')}
+                                                            </p>
+                                                            <Button type="button" variant="outline" size="sm"
+                                                                onClick={() => onRestorePhysicalDisplay(watchedDeviceName)}>
+                                                                {t('pages.desk.restorePhysicalResolution')}
+                                                            </Button>
+                                                        </>
+                                                    )}
                                                     {!canEnable && (
                                                         <p className="text-xs text-muted-foreground">
-                                                            {t(
-                                                                'pages.desk.adaptiveResolutionVirtualOnly',
-                                                            )}
+                                                            {t(physicalSupported
+                                                                && watchedDeviceName !== virtualDisplayName
+                                                                && !initData?.physical_display_capabilities
+                                                                    ?.[watchedCaptureBackend]?.[watchedDeviceName]
+                                                                ? 'pages.desk.adaptiveResolutionDetecting'
+                                                                : 'pages.desk.adaptiveResolutionUnavailable')}
                                                         </p>
                                                     )}
                                                 </div>

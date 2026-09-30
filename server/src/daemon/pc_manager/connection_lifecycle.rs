@@ -173,6 +173,110 @@ pub async fn cleanup_pc(
             log::warn!("[pc_manager] N->0 virtual display detach failed: {e}");
         }
     }
+    if removed.is_some()
+        && registry.len().await == 0
+        && registry.pending_requests() == 0
+        && registry.admission(connection_id).await.is_none()
+    {
+        restore_physical_displays_if_unused(registry, worker_mgr, connection_id).await;
+    }
+}
+
+/// Restore remembered physical modes through their owning session workers.
+/// The last departing connection may belong to another login session. Errors
+/// are best effort: no persistent repair state is created.
+async fn restore_physical_displays_if_unused(
+    registry: &PcRegistry,
+    worker_mgr: &WorkerManager,
+    connection_id: &str,
+) {
+    if registry.len().await != 0 || registry.pending_requests() != 0 {
+        return;
+    }
+    let Some(supervisor) = registry.physical_display_supervisor() else {
+        return;
+    };
+    let _restore_guard = supervisor.lock_restores().await;
+    // A mode request may already be executing when the last PC goes away.
+    // Let its worker result establish the original-mode snapshot before
+    // deciding what needs restoring; the worker response reader runs in a
+    // separate task from this connection cleanup path.
+    if !supervisor.wait_for_idle(Duration::from_secs(20)).await {
+        log::warn!(
+            "[physical-display] best-effort restore deferred: in-flight mode operation did not finish"
+        );
+        return;
+    }
+    if registry.len().await != 0 || registry.pending_requests() != 0 {
+        return;
+    }
+    for (device_name, recorded) in supervisor.recorded_displays().await {
+        let Some(action) = supervisor
+            .restore_action(&device_name, recorded.session_key.as_ref())
+            .await
+        else {
+            continue;
+        };
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let operation_id = match supervisor
+            .begin(
+                &device_name,
+                &request_id,
+                &recorded.connection_epoch,
+                recorded.session_key.clone(),
+                &action,
+            )
+            .await
+        {
+            Ok(id) => id,
+            Err(error) => {
+                log::warn!(
+                    "[physical-display] best-effort restore skipped for {device_name}: {error}"
+                );
+                continue;
+            }
+        };
+        let command = desk_ipc_protocol::message::SetPhysicalDisplayModePayload {
+            request_id,
+            connection_id: connection_id.into(),
+            connection_epoch: recorded.connection_epoch,
+            device_name: device_name.clone(),
+            capture_backend: String::new(),
+            operation_id,
+            action,
+        };
+        let message = ServiceToWorker::SetPhysicalDisplayMode(command);
+        let send = match recorded.session_key.as_ref() {
+            Some(session) => worker_mgr.send_to_session_worker(session, message).await,
+            None => worker_mgr.send_to_worker(message).await,
+        };
+        if let Err(error) = send {
+            log::warn!(
+                "[physical-display] best-effort restore send failed for {device_name}: {error}"
+            );
+            supervisor.abandon(operation_id).await;
+            supervisor
+                .forget(&device_name, recorded.session_key.as_ref())
+                .await;
+            continue;
+        }
+        if !supervisor.wait_for_idle(Duration::from_secs(20)).await {
+            log::warn!("[physical-display] best-effort restore timed out for {device_name}");
+            // The worker may still complete this OS write and reply after
+            // the wait expires. Keep its operation fence and original-mode
+            // snapshot; do not start another display topology write yet.
+            break;
+        } else if supervisor
+            .restore_action(&device_name, recorded.session_key.as_ref())
+            .await
+            .is_some()
+        {
+            log::warn!("[physical-display] best-effort restore did not complete for {device_name}");
+            supervisor
+                .forget(&device_name, recorded.session_key.as_ref())
+                .await;
+        }
+    }
 }
 
 pub async fn hide_private_screen_best_effort(
@@ -231,6 +335,7 @@ async fn finalize_logical_connection(
     registry.unindex_grant_connection(connection_id).await;
     registry.unmark_terminal_connection(connection_id).await;
     detach_virtual_display_if_unused(registry, virtual_display, reason).await;
+    restore_physical_displays_if_unused(registry, worker_mgr, connection_id).await;
     worker_mgr.clear_connection_target(connection_id);
 }
 
@@ -505,6 +610,138 @@ pub async fn handle_connection_removed(
 #[cfg(test)]
 mod reconnect_tests {
     use super::*;
+    use actix_web::web;
+    use desk_ipc_protocol::message::{
+        DesktopTarget, PhysicalDisplayAction, PhysicalDisplayModeData, PhysicalDisplayModeOutcome,
+        PhysicalDisplayModeResponsePayload, SessionKey, WorkerKey,
+    };
+
+    #[tokio::test]
+    async fn last_connection_restores_another_login_sessions_display() {
+        let registry = PcRegistry::new();
+        let supervisor =
+            Arc::new(crate::daemon::physical_display::PhysicalDisplaySupervisor::new());
+        registry.set_physical_display_supervisor(Arc::clone(&supervisor));
+        let settings = web::Data::new(crate::model::settings::SharedSettings::from(
+            crate::model::settings::Settings::default(),
+        ));
+        let (workers, _worker_messages) = WorkerManager::new(settings, registry.clone());
+        workers.enable_session_targeting_for_test();
+        let session_a = SessionKey {
+            platform_session_id: "session-a".into(),
+            session_generation: 1,
+        };
+        let session_b = SessionKey {
+            platform_session_id: "session-b".into(),
+            session_generation: 1,
+        };
+        let (a_tx, mut a_rx) = mpsc::unbounded_channel();
+        let (b_tx, mut b_rx) = mpsc::unbounded_channel();
+        for (session, sender) in [(session_a.clone(), a_tx), (session_b.clone(), b_tx)] {
+            workers
+                .install_resident_for_test(
+                    WorkerKey {
+                        session,
+                        desktop: DesktopTarget::LinuxSession,
+                    },
+                    sender,
+                )
+                .await;
+        }
+        workers
+            .bind_connection_target("last-connection-b", &session_b)
+            .unwrap();
+
+        let initial_operation = supervisor
+            .begin(
+                "display-a",
+                "apply-a",
+                "epoch-a",
+                Some(session_a.clone()),
+                &PhysicalDisplayAction::Select {
+                    selector: "mode-b".into(),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            supervisor
+                .complete(&PhysicalDisplayModeResponsePayload {
+                    request_id: "apply-a".into(),
+                    connection_id: "departed-connection-a".into(),
+                    connection_epoch: "epoch-a".into(),
+                    operation_id: initial_operation,
+                    outcome: PhysicalDisplayModeOutcome::Applied(PhysicalDisplayModeData {
+                        device_name: "display-a".into(),
+                        display_identity: "monitor-a".into(),
+                        previous_selector: "mode-a".into(),
+                        selector: "mode-b".into(),
+                        pixel_width: 1280,
+                        pixel_height: 800,
+                        refresh_millihz: 60_000,
+                        changed: true,
+                        restored: false,
+                    }),
+                })
+                .await
+        );
+
+        let restore = tokio::spawn({
+            let registry = registry.clone();
+            let workers = workers.clone();
+            async move {
+                restore_physical_displays_if_unused(&registry, &workers, "last-connection-b").await;
+            }
+        });
+        let command = tokio::time::timeout(Duration::from_secs(2), a_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let ServiceToWorker::SetPhysicalDisplayMode(command) = command else {
+            panic!("expected physical display restore");
+        };
+        assert_eq!(command.connection_id, "last-connection-b");
+        assert!(matches!(
+            command.action,
+            PhysicalDisplayAction::Restore {
+                ref original_selector,
+                ref expected_applied_selector,
+                ..
+            } if original_selector == "mode-a" && expected_applied_selector == "mode-b"
+        ));
+        assert!(b_rx.try_recv().is_err());
+        assert!(
+            supervisor
+                .complete(&PhysicalDisplayModeResponsePayload {
+                    request_id: command.request_id,
+                    connection_id: command.connection_id,
+                    connection_epoch: command.connection_epoch,
+                    operation_id: command.operation_id,
+                    outcome: PhysicalDisplayModeOutcome::Applied(PhysicalDisplayModeData {
+                        device_name: "display-a".into(),
+                        display_identity: "monitor-a".into(),
+                        previous_selector: "mode-b".into(),
+                        selector: "mode-a".into(),
+                        pixel_width: 1920,
+                        pixel_height: 1080,
+                        refresh_millihz: 60_000,
+                        changed: true,
+                        restored: true,
+                    }),
+                })
+                .await
+        );
+        tokio::time::timeout(Duration::from_secs(2), restore)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            supervisor
+                .restore_action("display-a", Some(&session_a))
+                .await
+                .is_none()
+        );
+    }
 
     #[test]
     fn only_a_reconnected_peer_requires_an_extra_keyframe() {

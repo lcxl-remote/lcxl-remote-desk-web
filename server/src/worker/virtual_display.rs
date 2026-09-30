@@ -54,15 +54,10 @@ pub struct VirtualDisplayState {
     /// `AttachVirtualDisplay`. `None` ⇒ capture targets the physical
     /// display the user originally selected.
     pub attached_display: Option<String>,
-    /// Original StartMedia exactly as it arrived from the daemon
-    /// (preserving the user's preferred physical capture target).
-    /// Survives Attach/Detach swaps so a Detach can rebuild capture
-    /// against the original target without the daemon re-issuing
-    /// StartMedia from scratch.
+    /// StartMedia exactly as it arrived from the daemon. The selected
+    /// capture target remains per connection even while the IDD is attached.
     pub original_start_payload: HashMap<String, StartMediaPayload>,
-    /// StartMedia actually handed to the producer — same as `original`
-    /// except `video_device` is overridden to the attached display
-    /// name when attached.
+    /// StartMedia handed to the producer for each connection.
     pub active_start_payload: HashMap<String, StartMediaPayload>,
     /// Per-session exclusive layout — `Some` only while the worker
     /// has detached the physical displays to migrate windows onto
@@ -80,21 +75,13 @@ impl VirtualDisplayState {
         Self::default()
     }
 
-    /// Build the active payload from `original`, applying the attached
-    /// display override if any.
+    /// Keep the browser-selected capture target for this connection.
     fn make_active(&self, original: &StartMediaPayload) -> StartMediaPayload {
-        match &self.attached_display {
-            Some(d) => StartMediaPayload {
-                video_device: Some(d.clone()),
-                ..original.clone()
-            },
-            None => original.clone(),
-        }
+        original.clone()
     }
 
     /// Record an inbound StartMedia: cache `original`, return the
-    /// payload that should be forwarded to the producer (already
-    /// adjusted for the attached display, if any).
+    /// payload that should be forwarded to the producer.
     pub fn record_start(&mut self, payload: StartMediaPayload) -> StartMediaPayload {
         self.original_start_payload
             .insert(payload.connection_id.clone(), payload.clone());
@@ -110,30 +97,32 @@ impl VirtualDisplayState {
         self.active_start_payload.remove(connection_id);
     }
 
-    /// Apply a new attached-display state and re-derive `active`
-    /// payloads. Returns the list of (connection_id, active_payload)
-    /// the caller should drive Stop+Start against the producer to
-    /// swap capture targets.
+    /// Apply a new attached-display state. Only connections selecting the
+    /// old or new IDD need their capture pipeline restarted.
     pub fn rebuild_active_for_attach(&mut self, display_name: Option<String>) -> Vec<RestartStep> {
+        let previous = self.attached_display.clone();
         self.attached_display = display_name;
         let originals: Vec<StartMediaPayload> =
             self.original_start_payload.values().cloned().collect();
         self.active_start_payload.clear();
         originals
             .into_iter()
-            .map(|orig| {
+            .filter_map(|orig| {
                 let active = self.make_active(&orig);
                 self.active_start_payload
                     .insert(active.connection_id.clone(), active.clone());
-                RestartStep {
+                let targets_idd = active.video_device.as_ref().is_some_and(|name| {
+                    previous.as_ref() == Some(name) || self.attached_display.as_ref() == Some(name)
+                });
+                targets_idd.then_some(RestartStep {
                     connection_id: orig.connection_id.clone(),
                     active,
-                }
+                })
             })
             .collect()
     }
 
-    /// Collect a [`RestartStep`] for every currently-active connection
+    /// Collect a [`RestartStep`] for connections capturing the IDD
     /// without mutating `attached_display`. Used by the
     /// `SetVirtualDisplayMode` handler: a mode change does not switch
     /// targets, so the attached display name stays the same; we just
@@ -142,8 +131,17 @@ impl VirtualDisplayState {
     /// underlying monitor remount. The caller filters by per-connection
     /// effective `CaptureKey` before issuing the Stop+Start.
     pub fn restart_steps_for_attached(&self) -> Vec<RestartStep> {
+        let Some(name) = self.attached_display.as_deref() else {
+            return Vec::new();
+        };
+        self.restart_steps_for_display(name)
+    }
+
+    /// Return active connections capturing one selected display.
+    pub fn restart_steps_for_display(&self, device_name: &str) -> Vec<RestartStep> {
         self.active_start_payload
             .iter()
+            .filter(|(_, active)| active.video_device.as_deref() == Some(device_name))
             .map(|(connection_id, active)| RestartStep {
                 connection_id: connection_id.clone(),
                 active: active.clone(),
@@ -391,6 +389,7 @@ pub struct ExclusiveCoordinator {
     /// in tests this stays `None` so the coordinator can be exercised
     /// without wiring up the consumer side.
     commit_tx: Option<mpsc::UnboundedSender<ExclusiveCommitEvent>>,
+    topology_lock: Option<Arc<tokio::sync::Mutex<()>>>,
 }
 
 impl Default for ExclusiveCoordinator {
@@ -399,6 +398,7 @@ impl Default for ExclusiveCoordinator {
             cancel: None,
             runner: None,
             commit_tx: None,
+            topology_lock: None,
         }
     }
 }
@@ -406,6 +406,10 @@ impl Default for ExclusiveCoordinator {
 impl ExclusiveCoordinator {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn set_topology_lock(&mut self, lock: Arc<tokio::sync::Mutex<()>>) {
+        self.topology_lock = Some(lock);
     }
 
     /// Install the channel that receives [`ExclusiveCommitEvent`]
@@ -437,6 +441,7 @@ impl ExclusiveCoordinator {
         self.cancel = Some(cancel_tx);
         let prev = self.runner.take();
         let commit_tx = self.commit_tx.clone();
+        let topology_lock = self.topology_lock.clone();
         self.runner = Some(tokio::spawn(async move {
             // Wait for the previous runner to finish so CDS calls
             // serialise. The cancel oneshot is the unconditional way
@@ -454,6 +459,10 @@ impl ExclusiveCoordinator {
             if cancel_rx.try_recv().is_ok() {
                 return;
             }
+            let _topology_guard = match topology_lock.as_ref() {
+                Some(lock) => Some(lock.lock().await),
+                None => None,
+            };
             run_exclusive_reconciler(
                 op_id, desired, prompt_ms, attached, layout, cancel_rx, writer_tx, commit_tx,
             )
@@ -857,12 +866,11 @@ mod tests {
     }
 
     #[test]
-    fn record_start_caches_original_and_overrides_active_when_attached() {
+    fn record_start_keeps_physical_target_when_idd_attached() {
         let mut state = VirtualDisplayState::new();
         state.attached_display = Some("\\\\.\\DISPLAY9".to_string());
         let original = make_payload("conn-1", Some("\\\\.\\DISPLAY1"));
         let active = state.record_start(original.clone());
-        // original is preserved exactly.
         assert_eq!(
             state
                 .original_start_payload
@@ -872,8 +880,7 @@ mod tests {
                 .as_deref(),
             Some("\\\\.\\DISPLAY1"),
         );
-        // active is overridden.
-        assert_eq!(active.video_device.as_deref(), Some("\\\\.\\DISPLAY9"));
+        assert_eq!(active.video_device.as_deref(), Some("\\\\.\\DISPLAY1"));
         assert_eq!(
             state
                 .active_start_payload
@@ -881,7 +888,7 @@ mod tests {
                 .unwrap()
                 .video_device
                 .as_deref(),
-            Some("\\\\.\\DISPLAY9"),
+            Some("\\\\.\\DISPLAY1"),
         );
     }
 
@@ -912,27 +919,20 @@ mod tests {
     }
 
     #[test]
-    fn restart_steps_for_attached_returns_step_per_active_connection() {
+    fn restart_steps_for_attached_only_targets_idd_connections() {
         let mut state = VirtualDisplayState::new();
         state.record_start(make_payload("conn-1", Some("\\\\.\\DISPLAY1")));
-        state.record_start(make_payload("conn-2", Some("\\\\.\\DISPLAY1")));
+        state.record_start(make_payload("conn-2", Some("\\\\.\\DISPLAY9")));
         let _ = state.rebuild_active_for_attach(Some("\\\\.\\DISPLAY9".to_string()));
-        // Sanity precondition: attached_display set, 2 active payloads.
         assert_eq!(state.attached_display.as_deref(), Some("\\\\.\\DISPLAY9"));
 
         let steps = state.restart_steps_for_attached();
-        assert_eq!(steps.len(), 2);
-        let mut ids: Vec<&str> = steps.iter().map(|s| s.connection_id.as_str()).collect();
-        ids.sort();
-        assert_eq!(ids, vec!["conn-1", "conn-2"]);
-        for step in &steps {
-            // Each step carries the active payload (already rewritten
-            // to target the attached display); the SetVirtualDisplayMode
-            // handler will Stop+Start the producer with this payload.
-            assert_eq!(step.active.video_device.as_deref(), Some("\\\\.\\DISPLAY9"));
-        }
-        // restart_steps_for_attached must NOT mutate attached_display
-        // (set_mode keeps the same target, only the resolution changed).
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].connection_id, "conn-2");
+        assert_eq!(
+            steps[0].active.video_device.as_deref(),
+            Some("\\\\.\\DISPLAY9")
+        );
         assert_eq!(state.attached_display.as_deref(), Some("\\\\.\\DISPLAY9"));
     }
 
@@ -943,35 +943,38 @@ mod tests {
     }
 
     #[test]
-    fn rebuild_active_for_attach_emits_restart_steps_for_each_connection() {
+    fn rebuild_active_for_attach_preserves_mixed_capture_targets() {
         let mut state = VirtualDisplayState::new();
         state.record_start(make_payload("conn-1", Some("\\\\.\\DISPLAY1")));
-        state.record_start(make_payload("conn-2", Some("\\\\.\\DISPLAY1")));
+        state.record_start(make_payload("conn-2", Some("\\\\.\\DISPLAY9")));
         let steps = state.rebuild_active_for_attach(Some("\\\\.\\DISPLAY9".to_string()));
-        assert_eq!(steps.len(), 2);
-        for step in &steps {
-            assert_eq!(step.active.video_device.as_deref(), Some("\\\\.\\DISPLAY9"));
-        }
-        // Active cache now reflects the override.
-        for active in state.active_start_payload.values() {
-            assert_eq!(active.video_device.as_deref(), Some("\\\\.\\DISPLAY9"));
-        }
-        // Original is untouched.
-        for original in state.original_start_payload.values() {
-            assert_eq!(original.video_device.as_deref(), Some("\\\\.\\DISPLAY1"));
-        }
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].connection_id, "conn-2");
+        assert_eq!(
+            state.active_start_payload["conn-1"].video_device.as_deref(),
+            Some("\\\\.\\DISPLAY1")
+        );
+        assert_eq!(
+            state.active_start_payload["conn-2"].video_device.as_deref(),
+            Some("\\\\.\\DISPLAY9")
+        );
     }
 
     #[test]
-    fn rebuild_active_for_detach_restores_original_video_device() {
+    fn rebuild_active_for_detach_only_restarts_virtual_capture() {
         let mut state = VirtualDisplayState::new();
         state.attached_display = Some("\\\\.\\DISPLAY9".to_string());
         state.record_start(make_payload("conn-1", Some("\\\\.\\DISPLAY1")));
+        state.record_start(make_payload("conn-2", Some("\\\\.\\DISPLAY9")));
         let steps = state.rebuild_active_for_attach(None);
         assert_eq!(steps.len(), 1);
-        // Detach restores the original physical device.
+        assert_eq!(steps[0].connection_id, "conn-2");
         assert_eq!(
             steps[0].active.video_device.as_deref(),
+            Some("\\\\.\\DISPLAY9")
+        );
+        assert_eq!(
+            state.active_start_payload["conn-1"].video_device.as_deref(),
             Some("\\\\.\\DISPLAY1")
         );
         assert!(state.attached_display.is_none());

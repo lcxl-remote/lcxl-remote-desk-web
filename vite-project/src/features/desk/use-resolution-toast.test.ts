@@ -135,6 +135,21 @@ describe("useResolutionToast", () => {
         expect(result.current.resolutionToast).toBeNull();
     });
 
+    it("localizes the shared single-client auto gate from its error code", () => {
+        const { result, emit } = renderToast();
+        act(() => result.current.registerSent("r-multiple", 1280, 800));
+
+        emit(makeFailed(
+            "r-multiple",
+            deskErrorCodeEnum.ADAPTIVE_RESOLUTION_REQUIRES_SINGLE_CLIENT,
+            "auto requires single client connection",
+        ));
+        expect(result.current.resolutionToast).toEqual({
+            phase: "failed",
+            reason: "Automatic resolution is unavailable while multiple remote desktops are connected.",
+        });
+    });
+
     /**
      * A debounced or stuck old request can still
      * land an echo on the wire after the user moved on. The toast

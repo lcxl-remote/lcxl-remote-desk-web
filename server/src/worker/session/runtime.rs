@@ -713,6 +713,8 @@ impl WorkerSession {
         // covers (the registry replays the physical layout on next
         // logon).
         let mut exclusive_coord = crate::worker::virtual_display::ExclusiveCoordinator::new();
+        let topology_lock = Arc::new(tokio::sync::Mutex::new(()));
+        exclusive_coord.set_topology_lock(Arc::clone(&topology_lock));
         let _exclusive_guard = crate::worker::virtual_display::ExclusiveGuard::new(Arc::clone(
             &vd_state.exclusive_layout,
         ));
@@ -1510,6 +1512,178 @@ impl WorkerSession {
                                                 );
                                             });
                                         }
+                                    }
+                                }
+                                ServiceToWorker::SetPhysicalDisplayMode(payload) => {
+                                    let _topology_guard = topology_lock.lock().await;
+                                    let target = payload.device_name.clone();
+                                    let requester = payload.connection_id.clone();
+                                    let restart_steps = vd_state
+                                        .restart_steps_for_display(&target)
+                                        .into_iter()
+                                        .filter(|step| step.active.start_video)
+                                        .collect::<Vec<_>>();
+                                    let capture_encoder = vd_state
+                                        .active_start_payload
+                                        .get(&payload.connection_id)
+                                        .filter(|active| {
+                                            active.connection_epoch == payload.connection_epoch
+                                                && active.start_video
+                                                && active.video_device.as_deref() == Some(target.as_str())
+                                                && active.image_capture == payload.capture_backend
+                                        })
+                                        .map(|active| active.video_encoder)
+                                        .filter(|_| media_producer.is_some());
+                                    let capture_encoders = capture_encoder.map(|requester_encoder| {
+                                        let mut encoders = restart_steps
+                                            .iter()
+                                            .map(|step| step.active.video_encoder)
+                                            .collect::<Vec<_>>();
+                                        if !encoders.contains(&requester_encoder) {
+                                            encoders.push(requester_encoder);
+                                        }
+                                        encoders
+                                    });
+                                    let mut response = physical_display::run_mode(
+                                        payload,
+                                        capture_encoders,
+                                    )
+                                    .await;
+                                    let changed = matches!(
+                                        &response,
+                                        WorkerToService::PhysicalDisplayMode(result)
+                                            if matches!(
+                                                &result.outcome,
+                                                desk_ipc_protocol::message::PhysicalDisplayModeOutcome::Applied(data)
+                                                    if data.changed
+                                            )
+                                    );
+                                    if changed {
+                                        // Changing one monitor's mode can move
+                                        // neighbouring monitors in the desktop
+                                        // coordinate space. Refresh every active
+                                        // connection immediately, even if the OS
+                                        // display-change callback arrives late.
+                                        input_dispatcher.refresh_geometry(None);
+                                        if let Some(producer) = media_producer.as_ref() {
+                                            let frame_probes = restart_steps.iter().map(|step| {
+                                                (step.connection_id.clone(), step.active.video_encoder)
+                                            }).collect::<Vec<_>>();
+                                            let keys = dedup_capture_keys(&restart_steps, |id| {
+                                                producer.connection_capture_key(id)
+                                            });
+                                            for key in &keys {
+                                                producer.invalidate_capture_key(key);
+                                            }
+                                            for step in restart_steps {
+                                                producer.stop_media(&StopMediaPayload {
+                                                    connection_id: step.connection_id.clone(),
+                                                    connection_epoch: step.active.connection_epoch.clone(),
+                                                });
+                                                let connection_id = step.connection_id.clone();
+                                                producer.start_media_with(step.active, |generation| {
+                                                    input_dispatcher.set_connection_generation_if_present(
+                                                        &connection_id,
+                                                        generation,
+                                                    );
+                                                });
+                                            }
+                                            if !frame_probes.is_empty() {
+                                                let deadline = tokio::time::Instant::now()
+                                                    + std::time::Duration::from_secs(8);
+                                                let mut frame_error = None;
+                                                for (connection_id, encoder_id) in frame_probes {
+                                                    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                                                    match producer.wait_for_valid_frame(
+                                                        &connection_id,
+                                                        encoder_id,
+                                                        remaining,
+                                                    ).await {
+                                                        Ok((width, height)) => {
+                                                            if connection_id == requester
+                                                                && let WorkerToService::PhysicalDisplayMode(result) = &mut response
+                                                                && let desk_ipc_protocol::message::PhysicalDisplayModeOutcome::Applied(data) = &mut result.outcome
+                                                            {
+                                                                data.pixel_width = width;
+                                                                data.pixel_height = height;
+                                                            }
+                                                        }
+                                                        Err(reason) => {
+                                                            frame_error = Some(format!("connection {connection_id}: {reason}"));
+                                                            break;
+                                                        }
+                                                    }
+                                                }
+                                                if let Some(reason) = frame_error {
+                                                    warn!("Physical display new frame unavailable: {reason}");
+                                                    if let WorkerToService::PhysicalDisplayMode(result) = &mut response
+                                                        && let desk_ipc_protocol::message::PhysicalDisplayModeOutcome::Applied(data) = &result.outcome
+                                                    {
+                                                        result.outcome = physical_display::rollback_after_failed_frame(
+                                                            target.clone(),
+                                                            data.clone(),
+                                                            reason,
+                                                        ).await;
+                                                    }
+                                                        let steps = vd_state.restart_steps_for_display(&target)
+                                                            .into_iter()
+                                                            .filter(|step| step.active.start_video)
+                                                            .collect::<Vec<_>>();
+                                                        let keys = dedup_capture_keys(&steps, |id| {
+                                                            producer.connection_capture_key(id)
+                                                        });
+                                                        for key in &keys {
+                                                            producer.invalidate_capture_key(key);
+                                                        }
+                                                        for step in steps {
+                                                            producer.stop_media(&StopMediaPayload {
+                                                                connection_id: step.connection_id.clone(),
+                                                                connection_epoch: step.active.connection_epoch.clone(),
+                                                            });
+                                                            let connection_id = step.connection_id.clone();
+                                                            producer.start_media_with(step.active, |generation| {
+                                                                input_dispatcher.set_connection_generation_if_present(
+                                                                    &connection_id,
+                                                                    generation,
+                                                                );
+                                                            });
+                                                        }
+                                                        input_dispatcher.refresh_geometry(None);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if writer_tx.send(response).is_err() {
+                                        warn!("writer task closed; dropping PhysicalDisplayMode response");
+                                    }
+                                    // A new viewer can request its device list before the OS
+                                    // display-change callback is delivered. Even a failed or
+                                    // no-op request needs a fresh snapshot: a local mode change
+                                    // can arrive while the daemon still has a pending operation,
+                                    // so its earlier callback is deliberately not reconciled.
+                                    // Queue the snapshot after the mode result. FIFO delivery
+                                    // lets the daemon clear the pending fence before comparing
+                                    // the actual selector with its restore record.
+                                    let build_desktop_name = init_payload.desktop_name.clone();
+                                    let has_tauri = init_payload.host_upstream_url.is_some();
+                                    match tokio::task::spawn_blocking(move || {
+                                        MediaProducer::build_capabilities(
+                                            build_desktop_name.as_deref(),
+                                            has_tauri,
+                                        )
+                                    }).await {
+                                        Ok(mut refreshed) => {
+                                            if worker_profile == WorkerProfile::RestrictedDesktop {
+                                                refreshed.audio_codecs.clear();
+                                                refreshed.audio_encoders.clear();
+                                                refreshed.audio_device_list.clear();
+                                                refreshed.has_tauri = false;
+                                            }
+                                            if writer_tx.send(WorkerToService::Capabilities(refreshed)).is_err() {
+                                                warn!("writer task closed; dropping physical-display capabilities");
+                                            }
+                                        }
+                                        Err(error) => warn!("Physical-display capability refresh failed: {error}"),
                                     }
                                 }
                                 ServiceToWorker::AttachVirtualDisplay(payload) => {
@@ -3267,6 +3441,24 @@ impl WorkerSession {
                                 evt.seq, retried
                             );
                         }
+                    }
+                    let build_desktop_name = init_payload.desktop_name.clone();
+                    let has_tauri = init_payload.host_upstream_url.is_some();
+                    match tokio::task::spawn_blocking(move || {
+                        MediaProducer::build_capabilities(build_desktop_name.as_deref(), has_tauri)
+                    }).await {
+                        Ok(mut refreshed) => {
+                            if worker_profile == WorkerProfile::RestrictedDesktop {
+                                refreshed.audio_codecs.clear();
+                                refreshed.audio_encoders.clear();
+                                refreshed.audio_device_list.clear();
+                                refreshed.has_tauri = false;
+                            }
+                            if writer_tx.send(WorkerToService::Capabilities(refreshed)).is_err() {
+                                warn!("writer task closed; dropping display-change capabilities");
+                            }
+                        }
+                        Err(error) => warn!("Display-change capability refresh failed: {error}"),
                     }
                 }
 

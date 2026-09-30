@@ -19,7 +19,7 @@ impl serde::Serialize for ChangeDisplaySettingsPayload {
     where
         S: serde::Serializer,
     {
-        desk_signal_facade::model::virtual_display::ChangeDisplaySettingsPayload {
+        desk_signal_facade::model::virtual_display::ChangeDisplaySettingsCommand::Virtual {
             connection_epoch: TEST_CONNECTION_EPOCH.to_string(),
             width: self.width,
             height: self.height,
@@ -87,6 +87,9 @@ async fn make_ctx() -> RouterContext {
         host_control_hub,
         worker_mgr,
         virtual_display: None,
+        physical_display: Arc::new(
+            crate::daemon::physical_display::PhysicalDisplaySupervisor::new(),
+        ),
         diagnose_orchestrator: None,
         remote_read: None,
         exec_supported: false,

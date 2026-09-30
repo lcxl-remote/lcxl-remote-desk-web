@@ -250,6 +250,14 @@ pub struct RemoteAccessInitializedData {
     /// IDD resolution while the worker is capturing a physical monitor.
     #[serde(default)]
     pub virtual_display_device_name: Option<String>,
+    /// The host has a physical-display mode provider for this OS. Each
+    /// selected display is rechecked in the interactive worker before use.
+    pub physical_display_mode_supported: bool,
+    pub physical_display_capabilities: BTreeMap<
+        String,
+        BTreeMap<String, crate::model::virtual_display::PhysicalDisplayCapability>,
+    >,
+    pub physical_display_external_changes: Vec<String>,
     /// Browser-side adaptive resolution knobs sourced from
     /// `VirtualDisplaySettings`. Missing in legacy responses ⇒
     /// `AdaptiveResolutionParams::Default` (5000 ms / 16 px).
@@ -262,6 +270,19 @@ pub struct RemoteAccessInitializedData {
     /// machine's own OS, which is what `OperationSystemEnum::default()` yields.
     #[serde(default = "unknown_host_os")]
     pub operation_system: OperationSystemEnum,
+}
+
+/// Host notification when the interactive worker discovers or loses displays.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct MediaCapabilitiesStateChangedData {
+    pub connection_epoch: String,
+    pub video_device_list: BTreeMap<String, Vec<DisplayInfo>>,
+    pub physical_display_mode_supported: bool,
+    pub physical_display_capabilities: BTreeMap<
+        String,
+        BTreeMap<String, crate::model::virtual_display::PhysicalDisplayCapability>,
+    >,
+    pub physical_display_external_changes: Vec<String>,
 }
 
 /// Serde fallback for a host that does not advertise its OS. Unlike

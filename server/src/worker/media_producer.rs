@@ -348,6 +348,82 @@ impl MediaProducer {
         self.capture_registry.display_info_for_key(&key)
     }
 
+    /// Confirm that the restarted capture generation produced a sized frame
+    /// accepted by the selected encoder. Never creates a second OS capture.
+    pub async fn wait_for_valid_frame(
+        &self,
+        connection_id: &str,
+        encoder_id: VideoEncoderId,
+        timeout: Duration,
+    ) -> Result<(u32, u32), String> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        'probe: loop {
+            let (generation, state) = {
+                let tasks = self
+                    .inner
+                    .lock()
+                    .map_err(|_| "media producer lock poisoned")?;
+                let task = tasks.get(connection_id).ok_or("video pipeline stopped")?;
+                (task.generation, task.video_state.load(Ordering::Acquire))
+            };
+            if state == VIDEO_STATE_BLOCKED || state == VIDEO_STATE_FAILED {
+                return Err("video pipeline rejected the new physical mode".into());
+            }
+            let key = self
+                .capture_keys
+                .lock()
+                .map_err(|_| "capture key lock poisoned")?
+                .get(connection_id)
+                .filter(|record| record.generation == generation)
+                .map(|record| record.key.clone());
+            if let Some(handle) = key.and_then(|key| self.capture_registry.subscribe_existing(&key))
+            {
+                let mut frames = handle.subscribe();
+                loop {
+                    let frame = match tokio::time::timeout_at(deadline, frames.recv()).await {
+                        Ok(Ok(frame)) => frame,
+                        Ok(Err(broadcast::error::RecvError::Lagged(_))) => continue,
+                        Ok(Err(broadcast::error::RecvError::Closed)) => break,
+                        Err(_) => {
+                            return Err("timed out waiting for a new physical display frame".into());
+                        }
+                    };
+                    if frame.width == 0 || frame.height == 0 {
+                        continue;
+                    }
+                    let support = VideoEncoderCapability::for_id(encoder_id).input_support;
+                    check_encoder_input(Resolution::new(frame.width, frame.height), &support)
+                        .map_err(|error| {
+                            format!(
+                                "new physical display frame is incompatible with encoder: {error:?}"
+                            )
+                        })?;
+                    let (current_generation, state) = {
+                        let tasks = self
+                            .inner
+                            .lock()
+                            .map_err(|_| "media producer lock poisoned")?;
+                        let task = tasks.get(connection_id).ok_or("video pipeline stopped")?;
+                        (task.generation, task.video_state.load(Ordering::Acquire))
+                    };
+                    if current_generation != generation {
+                        continue 'probe;
+                    }
+                    if state == VIDEO_STATE_BLOCKED || state == VIDEO_STATE_FAILED {
+                        return Err("video pipeline rejected the new physical mode".into());
+                    }
+                    if state == VIDEO_STATE_STREAMING {
+                        return Ok((frame.width, frame.height));
+                    }
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err("timed out waiting for restarted physical display capture".into());
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
     pub fn set_geometry_update_handler(&self, handler: Arc<GeometryUpdateHandler>) {
         *self
             .geometry_update_handler
@@ -979,6 +1055,40 @@ impl MediaProducer {
         // browser's capture-source picker keeps the per-driver
         // grouping it had in the legacy worker-owned-PC path.
         let video_device_list = list_image_capture();
+        let physical_display_capabilities = video_device_list
+            .iter()
+            .map(|(backend, displays)| {
+                let capabilities = displays
+                    .iter()
+                    .map(|display| {
+                        let capability = match crate::worker::physical_display::inspect(&display.device_name) {
+                            Ok(snapshot) if !snapshot.candidates.is_empty() => {
+                                desk_signal_facade::model::virtual_display::PhysicalDisplayCapability {
+                                    available: true,
+                                    reason: None,
+                                    current_selector: Some(snapshot.current.selector),
+                                    display_identity: Some(snapshot.identity),
+                                }
+                            }
+                            Ok(snapshot) => desk_signal_facade::model::virtual_display::PhysicalDisplayCapability {
+                                available: false,
+                                reason: Some("no usable physical display modes".into()),
+                                current_selector: None,
+                                display_identity: Some(snapshot.identity),
+                            },
+                            Err(reason) => desk_signal_facade::model::virtual_display::PhysicalDisplayCapability {
+                                available: false,
+                                reason: Some(reason),
+                                current_selector: None,
+                                display_identity: None,
+                            },
+                        };
+                        (display.device_name.clone(), capability)
+                    })
+                    .collect();
+                (backend.clone(), capabilities)
+            })
+            .collect();
         let audio_device_list = list_audio_capture();
         MediaCapabilities {
             video_codecs,
@@ -987,6 +1097,7 @@ impl MediaProducer {
             video_encoders,
             audio_encoders,
             video_device_list,
+            physical_display_capabilities,
             audio_device_list,
             has_tauri,
             is_admin: desk_utils::permission::is_admin(),

@@ -118,6 +118,7 @@ pub fn signaling_role(t: SignalingType) -> SignalingRole {
         | SignalingType::PrivateScreenStateChanged
         | SignalingType::AudioPlaybackFailed
         | SignalingType::MediaPipelineStateChanged
+        | SignalingType::MediaCapabilitiesStateChanged
         | SignalingType::SystemAudioCaptureStateChanged
         | SignalingType::TerminalOutputProduced
         | SignalingType::TerminalClosed

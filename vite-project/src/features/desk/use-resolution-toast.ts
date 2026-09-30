@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { MutableRefObject } from "react";
 import { deskErrorCodeEnum } from "@/services/types";
+import { deskErrorKey, type ErrorCodeKeyMap } from "@/lib/desk-error-i18n";
+
+const RESOLUTION_ERROR_KEYS: ErrorCodeKeyMap = {
+    [deskErrorCodeEnum.ADAPTIVE_RESOLUTION_REQUIRES_SINGLE_CLIENT]:
+        "pages.desk.adaptiveResolutionMultipleClients",
+};
 
 /**
  * Toast phases driven by the adaptive-resolution round-trip.
@@ -22,6 +28,8 @@ export interface ResolutionEchoData {
     width?: number;
     /** Height the daemon actually applied. */
     height?: number;
+    pixel_width?: number;
+    pixel_height?: number;
 }
 
 /**
@@ -80,6 +88,7 @@ export interface UseResolutionToastResult {
      * stale echoes for the prior request will be ignored.
      */
     registerSent: (reqId: string, targetW: number, targetH: number) => void;
+    clear: () => void;
     /**
      * Test-only escape hatch: track of pending ids the parent
      * component might still rely on. We do NOT expose this in
@@ -164,6 +173,13 @@ export function useResolutionToast(
         }
     }, []);
 
+    const clear = useCallback(() => {
+        clearAutoClear();
+        clearWatchdog();
+        latestReqIdRef.current = null;
+        setResolutionToast(null);
+    }, [clearAutoClear, clearWatchdog]);
+
     const armAutoClear = useCallback(
         (ms: number) => {
             clearAutoClear();
@@ -229,16 +245,18 @@ export function useResolutionToast(
                 const data = message.signaling_data ?? {};
                 setResolutionToast({
                     phase: "success",
-                    appliedW: data.width ?? 0,
-                    appliedH: data.height ?? 0,
+                    appliedW: data.pixel_width ?? data.width ?? 0,
+                    appliedH: data.pixel_height ?? data.height ?? 0,
                 });
                 armAutoClear(successAutoClearMs);
             } else {
+                const key = deskErrorKey(RESOLUTION_ERROR_KEYS, errorCode);
                 setResolutionToast({
                     phase: "failed",
-                    reason:
-                        message.response_state?.message ??
-                        translateRef.current("pages.desk.resolutionFailed"),
+                    reason: key
+                        ? translateRef.current(key)
+                        : message.response_state?.message
+                            ?? translateRef.current("pages.desk.resolutionFailed"),
                 });
                 armAutoClear(failureAutoClearMs);
             }
@@ -279,5 +297,5 @@ export function useResolutionToast(
         [clearAutoClear, clearWatchdog],
     );
 
-    return { resolutionToast, registerSent, latestReqIdRef };
+    return { resolutionToast, registerSent, clear, latestReqIdRef };
 }

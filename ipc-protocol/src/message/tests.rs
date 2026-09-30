@@ -14,7 +14,106 @@ use desk_signal_facade::model::system_info::SystemInfo;
 use desk_signal_facade::model::terminal::{
     StartTerminalSession, TerminalInputData, TerminalList, TerminalOutputData, TerminalResizeData,
 };
+use desk_signal_facade::model::virtual_display::PhysicalDisplayCapability;
 use std::collections::BTreeMap;
+
+#[test]
+fn physical_capability_identity_survives_worker_ipc() {
+    let capability = PhysicalDisplayCapability {
+        available: true,
+        reason: None,
+        current_selector: Some("current".into()),
+        display_identity: Some("monitor-serial".into()),
+    };
+    let bytes = wincode::config::serialize(&capability, crate::transport::IPC_CONFIG).unwrap();
+    let decoded: PhysicalDisplayCapability =
+        wincode::config::deserialize(&bytes, crate::transport::IPC_CONFIG).unwrap();
+    assert_eq!(decoded.display_identity, capability.display_identity);
+}
+
+#[test]
+fn physical_mode_request_and_result_round_trip_with_operation_fence() {
+    let request = ServiceToWorker::SetPhysicalDisplayMode(SetPhysicalDisplayModePayload {
+        request_id: "request".into(),
+        connection_id: "connection".into(),
+        connection_epoch: "epoch".into(),
+        device_name: "display".into(),
+        capture_backend: "SCK".into(),
+        operation_id: 27,
+        action: PhysicalDisplayAction::Auto {
+            viewport_width: 1600,
+            viewport_height: 900,
+            viewport_sequence: 3,
+            max_capture_width: 3840,
+            max_capture_height: 2160,
+        },
+    });
+    let ServiceToWorker::SetPhysicalDisplayMode(decoded) = wincode_round_trip(&request) else {
+        panic!("wrong physical mode request variant")
+    };
+    assert_eq!(decoded.operation_id, 27);
+    assert!(matches!(
+        decoded.action,
+        PhysicalDisplayAction::Auto {
+            viewport_sequence: 3,
+            ..
+        }
+    ));
+
+    let response = WorkerToService::PhysicalDisplayMode(PhysicalDisplayModeResponsePayload {
+        request_id: decoded.request_id,
+        connection_id: decoded.connection_id,
+        connection_epoch: decoded.connection_epoch,
+        operation_id: decoded.operation_id,
+        outcome: PhysicalDisplayModeOutcome::Applied(PhysicalDisplayModeData {
+            device_name: "display".into(),
+            display_identity: "screen-1".into(),
+            previous_selector: "original".into(),
+            selector: "applied".into(),
+            pixel_width: 1920,
+            pixel_height: 1080,
+            refresh_millihz: 60_000,
+            changed: true,
+            restored: false,
+        }),
+    });
+    let WorkerToService::PhysicalDisplayMode(decoded) = wincode_round_trip(&response) else {
+        panic!("wrong physical mode response variant")
+    };
+    assert_eq!(decoded.operation_id, 27);
+    assert!(
+        matches!(decoded.outcome, PhysicalDisplayModeOutcome::Applied(mode) if mode.pixel_width == 1920)
+    );
+
+    let stranded = WorkerToService::PhysicalDisplayMode(PhysicalDisplayModeResponsePayload {
+        request_id: "request-2".into(),
+        connection_id: "connection".into(),
+        connection_epoch: "epoch".into(),
+        operation_id: 28,
+        outcome: PhysicalDisplayModeOutcome::AppliedWithoutVideo {
+            data: PhysicalDisplayModeData {
+                device_name: "display".into(),
+                display_identity: "screen-1".into(),
+                previous_selector: "original".into(),
+                selector: "applied".into(),
+                pixel_width: 1920,
+                pixel_height: 1080,
+                refresh_millihz: 60_000,
+                changed: true,
+                restored: false,
+            },
+            reason: "capture failed and rollback failed".into(),
+        },
+    });
+    let WorkerToService::PhysicalDisplayMode(decoded) = wincode_round_trip(&stranded) else {
+        panic!("wrong physical mode response variant")
+    };
+    assert!(matches!(
+        decoded.outcome,
+        PhysicalDisplayModeOutcome::AppliedWithoutVideo { data, .. }
+            if data.selector == "applied"
+    ));
+}
 
 #[test]
 fn local_recovery_stays_in_user_worker_ipc_and_redacts_export_debug() {
@@ -493,6 +592,7 @@ fn capabilities_round_trips_wincode() {
         video_encoder_capabilities: vec![],
         audio_encoders: vec!["Opus".to_string()],
         video_device_list: video_device_list.clone(),
+        physical_display_capabilities: std::collections::BTreeMap::new(),
         audio_device_list: audio_device_list.clone(),
         has_tauri: true,
         is_admin: false,

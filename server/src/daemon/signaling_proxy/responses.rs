@@ -2,6 +2,41 @@
 
 use super::*;
 
+pub(super) async fn send_media_capabilities_notifications(
+    registry: &PcRegistry,
+    worker_mgr: &WorkerManager,
+    worker_key: Option<&desk_ipc_protocol::message::WorkerKey>,
+    caps: &desk_ipc_protocol::message::MediaCapabilities,
+    external_changes: &[String],
+    outbound_tx: &broadcast::Sender<String>,
+) {
+    for connection_id in registry.all_connection_ids().await {
+        if let Some(key) = worker_key
+            && worker_mgr.connection_target(&connection_id).as_ref() != Some(&key.session)
+        {
+            continue;
+        }
+        let Some(pc) = registry.get(&connection_id).await else {
+            continue;
+        };
+        let connection_epoch = pc.read().await.connection_epoch.clone();
+        let data = desk_signal_facade::model::signal::MediaCapabilitiesStateChangedData {
+            connection_epoch,
+            video_device_list: caps.video_device_list.clone(),
+            physical_display_mode_supported: cfg!(any(target_os = "windows", target_os = "macos")),
+            physical_display_capabilities: caps.physical_display_capabilities.clone(),
+            physical_display_external_changes: external_changes.to_vec(),
+        };
+        send_terminal_notification(
+            outbound_tx,
+            "MediaCapabilitiesStateChanged",
+            &connection_id,
+            SignalingType::MediaCapabilitiesStateChanged,
+            Some(&data),
+        );
+    }
+}
+
 /// Dispatch a [`WorkerToService::VirtualDisplayAttachResult`] to the
 /// supervisor if it exists; in non-service-daemon modes
 /// (`virtual_display = None`) production routes never produce this

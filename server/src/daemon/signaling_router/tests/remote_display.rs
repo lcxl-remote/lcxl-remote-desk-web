@@ -219,6 +219,35 @@ pub(super) async fn request_remote_continues_when_provider_not_supported() {
 // supervisor, so each test only needs to focus on its own gate.
 // ===========================================================
 
+#[tokio::test]
+pub(super) async fn physical_auto_uses_the_same_single_desktop_session_gate() {
+    let (ctx, mut rx, _worker_rx) = make_ctx_with_attached_supervisor().await;
+    ctx.pc_registry.set_test_remote_desktop_extra(1);
+    let model = SignalingModel::new(
+        "physical-multi",
+        SignalingType::ChangeDisplaySettings,
+        Some("conn-1".into()),
+        None,
+        Some(serde_json::to_value(
+            desk_signal_facade::model::virtual_display::ChangeDisplaySettingsCommand::PhysicalAuto {
+                connection_epoch: TEST_CONNECTION_EPOCH.into(),
+                capture_backend: "SCK".into(),
+                device_name: "42".into(),
+                viewport_width: 1600,
+                viewport_height: 900,
+                viewport_sequence: 1,
+            },
+        ).unwrap()),
+        None,
+    );
+    route(&model, &ctx).await.unwrap();
+    let response = read_response(&mut rx);
+    assert_eq!(
+        response.response_state.unwrap().error_code,
+        DeskErrorCode::ADAPTIVE_RESOLUTION_REQUIRES_SINGLE_CLIENT.code(),
+    );
+}
+
 /// Multi-client guard: `pc_registry.len() != 1` ⇒ INVALID_STATE for
 /// auto requests, no IPC sent to worker. This is the user-decided
 /// "only single connection" strategy — manual path must keep

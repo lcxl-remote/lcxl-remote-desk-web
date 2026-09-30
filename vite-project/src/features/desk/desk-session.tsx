@@ -649,8 +649,7 @@ export default function DeskSession({
         const localSettings = pending.requested;
         const accepted: DeskConfigSubmission = {
             ...applied.baseline_settings,
-            adaptive_web_page_resolution:
-                localSettings?.adaptive_web_page_resolution ?? true,
+            adaptive_web_page_resolution: localSettings.adaptive_web_page_resolution,
             wayland_control_mode:
                 localSettings?.wayland_control_mode ?? admittedWaylandModeRef.current,
         };
@@ -726,6 +725,9 @@ export default function DeskSession({
     // `useResolutionToast` hook below drives the right-bottom toast state
     // machine off the same signaling subscription.
     const pendingAutoRequestIdsRef = useRef<Set<string>>(new Set());
+    const pendingPhysicalAutoRequestIdsRef = useRef<Set<string>>(new Set());
+    const latestAdaptiveRequestIdRef = useRef<string | null>(null);
+    const [physicalRetrySignal, setPhysicalRetrySignal] = useState(0);
 
     // Adaptive-resolution status toast (right-bottom corner). Lives in
     // its own hook so the state machine can be exercised in isolation:
@@ -735,13 +737,30 @@ export default function DeskSession({
     //   - flipping `isRTCConnected` to false clears a stuck toast
     // The `translate` closure is hand-rolled instead of passing `t`
     // directly to keep the hook framework-agnostic for testing.
-    const { resolutionToast, registerSent: registerResolutionSent } =
+    const { resolutionToast, registerSent: registerResolutionSent,
+        clear: clearResolutionToast } =
         useResolutionToast({
             subscribe,
             isRTCConnected,
             changeDisplaySettingsType: SIGNALING_TYPE_CODE_DISPLAY_SETTINGS_CHANGED,
             translate: (key) => t(key),
         });
+    useEffect(() => {
+        const changed = initData?.physical_display_external_changes ?? [];
+        if (changed.length === 0) return;
+        setActiveSettings((current) => current && changed.includes(current.video_device_name ?? "")
+            ? { ...current, adaptive_web_page_resolution: false }
+            : current);
+        pendingAutoRequestIdsRef.current.clear();
+        pendingPhysicalAutoRequestIdsRef.current.clear();
+        latestAdaptiveRequestIdRef.current = null;
+        setPhysicalRetrySignal(0);
+        clearResolutionToast();
+        toast({
+            title: t("pages.desk.physicalDisplayChangedLocally"),
+            description: t("pages.desk.physicalDisplayChangedLocallyDescription"),
+        });
+    }, [initData?.physical_display_external_changes, clearResolutionToast, toast, t]);
 
     // Adaptive quality state
     const statsWindowRef = useRef<Array<{ packetLoss: number; rtt: number }>>([]);
@@ -1021,6 +1040,22 @@ export default function DeskSession({
                 const requestId = message.request_id;
                 if (requestId && pendingAutoRequestIdsRef.current.delete(requestId)) {
                     console.debug("[adaptive-resolution] response", message);
+                    const code = message.response_state?.error_code;
+                    const wasPhysical = pendingPhysicalAutoRequestIdsRef.current.delete(requestId);
+                    const isLatestAdaptiveRequest = requestId === latestAdaptiveRequestIdRef.current;
+                    if (wasPhysical && isLatestAdaptiveRequest) {
+                        if (code === deskErrorCodeEnum.ACTION_NEED_RETRY) {
+                            setPhysicalRetrySignal((current) => current + 1);
+                        } else {
+                            setPhysicalRetrySignal(0);
+                        }
+                    }
+                    if (isLatestAdaptiveRequest && (code === deskErrorCodeEnum.PERMISSION_ERROR
+                        || code === deskErrorCodeEnum.ORG_PERMISSION_ERROR)) {
+                        setActiveSettings((current) => current
+                            ? { ...current, adaptive_web_page_resolution: false }
+                            : current);
+                    }
                 }
             }
         };
@@ -1182,6 +1217,7 @@ export default function DeskSession({
     // even when the request never reaches the daemon (transport down),
     // the watchdog will eventually surface a timeout instead of
     // leaving the operator staring at a frozen spinner.
+    const physicalViewportSequenceRef = useRef(0);
     const sendChangeDisplay = useCallback(
         (payload: {
             width: number;
@@ -1190,10 +1226,24 @@ export default function DeskSession({
             auto: true;
         }) => {
             if (!initData?.connection_epoch) return "";
-            const wirePayload = {
-                ...payload,
-                connection_epoch: initData.connection_epoch,
-            };
+            const selectedDevice = activeSettings?.video_device_name;
+            const virtual = selectedDevice === initData.virtual_display_device_name;
+            if (!selectedDevice || !activeSettings?.image_capture) return "";
+            const wirePayload = virtual
+                ? {
+                    kind: "virtual",
+                    ...payload,
+                    connection_epoch: initData.connection_epoch,
+                }
+                : {
+                    kind: "physical_auto",
+                    connection_epoch: initData.connection_epoch,
+                    capture_backend: activeSettings.image_capture,
+                    device_name: selectedDevice,
+                    viewport_width: payload.width,
+                    viewport_height: payload.height,
+                    viewport_sequence: ++physicalViewportSequenceRef.current,
+                };
             const reqId = sendMessage(
                 SIGNALING_TYPE_CODE_CHANGE_DISPLAY_SETTINGS,
                 wirePayload,
@@ -1205,9 +1255,13 @@ export default function DeskSession({
                 deskId,
             });
             registerResolutionSent(reqId, payload.width, payload.height);
+            if (reqId) latestAdaptiveRequestIdRef.current = reqId;
+            if (!virtual && reqId) pendingPhysicalAutoRequestIdsRef.current.add(reqId);
             return reqId;
         },
-        [sendMessage, deskId, initData?.connection_epoch, registerResolutionSent],
+        [sendMessage, deskId, initData?.connection_epoch,
+            initData?.virtual_display_device_name, activeSettings?.video_device_name,
+            activeSettings?.image_capture, registerResolutionSent],
     );
 
     // The hook's `enabled` aggregates every condition that must be
@@ -1215,18 +1269,10 @@ export default function DeskSession({
     //   - deskId is real (so sendMessage has a connection target)
     //   - WebRTC is actually connected (RTCPeerConnection up + tracks
     //     flowing — there is no point adapting an inactive stream)
-    //   - daemon side reports the IDD is currently attached
-    //     (`virtual_display_active`); without this the daemon would
-    //     reject every auto request with FEATURE_UNAVAILABLE
-    //   - daemon side surfaces the IDD's GDI name
-    //     (`virtual_display_device_name`) AND that name matches the
-    //     display the worker is actually capturing. If the operator
-    //     picked a physical monitor in the config dialog, firing 205
-    //     would silently change the IDD's resolution while WGC keeps
-    //     capturing the physical screen — invisible to the user. The
-    //     config dialog now disables the adaptive toggle in this
-    //     scenario, but defence-in-depth here keeps us safe if a
-    //     stale `adaptive_web_page_resolution=true` slips through.
+    //   - the selected IDD is attached, or the selected physical display
+    //     reports mode-switching capability for its capture backend
+    //   - the selected display name matches the target sent with 205, so
+    //     a physical capture never changes the IDD (or another monitor)
     //   - user toggled "Adaptive Resolution" on in the config dialog
     // A new Offer seeds `lastSettingsRef.current` before `connect`; live
     // changes update it only after the host confirms the accepted baseline.
@@ -1234,11 +1280,28 @@ export default function DeskSession({
         deskId,
         isRTCConnected,
         virtualDisplayActive: initData?.virtual_display_active,
+        physicalDisplayModeSupported: initData?.physical_display_mode_supported,
+        physicalDisplayAvailable: initData?.physical_display_capabilities
+            ?.[activeSettings?.image_capture ?? ""]
+            ?.[activeSettings?.video_device_name ?? ""]?.available,
         virtualDisplayDeviceName: initData?.virtual_display_device_name,
         selectedVideoDeviceName: activeSettings?.video_device_name,
         adaptiveWebPageResolution: activeSettings?.adaptive_web_page_resolution,
     };
     const adaptiveGateOpen = isAdaptiveResolutionGateOpen(adaptiveGateInputs);
+    const adaptiveTargetKey = `${initData?.connection_epoch ?? ""}\u0000${activeSettings?.image_capture ?? ""}\u0000${activeSettings?.video_device_name ?? ""}`;
+    const previousAdaptiveTargetKeyRef = useRef<string | null>(null);
+    useEffect(() => {
+        if (previousAdaptiveTargetKeyRef.current !== null
+            && previousAdaptiveTargetKeyRef.current !== adaptiveTargetKey) {
+            pendingAutoRequestIdsRef.current.clear();
+            pendingPhysicalAutoRequestIdsRef.current.clear();
+            latestAdaptiveRequestIdRef.current = null;
+            setPhysicalRetrySignal(0);
+            clearResolutionToast();
+        }
+        previousAdaptiveTargetKeyRef.current = adaptiveTargetKey;
+    }, [adaptiveTargetKey, clearResolutionToast]);
     // Diagnostic: log every gate evaluation. Each axis is dumped so the
     // operator can see exactly which check is closed (the daemon-side
     // active flag missing, the selected device not matching the IDD,
@@ -1257,6 +1320,8 @@ export default function DeskSession({
         adaptiveGateInputs.deskId,
         adaptiveGateInputs.isRTCConnected,
         adaptiveGateInputs.virtualDisplayActive,
+        adaptiveGateInputs.physicalDisplayModeSupported,
+        adaptiveGateInputs.physicalDisplayAvailable,
         adaptiveGateInputs.virtualDisplayDeviceName,
         adaptiveGateInputs.selectedVideoDeviceName,
         adaptiveGateInputs.adaptiveWebPageResolution,
@@ -1265,8 +1330,10 @@ export default function DeskSession({
     useAdaptiveResolution({
         wrapperRef: videoWrapperRef,
         enabled: adaptiveGateOpen,
+        targetKey: adaptiveTargetKey,
         sendChangeDisplay,
         pendingAutoRequestIds: pendingAutoRequestIdsRef,
+        retrySignal: physicalRetrySignal,
         // `bigint` (u64 on the wire) → `number` because setTimeout
         // does not accept bigint. The clamp on the daemon side keeps
         // the value comfortably inside Number's safe-integer range.
@@ -1275,7 +1342,27 @@ export default function DeskSession({
                 ? Number(initData.adaptive_resolution.debounce_ms)
                 : undefined,
         minDeltaPx: initData?.adaptive_resolution?.min_delta_px ?? undefined,
+        maxDimension: activeSettings?.video_device_name === initData?.virtual_display_device_name
+            ? undefined : 16_384,
     });
+
+    const restorePhysicalDisplay = useCallback((deviceName: string) => {
+        if (!deskId || !initData?.connection_epoch) return;
+        const requestId = sendMessage(
+            SIGNALING_TYPE_CODE_CHANGE_DISPLAY_SETTINGS,
+            {
+                kind: "physical_restore",
+                connection_epoch: initData.connection_epoch,
+                device_name: deviceName,
+            },
+            deskId,
+        );
+        registerResolutionSent(
+            requestId,
+            videoRef.current?.videoWidth ?? 0,
+            videoRef.current?.videoHeight ?? 0,
+        );
+    }, [deskId, initData?.connection_epoch, sendMessage, registerResolutionSent]);
 
     const handleConfigSubmit = (
         settings: DeskConfigSubmission,
@@ -1572,6 +1659,7 @@ export default function DeskSession({
                 preferences={devicePreferences}
                 onSubmit={handleConfigSubmit}
                 onCancel={handleConfigCancel}
+                onRestorePhysicalDisplay={restorePhysicalDisplay}
                 adaptiveQualityEnabled={adaptiveQualityEnabled}
                 onAdaptiveQualityChange={setAdaptiveQualityEnabled}
                 adaptiveBitrateEnabled={adaptiveBitrateEnabled}

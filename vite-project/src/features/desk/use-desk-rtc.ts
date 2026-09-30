@@ -6,6 +6,7 @@ import {
     SIGNALING_TYPE_CODE_OFFER,
     SIGNALING_TYPE_CODE_ANSWER,
     SIGNALING_TYPE_CODE_ICE_CANDIDATE,
+    SIGNALING_TYPE_CODE_MEDIA_CAPABILITIES_STATE_CHANGED,
 } from './constants';
 import type {
     SignalingMessage,
@@ -299,6 +300,25 @@ export function useDeskRTC({ deskId, subscribe, sendTracked, cancelQueued, cance
             connectionEpochRef.current = initialized.connection_epoch;
             setInitData(initialized);
 
+        } else if (signaling_type === SIGNALING_TYPE_CODE_MEDIA_CAPABILITIES_STATE_CHANGED) {
+            const update = signaling_data as {
+                connection_epoch: string;
+                video_device_list: RemoteAccessInitializedData["video_device_list"];
+                physical_display_mode_supported: boolean;
+                physical_display_capabilities: RemoteAccessInitializedData["physical_display_capabilities"];
+                physical_display_external_changes: string[];
+            } | null;
+            if (update && update.connection_epoch === connectionEpochRef.current) {
+                setInitData((current) => current?.connection_epoch === update.connection_epoch
+                    ? {
+                        ...current,
+                        video_device_list: update.video_device_list,
+                        physical_display_mode_supported: update.physical_display_mode_supported,
+                        physical_display_capabilities: update.physical_display_capabilities,
+                        physical_display_external_changes: update.physical_display_external_changes,
+                    }
+                    : current);
+            }
         } else if (
             signaling_type === SIGNALING_TYPE_CODE_OFFER
             && message.response_state

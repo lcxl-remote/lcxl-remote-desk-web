@@ -46,7 +46,33 @@ pub async fn update_exclusive_after_control_change(
     let active = supervisor.is_active().await;
     let (desired, prompt_ms) =
         compute_desired_with_active(&ctx.settings, &ctx.pc_registry, active).await;
-    supervisor.set_desired_exclusive(desired, prompt_ms);
+    if desired
+        && !crate::daemon::physical_display::restore_before_exclusive(
+            &ctx.physical_display,
+            &ctx.pc_registry,
+            &ctx.worker_mgr,
+            None,
+        )
+        .await
+    {
+        log::warn!("[virtual-display] exclusive entry deferred: physical display restore failed");
+        supervisor.set_desired_exclusive(false, prompt_ms);
+        return;
+    }
+    if desired {
+        if !ctx
+            .physical_display
+            .try_enter_exclusive(supervisor, prompt_ms)
+            .await
+        {
+            log::warn!(
+                "[virtual-display] exclusive entry deferred: physical mode operation started after restore"
+            );
+            supervisor.set_desired_exclusive(false, prompt_ms);
+        }
+    } else {
+        supervisor.set_desired_exclusive(false, prompt_ms);
+    }
 }
 
 /// Emit an error response back to the browser via `outbound_tx`. The
@@ -202,6 +228,260 @@ pub(super) async fn handle_change_display_settings_inbound(
     ctx: &RouterContext,
     model: &SignalingModel,
 ) -> Result<(), RouterError> {
+    let command = match model.get_data::<ChangeDisplaySettingsCommand>() {
+        Ok(command) => command,
+        Err(error) => {
+            emit_error_response(
+                ctx,
+                model,
+                DeskErrorCode::INVALID_PARAMS,
+                &format!("bad ChangeDisplaySettings command: {error}"),
+            );
+            return Ok(());
+        }
+    };
+    let Some(connection_id) = model.from_connection_id.as_deref() else {
+        emit_error_response(
+            ctx,
+            model,
+            DeskErrorCode::INVALID_PARAMS,
+            "ChangeDisplaySettings requires a source connection",
+        );
+        return Ok(());
+    };
+    let Some(pc) = ctx.pc_registry.get(connection_id).await else {
+        emit_error_response(
+            ctx,
+            model,
+            DeskErrorCode::REMOTE_DESK_OFFLINE,
+            "remote desktop connection is no longer active",
+        );
+        return Ok(());
+    };
+    if pc.read().await.connection_epoch != command.connection_epoch() {
+        return Ok(());
+    }
+    if command.is_auto() && ctx.pc_registry.remote_desktop_count().await != 1 {
+        emit_error_response(
+            ctx,
+            model,
+            DeskErrorCode::ADAPTIVE_RESOLUTION_REQUIRES_SINGLE_CLIENT,
+            "auto requires single client connection",
+        );
+        return Ok(());
+    }
+    match command {
+        ChangeDisplaySettingsCommand::Virtual {
+            connection_epoch,
+            width,
+            height,
+            refresh_hz,
+            auto,
+        } => {
+            handle_virtual_display_mode(
+                ctx,
+                model,
+                ChangeDisplaySettingsPayload {
+                    connection_epoch,
+                    width,
+                    height,
+                    refresh_hz,
+                    auto,
+                },
+            )
+            .await
+        }
+        command => handle_physical_display_mode(ctx, model, command).await,
+    }
+}
+
+async fn handle_physical_display_mode(
+    ctx: &RouterContext,
+    model: &SignalingModel,
+    command: ChangeDisplaySettingsCommand,
+) -> Result<(), RouterError> {
+    if !cfg!(any(target_os = "windows", target_os = "macos")) {
+        emit_error_response(
+            ctx,
+            model,
+            DeskErrorCode::FEATURE_UNAVAILABLE,
+            "physical display mode changes are unsupported on this platform",
+        );
+        return Ok(());
+    }
+    if ctx
+        .virtual_display
+        .as_ref()
+        .is_some_and(|supervisor| !supervisor.physical_modes_available())
+    {
+        emit_error_response(
+            ctx,
+            model,
+            DeskErrorCode::INVALID_STATE,
+            "physical display is unavailable during virtual display exclusive mode",
+        );
+        return Ok(());
+    }
+    let connection_id = model.from_connection_id.as_deref().unwrap_or_default();
+    let (connection_epoch, device_name, capture_backend, action) = match command {
+        ChangeDisplaySettingsCommand::PhysicalAuto {
+            connection_epoch,
+            capture_backend,
+            device_name,
+            viewport_width,
+            viewport_height,
+            viewport_sequence,
+        } => {
+            if !(320..=16_384).contains(&viewport_width)
+                || !(240..=16_384).contains(&viewport_height)
+            {
+                emit_error_response(
+                    ctx,
+                    model,
+                    DeskErrorCode::INVALID_PARAMS,
+                    "invalid physical display viewport",
+                );
+                return Ok(());
+            }
+            let action = PhysicalDisplayAction::Auto {
+                viewport_width,
+                viewport_height,
+                viewport_sequence,
+                max_capture_width: 16_384,
+                max_capture_height: 16_384,
+            };
+            (connection_epoch, device_name, capture_backend, action)
+        }
+        ChangeDisplaySettingsCommand::PhysicalSelect {
+            connection_epoch,
+            capture_backend,
+            device_name,
+            selector,
+        } => (
+            connection_epoch,
+            device_name,
+            capture_backend,
+            PhysicalDisplayAction::Select { selector },
+        ),
+        ChangeDisplaySettingsCommand::PhysicalRestore {
+            connection_epoch,
+            device_name,
+        } => {
+            let session_key = ctx.worker_mgr.connection_target(connection_id);
+            let Some(action) = ctx
+                .physical_display
+                .restore_action(&device_name, session_key.as_ref())
+                .await
+            else {
+                emit_error_response(
+                    ctx,
+                    model,
+                    DeskErrorCode::INVALID_STATE,
+                    "no physical display mode needs restoration",
+                );
+                return Ok(());
+            };
+            (connection_epoch, device_name, String::new(), action)
+        }
+        ChangeDisplaySettingsCommand::Virtual { .. } => unreachable!(),
+    };
+    if let Some(supervisor) = ctx.virtual_display.as_ref()
+        && supervisor.attached_display_name().await.as_deref() == Some(device_name.as_str())
+    {
+        emit_error_response(
+            ctx,
+            model,
+            DeskErrorCode::INVALID_PARAMS,
+            "virtual display cannot be used as a physical mode target",
+        );
+        return Ok(());
+    }
+    let Some(pc) = ctx.pc_registry.get(connection_id).await else {
+        emit_error_response(
+            ctx,
+            model,
+            DeskErrorCode::REMOTE_DESK_OFFLINE,
+            "remote desktop connection is no longer active",
+        );
+        return Ok(());
+    };
+    if !matches!(&action, PhysicalDisplayAction::Restore { .. }) {
+        let pc_guard = pc.read().await;
+        let start = pc_guard.cached_start_media.read().await.clone();
+        drop(pc_guard);
+        let capture_matches = start.as_ref().is_some_and(|start| {
+            start.connection_epoch == connection_epoch
+                && start.start_video
+                && start.video_device.as_deref() == Some(device_name.as_str())
+                && start.image_capture == capture_backend
+        });
+        if !capture_matches {
+            emit_error_response(
+                ctx,
+                model,
+                DeskErrorCode::INVALID_STATE,
+                "physical display is not the active capture target",
+            );
+            return Ok(());
+        }
+    }
+    let operation_id = match ctx
+        .physical_display
+        .begin_checked(
+            &device_name,
+            &model.request_id,
+            &connection_epoch,
+            ctx.worker_mgr.connection_target(connection_id),
+            &action,
+            ctx.virtual_display.as_deref(),
+        )
+        .await
+    {
+        Ok(id) => id,
+        Err(reason) => {
+            let code =
+                if matches!(&action, PhysicalDisplayAction::Auto { .. }) && reason.retryable() {
+                    DeskErrorCode::ACTION_NEED_RETRY
+                } else {
+                    DeskErrorCode::INVALID_STATE
+                };
+            emit_error_response(ctx, model, code, &reason.to_string());
+            return Ok(());
+        }
+    };
+    let payload = SetPhysicalDisplayModePayload {
+        request_id: model.request_id.clone(),
+        connection_id: connection_id.into(),
+        connection_epoch,
+        device_name,
+        capture_backend,
+        operation_id,
+        action,
+    };
+    if let Err(error) = ctx
+        .worker_mgr
+        .send_to_connection_worker(
+            connection_id,
+            ServiceToWorker::SetPhysicalDisplayMode(payload),
+        )
+        .await
+    {
+        ctx.physical_display.abandon(operation_id).await;
+        emit_error_response(
+            ctx,
+            model,
+            DeskErrorCode::REMOTE_DESK_OFFLINE,
+            &format!("worker unavailable: {error}"),
+        );
+    }
+    Ok(())
+}
+
+async fn handle_virtual_display_mode(
+    ctx: &RouterContext,
+    model: &SignalingModel,
+    payload: ChangeDisplaySettingsPayload,
+) -> Result<(), RouterError> {
     let supervisor = match ctx.virtual_display.as_ref() {
         Some(s) => s,
         None => {
@@ -233,18 +513,6 @@ pub(super) async fn handle_change_display_settings_inbound(
         );
         return Ok(());
     }
-    let payload = match model.get_data::<ChangeDisplaySettingsPayload>() {
-        Ok(p) => p,
-        Err(e) => {
-            emit_error_response(
-                ctx,
-                model,
-                DeskErrorCode::INVALID_PARAMS,
-                &format!("bad ChangeDisplaySettings payload: {e}"),
-            );
-            return Ok(());
-        }
-    };
     let Some(connection_id) = model.from_connection_id.as_deref() else {
         emit_error_response(
             ctx,

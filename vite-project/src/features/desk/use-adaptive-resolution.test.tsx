@@ -18,10 +18,10 @@ import {
 type MockROCallback = (entries: ResizeObserverEntry[]) => void;
 const mockResizeObserverState: {
     instances: MockROInstance[];
-    fire(rect: { width: number; height: number }): void;
+    fire(rect: { width: number; height: number }, device?: { width: number; height: number }): void;
 } = {
     instances: [],
-    fire(rect) {
+    fire(rect, device) {
         for (const inst of mockResizeObserverState.instances) {
             inst.cb([
                 {
@@ -29,6 +29,9 @@ const mockResizeObserverState: {
                         width: rect.width,
                         height: rect.height,
                     },
+                    devicePixelContentBoxSize: device
+                        ? [{ inlineSize: device.width, blockSize: device.height }]
+                        : undefined,
                 } as unknown as ResizeObserverEntry,
             ]);
         }
@@ -217,6 +220,19 @@ describe("useAdaptiveResolution", () => {
         expect(h.sendCalls[0].height).toBe(800);
     });
 
+    it("prefers exact device pixels over CSS size times DPR", () => {
+        const h = makeHarness({ debounceMs: 100 });
+        Object.defineProperty(window, "devicePixelRatio", { configurable: true, value: 2 });
+        act(() => {
+            mockResizeObserverState.fire(
+                { width: 1000, height: 700 },
+                { width: 1800, height: 1200 },
+            );
+            vi.advanceTimersByTime(100);
+        });
+        expect(h.sendCalls[0]).toMatchObject({ width: 1800, height: 1200 });
+    });
+
     /**
      * Trailing-edge semantics: a resize 4s into the timer must RESET
      * the countdown, not piggy-back on the original. The next send
@@ -261,6 +277,40 @@ describe("useAdaptiveResolution", () => {
             vi.advanceTimersByTime(150);
         });
         expect(h.sendCalls).toHaveLength(1);
+    });
+
+    it("rechecks the latest viewport after a retryable physical-mode response", () => {
+        const h = makeHarness({ debounceMs: 100, retryDelayMs: 1_000 });
+        act(() => {
+            mockResizeObserverState.fire({ width: 1200, height: 800 });
+            vi.advanceTimersByTime(100);
+        });
+        expect(h.sendCalls).toHaveLength(1);
+        act(() => h.rerender({ debounceMs: 100, retryDelayMs: 1_000, retrySignal: 1 }));
+        act(() => vi.advanceTimersByTime(1_000));
+        expect(h.sendCalls).toHaveLength(1);
+        act(() => vi.advanceTimersByTime(100));
+        expect(h.sendCalls).toHaveLength(2);
+        expect(h.sendCalls[1]).toMatchObject({ width: 1200, height: 800 });
+    });
+
+    it("cancels a deferred retry when a newer request or capture target replaces it", () => {
+        const h = makeHarness({ debounceMs: 100, retryDelayMs: 1_000, targetKey: "first" });
+        act(() => {
+            mockResizeObserverState.fire({ width: 1200, height: 800 });
+            vi.advanceTimersByTime(100);
+        });
+        act(() => h.rerender({ debounceMs: 100, retryDelayMs: 1_000, targetKey: "first", retrySignal: 1 }));
+        act(() => {
+            mockResizeObserverState.fire({ width: 1400, height: 900 });
+            vi.advanceTimersByTime(100);
+            vi.advanceTimersByTime(1_000);
+        });
+        expect(h.sendCalls).toHaveLength(2);
+        act(() => h.rerender({ debounceMs: 100, retryDelayMs: 1_000, targetKey: "first", retrySignal: 2 }));
+        act(() => h.rerender({ debounceMs: 100, retryDelayMs: 1_000, targetKey: "second", retrySignal: 0 }));
+        act(() => vi.advanceTimersByTime(1_100));
+        expect(h.sendCalls).toHaveLength(2);
     });
 
     /** Auto path always sends `refresh_hz: 0` (daemon authoritative). */
@@ -552,6 +602,21 @@ describe("isAdaptiveResolutionGateOpen", () => {
                 selectedVideoDeviceName: "",
             }),
         ).toBe(false);
+    });
+
+    it("opens for a supported physical target with the same toggle", () => {
+        expect(isAdaptiveResolutionGateOpen({
+            ...happy,
+            selectedVideoDeviceName: "physical",
+            physicalDisplayModeSupported: true,
+            physicalDisplayAvailable: true,
+            virtualDisplayActive: false,
+        })).toBe(true);
+        expect(isAdaptiveResolutionGateOpen({
+            ...happy,
+            selectedVideoDeviceName: "physical",
+            physicalDisplayModeSupported: false,
+        })).toBe(false);
     });
 
     it("closes when the user has not ticked the adaptive toggle", () => {

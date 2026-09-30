@@ -355,6 +355,7 @@ pub struct VirtualDisplaySupervisor {
     /// window, which is fine because nothing has driven the state
     /// machine into a non-Idle state yet either.
     desired_computer: Mutex<Option<DesiredComputerFn>>,
+    physical_display_gate: Mutex<Option<Arc<super::physical_display::PhysicalDisplaySupervisor>>>,
 }
 
 impl VirtualDisplaySupervisor {
@@ -390,6 +391,7 @@ impl VirtualDisplaySupervisor {
             reconcile_notify: Arc::new(Notify::new()),
             exclusive_shutdown_tx: Mutex::new(None),
             desired_computer: Mutex::new(None),
+            physical_display_gate: Mutex::new(None),
         }
     }
 
@@ -1070,6 +1072,13 @@ impl VirtualDisplaySupervisor {
         *guard = Some(computer);
     }
 
+    pub async fn set_physical_display_gate(
+        &self,
+        physical: Arc<super::physical_display::PhysicalDisplaySupervisor>,
+    ) {
+        *self.physical_display_gate.lock().await = Some(physical);
+    }
+
     /// Router-facing: change the desired exclusive state. Does not
     /// emit an IPC by itself — the driver loop reads the flag at the
     /// next reconcile and produces the right action.
@@ -1096,7 +1105,18 @@ impl VirtualDisplaySupervisor {
         };
         let active = self.is_active().await;
         let (desired, prompt_ms) = computer(active).await;
-        self.set_desired_exclusive(desired, prompt_ms);
+        if desired {
+            let physical = self.physical_display_gate.lock().await.clone();
+            if let Some(physical) = physical {
+                if !physical.try_enter_exclusive(self, prompt_ms).await {
+                    self.set_desired_exclusive(false, prompt_ms);
+                }
+            } else {
+                self.set_desired_exclusive(true, prompt_ms);
+            }
+        } else {
+            self.set_desired_exclusive(false, prompt_ms);
+        }
     }
 
     /// Subscribe to a watch reader of the exclusive state. Used by
@@ -1104,6 +1124,13 @@ impl VirtualDisplaySupervisor {
     /// transition sequence.
     pub fn subscribe_exclusive_state(&self) -> watch::Receiver<ExclusiveState> {
         self.exclusive_state_watch.subscribe()
+    }
+
+    /// Physical mode requests must not start while the worker is detaching
+    /// physical outputs or while an exclusive enter is queued.
+    pub fn physical_modes_available(&self) -> bool {
+        !self.exclusive_desired.load(Ordering::SeqCst)
+            && *self.exclusive_state_watch.borrow() == ExclusiveState::Idle
     }
 
     /// Wait until the exclusive state becomes `Idle` or the timeout
@@ -1553,6 +1580,7 @@ impl VirtualDisplaySupervisor {
             video_encoder_capabilities: vec![],
             audio_encoders: vec![],
             video_device_list,
+            physical_display_capabilities: std::collections::BTreeMap::new(),
             audio_device_list: BTreeMap::new(),
             has_tauri: false,
             is_admin: false,
@@ -1590,6 +1618,7 @@ impl VirtualDisplaySupervisor {
             reconcile_notify: Arc::new(Notify::new()),
             exclusive_shutdown_tx: Mutex::new(None),
             desired_computer: Mutex::new(None),
+            physical_display_gate: Mutex::new(None),
         }
     }
 }

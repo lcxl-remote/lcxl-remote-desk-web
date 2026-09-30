@@ -50,9 +50,10 @@ use desk_ipc_protocol::message::{
     AgentRequestPayload, ApplyMediaSettingsPayload, AudioPipelinePhase, CloseTerminalPayload,
     DeleteFilePayload, ExecCancelPayload, ExecPlanPayload, ListFilesPayload,
     ListTerminalCommandsPayload, ManagerRequestRefPayload, MediaCodec, MediaKind,
-    MediaSettingsAction, ResizeTerminalPayload, SendTerminalInputPayload, ServiceToWorker,
-    SetPrivateScreenVisibilityPayload, SetVirtualDisplayModePayload, StartAudioSettings,
-    StartMediaPayload, StartTerminalPayload, UpdateMediaSettingsPayload,
+    MediaSettingsAction, PhysicalDisplayAction, ResizeTerminalPayload, SendTerminalInputPayload,
+    ServiceToWorker, SetPhysicalDisplayModePayload, SetPrivateScreenVisibilityPayload,
+    SetVirtualDisplayModePayload, StartAudioSettings, StartMediaPayload, StartTerminalPayload,
+    UpdateMediaSettingsPayload,
 };
 use desk_signal_facade::model::files::{DeleteFileRequest, FileListParams};
 use desk_signal_facade::model::media_pipeline::{MediaPipelinePhase, MediaPipelineStateData};
@@ -73,7 +74,9 @@ use desk_signal_facade::model::signal::{
 use desk_signal_facade::model::terminal::{
     StartTerminalSession, TerminalInputData, TerminalResizeData,
 };
-use desk_signal_facade::model::virtual_display::ChangeDisplaySettingsPayload;
+use desk_signal_facade::model::virtual_display::{
+    ChangeDisplaySettingsCommand, ChangeDisplaySettingsPayload,
+};
 use desk_signal_facade::service::response_type_for_request;
 use desk_utils::error::{CustomDeskError, DeskErrorCode};
 use desk_virtual_display::{VirtualDisplayMode, validate_mode};
@@ -83,6 +86,7 @@ use crate::daemon::pc_manager::{
     self, MediaRestartStage, MediaRestartTrigger, MediaRetryAdmission, MediaSlotLifecycle,
     PcRegistry, RestartOutcome,
 };
+use crate::daemon::physical_display::PhysicalDisplaySupervisor;
 use crate::daemon::virtual_display::{EnsureAttachedOutcome, VirtualDisplaySupervisor};
 use crate::daemon::worker_manager::WorkerManager;
 use crate::diagnose::DiagnoseOrchestrator;
@@ -197,6 +201,7 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         | SignalingType::PrivateScreenVisibilitySet
         | SignalingType::AudioPlaybackFailed
         | SignalingType::MediaPipelineStateChanged
+        | SignalingType::MediaCapabilitiesStateChanged
         | SignalingType::MediaPipelineRetryCompleted
         | SignalingType::SystemInfoRetrieved
         | SignalingType::DisplaySettingsChanged
@@ -477,6 +482,8 @@ pub struct RouterContext {
     /// `ChangeDisplaySettings` route always replies with
     /// `FEATURE_UNAVAILABLE` outside service mode.
     pub virtual_display: Option<Arc<VirtualDisplaySupervisor>>,
+    /// Physical display state is host-local and shared by all connection lanes.
+    pub physical_display: Arc<PhysicalDisplaySupervisor>,
     /// Enterprise fleet evidence collector.
     pub diagnose_orchestrator: Option<Arc<DiagnoseOrchestrator>>,
     /// `Some(...)` in modes with an in-process worker (Default / DeskServer),
@@ -1149,6 +1156,7 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
         | SignalingType::PrivateScreenVisibilitySet
         | SignalingType::AudioPlaybackFailed
         | SignalingType::MediaPipelineStateChanged
+        | SignalingType::MediaCapabilitiesStateChanged
         | SignalingType::MediaPipelineRetryCompleted
         | SignalingType::RemoteSessionSettingsApplied
         | SignalingType::SystemAudioCaptureStateChanged

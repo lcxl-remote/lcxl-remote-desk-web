@@ -1949,8 +1949,8 @@ pub(super) async fn route_returns_error_on_payload_parse_fail() {
             .message
             .as_deref()
             .unwrap_or("")
-            .starts_with("bad ChangeDisplaySettings payload"),
-        "expected 'bad ChangeDisplaySettings payload' prefix, got {:?}",
+            .starts_with("bad ChangeDisplaySettings command"),
+        "expected 'bad ChangeDisplaySettings command' prefix, got {:?}",
         state.message
     );
 }

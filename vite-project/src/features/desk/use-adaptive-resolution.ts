@@ -10,17 +10,19 @@ export interface UseAdaptiveResolutionParams {
     /**
      * Wrapper element to observe. The hook tracks `getBoundingClientRect`
      * on this node and treats `width × devicePixelRatio` as the
-     * pixel-for-pixel target for the IDD virtual display.
+     * device-pixel viewport target for the selected virtual or physical display.
      */
     wrapperRef: RefObject<HTMLDivElement | null>;
     /**
      * Composite gate: callers set this to `true` only when the deskId,
-     * RTC connection, daemon-reported `virtual_display_active`, and
+     * RTC connection, host-reported selected display capability, and
      * user-toggled `adaptive_web_page_resolution` are all satisfied.
      * Flipping this `false` mid-debounce immediately cancels the
      * pending timer.
      */
     enabled: boolean;
+    /** Capture backend, display, and connection epoch currently owning requests. */
+    targetKey?: string;
     /**
      * Dispatcher that posts a ChangeDisplaySettings(205) request and
      * returns the actual `request_id` placed on the wire. The hook
@@ -52,10 +54,15 @@ export interface UseAdaptiveResolutionParams {
      * cursor-driven resize loops.
      */
     minDeltaPx?: number;
+    maxDimension?: number;
+    /** Increment after a retryable physical-mode response to recheck the latest viewport. */
+    retrySignal?: number;
+    retryDelayMs?: number;
 }
 
 const DEFAULT_DEBOUNCE_MS = 5_000;
 const DEFAULT_MIN_DELTA_PX = 16;
+const DEFAULT_PHYSICAL_RETRY_DELAY_MS = 30_500;
 
 /**
  * Inputs to {@link isAdaptiveResolutionGateOpen}: the union of state
@@ -70,6 +77,9 @@ export interface AdaptiveResolutionGateInputs {
     isRTCConnected: boolean;
     /** Daemon supervisor reports the IDD currently has a live handle. */
     virtualDisplayActive: boolean | null | undefined;
+    /** Host platform can inspect and switch supported physical modes. */
+    physicalDisplayModeSupported?: boolean | null;
+    physicalDisplayAvailable?: boolean | null;
     /** GDI name (`\\.\DISPLAYn`) of the attached IDD, as reported by the daemon. */
     virtualDisplayDeviceName: string | null | undefined;
     /** Capture target the user picked in the config dialog. */
@@ -84,11 +94,8 @@ export interface AdaptiveResolutionGateInputs {
  *
  *   - `deskId` is real (sendMessage needs a routing target)
  *   - WebRTC is connected (no point adapting an inactive stream)
- *   - daemon reports the IDD as currently attached
- *     (`virtualDisplayActive`) AND surfaces its GDI device name
- *   - the user-selected capture device equals that IDD name — without
- *     this, firing 205 would silently change the IDD resolution while
- *     WGC keeps capturing a physical screen
+ *   - a selected IDD is attached, or a selected physical display has
+ *     mode-switch capability in the current worker
  *   - the user ticked the adaptive toggle
  *
  * Extracted to its own export so the gate semantics are unit-testable
@@ -106,9 +113,10 @@ export function isAdaptiveResolutionGateOpen(
     return (
         !!args.deskId &&
         args.isRTCConnected &&
-        !!args.virtualDisplayActive &&
-        !!args.virtualDisplayDeviceName &&
-        args.selectedVideoDeviceName === args.virtualDisplayDeviceName &&
+        !!args.selectedVideoDeviceName &&
+        (args.selectedVideoDeviceName === args.virtualDisplayDeviceName
+            ? !!args.virtualDisplayActive
+            : !!args.physicalDisplayModeSupported && !!args.physicalDisplayAvailable) &&
         !!args.adaptiveWebPageResolution
     );
 }
@@ -136,6 +144,7 @@ export function normaliseDims(
     cssW: number,
     cssH: number,
     dpr: number,
+    maxDimension = MAX_DIMENSION,
 ): { width: number; height: number } | null {
     const safeDpr = Number.isFinite(dpr) && dpr > 0 ? dpr : 1;
     if (
@@ -147,8 +156,22 @@ export function normaliseDims(
         return null;
     }
     const clamp = (n: number) =>
-        Math.max(MIN_DIMENSION, Math.min(MAX_DIMENSION, Math.round(n * safeDpr)));
+        Math.max(MIN_DIMENSION, Math.min(maxDimension, Math.round(n * safeDpr)));
     return { width: clamp(cssW), height: clamp(cssH) };
+}
+
+function normaliseDevicePixelDims(
+    width: number,
+    height: number,
+    maxDimension: number,
+): { width: number; height: number } | null {
+    if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+        return null;
+    }
+    return {
+        width: Math.max(MIN_DIMENSION, Math.min(maxDimension, Math.round(width))),
+        height: Math.max(MIN_DIMENSION, Math.min(maxDimension, Math.round(height))),
+    };
 }
 
 /**
@@ -168,10 +191,14 @@ export function normaliseDims(
 export function useAdaptiveResolution({
     wrapperRef,
     enabled,
+    targetKey = "",
     sendChangeDisplay,
     pendingAutoRequestIds,
     debounceMs = DEFAULT_DEBOUNCE_MS,
     minDeltaPx = DEFAULT_MIN_DELTA_PX,
+    maxDimension = MAX_DIMENSION,
+    retrySignal = 0,
+    retryDelayMs = DEFAULT_PHYSICAL_RETRY_DELAY_MS,
 }: UseAdaptiveResolutionParams): void {
     /**
      * `lastSent` is the last (width, height) the hook actually placed
@@ -180,8 +207,11 @@ export function useAdaptiveResolution({
      * the first.
      */
     const lastSentRef = useRef<{ width: number; height: number } | null>(null);
+    const sentRevisionRef = useRef(0);
+    const lastTargetKeyRef = useRef(targetKey);
     /** Pending debounce timer handle. */
     const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const retryRecheckRef = useRef<() => void>(() => {});
 
     /**
      * Latest-callback-in-ref pattern. The `desk-session` parent
@@ -201,7 +231,13 @@ export function useAdaptiveResolution({
     sendChangeDisplayRef.current = sendChangeDisplay;
 
     useEffect(() => {
+        if (lastTargetKeyRef.current !== targetKey) {
+            lastSentRef.current = null;
+            lastTargetKeyRef.current = targetKey;
+        }
         if (!enabled) {
+            lastSentRef.current = null;
+            retryRecheckRef.current = () => {};
             console.info(
                 "[adaptive-resolution hook] effect skipped: enabled=false",
             );
@@ -233,13 +269,19 @@ export function useAdaptiveResolution({
                 refresh_hz: 0,
                 auto: true,
             });
-            pendingAutoRequestIds.current.add(id);
-            lastSentRef.current = target;
+            if (id) {
+                pendingAutoRequestIds.current.add(id);
+                lastSentRef.current = target;
+                sentRevisionRef.current += 1;
+            }
         };
 
-        const onResize = (rect: DOMRectReadOnly) => {
+        let latestObserved: { width: number; height: number } | null = null;
+        const onResize = (rect: DOMRectReadOnly, deviceBox?: ResizeObserverSize) => {
             const dpr = window.devicePixelRatio;
-            const normalised = normaliseDims(rect.width, rect.height, dpr);
+            const normalised = deviceBox
+                ? normaliseDevicePixelDims(deviceBox.inlineSize, deviceBox.blockSize, maxDimension)
+                : normaliseDims(rect.width, rect.height, dpr, maxDimension);
             if (!normalised) {
                 console.debug("[adaptive-resolution hook] resize ignored: invalid rect", {
                     cssW: rect.width,
@@ -248,6 +290,7 @@ export function useAdaptiveResolution({
                 });
                 return;
             }
+            latestObserved = normalised;
             const last = lastSentRef.current;
             const dw = last ? Math.abs(normalised.width - last.width) : Infinity;
             const dh = last ? Math.abs(normalised.height - last.height) : Infinity;
@@ -274,13 +317,29 @@ export function useAdaptiveResolution({
             timerRef.current = setTimeout(() => fire(normalised), debounceMs);
         };
 
+        // A retryable response can arrive after the original resize has gone
+        // quiet. Recheck the most recently observed device-pixel dimensions
+        // after the host cooldown, preserving the normal trailing debounce.
+        retryRecheckRef.current = () => {
+            const target = latestObserved;
+            if (!target) return;
+            lastSentRef.current = null;
+            if (timerRef.current !== null) clearTimeout(timerRef.current);
+            timerRef.current = setTimeout(() => fire(target), debounceMs);
+        };
+
         const observer = new ResizeObserver((entries) => {
             const entry = entries[entries.length - 1];
             if (entry) {
-                onResize(entry.contentRect);
+                const deviceBox = entry.devicePixelContentBoxSize?.[0];
+                onResize(entry.contentRect, deviceBox);
             }
         });
-        observer.observe(wrapper);
+        try {
+            observer.observe(wrapper, { box: "device-pixel-content-box" });
+        } catch {
+            observer.observe(wrapper);
+        }
         console.info("[adaptive-resolution hook] observer attached", {
             wrapperRect: wrapper.getBoundingClientRect(),
             dpr: window.devicePixelRatio,
@@ -290,6 +349,7 @@ export function useAdaptiveResolution({
 
         return () => {
             observer.disconnect();
+            retryRecheckRef.current = () => {};
             if (timerRef.current !== null) {
                 clearTimeout(timerRef.current);
                 timerRef.current = null;
@@ -302,5 +362,14 @@ export function useAdaptiveResolution({
         // stays in the deps because its identity is stable across
         // renders (the parent holds it in a `useRef`), and React's
         // exhaustive-deps lint expects it.
-    }, [enabled, wrapperRef, pendingAutoRequestIds, debounceMs, minDeltaPx]);
+    }, [enabled, targetKey, wrapperRef, pendingAutoRequestIds, debounceMs, minDeltaPx, maxDimension]);
+
+    useEffect(() => {
+        if (!enabled || retrySignal === 0) return;
+        const revision = sentRevisionRef.current;
+        const timer = setTimeout(() => {
+            if (sentRevisionRef.current === revision) retryRecheckRef.current();
+        }, retryDelayMs);
+        return () => clearTimeout(timer);
+    }, [enabled, targetKey, retrySignal, retryDelayMs]);
 }

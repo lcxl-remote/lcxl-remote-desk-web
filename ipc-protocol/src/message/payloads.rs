@@ -279,6 +279,11 @@ pub struct MediaCapabilities {
     pub audio_encoders: Vec<String>,
     /// Per-backend display map (e.g. `"dxgi" -> [DISPLAY1, DISPLAY2]`).
     pub video_device_list: BTreeMap<String, Vec<DisplayInfo>>,
+    /// Worker-verified mode availability by capture backend and device name.
+    pub physical_display_capabilities: BTreeMap<
+        String,
+        BTreeMap<String, desk_signal_facade::model::virtual_display::PhysicalDisplayCapability>,
+    >,
     /// Per-backend audio device map.
     pub audio_device_list: BTreeMap<String, Vec<AudioDevice>>,
     /// Whether this worker can talk to a Tauri shell on the same desktop

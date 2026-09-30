@@ -18,6 +18,7 @@ pub mod manager_credential_scope;
 pub mod manager_link_gate;
 pub mod manager_link_state;
 pub mod pc_manager;
+pub mod physical_display;
 #[cfg(target_os = "windows")]
 pub mod pipe_security;
 pub mod remote_access;
@@ -297,6 +298,11 @@ pub async fn run_service_daemon_inner(
     let virtual_display_supervisor = {
         let provider = desk_virtual_display::lifecycle_provider();
         let supervisor = virtual_display::new_arc(provider, worker_mgr.clone());
+        if let Some(physical) = pc_registry.physical_display_supervisor() {
+            supervisor
+                .set_physical_display_gate(Arc::clone(physical))
+                .await;
+        }
         // Inject the router-side desired-state computer. The closure
         // captures `settings` and `pc_registry` Arc clones but
         // intentionally does NOT capture the supervisor itself; the
@@ -310,8 +316,20 @@ pub async fn run_service_daemon_inner(
                 let settings = settings.clone();
                 let pc_registry = pc_registry.clone();
                 Box::pin(async move {
-                    signaling_router::compute_desired_with_active(&settings, &pc_registry, active)
-                        .await
+                    let (mut desired, prompt_ms) = signaling_router::compute_desired_with_active(
+                        &settings,
+                        &pc_registry,
+                        active,
+                    )
+                    .await;
+                    if desired
+                        && let Some(physical) = pc_registry.physical_display_supervisor()
+                        && (physical.has_pending_operation().await
+                            || !physical.recorded_displays().await.is_empty())
+                    {
+                        desired = false;
+                    }
+                    (desired, prompt_ms)
                 })
             });
             supervisor.set_desired_computer(computer).await;
@@ -381,6 +399,12 @@ pub async fn run_service_daemon_inner(
 
     if let Some(supervisor) = virtual_display_supervisor.as_ref() {
         supervisor.shutdown().await;
+    }
+    if let Some(physical) = pc_registry.physical_display_supervisor()
+        && !physical_display::restore_before_exclusive(&physical, &pc_registry, &worker_mgr, None)
+            .await
+    {
+        log::warn!("[physical-display] graceful-shutdown restore was incomplete");
     }
     worker_mgr.shutdown_all().await;
     monitor_handle.abort();

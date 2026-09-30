@@ -168,6 +168,9 @@ pub enum ServiceToWorker {
     /// travels back via [`WorkerToService::VirtualDisplayMode`].
     SetVirtualDisplayMode(SetVirtualDisplayModePayload),
 
+    /// Apply or restore a supported mode on the selected physical display.
+    SetPhysicalDisplayMode(SetPhysicalDisplayModePayload),
+
     /// Daemon → worker: a virtual display is live; rebuild any active
     /// capture pipeline so it targets the virtual monitor. Re-sent every
     /// time the daemon sees a worker [`WorkerToService::Capabilities`]
@@ -472,6 +475,9 @@ pub enum WorkerToService {
     /// response (Applied) or `SignalingModel::error(...)` (Failed).
     VirtualDisplayMode(VirtualDisplayModeResponsePayload),
 
+    /// Worker result for a physical display mode operation.
+    PhysicalDisplayMode(PhysicalDisplayModeResponsePayload),
+
     /// Worker → daemon reply to
     /// [`ServiceToWorker::AttachVirtualDisplay`]. The daemon stops at
     /// `SwDeviceCreate` (Session 0 cannot enumerate displays) and
@@ -632,6 +638,7 @@ impl WorkerToService {
             Self::TerminalOutputProduced(payload) => Some(&payload.connection_id),
             Self::TerminalCommandsListed(payload) => payload.connection_id.as_deref(),
             Self::VirtualDisplayMode(payload) => Some(&payload.connection_id),
+            Self::PhysicalDisplayMode(payload) => Some(&payload.connection_id),
             Self::AgentCapabilityCompleted(payload) => payload.connection_id.as_deref(),
             Self::ComputerActionStarted(payload) => payload.connection_id.as_deref(),
             Self::ComputerActionCompleted(payload) => payload.connection_id.as_deref(),
@@ -665,10 +672,12 @@ impl WorkerToService {
 
 mod agent;
 mod payloads;
+mod physical_display;
 mod virtual_display;
 
 pub use agent::*;
 pub use payloads::*;
+pub use physical_display::*;
 pub use virtual_display::*;
 #[cfg(test)]
 mod tests;

@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest"
 import {
     canConnectCaptureTarget,
     canEnableAdaptiveResolution,
+    adaptiveSelectionKey,
     DESK_CONFIG_DEFAULTS,
     formatDisplayLabel,
     hasNoDisplaysForMode,
@@ -109,6 +110,14 @@ describe("canEnableAdaptiveResolution", () => {
         expect(
             canEnableAdaptiveResolution("\\\\.\\DISPLAY1", "\\\\.\\DISPLAY8"),
         ).toBe(false)
+    })
+
+    it("enables the same toggle for a supported physical display", () => {
+        expect(canEnableAdaptiveResolution("physical", "virtual", true, true)).toBe(true)
+        expect(canEnableAdaptiveResolution("physical", "virtual", true, false)).toBe(false)
+        expect(canEnableAdaptiveResolution("", "virtual", true, true)).toBe(false)
+        expect(adaptiveSelectionKey("WGC", "physical"))
+            .not.toBe(adaptiveSelectionKey("DXGI", "physical"))
     })
 
     it("disables when no virtual display is attached (daemon reports None)", () => {

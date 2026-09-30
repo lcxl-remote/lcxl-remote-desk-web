@@ -424,6 +424,16 @@ impl SharedCaptureRegistry {
             .map(|inner| inner.geometry.read().display_info)
     }
 
+    /// Observe an already-running capture without constructing a second OS
+    /// capture source. The returned handle keeps that generation alive while
+    /// a display-mode transaction waits for its first real frame.
+    pub(crate) fn subscribe_existing(&self, key: &CaptureKey) -> Option<SharedCaptureHandle> {
+        let g = self.map.lock().ok()?;
+        g.get(key)
+            .and_then(Weak::upgrade)
+            .map(|inner| SharedCaptureHandle { inner })
+    }
+
     /// Diagnostic / test introspection: count of live capture loops.
     pub fn live_count(&self) -> usize {
         let g = self.map.lock().expect("shared capture registry poisoned");

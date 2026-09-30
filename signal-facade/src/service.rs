@@ -1118,6 +1118,7 @@ impl<U: SignalingUser> SignalingHandler<U> {
             | SignalingType::TerminalStarted
             | SignalingType::AudioPlaybackFailed
             | SignalingType::MediaPipelineStateChanged
+            | SignalingType::MediaCapabilitiesStateChanged
             | SignalingType::RetryMediaPipeline
             | SignalingType::MediaPipelineRetryCompleted
             | SignalingType::DesktopSwitching

@@ -19,14 +19,15 @@ use desk_agent_protocol::authz::{AuthorizationBlock, AuthorizedControlPayload};
 use desk_agent_protocol::exec_lifecycle::{ExecLifecycleEvent, ExecLifecyclePayload};
 use desk_ipc_protocol::message::{
     ERROR_CODE_MEDIA_TRANSPORT_STUCK, MediaKind, MediaSettingsAppliedPayload,
-    MediaSettingsApplyOutcome, VirtualDisplayModeOutcome, WorkerToService,
+    MediaSettingsApplyOutcome, PhysicalDisplayModeOutcome, VirtualDisplayModeOutcome,
+    WorkerToService,
 };
 use desk_signal_facade::model::{
     remote_session::{SystemAudioCaptureState, SystemAudioCaptureStateData},
     request_remote_authz::{AuthorizedRequestRemote, AuthorizedTerminalStart, RequestRemoteAuthz},
     signal::{RemoteDeskTypeEnum, SignalingModel, SignalingResponseState, SignalingType},
     version::VersionInfo,
-    virtual_display::ChangeDisplaySettingsPayload,
+    virtual_display::{ChangeDisplaySettingsPayload, PhysicalDisplayChangedData},
 };
 use desk_utils::error::DeskErrorCode;
 use futures_util::{SinkExt, StreamExt};
@@ -293,6 +294,9 @@ pub async fn run_signaling_proxy(
         // with FEATURE_UNAVAILABLE for every inbound
         // ChangeDisplaySettings.
         virtual_display: virtual_display.clone(),
+        physical_display: Arc::new(
+            crate::daemon::physical_display::PhysicalDisplaySupervisor::new(),
+        ),
         diagnose_orchestrator,
         remote_read: remote_read.clone(),
         // Confirmed execution is available wherever an in-process worker can
@@ -317,6 +321,7 @@ pub async fn run_signaling_proxy(
         // On-demand temporary-support lifecycle, shared with the support loop.
         support_link_state: support_link_state.clone(),
     };
+    pc_registry.set_physical_display_supervisor(router_ctx.physical_display.clone());
 
     let credential_expiry_handle = {
         let mut expiry_rx = credential_scopes.subscribe_expirations();
@@ -661,6 +666,11 @@ pub async fn run_signaling_proxy(
         })
     };
 
+    let mut capability_incarnations = std::collections::HashMap::<
+        desk_ipc_protocol::message::WorkerKey,
+        super::worker_manager::WorkerIncarnation,
+    >::new();
+    let mut unkeyed_capability_incarnation = None;
     while let Some(worker_message) = worker_rx.recv().await {
         // Every IPC message — heartbeat, signaling, desktop change —
         // counts as a sign of life for the watchdog. Updating before
@@ -795,16 +805,135 @@ pub async fn run_signaling_proxy(
                     caps.has_tauri,
                     caps.is_admin,
                 );
+                let notification_caps = caps.clone();
                 if let Some(key) = resident_worker_key.as_ref() {
                     if !worker_mgr.set_resident_worker_capabilities(key, caps).await {
                         debug!(
                             "[SignalingProxy] resident capabilities arrived after slot removal: {:?}",
                             key
                         );
+                        continue;
                     }
+                    let previous_incarnation =
+                        capability_incarnations.insert(key.clone(), worker_incarnation);
+                    let fresh_incarnation = previous_incarnation != Some(worker_incarnation);
+                    if previous_incarnation.is_some()
+                        && fresh_incarnation
+                        && router_ctx
+                            .physical_display
+                            .abandon_pending_for_session(Some(&key.session))
+                            .await
+                    {
+                        warn!(
+                            "[physical-display] unacknowledged mode operation lost with worker restart"
+                        );
+                    }
+                    let recovering = fresh_incarnation
+                        && router_ctx
+                            .physical_display
+                            .has_recorded_for_session(Some(&key.session))
+                            .await;
+                    let external_changes = if recovering {
+                        Vec::new()
+                    } else {
+                        router_ctx
+                            .physical_display
+                            .reconcile_capabilities(
+                                Some(&key.session),
+                                &notification_caps.physical_display_capabilities,
+                            )
+                            .await
+                    };
+                    if recovering {
+                        let physical = Arc::clone(&router_ctx.physical_display);
+                        let registry = pc_registry.clone();
+                        let workers = worker_mgr.clone();
+                        let session_key = key.session.clone();
+                        tokio::spawn(async move {
+                            if !crate::daemon::physical_display::restore_before_exclusive(
+                                &physical,
+                                &registry,
+                                &workers,
+                                Some(&session_key),
+                            )
+                            .await
+                            {
+                                warn!(
+                                    "[physical-display] best-effort worker-restart restore was incomplete"
+                                );
+                                physical.forget_for_session(Some(&session_key)).await;
+                            }
+                        });
+                    }
+                    send_media_capabilities_notifications(
+                        &pc_registry,
+                        &worker_mgr,
+                        Some(key),
+                        &notification_caps,
+                        &external_changes,
+                        &outbound_tx,
+                    )
+                    .await;
                     continue;
                 }
                 worker_mgr.set_worker_capabilities(caps);
+                let previous_incarnation =
+                    unkeyed_capability_incarnation.replace(worker_incarnation);
+                let fresh_incarnation = previous_incarnation != Some(worker_incarnation);
+                let uncertain_inprocess_operation = previous_incarnation.is_some()
+                    && fresh_incarnation
+                    && router_ctx
+                        .physical_display
+                        .has_pending_for_session(None)
+                        .await;
+                if uncertain_inprocess_operation {
+                    warn!(
+                        "[physical-display] keeping unacknowledged in-process mode operation fenced; an aborted spawn_blocking task may still write the OS mode"
+                    );
+                }
+                let recovering = fresh_incarnation
+                    && !uncertain_inprocess_operation
+                    && router_ctx
+                        .physical_display
+                        .has_recorded_for_session(None)
+                        .await;
+                let external_changes = if recovering {
+                    Vec::new()
+                } else {
+                    router_ctx
+                        .physical_display
+                        .reconcile_capabilities(
+                            None,
+                            &notification_caps.physical_display_capabilities,
+                        )
+                        .await
+                };
+                if recovering {
+                    let physical = Arc::clone(&router_ctx.physical_display);
+                    let registry = pc_registry.clone();
+                    let workers = worker_mgr.clone();
+                    tokio::spawn(async move {
+                        if !crate::daemon::physical_display::restore_before_exclusive(
+                            &physical, &registry, &workers, None,
+                        )
+                        .await
+                        {
+                            warn!(
+                                "[physical-display] best-effort in-process worker-restart restore was incomplete"
+                            );
+                            physical.forget_for_session(None).await;
+                        }
+                    });
+                }
+                send_media_capabilities_notifications(
+                    &pc_registry,
+                    &worker_mgr,
+                    None,
+                    &notification_caps,
+                    &external_changes,
+                    &outbound_tx,
+                )
+                .await;
                 // A fresh worker starts from the policy serialized into its Init
                 // payload: the right values, but at sequence zero, which cannot
                 // be compared with what the daemon has been counting. Restating
@@ -1392,6 +1521,32 @@ pub async fn run_signaling_proxy(
             // next ChangeDisplaySettings request.
             WorkerToService::VirtualDisplayAttachResult(payload) => {
                 dispatch_attach_result(payload, virtual_display.as_ref()).await;
+                if let Some(virtual_supervisor) = virtual_display.as_ref()
+                    && virtual_supervisor.is_active().await
+                    && !router_ctx
+                        .physical_display
+                        .recorded_displays()
+                        .await
+                        .is_empty()
+                {
+                    let virtual_supervisor = Arc::clone(virtual_supervisor);
+                    let physical = Arc::clone(&router_ctx.physical_display);
+                    let registry = pc_registry.clone();
+                    let workers = worker_mgr.clone();
+                    tokio::spawn(async move {
+                        if crate::daemon::physical_display::restore_before_exclusive(
+                            &physical, &registry, &workers, None,
+                        )
+                        .await
+                        {
+                            virtual_supervisor.recompute_desired().await;
+                        } else {
+                            warn!(
+                                "[virtual-display] exclusive entry deferred after attach: physical restore failed"
+                            );
+                        }
+                    });
+                }
             }
             // Virtual display response: rebuild the matching outbound
             // ChangeDisplaySettings model and write it onto the
@@ -1416,6 +1571,112 @@ pub async fn run_signaling_proxy(
                         "[SignalingProxy] Failed to build VirtualDisplayMode response model \
                          for {connection_id_debug} (request_id={request_id_debug}): {e}"
                     ),
+                }
+            }
+            WorkerToService::PhysicalDisplayMode(payload) => {
+                if let Some(was_restore) = router_ctx
+                    .physical_display
+                    .complete_and_identify(&payload)
+                    .await
+                {
+                    let has_snapshots = !router_ctx
+                        .physical_display
+                        .recorded_displays()
+                        .await
+                        .is_empty();
+                    let retry_exclusive = if was_restore {
+                        !has_snapshots
+                            && matches!(
+                                &payload.outcome,
+                                PhysicalDisplayModeOutcome::Applied(data)
+                                    | PhysicalDisplayModeOutcome::AppliedWithoutVideo { data, .. }
+                                    if data.restored
+                            )
+                    } else {
+                        true
+                    };
+                    if retry_exclusive && let Some(supervisor) = virtual_display.as_ref() {
+                        let supervisor = Arc::clone(supervisor);
+                        let physical = Arc::clone(&router_ctx.physical_display);
+                        let registry = pc_registry.clone();
+                        let workers = worker_mgr.clone();
+                        let settings = router_ctx.settings.clone();
+                        tokio::spawn(async move {
+                            let active = supervisor.is_active().await;
+                            let (desired, _) = signaling_router::compute_desired_with_active(
+                                &settings, &registry, active,
+                            )
+                            .await;
+                            if desired {
+                                if crate::daemon::physical_display::restore_before_exclusive(
+                                    &physical, &registry, &workers, None,
+                                )
+                                .await
+                                {
+                                    supervisor.recompute_desired().await;
+                                } else {
+                                    warn!(
+                                        "[virtual-display] exclusive entry remains deferred after physical mode completion"
+                                    );
+                                }
+                            } else {
+                                supervisor.recompute_desired().await;
+                            }
+                        });
+                    }
+                    let connection_id = Some(payload.connection_id);
+                    let model = match payload.outcome {
+                        PhysicalDisplayModeOutcome::Applied(data) => {
+                            let changed = PhysicalDisplayChangedData {
+                                connection_epoch: payload.connection_epoch,
+                                device_name: data.device_name,
+                                selector: data.selector,
+                                pixel_width: data.pixel_width,
+                                pixel_height: data.pixel_height,
+                                refresh_millihz: data.refresh_millihz,
+                                changed: data.changed,
+                                restored: data.restored,
+                            };
+                            SignalingModel::success_response(
+                                &payload.request_id,
+                                SignalingType::DisplaySettingsChanged,
+                                None,
+                                connection_id,
+                                Some(&changed),
+                            )
+                        }
+                        PhysicalDisplayModeOutcome::Failed(reason) => SignalingModel::error(
+                            &payload.request_id,
+                            SignalingType::DisplaySettingsChanged,
+                            None,
+                            connection_id,
+                            DeskErrorCode::INVALID_STATE,
+                            &reason,
+                        ),
+                        PhysicalDisplayModeOutcome::AppliedWithoutVideo { reason, .. } => {
+                            SignalingModel::error(
+                                &payload.request_id,
+                                SignalingType::DisplaySettingsChanged,
+                                None,
+                                connection_id,
+                                DeskErrorCode::INVALID_STATE,
+                                &reason,
+                            )
+                        }
+                    };
+                    match model {
+                        Ok(model) => match serde_json::to_string(&model) {
+                            Ok(text) => {
+                                let _ = outbound_tx.send(text);
+                            }
+                            Err(error) => warn!(
+                                "[SignalingProxy] failed to serialise physical display response: {error}"
+                            ),
+                        },
+                        Err(error) => warn!(
+                            "[SignalingProxy] failed to build physical display response: {error}"
+                        ),
+                    }
                 }
             }
             // Route to the supervisor; the driver loop and op_id gate

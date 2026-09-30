@@ -695,6 +695,9 @@ async fn make_router_ctx() -> (RouterContext, broadcast::Sender<String>) {
         host_control_hub: Arc::new(HostControlHub::new_local()),
         worker_mgr,
         virtual_display: None,
+        physical_display: Arc::new(
+            crate::daemon::physical_display::PhysicalDisplaySupervisor::new(),
+        ),
         diagnose_orchestrator: None,
         remote_read: None,
         exec_supported: false,

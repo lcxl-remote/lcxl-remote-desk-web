@@ -252,6 +252,7 @@ pub async fn handle_request_remote(
         video_encoder_capabilities,
         audio_device_list,
         video_device_list,
+        physical_display_capabilities,
         is_admin_value,
     ) = if let Some(caps) = capabilities {
         // Prefer the verbatim encoder identifiers reported by the worker
@@ -282,6 +283,7 @@ pub async fn handle_request_remote(
             caps.video_encoder_capabilities.clone(),
             caps.audio_device_list.clone(),
             caps.video_device_list.clone(),
+            caps.physical_display_capabilities.clone(),
             caps.is_admin,
         )
     } else {
@@ -293,6 +295,7 @@ pub async fn handle_request_remote(
                 desk_signal_facade::model::media_capability::capabilities_for_encoder_names(
                     &video_encoder_list,
                 ),
+                std::collections::BTreeMap::new(),
                 std::collections::BTreeMap::new(),
                 std::collections::BTreeMap::new(),
                 desk_utils::permission::is_admin(),
@@ -348,6 +351,9 @@ pub async fn handle_request_remote(
         virtual_display_active,
         virtual_display_current_refresh_hz,
         virtual_display_device_name,
+        physical_display_mode_supported: cfg!(any(target_os = "windows", target_os = "macos")),
+        physical_display_capabilities,
+        physical_display_external_changes: Vec::new(),
         adaptive_resolution,
         // The daemon/server process runs on the host, so the compile-time OS
         // is the host's OS. The browser uses this to tailor host-targeted UI.

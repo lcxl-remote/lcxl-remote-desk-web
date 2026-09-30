@@ -517,6 +517,8 @@ struct GrantSessionEntry {
 pub struct PcRegistry {
     inner: Arc<RwLock<HashMap<String, Arc<RwLock<PeerConnectionContext>>>>>,
     worker_mgr: Arc<tokio::sync::OnceCell<WorkerManager>>,
+    physical_display:
+        Arc<tokio::sync::OnceCell<Arc<crate::daemon::physical_display::PhysicalDisplaySupervisor>>>,
     outbound_tx: Arc<tokio::sync::OnceCell<broadcast::Sender<String>>>,
     host_activity: Arc<tokio::sync::OnceCell<crate::host_activity::HostActivityRegistry>>,
     manager_credential_scopes: Arc<
@@ -648,6 +650,19 @@ impl PcRegistry {
                 "[pc_manager] PcRegistry::set_worker_manager called more than once; ignoring"
             );
         }
+    }
+
+    pub fn set_physical_display_supervisor(
+        &self,
+        supervisor: Arc<crate::daemon::physical_display::PhysicalDisplaySupervisor>,
+    ) {
+        let _ = self.physical_display.set(supervisor);
+    }
+
+    pub fn physical_display_supervisor(
+        &self,
+    ) -> Option<&Arc<crate::daemon::physical_display::PhysicalDisplaySupervisor>> {
+        self.physical_display.get()
     }
 
     /// Enforce hot tightening of the independent system-audio permission.

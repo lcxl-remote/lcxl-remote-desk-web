@@ -1,5 +1,20 @@
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
+use wincode::{SchemaRead, SchemaWrite};
+
+#[derive(
+    Clone, Debug, Deserialize, Serialize, PartialEq, Eq, ToSchema, SchemaRead, SchemaWrite,
+)]
+pub struct PhysicalDisplayCapability {
+    pub available: bool,
+    pub reason: Option<String>,
+    pub current_selector: Option<String>,
+    /// Daemon/worker IPC only. The raw monitor identity may contain a serial
+    /// number or device instance path and is not needed by the browser.
+    #[serde(skip_serializing)]
+    #[schema(ignore)]
+    pub display_identity: Option<String>,
+}
 
 /// Default trailing-edge debounce window (ms) the browser waits after a
 /// `resize` settles before issuing an auto `ChangeDisplaySettings`. Server
@@ -12,22 +27,13 @@ pub const DEFAULT_ADAPTIVE_DEBOUNCE_MS: u64 = 5_000;
 /// height changes are skipped to suppress micro-jitter.
 pub const DEFAULT_ADAPTIVE_MIN_DELTA_PX: u32 = 16;
 
-/// Data payload for `SignalingType::ChangeDisplaySettings` (numeric tag
-/// 205). Carries the browser-requested virtual monitor mode. The desk
-/// server's signaling router validates the values via
-/// `desk_virtual_display::validate_mode` before forwarding to the
-/// worker, and the worker replies with an updated
-/// `ChangeDisplaySettingsPayload` (containing the mode the driver
-/// actually applied — the IDD driver may snap to a nearby supported
-/// configuration) inside a `SignalingModel::new_response`.
-///
-/// `auto = true` marks the request as browser-initiated adaptive
-/// resolution. The daemon enforces extra gates on auto requests
-/// (single-client only, throttle, requires `desk_settings.adaptive_web_page_resolution`),
-/// and the browser silently drops the echoed response. Manual
-/// requests (`auto = false`, the default) bypass those gates and any
-/// echo is treated as a normal response.
-///
+/// Virtual-display mode fields used by the router and its `220` response.
+/// Browser `205` requests use [`ChangeDisplaySettingsCommand`] to identify
+/// their virtual or physical target. The router validates virtual modes via
+/// `desk_virtual_display::validate_mode`; the worker's response contains the
+/// mode the IDD actually applied. `auto = true` on a virtual request uses
+/// the shared single-desktop-session gate and the IDD throttle. The browser's
+/// adaptive toggle is a per-session choice, not a host settings permission.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq, ToSchema)]
 pub struct ChangeDisplaySettingsPayload {
     pub connection_epoch: String,
@@ -37,9 +43,95 @@ pub struct ChangeDisplaySettingsPayload {
     pub auto: bool,
 }
 
+/// Browser request for display mode changes. The target is explicit so one
+/// adaptive toggle can address the display currently being captured.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, ToSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ChangeDisplaySettingsCommand {
+    Virtual {
+        connection_epoch: String,
+        width: u32,
+        height: u32,
+        refresh_hz: u32,
+        auto: bool,
+    },
+    PhysicalAuto {
+        connection_epoch: String,
+        capture_backend: String,
+        device_name: String,
+        viewport_width: u32,
+        viewport_height: u32,
+        viewport_sequence: u64,
+    },
+    PhysicalSelect {
+        connection_epoch: String,
+        capture_backend: String,
+        device_name: String,
+        selector: String,
+    },
+    PhysicalRestore {
+        connection_epoch: String,
+        device_name: String,
+    },
+}
+
+impl ChangeDisplaySettingsCommand {
+    pub fn connection_epoch(&self) -> &str {
+        match self {
+            Self::Virtual {
+                connection_epoch, ..
+            }
+            | Self::PhysicalAuto {
+                connection_epoch, ..
+            }
+            | Self::PhysicalSelect {
+                connection_epoch, ..
+            }
+            | Self::PhysicalRestore {
+                connection_epoch, ..
+            } => connection_epoch,
+        }
+    }
+
+    pub fn is_auto(&self) -> bool {
+        match self {
+            Self::Virtual { auto, .. } => *auto,
+            Self::PhysicalAuto { .. } => true,
+            Self::PhysicalSelect { .. } | Self::PhysicalRestore { .. } => false,
+        }
+    }
+}
+
+/// Result data for a physical display change. The mode selector is an opaque
+/// host-issued identifier and must not be treated as a browser choice.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, ToSchema)]
+pub struct PhysicalDisplayChangedData {
+    pub connection_epoch: String,
+    pub device_name: String,
+    pub selector: String,
+    pub pixel_width: u32,
+    pub pixel_height: u32,
+    pub refresh_millihz: u32,
+    pub changed: bool,
+    pub restored: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn physical_capability_omits_internal_identity_from_browser_json() {
+        let capability = PhysicalDisplayCapability {
+            available: true,
+            reason: None,
+            current_selector: Some("current".into()),
+            display_identity: Some("monitor-serial".into()),
+        };
+        let json = serde_json::to_value(&capability).expect("encode");
+        assert!(json.get("display_identity").is_none());
+        assert_eq!(json["current_selector"], "current");
+    }
 
     #[test]
     fn change_display_settings_payload_serde_roundtrip() {
@@ -101,5 +193,28 @@ mod tests {
         };
         let json = serde_json::to_string(&p).expect("encode");
         assert!(json.contains("\"auto\":false"));
+    }
+
+    #[test]
+    fn physical_command_requires_explicit_target_and_preserves_sequence() {
+        let command = ChangeDisplaySettingsCommand::PhysicalAuto {
+            connection_epoch: "epoch".into(),
+            capture_backend: "WGC".into(),
+            device_name: r"\\.\DISPLAY1".into(),
+            viewport_width: 1600,
+            viewport_height: 900,
+            viewport_sequence: 42,
+        };
+        let json = serde_json::to_string(&command).unwrap();
+        assert!(json.contains("\"kind\":\"physical_auto\""));
+        assert_eq!(
+            serde_json::from_str::<ChangeDisplaySettingsCommand>(&json).unwrap(),
+            command
+        );
+        assert!(command.is_auto());
+        assert!(serde_json::from_str::<ChangeDisplaySettingsCommand>(
+            r#"{"connection_epoch":"epoch","width":1920,"height":1080,"refresh_hz":60,"auto":true}"#
+        )
+        .is_err());
     }
 }
