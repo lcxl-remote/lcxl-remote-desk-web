@@ -110,6 +110,45 @@ describe("useResolutionToast", () => {
         expect(result.current.resolutionToast).toBeNull();
     });
 
+    it("reports an unchanged physical mode with its current dimensions and auto-clears", () => {
+        const { result, emit } = renderToast();
+        act(() => result.current.registerSent("r-unchanged", 1920, 1080));
+
+        emit({
+            signaling_type: CHANGE_DISPLAY_SETTINGS,
+            request_id: "r-unchanged",
+            signaling_data: { pixel_width: 1280, pixel_height: 800, changed: false },
+            response_state: { error_code: deskErrorCodeEnum.SUCCESS },
+        });
+        expect(result.current.resolutionToast).toEqual({
+            phase: "unchanged",
+            currentW: 1280,
+            currentH: 800,
+        });
+
+        act(() => vi.advanceTimersByTime(DEFAULT_SUCCESS_AUTOCLEAR_MS));
+        expect(result.current.resolutionToast).toBeNull();
+        act(() => vi.advanceTimersByTime(DEFAULT_RESOLUTION_WATCHDOG_MS));
+        expect(result.current.resolutionToast).toBeNull();
+    });
+
+    it("reports success when the physical mode actually changed", () => {
+        const { result, emit } = renderToast();
+        act(() => result.current.registerSent("r-changed", 1920, 1080));
+
+        emit({
+            signaling_type: CHANGE_DISPLAY_SETTINGS,
+            request_id: "r-changed",
+            signaling_data: { pixel_width: 1920, pixel_height: 1080, changed: true },
+            response_state: { error_code: deskErrorCodeEnum.SUCCESS },
+        });
+        expect(result.current.resolutionToast).toEqual({
+            phase: "success",
+            appliedW: 1920,
+            appliedH: 1080,
+        });
+    });
+
     it("transitions updating → failed on an error echo with the server message and lingers longer", () => {
         const { result, emit } = renderToast();
         act(() => result.current.registerSent("r-bad", 1280, 720));
@@ -163,6 +202,10 @@ describe("useResolutionToast", () => {
         act(() => result.current.registerSent("r-new", 2560, 1440));
 
         emit(makeApplied("r-old", 1920, 1080));
+        emit({
+            ...makeApplied("r-old", 1920, 1080),
+            signaling_data: { pixel_width: 1280, pixel_height: 800, changed: false },
+        });
 
         // Should still be updating with the NEW target — the stale
         // echo must not collapse the toast.

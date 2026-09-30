@@ -1807,6 +1807,7 @@ export default {
   'pages.desk.virtualDisplayBadge': '虚拟屏',
   'pages.desk.resolutionUpdating': '正在更新分辨率 {{w}}×{{h}}…',
   'pages.desk.resolutionApplied': '已应用 {{w}}×{{h}}',
+  'pages.desk.resolutionUnchanged': '无需切换，保持 {{w}}×{{h}}',
   'pages.desk.resolutionFailed': '更新失败：{{reason}}',
   'pages.desk.resolutionTimeout': '更新超时未收到回复',
   'pages.desk.adaptiveQuality': '自适应画质',

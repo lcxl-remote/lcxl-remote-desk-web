@@ -67,6 +67,8 @@ Wayland support here covers an already logged-in graphical user session. It does
 
 The configuration dialog has one **Adaptive resolution** switch for the selected display. With a Windows virtual display, the host can match the browser's viewport directly. With a supported Windows or macOS physical display, the host chooses the closest suitable mode from that monitor's existing modes. A physical mode change also affects the local screen, so each physical target starts with the switch off in a new browser session; you must turn it on. The virtual display keeps its existing browser preference.
 
+If no better physical mode is needed or available, the current resolution is kept and the status message says **No change needed**.
+
 Automatic changes run only while exactly one remote desktop connection exists. Other connections can still view and control the desktop. Turning the switch off stops future changes; **Restore original resolution** is available in the configuration dialog. The host also attempts restoration when the last connection leaves. If someone changes the mode locally, automatic adjustment stops and does not override that choice. Physical mode adjustment does not require the virtual display or its driver. Linux, mirrored displays, and displays whose modes cannot be safely enumerated are currently unavailable.
 
 ## Tuning Tips

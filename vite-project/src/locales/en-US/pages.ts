@@ -1809,6 +1809,7 @@ export default {
   'pages.desk.virtualDisplayBadge': 'Virtual',
   'pages.desk.resolutionUpdating': 'Updating resolution {{w}}×{{h}}…',
   'pages.desk.resolutionApplied': 'Applied {{w}}×{{h}}',
+  'pages.desk.resolutionUnchanged': 'No change needed; keeping {{w}}×{{h}}',
   'pages.desk.resolutionFailed': 'Update failed: {{reason}}',
   'pages.desk.resolutionTimeout': 'No reply within timeout',
   'pages.desk.adaptiveQuality': 'Adaptive Video Quality',

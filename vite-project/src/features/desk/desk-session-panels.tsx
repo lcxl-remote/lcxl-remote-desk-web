@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next"
 import {
     AlertCircle,
     CheckCircle2,
+    Info,
     Loader2,
     SignalHigh,
     SignalLow,
@@ -311,6 +312,17 @@ export function ResolutionStatusToast({
                         {t("pages.desk.resolutionApplied", {
                             w: toast.appliedW,
                             h: toast.appliedH,
+                        })}
+                    </span>
+                </>
+            )}
+            {toast.phase === "unchanged" && (
+                <>
+                    <Info className="h-4 w-4 text-blue-300" />
+                    <span>
+                        {t("pages.desk.resolutionUnchanged", {
+                            w: toast.currentW,
+                            h: toast.currentH,
                         })}
                     </span>
                 </>

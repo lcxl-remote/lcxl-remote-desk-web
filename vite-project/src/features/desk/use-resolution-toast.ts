@@ -13,13 +13,13 @@ const RESOLUTION_ERROR_KEYS: ErrorCodeKeyMap = {
  *
  * `updating` is entered the moment the browser hook fires a 205; it
  * stays on screen until either a matching response arrives or the
- * watchdog elapses, whichever comes first. `success` / `failed` are
- * the two terminal phases (auto-cleared by a follow-up timer the
- * caller owns).
+ * watchdog elapses, whichever comes first. `success`, `unchanged`, and
+ * `failed` are terminal phases, auto-cleared by a follow-up timer.
  */
 export type ResolutionToast =
     | { phase: "updating"; targetW: number; targetH: number; reqId: string }
     | { phase: "success"; appliedW: number; appliedH: number }
+    | { phase: "unchanged"; currentW: number; currentH: number }
     | { phase: "failed"; reason: string }
     | null;
 
@@ -30,6 +30,8 @@ export interface ResolutionEchoData {
     height?: number;
     pixel_width?: number;
     pixel_height?: number;
+    /** Physical display results explicitly report whether the mode changed. */
+    changed?: boolean;
 }
 
 /**
@@ -151,7 +153,7 @@ export function useResolutionToast(
     translateRef.current = translate;
 
     // Two independent timer slots:
-    //   - `autoClearRef` for the `success` / `failed` fade-out
+    //   - `autoClearRef` for terminal-state fade-out
     //   - `watchdogRef` for the `updating → failed{timeout}` fallback
     // Holding them in separate refs makes it impossible to
     // accidentally cancel the auto-clear when we re-arm the
@@ -243,11 +245,11 @@ export function useResolutionToast(
                 message.response_state?.error_code ?? deskErrorCodeEnum.SUCCESS;
             if (errorCode === deskErrorCodeEnum.SUCCESS) {
                 const data = message.signaling_data ?? {};
-                setResolutionToast({
-                    phase: "success",
-                    appliedW: data.pixel_width ?? data.width ?? 0,
-                    appliedH: data.pixel_height ?? data.height ?? 0,
-                });
+                const width = data.pixel_width ?? data.width ?? 0;
+                const height = data.pixel_height ?? data.height ?? 0;
+                setResolutionToast(data.changed === false
+                    ? { phase: "unchanged", currentW: width, currentH: height }
+                    : { phase: "success", appliedW: width, appliedH: height });
                 armAutoClear(successAutoClearMs);
             } else {
                 const key = deskErrorKey(RESOLUTION_ERROR_KEYS, errorCode);
