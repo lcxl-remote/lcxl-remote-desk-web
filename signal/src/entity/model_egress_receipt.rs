@@ -29,6 +29,7 @@ pub struct Model {
     /// Immutable normalized usage from a returned provider turn; absent means
     /// no terminal usage was recorded and the task reservation must be retained.
     pub usage_json: Option<String>,
+    pub usage_recorded_at: Option<DateTimeUtc>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

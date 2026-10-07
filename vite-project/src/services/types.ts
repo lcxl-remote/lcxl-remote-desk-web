@@ -83,7 +83,8 @@ export const aiAssistantAttentionReasonEnum = {
     goal_budget: "goal_budget",
     goal_stalled: "goal_stalled",
     goal_blocked: "goal_blocked",
-    goal_deadline_soon: "goal_deadline_soon"
+    goal_deadline_soon: "goal_deadline_soon",
+    sub_agent_result: "sub_agent_result"
 } as const;
 
 export type AiAssistantAttentionReasonEnumKey = (typeof aiAssistantAttentionReasonEnum)[keyof typeof aiAssistantAttentionReasonEnum];
@@ -201,6 +202,298 @@ export type AiAssistantClientCapabilities = {
      * @type boolean
     */
     turn_stream: boolean;
+};
+
+/**
+ * @description Idempotency is the immutable native request/generation pair, not the latest turn.
+*/
+export type AiAssistantCommandCancelBody = {
+    /**
+     * @type string
+    */
+    connection: string;
+    /**
+     * @type string
+    */
+    exec_request_id: string;
+    /**
+     * @type string
+    */
+    execution_generation: string;
+    /**
+     * @type string
+    */
+    session: string;
+};
+
+export const subAgentSourceKindEnum = {
+    user_input: "user_input"
+} as const;
+
+export type SubAgentSourceKindEnumKey = (typeof subAgentSourceKindEnum)[keyof typeof subAgentSourceKindEnum];
+
+export const subAgentSourceKindEnum2 = {
+    goal: "goal"
+} as const;
+
+export type SubAgentSourceKindEnum2Key = (typeof subAgentSourceKindEnum2)[keyof typeof subAgentSourceKindEnum2];
+
+export const subAgentSourceKindEnum3 = {
+    scheduled_occurrence: "scheduled_occurrence"
+} as const;
+
+export type SubAgentSourceKindEnum3Key = (typeof subAgentSourceKindEnum3)[keyof typeof subAgentSourceKindEnum3];
+
+export type SubAgentSource = ({
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    input_revision: number;
+    /**
+     * @type string
+    */
+    kind: SubAgentSourceKindEnumKey;
+} | {
+    /**
+     * @type string
+    */
+    goal_id: string;
+    /**
+     * @type string
+    */
+    kind: SubAgentSourceKindEnum2Key;
+} | {
+    /**
+     * @type string
+    */
+    kind: SubAgentSourceKindEnum3Key;
+    /**
+     * @type string
+    */
+    occurrence_id: string;
+    /**
+     * @type string
+    */
+    schedule_id: string;
+});
+
+export const subAgentStateEnum = {
+    queued: "queued",
+    running: "running",
+    waiting_approval: "waiting_approval",
+    waiting_work: "waiting_work",
+    waiting_resource: "waiting_resource",
+    waiting_source: "waiting_source",
+    cancelling: "cancelling",
+    completed: "completed",
+    failed: "failed",
+    cancelled: "cancelled"
+} as const;
+
+export type SubAgentStateEnumKey = (typeof subAgentStateEnum)[keyof typeof subAgentStateEnum];
+
+export type SubAgentState = SubAgentStateEnumKey;
+
+export const subAgentWaitReasonEnum = {
+    owner_approval: "owner_approval",
+    background_work: "background_work",
+    model_capacity: "model_capacity",
+    writer_capacity: "writer_capacity",
+    source_paused: "source_paused",
+    device_unavailable: "device_unavailable"
+} as const;
+
+export type SubAgentWaitReasonEnumKey = (typeof subAgentWaitReasonEnum)[keyof typeof subAgentWaitReasonEnum];
+
+export type SubAgentWaitReason = SubAgentWaitReasonEnumKey;
+
+export type AiAssistantSubAgentSummary = {
+    /**
+     * @description Recovery selector for this child; every read and decision rechecks ownership.
+     * @type string
+    */
+    child_session_id: string;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    control_revision: number;
+    /**
+     * @type string
+    */
+    created_at: string;
+    /**
+     * @type string
+    */
+    group_id: string;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    input_revision: number;
+    /**
+     * @type string
+    */
+    name: string;
+    source: SubAgentSource;
+    /**
+     * @type string,null
+    */
+    source_goal_id?: string | null;
+    /**
+     * @type string
+    */
+    state: SubAgentState;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    state_revision: number;
+    /**
+     * @type string
+    */
+    task_id: string;
+    /**
+     * @type string
+    */
+    updated_at: string;
+    wait_reason?: (null | SubAgentWaitReason);
+};
+
+export type AiAssistantSubAgentPage = {
+    /**
+     * @type boolean
+    */
+    has_more: boolean;
+    /**
+     * @type array
+    */
+    items: AiAssistantSubAgentSummary[];
+    /**
+     * @type string,null
+    */
+    next_cursor?: string | null;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    total: number;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    unfinished: number;
+};
+
+export type AiAssistantDelegationSnapshot = {
+    /**
+     * @description Include every unfinished child, even when it is outside the recent page.
+     * @type array
+    */
+    active_tasks: AiAssistantSubAgentSummary[];
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    attention_count: number;
+    /**
+     * @description Bounded oldest unread tasks needing owner attention, including old groups.
+     * @type array
+    */
+    attention_tasks: AiAssistantSubAgentSummary[];
+    /**
+     * @type string,null
+    */
+    parent_session_id?: string | null;
+    task?: (null | AiAssistantSubAgentSummary);
+    tasks?: (null | AiAssistantSubAgentPage);
+};
+
+export const aiAssistantDirectoryControlActionKindEnum = {
+    select_directory: "select_directory"
+} as const;
+
+export type AiAssistantDirectoryControlActionKindEnumKey = (typeof aiAssistantDirectoryControlActionKindEnum)[keyof typeof aiAssistantDirectoryControlActionKindEnum];
+
+export const aiAssistantDirectoryControlActionKindEnum2 = {
+    decide_directory: "decide_directory"
+} as const;
+
+export type AiAssistantDirectoryControlActionKindEnum2Key = (typeof aiAssistantDirectoryControlActionKindEnum2)[keyof typeof aiAssistantDirectoryControlActionKindEnum2];
+
+export const aiAssistantDirectoryControlActionKindEnum3 = {
+    revoke_directory: "revoke_directory"
+} as const;
+
+export type AiAssistantDirectoryControlActionKindEnum3Key = (typeof aiAssistantDirectoryControlActionKindEnum3)[keyof typeof aiAssistantDirectoryControlActionKindEnum3];
+
+export type AiAssistantDirectoryControlAction = ({
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    expected_revision: number;
+    /**
+     * @type string
+    */
+    kind: AiAssistantDirectoryControlActionKindEnumKey;
+    /**
+     * @type string
+    */
+    path: string;
+    /**
+     * @type string
+    */
+    purpose: string;
+} | {
+    /**
+     * @type boolean
+    */
+    approve: boolean;
+    /**
+     * @type string
+    */
+    directory_request_id: string;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    expected_revision: number;
+    /**
+     * @type string
+    */
+    kind: AiAssistantDirectoryControlActionKindEnum2Key;
+} | {
+    /**
+     * @type string
+    */
+    directory_request_id: string;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    expected_revision: number;
+    /**
+     * @type string
+    */
+    kind: AiAssistantDirectoryControlActionKindEnum3Key;
+});
+
+export type AiAssistantDirectoryControlBody = {
+    /**
+     * @type string
+    */
+    client_request_id: string;
+    /**
+     * @type string
+    */
+    connection: string;
+    operation: AiAssistantDirectoryControlAction;
+    /**
+     * @type string
+    */
+    session: string;
 };
 
 export const aiAssistantGoalOwnerActionEnum = {
@@ -802,7 +1095,34 @@ export type ContextNoticeDto = {
     turnId: string;
 };
 
+export type ContextUsageBreakdownDto = {
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    messagesBytes: number;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    projectedBytes: number;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    replayBytes: number;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    toolsBytes: number;
+};
+
 export type ContextUsageDto = {
+    /**
+     * @type object
+    */
+    breakdown: ContextUsageBreakdownDto;
     /**
      * @minLength 0
      * @type integer, int64
@@ -2211,6 +2531,11 @@ export type AiAssistantSessionSnapshotDto = {
     contextNotices: ContextNoticeDto[];
     contextUsage?: (null | ContextUsageDto);
     /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    controlRevision: number;
+    /**
      * @description Bounded metadata-only lineage graph. It contains no message bodies,\ncredentials, cookies, tokens, browser storage or native paths.
      * @type object
     */
@@ -2236,6 +2561,10 @@ export type AiAssistantSessionSnapshotDto = {
      * @type integer, int64
     */
     latestInputSeq: number;
+    /**
+     * @type boolean
+    */
+    mainStopped: boolean;
     /**
      * @description Cursor metadata for the bounded `messages` page.
      * @type object
@@ -2267,6 +2596,10 @@ export type AiAssistantSessionSnapshotDto = {
      * @type string
     */
     sessionId: string;
+    /**
+     * @type object
+    */
+    subagents: AiAssistantDelegationSnapshot;
     taskStatusProjection?: (null | TaskStatusProjectionDto);
     terminalError?: (null | AgentError);
     unresolvedOutcome?: (null | UnknownOutcomeDto);
@@ -2309,6 +2642,239 @@ export type AiAssistantSettingsUpdate = {
      * @type integer, int64
     */
     expected_revision: number;
+};
+
+export const subAgentStopChoiceEnum = {
+    include_sub_agents: "include_sub_agents",
+    main_only: "main_only"
+} as const;
+
+export type SubAgentStopChoiceEnumKey = (typeof subAgentStopChoiceEnum)[keyof typeof subAgentStopChoiceEnum];
+
+export type SubAgentStopChoice = SubAgentStopChoiceEnumKey;
+
+/**
+ * @description Absence of a choice is valid only if the transaction finds no unfinished child.
+*/
+export type AiAssistantStopControl = {
+    /**
+     * @type string
+    */
+    client_request_id: string;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    expected_control_revision: number;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    expected_input_revision: number;
+    subagent_choice?: (null | SubAgentStopChoice);
+};
+
+export type AiAssistantStopBody = {
+    /**
+     * @type string
+    */
+    connection: string;
+    /**
+     * @description Absence of a choice is valid only if the transaction finds no unfinished child.
+     * @type object
+    */
+    control: AiAssistantStopControl;
+    /**
+     * @type string,null
+    */
+    conversation?: string | null;
+    /**
+     * @type string,null
+    */
+    session?: string | null;
+};
+
+export type AiAssistantStopResult = {
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    control_revision: number;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    input_revision: number;
+    /**
+     * @type array
+    */
+    stopped_subagents: AiAssistantSubAgentSummary[];
+};
+
+export const subAgentControlActionKindEnum = {
+    cancel: "cancel"
+} as const;
+
+export type SubAgentControlActionKindEnumKey = (typeof subAgentControlActionKindEnum)[keyof typeof subAgentControlActionKindEnum];
+
+export const subAgentControlActionKindEnum2 = {
+    adjust: "adjust"
+} as const;
+
+export type SubAgentControlActionKindEnum2Key = (typeof subAgentControlActionKindEnum2)[keyof typeof subAgentControlActionKindEnum2];
+
+export type SubAgentControlAction = ({
+    /**
+     * @type string
+    */
+    kind: SubAgentControlActionKindEnumKey;
+} | {
+    /**
+     * @type string
+    */
+    kind: SubAgentControlActionKindEnum2Key;
+    /**
+     * @type string
+    */
+    message: string;
+});
+
+/**
+ * @description Owner controls use input/control fencing; progress revisions are observational.
+*/
+export type AiAssistantSubAgentControl = {
+    action: SubAgentControlAction;
+    /**
+     * @type string
+    */
+    client_request_id: string;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    expected_control_revision: number;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    expected_input_revision: number;
+    /**
+     * @type string
+    */
+    task_id: string;
+};
+
+export type AiAssistantSubAgentControlBody = {
+    /**
+     * @type string
+    */
+    connection: string;
+    /**
+     * @description Owner controls use input/control fencing; progress revisions are observational.
+     * @type object
+    */
+    control: AiAssistantSubAgentControl;
+    /**
+     * @type string,null
+    */
+    conversation?: string | null;
+    /**
+     * @type string,null
+    */
+    session?: string | null;
+};
+
+export type AiAssistantSubAgentReadBody = {
+    /**
+     * @type string
+    */
+    connection: string;
+    /**
+     * @type string,null
+    */
+    conversation?: string | null;
+    /**
+     * @type string,null
+    */
+    session?: string | null;
+    /**
+     * @type string
+    */
+    task_id: string;
+    /**
+     * @description Marks only UI notifications at or before the revision displayed by the owner.
+     * @minLength 0
+     * @type integer, int64
+    */
+    through_state_revision: number;
+};
+
+export const taskAssessmentEnum = {
+    complete: "complete",
+    unable: "unable",
+    pending: "pending"
+} as const;
+
+export type TaskAssessmentEnumKey = (typeof taskAssessmentEnum)[keyof typeof taskAssessmentEnum];
+
+export type TaskAssessment = TaskAssessmentEnumKey;
+
+/**
+ * @description Runtime-generated result metadata. Complete means the run ended, not business success.\nAuthority-controlled identifiers, revisions and status are deliberately absent.
+*/
+export type TaskFinalReport = {
+    /**
+     * @type string
+    */
+    assessment: TaskAssessment;
+    /**
+     * @type array
+    */
+    delivered: string[];
+    /**
+     * @type array
+    */
+    evidence_refs: string[];
+    /**
+     * @type array
+    */
+    findings: string[];
+    /**
+     * @type string,null
+    */
+    reason?: string | null;
+    /**
+     * @type array
+    */
+    receipt_refs: string[];
+    /**
+     * @type array
+    */
+    remaining: string[];
+    /**
+     * @type string
+    */
+    summary: string;
+};
+
+export type AiAssistantSubAgentResult = {
+    /**
+     * @type array
+    */
+    acceptance_criteria: string[];
+    /**
+     * @type string,null
+    */
+    failure_reason?: string | null;
+    /**
+     * @type string
+    */
+    objective: string;
+    report?: (null | TaskFinalReport);
+    /**
+     * @type object
+    */
+    task: AiAssistantSubAgentSummary;
 };
 
 export const executionModeEnum = {
@@ -7110,6 +7676,11 @@ export type RestResponseAiAssistantSessionSnapshotDto = {
         contextNotices: ContextNoticeDto[];
         contextUsage?: (null | ContextUsageDto);
         /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        controlRevision: number;
+        /**
          * @description Bounded metadata-only lineage graph. It contains no message bodies,\ncredentials, cookies, tokens, browser storage or native paths.
          * @type object
         */
@@ -7135,6 +7706,10 @@ export type RestResponseAiAssistantSessionSnapshotDto = {
          * @type integer, int64
         */
         latestInputSeq: number;
+        /**
+         * @type boolean
+        */
+        mainStopped: boolean;
         /**
          * @description Cursor metadata for the bounded `messages` page.
          * @type object
@@ -7166,6 +7741,10 @@ export type RestResponseAiAssistantSessionSnapshotDto = {
          * @type string
         */
         sessionId: string;
+        /**
+         * @type object
+        */
+        subagents: AiAssistantDelegationSnapshot;
         taskStatusProjection?: (null | TaskStatusProjectionDto);
         terminalError?: (null | AgentError);
         unresolvedOutcome?: (null | UnknownOutcomeDto);
@@ -7206,6 +7785,189 @@ export type RestResponseAiAssistantSettings = {
          * @type integer, int64
         */
         revision: number;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponseAiAssistantStopResult = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        control_revision: number;
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        input_revision: number;
+        /**
+         * @type array
+        */
+        stopped_subagents: AiAssistantSubAgentSummary[];
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponseAiAssistantSubAgentPage = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @type boolean
+        */
+        has_more: boolean;
+        /**
+         * @type array
+        */
+        items: AiAssistantSubAgentSummary[];
+        /**
+         * @type string,null
+        */
+        next_cursor?: string | null;
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        total: number;
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        unfinished: number;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponseAiAssistantSubAgentResult = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @type array
+        */
+        acceptance_criteria: string[];
+        /**
+         * @type string,null
+        */
+        failure_reason?: string | null;
+        /**
+         * @type string
+        */
+        objective: string;
+        report?: (null | TaskFinalReport);
+        /**
+         * @type object
+        */
+        task: AiAssistantSubAgentSummary;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponseAiAssistantSubAgentSummary = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @description Recovery selector for this child; every read and decision rechecks ownership.
+         * @type string
+        */
+        child_session_id: string;
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        control_revision: number;
+        /**
+         * @type string
+        */
+        created_at: string;
+        /**
+         * @type string
+        */
+        group_id: string;
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        input_revision: number;
+        /**
+         * @type string
+        */
+        name: string;
+        source: SubAgentSource;
+        /**
+         * @type string,null
+        */
+        source_goal_id?: string | null;
+        /**
+         * @type string
+        */
+        state: SubAgentState;
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        state_revision: number;
+        /**
+         * @type string
+        */
+        task_id: string;
+        /**
+         * @type string
+        */
+        updated_at: string;
+        wait_reason?: (null | SubAgentWaitReason);
     };
     /**
      * @type string,null
@@ -9187,6 +9949,49 @@ export type RestResponseServiceOperationStatus = {
          * @type string
         */
         state: ServiceOperationState;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type SubAgentLimits = {
+    /**
+     * @description Includes approval and native-work waits, across all groups in a root chat.
+     * @minLength 0
+     * @type integer, int32
+    */
+    maxUnfinishedPerRoot: number;
+};
+
+export type RestResponseSubAgentPolicy = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @type object
+        */
+        limits: SubAgentLimits;
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        revision: number;
+        /**
+         * @minLength 0
+         * @type integer, int32
+        */
+        schemaVersion: number;
     };
     /**
      * @type string,null
@@ -11572,6 +12377,7 @@ export const scheduledRunStatusEnum = {
     waiting_device: "waiting_device",
     running: "running",
     awaiting_permission: "awaiting_permission",
+    awaiting_children: "awaiting_children",
     succeeded: "succeeded",
     failed: "failed",
     missed: "missed",
@@ -12171,6 +12977,23 @@ export type SignalingModel = {
     to_connection_id?: string | null;
 };
 
+export type SubAgentPolicy = {
+    /**
+     * @type object
+    */
+    limits: SubAgentLimits;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    revision: number;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    schemaVersion: number;
+};
+
 export type SupportSessionStatus = {
     /**
      * @description True while a support session is live (upstream requested / open and not yet\nstopped or expired).
@@ -12668,6 +13491,18 @@ export type UpdateScheduleBudgetPolicy = {
     maximum: TaskBudget;
 };
 
+export type UpdateSubAgentPolicy = {
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    expectedRevision: number;
+    /**
+     * @type object
+    */
+    limits: SubAgentLimits;
+};
+
 /**
  * @description Usage-retention windows, one per rollup family, in whole days.
 */
@@ -12824,6 +13659,27 @@ export type UpdateScheduleBudgetPolicyMutationResponse = UpdateScheduleBudgetPol
 export type UpdateScheduleBudgetPolicyMutation = {
     Response: UpdateScheduleBudgetPolicy200;
     Request: UpdateScheduleBudgetPolicyMutationRequest;
+    Errors: any;
+};
+
+export type GetSubagentPolicy200 = RestResponseSubAgentPolicy;
+
+export type GetSubagentPolicyQueryResponse = GetSubagentPolicy200;
+
+export type GetSubagentPolicyQuery = {
+    Response: GetSubagentPolicy200;
+    Errors: any;
+};
+
+export type UpdateSubagentPolicy200 = RestResponseSubAgentPolicy;
+
+export type UpdateSubagentPolicyMutationRequest = UpdateSubAgentPolicy;
+
+export type UpdateSubagentPolicyMutationResponse = UpdateSubagentPolicy200;
+
+export type UpdateSubagentPolicyMutation = {
+    Response: UpdateSubagentPolicy200;
+    Request: UpdateSubagentPolicyMutationRequest;
     Errors: any;
 };
 
@@ -14198,6 +15054,18 @@ export type RevokeAiAssistantCapabilityGrantMutation = {
     Errors: any;
 };
 
+export type CancelAiAssistantCommand200 = RestResponseBool;
+
+export type CancelAiAssistantCommandMutationRequest = AiAssistantCommandCancelBody;
+
+export type CancelAiAssistantCommandMutationResponse = CancelAiAssistantCommand200;
+
+export type CancelAiAssistantCommandMutation = {
+    Response: CancelAiAssistantCommand200;
+    Request: CancelAiAssistantCommandMutationRequest;
+    Errors: any;
+};
+
 export type DeleteAiAssistantSession200 = RestResponseDeleteAiAssistantSessionResponse;
 
 export type DeleteAiAssistantSessionMutationRequest = DeleteAiAssistantSessionBody;
@@ -14207,6 +15075,18 @@ export type DeleteAiAssistantSessionMutationResponse = DeleteAiAssistantSession2
 export type DeleteAiAssistantSessionMutation = {
     Response: DeleteAiAssistantSession200;
     Request: DeleteAiAssistantSessionMutationRequest;
+    Errors: any;
+};
+
+export type ControlAiAssistantDirectory200 = RestResponseBool;
+
+export type ControlAiAssistantDirectoryMutationRequest = AiAssistantDirectoryControlBody;
+
+export type ControlAiAssistantDirectoryMutationResponse = ControlAiAssistantDirectory200;
+
+export type ControlAiAssistantDirectoryMutation = {
+    Response: ControlAiAssistantDirectory200;
+    Request: ControlAiAssistantDirectoryMutationRequest;
     Errors: any;
 };
 
@@ -14323,6 +15203,148 @@ export type DecideAiAssistantPermissionMutationResponse = DecideAiAssistantPermi
 export type DecideAiAssistantPermissionMutation = {
     Response: DecideAiAssistantPermission200;
     Request: DecideAiAssistantPermissionMutationRequest;
+    Errors: any;
+};
+
+export type StopAiAssistantSession200 = RestResponseAiAssistantStopResult;
+
+export type StopAiAssistantSessionMutationRequest = AiAssistantStopBody;
+
+export type StopAiAssistantSessionMutationResponse = StopAiAssistantSession200;
+
+export type StopAiAssistantSessionMutation = {
+    Response: StopAiAssistantSession200;
+    Request: StopAiAssistantSessionMutationRequest;
+    Errors: any;
+};
+
+export type GetMySubagentPolicy200 = RestResponseSubAgentPolicy;
+
+export type GetMySubagentPolicyQueryResponse = GetMySubagentPolicy200;
+
+export type GetMySubagentPolicyQuery = {
+    Response: GetMySubagentPolicy200;
+    Errors: any;
+};
+
+export type ListAiAssistantSubagentsQueryParams = {
+    /**
+     * @description Original target connection
+     * @type string
+    */
+    connection: string;
+    /**
+     * @description Client conversation intent
+     * @type string | undefined
+    */
+    conversation?: string;
+    /**
+     * @description Opaque original main session
+     * @type string | undefined
+    */
+    session?: string;
+    /**
+     * @description Exclusive opaque page cursor
+     * @type string | undefined
+    */
+    cursor?: string;
+    /**
+     * @description Page size, 1 through 20
+     * @minLength 0
+     * @type integer | undefined, int32
+    */
+    limit?: number;
+};
+
+export type ListAiAssistantSubagents200 = RestResponseAiAssistantSubAgentPage;
+
+export type ListAiAssistantSubagentsQueryResponse = ListAiAssistantSubagents200;
+
+export type ListAiAssistantSubagentsQuery = {
+    Response: ListAiAssistantSubagents200;
+    QueryParams: ListAiAssistantSubagentsQueryParams;
+    Errors: any;
+};
+
+export type ControlAiAssistantSubagent200 = RestResponseAiAssistantSubAgentSummary;
+
+export type ControlAiAssistantSubagentMutationRequest = AiAssistantSubAgentControlBody;
+
+export type ControlAiAssistantSubagentMutationResponse = ControlAiAssistantSubagent200;
+
+export type ControlAiAssistantSubagentMutation = {
+    Response: ControlAiAssistantSubagent200;
+    Request: ControlAiAssistantSubagentMutationRequest;
+    Errors: any;
+};
+
+export type MarkAiAssistantSubagentRead200 = RestResponseBool;
+
+export type MarkAiAssistantSubagentReadMutationRequest = AiAssistantSubAgentReadBody;
+
+export type MarkAiAssistantSubagentReadMutationResponse = MarkAiAssistantSubagentRead200;
+
+export type MarkAiAssistantSubagentReadMutation = {
+    Response: MarkAiAssistantSubagentRead200;
+    Request: MarkAiAssistantSubagentReadMutationRequest;
+    Errors: any;
+};
+
+export type ReadAiAssistantSubagentResultQueryParams = {
+    /**
+     * @type string
+    */
+    connection: string;
+    /**
+     * @type string | undefined
+    */
+    conversation?: string;
+    /**
+     * @type string | undefined
+    */
+    session?: string;
+    /**
+     * @type string
+    */
+    task_id: string;
+};
+
+export type ReadAiAssistantSubagentResult200 = RestResponseAiAssistantSubAgentResult;
+
+export type ReadAiAssistantSubagentResultQueryResponse = ReadAiAssistantSubagentResult200;
+
+export type ReadAiAssistantSubagentResultQuery = {
+    Response: ReadAiAssistantSubagentResult200;
+    QueryParams: ReadAiAssistantSubagentResultQueryParams;
+    Errors: any;
+};
+
+export type GetAiAssistantSubagentStatusQueryParams = {
+    /**
+     * @type string
+    */
+    connection: string;
+    /**
+     * @type string | undefined
+    */
+    conversation?: string;
+    /**
+     * @type string | undefined
+    */
+    session?: string;
+    /**
+     * @type string
+    */
+    task_id: string;
+};
+
+export type GetAiAssistantSubagentStatus200 = RestResponseAiAssistantSubAgentSummary;
+
+export type GetAiAssistantSubagentStatusQueryResponse = GetAiAssistantSubagentStatus200;
+
+export type GetAiAssistantSubagentStatusQuery = {
+    Response: GetAiAssistantSubagentStatus200;
+    QueryParams: GetAiAssistantSubagentStatusQueryParams;
     Errors: any;
 };
 

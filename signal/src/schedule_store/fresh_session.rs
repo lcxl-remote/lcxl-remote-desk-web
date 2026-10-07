@@ -161,6 +161,20 @@ mod tests {
             )
             .await
             .unwrap();
+            let delegation = authority.delegation_source().unwrap();
+            assert_eq!(&delegation.provenance, authority.provenance());
+            assert_eq!(delegation.started_at_ms, work.started_at.unwrap());
+            assert_eq!(
+                delegation.validate().unwrap().digest(),
+                authority.contract().digest()
+            );
+            let original_deadline = work.started_at.unwrap()
+                + i64::from(authority.contract().contract().budget.max_runtime_seconds) * 1_000;
+            assert_eq!(
+                delegation.deadline_ms().unwrap(),
+                original_deadline.min(delegation.authorization_expires_at_ms.unwrap_or(i64::MAX))
+            );
+            assert!(delegation.deadline_ms().unwrap() >= authority.valid_until());
             if revoked {
                 agent_task_authorization::Entity::update_many()
                     .set(agent_task_authorization::ActiveModel {

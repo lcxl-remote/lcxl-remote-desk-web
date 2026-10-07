@@ -42,6 +42,14 @@ pub fn global_ai_assistant_gate() -> Arc<AiAssistantGate> {
 }
 
 #[cfg(test)]
+pub(crate) fn enable_test_host() {
+    global_ai_assistant_gate().replace(AiAssistantSettings {
+        revision: 1,
+        enabled: true,
+    });
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

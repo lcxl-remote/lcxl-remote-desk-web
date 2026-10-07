@@ -8,7 +8,7 @@ const policy = (revision: number, deviceUnavailableMaxMs = 86_400_000) => ({
     schemaVersion: 1,
     revision,
     limits: {
-        activeTimeMs: 7_200_000, deadlineMs: null, modelTokens: 100_000, modelCalls: 160,
+        activeTimeMs: 7_200_000, deadlineMs: null, modelTokens: 10_000_000, modelCalls: 160,
         toolCalls: 200, slices: 20, stalledSlices: 3,
     },
     deviceUnavailableMaxMs,

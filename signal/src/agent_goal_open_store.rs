@@ -47,7 +47,8 @@ pub async fn save_model_request(
     event
         .validate()
         .map_err(|_| failed("invalid goal opening request"))?;
-    if session.surface != AgentSessionSurface::AiAssistant
+    if !session.agent_role.is_main()
+        || session.surface != AgentSessionSurface::AiAssistant
         || session.trigger_origin != TriggerOrigin::User
         || session.turn_state != TurnState::Running
         || event.event.run_id != session.conversation_id
@@ -74,6 +75,12 @@ pub async fn save_model_request(
         .await
         .map_err(|_| failed("goal opening storage is unavailable"))?
         .ok_or_else(|| failed("goal conversation is unavailable"))?;
+    // Role authority comes from the locked durable session, not the caller's copy.
+    let persisted = PersistedAgentSession::decode_json(&row.state_json)
+        .map_err(|_| failed("invalid stored goal conversation"))?;
+    if !persisted.agent_role.is_main() {
+        return Err(failed("stored child session cannot propose a goal"));
+    }
     let active_goal = goal_row::Entity::find()
         .filter(goal_row::Column::ConversationId.eq(&session.conversation_id))
         .filter(goal_row::Column::Status.is_not_in(["completed", "failed", "cancelled"]))
@@ -322,7 +329,8 @@ pub async fn decide_for_subject(
     };
     let mut session =
         PersistedAgentSession::decode_json(&session_row.state_json).map_err(|_| invalid())?;
-    if session.surface != AgentSessionSurface::AiAssistant
+    if !session.agent_role.is_main()
+        || session.surface != AgentSessionSurface::AiAssistant
         || !session.turn_state.can_claim()
         || session_row
             .lease_deadline
@@ -553,7 +561,7 @@ pub async fn expire_due(
             &row.device_id,
             &row.request_id,
             false,
-            now.clone(),
+            now,
         )
         .await
         {

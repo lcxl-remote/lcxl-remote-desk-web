@@ -46,10 +46,20 @@ pub enum ToolEffect {
     DirectoryPlanning,
     /// Creates only an owner-reviewable schedule draft from a user turn.
     SchedulePlanning,
+    /// Reads schedule state within this session's existing owner/device scope.
+    ScheduleQuery,
     /// Proposes a long-running goal for owner approval; it cannot start work.
     GoalOpenPlanning,
     /// Ends one claimed long-running goal segment. No device action or grant.
     GoalControl,
+    /// Creates a finite child under the main task's existing source and budget.
+    SubAgentPlanning,
+    /// Explicitly adjusts or cancels a child; completion origins cannot do this.
+    SubAgentControl,
+    /// Reads current child state or result, without device authority.
+    SubAgentQuery,
+    /// Registers a durable dependency wait and releases the main turn lease.
+    SubAgentWait,
 }
 
 /// A tool registered with the agent loop: its model-facing spec, the capability
@@ -82,8 +92,13 @@ fn mode_allows_effect(mode: ExecutionMode, effect: ToolEffect) -> bool {
         | ToolEffect::ConversationHistory
         | ToolEffect::DirectoryPlanning
         | ToolEffect::SchedulePlanning
+        | ToolEffect::ScheduleQuery
         | ToolEffect::GoalOpenPlanning
-        | ToolEffect::GoalControl => true,
+        | ToolEffect::GoalControl
+        | ToolEffect::SubAgentPlanning
+        | ToolEffect::SubAgentControl
+        | ToolEffect::SubAgentQuery
+        | ToolEffect::SubAgentWait => true,
         ToolEffect::Mutating => matches!(
             mode,
             ExecutionMode::ConfirmEachAction
@@ -114,6 +129,34 @@ pub fn exposure_block_reason(
     execution_state: &ExecutionState,
     origin: TriggerOrigin,
 ) -> Option<&'static str> {
+    if origin == TriggerOrigin::SubAgentCompletion
+        && !matches!(
+            tool.effect,
+            ToolEffect::SubAgentQuery
+                | ToolEffect::SubAgentWait
+                | ToolEffect::RunProjection
+                | ToolEffect::ConversationHistory
+        )
+    {
+        return Some("subagent_completion_allows_existing_dependency_queries_only");
+    }
+    if matches!(
+        tool.effect,
+        ToolEffect::SubAgentPlanning | ToolEffect::SubAgentControl
+    ) {
+        return (!origin.allows_new_mutation())
+            .then_some("trigger_origin_disallows_delegation_control");
+    }
+    if matches!(
+        tool.effect,
+        ToolEffect::SubAgentQuery | ToolEffect::SubAgentWait
+    ) {
+        return matches!(
+            origin,
+            TriggerOrigin::ExecCompletion | TriggerOrigin::WorkCompletion { .. }
+        )
+        .then_some("command_completion_has_no_tools");
+    }
     // The wait tool operates on the session's own task, not the device: it needs no
     // capability grant and is offered only while there is a task to wait on.
     if tool.effect == ToolEffect::WaitTask {
@@ -142,6 +185,13 @@ pub fn exposure_block_reason(
     }
     if tool.effect == ToolEffect::SchedulePlanning {
         return (origin != TriggerOrigin::User).then_some("trigger_origin_disallows_planning");
+    }
+    if tool.effect == ToolEffect::ScheduleQuery {
+        return (!matches!(
+            origin,
+            TriggerOrigin::User | TriggerOrigin::DelegatedTask | TriggerOrigin::PermissionDecision
+        ))
+        .then_some("trigger_origin_disallows_schedule_query");
     }
     if tool.effect == ToolEffect::DirectoryPlanning {
         return (!origin.allows_new_mutation()).then_some("trigger_origin_disallows_mutation");
@@ -185,6 +235,64 @@ pub fn lookup_exposed<'a>(
     registry
         .iter()
         .find(|t| t.name() == name && is_exposed(t, scope, execution_state, origin))
+}
+
+/// Role filtering is identical at advertisement and final dispatch. Role comes
+/// from a trusted persisted session and cannot be changed by model arguments.
+pub fn exposed_for_session<'a>(
+    registry: &'a [RegisteredTool],
+    session: &crate::session::PersistedAgentSession,
+) -> Vec<&'a RegisteredTool> {
+    exposed_tools(
+        registry,
+        &session.scope_snapshot,
+        &session.execution_state,
+        session.trigger_origin,
+    )
+    .into_iter()
+    .filter(|tool| {
+        session.agent_role.allows_effect(tool.effect)
+            && (!session.is_subagent_result_turn()
+                || matches!(
+                    tool.effect,
+                    ToolEffect::SubAgentQuery
+                        | ToolEffect::SubAgentWait
+                        | ToolEffect::RunProjection
+                        | ToolEffect::ConversationHistory
+                ))
+            && (tool.effect != ToolEffect::ScheduleQuery
+                || !session.agent_role.is_main()
+                || session.trigger_origin == TriggerOrigin::User)
+    })
+    .collect()
+}
+
+pub fn lookup_for_session<'a>(
+    registry: &'a [RegisteredTool],
+    name: &str,
+    session: &crate::session::PersistedAgentSession,
+) -> Option<&'a RegisteredTool> {
+    lookup_exposed(
+        registry,
+        name,
+        &session.scope_snapshot,
+        &session.execution_state,
+        session.trigger_origin,
+    )
+    .filter(|tool| {
+        session.agent_role.allows_effect(tool.effect)
+            && (!session.is_subagent_result_turn()
+                || matches!(
+                    tool.effect,
+                    ToolEffect::SubAgentQuery
+                        | ToolEffect::SubAgentWait
+                        | ToolEffect::RunProjection
+                        | ToolEffect::ConversationHistory
+                ))
+            && (tool.effect != ToolEffect::ScheduleQuery
+                || !session.agent_role.is_main()
+                || session.trigger_origin == TriggerOrigin::User)
+    })
 }
 
 #[cfg(test)]

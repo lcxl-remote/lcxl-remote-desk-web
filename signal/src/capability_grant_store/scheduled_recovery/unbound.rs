@@ -9,15 +9,30 @@ pub(super) async fn reconcile_on(
     payload: &CapabilityDispatchPayload,
     now_ms: u64,
 ) -> Result<(String, ActionIdentity), DbErr> {
-    if payload.command_origin.is_some()
+    let delegated_command = if let Some(origin) = &payload.command_origin {
+        if session.agent_role.binding().is_none() {
+            return Err(invalid());
+        }
+        desk_diagnose_core::subagent::facts::validate_origin(session, origin)
+            .map_err(|_| invalid())?;
+        true
+    } else {
+        false
+    };
+    if (payload.command_origin.is_some() && !delegated_command)
         || payload.command_receipt.is_some()
         || outbox.computer_binding_json.is_some()
         || outbox.computer_acceptance_json.is_some()
         || outbox.computer_background_json.is_some()
         || work.result_json.is_some()
         || work.result_schema_version.is_some()
-        || payload.input_revision != session.input_revision
-        || payload.input_watermark != session.latest_input_seq
+        || (if session.agent_role.is_main() {
+            payload.input_revision != session.input_revision
+                || payload.input_watermark != session.latest_input_seq
+        } else {
+            payload.input_revision > session.input_revision
+                || payload.input_watermark > session.latest_input_seq
+        })
         || !matches!(
             (outbox.state.as_str(), work.status.as_str()),
             (DISPATCH_OUTBOX_PENDING, CAPABILITY_WORK_INTENT_RECORDED)

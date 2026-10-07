@@ -69,7 +69,12 @@ impl ScheduleStore {
             || work.lease_deadline.is_none_or(|at| at > now)
             || work.conversation_id != work.run_id
             || work.result_ref.as_deref().is_some_and(|reference| {
-                !reference.starts_with("permission:") && !reference.starts_with("directory:")
+                !reference.starts_with("permission:")
+                    && !reference.starts_with("directory:")
+                    && !reference.starts_with("children:")
+                    && !reference.starts_with("stopped-children:")
+                    && !reference.starts_with("answer-children:")
+                    && !reference.starts_with("delegated-effects:")
             })
         {
             return Ok(false);
@@ -96,6 +101,52 @@ impl ScheduleStore {
             || session.input_revision != 1
         {
             return Err(ScheduleStoreError::Conflict);
+        }
+        let stopped_children = if session.main_stopped {
+            use crate::entity::agent_subagent_run as child;
+            child::Entity::find()
+                .filter(child::Column::RootConversationId.eq(run_id))
+                .filter(
+                    child::Column::GroupId
+                        .eq(session.delegation_group_id.clone().unwrap_or_default()),
+                )
+                .filter(child::Column::ActorId.eq(&session.actor_id))
+                .filter(child::Column::DeviceId.eq(&session.device_id))
+                .one(&txn)
+                .await?
+                .is_some()
+        } else {
+            false
+        };
+        let answer_children = if session.delegation_group_id.is_some()
+            && session.execution_state == desk_diagnose_core::session::ExecutionState::None
+            && session.unclosed_tool_call_ids().is_empty()
+        {
+            use crate::entity::agent_subagent_run as child;
+            let unfinished = child::Entity::find()
+                .filter(child::Column::RootConversationId.eq(run_id))
+                .filter(
+                    child::Column::GroupId
+                        .eq(session.delegation_group_id.clone().unwrap_or_default()),
+                )
+                .filter(child::Column::ActorId.eq(&session.actor_id))
+                .filter(child::Column::DeviceId.eq(&session.device_id))
+                .filter(child::Column::State.is_not_in(["completed", "failed", "cancelled"]))
+                .one(&txn)
+                .await?
+                .is_some();
+            super::fresh_children_recovery::answer_wait_reference(&work, &session, unfinished)
+                .is_some()
+        } else {
+            false
+        };
+        if session.delegation_group_id.is_some()
+            && (stopped_children
+                || session.subagent_wait.is_some()
+                || session.ready_subagent_wait.is_some()
+                || answer_children)
+        {
+            return super::fresh_children_recovery::recover(txn, work, row, session, now).await;
         }
         if (session.turn_state == TurnState::Idle
             && session.terminal_permission_request_id.is_some())
@@ -190,6 +241,28 @@ impl ScheduleStore {
                 unknown_effect = true;
             }
         }
+        if let Some(group_id) = &session.delegation_group_id {
+            use crate::entity::agent_delegation_group as source_group;
+            let group = source_group::Entity::find()
+                .filter(source_group::Column::GroupId.eq(group_id))
+                .filter(source_group::Column::RootConversationId.eq(run_id))
+                .filter(source_group::Column::SourceOccurrenceId.eq(run_id))
+                .filter(source_group::Column::ActorId.eq(&session.actor_id))
+                .filter(source_group::Column::DeviceId.eq(&session.device_id))
+                .one(&txn)
+                .await?
+                .ok_or(ScheduleStoreError::Conflict)?;
+            match crate::agent_subagent_store::scheduled_native_on(&txn, &group).await? {
+                crate::agent_subagent_store::ScheduledNativeDisposition::Pending => {
+                    return Ok(false);
+                }
+                crate::agent_subagent_store::ScheduledNativeDisposition::Unknown => {
+                    action_failure = true;
+                    unknown_effect = true;
+                }
+                crate::agent_subagent_store::ScheduledNativeDisposition::Settled => {}
+            }
+        }
         let mut result_ref = None;
         let mut incomplete_steps = false;
         let answered = session.turn_state == TurnState::Idle;
@@ -230,6 +303,15 @@ impl ScheduleStore {
                     .values()
                     .any(|state| *state != TaskStepStatus::Succeeded);
             }
+        }
+        if unknown_effect && session.delegation_group_id.is_some() {
+            result_ref = Some(format!(
+                "delegated-effects:{}",
+                session
+                    .delegation_group_id
+                    .as_deref()
+                    .ok_or(ScheduleStoreError::Conflict)?
+            ));
         }
         let cancelled = if committed {
             session.turn_state == TurnState::Cancelled

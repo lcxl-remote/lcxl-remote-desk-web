@@ -86,6 +86,7 @@ async fn exercise_process(reconnect: bool) {
     );
     let db = Database::connect(&database_url).await.unwrap();
     crate::db::initialize_schema(&db).await.unwrap();
+    crate::ai_assistant_gate::enable_test_host();
     crate::model_provider::save(
         &db,
         crate::model_provider::ModelProviderConfig {
@@ -204,10 +205,10 @@ async fn exercise_process(reconnect: bool) {
             .await
             .unwrap();
         assert!(runs.len() <= 1);
-        if let Some(run) = runs.into_iter().next() {
-            if run.status == "waiting_device" {
-                break run;
-            }
+        if let Some(run) = runs.into_iter().next()
+            && run.status == "waiting_device"
+        {
+            break run;
         }
         assert!(
             Instant::now() < deadline,

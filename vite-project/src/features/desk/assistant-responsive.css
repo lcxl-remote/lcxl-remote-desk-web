@@ -1,6 +1,13 @@
 .assistant-composer, .assistant-header { container-type: inline-size; }
 .assistant-action { gap: 0.5rem; min-width: 44px; min-height: 44px; }
 
+.assistant-approval-tab-title { color: #9a3412; font-weight: 600; animation: assistant-approval-title 2s ease-in-out infinite; }
+.dark .assistant-approval-tab-title { color: #fbbf24; }
+@keyframes assistant-approval-title { 0%, 100% { opacity: 1; } 50% { opacity: 0.85; } }
+@media (prefers-reduced-motion: reduce) {
+    .assistant-approval-tab-title { animation: none; text-decoration: underline; }
+}
+
 @media (max-width: 767px) {
     .assistant-header button,
     .assistant-composer button {
@@ -170,4 +177,9 @@
         width: 36px;
         height: 36px;
     }
+}
+
+.assistant-conversation-tabs { container-type: inline-size; }
+@container (max-width: 480px) {
+    .assistant-tab-scroll-button { display: none; }
 }

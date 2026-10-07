@@ -8,6 +8,7 @@ async fn expired_history_remains_available_without_compaction() {
     let address = listener.local_addr().unwrap();
     let db = Database::connect("sqlite::memory:").await.unwrap();
     crate::db::initialize_schema(&db).await.unwrap();
+    crate::ai_assistant_gate::enable_test_host();
     crate::model_provider::save(
         &db,
         crate::model_provider::ModelProviderConfig {
@@ -108,6 +109,7 @@ async fn production_compaction_answers_and_restores_checkpoint_from_sqlite() {
     );
     let db = Database::connect(&url).await.unwrap();
     crate::db::initialize_schema(&db).await.unwrap();
+    crate::ai_assistant_gate::enable_test_host();
     let config = crate::model_provider::ModelProviderConfig {
         wire_protocol: Some(desk_diagnose_core::model_profile::WireProtocol::OpenAiChatCompletions),
         model: Some("fake-model".into()),

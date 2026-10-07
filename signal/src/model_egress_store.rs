@@ -100,6 +100,7 @@ impl SignalModelEgressStore {
             authorized_at: Set(now),
             completed_at: Set(None),
             usage_json: Set(None),
+            usage_recorded_at: Set(None),
         }
         .insert(txn)
         .await
@@ -117,6 +118,7 @@ impl SignalModelEgressStore {
         let changed = model_egress_receipt::Entity::update_many()
             .set(model_egress_receipt::ActiveModel {
                 usage_json: Set(Some(encoded.clone())),
+                usage_recorded_at: Set(Some(chrono::Utc::now())),
                 ..Default::default()
             })
             .filter(model_egress_receipt::Column::ReceiptId.eq(receipt_id))
@@ -152,7 +154,7 @@ impl SignalModelEgressStore {
             model_egress_receipt::Entity::update_many()
                 .col_expr(
                     model_egress_receipt::Column::ReceiptId,
-                    Expr::col(model_egress_receipt::Column::ReceiptId).into(),
+                    Expr::col(model_egress_receipt::Column::ReceiptId),
                 )
                 .filter(model_egress_receipt::Column::ReceiptId.eq(receipt_id))
                 .exec(&txn)

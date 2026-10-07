@@ -268,15 +268,35 @@ pub async fn process_pending_permission_review(
     let Some(snapshot) = snapshot else {
         return true;
     };
-    let Some(question) =
-        desk_diagnose_core::permission_resume::latest_user_requirement(&snapshot.messages)
-            .map(|message| message.text.clone())
+    let child_context = match crate::agent_subagent_store::SubAgentStore::new(db.clone())
+        .child_context_for_subject(
+            &subject.conversation_id,
+            &subject.owner_id,
+            &subject.device_id,
+            snapshot.seq,
+        )
+        .await
+    {
+        Ok(context) => context,
+        Err(_) => return true,
+    };
+    let Some(question) = child_context
+        .as_ref()
+        .map(|(creation, _)| creation.source.owner_requirement.text.clone())
+        .or_else(|| {
+            desk_diagnose_core::permission_resume::latest_user_requirement(&snapshot.messages)
+                .map(|message| message.text.clone())
+        })
     else {
         return true;
     };
+    let locale = child_context
+        .as_ref()
+        .and_then(|(creation, _)| creation.response_locale.clone());
     let resume_request_id = format!("permission-resume-{}", subject.request_id);
     let ask = AiAssistantAsk {
         question,
+        locale,
         client_message_id: resume_request_id.clone(),
         conversation_id: snapshot.client_conversation_id,
         ..Default::default()

@@ -2,7 +2,7 @@
 use super::*;
 mod unknown;
 use desk_diagnose_core::session::{ExecutionState, TriggerOrigin};
-use sea_orm::{DatabaseTransaction, QuerySelect};
+use sea_orm::{DatabaseTransaction, QueryOrder, QuerySelect};
 
 fn invalid() -> DbErr {
     DbErr::Custom("invalid completed task recovery receipt".into())
@@ -21,9 +21,14 @@ pub(crate) async fn restore_completed_calls(
     }
     let rows = agent_action_item::Entity::find()
         .filter(agent_action_item::Column::ConversationId.eq(&session.conversation_id))
+        .order_by_asc(agent_action_item::Column::Id)
+        .limit(desk_diagnose_core::subagent::facts::MAX_ACTION_FACTS as u64 + 1)
         .lock_exclusive()
         .all(txn)
         .await?;
+    if rows.len() > desk_diagnose_core::subagent::facts::MAX_ACTION_FACTS {
+        return Err(invalid());
+    }
     if rows.iter().any(|row| {
         !matches!(
             row.status.as_str(),
@@ -34,6 +39,7 @@ pub(crate) async fn restore_completed_calls(
                 | CAPABILITY_WORK_REVOKED
                 | CAPABILITY_WORK_REVIEW_CLOSED
                 | CAPABILITY_WORK_OUTCOME_UNKNOWN
+                | CAPABILITY_WORK_DISPATCHING
         )
     }) {
         return Ok(false);
@@ -43,6 +49,32 @@ pub(crate) async fn restore_completed_calls(
         .ok()
         .and_then(|time| u64::try_from(time.timestamp_millis()).ok())
         .ok_or_else(invalid)?;
+    let mut command_work = std::collections::BTreeSet::new();
+    for row in &rows {
+        if row.dispatch_intent_at.is_none() {
+            continue;
+        }
+        let outbox = agent_capability_dispatch_outbox::Entity::find()
+            .filter(agent_capability_dispatch_outbox::Column::WorkId.eq(row.id))
+            .one(txn)
+            .await?
+            .ok_or_else(invalid)?;
+        let (outbox, work, payload) =
+            super::computer_binding::original_on(txn, &outbox.dispatch_id).await?;
+        if payload.command_origin.is_some() {
+            super::scheduled_recovery::command::reconcile_history_on(
+                txn, &mut next, &outbox, &work, &payload, now_ms, context,
+            )
+            .await?;
+            command_work.insert(row.id);
+        }
+    }
+    if rows
+        .iter()
+        .any(|row| row.status == CAPABILITY_WORK_DISPATCHING && !command_work.contains(&row.id))
+    {
+        return Ok(false);
+    }
     for row in &rows {
         if !matches!(
             row.status.as_str(),
@@ -75,7 +107,7 @@ pub(crate) async fn restore_completed_calls(
         super::scheduled_recovery::prepared::close_on(txn, &mut next, row, now_ms).await?;
     }
     for row in &rows {
-        if row.status == CAPABILITY_WORK_OUTCOME_UNKNOWN {
+        if row.status == CAPABILITY_WORK_OUTCOME_UNKNOWN && !command_work.contains(&row.id) {
             unknown::restore(txn, &mut next, row, context).await?;
         }
     }
@@ -85,9 +117,10 @@ pub(crate) async fn restore_completed_calls(
         .tasks()
         .into_iter()
         .filter(|action| {
-            !rows.iter().any(|row| {
-                row.id == action.work_id && row.status == CAPABILITY_WORK_OUTCOME_UNKNOWN
-            })
+            action.kind != desk_diagnose_core::session::WorkKind::AgentExec
+                && !rows.iter().any(|row| {
+                    row.id == action.work_id && row.status == CAPABILITY_WORK_OUTCOME_UNKNOWN
+                })
         })
     {
         let row = rows
@@ -121,6 +154,9 @@ pub(crate) async fn restore_completed_calls(
     for call_id in calls {
         let mut found = None;
         for row in &rows {
+            if command_work.contains(&row.id) {
+                continue;
+            }
             if matches!(
                 row.status.as_str(),
                 CAPABILITY_WORK_PREPARED

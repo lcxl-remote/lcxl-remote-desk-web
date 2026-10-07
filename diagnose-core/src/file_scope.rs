@@ -413,6 +413,24 @@ impl PersistedAgentSession {
         self.file_scope.check_subject(&subject)?;
         Ok(subject)
     }
+
+    /// Children have no user conversation intent. Their original session is an
+    /// owner control selector, never a new user input or a grant from the parent.
+    pub fn file_scope_selector(&self) -> Option<&str> {
+        if self.surface != AgentSessionSurface::AiAssistant {
+            return None;
+        }
+        if let Some(binding) = self.agent_role.binding() {
+            if self.client_conversation_id.is_some()
+                || binding.validate(&self.conversation_id).is_err()
+            {
+                return None;
+            }
+            Some(&self.conversation_id)
+        } else {
+            self.client_conversation_id.as_deref()
+        }
+    }
 }
 
 fn valid_id(value: &str) -> bool {

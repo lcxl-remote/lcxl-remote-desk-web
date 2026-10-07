@@ -30,6 +30,7 @@ pub mod model_admission;
 pub mod model_usage;
 pub mod permission_wait;
 pub mod policy;
+pub mod published_input;
 pub mod rehearsal;
 pub mod retention;
 pub mod source_graph;

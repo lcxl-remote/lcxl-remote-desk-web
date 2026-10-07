@@ -16,8 +16,10 @@ use std::rc::Rc;
 
 mod background_receipts;
 mod command_completion;
+mod delegation_budget;
 mod egress;
 mod original_results;
+mod subagents;
 mod version_handoff;
 
 #[test]
@@ -916,6 +918,20 @@ fn answer(text: &str) -> ModelTurn {
     }
 }
 
+fn thinking_answer(text: &str) -> ModelTurn {
+    let mut turn = answer(text);
+    turn.provider_meta.reasoning_observed = true;
+    turn.provider_meta.display_reasoning = Some("bounded display".into());
+    turn.provider_meta.replay = Some(ReplayDisposition::Present {
+        envelope: crate::replay::ProviderReplayEnvelope::new(
+            crate::replay::ReplayCodec::OpenAiReasoningContent,
+            SourceContextKey::derive(WireProtocol::OpenAiChatCompletions, "test", "test", "test"),
+            serde_json::json!("complete opaque reasoning for protocol replay"),
+        ),
+    });
+    turn
+}
+
 fn tool_use(id: &str, name: &str) -> ModelTurn {
     tool_use_args(
         id,
@@ -1027,6 +1043,84 @@ async fn answers_without_tools() {
     assert_eq!(s.conversation.len(), 2);
     // The model was offered the granted read tool.
     assert_eq!(model.requests.borrow()[0].tools.len(), 1);
+}
+
+#[tokio::test]
+async fn plain_answer_replay_survives_reopen_and_completion_resume() {
+    let sess = MemSession::default();
+    let model = ScriptModel {
+        turns: RefCell::new(
+            [
+                thinking_answer("waiting for background results"),
+                answer("done"),
+            ]
+            .into(),
+        ),
+        requests: Rc::new(RefCell::new(vec![])),
+    };
+    let tools = RecordingTools {
+        calls: Rc::new(RefCell::new(vec![])),
+        reply: "unused".into(),
+    };
+    let reg = vec![read_tool("sysinfo", Capability::SystemInfo)];
+    let clock = || "2026-06-20T00:00:01Z".to_string();
+    let runtime = deps(&sess, &model, &tools, &reg, &clock);
+    run_agent_turn(
+        &runtime,
+        claim(),
+        ChatMessage::text("u", ChatRole::User, "investigate"),
+        &mut NullTurnSink,
+    )
+    .await
+    .unwrap();
+    let encoded = sess
+        .inner
+        .borrow()
+        .as_ref()
+        .unwrap()
+        .encode_json_for_storage()
+        .unwrap();
+    let mut reopened = PersistedAgentSession::decode_json(&encoded).unwrap();
+    reopened.conversation.push(ChatMessage::system_event(
+        "completion",
+        "Background task completed",
+    ));
+    *sess.inner.borrow_mut() = Some(reopened);
+    let mut completion = claim();
+    completion.turn_id = "completion-turn".into();
+    completion.trigger_origin = TriggerOrigin::WorkCompletion {
+        kind: crate::session::WorkKind::AgentExec,
+    };
+    assert_eq!(
+        resume_agent_turn(&runtime, completion, &mut NullTurnSink)
+            .await
+            .unwrap(),
+        LoopOutcome::Answered("done".into())
+    );
+    let requests = model.requests.borrow();
+    let first_answer = requests[1]
+        .messages
+        .iter()
+        .find(|message| message.text == "waiting for background results")
+        .unwrap();
+    assert!(first_answer.tool_calls.is_empty());
+    assert_eq!(first_answer.reasoning.as_deref(), Some("bounded display"));
+    let Some(ReplayDisposition::Present { envelope }) = &first_answer.replay_disposition else {
+        panic!("plain answer lost provider replay")
+    };
+    assert_eq!(
+        envelope.payload.as_str(),
+        Some("complete opaque reasoning for protocol replay")
+    );
+    assert!(!requests[1].tools.is_empty());
+    assert_eq!(
+        requests[1]
+            .messages
+            .iter()
+            .filter(|m| m.role == ChatRole::User)
+            .count(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -5772,7 +5866,7 @@ async fn mutating_backend_error_fails_turn() {
         ) -> Result<ExecOutcome, AgentError> {
             Err(AgentError {
                 kind: desk_agent_protocol::AgentErrorKind::Internal,
-                message: "db down".into(),
+                message: "command execution requires an accepted run input".into(),
                 retryable: false,
                 safe_for_model: false,
                 error_code: None,
@@ -5781,7 +5875,14 @@ async fn mutating_backend_error_fails_turn() {
     }
     let sess = MemSession::default();
     let model = ScriptModel {
-        turns: RefCell::new([tool_use("c1", "exec_command")].into()),
+        turns: RefCell::new(
+            [
+                tool_use("c1", "exec_command"),
+                tool_use("c2", "exec_command"),
+                answer("done"),
+            ]
+            .into(),
+        ),
         requests: Rc::new(RefCell::new(vec![])),
     };
     let failing = FailingExec;
@@ -5817,6 +5918,8 @@ async fn mutating_backend_error_fails_turn() {
         .await
         .unwrap_err();
     assert_eq!(err.kind, desk_agent_protocol::AgentErrorKind::Internal);
+    assert_eq!(model.requests.borrow().len(), 1);
+    assert_eq!(model.turns.borrow().len(), 2);
     // The turn settled to Failed.
     assert_eq!(
         sess.inner.borrow().as_ref().unwrap().turn_state,

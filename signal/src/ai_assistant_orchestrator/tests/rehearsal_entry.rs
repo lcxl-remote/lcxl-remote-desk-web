@@ -32,6 +32,7 @@ async fn run_case(failed: bool) {
     ));
     let db = Database::connect("sqlite::memory:").await.unwrap();
     crate::db::initialize_schema(&db).await.unwrap();
+    crate::ai_assistant_gate::enable_test_host();
     crate::model_provider::save(
         &db,
         crate::model_provider::ModelProviderConfig {

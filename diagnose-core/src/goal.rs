@@ -8,10 +8,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const GOAL_SCHEMA_VERSION: u16 = 1;
+pub const GOAL_SCHEMA_VERSION: u16 = 2;
 pub const DEFAULT_ACTIVE_TIME_MS: u64 = 2 * 60 * 60 * 1_000;
 pub const DEFAULT_DEADLINE_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
-pub const DEFAULT_MODEL_TOKENS: u64 = 100_000;
+pub const DEFAULT_MODEL_TOKENS: u64 = 10_000_000;
 pub const DEFAULT_MODEL_CALLS: u32 = 160;
 pub const DEFAULT_TOOL_CALLS: u32 = 200;
 pub const DEFAULT_SLICES: u32 = 20;
@@ -660,7 +660,7 @@ impl GoalLimits {
     pub const fn policy_ceiling() -> Self {
         Self {
             active_time_ms: 24 * 60 * 60 * 1_000,
-            model_tokens: 2_000_000,
+            model_tokens: 10_000_000,
             model_calls: 1_000,
             tool_calls: 2_000,
             slices: 200,
@@ -956,6 +956,11 @@ pub struct GoalRun {
     pub budget_reservations: BTreeMap<String, GoalUsage>,
     /// Idempotent settlement identities; only usage counters are retained.
     pub budget_settlements: BTreeMap<String, GoalUsage>,
+    /// Source-group calls share this goal's cumulative usage but are independent
+    /// of the current main segment lease. Unknown calls remain reserved after a
+    /// segment settles, source pause, cancellation, or main-only stop.
+    pub delegation_reservations: BTreeMap<String, GoalUsage>,
+    pub delegation_settlements: BTreeMap<String, GoalUsage>,
     /// Digests of distinct, server-observed successful tool results. This keeps
     /// repeated reads from resetting the stalled-segment guard after compaction.
     pub seen_result_fingerprints: BTreeSet<String>,
@@ -1129,11 +1134,34 @@ impl GoalRun {
         {
             return Err(GoalError::InvalidState);
         }
-        if self.budget_reservations.len() + self.budget_settlements.len()
+        if self.budget_reservations.len()
+            + self.budget_settlements.len()
+            + self.delegation_reservations.len()
+            + self.delegation_settlements.len()
             > MAX_BUDGET_LEDGER_ENTRIES
         {
             return Err(GoalError::InvalidState);
         }
+        for (id, usage) in self
+            .delegation_reservations
+            .iter()
+            .chain(&self.delegation_settlements)
+        {
+            valid_id(id)?;
+            if usage.slices != 0
+                || (self.delegation_reservations.contains_key(id) && *usage == GoalUsage::default())
+                || self.budget_reservations.contains_key(id)
+                || self.budget_settlements.contains_key(id)
+                || (self.delegation_reservations.contains_key(id)
+                    && self.delegation_settlements.contains_key(id))
+            {
+                return Err(GoalError::InvalidState);
+            }
+        }
+        self.used
+            .checked_add(self.reserved)
+            .and_then(|usage| usage.checked_add(self.delegation_reserved_usage().ok()?))
+            .ok_or(GoalError::ArithmeticOverflow)?;
         if self
             .device_unavailable_since_unix_ms
             .is_some_and(|since| self.state.is_terminal() || since < self.created_at_unix_ms)
@@ -1278,6 +1306,8 @@ impl GoalRun {
             reserved: GoalUsage::default(),
             budget_reservations: BTreeMap::new(),
             budget_settlements: BTreeMap::new(),
+            delegation_reservations: BTreeMap::new(),
+            delegation_settlements: BTreeMap::new(),
             seen_result_fingerprints: BTreeSet::new(),
             stalled_slices: 0,
             created_at_unix_ms,
@@ -1316,6 +1346,7 @@ impl GoalRun {
         let projected = self
             .used
             .checked_add(self.reserved)
+            .and_then(|usage| usage.checked_add(self.delegation_reserved_usage().ok()?))
             .and_then(|total| total.checked_add(delta))
             .ok_or(GoalError::ArithmeticOverflow)?;
         if projected.fits(self.limits) {
@@ -1375,6 +1406,8 @@ impl GoalRun {
             || now_unix_ms >= self.deadline_unix_ms
             || delta.slices != 0
             || delta == GoalUsage::default()
+            || self.delegation_reservations.contains_key(id)
+            || self.delegation_settlements.contains_key(id)
         {
             return Err(GoalError::InvalidState);
         }
@@ -1390,7 +1423,10 @@ impl GoalRun {
         }
         // A full ledger stops new work the same way an exhausted budget does:
         // the segment can still settle, recover or be cancelled.
-        if self.budget_reservations.len() + self.budget_settlements.len()
+        if self.budget_reservations.len()
+            + self.budget_settlements.len()
+            + self.delegation_reservations.len()
+            + self.delegation_settlements.len()
             >= MAX_BUDGET_LEDGER_ENTRIES
         {
             return Err(GoalError::BudgetExceeded);
@@ -1405,6 +1441,130 @@ impl GoalRun {
             .state_version
             .checked_add(1)
             .ok_or(GoalError::ArithmeticOverflow)?;
+        self.updated_at_unix_ms = now_unix_ms;
+        Ok(true)
+    }
+
+    fn delegation_reserved_usage(&self) -> Result<GoalUsage, GoalError> {
+        self.delegation_reservations
+            .values()
+            .try_fold(GoalUsage::default(), |sum, usage| {
+                sum.checked_add(*usage).ok_or(GoalError::ArithmeticOverflow)
+            })
+    }
+
+    /// The host proves the live source-group admission in the same transaction.
+    /// A waiting main segment does not own or gate a finite child's planner.
+    pub fn reserve_delegation_with_id(
+        &mut self,
+        id: &str,
+        upper: GoalUsage,
+        now_unix_ms: u64,
+    ) -> Result<bool, GoalError> {
+        valid_id(id)?;
+        if now_unix_ms >= self.deadline_unix_ms {
+            return Err(GoalError::DeadlineReached);
+        }
+        if self.state.is_terminal()
+            || now_unix_ms < self.updated_at_unix_ms
+            || upper.slices != 0
+            || (upper.model_calls == 0 && upper.tool_calls == 0)
+            || self.budget_reservations.contains_key(id)
+            || self.budget_settlements.contains_key(id)
+        {
+            return Err(GoalError::InvalidState);
+        }
+        if let Some(existing) = self.delegation_reservations.get(id) {
+            return if *existing == upper {
+                Ok(false)
+            } else {
+                Err(GoalError::InvalidState)
+            };
+        }
+        if self.delegation_settlements.contains_key(id) {
+            return Err(GoalError::InvalidState);
+        }
+        if self.budget_reservations.len()
+            + self.budget_settlements.len()
+            + self.delegation_reservations.len()
+            + self.delegation_settlements.len()
+            >= MAX_BUDGET_LEDGER_ENTRIES
+        {
+            return Err(GoalError::BudgetExceeded);
+        }
+        self.available_for(upper)?;
+        let version = self
+            .state_version
+            .checked_add(1)
+            .ok_or(GoalError::ArithmeticOverflow)?;
+        self.delegation_reservations.insert(id.to_owned(), upper);
+        self.state_version = version;
+        self.updated_at_unix_ms = now_unix_ms;
+        Ok(true)
+    }
+
+    /// Known physical usage may arrive after the source closes and may exceed an
+    /// estimate. Keep the incurred facts; subsequent reservations fail on totals.
+    pub fn settle_delegation_with_id(
+        &mut self,
+        id: &str,
+        actual: GoalUsage,
+        now_unix_ms: u64,
+    ) -> Result<bool, GoalError> {
+        self.settle_delegation_fact(id, actual, now_unix_ms, false)
+    }
+
+    /// The host proves there is no durable provider-start boundary under the
+    /// original root/control locks. This refunds only an unstarted model call.
+    pub fn release_unstarted_delegation_model_with_id(
+        &mut self,
+        id: &str,
+        now_unix_ms: u64,
+    ) -> Result<bool, GoalError> {
+        self.settle_delegation_fact(id, GoalUsage::default(), now_unix_ms, true)
+    }
+
+    fn settle_delegation_fact(
+        &mut self,
+        id: &str,
+        actual: GoalUsage,
+        now_unix_ms: u64,
+        unstarted_model: bool,
+    ) -> Result<bool, GoalError> {
+        valid_id(id)?;
+        if let Some(existing) = self.delegation_settlements.get(id) {
+            return if *existing == actual {
+                Ok(false)
+            } else {
+                Err(GoalError::InvalidState)
+            };
+        }
+        let upper = self
+            .delegation_reservations
+            .get(id)
+            .ok_or(GoalError::InvalidState)?;
+        if now_unix_ms < self.updated_at_unix_ms
+            || actual.slices != 0
+            || if unstarted_model {
+                actual != GoalUsage::default() || upper.model_calls != 1 || upper.tool_calls != 0
+            } else {
+                actual.model_calls != upper.model_calls || actual.tool_calls != upper.tool_calls
+            }
+        {
+            return Err(GoalError::InvalidState);
+        }
+        let used = self
+            .used
+            .checked_add(actual)
+            .ok_or(GoalError::ArithmeticOverflow)?;
+        let version = self
+            .state_version
+            .checked_add(1)
+            .ok_or(GoalError::ArithmeticOverflow)?;
+        self.delegation_reservations.remove(id);
+        self.delegation_settlements.insert(id.to_owned(), actual);
+        self.used = used;
+        self.state_version = version;
         self.updated_at_unix_ms = now_unix_ms;
         Ok(true)
     }
@@ -1965,6 +2125,24 @@ impl GoalRun {
         self.model_wait_attempts = 0;
         self.updated_at_unix_ms = now_unix_ms;
         Ok(())
+    }
+
+    /// Stop main planning without withdrawing the finite allocation already
+    /// assigned to children. Main requests keep their conservative charge;
+    /// delegation reservations and late receipts remain independent.
+    pub fn stop_main_planning(&mut self, now_unix_ms: u64) -> Result<(), GoalError> {
+        if self.state.is_terminal() {
+            return Ok(());
+        }
+        if self.state == GoalState::Running {
+            self.recover_interrupted_slice(false, now_unix_ms)?;
+        } else {
+            self.pause_settled(GoalPauseReason::Recovery, now_unix_ms)?;
+        }
+        if !self.state.is_terminal() {
+            self.status_reason = Some("owner_stopped_main_planning".into());
+        }
+        self.validate()
     }
 
     pub fn can_propose_revision(&self, input_revision: u64) -> Result<(), GoalError> {
@@ -2653,6 +2831,178 @@ mod tests {
             tool_calls: 1,
             ..GoalUsage::default()
         }
+    }
+
+    #[test]
+    fn delegated_call_does_not_hold_the_parent_segment_lease() {
+        let mut goal = goal();
+        goal.claim_slice(1_001).unwrap();
+        let upper = GoalUsage {
+            input_tokens: 100,
+            output_tokens: 20,
+            model_calls: 1,
+            ..GoalUsage::default()
+        };
+        goal.reserve_delegation_with_id("child-call", upper, 1_002)
+            .unwrap();
+        let lease = goal.lease_epoch;
+        goal.finish_slice(
+            1,
+            1,
+            lease,
+            &GoalControl::Continue {
+                progress: "Delegated the evidence collection".into(),
+                next_step: "Read the child result".into(),
+            },
+            true,
+            false,
+            1,
+            Vec::new(),
+            1_003,
+        )
+        .unwrap();
+        assert_eq!(goal.state, GoalState::Queued);
+        assert_eq!(goal.reserved, GoalUsage::default());
+        assert_eq!(goal.delegation_reservations.get("child-call"), Some(&upper));
+        goal.validate().unwrap();
+        goal.claim_slice(1_004).unwrap();
+        assert_eq!(goal.delegation_reservations.get("child-call"), Some(&upper));
+    }
+
+    #[test]
+    fn late_delegated_usage_survives_owner_pause_and_source_cancellation() {
+        let mut goal = goal();
+        let upper = GoalUsage {
+            input_tokens: 100,
+            model_calls: 1,
+            ..GoalUsage::default()
+        };
+        goal.reserve_delegation_with_id("child-call", upper, 1_001)
+            .unwrap();
+        goal.state = GoalState::Paused(GoalPauseReason::Owner);
+        goal.updated_at_unix_ms = 1_002;
+        goal.cancel_settled(1_003).unwrap();
+        assert_eq!(goal.delegation_reservations.get("child-call"), Some(&upper));
+        let actual = GoalUsage {
+            input_tokens: 20,
+            output_tokens: 10,
+            model_calls: 1,
+            active_time_ms: 7,
+            ..GoalUsage::default()
+        };
+        assert!(
+            goal.settle_delegation_with_id("child-call", actual, 1_004)
+                .unwrap()
+        );
+        assert!(
+            !goal
+                .settle_delegation_with_id("child-call", actual, 1_005)
+                .unwrap()
+        );
+        assert_eq!(goal.used, actual);
+        assert_eq!(goal.state, GoalState::Cancelled);
+        assert!(
+            goal.reserve_delegation_with_id("new-call", upper, 1_006)
+                .is_err()
+        );
+        assert!(
+            goal.settle_delegation_with_id("child-call", upper, 1_006)
+                .is_err()
+        );
+        goal.validate().unwrap();
+    }
+
+    #[test]
+    fn unstarted_delegation_model_refund_is_durable_and_does_not_refund_native_tools() {
+        let mut goal = goal();
+        let upper = GoalUsage {
+            input_tokens: 100,
+            model_calls: 1,
+            ..GoalUsage::default()
+        };
+        goal.reserve_delegation_with_id("not-sent", upper, 1_001)
+            .unwrap();
+        goal.reserve_delegation_with_id("native", tool_call(), 1_001)
+            .unwrap();
+        goal.state = GoalState::Paused(GoalPauseReason::Owner);
+        assert!(
+            goal.release_unstarted_delegation_model_with_id("not-sent", 1_002)
+                .unwrap()
+        );
+        assert!(
+            !goal
+                .release_unstarted_delegation_model_with_id("not-sent", 1_003)
+                .unwrap()
+        );
+        assert!(
+            goal.release_unstarted_delegation_model_with_id("native", 1_003)
+                .is_err()
+        );
+        assert!(
+            goal.settle_delegation_with_id("not-sent", upper, 1_003)
+                .is_err()
+        );
+        assert_eq!(goal.used, GoalUsage::default());
+        assert_eq!(goal.state, GoalState::Paused(GoalPauseReason::Owner));
+        goal.validate().unwrap();
+        let encoded = serde_json::to_string(&goal).unwrap();
+        let decoded: GoalRun = serde_json::from_str(&encoded).unwrap();
+        decoded.validate().unwrap();
+        assert_eq!(
+            decoded.delegation_settlements.get("not-sent"),
+            Some(&GoalUsage::default())
+        );
+    }
+
+    #[test]
+    fn group_open_children_can_use_original_budget_after_main_only_stop() {
+        let mut goal = goal();
+        goal.state = GoalState::Paused(GoalPauseReason::Recovery);
+        let upper = GoalUsage {
+            model_calls: 1,
+            input_tokens: 10,
+            ..GoalUsage::default()
+        };
+        // The host's source-group gate distinguishes main-only stop from owner
+        // source pause. This allocation cannot claim or resume the main planner.
+        goal.reserve_delegation_with_id("child-call", upper, 1_001)
+            .unwrap();
+        assert_eq!(goal.state, GoalState::Paused(GoalPauseReason::Recovery));
+        assert_eq!(goal.slice_seq, 0);
+        assert_eq!(goal.lease_epoch, 0);
+        goal.validate().unwrap();
+    }
+
+    #[test]
+    fn delegated_provider_overrun_is_recorded_once_and_blocks_new_admission() {
+        let mut goal = goal();
+        goal.limits.model_tokens = 100;
+        let upper = GoalUsage {
+            model_calls: 1,
+            input_tokens: 80,
+            ..GoalUsage::default()
+        };
+        goal.reserve_delegation_with_id("child-call", upper, 1_001)
+            .unwrap();
+        let actual = GoalUsage {
+            model_calls: 1,
+            input_tokens: 120,
+            ..GoalUsage::default()
+        };
+        goal.settle_delegation_with_id("child-call", actual, 1_002)
+            .unwrap();
+        assert_eq!(goal.used, actual);
+        assert!(goal.delegation_reservations.is_empty());
+        assert_eq!(
+            goal.reserve_delegation_with_id("retry", upper, 1_003),
+            Err(GoalError::BudgetExceeded)
+        );
+        assert!(
+            !goal
+                .settle_delegation_with_id("child-call", actual, 1_004)
+                .unwrap()
+        );
+        goal.validate().unwrap();
     }
 
     fn unlimited_goal() -> GoalRun {

@@ -149,7 +149,7 @@ impl SignalAgentExecStore {
                 return Err(internal("command result does not match original dispatch"));
             }
             let output = desk_diagnose_core::seam::ToolRunOutput {
-                format: output_format(&task),
+                format: output_format(task),
                 content: task
                     .result_text
                     .clone()
@@ -222,6 +222,8 @@ impl SignalAgentExecStore {
             result_text: Set(None),
             event_id: Set(event_id),
             delivery_state: Set(DELIVERY_PENDING.to_string()),
+            cancel_requested_at: Set(None),
+            cancel_requested_by: Set(None),
             deadline: Set(deadline),
             created_at: Set(now),
             updated_at: Set(now),
@@ -277,7 +279,13 @@ impl SignalAgentExecStore {
         if row.target_connection_id != source_connection_id {
             return Ok(None);
         }
-        if matches!(row.status.as_str(), STATUS_DONE | STATUS_UNKNOWN) {
+        if row.status == STATUS_DONE
+            || (row.status == STATUS_UNKNOWN
+                && matches!(
+                    disposition,
+                    EdgeExecDisposition::ExecutionStateUnknown { .. }
+                ))
+        {
             return Ok(Some(row));
         }
         let status = if matches!(
@@ -300,9 +308,17 @@ impl SignalAgentExecStore {
                 agent_exec_task::Column::ResultText,
                 Expr::value(disposition_text(disposition)),
             )
+            .col_expr(
+                agent_exec_task::Column::DeliveryState,
+                Expr::value(DELIVERY_PENDING),
+            )
             .col_expr(agent_exec_task::Column::UpdatedAt, Expr::value(Utc::now()))
             .filter(agent_exec_task::Column::Id.eq(row.id))
-            .filter(agent_exec_task::Column::Status.is_in([STATUS_DISPATCHING, STATUS_RUNNING]))
+            .filter(agent_exec_task::Column::Status.is_in([
+                STATUS_DISPATCHING,
+                STATUS_RUNNING,
+                STATUS_UNKNOWN,
+            ]))
             .exec(&self.db)
             .await
             .map_err(|e| internal(format!("finalize agent execution: {e}")))?;
@@ -453,6 +469,18 @@ impl SignalAgentExecStore {
         else {
             return Ok(true);
         };
+        let terminal_child = crate::agent_subagent_store::SubAgentStore::new(self.db.clone())
+            .child_is_terminal(&session)
+            .await
+            .map_err(|_| internal("child completion control changed"))?;
+        if session.main_stopped || terminal_child {
+            return Ok(!matches!(
+                sessions
+                    .prune_auto_trigger(&task.conversation_id, &task.event_id, now)
+                    .await?,
+                EventAppend::Busy
+            ));
+        }
         if let Some(goal) = crate::agent_goal_store::load_latest_for_subject(
             &self.db,
             &task.conversation_id,
@@ -477,6 +505,14 @@ impl SignalAgentExecStore {
                     EventAppend::Busy
                 ));
             }
+        }
+        if session.agent_role.binding().is_some()
+            && !crate::agent_subagent_store::SubAgentStore::new(self.db.clone())
+                .child_resume_available(&session)
+                .await
+                .map_err(|_| internal("child completion source changed"))?
+        {
+            return Ok(false);
         }
         let expired = session
             .scope_snapshot

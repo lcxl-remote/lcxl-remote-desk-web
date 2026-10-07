@@ -43,7 +43,10 @@ impl SignalScheduleExecutor {
             first
         };
         let Some(target) = target else {
-            if candidate.status != "awaiting_permission" {
+            if !matches!(
+                candidate.status.as_str(),
+                "awaiting_permission" | "awaiting_children"
+            ) {
                 store.wait_for_device(&candidate.run_id).await?;
             }
             return Ok(DispatchResult::Deferred);
@@ -143,6 +146,19 @@ impl SignalScheduleExecutor {
             Ok(LoopOutcome::Answered(answer)) => {
                 store.finish_answered_fresh_task(lease(), &answer).await
             }
+            Ok(LoopOutcome::SubAgentsWaiting { wait_id }) => {
+                return Ok(
+                    if store
+                        .await_fresh_task_children(lease(), &wait_id)
+                        .await
+                        .is_ok()
+                    {
+                        DispatchResult::Waiting
+                    } else {
+                        DispatchResult::Reconcile
+                    },
+                );
+            }
             Ok(LoopOutcome::PermissionRequested { request_id }) => {
                 return Ok(
                     if store
@@ -171,6 +187,7 @@ impl SignalScheduleExecutor {
             }
         };
         Ok(match settled {
+            Ok(run) if run.status == "awaiting_children" => DispatchResult::Waiting,
             Ok(run) if run.status == "outcome_unknown" => DispatchResult::Reconcile,
             Ok(_) => DispatchResult::Settled,
             Err(_) => DispatchResult::Reconcile,

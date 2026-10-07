@@ -79,7 +79,7 @@ pub(super) fn validate_intent(
 
 // Acquire SQLite's writer reservation before reading facts. Concurrent owners,
 // ACKs and completions serialize without upgrading a stale deferred snapshot.
-async fn lock_task(txn: &DatabaseTransaction, task: &str) -> Result<(), DbErr> {
+async fn lock_task<C: sea_orm::ConnectionTrait>(txn: &C, task: &str) -> Result<(), DbErr> {
     agent_action_item::Entity::update_many()
         .filter(agent_action_item::Column::ActionRequestId.eq(task))
         .col_expr(
@@ -91,8 +91,8 @@ async fn lock_task(txn: &DatabaseTransaction, task: &str) -> Result<(), DbErr> {
     Ok(())
 }
 
-async fn save_promotion(
-    txn: &DatabaseTransaction,
+async fn save_promotion<C: sea_orm::ConnectionTrait>(
+    txn: &C,
     outbox: agent_capability_dispatch_outbox::Model,
     promotion: &Promotion,
 ) -> Result<(), DbErr> {
@@ -117,15 +117,33 @@ impl SignalCapabilityGrantStore {
         request_id: &str,
         reason: &str,
     ) -> Result<Option<BackgroundTaskRecord>, DbErr> {
+        let txn = crate::db::begin_write(&self.db, crate::entity::agent_session::Entity).await?;
+        let result = Self::request_computer_background_cancel_on(
+            &txn, task, run, actor, device, request_id, reason,
+        )
+        .await?;
+        txn.commit().await?;
+        Ok(result)
+    }
+
+    /// Commit stop intent with the caller's root/task control, without device I/O.
+    pub(crate) async fn request_computer_background_cancel_on<C: sea_orm::ConnectionTrait>(
+        txn: &C,
+        task: &str,
+        run: &str,
+        actor: &str,
+        device: &str,
+        request_id: &str,
+        reason: &str,
+    ) -> Result<Option<BackgroundTaskRecord>, DbErr> {
         if !valid_request_id(request_id) || reason.len() > 4096 {
             return Err(invalid());
         }
-        let txn = crate::db::begin_write(&self.db, crate::entity::agent_session::Entity).await?;
-        lock_task(&txn, task).await?;
+        lock_task(txn, task).await?;
         let Some(work) = agent_action_item::Entity::find()
             .filter(agent_action_item::Column::ActionRequestId.eq(task))
             .filter(agent_action_item::Column::Kind.eq(CAPABILITY_WORK_KIND))
-            .one(&txn)
+            .one(txn)
             .await?
         else {
             return Ok(None);
@@ -135,13 +153,13 @@ impl SignalCapabilityGrantStore {
             return Err(invalid());
         }
         let now = u64::try_from(Utc::now().timestamp_millis()).map_err(|_| invalid())?;
-        let record = task_on(&txn, &work, now).await?.ok_or_else(invalid)?;
+        let record = task_on(txn, &work, now).await?.ok_or_else(invalid)?;
         if !record.supports_cancel {
             return Err(invalid());
         }
         let outbox = agent_capability_dispatch_outbox::Entity::find()
             .filter(agent_capability_dispatch_outbox::Column::WorkId.eq(work.id))
-            .one(&txn)
+            .one(txn)
             .await?
             .ok_or_else(invalid)?;
         let mut promotion: Promotion = serde_json::from_str(
@@ -156,7 +174,6 @@ impl SignalCapabilityGrantStore {
             if previous.request_id != request_id || previous.reason_sha256 != digest {
                 return Err(invalid());
             }
-            txn.commit().await?;
             return Ok(Some(record));
         }
         // Record even a terminal no-op, so replay cannot change its request bytes.
@@ -174,10 +191,9 @@ impl SignalCapabilityGrantStore {
         if work.result_json.is_none() {
             active.updated_at = Set(timestamp(now)?);
         }
-        let updated = active.update(&txn).await?;
-        save_promotion(&txn, outbox, &promotion).await?;
-        let record = task_on(&txn, &updated, now).await?.ok_or_else(invalid)?;
-        txn.commit().await?;
+        let updated = active.update(txn).await?;
+        save_promotion(txn, outbox, &promotion).await?;
+        let record = task_on(txn, &updated, now).await?.ok_or_else(invalid)?;
         Ok(Some(record))
     }
 

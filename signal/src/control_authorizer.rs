@@ -321,17 +321,13 @@ impl ControlFrameAuthorizer for SignalControlAuthorizer {
             if model.signaling_type == SignalingType::CancelTerminalAiAssistant {
                 return ControlFrameOutcome::Handled;
             }
-            // Cancel only the cookie-authenticated actor's central turn. Background
-            // device tasks have their own cancellation API and remain independent.
+            // Main stops need durable input/control fences and an explicit child
+            // scope, committed by the owner REST endpoint before token delivery.
             if model.signaling_type == SignalingType::CancelAiAssistant {
-                let Some(owner) = actor_user_id(&actor.auth_context) else {
-                    return ControlFrameOutcome::Reject {
-                        code: DeskErrorCode::PERMISSION_ERROR,
-                        message: "AI cancellation requires an authenticated operator".into(),
-                    };
+                return ControlFrameOutcome::Reject {
+                    code: DeskErrorCode::PRECONDITION_FAILED,
+                    message: "Use the owner AI Assistant stop API with current input and control revisions".into(),
                 };
-                crate::ai_assistant_orchestrator::cancellation::cancel(owner, &model.request_id);
-                return ControlFrameOutcome::Handled;
             }
             if starts_ai_assistant_work(model.signaling_type)
                 && !self.ai_assistant_gate.is_enabled()

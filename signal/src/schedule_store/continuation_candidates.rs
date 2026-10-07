@@ -81,12 +81,19 @@ impl ScheduleStore {
                     .add(run::Column::ResultRef.starts_with("permission:"))
                     .add(run::Column::ResultRef.starts_with("directory:")),
             );
+        let children = Condition::all()
+            .add(run::Column::Status.eq("awaiting_children"))
+            .add(run::Column::StartedAt.is_not_null())
+            .add(run::Column::Attempt.eq(1))
+            .add(run::Column::LeaseEpoch.gt(0))
+            .add(run::Column::LeaseOwner.is_null())
+            .add(run::Column::ResultRef.starts_with("children:"));
         Ok(run::Entity::find()
             .filter(run::Column::Id.gt(after_id))
             .filter(run::Column::RunId.in_subquery(tasks))
             .filter(run::Column::OwnerUserId.gt(0))
             .filter(run::Column::LeaseDeadline.is_null())
-            .filter(Condition::any().add(initial).add(approval))
+            .filter(Condition::any().add(initial).add(approval).add(children))
             .filter(run::Column::CancelRequestedAt.is_null())
             .filter(run::Column::FinishedAt.is_null())
             .filter(run::Column::FailureAccounted.eq(false))

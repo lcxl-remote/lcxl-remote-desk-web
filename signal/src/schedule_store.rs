@@ -18,6 +18,9 @@ mod review_wait;
 mod search;
 pub use history::RunHistoryPage;
 mod fresh_admission;
+mod fresh_children;
+mod fresh_children_recovery;
+mod fresh_children_settlement;
 mod fresh_model;
 mod fresh_recovery;
 mod fresh_result;
@@ -40,6 +43,7 @@ pub use fresh_model::FreshModelDispatch;
 mod materializer;
 pub use materializer::ScheduleScanReport;
 mod budget;
+pub(crate) use authority::CurrentDelegationSourceAuthority;
 pub use authority::CurrentTaskAuthority;
 pub use budget::{TaskBudgetKind, TaskBudgetRequest};
 mod cancel;
@@ -50,6 +54,7 @@ mod publication_runtime;
 #[cfg(test)]
 pub(crate) use publication::tests::{
     Verifier as TestPublicationVerifier, fixture_on as publication_test_fixture,
+    fixture_on_for_device as publication_device_test_fixture,
 };
 pub use publication_runtime::SignalTaskPublicationVerifier;
 mod rehearsal;

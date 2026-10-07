@@ -426,3 +426,33 @@ fn stale_heartbeat_fires_when_enabled() {
         Duration::from_secs(120),
     ));
 }
+
+#[tokio::test]
+async fn execution_dispatch_requires_original_worker_incarnation() {
+    let (manager, _rx) = test_manager();
+    let (tx, mut original) = mpsc::unbounded_channel();
+    manager.install_active_for_test(tx).await;
+    let target = manager.exec_worker_target_for_session(None).await.unwrap();
+    let cancel = || {
+        ServiceToWorker::ExecCancel(desk_ipc_protocol::message::ExecCancelPayload {
+            execution_generation: "original-generation".into(),
+        })
+    };
+    manager
+        .send_to_exec_target(&target, cancel())
+        .await
+        .unwrap();
+    assert!(matches!(
+        original.try_recv().unwrap(),
+        ServiceToWorker::ExecCancel(_)
+    ));
+    let (tx, mut replacement) = mpsc::unbounded_channel();
+    manager.install_active_for_test(tx).await;
+    assert!(
+        manager
+            .send_to_exec_target(&target, cancel())
+            .await
+            .is_err()
+    );
+    assert!(replacement.try_recv().is_err());
+}

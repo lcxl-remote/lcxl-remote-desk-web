@@ -41,7 +41,13 @@ pub(super) async fn list(
                 row.exec_request_id,
                 row.tool_call_id,
                 row.execution_generation,
-                &row.status,
+                if row.cancel_requested_at.is_some()
+                    && matches!(row.status.as_str(), "dispatching" | "running" | "unknown")
+                {
+                    "cancel_requested"
+                } else {
+                    &row.status
+                },
                 row.updated_at.to_rfc3339(),
                 outcome,
             ));
@@ -88,4 +94,53 @@ mod tests {
         assert_eq!(tasks[0].execution_generation, "generation-a");
         assert!(list(&db, "unrelated-run").await.unwrap().is_empty());
     }
+}
+
+#[utoipa::path(tag = TAG, summary = "Request a durable stop for one original AI command generation",
+    request_body = AiAssistantCommandCancelBody, responses((status = 200, body = RestResponse<bool>)))]
+#[post("/my/ai-assistant-session/command/cancel")]
+pub async fn cancel_ai_assistant_command(
+    connections: web::Data<SharedConnectionMap>,
+    session: Session,
+    body: web::Json<AiAssistantCommandCancelBody>,
+) -> Result<HttpResponse, DeskSignalError> {
+    if session
+        .get_current_user::<CurrentUser>()
+        .map_err(|error| {
+            DeskSignalError::new_custom_error(DeskErrorCode::SYSTEM_ERROR, &error.to_string())
+        })?
+        .is_none()
+    {
+        return Ok(not_accessible());
+    }
+    let actor = SINGLE_ACCOUNT_USER_ID.to_string();
+    let db = crate::db::get_db();
+    let Some((run, device)) = recovery::resolve(
+        &SignalAgentSessionStore::new(db.clone()),
+        connections.get_ref(),
+        &actor,
+        &body.connection,
+        Some(&body.session),
+        None,
+    )
+    .await?
+    else {
+        return Ok(not_accessible());
+    };
+    let requested = crate::agent_subagent_store::SubAgentStore::new(db.clone())
+        .cancel_command_for_owner(
+            &run,
+            &actor,
+            &device,
+            &body.exec_request_id,
+            &body.execution_generation,
+        )
+        .await
+        .map_err(|_| {
+            DeskSignalError::new_custom_error(
+                DeskErrorCode::PERMISSION_ERROR,
+                "Original command not found or not accessible",
+            )
+        })?;
+    Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(requested)))
 }

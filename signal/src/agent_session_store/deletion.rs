@@ -1,8 +1,7 @@
 //! Owner-authorized deletion fences the model turn before removing its history.
 use super::*;
 use crate::entity::{
-    agent_action_item, agent_approval_delegation, agent_attachment,
-    agent_capability_dispatch_outbox, agent_goal_open_request, agent_schedule,
+    agent_action_item, agent_attachment, agent_capability_dispatch_outbox, agent_schedule,
 };
 use desk_diagnose_core::goal::GoalRemovalReason;
 use sea_orm::{ExprTrait, QuerySelect, QueryTrait};
@@ -30,7 +29,7 @@ impl SignalAgentSessionStore {
         let locked = agent_session::Entity::update_many()
             .col_expr(
                 agent_session::Column::Version,
-                Expr::col(agent_session::Column::Version).into(),
+                Expr::col(agent_session::Column::Version),
             )
             .filter(agent_session::Column::ConversationId.eq(id))
             .filter(agent_session::Column::ActorId.eq(actor))
@@ -55,6 +54,13 @@ impl SignalAgentSessionStore {
         session
             .check_surface(AgentSessionSurface::AiAssistant)
             .map_err(|_| internal("Conversation not accessible"))?;
+        if !session.agent_role.is_main() {
+            return Err(internal("Only a main conversation can be deleted"));
+        }
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        crate::agent_subagent_store::close_root_on(&txn, &session, now_ms)
+            .await
+            .map_err(save_backend)?;
         agent_schedule::Entity::update_many()
             .col_expr(agent_schedule::Column::Status, Expr::value("deleted"))
             .col_expr(
@@ -75,28 +81,9 @@ impl SignalAgentSessionStore {
             .exec(&txn)
             .await
             .map_err(save_backend)?;
-        crate::entity::agent_grant_reservation::Entity::delete_many()
-            .filter(crate::entity::agent_grant_reservation::Column::RunId.eq(id))
-            .exec(&txn)
-            .await
-            .map_err(save_backend)?;
-        crate::entity::agent_capability_grant::Entity::delete_many()
-            .filter(crate::entity::agent_capability_grant::Column::RunId.eq(id))
-            .exec(&txn)
-            .await
-            .map_err(save_backend)?;
-        crate::entity::agent_run_event::Entity::delete_many()
-            .filter(crate::entity::agent_run_event::Column::RunId.eq(id))
-            .exec(&txn)
-            .await
-            .map_err(save_backend)?;
-        crate::entity::agent_permission_resume::Entity::delete_many()
-            .filter(crate::entity::agent_permission_resume::Column::RunId.eq(id))
-            .exec(&txn)
-            .await
-            .map_err(save_backend)?;
+        // Do not cascade authorization or execution lineage. Late native and
+        // provider receipts still need their original immutable bindings.
         let now = chrono::Utc::now();
-        let now_ms = now.timestamp_millis();
         // End every goal of this conversation; a running segment's worker gets
         // an idempotent cancellation when it settles.
         crate::agent_goal_store::cancel_conversation_goals_on(
@@ -107,16 +94,6 @@ impl SignalAgentSessionStore {
         )
         .await
         .map_err(save_backend)?;
-        agent_goal_open_request::Entity::delete_many()
-            .filter(agent_goal_open_request::Column::ConversationId.eq(id))
-            .exec(&txn)
-            .await
-            .map_err(save_backend)?;
-        agent_approval_delegation::Entity::delete_many()
-            .filter(agent_approval_delegation::Column::ConversationId.eq(id))
-            .exec(&txn)
-            .await
-            .map_err(save_backend)?;
         // Undispatched work becomes terminal and its queued outbox entries are
         // dropped; work that may already be on the device keeps its evidence
         // and records the cancellation request. Nothing is reported as "did
@@ -186,22 +163,6 @@ impl SignalAgentSessionStore {
             .exec(&txn)
             .await
             .map_err(save_backend)?;
-        // Persist before removing history: reconnect and restart must retain cleanup intent.
-        crate::entity::agent_file_recovery_cleanup::ActiveModel {
-            conversation_id: Set(id.to_owned()),
-            actor_id: Set(actor.to_owned()),
-            device_id: Set(device.to_owned()),
-            created_at_unix_ms: Set(now_ms),
-            next_attempt_at_unix_ms: Set(now_ms),
-            attempts: Set(0),
-            lease_id: Set(None),
-            lease_until_unix_ms: Set(None),
-            completed_at_unix_ms: Set(None),
-            last_error: Set(None),
-        }
-        .insert(&txn)
-        .await
-        .map_err(save_backend)?;
         agent_session::Entity::delete_many()
             .filter(agent_session::Column::Id.eq(row.id))
             .exec(&txn)

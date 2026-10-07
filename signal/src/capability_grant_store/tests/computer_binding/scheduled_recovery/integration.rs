@@ -18,12 +18,12 @@ pub(in crate::capability_grant_store::tests::computer_binding) async fn claim_or
     session: &mut PersistedAgentSession,
 ) {
     let schema = Schema::new(db.get_database_backend());
-    for statement in [
+    for mut statement in [
         schema.create_table_from_entity(agent_schedule::Entity),
         schema.create_table_from_entity(agent_schedule_run::Entity),
         schema.create_table_from_entity(agent_exec_task::Entity),
     ] {
-        db.execute(&statement).await.unwrap();
+        db.execute(statement.if_not_exists()).await.unwrap();
     }
     crate::db::ensure_lifecycle_tables(db).await;
     assert_eq!(session.actor_id, "1");

@@ -1,4 +1,4 @@
-//! Bind the original user-authored requirement to the reviewed task definition.
+//! Bind authentic rehearsal input or published occurrence input to the task definition.
 use crate::{
     chat::ChatRole,
     model_egress::ModelInputLineage,
@@ -49,7 +49,8 @@ pub fn fixed_task_input_source(
                 && !crate::permission_resume::is_resume_control_message(message)
         })
         .collect();
-    if inputs.len() != 1
+    if !session.agent_role.is_main()
+        || inputs.len() != 1
         || inputs[0].message_id != original_input_id
         || session.device_id != contract.contract().target_device_id
         || session
@@ -81,14 +82,30 @@ pub fn fixed_task_input_source(
     {
         return Err(InvalidFixedTaskInput);
     }
-    let expected = model_bound_user_message(
-        input.message_id.clone(),
-        input.text.clone(),
-        label.allowed_destinations[0].clone(),
-    )
-    .map_err(|_| InvalidFixedTaskInput)?;
-    if expected.data_envelope.as_ref() != Some(label) {
-        return Err(InvalidFixedTaskInput);
+    if session.trigger_origin == crate::session::TriggerOrigin::ScheduledTask {
+        if session.input_revision != 1
+            || session.current_request_id.as_deref() != Some(session.conversation_id.as_str())
+            || original_input_id != format!("{}:input", session.conversation_id)
+        {
+            return Err(InvalidFixedTaskInput);
+        }
+        crate::schedule::published_input::validate_published_input(
+            input,
+            &session.conversation_id,
+            contract,
+            &label.allowed_destinations[0],
+        )
+        .map_err(|_| InvalidFixedTaskInput)?;
+    } else {
+        let expected = model_bound_user_message(
+            input.message_id.clone(),
+            input.text.clone(),
+            label.allowed_destinations[0].clone(),
+        )
+        .map_err(|_| InvalidFixedTaskInput)?;
+        if expected.data_envelope.as_ref() != Some(label) {
+            return Err(InvalidFixedTaskInput);
+        }
     }
     Ok((
         ModelInputLineage {

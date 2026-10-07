@@ -231,6 +231,7 @@ export default {
     "schedules.runStatus.waiting_device": "Waiting for device",
     "schedules.runStatus.running": "Running",
     "schedules.runStatus.awaiting_permission": "Awaiting permission",
+    "schedules.runStatus.awaiting_children": "Waiting for subagents",
     "schedules.runStatus.succeeded": "Succeeded",
     "schedules.runStatus.failed": "Failed",
     "schedules.runStatus.missed": "Missed",

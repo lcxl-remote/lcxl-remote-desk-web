@@ -55,16 +55,49 @@ impl MeteredModel {
         ordinal: u64,
         ordinary_id: String,
     ) -> Result<String, ModelAdmissionError<DbErr>> {
+        if let Some(reservation) = authorized.request.delegation_call.as_ref() {
+            let (_, units) = self
+                .inner
+                .task_request_budget(&authorized.request)
+                .map_err(|_| denied())?;
+            if !reservation.permits_rendered_tokens(units) {
+                return Err(ModelAdmissionError::BudgetExceeded);
+            }
+        }
         let Some(task) = &self.fresh_task else {
-            crate::model_egress_store::SignalModelEgressStore::new(self.db.clone())
-                .record_dispatch_intent(
-                    ordinary_id.clone(),
-                    self.export_authorization_id.clone(),
-                    ordinal,
-                    &authorized.audit,
-                    &authorized.input_envelopes,
+            let gate = crate::ai_assistant_gate::global_ai_assistant_gate();
+            let settings = gate.snapshot();
+            if self.inner.dispatch_cancelled() || !settings.enabled {
+                return Err(denied().into());
+            }
+            let txn =
+                crate::db::begin_write(&self.db, crate::entity::agent_session::Entity).await?;
+            self.inner
+                .validate_current_on(&txn)
+                .await
+                .map_err(|_| denied())?;
+            if let Some(reservation) = authorized.request.delegation_call.as_ref() {
+                crate::agent_subagent_store::SubAgentStore::link_model_receipt_on(
+                    &txn,
+                    reservation,
+                    &ordinary_id,
+                    chrono::Utc::now().timestamp_millis(),
                 )
                 .await?;
+            }
+            crate::model_egress_store::SignalModelEgressStore::record_dispatch_intent_on(
+                &txn,
+                ordinary_id.clone(),
+                self.export_authorization_id.clone(),
+                ordinal,
+                &authorized.audit,
+                &authorized.input_envelopes,
+            )
+            .await?;
+            if self.inner.dispatch_cancelled() || gate.snapshot() != settings {
+                return Err(denied().into());
+            }
+            txn.commit().await?;
             return Ok(ordinary_id);
         };
         let settings = task.gate.snapshot();
@@ -112,46 +145,73 @@ impl MeteredModel {
             .validate_current_on(&txn)
             .await
             .map_err(|_| denied())?;
-        let dispatch = ScheduleStore::reserve_fresh_model_dispatch_on(
-            &txn,
-            &held,
-            &TaskBudgetRequest {
-                owner: SINGLE_ACCOUNT_USER_ID,
-                device: &task.device_id,
-                run_id: &task.run_id,
-                node: &task.node_id,
-                lease_epoch: task.run_epoch,
-                kind: TaskBudgetKind::ModelTokens,
-                rule_id: None,
-                logical_key: &format!("model-step-{ordinal}"),
-                input_sha256: &digest,
-                units,
-            },
-            &self.export_authorization_id,
-            ordinal,
-            &authorized.audit,
-            &authorized.input_envelopes,
-        )
-        .await
-        .map_err(|error| match error {
-            crate::schedule_store::ScheduleStoreError::BudgetExceeded => {
-                ModelAdmissionError::BudgetExceeded
-            }
-            _ => ModelAdmissionError::Backend(denied()),
-        })?;
+        let receipt_id = if let Some(reservation) = authorized.request.delegation_call.as_ref() {
+            // The group and original occurrence quotas were reserved together.
+            crate::agent_subagent_store::SubAgentStore::link_model_receipt_on(
+                &txn,
+                reservation,
+                &ordinary_id,
+                chrono::Utc::now().timestamp_millis(),
+            )
+            .await?;
+            crate::model_egress_store::SignalModelEgressStore::record_dispatch_intent_on(
+                &txn,
+                ordinary_id.clone(),
+                self.export_authorization_id.clone(),
+                ordinal,
+                &authorized.audit,
+                &authorized.input_envelopes,
+            )
+            .await?;
+            ordinary_id
+        } else {
+            ScheduleStore::reserve_fresh_model_dispatch_on(
+                &txn,
+                &held,
+                &TaskBudgetRequest {
+                    owner: SINGLE_ACCOUNT_USER_ID,
+                    device: &task.device_id,
+                    run_id: &task.run_id,
+                    node: &task.node_id,
+                    lease_epoch: task.run_epoch,
+                    kind: TaskBudgetKind::ModelTokens,
+                    rule_id: None,
+                    logical_key: &format!("model-step-{ordinal}"),
+                    input_sha256: &digest,
+                    units,
+                },
+                &self.export_authorization_id,
+                ordinal,
+                &authorized.audit,
+                &authorized.input_envelopes,
+            )
+            .await
+            .map_err(|error| match error {
+                crate::schedule_store::ScheduleStoreError::BudgetExceeded => {
+                    ModelAdmissionError::BudgetExceeded
+                }
+                _ => ModelAdmissionError::Backend(denied()),
+            })?
+            .receipt
+            .receipt_id
+        };
         task.validate_target().await?;
-        if task.gate.snapshot() != settings {
+        if self.inner.dispatch_cancelled() || task.gate.snapshot() != settings {
             return Err(denied().into());
         }
         txn.commit().await?;
-        Ok(dispatch.receipt.receipt_id)
+        Ok(receipt_id)
     }
 
     pub(super) async fn settle_task_dispatch(
         &self,
         ordinal: u64,
         usage: &desk_diagnose_core::chat::TokenUsage,
+        delegated: bool,
     ) -> Result<(), AgentError> {
+        if delegated {
+            return Ok(());
+        }
         let Some(task) = &self.fresh_task else {
             return Ok(());
         };

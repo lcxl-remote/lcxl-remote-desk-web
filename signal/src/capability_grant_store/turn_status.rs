@@ -30,10 +30,28 @@ impl SignalCapabilityGrantStore {
         if state != ComputerActionTurnState::Current {
             return Ok(state);
         }
+        if let Some(session) = session.as_ref()
+            && !session.agent_role.is_main()
+        {
+            let fence =
+                desk_diagnose_core::action_turn_fence::AssistantTurnFence::from_session(session)
+                    .map_err(|_| DbErr::Custom("invalid delegated turn state".into()))?
+                    .ok_or_else(|| DbErr::Custom("missing delegated turn state".into()))?;
+            if !crate::agent_subagent_store::check_child_action_on(
+                &self.db,
+                session,
+                &fence,
+                chrono::Utc::now().timestamp_millis(),
+            )
+            .await?
+            {
+                return Ok(ComputerActionTurnState::Revoked);
+            }
+        }
         // Use the database clock shared by all central instances. A current
         // reply never renews this lease or the device's local control deadline.
         use sea_orm::sea_query::{Alias, Expr, Func, SimpleExpr};
-        let deadline: SimpleExpr = Expr::col(agent_session::Column::LeaseDeadline).into();
+        let deadline: SimpleExpr = Expr::col(agent_session::Column::LeaseDeadline);
         let clock = Expr::current_timestamp();
         // SQLite stores timestamps as text; normalize both RFC3339 and SQL
         // encodings before comparison instead of comparing their separators.

@@ -51,6 +51,7 @@ struct PreparedReview {
     max_context_bytes: u64,
 }
 
+#[allow(clippy::large_enum_variant)]
 enum ClaimState {
     NotRequired,
     Existing(ConcreteReviewResult),
@@ -94,7 +95,7 @@ async fn prepare_on(
     session.version = row.version;
     if session.surface != AgentSessionSurface::AiAssistant
         || !session.turn_state.is_active()
-        || !session.trigger_origin.allows_delegated_review()
+        || !session.allows_delegated_review()
         || session.current_turn_id.as_deref() != Some(subject.turn_id)
         || session.conversation_id != subject.conversation_id
         || session.actor_id != subject.actor_id
@@ -426,10 +427,22 @@ async fn claim(
     }
     .insert(&txn)
     .await?;
+    let (call_authority, delegation_call) = crate::agent_subagent_store::reserve_review_call_on(
+        &txn,
+        candidate,
+        &prepared.destination,
+        &prepared.authorized,
+        prepared.prices,
+        reserved_tokens,
+        i64::try_from(now_unix_ms).map_err(|_| invalid())?,
+    )
+    .await?;
     txn.commit().await?;
     Ok(ClaimState::Claimed(
         prepared.candidate.clone(),
         ClaimedPermissionReview {
+            call_authority,
+            delegation_call,
             candidate_id: prepared.candidate.candidate_id,
             lease_epoch: 1,
             lease_owner,
@@ -506,9 +519,21 @@ async fn settle(
         || row
             .lease_deadline
             .is_none_or(|deadline| deadline <= as_i64(now_unix_ms).unwrap_or(i64::MAX));
+    let physical = crate::agent_subagent_store::settle_review_call_on(
+        &txn,
+        &row,
+        actual_tokens,
+        actual_cost_micros,
+        i64::try_from(now_unix_ms).map_err(|_| invalid())?,
+    )
+    .await?;
+    let actual_tokens = physical.tokens;
+    let actual_cost_micros = physical.cost_micros;
+    let accounted = physical.settlement(row.reserved_tokens, row.reserved_cost_micros)?;
     let usage_in_bounds = actual_tokens.is_none_or(|used| used <= row.reserved_tokens as u64)
         && actual_cost_micros.is_none_or(|used| used <= row.reserved_cost_micros as u64);
-    let valid_decision = decision.is_some_and(|review| review.validate_for(candidate).is_ok());
+    let valid_decision = physical.dispatched
+        && decision.is_some_and(|review| review.validate_for(candidate).is_ok());
     let status = if expired {
         APPROVAL_REVIEW_STATUS_EXPIRED
     } else if !current || !usage_in_bounds || !valid_decision {
@@ -520,14 +545,27 @@ async fn settle(
             _ => APPROVAL_REVIEW_STATUS_UNAVAILABLE,
         }
     };
-    delegation
-        .settle(
-            row.reserved_tokens as u64,
-            row.reserved_cost_micros as u64,
-            usage_in_bounds.then_some(actual_tokens).flatten(),
-            usage_in_bounds.then_some(actual_cost_micros).flatten(),
-        )
-        .map_err(|_| invalid())?;
+    if physical.dispatched {
+        delegation
+            .settle(
+                row.reserved_tokens as u64,
+                row.reserved_cost_micros as u64,
+                Some(accounted.tokens),
+                Some(accounted.cost_micros),
+            )
+            .map_err(|_| invalid())?;
+    } else {
+        delegation
+            .release_unstarted_review(row.reserved_tokens as u64, row.reserved_cost_micros as u64)
+            .map_err(|_| invalid())?;
+    }
+    crate::agent_approval_usage::record_usage_on(
+        &txn,
+        &row,
+        accounted,
+        i64::try_from(now_unix_ms).map_err(|_| invalid())?,
+    )
+    .await?;
     let changed = delegation_row::Entity::update_many()
         .col_expr(
             delegation_row::Column::StateJson,

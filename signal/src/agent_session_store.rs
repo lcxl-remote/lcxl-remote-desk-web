@@ -8,6 +8,7 @@ mod object_context;
 pub use live_context::UpdateLiveContext;
 mod permission_receipt;
 pub mod permission_resume;
+mod subagents;
 pub use object_context::UpdateObjectContext;
 pub use permission_receipt::{PermissionDecisionOutcome, PermissionDecisionSubject};
 
@@ -30,6 +31,7 @@ use desk_diagnose_core::session::{
     ActionIdentity, AgentSessionSurface, ExecutionState, PendingAutoTrigger, PersistedAgentSession,
     RecoveryVerdict, TurnClaimError, TurnState, WorkKind,
 };
+use sea_orm::QueryTrait;
 use sea_orm::sea_query::Expr;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder,
@@ -169,6 +171,9 @@ impl SignalAgentSessionStore {
             _ => None,
         };
         Ok(Some(SessionSnapshot {
+            control_revision: session.control_revision,
+            main_stopped: session.main_stopped,
+            subagents: Default::default(),
             file_scope: session.file_scope,
             terminal_error: session.terminal_error,
             context_usage: session
@@ -337,18 +342,32 @@ impl SignalAgentSessionStore {
             let mut session =
                 permission_receipt::session(&row, conversation_id, actor_id, device_id)?;
             permission_receipt::check_expected_request(&session, expected_run_request_id)?;
-            if matches!(&authority, PermissionDecisionAuthority::Owner) {
-                if let Some(state) =
+            if matches!(&authority, PermissionDecisionAuthority::Owner)
+                && let Some(state) =
                     permission_receipt::replay_on(&txn, &session, request_id, &decisions).await?
-                {
-                    txn.commit()
-                        .await
-                        .map_err(|_| internal("read permission receipt transaction failed"))?;
-                    return Ok(PermissionDecisionOutcome {
-                        state,
-                        newly_recorded: false,
-                    });
-                }
+            {
+                txn.commit()
+                    .await
+                    .map_err(|_| internal("read permission receipt transaction failed"))?;
+                return Ok(PermissionDecisionOutcome {
+                    state,
+                    newly_recorded: false,
+                });
+            }
+            crate::agent_subagent_store::lock_child_source_on(&txn, &session)
+                .await
+                .map_err(|_| internal("delegated permission source is unavailable"))?;
+            if !crate::agent_subagent_store::check_child_permission_on(
+                &txn,
+                &session,
+                Utc::now().timestamp_millis(),
+            )
+            .await
+            .map_err(|_| internal("delegated permission source is unavailable"))?
+            {
+                return Err(internal(
+                    "delegated permission request is no longer current",
+                ));
             }
             if session.turn_state.is_active() {
                 txn.rollback().await.ok();
@@ -636,6 +655,14 @@ impl SignalAgentSessionStore {
             .order_by(running_order, sea_orm::Order::Desc)
             .order_by_desc(agent_session::Column::UpdatedAt)
             .limit(limit.saturating_mul(4))
+            .filter(
+                agent_session::Column::ConversationId.not_in_subquery(
+                    crate::entity::agent_subagent_run::Entity::find()
+                        .select_only()
+                        .column(crate::entity::agent_subagent_run::Column::ChildConversationId)
+                        .into_query(),
+                ),
+            )
             .all(&self.db)
             .await
             .map_err(|e| internal(format!("list agent sessions: {e}")))?;
@@ -653,7 +680,9 @@ impl SignalAgentSessionStore {
                         return None;
                     }
                 };
-                if session.surface != AgentSessionSurface::AiAssistant {
+                if session.surface != AgentSessionSurface::AiAssistant
+                    || !session.agent_role.is_main()
+                {
                     return None;
                 }
                 let first_question = session
@@ -717,7 +746,8 @@ impl SignalAgentSessionStore {
         let row = &current;
         let mut session = PersistedAgentSession::decode_json(&row.state_json)
             .map_err(|e| internal(format!("decode lapsed agent session: {e}")))?;
-        if !session.turn_state.is_active()
+        if !session.agent_role.is_main()
+            || !session.turn_state.is_active()
             || matches!(
                 session.trigger_origin,
                 desk_diagnose_core::session::TriggerOrigin::ScheduledContinuation
@@ -1203,6 +1233,9 @@ pub enum EventAppend {
 
 #[derive(Debug, Clone)]
 pub struct SessionSnapshot {
+    pub control_revision: u64,
+    pub main_stopped: bool,
+    pub subagents: desk_agent_protocol::ai_assistant::subagent::AiAssistantDelegationSnapshot,
     pub file_scope: desk_diagnose_core::file_scope::SessionFileScope,
     pub terminal_error: Option<desk_agent_protocol::AgentError>,
     pub context_usage: Option<desk_diagnose_core::context_usage::ContextUsage>,
@@ -1248,6 +1281,9 @@ fn snapshot_from_row(row: agent_session::Model) -> Result<SessionSnapshot, Agent
         _ => None,
     };
     Ok(SessionSnapshot {
+        control_revision: session.control_revision,
+        main_stopped: session.main_stopped,
+        subagents: Default::default(),
         file_scope: session.file_scope,
         terminal_error: session.terminal_error,
         context_usage: session
@@ -1341,6 +1377,52 @@ async fn find_recovery_task(
 
 #[async_trait(?Send)]
 impl SessionSeam for SignalAgentSessionStore {
+    fn subagents(
+        &self,
+        session: &PersistedAgentSession,
+    ) -> Option<&dyn desk_diagnose_core::subagent::seam::SubAgentSeam> {
+        (session.agent_role.binding().is_some() || session.delegation_group_id.is_some())
+            .then_some(self as &dyn desk_diagnose_core::subagent::seam::SubAgentSeam)
+    }
+
+    async fn reserve_delegation_call(
+        &self,
+        session: &PersistedAgentSession,
+        logical_id: &str,
+        kind: desk_diagnose_core::subagent::reservation::DelegationCallKind,
+        arguments_sha256: &str,
+        upper: desk_diagnose_core::goal::GoalUsage,
+        now: &str,
+    ) -> Result<desk_diagnose_core::subagent::reservation::CallAdmission, AgentError> {
+        let now = chrono::DateTime::parse_from_rfc3339(now)
+            .map_err(|_| internal("invalid delegation budget clock"))?;
+        crate::agent_subagent_store::SubAgentStore::new(self.db.clone())
+            .reserve_runtime_call(
+                session,
+                logical_id,
+                kind,
+                arguments_sha256,
+                upper,
+                now.timestamp_millis(),
+            )
+            .await
+            .map_err(|error| internal(format!("delegation call accounting: {error}")))
+    }
+
+    async fn settle_delegation_call(
+        &self,
+        reservation: &desk_diagnose_core::subagent::reservation::DelegationCallReservation,
+        actual: Option<desk_diagnose_core::goal::GoalUsage>,
+        now: &str,
+    ) -> Result<(), AgentError> {
+        let now = chrono::DateTime::parse_from_rfc3339(now)
+            .map_err(|_| internal("invalid delegation settlement clock"))?;
+        crate::agent_subagent_store::SubAgentStore::new(self.db.clone())
+            .settle_runtime_call(reservation, actual, now.timestamp_millis())
+            .await
+            .map_err(|error| internal(format!("delegation call accounting: {error}")))
+    }
+
     async fn delete_attachments(
         &self,
         session: &PersistedAgentSession,
@@ -1554,6 +1636,8 @@ impl SessionSeam for SignalAgentSessionStore {
             params.trigger_origin,
             desk_diagnose_core::session::TriggerOrigin::ScheduledContinuation
                 | desk_diagnose_core::session::TriggerOrigin::GoalContinuation
+                | desk_diagnose_core::session::TriggerOrigin::DelegatedTask
+                | desk_diagnose_core::session::TriggerOrigin::SubAgentCompletion
         ) {
             return Err(ClaimError::Backend(internal(
                 "continuation requires its atomic source and session claim",
@@ -1768,6 +1852,19 @@ impl SessionSeam for SignalAgentSessionStore {
                     let state_json = session.encode_json_for_storage().map_err(|e| {
                         ClaimError::Backend(internal(format!("encode agent session state: {e}")))
                     })?;
+                    let txn = crate::db::begin_write(&self.db, agent_session::Entity)
+                        .await
+                        .map_err(|error| {
+                            ClaimError::Backend(internal(format!("create conversation: {error}")))
+                        })?;
+                    if crate::agent_subagent_store::deleted_on(&txn, &params.conversation_id)
+                        .await
+                        .map_err(|_| {
+                            ClaimError::Backend(internal("conversation deletion state unavailable"))
+                        })?
+                    {
+                        return Err(ClaimError::Backend(internal("conversation was deleted")));
+                    }
                     let inserted = agent_session::ActiveModel {
                         conversation_id: Set(session.conversation_id.clone()),
                         actor_id: Set(session.actor_id.clone()),
@@ -1780,8 +1877,26 @@ impl SessionSeam for SignalAgentSessionStore {
                         updated_at: Set(now),
                         ..Default::default()
                     }
-                    .insert(&self.db)
+                    .insert(&txn)
                     .await;
+                    let inserted = match inserted {
+                        Ok(value) => {
+                            txn.commit().await.map_err(|error| {
+                                ClaimError::Backend(internal(format!(
+                                    "create conversation: {error}"
+                                )))
+                            })?;
+                            Ok(value)
+                        }
+                        Err(error) => {
+                            txn.rollback().await.map_err(|rollback| {
+                                ClaimError::Backend(internal(format!(
+                                    "create conversation: {rollback}"
+                                )))
+                            })?;
+                            Err(error)
+                        }
+                    };
                     match inserted {
                         Ok(_) => return Ok(session),
                         Err(_)
@@ -1806,6 +1921,18 @@ impl SessionSeam for SignalAgentSessionStore {
     }
 
     async fn save(&self, session: &mut PersistedAgentSession) -> Result<(), AgentError> {
+        if !session.agent_role.is_main() {
+            return crate::agent_subagent_store::save_child_session(&self.db, session)
+                .await
+                .map_err(|error| internal(format!("save delegated session: {error}")));
+        }
+        if session.delegation_group_id.is_some()
+            || !session.accepted_subagent_observations.is_empty()
+        {
+            return crate::agent_subagent_store::save_main_delegation_session(&self.db, session)
+                .await
+                .map_err(|error| internal(format!("save delegation result: {error}")));
+        }
         let now = Utc::now();
         let old_version = session.version;
         let new_version = old_version + 1;
@@ -2086,6 +2213,24 @@ impl SessionSeam for SignalAgentSessionStore {
         let txn = crate::db::begin_write(&self.db, crate::entity::agent_session::Entity)
             .await
             .map_err(|error| internal(format!("begin permission transaction: {error}")))?;
+        if !session.agent_role.is_main() {
+            let fence =
+                desk_diagnose_core::action_turn_fence::AssistantTurnFence::from_session(session)?
+                    .ok_or_else(|| internal("missing delegated planning fence"))?;
+            if !crate::agent_subagent_store::check_child_action_on(
+                &txn,
+                session,
+                &fence,
+                Utc::now().timestamp_millis(),
+            )
+            .await
+            .map_err(|_| internal("delegated planning source is unavailable"))?
+            {
+                return Err(internal(
+                    "delegated planning source is paused or no longer current",
+                ));
+            }
+        }
         crate::schedule_store::validate_task_permission_on(&txn, session, &update.request)
             .await
             .map_err(|_| internal("permission request exceeds current task authority"))?;
@@ -2772,6 +2917,7 @@ mod tests {
         db.execute(&schema.create_table_from_entity(agent_capability_grant::Entity))
             .await
             .unwrap();
+        crate::db::ensure_lifecycle_tables(&db).await;
         SignalAgentSessionStore::new(db)
     }
 
@@ -2830,8 +2976,11 @@ mod tests {
             },
             digest_sha256: digest,
             sensitivity: Sensitivity::UserContent,
-            allowed_destinations: vec![DestinationIdentity::LocalArtifact {
-                workspace_id: "test-workspace".into(),
+            allowed_destinations: vec![DestinationIdentity::Model {
+                connection_id: "gateway".into(),
+                connection_revision: 1,
+                model_id: "model".into(),
+                profile_revision: 1,
             }],
             retention: RetentionBoundary {
                 expires_at_unix_ms: None,
@@ -3034,6 +3183,7 @@ mod tests {
         db.execute(&schema.create_table_from_entity(agent_capability_grant::Entity))
             .await
             .unwrap();
+        crate::db::ensure_lifecycle_tables(&db).await;
         let first = SignalAgentSessionStore::new(db).with_client_metadata(
             Some("client-conversation-1".into()),
             AgentSessionSurface::AiAssistant,
@@ -3157,6 +3307,7 @@ mod tests {
         db.execute(&schema.create_table_from_entity(agent_capability_grant::Entity))
             .await
             .unwrap();
+        crate::db::ensure_lifecycle_tables(&db).await;
         let owner = SignalAgentSessionStore::new(db).with_client_metadata(
             Some("client-conversation-1".into()),
             AgentSessionSurface::AiAssistant,
@@ -3865,6 +4016,7 @@ mod tests {
         db.execute(&schema.create_table_from_entity(agent_exec_task::Entity))
             .await
             .unwrap();
+        crate::db::ensure_lifecycle_tables(&db).await;
         SignalAgentSessionStore::new(db)
     }
 

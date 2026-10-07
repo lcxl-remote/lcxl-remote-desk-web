@@ -21,6 +21,17 @@ pub struct Model {
     /// Keyed digest of the transient approval context; never store a second
     /// copy of the user's messages, exact inputs or attachment contents.
     pub context_hmac_sha256: String,
+    /// Frozen review lease and original task source; contains no prompt body.
+    pub call_authority_json: Option<String>,
+    pub token_prices_json: Option<String>,
+    pub delegation_reservation_id: Option<String>,
+    pub provider_receipt_kind: Option<String>,
+    pub provider_receipt_id: Option<String>,
+    pub provider_started_at_ms: Option<i64>,
+    /// Contribution already applied to the cumulative approval ledger.
+    pub usage_settlement_json: Option<String>,
+    pub usage_settlement_state: Option<String>,
+    pub usage_reconcile_at_ms: Option<i64>,
     pub decision_json: Option<String>,
     #[sea_orm(indexed)]
     pub status: String,

@@ -177,6 +177,54 @@ impl ScheduleStore {
         txn: &DatabaseTransaction,
         request: &TaskBudgetRequest<'_>,
     ) -> Result<ledger::Model, ScheduleStoreError> {
+        let authority = Self::lock_run_authority(
+            txn,
+            request.owner,
+            request.device,
+            request.run_id,
+            request.node,
+            request.lease_epoch,
+        )
+        .await?;
+        Self::reserve_budget_for_authority_on(txn, &authority, request).await
+    }
+
+    /// Uses only the original occurrence's model quota. A source authority is
+    /// deliberately ineligible for automatic task grants and tool dispatch.
+    pub(crate) async fn reserve_delegation_model_budget_on(
+        txn: &DatabaseTransaction,
+        authority: &super::authority::CurrentDelegationSourceAuthority,
+        logical_key: &str,
+        input_sha256: &str,
+        units: u64,
+    ) -> Result<ledger::Model, ScheduleStoreError> {
+        let request = TaskBudgetRequest {
+            owner: authority.run().owner_user_id,
+            device: &authority.contract().contract().target_device_id,
+            run_id: &authority.provenance().scheduled_run_id,
+            node: "",
+            lease_epoch: 0,
+            kind: TaskBudgetKind::ModelTokens,
+            rule_id: None,
+            logical_key,
+            input_sha256,
+            units,
+        };
+        let reservation =
+            Self::reserve_budget_for_authority_on(txn, authority.budget_authority(), &request)
+                .await?;
+        let now = authority_now(txn).await?;
+        if now < authority.verified_at() || now >= authority.deadline_ms() {
+            return Err(ScheduleStoreError::Conflict);
+        }
+        Ok(reservation)
+    }
+
+    async fn reserve_budget_for_authority_on(
+        txn: &DatabaseTransaction,
+        authority: &CurrentTaskAuthority,
+        request: &TaskBudgetRequest<'_>,
+    ) -> Result<ledger::Model, ScheduleStoreError> {
         key(request.logical_key)?;
         match (request.kind, request.rule_id) {
             (TaskBudgetKind::ToolCall, Some(rule)) => key(rule)?,
@@ -190,15 +238,6 @@ impl ScheduleStore {
             return Err(ScheduleStoreError::Invalid);
         }
         let units = i64::try_from(request.units).map_err(|_| ScheduleStoreError::Invalid)?;
-        let authority = Self::lock_run_authority(
-            txn,
-            request.owner,
-            request.device,
-            request.run_id,
-            request.node,
-            request.lease_epoch,
-        )
-        .await?;
         let rule_limit = request
             .rule_id
             .map(|id| {
@@ -235,7 +274,7 @@ impl ScheduleStore {
             .filter(ledger::Column::ReservationId.eq(id))
             .one(txn)
             .await?;
-        reserve_run_budget(txn, &authority).await?;
+        reserve_run_budget(txn, authority).await?;
         if let Some(existing) = existing_call {
             validate_row(&existing)?;
             if existing.schedule_id != authority.provenance().schedule_id
@@ -315,7 +354,7 @@ impl ScheduleStore {
         }
         insert(
             txn,
-            &authority,
+            authority,
             request.kind.name(),
             request.logical_key,
             request.input_sha256,

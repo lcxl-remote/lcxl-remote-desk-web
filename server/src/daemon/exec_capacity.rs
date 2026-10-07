@@ -26,6 +26,22 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use super::worker_manager::ExecWorkerTarget;
+
+/// Frozen dispatch destination and controlling channel. A central cancellation
+/// has no browser channel; it must still target the originally admitted worker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecBinding {
+    pub target: ExecWorkerTarget,
+    pub owner_connection_id: Option<String>,
+    pub daemon_pty: bool,
+}
+
+struct Slot {
+    deadline: Instant,
+    binding: Option<ExecBinding>,
+}
+
 /// Grace added to a command's own timeout before its slot is reclaimed, covering
 /// the spawn, the result's trip back, and clock jitter. Generous on purpose:
 /// reclaiming a slot early would let one more command run than the ceiling
@@ -53,7 +69,7 @@ impl std::fmt::Display for CapacityFull {
 #[derive(Default)]
 pub struct ExecCapacity {
     /// Generation → the moment its slot may be reclaimed even without a report.
-    slots: Mutex<HashMap<String, Instant>>,
+    slots: Mutex<HashMap<String, Slot>>,
 }
 
 impl ExecCapacity {
@@ -66,18 +82,20 @@ impl ExecCapacity {
     /// Re-admitting a generation that already holds a slot is not an error and
     /// does not consume a second one: the ledger has already decided whether that
     /// dispatch may proceed, and capacity must not double-count one execution.
+    /// Returns whether this call created a slot, so a duplicate ledger lookup
+    /// cannot release the original execution's destination or capacity.
     pub fn try_admit(
         &self,
         generation: &str,
         limit: usize,
         timeout: Duration,
-    ) -> Result<(), CapacityFull> {
+    ) -> Result<bool, CapacityFull> {
         let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
         let now = Instant::now();
-        slots.retain(|_, deadline| *deadline > now);
+        slots.retain(|_, slot| slot.deadline > now);
 
         if slots.contains_key(generation) {
-            return Ok(());
+            return Ok(false);
         }
         if slots.len() >= limit {
             return Err(CapacityFull {
@@ -85,8 +103,48 @@ impl ExecCapacity {
                 limit,
             });
         }
-        slots.insert(generation.to_string(), now + timeout + SLOT_GRACE);
-        Ok(())
+        slots.insert(
+            generation.to_string(),
+            Slot {
+                deadline: now + timeout + SLOT_GRACE,
+                binding: None,
+            },
+        );
+        Ok(true)
+    }
+
+    /// Bind before native dispatch. A lost or rebound slot cannot dispatch to a
+    /// replacement worker, even if the selected desktop has the same name.
+    pub fn bind(&self, generation: &str, binding: ExecBinding) -> Result<(), String> {
+        let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+        let slot = slots
+            .get_mut(generation)
+            .filter(|slot| slot.deadline > Instant::now())
+            .ok_or_else(|| "execution capacity reservation is no longer current".to_string())?;
+        match slot.binding.as_ref() {
+            Some(current) if current != &binding => {
+                Err("execution destination cannot be rebound".into())
+            }
+            Some(_) => Ok(()),
+            None => {
+                slot.binding = Some(binding);
+                Ok(())
+            }
+        }
+    }
+
+    pub fn binding_for_owner(
+        &self,
+        generation: &str,
+        owner_connection_id: Option<&str>,
+    ) -> Option<ExecBinding> {
+        let slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+        slots
+            .get(generation)
+            .filter(|slot| slot.deadline > Instant::now())
+            .and_then(|slot| slot.binding.as_ref())
+            .filter(|binding| binding.owner_connection_id.as_deref() == owner_connection_id)
+            .cloned()
     }
 
     /// Give back a slot once the execution is accounted for — it finished, or it
@@ -102,7 +160,7 @@ impl ExecCapacity {
     pub fn in_flight(&self) -> usize {
         let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
         let now = Instant::now();
-        slots.retain(|_, deadline| *deadline > now);
+        slots.retain(|_, slot| slot.deadline > now);
         slots.len()
     }
 }
@@ -149,10 +207,13 @@ mod tests {
     fn a_lost_execution_does_not_hold_its_slot_for_ever() {
         let cap = ExecCapacity::new();
         // A command whose deadline is already in the past: the worker vanished.
-        cap.slots
-            .lock()
-            .unwrap()
-            .insert("lost".to_string(), Instant::now() - Duration::from_secs(1));
+        cap.slots.lock().unwrap().insert(
+            "lost".to_string(),
+            Slot {
+                deadline: Instant::now() - Duration::from_secs(1),
+                binding: None,
+            },
+        );
 
         assert_eq!(cap.in_flight(), 0, "the stale slot was not reclaimed");
         assert!(cap.try_admit("fresh", 1, T).is_ok());
@@ -163,5 +224,44 @@ mod tests {
     fn a_zero_limit_admits_nothing() {
         let cap = ExecCapacity::new();
         assert!(cap.try_admit("a", 0, T).is_err());
+    }
+    #[test]
+    fn execution_destination_and_owner_are_immutable_and_expire_with_slot() {
+        let cap = ExecCapacity::new();
+        let binding = ExecBinding {
+            target: ExecWorkerTarget {
+                worker_key: None,
+                source_incarnation: super::super::worker_manager::WorkerIncarnation::for_test(1),
+                session_target_id: "session".into(),
+                registration_generation: 0,
+                wire_worker_incarnation: 0,
+            },
+            owner_connection_id: Some("browser".into()),
+            daemon_pty: false,
+        };
+        assert!(cap.bind("generation", binding.clone()).is_err());
+        assert_eq!(cap.try_admit("generation", 1, T).unwrap(), true);
+        cap.bind("generation", binding.clone()).unwrap();
+        assert_eq!(cap.try_admit("generation", 1, T).unwrap(), false);
+        assert_eq!(
+            cap.binding_for_owner("generation", Some("browser")),
+            Some(binding.clone())
+        );
+        assert!(cap.binding_for_owner("generation", None).is_none());
+        let mut changed = binding.clone();
+        changed.target.source_incarnation =
+            super::super::worker_manager::WorkerIncarnation::for_test(2);
+        assert!(cap.bind("generation", changed).is_err());
+        cap.slots
+            .lock()
+            .unwrap()
+            .get_mut("generation")
+            .unwrap()
+            .deadline = Instant::now() - T;
+        assert!(
+            cap.binding_for_owner("generation", Some("browser"))
+                .is_none()
+        );
+        assert!(cap.bind("generation", binding).is_err());
     }
 }

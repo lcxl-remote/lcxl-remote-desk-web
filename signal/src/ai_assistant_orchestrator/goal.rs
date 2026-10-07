@@ -57,6 +57,7 @@ pub async fn resume_queued_goal(
         None,
         None,
         Some(goal),
+        None,
     )
     .await?
     .ok_or_else(|| transport_error("goal continuation did not pass runtime preflight"))

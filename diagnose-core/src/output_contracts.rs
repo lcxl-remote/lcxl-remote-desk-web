@@ -43,6 +43,13 @@ macro_rules! catalog {
 }
 
 catalog!(
+    ("spawn_subagent", "SubAgentSpawnReceipt", Inline),
+    ("list_subagents", "AiAssistantSubAgentPage", Inline),
+    ("get_subagent_status", "AiAssistantSubAgentSummary", Inline),
+    ("read_subagent_result", "SubAgentModelResult", Inline),
+    ("wait_subagents", "SubAgentWaitReceipt", Inline),
+    ("cancel_subagent", "SubAgentControlReceipt", Inline),
+    ("send_subagent_message", "SubAgentControlReceipt", Inline),
     ("update_task_status", "TaskStatusUpdateReceipt", Inline),
     ("control_goal", "GoalControlReceipt", Inline),
     ("request_goal", "GoalRequestReceipt", Inline),
@@ -431,7 +438,7 @@ pub(crate) fn project_status(message: &mut ChatMessage) {
 
 pub fn markdown() -> String {
     let mut document = String::from(
-        "# AI Assistant output contracts\n\nGenerated from `diagnose-core/src/output_contracts.rs`. Catalog version describes this mapping, not a payload schema field. All errors may instead be returned as safe text; an externalized attachment must be read before interpreting its business payload.\n\n| Tool | Business output type | Catalog version | Possible delivery |\n|---|---|---:|---|\n",
+        "# AI Assistant output contracts\n\nGenerated from `diagnose-core/src/output_contracts.rs`. Catalog version describes this mapping, not a payload schema field. All errors may instead be returned as safe text; an externalized attachment must be read before interpreting its business payload.\n\n`read_subagent_result` returns `SubAgentModelResult`: the full answer, frozen acceptance criteria, task identity and state revision, and nonempty runtime facts or references. It omits UI metadata and empty optional fields. `include_task=true` adds the original task instructions; owner views keep the full stored result.\n\n| Tool | Business output type | Catalog version | Possible delivery |\n|---|---|---:|---|\n",
     );
     for contract in ALL {
         document.push_str(&format!(
@@ -447,7 +454,7 @@ pub fn markdown() -> String {
 
 pub fn markdown_zh() -> String {
     let mut document = String::from(
-        "# AI 助手出参契约目录\n\n由 `diagnose-core/src/output_contracts.rs` 生成。目录版本是映射版本，并不表示每个业务对象都有 `schema_version` 字段。错误可能以安全文本返回；结果外置时须先读取附件，再判断业务内容。\n\n| 工具 | 业务出参类型 | 目录版本 | 可能的投递形态 |\n|---|---|---:|---|\n",
+        "# AI 助手出参契约目录\n\n由 `diagnose-core/src/output_contracts.rs` 生成。目录版本是映射版本，并不表示每个业务对象都有 `schema_version` 字段。错误可能以安全文本返回；结果外置时须先读取附件，再判断业务内容。\n\n`read_subagent_result` 返回 `SubAgentModelResult`：完整答复、冻结完成标准、任务身份和状态版本，以及非空运行事实或引用；省略 UI 元数据和空可选字段。`include_task=true` 补回冻结的原任务说明；用户界面仍保留完整存储结果。\n\n| 工具 | 业务出参类型 | 目录版本 | 可能的投递形态 |\n|---|---|---:|---|\n",
     );
     for contract in ALL {
         document.push_str(&format!(
@@ -498,7 +505,7 @@ mod tests {
         ] {
             assert!(for_tool(builtin).is_some());
         }
-        assert_eq!(ALL.len(), 75);
+        assert_eq!(ALL.len(), 82);
     }
 
     #[test]

@@ -213,6 +213,33 @@ impl ApprovalDelegation {
         Ok(())
     }
 
+    /// Release a claimed review whose atomic send boundary never committed.
+    /// This changes accounting only and does not renew the delegation.
+    pub fn release_unstarted_review(
+        &mut self,
+        reserved_tokens: u64,
+        reserved_cost_micros: u64,
+    ) -> Result<(), ApprovalDelegationError> {
+        self.validate()?;
+        if reserved_tokens == 0
+            || reserved_cost_micros == 0
+            || self.usage.reviews_reserved == 0
+            || self.usage.tokens_reserved < reserved_tokens
+            || self.usage.cost_reserved_micros < reserved_cost_micros
+        {
+            return Err(ApprovalDelegationError::BudgetExceeded);
+        }
+        let version = self
+            .ledger_version
+            .checked_add(1)
+            .ok_or(ApprovalDelegationError::BudgetExceeded)?;
+        self.usage.reviews_reserved -= 1;
+        self.usage.tokens_reserved -= reserved_tokens;
+        self.usage.cost_reserved_micros -= reserved_cost_micros;
+        self.ledger_version = version;
+        Ok(())
+    }
+
     /// Unknown usage is charged at the reserved upper bound. No failure path
     /// silently refunds a request whose provider may already have processed it.
     pub fn settle(
@@ -226,8 +253,6 @@ impl ApprovalDelegation {
         if self.usage.reviews_reserved == 0
             || self.usage.tokens_reserved < reserved_tokens
             || self.usage.cost_reserved_micros < reserved_cost_micros
-            || actual_tokens.is_some_and(|used| used > reserved_tokens)
-            || actual_cost_micros.is_some_and(|used| used > reserved_cost_micros)
         {
             return Err(ApprovalDelegationError::InvalidState);
         }
@@ -249,6 +274,48 @@ impl ApprovalDelegation {
             .usage
             .cost_used_micros
             .checked_add(actual_cost_micros.unwrap_or(reserved_cost_micros))
+            .ok_or(ApprovalDelegationError::InvalidState)?;
+        staged.ledger_version = staged
+            .ledger_version
+            .checked_add(1)
+            .ok_or(ApprovalDelegationError::InvalidState)?;
+        staged.validate()?;
+        *self = staged;
+        Ok(())
+    }
+
+    /// Replace one unknown review's held contribution with durable provider
+    /// usage. The host CASes that record in the same transaction to prevent replay.
+    pub fn reconcile_review_usage(
+        &mut self,
+        previous: crate::approval_cost::ReviewUsageSettlement,
+        actual: crate::approval_cost::ReviewUsageSettlement,
+    ) -> Result<(), ApprovalDelegationError> {
+        self.validate()?;
+        if previous.schema_version != 1
+            || actual.schema_version != 1
+            || !previous.provider_started
+            || previous.usage_known
+            || !actual.provider_started
+            || !actual.usage_known
+            || previous.tokens == 0
+            || previous.cost_micros == 0
+            || self.usage.reviews_used == 0
+        {
+            return Err(ApprovalDelegationError::InvalidState);
+        }
+        let mut staged = self.clone();
+        staged.usage.tokens_used = staged
+            .usage
+            .tokens_used
+            .checked_sub(previous.tokens)
+            .and_then(|remaining| remaining.checked_add(actual.tokens))
+            .ok_or(ApprovalDelegationError::InvalidState)?;
+        staged.usage.cost_used_micros = staged
+            .usage
+            .cost_used_micros
+            .checked_sub(previous.cost_micros)
+            .and_then(|remaining| remaining.checked_add(actual.cost_micros))
             .ok_or(ApprovalDelegationError::InvalidState)?;
         staged.ledger_version = staged
             .ledger_version
@@ -357,6 +424,33 @@ mod tests {
     }
 
     #[test]
+    fn unstarted_review_releases_allocation_without_a_used_review_or_new_authority() {
+        let mut delegation = delegation();
+        let revision = delegation.revision;
+        delegation.reserve(4000, 20000).unwrap();
+        delegation.close(ApprovalDelegationStatus::Closed).unwrap();
+        let closed_revision = delegation.revision;
+        delegation.release_unstarted_review(4000, 20000).unwrap();
+        assert_eq!(delegation.usage, ApprovalDelegationUsage::default());
+        assert_eq!(delegation.status, ApprovalDelegationStatus::Closed);
+        assert_eq!(delegation.revision, closed_revision);
+        assert!(closed_revision > revision);
+        let before = delegation.clone();
+        assert!(delegation.release_unstarted_review(4000, 20000).is_err());
+        assert_eq!(delegation, before);
+    }
+
+    #[test]
+    fn unstarted_release_overflow_does_not_partially_refund() {
+        let mut delegation = delegation();
+        delegation.reserve(4000, 20000).unwrap();
+        delegation.ledger_version = u64::MAX;
+        let before = delegation.clone();
+        assert!(delegation.release_unstarted_review(4000, 20000).is_err());
+        assert_eq!(delegation, before);
+    }
+
+    #[test]
     fn closing_changes_authority_and_ledger_versions() {
         let mut delegation = delegation();
         delegation.reserve(4_000, 20_000).unwrap();
@@ -393,6 +487,95 @@ mod tests {
             delegation.reserve(1, 1),
             Err(ApprovalDelegationError::BudgetExceeded)
         );
+        assert_eq!(delegation, before);
+    }
+    #[test]
+    fn late_review_accounting_replaces_one_contribution_without_reopening_authority() {
+        use crate::approval_cost::ReviewUsageSettlement;
+        let mut delegation = delegation();
+        delegation.reserve(100, 200).unwrap();
+        delegation.settle(100, 200, None, None).unwrap();
+        delegation.reserve(20, 30).unwrap();
+        delegation.settle(20, 30, Some(12), Some(13)).unwrap();
+        delegation.reserve(40, 50).unwrap();
+        delegation.close(ApprovalDelegationStatus::Closed).unwrap();
+        let before = delegation.clone();
+        let previous =
+            ReviewUsageSettlement::from_provider_fact(true, None, None, 100, 200).unwrap();
+        let actual =
+            ReviewUsageSettlement::from_provider_fact(true, Some(7), Some(9), 100, 200).unwrap();
+        delegation.reconcile_review_usage(previous, actual).unwrap();
+        assert_eq!(delegation.usage.tokens_used, 19);
+        assert_eq!(delegation.usage.cost_used_micros, 22);
+        assert_eq!(delegation.usage.reviews_used, 2);
+        assert_eq!(delegation.usage.reviews_reserved, 1);
+        assert_eq!(delegation.usage.tokens_reserved, 40);
+        assert_eq!(delegation.usage.cost_reserved_micros, 50);
+        assert_eq!(delegation.status, before.status);
+        assert_eq!(delegation.revision, before.revision);
+        assert_eq!(delegation.ledger_version, before.ledger_version + 1);
+        assert!(
+            delegation
+                .require_current("conversation", "owner", "device")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn actual_review_overage_remains_fully_accounted() {
+        use crate::approval_cost::ReviewUsageSettlement;
+        let mut delegation = delegation();
+        delegation.reserve(100, 200).unwrap();
+        delegation.settle(100, 200, Some(150), Some(250)).unwrap();
+        delegation.reserve(100, 200).unwrap();
+        delegation.settle(100, 200, None, None).unwrap();
+        let previous =
+            ReviewUsageSettlement::from_provider_fact(true, None, None, 100, 200).unwrap();
+        let actual =
+            ReviewUsageSettlement::from_provider_fact(true, Some(170), Some(290), 100, 200)
+                .unwrap();
+        delegation.reconcile_review_usage(previous, actual).unwrap();
+        assert_eq!(delegation.usage.tokens_used, 320);
+        assert_eq!(delegation.usage.cost_used_micros, 540);
+        assert_eq!(delegation.usage.reviews_used, 2);
+    }
+
+    #[test]
+    fn late_review_invalid_transition_and_overflow_preserve_the_entire_ledger() {
+        use crate::approval_cost::ReviewUsageSettlement;
+        let mut delegation = delegation();
+        delegation.reserve(100, 200).unwrap();
+        delegation.settle(100, 200, None, None).unwrap();
+        let unknown =
+            ReviewUsageSettlement::from_provider_fact(true, None, None, 100, 200).unwrap();
+        let known =
+            ReviewUsageSettlement::from_provider_fact(true, Some(7), Some(9), 100, 200).unwrap();
+        let unstarted =
+            ReviewUsageSettlement::from_provider_fact(false, None, None, 100, 200).unwrap();
+        for (previous, actual) in [
+            (known, known),
+            (unknown, unknown),
+            (unstarted, known),
+            (unknown, unstarted),
+        ] {
+            let before = delegation.clone();
+            assert!(delegation.reconcile_review_usage(previous, actual).is_err());
+            assert_eq!(delegation, before);
+        }
+        delegation.usage.tokens_used = 99;
+        let before = delegation.clone();
+        assert!(delegation.reconcile_review_usage(unknown, known).is_err());
+        assert_eq!(delegation, before);
+        delegation.usage.tokens_used = u64::MAX;
+        let huge =
+            ReviewUsageSettlement::from_provider_fact(true, Some(101), Some(9), 100, 200).unwrap();
+        let before = delegation.clone();
+        assert!(delegation.reconcile_review_usage(unknown, huge).is_err());
+        assert_eq!(delegation, before);
+        delegation.usage.tokens_used = 100;
+        delegation.ledger_version = u64::MAX;
+        let before = delegation.clone();
+        assert!(delegation.reconcile_review_usage(unknown, known).is_err());
         assert_eq!(delegation, before);
     }
 }

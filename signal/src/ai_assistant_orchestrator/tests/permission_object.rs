@@ -27,7 +27,7 @@ mod scheduled;
 pub(super) fn tool_reply(name: &str, arguments: serde_json::Value) -> String {
     let delta = serde_json::json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":format!("call-{name}"),"type":"function","function":{"name":name,"arguments":arguments.to_string()}}]}}]});
     format!(
-        "data: {delta}\n\ndata: {{\"choices\":[{{\"delta\":{{}},\"finish_reason\":\"tool_calls\"}}]}}\n\ndata: [DONE]\n\n"
+        "data: {delta}\n\ndata: {{\"choices\":[{{\"delta\":{{}},\"finish_reason\":\"tool_calls\"}}]}}\n\ndata: {{\"choices\":[],\"usage\":{{\"prompt_tokens\":5,\"completion_tokens\":2}}}}\n\ndata: [DONE]\n\n"
     )
 }
 
@@ -105,7 +105,16 @@ async fn run_case(change: Option<&str>, mode: ResumeMode) {
     Box::pin(run_case_with_live(change, mode, false)).await;
 }
 
-async fn run_case_with_live(change: Option<&str>, mode: ResumeMode, live: bool) {
+#[inline(never)]
+fn run_case_with_live(
+    change: Option<&str>,
+    mode: ResumeMode,
+    live: bool,
+) -> std::pin::Pin<Box<impl std::future::Future<Output = ()> + '_>> {
+    Box::pin(run_case_with_live_inner(change, mode, live))
+}
+
+async fn run_case_with_live_inner(change: Option<&str>, mode: ResumeMode, live: bool) {
     let scanner = matches!(mode, ResumeMode::Scan | ResumeMode::Loop);
     let directory = tempfile::tempdir().unwrap();
     let url = if scanner {
@@ -118,6 +127,7 @@ async fn run_case_with_live(change: Option<&str>, mode: ResumeMode, live: bool) 
     };
     let db = Database::connect(&url).await.unwrap();
     crate::db::initialize_schema(&db).await.unwrap();
+    crate::ai_assistant_gate::enable_test_host();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let config = crate::model_provider::ModelProviderConfig {
@@ -350,9 +360,11 @@ async fn run_case_with_live(change: Option<&str>, mode: ResumeMode, live: bool) 
         .unwrap()
         .context_attachments
         .remove(0);
+    // The real input controller starts an independent task. Keep this large
+    // multi-phase fixture off the production input driver's poll stack too.
     let initial = tokio::time::timeout(
         Duration::from_secs(10),
-        run_turn_inner(
+        actix_web::rt::spawn(run_turn_inner(
             connections.clone(),
             db.clone(),
             "first".into(),
@@ -377,7 +389,7 @@ async fn run_case_with_live(change: Option<&str>, mode: ResumeMode, live: bool) 
                 ..Default::default()
             },
             None,
-        ),
+        )),
     )
     .await;
     assert!(
@@ -385,6 +397,7 @@ async fn run_case_with_live(change: Option<&str>, mode: ResumeMode, live: bool) 
         "initial turn timed out: {:?}",
         sessions.read_snapshot(&run_id).await.unwrap()
     );
+    initial.unwrap().unwrap();
     let snapshot = sessions.read_snapshot(&run_id).await.unwrap().unwrap();
     assert_eq!(snapshot.permission_requests.len(), 1, "{snapshot:?}");
     let request = &snapshot.permission_requests[0];
@@ -503,225 +516,227 @@ async fn run_case_with_live(change: Option<&str>, mode: ResumeMode, live: bool) 
             .unwrap();
         assert_eq!(row.state, "pending");
     }
-    let resume = || async {
-        if let Some(scheduled_run) = &scheduled_run {
-            if matches!(mode, ResumeMode::ScheduledScan | ResumeMode::ScheduledLoop) {
-                let executor = crate::schedule_executor::SignalScheduleExecutor::new(
-                    db.clone(),
-                    connections.clone(),
-                    std::sync::Arc::new(crate::ai_assistant_gate::AiAssistantGate::new(
-                        desk_agent_protocol::ai_assistant::AiAssistantSettings {
-                            enabled: true,
-                            revision: 1,
-                        },
-                    )),
-                );
-                if mode == ResumeMode::ScheduledLoop {
-                    let runner = actix_web::rt::spawn(executor.clone().run());
-                    let completed = tokio::time::timeout(Duration::from_secs(12), async {
-                        loop {
-                            let work = crate::entity::agent_schedule_run::Entity::find()
-                                .filter(
-                                    crate::entity::agent_schedule_run::Column::RunId
-                                        .eq(scheduled_run),
-                                )
-                                .one(&db)
-                                .await
-                                .unwrap()
-                                .unwrap();
-                            if work.failure_accounted {
-                                break;
-                            }
-                            tokio::time::sleep(Duration::from_millis(25)).await;
-                        }
-                    })
-                    .await;
-                    runner.abort();
-                    let _ = runner.await;
-                    completed.unwrap();
-                } else {
-                    let scan_a = executor.clone();
-                    let scan_b = executor.clone();
-                    let (first, second) = tokio::join!(
-                        actix_web::rt::spawn(async move { scan_a.scan_once(0).await }),
-                        actix_web::rt::spawn(async move { scan_b.scan_once(0).await }),
+    let resume = || {
+        Box::pin(async {
+            if let Some(scheduled_run) = &scheduled_run {
+                if matches!(mode, ResumeMode::ScheduledScan | ResumeMode::ScheduledLoop) {
+                    let executor = crate::schedule_executor::SignalScheduleExecutor::new(
+                        db.clone(),
+                        connections.clone(),
+                        std::sync::Arc::new(crate::ai_assistant_gate::AiAssistantGate::new(
+                            desk_agent_protocol::ai_assistant::AiAssistantSettings {
+                                enabled: true,
+                                revision: 1,
+                            },
+                        )),
                     );
-                    let (first, second) = (first.unwrap(), second.unwrap());
-                    let (first, second) = (first.unwrap(), second.unwrap());
-                    assert_eq!(first.settled + second.settled, 1);
-                    assert_eq!(first.needs_reconciliation + second.needs_reconciliation, 0);
-                }
-                assert_eq!(executor.scan_once(0).await.unwrap().scanned, 0);
-                let work = crate::entity::agent_schedule_run::Entity::find()
-                    .filter(crate::entity::agent_schedule_run::Column::RunId.eq(scheduled_run))
-                    .one(&db)
-                    .await
-                    .unwrap()
-                    .unwrap();
-                assert_eq!(work.status, "succeeded");
-                assert_eq!(work.attempt, 1);
-                return;
-            }
-            let gate = crate::ai_assistant_gate::AiAssistantGate::new(
-                desk_agent_protocol::ai_assistant::AiAssistantSettings {
-                    enabled: true,
-                    revision: 1,
-                },
-            );
-            assert!(
-                claim_scheduled_permission(
-                    connections.as_ref(),
-                    &db,
-                    &crate::ai_assistant_gate::AiAssistantGate::default(),
-                    scheduled_run,
-                    90
-                )
-                .await
-                .is_err()
-            );
-            let original_host = map.write().await.remove(&host).unwrap();
-            assert!(
-                claim_scheduled_permission(connections.as_ref(), &db, &gate, scheduled_run, 90)
-                    .await
-                    .is_err()
-            );
-            map.write()
-                .await
-                .insert(host.clone(), original_host.clone());
-            let duplicate = format!("{host}-duplicate");
-            map.write().await.insert(duplicate.clone(), original_host);
-            assert!(
-                claim_scheduled_permission(connections.as_ref(), &db, &gate, scheduled_run, 90)
-                    .await
-                    .is_err()
-            );
-            map.write().await.remove(&duplicate);
-            let cache = crate::computer_use_readiness::global_computer_use_readiness_cache();
-            let cached = cache.get_fresh(&host, Utc::now()).unwrap();
-            cache.remove_connection(&host);
-            assert!(
-                claim_scheduled_permission(connections.as_ref(), &db, &gate, scheduled_run, 90)
-                    .await
-                    .is_err()
-            );
-            cache.update(&host, cached.readiness, Utc::now()).unwrap();
-            let prepared =
-                claim_scheduled_permission(connections.as_ref(), &db, &gate, scheduled_run, 90)
-                    .await
-                    .unwrap();
-            assert!(
-                claim_scheduled_permission(connections.as_ref(), &db, &gate, scheduled_run, 90)
-                    .await
-                    .is_err()
-            );
-            let epoch = prepared.claimed.run.lease_epoch;
-            let token = prepared.claimed.session.lease_token;
-            if change == Some("scheduled_revoke") {
-                crate::capability_grant_store::SignalCapabilityGrantStore::new(db.clone())
-                    .revoke(
-                        &grants[0].grant_id,
-                        "1",
-                        "device",
-                        Utc::now().timestamp_millis() as u64,
-                        "owner revoked",
-                    )
-                    .await
-                    .unwrap();
-            }
-            let continuation_connections = connections.clone();
-            let continuation_db = db.clone();
-            let outcome = actix_web::rt::spawn(async move {
-                resume_scheduled_turn(
-                    continuation_connections,
-                    continuation_db,
-                    &gate,
-                    prepared.target_connection_id,
-                    prepared.claimed,
-                    90,
-                )
-                .await
-            })
-            .await
-            .unwrap()
-            .unwrap();
-            let LoopOutcome::Answered(answer) = outcome else {
-                panic!("scheduled read must finish with an answer")
-            };
-            let settled = crate::schedule_store::ScheduleStore::new(db.clone())
-                .finish_answered_continuation(
-                    crate::schedule_store::ContinuationLease {
-                        owner: 1,
-                        run_id: scheduled_run,
-                        node_id: "oss-scheduler",
-                        run_epoch: epoch,
-                        session_token: token,
-                    },
-                    &answer,
-                )
-                .await
-                .unwrap();
-            assert_eq!(settled.status, "succeeded");
-            assert_eq!(settled.attempt, 1);
-            return;
-        }
-        if mode == ResumeMode::Loop {
-            let runner = actix_web::rt::spawn(executor.clone().run());
-            let settled = tokio::time::timeout(Duration::from_secs(12), async {
-                loop {
-                    let row = crate::entity::agent_permission_resume::Entity::find()
+                    if mode == ResumeMode::ScheduledLoop {
+                        let runner = actix_web::rt::spawn(executor.clone().run());
+                        let completed = tokio::time::timeout(Duration::from_secs(12), async {
+                            loop {
+                                let work = crate::entity::agent_schedule_run::Entity::find()
+                                    .filter(
+                                        crate::entity::agent_schedule_run::Column::RunId
+                                            .eq(scheduled_run),
+                                    )
+                                    .one(&db)
+                                    .await
+                                    .unwrap()
+                                    .unwrap();
+                                if work.failure_accounted {
+                                    break;
+                                }
+                                tokio::time::sleep(Duration::from_millis(25)).await;
+                            }
+                        })
+                        .await;
+                        runner.abort();
+                        let _ = runner.await;
+                        completed.unwrap();
+                    } else {
+                        let scan_a = executor.clone();
+                        let scan_b = executor.clone();
+                        let (first, second) = tokio::join!(
+                            actix_web::rt::spawn(async move { scan_a.scan_once(0).await }),
+                            actix_web::rt::spawn(async move { scan_b.scan_once(0).await }),
+                        );
+                        let (first, second) = (first.unwrap(), second.unwrap());
+                        let (first, second) = (first.unwrap(), second.unwrap());
+                        assert_eq!(first.settled + second.settled, 1);
+                        assert_eq!(first.needs_reconciliation + second.needs_reconciliation, 0);
+                    }
+                    assert_eq!(executor.scan_once(0).await.unwrap().scanned, 0);
+                    let work = crate::entity::agent_schedule_run::Entity::find()
+                        .filter(crate::entity::agent_schedule_run::Column::RunId.eq(scheduled_run))
                         .one(&db)
                         .await
                         .unwrap()
                         .unwrap();
-                    if row.state == "settled" {
-                        break;
-                    }
-                    tokio::time::sleep(Duration::from_millis(25)).await;
+                    assert_eq!(work.status, "succeeded");
+                    assert_eq!(work.attempt, 1);
+                    return;
                 }
-            })
-            .await;
-            runner.abort();
-            let _ = runner.await;
-            settled.unwrap();
-            return;
-        }
-        if scanner {
-            let scan_a = executor.clone();
-            let scan_b = executor.clone();
-            let (first, second) = tokio::join!(
-                actix_web::rt::spawn(async move { scan_a.scan_once(0).await }),
-                actix_web::rt::spawn(async move { scan_b.scan_once(0).await }),
-            );
-            let (first, second) = (first.unwrap(), second.unwrap());
-            first.unwrap();
-            second.unwrap();
-            return;
-        }
-        // Match the HTTP controller's task boundary: the fixture's large poll
-        // frame must not remain on the production continuation's call stack.
-        actix_web::rt::spawn(resume_after_permission_decision(
-            connections.clone(),
-            db.clone(),
-            format!("permission-resume-{}", request.request_id),
-            host.clone(),
-            if change == Some("subject") { 8 } else { 1 },
-            "device".into(),
-            run_id.clone(),
-            if change == Some("decision") {
-                "missing-decision".into()
-            } else {
-                request.request_id.clone()
-            },
-            AiAssistantAsk {
-                question: "UNTRUSTED REPLAY TEXT".into(),
-                client_message_id: "unused".into(),
-                // Exercise the mobile session-only continuation and do not supply current selections.
-                conversation_id: None,
-                ..Default::default()
-            },
-        ))
-        .await
-        .unwrap();
+                let gate = crate::ai_assistant_gate::AiAssistantGate::new(
+                    desk_agent_protocol::ai_assistant::AiAssistantSettings {
+                        enabled: true,
+                        revision: 1,
+                    },
+                );
+                assert!(
+                    claim_scheduled_permission(
+                        connections.as_ref(),
+                        &db,
+                        &crate::ai_assistant_gate::AiAssistantGate::default(),
+                        scheduled_run,
+                        90
+                    )
+                    .await
+                    .is_err()
+                );
+                let original_host = map.write().await.remove(&host).unwrap();
+                assert!(
+                    claim_scheduled_permission(connections.as_ref(), &db, &gate, scheduled_run, 90)
+                        .await
+                        .is_err()
+                );
+                map.write()
+                    .await
+                    .insert(host.clone(), original_host.clone());
+                let duplicate = format!("{host}-duplicate");
+                map.write().await.insert(duplicate.clone(), original_host);
+                assert!(
+                    claim_scheduled_permission(connections.as_ref(), &db, &gate, scheduled_run, 90)
+                        .await
+                        .is_err()
+                );
+                map.write().await.remove(&duplicate);
+                let cache = crate::computer_use_readiness::global_computer_use_readiness_cache();
+                let cached = cache.get_fresh(&host, Utc::now()).unwrap();
+                cache.remove_connection(&host);
+                assert!(
+                    claim_scheduled_permission(connections.as_ref(), &db, &gate, scheduled_run, 90)
+                        .await
+                        .is_err()
+                );
+                cache.update(&host, cached.readiness, Utc::now()).unwrap();
+                let prepared =
+                    claim_scheduled_permission(connections.as_ref(), &db, &gate, scheduled_run, 90)
+                        .await
+                        .unwrap();
+                assert!(
+                    claim_scheduled_permission(connections.as_ref(), &db, &gate, scheduled_run, 90)
+                        .await
+                        .is_err()
+                );
+                let epoch = prepared.claimed.run.lease_epoch;
+                let token = prepared.claimed.session.lease_token;
+                if change == Some("scheduled_revoke") {
+                    crate::capability_grant_store::SignalCapabilityGrantStore::new(db.clone())
+                        .revoke(
+                            &grants[0].grant_id,
+                            "1",
+                            "device",
+                            Utc::now().timestamp_millis() as u64,
+                            "owner revoked",
+                        )
+                        .await
+                        .unwrap();
+                }
+                let continuation_connections = connections.clone();
+                let continuation_db = db.clone();
+                let outcome = actix_web::rt::spawn(async move {
+                    resume_scheduled_turn(
+                        continuation_connections,
+                        continuation_db,
+                        &gate,
+                        prepared.target_connection_id,
+                        prepared.claimed,
+                        90,
+                    )
+                    .await
+                })
+                .await
+                .unwrap()
+                .unwrap();
+                let LoopOutcome::Answered(answer) = outcome else {
+                    panic!("scheduled read must finish with an answer")
+                };
+                let settled = crate::schedule_store::ScheduleStore::new(db.clone())
+                    .finish_answered_continuation(
+                        crate::schedule_store::ContinuationLease {
+                            owner: 1,
+                            run_id: scheduled_run,
+                            node_id: "oss-scheduler",
+                            run_epoch: epoch,
+                            session_token: token,
+                        },
+                        &answer,
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(settled.status, "succeeded");
+                assert_eq!(settled.attempt, 1);
+                return;
+            }
+            if mode == ResumeMode::Loop {
+                let runner = actix_web::rt::spawn(executor.clone().run());
+                let settled = tokio::time::timeout(Duration::from_secs(12), async {
+                    loop {
+                        let row = crate::entity::agent_permission_resume::Entity::find()
+                            .one(&db)
+                            .await
+                            .unwrap()
+                            .unwrap();
+                        if row.state == "settled" {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(25)).await;
+                    }
+                })
+                .await;
+                runner.abort();
+                let _ = runner.await;
+                settled.unwrap();
+                return;
+            }
+            if scanner {
+                let scan_a = executor.clone();
+                let scan_b = executor.clone();
+                let (first, second) = tokio::join!(
+                    actix_web::rt::spawn(async move { scan_a.scan_once(0).await }),
+                    actix_web::rt::spawn(async move { scan_b.scan_once(0).await }),
+                );
+                let (first, second) = (first.unwrap(), second.unwrap());
+                first.unwrap();
+                second.unwrap();
+                return;
+            }
+            // Match the HTTP controller's task boundary: the fixture's large poll
+            // frame must not remain on the production continuation's call stack.
+            actix_web::rt::spawn(resume_after_permission_decision(
+                connections.clone(),
+                db.clone(),
+                format!("permission-resume-{}", request.request_id),
+                host.clone(),
+                if change == Some("subject") { 8 } else { 1 },
+                "device".into(),
+                run_id.clone(),
+                if change == Some("decision") {
+                    "missing-decision".into()
+                } else {
+                    request.request_id.clone()
+                },
+                AiAssistantAsk {
+                    question: "UNTRUSTED REPLAY TEXT".into(),
+                    client_message_id: "unused".into(),
+                    // Exercise the mobile session-only continuation and do not supply current selections.
+                    conversation_id: None,
+                    ..Default::default()
+                },
+            ))
+            .await
+            .unwrap();
+        })
     };
 
     if matches!(change, Some("readiness" | "legacy")) {

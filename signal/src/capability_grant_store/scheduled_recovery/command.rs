@@ -10,18 +10,75 @@ pub(super) async fn reconcile_on(
     payload: &CapabilityDispatchPayload,
     now_ms: u64,
 ) -> Result<(String, ActionIdentity, bool), DbErr> {
+    reconcile_inner_on(txn, session, outbox, work, payload, now_ms, None).await
+}
+
+/// Observe an original published command after its planner fence has advanced.
+/// The historical grant authorizes receipt recovery only, never another send.
+pub(in crate::capability_grant_store) async fn reconcile_history_on(
+    txn: &DatabaseTransaction,
+    session: &mut PersistedAgentSession,
+    outbox: &agent_capability_dispatch_outbox::Model,
+    work: &agent_action_item::Model,
+    payload: &CapabilityDispatchPayload,
+    now_ms: u64,
+    context: &crate::schedule_store::TaskReceiptContext,
+) -> Result<(String, ActionIdentity, bool), DbErr> {
+    reconcile_inner_on(txn, session, outbox, work, payload, now_ms, Some(context)).await
+}
+
+async fn reconcile_inner_on(
+    txn: &DatabaseTransaction,
+    session: &mut PersistedAgentSession,
+    outbox: &agent_capability_dispatch_outbox::Model,
+    work: &agent_action_item::Model,
+    payload: &CapabilityDispatchPayload,
+    now_ms: u64,
+    history: Option<&crate::schedule_store::TaskReceiptContext>,
+) -> Result<(String, ActionIdentity, bool), DbErr> {
     let origin = payload.command_origin.as_ref().ok_or_else(invalid)?;
     origin.validate().map_err(|_| invalid())?;
     if outbox.computer_binding_json.is_some()
         || payload.tool_name != desk_diagnose_core::command_confirmation::COMMAND_TOOL
         || origin.tool_name != payload.tool_name
         || origin.provider_id != payload.provider_id
-        || AssistantTurnFence::from_session(session)
-            .map_err(|_| invalid())?
-            .as_ref()
-            != Some(&origin.turn_fence)
+        || (history.is_none()
+            && session.agent_role.is_main()
+            && AssistantTurnFence::from_session(session)
+                .map_err(|_| invalid())?
+                .as_ref()
+                != Some(&origin.turn_fence))
     {
         return Err(invalid());
+    }
+    if let Some(context) = history {
+        let fence = &origin.turn_fence;
+        if !session.agent_role.is_main()
+            || session.trigger_origin != TriggerOrigin::ScheduledTask
+            || session.conversation_id != context.run_id()
+            || fence.delegation.is_some()
+            || fence.conversation_id != session.conversation_id
+            || fence.actor_id != session.actor_id
+            || fence.device_id != session.device_id
+            || fence.input_revision != session.input_revision
+            || fence.input_revision != 1
+            || session.current_turn_id.as_deref() != Some(fence.turn_id.as_str())
+            || fence.lease_token > session.lease_token
+            || fence.control_revision > session.control_revision
+            || work.actor_id != session.actor_id
+            || work.target_device_id != session.device_id
+            || work.conversation_id != session.conversation_id
+            || work.turn_id != fence.turn_id
+            || work.manual_resolved_at.is_some()
+        {
+            return Err(invalid());
+        }
+        SignalCapabilityGrantStore::validate_task_dispatch_history_on(
+            txn,
+            &payload.dispatch_id,
+            context.provenance(),
+        )
+        .await?;
     }
     let proposals: Vec<_> = session
         .conversation
@@ -46,31 +103,60 @@ pub(super) async fn reconcile_on(
         serde_json::from_str(&call.arguments_json).map_err(|_| invalid())?,
     )
     .map_err(|_| invalid())?;
-    if canonical != payload.canonical_input_json {
+    if call.name != payload.tool_name || canonical != payload.canonical_input_json {
         return Err(invalid());
     }
-    let mut expected = ActionResultOrigin::capture(
-        &desk_diagnose_core::ai_assistant::ai_assistant_provider_registry(),
-        session,
-        &call,
-    )
-    .map_err(|_| invalid())?;
-    let context = origin.command_completion.as_ref().ok_or_else(invalid)?;
-    if context.context_sha256
-        != desk_diagnose_core::command_completion::context_digest(session).map_err(|_| invalid())?
+    if history.is_some()
+        && !session.conversation.iter().any(|message| {
+            message.role == ChatRole::Assistant
+                && message.turn_id.as_deref() == Some(work.turn_id.as_str())
+                && message
+                    .tool_calls
+                    .iter()
+                    .any(|proposal| proposal.id == call.id)
+                && message.data_envelope.as_ref().is_some_and(|envelope| {
+                    envelope.validate().is_ok()
+                        && origin.source_envelope_ids.contains(&envelope.envelope_id)
+                })
+        })
     {
         return Err(invalid());
     }
-    expected.retention.expires_at_unix_ms = Some(context.expires_at_unix_ms);
-    expected.command_completion = Some(context.clone());
-    if &expected != origin {
-        return Err(invalid());
+    if session.agent_role.binding().is_some() {
+        desk_diagnose_core::subagent::facts::validate_origin(session, origin)
+            .map_err(|_| invalid())?;
+    } else if history.is_none() {
+        let mut expected = ActionResultOrigin::capture(
+            &desk_diagnose_core::ai_assistant::ai_assistant_provider_registry(),
+            session,
+            &call,
+        )
+        .map_err(|_| invalid())?;
+        let context = origin.command_completion.as_ref().ok_or_else(invalid)?;
+        if context.context_sha256
+            != desk_diagnose_core::command_completion::context_digest(session)
+                .map_err(|_| invalid())?
+        {
+            return Err(invalid());
+        }
+        expected.retention.expires_at_unix_ms = Some(context.expires_at_unix_ms);
+        expected.command_completion = Some(context.clone());
+        if &expected != origin {
+            return Err(invalid());
+        }
     }
     let task = agent_exec_task::Entity::find()
         .filter(agent_exec_task::Column::ExecutionGeneration.eq(&payload.dispatch_id))
         .one(txn)
-        .await?
-        .ok_or_else(invalid)?;
+        .await?;
+    let Some(task) = task else {
+        if session.agent_role.binding().is_some() {
+            let (call, action) =
+                super::unbound::reconcile_on(txn, session, outbox, work, payload, now_ms).await?;
+            return Ok((call, action, true));
+        }
+        return Err(invalid());
+    };
     if task.exec_request_id != payload.call_id
         || task.conversation_id != session.conversation_id
         || task.tool_call_id != call.id
@@ -152,7 +238,8 @@ pub(super) async fn reconcile_on(
         {
             return Err(invalid());
         }
-        if existing.is_empty() {
+        let newly_delivered = existing.is_empty();
+        if newly_delivered {
             let execution = session
                 .execution_state
                 .execution(&action.execution_id)
@@ -182,22 +269,48 @@ pub(super) async fn reconcile_on(
             );
         }
         session.execution_state.remove(&action);
-        // The recovered turn owns delivery, including a foreground result with
-        // a different message ID. A publisher must not create another follow-up.
-        agent_exec_task::Entity::update_many()
-            .set(agent_exec_task::ActiveModel {
-                delivery_state: Set(crate::agent_exec_store::DELIVERY_CONSUMED.into()),
-                ..Default::default()
-            })
-            .filter(agent_exec_task::Column::Id.eq(task.id))
-            .filter(agent_exec_task::Column::ExecutionGeneration.eq(&task.execution_generation))
-            .filter(agent_exec_task::Column::Status.eq(crate::agent_exec_store::STATUS_DONE))
-            .filter(
-                agent_exec_task::Column::DeliveryState
-                    .eq(crate::agent_exec_store::DELIVERY_PENDING),
-            )
-            .exec(txn)
-            .await?;
+        if newly_delivered
+            && session.agent_role.binding().is_some()
+            && origin.turn_fence.input_revision == session.input_revision
+        {
+            session.add_pending_auto_trigger(desk_diagnose_core::session::PendingAutoTrigger {
+                work_id: action.work_id,
+                kind: WorkKind::AgentExec,
+                execution_id: action.execution_id.clone(),
+                tool_call_id: call.id.clone(),
+                event_id: task.event_id.clone(),
+                chain_id: session.chain_id.clone(),
+                resolution_org_id: None,
+                since: timestamp(now_ms)?.to_rfc3339(),
+            });
+        }
+        // A child still needs the original tool-free interpreter. Keep its
+        // native delivery pending until that interpreter drains the trigger.
+        // Scheduled/foreground recovery otherwise owns delivery itself.
+        let pending_child_interpretation = session.agent_role.binding().is_some()
+            && session.pending_auto_triggers.iter().any(|pending| {
+                pending.kind == WorkKind::AgentExec
+                    && pending.chain_id == session.chain_id
+                    && pending.event_id == task.event_id
+                    && pending.execution_id == task.execution_generation
+                    && pending.tool_call_id == task.tool_call_id
+            });
+        if !pending_child_interpretation {
+            agent_exec_task::Entity::update_many()
+                .set(agent_exec_task::ActiveModel {
+                    delivery_state: Set(crate::agent_exec_store::DELIVERY_CONSUMED.into()),
+                    ..Default::default()
+                })
+                .filter(agent_exec_task::Column::Id.eq(task.id))
+                .filter(agent_exec_task::Column::ExecutionGeneration.eq(&task.execution_generation))
+                .filter(agent_exec_task::Column::Status.eq(crate::agent_exec_store::STATUS_DONE))
+                .filter(
+                    agent_exec_task::Column::DeliveryState
+                        .eq(crate::agent_exec_store::DELIVERY_PENDING),
+                )
+                .exec(txn)
+                .await?;
+        }
         return Ok((call.id, action, false));
     }
     if !matches!(task.status.as_str(), "dispatching" | "running" | "unknown")

@@ -16,11 +16,35 @@ pub(super) fn drive<'a>(
 ) -> Pin<Box<dyn Future<Output = Result<LoopOutcome, AgentError>> + 'a>> {
     use desk_diagnose_core::agent_loop::*;
     if let Some(fresh) = fresh {
-        if let Some(request_id) = fresh.approval_reference.as_deref() {
+        let Some(creation) = fresh.creation.as_ref() else {
+            return Box::pin(async { Err(transport_error("published source was not bound")) });
+        };
+        if let Some(wait_id) = fresh.children_wait_id.as_deref() {
+            Box::pin(resume_claimed_fresh_task_children_turn(
+                deps,
+                session,
+                &fresh.contract,
+                creation,
+                run_id,
+                wait_id,
+                sink,
+            ))
+        } else if let Some(message_id) = fresh.children_notification_id.as_deref() {
+            Box::pin(resume_claimed_fresh_task_notification_turn(
+                deps,
+                session,
+                &fresh.contract,
+                creation,
+                run_id,
+                message_id,
+                sink,
+            ))
+        } else if let Some(request_id) = fresh.approval_reference.as_deref() {
             Box::pin(resume_claimed_fresh_task_permission_turn(
                 deps,
                 session,
                 &fresh.contract,
+                creation,
                 run_id,
                 request_id,
                 sink,
@@ -30,6 +54,7 @@ pub(super) fn drive<'a>(
                 deps,
                 session,
                 &fresh.contract,
+                creation,
                 run_id,
                 sink,
             ))

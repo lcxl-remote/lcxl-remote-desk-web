@@ -8,7 +8,7 @@ export type AssistantPanelId = 'details' | 'capabilities' | 'context' | 'connect
 export function AssistantDetailsSheet({ panel, onPanelChange, sections }: {
     panel: AssistantPanelId | null;
     onPanelChange: (panel: AssistantPanelId | null) => void;
-    sections: Record<AssistantPanelId, ReactNode>;
+    sections: Partial<Record<AssistantPanelId, ReactNode>>;
 }) {
     const { t } = useTranslation();
     return (
@@ -19,7 +19,7 @@ export function AssistantDetailsSheet({ panel, onPanelChange, sections }: {
                     <SheetDescription>{t('pages.aiAssistant.workspace.panelHint')}</SheetDescription>
                 </SheetHeader>
                 <nav className="flex flex-wrap gap-1 border-b py-3" aria-label={t('pages.aiAssistant.workspace.details')}>
-                    {(['details', 'capabilities', 'context', 'connection', 'observation'] as const).map((id) => (
+                    {(['details', 'capabilities', 'context', 'connection', 'observation'] as const).filter(id => id in sections).map((id) => (
                         <Button key={id} type="button" size="sm" variant={panel === id ? 'secondary' : 'ghost'}
                             aria-current={panel === id ? 'page' : undefined} onClick={() => onPanelChange(id)}>
                             {t(`pages.aiAssistant.workspace.${id}`)}

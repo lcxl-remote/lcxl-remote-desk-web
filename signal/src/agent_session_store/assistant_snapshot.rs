@@ -108,13 +108,21 @@ impl SignalAgentSessionStore {
             );
             let grants =
                 SignalCapabilityGrantStore::list_for_subject_on(&txn, run, actor, device).await?;
+            let subagents = crate::agent_subagent_store::presentation_on(&txn, &session).await?;
 
             let fingerprint = format!(
                 "{:x}",
                 Sha256::digest(
-                    serde_json::to_vec(&(&row.state_json, row.version, &tasks, &grants)).map_err(
-                        |_| sea_orm::DbErr::Custom("encode Assistant snapshot failed".into())
-                    )?
+                    serde_json::to_vec(&(
+                        &row.state_json,
+                        row.version,
+                        &tasks,
+                        &grants,
+                        &subagents
+                    ))
+                    .map_err(|_| sea_orm::DbErr::Custom(
+                        "encode Assistant snapshot failed".into()
+                    ))?
                 )
             );
             let previous = row.snapshot_seq.unwrap_or(row.version).max(row.version);
@@ -146,6 +154,7 @@ impl SignalAgentSessionStore {
             let mut snapshot = snapshot_from_row(row)
                 .map_err(|_| sea_orm::DbErr::Custom("invalid Assistant snapshot".into()))?;
             snapshot.seq = seq;
+            snapshot.subagents = subagents;
             Ok(Some(AssistantSnapshot {
                 session: snapshot,
                 background_tasks: tasks,

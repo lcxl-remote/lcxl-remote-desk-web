@@ -3,7 +3,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
     SIGNALING_TYPE_CODE_ASK_AI_ASSISTANT,
-    SIGNALING_TYPE_CODE_CANCEL_AI_ASSISTANT,
     SIGNALING_TYPE_CODE_CONTROL_EXECUTION,
     SIGNALING_TYPE_CODE_AI_ASSISTANT_CONTEXT_UPDATED,
     SIGNALING_TYPE_CODE_AI_ASSISTANT_OBJECT_CONTEXT_UPDATED,
@@ -20,6 +19,9 @@ import { useAiAssistantChat } from './use-ai-assistant-chat';
 import { deskErrorCodeEnum } from '@/services/types';
 
 vi.mock('react-i18next', () => import('@/test-utils/i18n-mock').then(m => m.reactI18nextMock()));
+
+const snapshotFields = { controlRevision: 1, inputRevision: 1, mainStopped: false,
+    subagents: { active_tasks: [], task: null, tasks: null, parent_session_id: null, attention_tasks: [], attention_count: 0 } };
 
 describe('useAiAssistantChat', () => {
     it('sends explicit goal intent with the completed goal being continued', async () => {
@@ -63,6 +65,7 @@ describe('useAiAssistantChat', () => {
     it('does not send live desktop metadata as an explicit object attachment', async () => {
         localStorage.setItem('ai-assistant-conversation:delivery-kinds', 'conversation');
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: {
+            ...snapshotFields,
             sessionId: 'session', seq: 1, active: false, messages: [],
             contextAttachments: [{ id: 'desktop-context', kind: 'interactive_session', capabilityId: 'desktop.ui.inspect',
                 providerId: 'desktop.ui', state: 'active', expiresAtUnixMs: 1, createdAtUnixMs: 0, displaySummary: 'desktop' }],
@@ -79,6 +82,7 @@ describe('useAiAssistantChat', () => {
     it('preserves intake rejection across an old successful snapshot and permits a new send', async () => {
         let subscriber: SignalingSubscriber | null = null;
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: {
+            ...snapshotFields,
             sessionId: 'session', seq: 10, active: false, messages: [{ id: 'old-answer', role: 'assistant', text: 'Previous success' }],
         } }) }));
         const sendMessage = vi.fn((_type: number, _data: unknown, _to?: string, id?: string) => id!);
@@ -166,6 +170,7 @@ describe('useAiAssistantChat', () => {
         act(() => { result.current.start('Already stored'); });
         const payload = sendMessage.mock.calls[0][1] as { client_message_id: string };
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: {
+            ...snapshotFields,
             sessionId: 'stored-session', seq: 1, active: false,
             messages: [{ id: payload.client_message_id, role: 'user', text: 'Already stored' }],
         } }) }));
@@ -199,6 +204,7 @@ describe('useAiAssistantChat', () => {
     it('restores a pending directory proposal as permission required, not a missing-answer error', async () => {
         localStorage.setItem('ai-assistant-conversation:pending-directory', 'saved-conversation');
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: {
+            ...snapshotFields,
             sessionId: 'saved-conversation', seq: 10, active: false,
             fileScope: { revision: 1, directories: [{ requestId: 'directory-request', canonicalPath: '/private/tmp/test',
                 purpose: 'report', state: 'pending', source: 'model_proposal', referenceExpiresAt: '2030-01-01T00:00:00Z' }] },
@@ -218,6 +224,7 @@ describe('useAiAssistantChat', () => {
     ])('restores and localizes durable terminal error code %s in a newly opened page', async (errorCode, expected) => {
         localStorage.setItem('ai-assistant-conversation:restore-error', 'saved-conversation');
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: {
+            ...snapshotFields,
             sessionId: 'saved-conversation', seq: 10, active: false,
             terminalError: { message: 'model context compression failed: stale_context', error_code: errorCode },
             messages: [{ id: 'user-1', role: 'user', text: 'continue' }],
@@ -235,6 +242,7 @@ describe('useAiAssistantChat', () => {
     ])('keeps localized turn error code %s after refresh and clears it on a new turn', async (errorCode, expected) => {
         let subscriber: SignalingSubscriber | null = null;
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: {
+            ...snapshotFields,
             sessionId: 'failed-session', seq: 10, active: false,
             messages: [{ id: 'user-1', role: 'user', text: 'continue' }],
         } }) }));
@@ -266,6 +274,7 @@ describe('useAiAssistantChat', () => {
     it('restores server context usage and clears it for a new conversation', async () => {
         localStorage.setItem('ai-assistant-conversation:budget-desk', 'budget-conversation');
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: {
+            ...snapshotFields,
             sessionId: 'budget-session', seq: 1, active: false, messages: [],
             contextUsage: { usedBytes: 200, limitBytes: 1000, strategy: 'checkpoint_summary' },
             contextNotices: [
@@ -284,6 +293,7 @@ describe('useAiAssistantChat', () => {
 
     it('opens history through its continuation id without sending a cancel or a question', async () => {
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: {
+            ...snapshotFields,
             sessionId: 'old-session', seq: 1, active: false, messages: [],
         } }) }));
         const sendMessage = vi.fn();
@@ -299,6 +309,7 @@ describe('useAiAssistantChat', () => {
     it('opens an attention deep link ahead of the last locally selected conversation', async () => {
         localStorage.setItem('ai-assistant-conversation:attention-device', 'previous-conversation');
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: {
+            ...snapshotFields,
             sessionId: 'attention-session', seq: 1, active: false, messages: [],
         } }) }));
         const sendMessage = vi.fn();
@@ -317,6 +328,7 @@ describe('useAiAssistantChat', () => {
 
     it('switches and creates conversations while a previous turn keeps running', async () => {
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: {
+            ...snapshotFields,
             sessionId: 'other', requestId: 'remote-turn', seq: 1, active: true, messages: [],
         } }) }));
         const sendMessage = vi.fn().mockReturnValue('original-turn');
@@ -458,6 +470,7 @@ describe('useAiAssistantChat', () => {
             ok: true,
             json: async () => ({
                 data: {
+                    ...snapshotFields,
                     sessionId: 'session-1',
                     seq: 1,
                     messages: [],
@@ -496,6 +509,7 @@ describe('useAiAssistantChat', () => {
         vi.stubGlobal('fetch', vi.fn(async () => ({
             ok: true,
             json: async () => ({ data: {
+                ...snapshotFields,
                 sessionId: 'session-1', seq: 34, active: false,
                 messages: [
                     { id: 'call', role: 'assistant', text: '', toolCalls: [{ id: 'command-1', name: 'exec_command', argumentsJson: '{}' }] },
@@ -526,6 +540,7 @@ describe('useAiAssistantChat', () => {
         } } });
         localStorage.setItem('ai-assistant-conversation:desk-1', 'conversation-1');
         vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ data: {
+            ...snapshotFields,
             sessionId: 'session-1', seq: 34, active: false, messages: [
                 { id: 'call', role: 'assistant', text: '', toolCalls: [{ id: 'file-1', name, argumentsJson: '{}' }] },
                 { id: 'finished', role: 'tool', toolCallId: 'file-1', text: output },
@@ -580,6 +595,7 @@ describe('useAiAssistantChat', () => {
             .mockResolvedValueOnce({
                 ok: true,
                 json: async () => ({ data: {
+                    ...snapshotFields,
                     sessionId: 'session-1',
                     seq: 7,
                     active: false,
@@ -594,6 +610,7 @@ describe('useAiAssistantChat', () => {
             .mockResolvedValueOnce({
                 ok: true,
                 json: async () => ({ data: {
+                    ...snapshotFields,
                     sessionId: 'session-1',
                     seq: 7,
                     active: false,
@@ -627,6 +644,7 @@ describe('useAiAssistantChat', () => {
         const response = (seq: number, ids: string[], hasMore: boolean, cursor?: string) => ({
             ok: true,
             json: async () => ({ data: {
+                ...snapshotFields,
                 sessionId: 'session-1', seq, active: false,
                 messages: ids.map(id => ({ id, role: 'assistant', text: `${id} at ${seq}` })),
                 messagePage: { hasMore, nextBeforeMessageId: cursor },
@@ -661,7 +679,7 @@ describe('useAiAssistantChat', () => {
         const response = (sessionId: string, seq: number, ids: string[]) => ({
             ok: true,
             json: async () => ({ data: {
-                sessionId, seq, active: false,
+                ...snapshotFields, sessionId, seq, active: false,
                 messages: ids.map(id => ({ id, role: 'assistant', text: `${id} at ${seq}` })),
                 messagePage: { hasMore: true, nextBeforeMessageId: ids[0] },
             } }),
@@ -723,6 +741,7 @@ describe('useAiAssistantChat', () => {
                 ok: true,
                 json: async () => ({
                     data: {
+                        ...snapshotFields,
                         sessionId: 'session-1',
                         seq: 12,
                         active: false,
@@ -755,6 +774,7 @@ describe('useAiAssistantChat', () => {
                 ok: true,
                 json: async () => ({
                     data: {
+                        ...snapshotFields,
                         sessionId: 'session-1',
                         seq: 11,
                         active: true,
@@ -818,6 +838,7 @@ describe('useAiAssistantChat', () => {
                 ok: true,
                 json: async () => ({
                     data: {
+                        ...snapshotFields,
                         sessionId: 'session-2',
                         seq: 1,
                         active: false,
@@ -836,6 +857,7 @@ describe('useAiAssistantChat', () => {
                 ok: true,
                 json: async () => ({
                     data: {
+                        ...snapshotFields,
                         sessionId: 'session-1',
                         seq: 99,
                         active: false,
@@ -875,6 +897,7 @@ describe('useAiAssistantChat', () => {
                 ok: true,
                 json: async () => ({
                     data: {
+                        ...snapshotFields,
                         sessionId: 'expired-session',
                         seq: 40,
                         active: false,
@@ -893,6 +916,7 @@ describe('useAiAssistantChat', () => {
                 ok: true,
                 json: async () => ({
                     data: {
+                        ...snapshotFields,
                         sessionId: 'replacement-session',
                         seq: 1,
                         active: false,
@@ -910,6 +934,7 @@ describe('useAiAssistantChat', () => {
     it('discovers another tab conversation and polls its durable completion', async () => {
         vi.useFakeTimers();
         let snapshot = {
+            ...snapshotFields,
             sessionId: 'session-1',
             seq: 1,
             active: true,
@@ -954,6 +979,7 @@ describe('useAiAssistantChat', () => {
 
         snapshot = {
             active: false,
+            ...snapshotFields,
             sessionId: 'session-1',
             seq: 2,
             messages: [
@@ -990,6 +1016,7 @@ describe('useAiAssistantChat', () => {
         vi.useFakeTimers();
         localStorage.setItem('ai-assistant-conversation:device-1', 'shared-conversation');
         let snapshot = {
+            ...snapshotFields,
             sessionId: 'session-1',
             seq: 1,
             active: true,
@@ -1091,6 +1118,7 @@ describe('useAiAssistantChat', () => {
             ok: true,
             json: async () => ({
                 data: {
+                    ...snapshotFields,
                     sessionId: 'session-1',
                     seq: 1,
                     active: false,
@@ -1158,6 +1186,7 @@ describe('useAiAssistantChat', () => {
             ok: true,
             json: async () => ({
                 data: {
+                    ...snapshotFields,
                     sessionId: 'session-1',
                     seq: 1,
                     active: false,
@@ -1415,6 +1444,7 @@ describe('useAiAssistantChat', () => {
     it('restores ordered tool calls including tool-only turns, errors, and missing results', async () => {
         localStorage.setItem('ai-assistant-conversation:tool-records', 'saved-conversation');
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: {
+            ...snapshotFields,
             sessionId: 'saved-conversation', seq: 3, active: false, messages: [
                 { id: 'user', role: 'user', text: 'check' },
                 { id: 'calls', role: 'assistant', text: '', toolCalls: [
@@ -1437,6 +1467,7 @@ describe('useAiAssistantChat', () => {
     it('restores reasoning on tool-only assistant messages and final answers', async () => {
         localStorage.setItem('ai-assistant-conversation:reasoning', 'saved-conversation');
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: {
+            ...snapshotFields,
             sessionId: 'saved-conversation', seq: 3, active: false, messages: [
                 { id: 'user', role: 'user', text: 'check', reasoning: 'ignore' },
                 { id: 'thinking', role: 'assistant', text: '', reasoning: 'Inspect first.' },
@@ -1457,116 +1488,24 @@ describe('useAiAssistantChat', () => {
             { taskId: 'command-1', callId: 'call-1', executionGeneration: 'generation-1', state: 'running', updatedAt: '2026-09-08T00:00:00Z', result: null, resultTruncated: false },
             { taskId: 'command-2', callId: 'call-2', executionGeneration: 'generation-2', state: 'succeeded', updatedAt: '2026-09-08T00:00:00Z', result: 'original output', resultTruncated: false },
         ];
-        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: {
+        const fetchMock = vi.fn().mockImplementation(async (url: string) => ({ ok: true, json: async () => url.endsWith('/command/cancel') ? ({ code: deskErrorCodeEnum.SUCCESS, data: true }) : ({ data: {
+            ...snapshotFields,
             sessionId: 'saved-conversation', seq: 10, active: false, messages: [], commandTasks: tasks,
         } }) }));
+        vi.stubGlobal('fetch', fetchMock);
         const sendMessage = vi.fn().mockReturnValue('control-request');
         const { result, unmount } = renderHook(() => useAiAssistantChat({ deskId: 'task-list',
             subscribe: () => () => undefined, sendMessage }));
         await waitFor(() => expect(result.current.commandTasks).toHaveLength(2));
         await act(async () => result.current.cancelTask('command', 'command-1'));
-        expect(sendMessage).toHaveBeenCalledExactlyOnceWith(SIGNALING_TYPE_CODE_CONTROL_EXECUTION,
-            { execution_generation: 'generation-1', action: 'cancel', requested_by: 'control-end' }, 'task-list');
+        const cancellations = fetchMock.mock.calls.filter(([url]) => url.endsWith('/command/cancel'));
+        expect(cancellations).toHaveLength(1);
+        expect(JSON.parse(cancellations[0][1].body)).toEqual({ connection: 'task-list', session: 'saved-conversation', exec_request_id: 'command-1', execution_generation: 'generation-1' });
         expect(result.current.commandTasks[0].state).toBe('running');
         expect(result.current.commandTasks[1].result).toBe('original output');
         await act(async () => { await expect(result.current.cancelTask('command', 'command-2')).rejects.toThrow(); });
-        expect(sendMessage).toHaveBeenCalledTimes(1);
-        unmount();
-    });
-
-    it('stops the current turn once without clearing its conversation or messages', () => {
-        let subscriber: SignalingSubscriber | null = null;
-        const sendMessage = vi.fn().mockReturnValue('request-stop');
-        const { result } = renderHook(() => useAiAssistantChat({
-            deskId: 'stop-local',
-            subscribe: handler => { subscriber = handler; return () => undefined; },
-            sendMessage,
-        }));
-        act(() => { result.current.start('keep this question'); });
-        const conversation = localStorage.getItem('ai-assistant-conversation:stop-local');
-        act(() => { result.current.stop(); result.current.stop(); });
-        expect(sendMessage).toHaveBeenCalledTimes(2);
-        expect(sendMessage).toHaveBeenLastCalledWith(
-            SIGNALING_TYPE_CODE_CANCEL_AI_ASSISTANT, null, 'stop-local', 'request-stop');
-        expect(result.current.stopping).toBe(true);
-        expect(result.current.turnRunning).toBe(true);
-        expect(result.current.messages[0].text).toBe('keep this question');
-        expect(localStorage.getItem('ai-assistant-conversation:stop-local')).toBe(conversation);
-        act(() => subscriber?.({ request_id: 'request-stop',
-            signaling_type: SIGNALING_TYPE_CODE_AI_ASSISTANT_UPDATED,
-            signaling_data: { seq: 1, kind: 'error', error: { message: 'cancelled' } },
-        }));
-        expect(result.current.stopping).toBe(false);
-        expect(result.current.turnRunning).toBe(false);
-        expect(result.current.messages[0].text).toBe('keep this question');
-    });
-
-    it('clears a local stopping turn when the server lease expires without a terminal event', async () => {
-        vi.useFakeTimers();
-        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: {
-            sessionId: 'expired-session', requestId: 'expired-request', seq: 10, active: false,
-            messages: [{ id: 'user-1', role: 'user', text: 'keep this question' }],
-        } }) }));
-        const { result, unmount } = renderHook(() => useAiAssistantChat({ deskId: 'expired-local',
-            subscribe: () => () => undefined, sendMessage: vi.fn().mockReturnValue('expired-request') }));
-        act(() => { result.current.start('keep this question'); });
-        act(() => { result.current.stop(); });
-        expect(result.current.stopping).toBe(true);
-        await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
-        expect(result.current.stopping).toBe(false);
-        expect(result.current.turnRunning).toBe(false);
-        expect(result.current.messages[0].text).toBe('keep this question');
-        act(() => { result.current.reset(); });
-        expect(result.current.messages).toEqual([]);
-        unmount();
-        vi.useRealTimers();
-    });
-
-    it('stops the server active request after a newer snapshot proves the local one ended', async () => {
-        vi.useFakeTimers();
-        let snapshot: Record<string, unknown> = {
-            sessionId: 'switch-session', requestId: 'request-a', seq: 5, active: true,
-            messages: [{ id: 'user-1', role: 'user', text: 'work on it' }],
-        };
-        vi.stubGlobal('fetch', vi.fn().mockImplementation(async () => ({ ok: true, json: async () => ({ data: snapshot }) })));
-        let subscriber: SignalingSubscriber | null = null;
-        const sendMessage = vi.fn().mockReturnValue('request-a');
-        const { result, unmount } = renderHook(() => useAiAssistantChat({ deskId: 'switch-local',
-            subscribe: handler => { subscriber = handler; return () => undefined; }, sendMessage }));
-        act(() => { result.current.start('work on it'); });
-        // The server accepted A, then A's terminal event was lost while a goal
-        // or timer started B on the same conversation.
-        act(() => subscriber?.({ request_id: 'request-a', signaling_type: SIGNALING_TYPE_CODE_AI_ASSISTANT_UPDATED,
-            signaling_data: { seq: 1, kind: 'status', status: 'accepted' } }));
-        snapshot = { ...snapshot, requestId: 'request-b', seq: 9 };
-        await act(async () => { await vi.advanceTimersByTimeAsync(2500); });
-        act(() => { result.current.stop(); });
-        expect(sendMessage).toHaveBeenLastCalledWith(
-            SIGNALING_TYPE_CODE_CANCEL_AI_ASSISTANT, null, 'switch-local', 'request-b');
-        expect(result.current.stopping).toBe(true);
-        // B's end releases the stopping gate.
-        snapshot = { ...snapshot, active: false, seq: 12 };
-        await act(async () => { await vi.advanceTimersByTimeAsync(2500); });
-        expect(result.current.stopping).toBe(false);
-        unmount();
-        vi.useRealTimers();
-    });
-
-    it('stops a restored active turn using its server request id', async () => {
-        localStorage.setItem('ai-assistant-conversation:stop-restored', 'saved-conversation');
-        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: {
-            sessionId: 'saved-conversation', requestId: 'server-request', seq: 10, active: true,
-            messages: [{ id: 'user-1', role: 'user', text: 'continue' }],
-        } }) }));
-        const sendMessage = vi.fn().mockReturnValue('unused');
-        const { result, unmount } = renderHook(() => useAiAssistantChat({
-            deskId: 'stop-restored', subscribe: () => () => undefined, sendMessage,
-        }));
-        await waitFor(() => expect(result.current.turnRunning).toBe(true));
-        act(() => result.current.stop());
-        expect(sendMessage).toHaveBeenLastCalledWith(
-            SIGNALING_TYPE_CODE_CANCEL_AI_ASSISTANT, null, 'stop-restored', 'server-request');
-        expect(result.current.messages[0].text).toBe('continue');
+        expect(fetchMock.mock.calls.filter(([url]) => url.endsWith('/command/cancel'))).toHaveLength(1);
+        expect(sendMessage).not.toHaveBeenCalled();
         unmount();
     });
 
@@ -1683,6 +1622,7 @@ describe('useAiAssistantChat', () => {
                 ok: true,
                 json: async () => ({
                     data: {
+                        ...snapshotFields,
                         sessionId: 'session-1',
                         seq: state === 'pending' ? 1 : 2,
                         active: false,
@@ -1766,6 +1706,7 @@ describe('useAiAssistantChat', () => {
                 ok: true,
                 json: async () => ({
                     data: {
+                        ...snapshotFields,
                         sessionId: 'session-1',
                         seq: revokedAtUnixMs ? 2 : 1,
                         active: false,
@@ -1803,6 +1744,7 @@ describe('useAiAssistantChat', () => {
     it('does not require user disposition after an inconclusive action', async () => {
         localStorage.setItem('ai-assistant-conversation:desk-1', 'conversation-1');
         vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ data: {
+            ...snapshotFields,
             sessionId: 'session-1', seq: 1, active: false,
             messages: [{ id: 'result-1', role: 'assistant', text: 'Read the current UI before continuing.' }],
             contextAttachments: [],
@@ -1827,6 +1769,7 @@ it.each([
         : { file_name: fileName, byte_len: 123, sha256: 'a'.repeat(64), validation_byte_len: 32, validation_sha256: 'b'.repeat(64) };
     const text = JSON.stringify({ result: 'verified', output: { kind, value } });
     vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ data: {
+        ...snapshotFields,
         sessionId: 'server-session', seq: 1, active: false,
         messages: [
             { id: 'assistant', role: 'assistant', text: '', toolCalls: [{ id: 'copy-call', name: tool, argumentsJson: '{}' }] },
@@ -1848,6 +1791,7 @@ it.each([
 it('projects a failed native action with the reason bound to its work record', async () => {
     localStorage.setItem('ai-assistant-conversation:reason-device', 'reason-conversation');
     vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ data: {
+        ...snapshotFields,
         sessionId: 'server-session', seq: 1, active: false, actionPermissionReasons: { '44': 'Create the approved calendar event', '45': 'Unrelated reason' },
         messages: [
             { id: 'assistant', role: 'assistant', text: '', toolCalls: [{ id: 'call', name: 'execute_ui_actions', argumentsJson: '{}' }] },
@@ -1873,6 +1817,7 @@ it('distinguishes returned historical results from explicit tool errors', async 
         { id: 'wait-error', name: 'wait_for_command', text: 'wait error: device disconnected' },
     ];
     vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ data: {
+        ...snapshotFields,
         sessionId: 'server-session', seq: 1, active: false,
         messages: [
             { id: 'assistant', role: 'assistant', text: '', toolCalls: calls.map(call => ({ id: call.id, name: call.name, argumentsJson: '{}' })) },
@@ -1902,6 +1847,7 @@ it('upgrades a returned tool result when a newer snapshot carries its durable ou
     let toolOk: boolean | undefined;
     let seq = 1;
     vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ data: {
+        ...snapshotFields,
         sessionId: 'server-session', seq, active: false,
         messages: [
             { id: 'assistant', role: 'assistant', text: '', toolCalls: [{ id: 'call', name: 'inspect_desktop_ui', argumentsJson: '{}' }] },

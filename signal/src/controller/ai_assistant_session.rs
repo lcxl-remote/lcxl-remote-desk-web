@@ -27,6 +27,16 @@ use crate::error::DeskSignalError;
 
 pub const TAG: &str = "AiAssistantSession";
 mod command_tasks;
+pub use command_tasks::cancel_ai_assistant_command;
+mod directories;
+mod stop;
+mod subagents;
+pub use directories::control_ai_assistant_directory;
+pub use stop::stop_ai_assistant_session;
+pub use subagents::{
+    control_ai_assistant_subagent, get_ai_assistant_subagent_status, list_ai_assistant_subagents,
+    mark_ai_assistant_subagent_read, read_ai_assistant_subagent_result,
+};
 pub(crate) mod recovery;
 pub use desk_signal_facade::controller::ai_assistant_session::*;
 
@@ -482,6 +492,9 @@ pub async fn get_ai_assistant_session(
             })?;
             Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(
                 AiAssistantSessionSnapshotDto {
+                    control_revision: snapshot.control_revision,
+                    main_stopped: snapshot.main_stopped,
+                    subagents: snapshot.subagents,
                     action_permission_reasons,
                     file_scope: snapshot.file_scope.into(),
                     terminal_error: snapshot.terminal_error,
@@ -850,7 +863,7 @@ pub(crate) async fn decide_permission_on(
         })?;
     let goal_wake = if decision.newly_recorded {
         match crate::agent_goal_store::wake_for_permission_decision(
-            &db,
+            db,
             &session_id,
             &actor_id,
             &target_audience,
@@ -878,16 +891,39 @@ pub(crate) async fn decide_permission_on(
             .map_err(|error| {
                 DeskSignalError::new_custom_error(DeskErrorCode::SYSTEM_ERROR, &error.message)
             })?
-        && let Some(question) =
-            desk_diagnose_core::permission_resume::latest_user_requirement(&snapshot.messages)
-                .map(|message| message.text.clone())
     {
+        let child_context = crate::agent_subagent_store::SubAgentStore::new(db.clone())
+            .child_context_for_subject(&session_id, &actor_id, &target_audience, snapshot.seq)
+            .await
+            .map_err(|_| {
+                DeskSignalError::new_custom_error(
+                    DeskErrorCode::SYSTEM_ERROR,
+                    "delegated permission source changed",
+                )
+            })?;
+        let Some(question) = child_context
+            .as_ref()
+            .map(|(creation, _)| creation.source.owner_requirement.text.clone())
+            .or_else(|| {
+                desk_diagnose_core::permission_resume::latest_user_requirement(&snapshot.messages)
+                    .map(|message| message.text.clone())
+            })
+        else {
+            return Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(
+                PermissionDecisionResponse {
+                    state: decision.state.into(),
+                },
+            )));
+        };
+        let locale = child_context
+            .as_ref()
+            .and_then(|(creation, _)| creation.response_locale.clone());
         let resume_request_id = format!("permission-resume-{}", body.request_id);
         let resume_ask = AiAssistantAsk {
             question,
             client_message_id: resume_request_id.clone(),
             conversation_id: snapshot.client_conversation_id,
-            locale: None,
+            locale,
             // The orchestrator reloads the original input selection. Current
             // active context is not authority to expand a permission resume.
             selected_capability_ids: Vec::new(),

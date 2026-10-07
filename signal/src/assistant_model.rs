@@ -37,6 +37,12 @@ pub(crate) struct MeteredModel {
 
 #[async_trait::async_trait(?Send)]
 impl ModelSeam for MeteredModel {
+    fn model_input_token_upper_bound(
+        &self,
+        request: &ModelRequest,
+    ) -> Result<Option<u64>, AgentError> {
+        self.inner.model_input_token_upper_bound(request)
+    }
     fn context_compression_provenance(
         &self,
         turn_id: &str,
@@ -104,11 +110,13 @@ impl ModelSeam for MeteredModel {
         request: ModelRequest,
         sink: &mut dyn TurnSink,
     ) -> Result<desk_diagnose_core::chat::ModelTurn, AgentError> {
+        request.validate_delegation_call()?;
         let is_compression =
             request.use_case == desk_diagnose_core::model_profile::ModelUseCase::ContextCompression;
         if is_compression {
             *self.completed_compression_receipt.borrow_mut() = None;
         }
+        let permit = self.inner.acquire_admission().await?;
         let policy = self
             .model_egress_policy()?
             .ok_or_else(|| transport_error("AI assistant model egress policy is unavailable"))?;
@@ -120,10 +128,14 @@ impl ModelSeam for MeteredModel {
             .model_call_ordinal
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             .saturating_add(1);
+        let physical_identity = authorized.request.delegation_call.as_ref().map_or_else(
+            || format!("ordinal:{model_call_ordinal}"),
+            |reservation| format!("delegation:{}", reservation.reservation_id),
+        );
         let ordinary_receipt_id = format!(
             "model-egress-{:x}",
             Sha256::digest(
-                format!("{}:{model_call_ordinal}", self.export_authorization_id).as_bytes()
+                format!("{}:{physical_identity}", self.export_authorization_id).as_bytes(),
             )
         );
         let egress_store = crate::model_egress_store::SignalModelEgressStore::new(self.db.clone());
@@ -150,7 +162,12 @@ impl ModelSeam for MeteredModel {
             authorized.audit.digests_sha256,
             authorized.audit.total_bytes
         );
-        let mut turn = match self.inner.call(authorized.request, sink).await {
+        let delegated = authorized.request.delegation_call.is_some();
+        let mut turn = match self
+            .inner
+            .call_admitted(authorized.request, sink, permit)
+            .await
+        {
             Ok(turn) => turn,
             Err(error) => {
                 if let Err(audit_error) = egress_store.mark_failed(&receipt_id).await {
@@ -165,7 +182,7 @@ impl ModelSeam for MeteredModel {
             .record_terminal_usage(&receipt_id, &turn.usage)
             .await
             .map_err(|_| transport_error("The AI model usage could not be recorded safely."))?;
-        self.settle_task_dispatch(model_call_ordinal, &turn.usage)
+        self.settle_task_dispatch(model_call_ordinal, &turn.usage, delegated)
             .await?;
         if turn.text.trim().is_empty() && turn.tool_calls.is_empty() {
             // There is no model output content to label or export. Close this

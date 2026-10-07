@@ -28,6 +28,9 @@ use sea_orm::{
 /// A claimed review is the sole permission to make one external reviewer call.
 /// The raw candidate is never stored a second time in SQLite.
 pub struct ClaimedPermissionReview {
+    pub call_authority: desk_diagnose_core::subagent::reservation::ReviewCallAuthority,
+    pub delegation_call:
+        Option<desk_diagnose_core::subagent::reservation::DelegationCallReservation>,
     pub candidate_id: String,
     pub lease_epoch: u64,
     pub lease_owner: String,
@@ -80,7 +83,7 @@ pub async fn pending_permission_reviews(
             PersistedAgentSession::decode_json(&session_row.state_json).map_err(|_| invalid())?;
         if session.surface != AgentSessionSurface::AiAssistant
             || session.turn_state.is_active()
-            || !session.trigger_origin.allows_delegated_review()
+            || !session.allows_delegated_review()
         {
             continue;
         }
@@ -386,8 +389,20 @@ pub async fn claim_permission_review(
     }
     .insert(&txn)
     .await?;
+    let (call_authority, delegation_call) = crate::agent_subagent_store::reserve_review_call_on(
+        &txn,
+        candidate,
+        &destination,
+        &authorized,
+        prices,
+        reserved_tokens,
+        i64::try_from(now_unix_ms).map_err(|_| invalid())?,
+    )
+    .await?;
     txn.commit().await?;
     Ok(Some(ClaimedPermissionReview {
+        call_authority,
+        delegation_call,
         candidate_id: candidate.candidate_id.clone(),
         lease_epoch: 1,
         lease_owner: lease_owner.to_owned(),
@@ -473,8 +488,7 @@ pub async fn settle_permission_review(
         _ => None,
     };
     let config = crate::approval_model_provider::load(&txn).await?;
-    let model_revision_matches =
-        i64::try_from(config.configuration_revision).ok() == Some(row.model_config_revision);
+    let model_revision_matches = config.configuration_revision == row.model_config_revision;
     let authority_matches = match request {
         Some(request) if readiness_revision != 0 => permission_authority_on(
             &txn,
@@ -508,9 +522,21 @@ pub async fn settle_permission_review(
         || row
             .lease_deadline
             .is_some_and(|deadline| deadline <= now_i64);
+    let physical = crate::agent_subagent_store::settle_review_call_on(
+        &txn,
+        &row,
+        actual_tokens,
+        actual_cost_micros,
+        i64::try_from(now_unix_ms).map_err(|_| invalid())?,
+    )
+    .await?;
+    let actual_tokens = physical.tokens;
+    let actual_cost_micros = physical.cost_micros;
+    let accounted = physical.settlement(row.reserved_tokens, row.reserved_cost_micros)?;
     let usage_in_bounds = actual_tokens.is_none_or(|used| used <= row.reserved_tokens as u64)
         && actual_cost_micros.is_none_or(|used| used <= row.reserved_cost_micros as u64);
-    let valid_decision = decision.is_some_and(|review| review.validate_for(candidate).is_ok());
+    let valid_decision = physical.dispatched
+        && decision.is_some_and(|review| review.validate_for(candidate).is_ok());
     let status = if expired {
         APPROVAL_REVIEW_STATUS_EXPIRED
     } else if !authorized || !usage_in_bounds || !valid_decision {
@@ -522,14 +548,27 @@ pub async fn settle_permission_review(
             _ => APPROVAL_REVIEW_STATUS_UNAVAILABLE,
         }
     };
-    delegation
-        .settle(
-            row.reserved_tokens as u64,
-            row.reserved_cost_micros as u64,
-            usage_in_bounds.then_some(actual_tokens).flatten(),
-            usage_in_bounds.then_some(actual_cost_micros).flatten(),
-        )
-        .map_err(|_| invalid())?;
+    if physical.dispatched {
+        delegation
+            .settle(
+                row.reserved_tokens as u64,
+                row.reserved_cost_micros as u64,
+                Some(accounted.tokens),
+                Some(accounted.cost_micros),
+            )
+            .map_err(|_| invalid())?;
+    } else {
+        delegation
+            .release_unstarted_review(row.reserved_tokens as u64, row.reserved_cost_micros as u64)
+            .map_err(|_| invalid())?;
+    }
+    crate::agent_approval_usage::record_usage_on(
+        &txn,
+        &row,
+        accounted,
+        i64::try_from(now_unix_ms).map_err(|_| invalid())?,
+    )
+    .await?;
     let changed = delegation_row::Entity::update_many()
         .col_expr(
             delegation_row::Column::StateJson,
@@ -552,7 +591,7 @@ pub async fn settle_permission_review(
     }
     let recorded_decision = if valid_decision && usage_in_bounds {
         decision
-            .map(|review| serde_json::to_string(review))
+            .map(serde_json::to_string)
             .transpose()
             .map_err(|_| invalid())?
     } else {
@@ -589,9 +628,9 @@ pub async fn settle_permission_review(
     Ok(status.to_owned())
 }
 
-/// A crashed or timed-out reviewer cannot be called again with the same
-/// candidate. Charge the full reservation so the pending request can receive
-/// a system-sourced, unexecuted denial; a late result loses the lease fence.
+/// A crashed or timed-out reviewer cannot redial the same candidate. Preserve
+/// unknown sent usage, release proven unsent allocations and close the verdict
+/// lease. Late usage remains accounting evidence, never a renewed verdict.
 pub async fn expire_review_leases(
     db: &DatabaseConnection,
     now_unix_ms: u64,
@@ -636,14 +675,27 @@ pub async fn expire_review_leases(
         if row.reserved_tokens <= 0 || row.reserved_cost_micros <= 0 {
             return Err(invalid());
         }
-        delegation
-            .settle(
-                row.reserved_tokens as u64,
-                row.reserved_cost_micros as u64,
-                None,
-                None,
-            )
-            .map_err(|_| invalid())?;
+        let physical =
+            crate::agent_subagent_store::settle_review_call_on(&txn, &row, None, None, now).await?;
+        let accounted = physical.settlement(row.reserved_tokens, row.reserved_cost_micros)?;
+        if physical.dispatched {
+            delegation
+                .settle(
+                    row.reserved_tokens as u64,
+                    row.reserved_cost_micros as u64,
+                    Some(accounted.tokens),
+                    Some(accounted.cost_micros),
+                )
+                .map_err(|_| invalid())?;
+        } else {
+            delegation
+                .release_unstarted_review(
+                    row.reserved_tokens as u64,
+                    row.reserved_cost_micros as u64,
+                )
+                .map_err(|_| invalid())?;
+        }
+        crate::agent_approval_usage::record_usage_on(&txn, &row, accounted, now).await?;
         let changed = delegation_row::Entity::update_many()
             .col_expr(
                 delegation_row::Column::StateJson,

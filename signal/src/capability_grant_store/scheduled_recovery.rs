@@ -7,10 +7,10 @@ use desk_diagnose_core::{
     dynamic_run::BackgroundTaskState,
     session::{ActionIdentity, ExecutionState, TriggerOrigin, TurnState, WorkKind},
 };
-use sea_orm::{DatabaseTransaction, QueryOrder};
+use sea_orm::{DatabaseTransaction, QueryOrder, QuerySelect};
 use std::collections::BTreeSet;
 
-mod command;
+pub(super) mod command;
 pub(super) mod prepared;
 mod reads;
 mod unbound;
@@ -26,8 +26,40 @@ pub(crate) async fn reconcile_on(
     session: &mut PersistedAgentSession,
     now_ms: u64,
 ) -> Result<(), DbErr> {
-    if session.trigger_origin != TriggerOrigin::ScheduledContinuation
-        || session.turn_state != TurnState::Running
+    reconcile_inner_on(txn, session, now_ms, false).await
+}
+
+/// Children observe old action fences after pause or explicit adjustment. This
+/// entry grants no new action authority and never captures a replacement origin.
+pub(crate) async fn reconcile_child_on(
+    txn: &DatabaseTransaction,
+    session: &mut PersistedAgentSession,
+    now_ms: u64,
+) -> Result<(), DbErr> {
+    if session.agent_role.binding().is_none() {
+        return Err(invalid());
+    }
+    if session.current_turn_id.is_none() {
+        return if session.unclosed_tool_call_ids().is_empty()
+            && session.execution_state.states().is_empty()
+        {
+            Ok(())
+        } else {
+            Err(invalid())
+        };
+    }
+    reconcile_inner_on(txn, session, now_ms, true).await
+}
+
+async fn reconcile_inner_on(
+    txn: &DatabaseTransaction,
+    session: &mut PersistedAgentSession,
+    now_ms: u64,
+    delegated: bool,
+) -> Result<(), DbErr> {
+    if (!delegated
+        && (session.trigger_origin != TriggerOrigin::ScheduledContinuation
+            || session.turn_state != TurnState::Running))
         || session.execution_state.interrupted()
     {
         return Err(invalid());
@@ -36,8 +68,12 @@ pub(crate) async fn reconcile_on(
     let rows = agent_action_item::Entity::find()
         .filter(agent_action_item::Column::ConversationId.eq(&session.conversation_id))
         .order_by_asc(agent_action_item::Column::Id)
+        .limit(desk_diagnose_core::subagent::facts::MAX_ACTION_FACTS as u64 + 1)
         .all(txn)
         .await?;
+    if rows.len() > desk_diagnose_core::subagent::facts::MAX_ACTION_FACTS {
+        return Err(invalid());
+    }
     let carried: Vec<_> = session
         .execution_state
         .tasks()
@@ -46,8 +82,41 @@ pub(crate) async fn reconcile_on(
         .collect();
     let mut matched = BTreeSet::new();
     let mut matched_actions = Vec::new();
+    let open: BTreeSet<_> = session.unclosed_tool_call_ids().into_iter().collect();
     for row in rows {
-        if row.turn_id != turn {
+        if delegated {
+            let open_proposal = session
+                .conversation
+                .iter()
+                .filter(|message| {
+                    message.role == ChatRole::Assistant
+                        && message.turn_id.as_deref() == Some(row.turn_id.as_str())
+                })
+                .flat_map(|message| &message.tool_calls)
+                .any(|call| {
+                    open.contains(&call.id)
+                        && stable_id(
+                            "capability-call",
+                            &format!("{}:{}:{}", session.conversation_id, row.turn_id, call.id),
+                        ) == row.tool_call_id
+                });
+            let dispatch = agent_capability_dispatch_outbox::Entity::find()
+                .filter(agent_capability_dispatch_outbox::Column::WorkId.eq(row.id))
+                .one(txn)
+                .await?;
+            let carried_action = carried.iter().any(|action| {
+                (action.kind == WorkKind::ComputerAction && action.work_id == row.id)
+                    || dispatch
+                        .as_ref()
+                        .is_some_and(|dispatch| action.execution_id == dispatch.dispatch_id)
+            });
+            // Closed historical actions remain in native completion facts. They
+            // do not require old proposal text to survive history compression.
+            if !open_proposal && !carried_action {
+                continue;
+            }
+        }
+        if !delegated && row.turn_id != turn {
             if carried
                 .iter()
                 .any(|action| action.kind == WorkKind::ComputerAction && action.work_id == row.id)
@@ -102,10 +171,11 @@ pub(crate) async fn reconcile_on(
             continue;
         }
         let binding = super::computer_background::bound(&outbox, &work, &payload)?;
-        if AssistantTurnFence::from_session(session)
-            .map_err(|_| invalid())?
-            .as_ref()
-            != Some(&binding.origin.turn_fence)
+        if !delegated
+            && AssistantTurnFence::from_session(session)
+                .map_err(|_| invalid())?
+                .as_ref()
+                != Some(&binding.origin.turn_fence)
         {
             return Err(invalid());
         }
@@ -125,13 +195,30 @@ pub(crate) async fn reconcile_on(
             name: proposal.name.clone(),
             arguments_json: proposal.arguments_json.clone(),
         };
-        let origin = ActionResultOrigin::capture(
-            &desk_diagnose_core::ai_assistant::ai_assistant_provider_registry(),
-            session,
-            &call,
-        )
-        .map_err(|_| invalid())?;
-        if origin != binding.origin || !matched.insert(call.id.clone()) {
+        if delegated {
+            desk_diagnose_core::subagent::facts::validate_origin(session, &binding.origin)
+                .map_err(|_| invalid())?;
+            let canonical =
+                desk_diagnose_core::permission_tools::canonical_tool_permission_input_json(
+                    &call.name,
+                    serde_json::from_str(&call.arguments_json).map_err(|_| invalid())?,
+                )
+                .map_err(|_| invalid())?;
+            if call.name != payload.tool_name || canonical != payload.canonical_input_json {
+                return Err(invalid());
+            }
+        } else {
+            let origin = ActionResultOrigin::capture(
+                &desk_diagnose_core::ai_assistant::ai_assistant_provider_registry(),
+                session,
+                &call,
+            )
+            .map_err(|_| invalid())?;
+            if origin != binding.origin {
+                return Err(invalid());
+            }
+        }
+        if !matched.insert(call.id.clone()) {
             return Err(invalid());
         }
         let action = ActionIdentity::new(
@@ -217,7 +304,7 @@ pub(crate) async fn reconcile_on(
                     "The original action is still running. Await its original result; do not dispatch again."
                 },
             );
-            message.turn_id = Some(turn.clone());
+            message.turn_id = Some(work.turn_id.clone());
             message.background_task_id = Some(action.action_request_id.clone());
             let parent = session
                 .conversation

@@ -226,8 +226,8 @@ pub struct ChatMessage {
     pub tool_ok: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background_task_id: Option<String>,
-    /// Present only on assistant tool-call messages. Opaque payloads are never
-    /// projected into public conversation DTOs or safety input.
+    /// Provider replay for assistant replies, with or without tool calls.
+    /// Opaque payloads never enter public conversation DTOs or safety input.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replay_disposition: Option<ReplayDisposition>,
     /// Information-flow metadata for content that may enter an external sink.

@@ -2,8 +2,17 @@
 
 Generated from `diagnose-core/src/output_contracts.rs`. Catalog version describes this mapping, not a payload schema field. All errors may instead be returned as safe text; an externalized attachment must be read before interpreting its business payload.
 
+`read_subagent_result` returns `SubAgentModelResult`: the full answer, frozen acceptance criteria, task identity and state revision, and nonempty runtime facts or references. It omits UI metadata and empty optional fields. `include_task=true` adds the original task instructions; owner views keep the full stored result.
+
 | Tool | Business output type | Catalog version | Possible delivery |
 |---|---|---:|---|
+| `spawn_subagent` | `SubAgentSpawnReceipt` | 1 | inline |
+| `list_subagents` | `AiAssistantSubAgentPage` | 1 | inline |
+| `get_subagent_status` | `AiAssistantSubAgentSummary` | 1 | inline |
+| `read_subagent_result` | `SubAgentModelResult` | 1 | inline |
+| `wait_subagents` | `SubAgentWaitReceipt` | 1 | inline |
+| `cancel_subagent` | `SubAgentControlReceipt` | 1 | inline |
+| `send_subagent_message` | `SubAgentControlReceipt` | 1 | inline |
 | `update_task_status` | `TaskStatusUpdateReceipt` | 1 | inline |
 | `control_goal` | `GoalControlReceipt` | 1 | inline |
 | `request_goal` | `GoalRequestReceipt` | 1 | inline |

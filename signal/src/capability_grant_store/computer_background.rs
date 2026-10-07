@@ -102,8 +102,8 @@ fn acceptance(
     Ok(Some(accepted))
 }
 
-pub(crate) async fn task_on(
-    txn: &DatabaseTransaction,
+pub(crate) async fn task_on<C: sea_orm::ConnectionTrait>(
+    txn: &C,
     work: &agent_action_item::Model,
     now_ms: u64,
 ) -> Result<Option<BackgroundTaskRecord>, DbErr> {

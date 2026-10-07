@@ -136,12 +136,16 @@ async fn exercise(model_budget: u64) {
     if model_budget == 10_000 {
         assert_eq!(finished.status, "failed");
         let error = state.terminal_error.unwrap();
-        assert_eq!(error.kind, desk_agent_protocol::AgentErrorKind::RiskBlocked);
         assert_eq!(
-            error.error_code,
-            Some(desk_utils::error::DeskErrorCode::SCHEDULE_MODEL_BUDGET_EXCEEDED.code())
+            error.kind,
+            desk_agent_protocol::AgentErrorKind::OutputLimitExceeded
         );
-        assert!(error.message.contains("model-token budget is insufficient"));
+        assert_eq!(error.error_code, None);
+        assert!(
+            error
+                .message
+                .contains("source has exhausted its call budget")
+        );
         assert!(!error.retryable);
         assert_eq!(requests.load(Ordering::SeqCst), 0);
         assert!(

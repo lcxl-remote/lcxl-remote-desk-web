@@ -24,6 +24,7 @@ pub mod model_egress_receipt;
 pub mod model_probe_observation;
 pub mod model_provider;
 pub mod schedule_budget_policy;
+pub mod subagent_policy;
 pub mod turn_usage;
 pub mod usage_retention;
 pub mod web_search_config;
@@ -40,3 +41,11 @@ pub mod agent_file_recovery_cleanup;
 pub mod agent_file_recovery_scope;
 
 pub mod agent_attachment;
+
+pub mod agent_delegation_group;
+
+pub mod agent_subagent_run;
+
+pub mod agent_subagent_inbox;
+
+pub mod agent_delegation_reservation;

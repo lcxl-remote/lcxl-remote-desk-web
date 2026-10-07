@@ -198,10 +198,9 @@ impl EdgeExecDisposition {
     /// - [`ExecState::Terminal`] with its stored result → replay it verbatim as
     ///   [`Self::Executed`]. A terminal state whose result has aged out of the
     ///   ledger is still genuinely uncertain to the upstream, so it stays unknown.
-    /// - [`ExecState::SpawnFailed`] / [`ExecState::Unknown`] → the host never ran
-    ///   it (a failed spawn, or no ledger record at all), so this *proves not
-    ///   executed*: reported as [`Self::DispatchFailedBeforeWorker`], which is
-    ///   retryable rather than held for review.
+    /// - [`ExecState::SpawnFailed`] proves that native execution never started.
+    /// - [`ExecState::Unknown`] has no settled evidence: a missing ledger entry
+    ///   cannot prove that an earlier dispatch did not run.
     /// - [`ExecState::Indeterminate`] → the host lost track of it across a crash;
     ///   this is the one truly-unknown case the whole design narrows down to.
     /// - [`ExecState::Reserved`] / [`ExecState::Running`] → still in flight, so the
@@ -232,12 +231,8 @@ impl EdgeExecDisposition {
                     true,
                 ),
             },
-            ExecState::Unknown => EdgeExecDisposition::DispatchFailedBeforeWorker {
-                error: Self::safe_error(
-                    AgentErrorKind::SessionUnavailable,
-                    "the host has no record of accepting this command",
-                    true,
-                ),
+            ExecState::Unknown => EdgeExecDisposition::ExecutionStateUnknown {
+                reason: "the host has no retained record of this command's execution".into(),
             },
             ExecState::Indeterminate => EdgeExecDisposition::ExecutionStateUnknown {
                 reason: reply.detail.clone().unwrap_or_else(|| {
@@ -373,18 +368,21 @@ mod tests {
         ));
     }
 
-    /// A host with no record of the dispatch, or a failed spawn, *proves* the
-    /// command did not run — the win over a bare timeout, which held it for review.
+    /// Only a recorded spawn failure proves that native execution never started.
     #[test]
-    fn no_record_or_failed_spawn_proves_not_executed() {
+    fn only_failed_spawn_proves_not_executed() {
         use crate::exec_lifecycle::ExecState;
-        for state in [ExecState::Unknown, ExecState::SpawnFailed] {
-            let disposition = EdgeExecDisposition::from_reconciled_state(&state_reply(state, None));
-            assert!(
-                disposition.proves_not_executed(),
-                "{state:?} should prove not executed, got {disposition:?}"
-            );
-        }
+        assert!(
+            EdgeExecDisposition::from_reconciled_state(&state_reply(ExecState::SpawnFailed, None))
+                .proves_not_executed()
+        );
+        let unknown =
+            EdgeExecDisposition::from_reconciled_state(&state_reply(ExecState::Unknown, None));
+        assert!(matches!(
+            unknown,
+            EdgeExecDisposition::ExecutionStateUnknown { .. }
+        ));
+        assert!(!unknown.proves_not_executed());
     }
 
     /// The one genuinely-uncertain case: the host crashed and cannot say. This is

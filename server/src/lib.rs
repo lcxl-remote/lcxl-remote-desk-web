@@ -273,7 +273,16 @@ pub fn configure_api_surface(
                 if opts.include_signaling {
                     cfg.service(create_token)
                         .service(get_ai_assistant_session)
+                        .service(desk_signal::controller::ai_assistant_session::list_ai_assistant_subagents)
+                        .service(desk_signal::controller::ai_assistant_session::get_ai_assistant_subagent_status)
+                        .service(desk_signal::controller::ai_assistant_session::read_ai_assistant_subagent_result)
+                        .service(desk_signal::controller::ai_assistant_session::control_ai_assistant_subagent)
+                        .service(desk_signal::controller::ai_assistant_session::stop_ai_assistant_session)
+                        .service(desk_signal::controller::ai_assistant_session::cancel_ai_assistant_command)
+                        .service(desk_signal::controller::ai_assistant_session::control_ai_assistant_directory)
+                        .service(desk_signal::controller::ai_assistant_session::mark_ai_assistant_subagent_read)
                         .service(desk_signal::controller::goal_budget_policy::get_my_goal_budget_policy)
+                .service(desk_signal::controller::subagent_policy::get_my_subagent_policy)
                         .service(list_assistant_images)
                         .service(desk_signal::controller::ai_assistant_session::list_assistant_attachments)
                         .service(desk_signal::controller::ai_assistant_session::get_assistant_attachment)
@@ -399,7 +408,9 @@ pub fn configure_api_surface(
                     .service(desk_signal::controller::schedule_budget_policy::get_schedule_budget_policy)
                     .service(desk_signal::controller::schedule_budget_policy::update_schedule_budget_policy)
                     .service(desk_signal::controller::goal_budget_policy::get_goal_budget_policy)
+                .service(desk_signal::controller::subagent_policy::get_subagent_policy)
                     .service(desk_signal::controller::goal_budget_policy::update_goal_budget_policy)
+                .service(desk_signal::controller::subagent_policy::update_subagent_policy)
                     .service(desk_signal::controller::web_search::update_web_search)
                     .service(desk_signal::controller::web_search::test_web_search)
                     // Usage-retention windows govern both rollup tables; the row
@@ -724,6 +735,13 @@ pub async fn run_with_hub(
         );
         tokio::spawn(
             desk_signal::computer_cancel_dispatch::SignalComputerCancelDispatcher::new(
+                desk_signal::db::get_db().clone(),
+                connection_map.clone().into_inner(),
+            )
+            .run(),
+        );
+        tokio::spawn(
+            desk_signal::agent_exec::SignalCommandCancelDispatcher::new(
                 desk_signal::db::get_db().clone(),
                 connection_map.clone().into_inner(),
             )

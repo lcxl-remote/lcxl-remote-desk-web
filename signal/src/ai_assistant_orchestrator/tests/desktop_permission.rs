@@ -47,6 +47,7 @@ async fn run_desktop_case(approve: bool, read_name: &str) {
 async fn run_desktop_case_kind(approve: bool, read_name: &str, ordinary_followup: bool) {
     let db = Database::connect("sqlite::memory:").await.unwrap();
     crate::db::initialize_schema(&db).await.unwrap();
+    crate::ai_assistant_gate::enable_test_host();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let config = crate::model_provider::ModelProviderConfig {
@@ -225,7 +226,12 @@ async fn run_desktop_case_kind(approve: bool, read_name: &str, ordinary_followup
             .granted
             .contains(&capability.required_capability)
     );
-    assert_eq!(snapshot.permission_requests.len(), 1);
+    assert_eq!(
+        snapshot.permission_requests.len(),
+        1,
+        "{:?}",
+        snapshot.terminal_error
+    );
     assert!(
         tokio::time::timeout(Duration::from_millis(25), socket.next())
             .await

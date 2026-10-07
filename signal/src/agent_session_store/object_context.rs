@@ -161,6 +161,12 @@ impl SignalAgentSessionStore {
             let txn = crate::db::begin_write(&self.db, crate::entity::agent_session::Entity)
                 .await
                 .map_err(storage_error)?;
+            if crate::agent_subagent_store::deleted_on(&txn, &params.run_id)
+                .await
+                .map_err(storage_error)?
+            {
+                return Err(error());
+            }
             let row = agent_session::Entity::find()
                 .filter(agent_session::Column::ConversationId.eq(&params.run_id))
                 .one(&txn)

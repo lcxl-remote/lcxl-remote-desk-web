@@ -36,8 +36,16 @@ pub fn specs() -> Vec<ToolSpec> {
 }
 
 pub fn parse(session: &PersistedAgentSession, call: &ToolCall) -> Result<Action, &'static str> {
-    if session.surface != AgentSessionSurface::AiAssistant
-        || session.trigger_origin != TriggerOrigin::User
+    let inspection = call.name == LIST;
+    let delegated_inspection = inspection
+        && !session.agent_role.is_main()
+        && matches!(
+            session.trigger_origin,
+            TriggerOrigin::DelegatedTask | TriggerOrigin::PermissionDecision
+        );
+    if ((!session.agent_role.is_main() || session.trigger_origin != TriggerOrigin::User)
+        && !delegated_inspection)
+        || session.surface != AgentSessionSurface::AiAssistant
         || !session.turn_state.is_active()
         || session.input_revision == 0
         || session.actor_id.is_empty()

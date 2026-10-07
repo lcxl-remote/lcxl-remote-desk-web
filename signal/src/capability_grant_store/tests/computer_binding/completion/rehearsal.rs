@@ -61,11 +61,11 @@ async fn report_fixture(read: bool) {
     observe(&f, &native).await.unwrap();
     let db = &f.store.db;
     let schema = Schema::new(db.get_database_backend());
-    for table in [
+    for mut table in [
         schema.create_table_from_entity(agent_schedule::Entity),
         schema.create_table_from_entity(agent_task_rehearsal::Entity),
     ] {
-        db.execute(&table).await.unwrap();
+        db.execute(table.if_not_exists()).await.unwrap();
     }
     let store = ScheduleStore::new(db.clone());
     let draft = ScheduleDraft {

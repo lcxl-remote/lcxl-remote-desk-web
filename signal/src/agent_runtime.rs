@@ -25,8 +25,8 @@ use crate::model_provider;
 const AGENT_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 const AUTO_FOLLOW_UP_MAX_STEPS: u32 = 4;
 
-struct SignalStoreHeartbeat {
-    store: crate::agent_session_store::SignalAgentSessionStore,
+pub(crate) struct SignalStoreHeartbeat {
+    pub(crate) store: crate::agent_session_store::SignalAgentSessionStore,
 }
 
 impl LeaseHeartbeat for SignalStoreHeartbeat {
@@ -235,24 +235,48 @@ impl ModelSeam for CompletionModel {
         if export != self.export {
             return Err(export_denied());
         }
-        let request =
-            if session.pending_auto_triggers.iter().any(|trigger| {
-                trigger.event_id == self.event_id && trigger.kind == WorkKind::AgentExec
-            }) {
-                desk_diagnose_core::command_completion::project_request(
+        let child_creation = crate::agent_subagent_store::SubAgentStore::new(self.inner.db.clone())
+            .child_creation_context(&session)
+            .await
+            .map_err(|_| export_denied())?;
+        if child_creation.is_some()
+            && !crate::agent_subagent_store::SubAgentStore::new(self.inner.db.clone())
+                .child_resume_available(&session)
+                .await
+                .map_err(|_| export_denied())?
+        {
+            return Err(export_denied());
+        }
+        let request = if session
+            .pending_auto_triggers
+            .iter()
+            .any(|trigger| trigger.event_id == self.event_id && trigger.kind == WorkKind::AgentExec)
+        {
+            match child_creation.as_ref() {
+                Some(creation) => desk_diagnose_core::command_completion::project_child_request(
                     request,
                     &session,
                     &self.event_id,
-                )?
-            } else {
-                request
-            };
+                    creation,
+                )?,
+                None => desk_diagnose_core::command_completion::project_request(
+                    request,
+                    &session,
+                    &self.event_id,
+                )?,
+            }
+        } else {
+            request
+        };
         let request = self
             .inner
             .model_egress_policy()?
             .ok_or_else(export_denied)?
             .authorize_request(request)
-            .map_err(|_| export_denied())?
+            .map_err(|error| {
+                log::warn!("[ai-assistant] command completion model egress denied: {error}");
+                error.agent_error()
+            })?
             .request;
         // A historical replay/retention filter may omit the original tool
         // group. Never call that a reaction to a result the model cannot see.
@@ -306,6 +330,36 @@ pub async fn resume_completion_turn(
             error_code: Some(DeskErrorCode::FEATURE_UNAVAILABLE.code()),
         });
     }
+    let child_store = crate::agent_subagent_store::SubAgentStore::new(db.clone());
+    let child_creation = child_store
+        .child_creation_context(&session)
+        .await
+        .map_err(|_| export_denied())?;
+    if child_creation.is_some()
+        && (work_kind != WorkKind::AgentExec
+            || !child_store
+                .child_resume_available(&session)
+                .await
+                .map_err(|_| export_denied())?)
+    {
+        return Ok(LoopOutcome::TurnBusy);
+    }
+    let child_completion_event = if child_creation.is_some() {
+        Some(
+            session
+                .pending_auto_triggers
+                .iter()
+                .find(|pending| {
+                    pending.kind == WorkKind::AgentExec && pending.chain_id == session.chain_id
+                })
+                .ok_or_else(export_denied)?
+                .event_id
+                .clone(),
+        )
+    } else {
+        None
+    };
+    let response_locale = session.response_locale.clone();
     let config = model_provider::load(&db).await.map_err(|error| {
         transport_error(format!("failed to load model provider config: {error}"))
     })?;
@@ -321,6 +375,12 @@ pub async fn resume_completion_turn(
             .filter(|_| matches!(work_kind, WorkKind::ComputerAction | WorkKind::AgentExec))
             .ok_or_else(export_denied)?;
         let destination = config.destination_identity().map_err(|_| export_denied())?;
+        if child_creation
+            .as_ref()
+            .is_some_and(|creation| creation.source.model_destination != destination)
+        {
+            return Err(export_denied());
+        }
         let export = crate::capability_grant_store::SignalCapabilityGrantStore::new(db.clone())
             .completion_export(&session, &pending.event_id, &destination)
             .await
@@ -357,7 +417,7 @@ pub async fn resume_completion_turn(
             model_name: config.model.clone().unwrap_or_default(),
         })
     };
-    let sessions = crate::agent_session_store::SignalAgentSessionStore::new(db)
+    let sessions = crate::agent_session_store::SignalAgentSessionStore::new(db.clone())
         .with_client_metadata(session.client_conversation_id.clone(), session.surface);
     let heartbeat = SignalStoreHeartbeat {
         store: sessions.clone(),
@@ -390,7 +450,7 @@ pub async fn resume_completion_turn(
         permission_continuation_exact_tools: &[],
         response_format: desk_diagnose_core::prompt::ResponseFormatSpec::None,
         system_prompt: build_agentic_system_message(None),
-        response_locale: None,
+        response_locale,
         interactive_user_home: None,
         interactive_user_home_incarnation: None,
         max_steps_per_turn: config.max_steps_per_turn.min(AUTO_FOLLOW_UP_MAX_STEPS),
@@ -401,5 +461,23 @@ pub async fn resume_completion_turn(
         heartbeat: Some(&heartbeat),
     };
     let mut sink = DiscardTurnSink;
-    resume_agent_turn(&deps, claim, &mut sink).await
+    match child_completion_event {
+        Some(event_id) => {
+            let destination = config.destination_identity().map_err(|_| export_denied())?;
+            match child_store
+                .claim_child_completion(&claim, &destination, &event_id)
+                .await
+                .map_err(|_| export_denied())?
+            {
+                Some(claimed) => {
+                    desk_diagnose_core::agent_loop::run_preclaimed_child_completion(
+                        &deps, claimed, &mut sink,
+                    )
+                    .await
+                }
+                None => Ok(LoopOutcome::TurnBusy),
+            }
+        }
+        None => resume_agent_turn(&deps, claim, &mut sink).await,
+    }
 }

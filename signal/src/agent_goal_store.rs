@@ -256,6 +256,14 @@ pub async fn apply_owner_action(
 ) -> Result<Option<GoalRun>, DbErr> {
     let now_ms = u64::try_from(now.timestamp_millis()).map_err(|_| invalid())?;
     let txn = crate::db::begin_write(db, agent_session::Entity).await?;
+    crate::agent_subagent_store::lock_goal_source_on(
+        &txn,
+        conversation_id,
+        actor_id,
+        device_id,
+        goal_id,
+    )
+    .await?;
     let Some(session_row) = agent_session::Entity::find()
         .filter(agent_session::Column::ConversationId.eq(conversation_id))
         .filter(agent_session::Column::ActorId.eq(actor_id))
@@ -267,7 +275,8 @@ pub async fn apply_owner_action(
     };
     let mut session =
         PersistedAgentSession::decode_json(&session_row.state_json).map_err(|_| invalid())?;
-    if session.surface != AgentSessionSurface::AiAssistant
+    if !session.agent_role.is_main()
+        || session.surface != AgentSessionSurface::AiAssistant
         || !(session.turn_state.can_claim() || session.turn_state == TurnState::AwaitingApproval)
         || session_row
             .lease_deadline
@@ -308,6 +317,25 @@ pub async fn apply_owner_action(
         .map_err(|_| invalid())?;
     goal.apply_owner_action(action, now_ms)
         .map_err(|_| invalid())?;
+    crate::agent_subagent_store::apply_goal_source_on(
+        &txn,
+        conversation_id,
+        actor_id,
+        device_id,
+        &goal.goal_id,
+        goal.state,
+        now.timestamp_millis(),
+    )
+    .await?;
+    if action == GoalOwnerAction::Resume {
+        crate::agent_subagent_store::resume_goal_parent_on(
+            &txn,
+            &mut session,
+            &goal.goal_id,
+            now.timestamp_millis(),
+        )
+        .await?;
+    }
     session.last_event_seq = session.last_event_seq.checked_add(1).ok_or_else(invalid)?;
     session.version = session_row.version.checked_add(1).ok_or_else(invalid)?;
     let ledger = GoalLedgerEvent::new(
@@ -388,7 +416,7 @@ pub async fn wake_for_permission_decision(
     };
     let mut session =
         PersistedAgentSession::decode_json(&session_row.state_json).map_err(|_| invalid())?;
-    if session.surface != AgentSessionSurface::AiAssistant {
+    if !session.agent_role.is_main() || session.surface != AgentSessionSurface::AiAssistant {
         return Ok(GoalPermissionWake::NoGoal);
     }
     let Some(goal_record) = goal_row::Entity::find()
@@ -669,7 +697,7 @@ pub async fn expire_due(
         .await?;
     for row in rows {
         let goal = decode(&row)?;
-        if let Err(error) = expire_settled(db, &goal, now.clone()).await {
+        if let Err(error) = expire_settled(db, &goal, now).await {
             log::warn!(
                 "[ai-assistant-goal] failed to expire goal {}: {error}",
                 goal.goal_id
@@ -722,7 +750,8 @@ async fn expire_settled(
     };
     let mut session =
         PersistedAgentSession::decode_json(&session_row.state_json).map_err(|_| invalid())?;
-    if session.surface != AgentSessionSurface::AiAssistant
+    if !session.agent_role.is_main()
+        || session.surface != AgentSessionSurface::AiAssistant
         || session.input_revision != goal.input_revision
         || !(session.turn_state.can_claim() || session.turn_state == TurnState::AwaitingApproval)
         || session_row
@@ -831,6 +860,19 @@ pub async fn wake_for_work_completion(
     expected: &GoalRun,
     now: DateTime<Utc>,
 ) -> Result<Option<GoalRun>, DbErr> {
+    if expected
+        .status_reason
+        .as_deref()
+        .is_some_and(|id| id.starts_with("subagent-wait-"))
+    {
+        let _ = crate::agent_subagent_store::SubAgentStore::new(db.clone())
+            .resolve_parent_wait(
+                &expected.conversation_id,
+                &expected.owner_id,
+                &expected.device_id,
+            )
+            .await?;
+    }
     scheduler_transition(db, expected, SchedulerTransition::WorkWake, now).await
 }
 
@@ -955,6 +997,8 @@ async fn scheduler_transition(
     let previous_state_version = goal.state_version;
     let previous_lease_epoch = goal.lease_epoch;
     let completed_work_event_id = goal.completed_work_event_id(&session).map(str::to_owned);
+    let subagent_wait_ready =
+        crate::agent_subagent_store::goal_wait_ready_on(&txn, &session, &goal).await?;
     match (goal.state, transition) {
         (GoalState::Waiting(GoalWaitReason::Device), SchedulerTransition::Device(false))
             if goal.device_unavailable_exceeded(policy.device_unavailable_max_ms, now_ms) =>
@@ -989,7 +1033,7 @@ async fn scheduler_transition(
             goal.wake_from(GoalWaitReason::Model, now_ms)
         }
         (GoalState::Waiting(GoalWaitReason::Work), SchedulerTransition::WorkWake)
-            if completed_work_event_id.is_some() =>
+            if completed_work_event_id.is_some() || subagent_wait_ready =>
         {
             goal.wake_from(GoalWaitReason::Work, now_ms)
         }
@@ -1262,7 +1306,8 @@ pub async fn claim_slice(
     };
     let mut session =
         PersistedAgentSession::decode_json(&session_row.state_json).map_err(|_| invalid())?;
-    if session.surface != AgentSessionSurface::AiAssistant
+    if !session.agent_role.is_main()
+        || session.surface != AgentSessionSurface::AiAssistant
         || !session.turn_state.can_claim()
         || session.execution_state != desk_diagnose_core::session::ExecutionState::None
         || !session.unclosed_tool_call_ids().is_empty()
@@ -1325,6 +1370,18 @@ pub async fn claim_slice(
         txn.rollback().await?;
         scheduler_transition(db, &goal, SchedulerTransition::BudgetPause, now).await?;
         return Ok(None);
+    }
+    crate::agent_subagent_store::initialize_goal_group_on(&txn, &mut session, &goal, now_ms as i64)
+        .await?;
+    if session.ready_subagent_wait.is_some() {
+        let (_, group, _) = crate::agent_subagent_store::ready_wait_source_on(&txn, &session)
+            .await?
+            .ok_or_else(invalid)?;
+        if group.source.goal_id() != Some(goal.goal_id.as_str()) {
+            return Err(invalid());
+        }
+        session.ready_subagent_wait = None;
+        session.ready_subagent_notification = None;
     }
     for event_id in goal.owned_pending_work_event_ids(&session) {
         session.remove_pending_auto_trigger(&event_id);
@@ -1520,12 +1577,20 @@ fn control_has_required_fact(session: &PersistedAgentSession, control: &GoalCont
         GoalControl::Wait {
             reason: GoalWaitReason::Work,
             reference_id,
-        } => session
-            .execution_state
-            .tasks()
-            .iter()
-            .any(|task| task.action_request_id == *reference_id),
-        GoalControl::Complete { .. } => no_pending_work(session),
+        } => {
+            session
+                .execution_state
+                .tasks()
+                .iter()
+                .any(|task| task.action_request_id == *reference_id)
+                || session.subagent_wait.as_ref().is_some_and(|wait| {
+                    wait.wait_id == *reference_id
+                        && wait.parent_input_revision == session.input_revision
+                        && wait.parent_control_revision == session.control_revision
+                        && wait.validate().is_ok()
+                })
+        }
+        GoalControl::Complete { .. } => no_pending_work(session) && session.subagent_wait.is_none(),
         _ => true,
     }
 }
@@ -1576,6 +1641,18 @@ pub async fn settle_slice(
     if !persisted.turn_state.is_active()
         || persisted.input_revision != session.input_revision
         || persisted.focus_epoch.goal_segment.as_ref() != Some(&segment)
+    {
+        return Err(invalid());
+    }
+    crate::agent_subagent_store::acknowledge_results_on(
+        &txn,
+        &persisted,
+        session,
+        now.timestamp_millis(),
+    )
+    .await?;
+    if matches!(end, GoalSegmentEnd::Control(GoalControl::Complete { .. }))
+        && !crate::agent_subagent_store::required_children_complete_on(&txn, session).await?
     {
         return Err(invalid());
     }

@@ -150,7 +150,8 @@ pub fn project_request(
         .iter()
         .find(|message| message.message_id == event_id)
         .filter(|message| {
-            message.role == ChatRole::UntrustedOutput && message.data_envelope.is_some()
+            matches!(message.role, ChatRole::Tool | ChatRole::UntrustedOutput)
+                && message.data_envelope.is_some()
         })
         .ok_or_else(denied)?;
     let requirement = crate::permission_resume::latest_user_requirement(&session.conversation)
@@ -166,7 +167,54 @@ pub fn project_request(
         .messages
         .retain(|message| message.role == ChatRole::System);
     request.messages.push(requirement.clone());
-    request.messages.push(result.clone());
+    let mut projected_result = result.clone();
+    projected_result.role = ChatRole::UntrustedOutput;
+    request.messages.push(projected_result);
+    request.messages.extend(runtime);
+    Ok(request)
+}
+
+/// Child completion is still one tool-free receipt interpretation. Its original
+/// source and finite task are supplied by the host under the child identity.
+pub fn project_child_request(
+    mut request: ModelRequest,
+    session: &PersistedAgentSession,
+    event_id: &str,
+    creation: &crate::subagent::creation::TaskCreationEnvelope,
+) -> Result<ModelRequest, AgentError> {
+    let binding = session.agent_role.binding().ok_or_else(denied)?;
+    creation.validate_task(binding)?;
+    if !request.tools.is_empty() {
+        return Err(denied());
+    }
+    let result = session
+        .conversation
+        .iter()
+        .find(|message| message.message_id == event_id)
+        .filter(|message| {
+            matches!(message.role, ChatRole::Tool | ChatRole::UntrustedOutput)
+                && message.data_envelope.is_some()
+        })
+        .ok_or_else(denied)?
+        .clone();
+    let runtime = request
+        .messages
+        .iter()
+        .filter(|message| crate::runtime_context::is_runtime(message))
+        .cloned()
+        .collect::<Vec<_>>();
+    request
+        .messages
+        .retain(|message| message.role == ChatRole::System);
+    request.messages.push(
+        creation
+            .source
+            .child_source_message(&session.conversation_id)?,
+    );
+    request.messages.push(creation.instruction.clone());
+    let mut result = result;
+    result.role = ChatRole::UntrustedOutput;
+    request.messages.push(result);
     request.messages.extend(runtime);
     Ok(request)
 }

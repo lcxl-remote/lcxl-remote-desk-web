@@ -124,6 +124,24 @@ pub(super) async fn a_cancel_reaches_the_worker_and_still_answers_from_the_ledge
     let (ctx, mut rx) = make_ctx_with_rx().await;
     let (worker_tx, mut worker_rx) = tokio::sync::mpsc::unbounded_channel::<ServiceToWorker>();
     ctx.worker_mgr.install_active_for_test(worker_tx).await;
+    let target = ctx
+        .worker_mgr
+        .exec_worker_target_for_connection(Some("conn-1"))
+        .await
+        .unwrap();
+    ctx.exec_capacity
+        .try_admit("gen-1", 2, Duration::from_secs(60))
+        .unwrap();
+    ctx.exec_capacity
+        .bind(
+            "gen-1",
+            crate::daemon::exec_capacity::ExecBinding {
+                target,
+                owner_connection_id: Some("conn-1".into()),
+                daemon_pty: false,
+            },
+        )
+        .unwrap();
     ctx.exec_ledger
         .reserve("task-1", "gen-1", "fp-1", None)
         .await
@@ -759,4 +777,113 @@ pub(super) async fn confirm_exec_local_mode_caps_manager_authorization() {
         !preview.executable,
         "local SuggestOnly must cap the manager ConfirmEachAction grant"
     );
+}
+
+#[tokio::test]
+async fn central_cancel_uses_original_worker_without_browser_connection() {
+    let (ctx, mut rx) = make_ctx_with_rx().await;
+    let (tx, mut worker) = tokio::sync::mpsc::unbounded_channel();
+    ctx.worker_mgr.install_active_for_test(tx).await;
+    let plan = super::exec_edge::fleet_plan(&super::exec_edge::fleet_template(), "gen-1");
+    super::super::edge_exec::dispatch_fleet_exec_plan(&ctx, "gen-1", plan, None, None).await;
+    assert!(matches!(
+        worker.try_recv().unwrap(),
+        ServiceToWorker::ExecPlan(_)
+    ));
+    let mut control = exec_control_model(
+        "stop-original",
+        ExecControlAction::Cancel {
+            requested_by: "owner".into(),
+        },
+    );
+    control.from_connection_id = None;
+    handle_exec_control_inbound(&ctx, &control).await.unwrap();
+    assert!(
+        matches!(worker.try_recv().unwrap(), ServiceToWorker::ExecCancel(cancel) if cancel.execution_generation == "gen-1")
+    );
+    assert_eq!(expect_state_reply(&mut rx).state, ExecState::Reserved);
+}
+
+#[tokio::test]
+async fn replacing_worker_or_controlling_channel_never_retargets_cancel() {
+    let (ctx, _rx) = make_ctx_with_rx().await;
+    let (tx, mut original) = tokio::sync::mpsc::unbounded_channel();
+    ctx.worker_mgr.install_active_for_test(tx).await;
+    let target = ctx
+        .worker_mgr
+        .exec_worker_target_for_connection(Some("conn-1"))
+        .await
+        .unwrap();
+    ctx.exec_capacity
+        .try_admit("gen-1", 2, Duration::from_secs(60))
+        .unwrap();
+    ctx.exec_capacity
+        .bind(
+            "gen-1",
+            crate::daemon::exec_capacity::ExecBinding {
+                target,
+                owner_connection_id: Some("conn-1".into()),
+                daemon_pty: false,
+            },
+        )
+        .unwrap();
+    let mut foreign = exec_control_model(
+        "foreign-stop",
+        ExecControlAction::Cancel {
+            requested_by: "owner".into(),
+        },
+    );
+    foreign.from_connection_id = Some("other-connection".into());
+    handle_exec_control_inbound(&ctx, &foreign).await.unwrap();
+    assert!(original.try_recv().is_err());
+    let (tx, mut replacement) = tokio::sync::mpsc::unbounded_channel();
+    ctx.worker_mgr.install_active_for_test(tx).await;
+    handle_exec_control_inbound(
+        &ctx,
+        &exec_control_model(
+            "original-stop",
+            ExecControlAction::Cancel {
+                requested_by: "owner".into(),
+            },
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(replacement.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn redelivered_execution_does_not_erase_original_stop_binding_or_capacity() {
+    let (ctx, _rx) = make_ctx_with_rx().await;
+    let (tx, mut worker) = tokio::sync::mpsc::unbounded_channel();
+    ctx.worker_mgr.install_active_for_test(tx).await;
+    let plan = super::exec_edge::fleet_plan(&super::exec_edge::fleet_template(), "gen-1");
+    super::super::edge_exec::dispatch_fleet_exec_plan(&ctx, "gen-1", plan.clone(), None, None)
+        .await;
+    assert!(matches!(
+        worker.try_recv().unwrap(),
+        ServiceToWorker::ExecPlan(_)
+    ));
+    let original = ctx.exec_capacity.binding_for_owner("gen-1", None).unwrap();
+    assert!(matches!(
+        admit_exec(&ctx, &plan).await,
+        ExecAdmission::AcceptedOutcomeUnknown(_)
+    ));
+    assert_eq!(ctx.exec_capacity.in_flight(), 1);
+    assert_eq!(
+        ctx.exec_capacity.binding_for_owner("gen-1", None),
+        Some(original)
+    );
+    let mut control = exec_control_model(
+        "stop",
+        ExecControlAction::Cancel {
+            requested_by: "owner".into(),
+        },
+    );
+    control.from_connection_id = None;
+    handle_exec_control_inbound(&ctx, &control).await.unwrap();
+    assert!(matches!(
+        worker.try_recv().unwrap(),
+        ServiceToWorker::ExecCancel(_)
+    ));
 }

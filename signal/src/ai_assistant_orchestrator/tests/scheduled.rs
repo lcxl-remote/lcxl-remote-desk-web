@@ -101,6 +101,7 @@ async fn exercise_with_restart(
     );
     let mut db = Database::connect(&database_url).await.unwrap();
     crate::db::initialize_schema(&db).await.unwrap();
+    crate::ai_assistant_gate::enable_test_host();
     crate::model_provider::save(
         &db,
         crate::model_provider::ModelProviderConfig {
@@ -186,6 +187,7 @@ async fn exercise_with_restart(
         db.close().await.unwrap();
         db = Database::connect(&database_url).await.unwrap();
         crate::db::initialize_schema(&db).await.unwrap();
+        crate::ai_assistant_gate::enable_test_host();
         let restored = crate::entity::agent_session::Entity::find()
             .filter(crate::entity::agent_session::Column::ConversationId.eq(&conversation))
             .one(&db)
@@ -487,6 +489,7 @@ async fn exercise_with_restart(
             },
             None,
             Some(prepared),
+            None,
             None,
         ),
     )

@@ -96,7 +96,7 @@ pub struct WorkerMessage {
     pub message: WorkerToService,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecWorkerTarget {
     pub worker_key: Option<WorkerKey>,
     pub source_incarnation: WorkerIncarnation,
@@ -2815,6 +2815,75 @@ impl WorkerManager {
             .ipc_tx
             .send(msg)
             .map_err(|error| format!("failed to send to resident worker {key:?}: {error}"))
+    }
+
+    /// Use the admitted worker identity rather than resolving a browser's current
+    /// desktop again. Replacement workers never inherit an old command cancel.
+    pub async fn send_to_exec_target(
+        &self,
+        target: &ExecWorkerTarget,
+        msg: ServiceToWorker,
+    ) -> Result<(), String> {
+        let inner = self.inner.lock().await;
+        let worker = match target.worker_key.as_ref() {
+            Some(key) => inner.resident_workers.get(key),
+            None if !self.session_targeting_enabled.load(Ordering::Acquire) => {
+                inner.active_worker.as_ref()
+            }
+            None => None,
+        }
+        .filter(|worker| worker.incarnation == target.source_incarnation)
+        .ok_or_else(|| "original execution worker is no longer current".to_string())?;
+        worker
+            .ipc_tx
+            .send(msg)
+            .map_err(|error| format!("failed to send to original execution worker: {error}"))
+    }
+
+    /// Resolve an already authenticated session selection once for both PTY and
+    /// ordinary commands. The caller freezes this target before native dispatch.
+    pub async fn exec_worker_target_for_session(
+        &self,
+        session: Option<&desk_ipc_protocol::message::SessionKey>,
+    ) -> Result<ExecWorkerTarget, String> {
+        let inner = self.inner.lock().await;
+        if self.session_targeting_enabled.load(Ordering::Acquire) {
+            let session =
+                session.ok_or_else(|| "execution has no immutable session target".to_string())?;
+            let key = [DesktopTarget::LinuxSession, DesktopTarget::WindowsDefault]
+                .into_iter()
+                .map(|desktop| WorkerKey {
+                    session: session.clone(),
+                    desktop,
+                })
+                .find(|key| inner.resident_workers.contains_key(key))
+                .ok_or_else(|| "original execution session has no worker".to_string())?;
+            let worker = inner
+                .resident_workers
+                .get(&key)
+                .expect("worker selected under manager lock");
+            return Ok(ExecWorkerTarget {
+                worker_key: Some(key.clone()),
+                source_incarnation: worker.incarnation,
+                session_target_id: key.session.platform_session_id.clone(),
+                registration_generation: key.session.session_generation,
+                wire_worker_incarnation: worker.incarnation.get(),
+            });
+        }
+        if session.is_some() {
+            return Err("portable execution cannot select a resident session".into());
+        }
+        let worker = inner
+            .active_worker
+            .as_ref()
+            .ok_or_else(|| "No active worker".to_string())?;
+        Ok(ExecWorkerTarget {
+            worker_key: None,
+            source_incarnation: worker.incarnation,
+            session_target_id: worker.session_id.to_string(),
+            registration_generation: 0,
+            wire_worker_incarnation: 0,
+        })
     }
 
     pub async fn send_to_connection_worker(

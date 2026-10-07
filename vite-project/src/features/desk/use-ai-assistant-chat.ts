@@ -8,6 +8,8 @@ import { v4 } from 'uuid';
 import type { AiProvenance } from '@/components/ai-generated-mark';
 import type {
     BackgroundTaskDto,
+    AiAssistantDelegationSnapshot,
+    AiAssistantStopControl,
     CommandTaskDto,
     CapabilityGrantDto,
     ContextNoticeDto,
@@ -19,8 +21,6 @@ import { deskErrorCodeEnum } from '@/services/types';
 import type { AiAssistantDocumentPreview, AiAssistantDocumentPreviewPageResponse, AiAssistantEvent, AiAssistantVisualEvidence } from './ai-assistant-event';
 import {
     SIGNALING_TYPE_CODE_ASK_AI_ASSISTANT,
-    SIGNALING_TYPE_CODE_CANCEL_AI_ASSISTANT,
-    SIGNALING_TYPE_CODE_CONTROL_EXECUTION,
     SIGNALING_TYPE_CODE_AI_ASSISTANT_CONTEXT_UPDATED,
     SIGNALING_TYPE_CODE_AI_ASSISTANT_OBJECT_CONTEXT_UPDATED,
     SIGNALING_TYPE_CODE_AI_ASSISTANT_SESSION_SELECTED,
@@ -248,7 +248,10 @@ export type AiAssistantApprovalModelReadiness = {
     reason?: string | null;
 };
 
-type PersistedSnapshot = {
+export type PersistedSnapshot = {
+    controlRevision: number;
+    mainStopped: boolean;
+    subagents: AiAssistantDelegationSnapshot;
     actionPermissionReasons?: Record<string, string>;
     requestId?: string;
     fileScope?: AssistantFileScopeView;
@@ -280,7 +283,7 @@ type PersistedSnapshot = {
     visualEvidence?: AiAssistantVisualEvidence[];
 };
 
-function projectPersistedSnapshot(snapshot: PersistedSnapshot) {
+export function projectPersistedSnapshot(snapshot: PersistedSnapshot) {
     const messages: AiAssistantMessage[] = [];
     let tools: AiAssistantToolActivity[] = [];
     let draft: ComputerActionDraftPreview | null = null;
@@ -450,6 +453,8 @@ export function useAiAssistantChat({
     const [permissionRequests, setPermissionRequests] = useState<PermissionRequestDto[]>([]);
     const [backgroundTasks, setBackgroundTasks] = useState<BackgroundTaskDto[]>([]);
     const [commandTasks, setCommandTasks] = useState<CommandTaskDto[]>([]);
+    const [subagents, setSubagents] = useState<AiAssistantDelegationSnapshot>({ active_tasks: [], task: null, tasks: null, parent_session_id: null, attention_tasks: [], attention_count: 0 });
+    const [mainStopped, setMainStopped] = useState(false);
     const [taskCancelling, setTaskCancelling] = useState<string | null>(null);
     const [capabilityGrants, setCapabilityGrants] = useState<CapabilityGrantDto[]>([]);
     const [outcomeDisposing, setOutcomeDisposing] = useState(false);
@@ -478,14 +483,17 @@ export function useAiAssistantChat({
     const activeRequest = useRef<string | null>(null);
     const snapshotActiveRequest = useRef<string | null>(null);
     const [stopping, setStopping] = useState(false);
+    const [stopConfirmation, setStopConfirmation] = useState<{
+        session: string; conversation: string; inputRevision: number; controlRevision: number;
+    } | null>(null);
     const stopPending = useRef(false);
-    const clearStopping = useCallback(() => {
+    const stopOperation = useRef<object | null>(null);
+    const clearStopping = useCallback((force = false) => {
+        if (stopOperation.current && !force) return;
+        if (force) stopOperation.current = null;
         stopPending.current = false;
         setStopping(false);
     }, []);
-    useEffect(() => {
-        if (connected === false) clearStopping();
-    }, [connected, clearStopping]);
     const contextRequest = useRef<string | null>(null);
     const contextTimer = useRef<number | null>(null);
     const conversationId = useRef<string | null>(null);
@@ -510,6 +518,7 @@ export function useAiAssistantChat({
         seq: number;
         requestOrder: number;
         inputRevision?: number;
+        controlRevision: number;
     } | null>(null);
     // Retain only durable snapshots, not optimistic/streaming messages. Once
     // history is expanded, tail polling must not collapse the loaded window.
@@ -602,6 +611,12 @@ export function useAiAssistantChat({
                 || snapshot.sessionId.length === 0
                 || !Number.isSafeInteger(snapshot.seq)
                 || snapshot.seq < 0
+                || !Number.isSafeInteger(snapshot.controlRevision) || snapshot.controlRevision < 1
+                || typeof snapshot.mainStopped !== 'boolean'
+                || !snapshot.subagents || !Array.isArray(snapshot.subagents.active_tasks)
+                || !Array.isArray(snapshot.subagents.attention_tasks) || !Number.isSafeInteger(snapshot.subagents.attention_count)
+                || snapshot.subagents.attention_count < 0
+                || snapshot.subagents.task !== null || snapshot.subagents.parent_session_id !== null
             ) return;
             const watermark = snapshotWatermark.current;
             if (
@@ -624,7 +639,11 @@ export function useAiAssistantChat({
                 seq: snapshot.seq,
                 requestOrder: expectedRequestOrder,
                 inputRevision: snapshot.inputRevision,
+                controlRevision: snapshot.controlRevision,
             };
+            setStopConfirmation(current => current && (current.session !== snapshot.sessionId
+                || current.inputRevision !== snapshot.inputRevision || current.controlRevision !== snapshot.controlRevision)
+                ? null : current);
             snapshotActiveRequest.current = snapshot.active ? snapshot.requestId ?? null : null;
             const local = activeRequest.current;
             if (local && snapshot.active && snapshot.requestId === local) acknowledgeActiveRequest(local);
@@ -639,7 +658,7 @@ export function useAiAssistantChat({
                 if (stoppingRequest.current === local) clearStopping();
             }
             if (!snapshot.active) {
-                clearStopping();
+                if (!stopPending.current) clearStopping();
                 // An expired server lease also settles a locally bound request
                 // whose terminal event was lost during a disconnect or restart.
                 if (activeRequest.current === snapshot.requestId) activeRequest.current = null;
@@ -673,6 +692,8 @@ export function useAiAssistantChat({
             setPermissionRequests(projected.permissionRequests);
             setBackgroundTasks(projected.backgroundTasks);
             setCommandTasks(snapshot.commandTasks ?? []);
+            setSubagents(snapshot.subagents);
+            setMainStopped(snapshot.mainStopped);
             setCapabilityGrants(projected.capabilityGrants);
             setPendingInputCount(projected.pendingInputCount);
             setMessagePage(page);
@@ -705,6 +726,9 @@ export function useAiAssistantChat({
                     setError(agentErrorMessage(translate.current, snapshot.terminalError.error_code,
                         snapshot.terminalError.message, 'The AI Assistant turn could not complete.'));
 
+                } else if (snapshot.mainStopped) {
+                    setStatus('cancelled');
+                    setError(null);
                 } else if (snapshot.goal && !['completed', 'failed', 'cancelled'].includes(snapshot.goal.state)) {
                     setStatus(snapshot.goal.state === 'waiting_approval' ? 'permission_required' : 'done');
                     setError(null);
@@ -836,7 +860,7 @@ export function useAiAssistantChat({
         setRemoteActive(false);
         activeRequest.current = null;
         snapshotActiveRequest.current = null;
-        clearStopping();
+        clearStopping(true);
         contextRequest.current = null;
         if (contextTimer.current !== null) window.clearTimeout(contextTimer.current);
         contextTimer.current = null;
@@ -849,6 +873,9 @@ export function useAiAssistantChat({
         setPermissionRequests([]);
         setBackgroundTasks([]);
         setCommandTasks([]);
+        setSubagents({ active_tasks: [], task: null, tasks: null, parent_session_id: null, attention_tasks: [], attention_count: 0 });
+        setMainStopped(false);
+        setStopConfirmation(null);
         setCapabilityGrants([]);
         setOutcomeDisposing(false);
         setPermissionUpdating(false);
@@ -881,7 +908,7 @@ export function useAiAssistantChat({
             }
             activeRequest.current = null;
             snapshotActiveRequest.current = null;
-            clearStopping();
+            clearStopping(true);
             contextRequest.current = null;
             if (contextTimer.current !== null) window.clearTimeout(contextTimer.current);
             contextTimer.current = null;
@@ -894,6 +921,9 @@ export function useAiAssistantChat({
             setPermissionRequests([]);
             setBackgroundTasks([]);
             setCommandTasks([]);
+            setSubagents({ active_tasks: [], task: null, tasks: null, parent_session_id: null, attention_tasks: [], attention_count: 0 });
+            setMainStopped(false);
+            setStopConfirmation(null);
             setCapabilityGrants([]);
             setPermissionUpdating(false);
             setGrantRevoking(null);
@@ -1269,6 +1299,9 @@ export function useAiAssistantChat({
             return false;
         }
         deliveryFailure.current = null;
+        setStopConfirmation(null);
+        snapshotEpoch.current += 1;
+        clearStopping(true);
         ensureConversation();
         const clientMessageId = rehearsal?.initial_message_id ?? `user-${v4()}`;
         if (rehearsal) rehearsalSent.current = true;
@@ -1572,13 +1605,20 @@ export function useAiAssistantChat({
         try {
             if (kind === 'command') {
                 const task = commandTasks.find(item => item.taskId === taskId);
-                if (connected === false || !task || !['running', 'outcome_unknown'].includes(task.state)) {
+                const session = snapshotWatermark.current?.conversationId === currentConversationId
+                    ? snapshotWatermark.current.sessionId : null;
+                if (!session || !task || !['running', 'outcome_unknown'].includes(task.state)) {
                     throw new Error('Task is no longer cancellable.');
                 }
-                sendMessage(SIGNALING_TYPE_CODE_CONTROL_EXECUTION, {
+                const response = await fetch('/api/my/ai-assistant-session/command/cancel', {
+                    method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ connection: deskId, session, exec_request_id: task.taskId,
                     execution_generation: task.executionGeneration,
-                    action: 'cancel', requested_by: 'control-end',
-                }, deskId);
+                    }),
+                });
+                const body = await response.json();
+                if (!response.ok || body.code !== deskErrorCodeEnum.SUCCESS || typeof body.data !== 'boolean')
+                    throw new Error(body.message || 'Cancellation failed.');
             } else {
                 const task = backgroundTasks.find(item => item.taskId === taskId);
                 if (!task?.supportsCancel || !['running', 'outcome_unknown'].includes(task.state)) {
@@ -1596,23 +1636,78 @@ export function useAiAssistantChat({
         } finally {
             setTaskCancelling(null);
         }
-    }, [backgroundTasks, commandTasks, connected, deskId, loadSnapshot, sendMessage, taskCancelling]);
+    }, [backgroundTasks, commandTasks, deskId, loadSnapshot, taskCancelling]);
+
+    const submitStop = useCallback(async (selection: NonNullable<typeof stopConfirmation>,
+        choice: AiAssistantStopControl['subagent_choice']) => {
+        if (stopPending.current || conversationId.current !== selection.conversation) return false;
+        const epoch = snapshotEpoch.current;
+        const operation = {};
+        stopOperation.current = operation;
+        const isCurrent = () => stopOperation.current === operation && snapshotEpoch.current === epoch
+            && conversationId.current === selection.conversation;
+        const control: AiAssistantStopControl = {
+            client_request_id: v4(), expected_input_revision: selection.inputRevision,
+            expected_control_revision: selection.controlRevision, subagent_choice: choice,
+        };
+        stopPending.current = true;
+        stoppingRequest.current = activeRequest.current ?? snapshotActiveRequest.current;
+        setStopping(true);
+        const controller = new AbortController();
+        const timer = window.setTimeout(() => controller.abort(), 15_000);
+        try {
+            const response = await fetch('/api/my/ai-assistant-session/stop', {
+                method: 'POST', credentials: 'include', signal: controller.signal,
+                headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+                body: JSON.stringify({ connection: deskId, conversation: selection.conversation,
+                    session: selection.session, control }),
+            });
+            const result = await response.json();
+            if (!isCurrent()) return false;
+            if (!response.ok || result.code !== deskErrorCodeEnum.SUCCESS || !result.data) {
+                throw new Error(result.message || translate.current('pages.aiAssistant.stopFailed'));
+            }
+            activeRequest.current = null;
+            snapshotActiveRequest.current = null;
+            activeRequestAck.current = null;
+            setRemoteActive(false);
+            setMainStopped(true);
+            setPartial('');
+            setStatus('cancelled');
+            setStopConfirmation(null);
+            await loadSnapshot(selection.conversation);
+            return true;
+        } catch (reason) {
+            if (!isCurrent()) return false;
+            // A lost reply may follow a committed stop. Refresh facts once;
+            // never automatically repeat an owner control mutation.
+            await loadSnapshot(selection.conversation);
+            if (isCurrent()) setError(reason instanceof Error ? reason.message
+                : translate.current('pages.aiAssistant.stopFailed'));
+            return false;
+        } finally {
+            window.clearTimeout(timer);
+            if (isCurrent()) clearStopping(true);
+        }
+    }, [deskId, loadSnapshot, clearStopping]);
 
     const stop = useCallback(() => {
-        const requestId = activeRequest.current ?? snapshotActiveRequest.current;
-        if (connected === false || !requestId || stopPending.current) return;
-        stopPending.current = true;
-        stoppingRequest.current = requestId;
-        setStopping(true);
-        try {
-            sendMessage(SIGNALING_TYPE_CODE_CANCEL_AI_ASSISTANT, null, deskId, requestId);
-        } catch (reason) {
-            clearStopping();
-            setError(reason instanceof Error ? reason.message : 'Failed to stop the assistant.');
+        const watermark = snapshotWatermark.current;
+        const selected = conversationId.current;
+        if (!selected || !watermark || watermark.conversationId !== selected || stopPending.current
+            || !Number.isSafeInteger(watermark.inputRevision) || !Number.isSafeInteger(watermark.controlRevision)) return;
+        const selection = { session: watermark.sessionId, conversation: selected,
+            inputRevision: watermark.inputRevision!, controlRevision: watermark.controlRevision };
+        if ((subagents.tasks?.unfinished ?? 0) > 0 || subagents.active_tasks.length > 0) {
+            setStopConfirmation(selection);
+        } else {
+            void submitStop(selection, null);
         }
-        // Keep the transcript and request binding until the server settles it.
-        // Stopping the current turn does not cancel independent background tasks.
-    }, [connected, deskId, sendMessage, clearStopping]);
+    }, [subagents, submitStop]);
+
+    const confirmStop = useCallback((includeSubagents: boolean) => stopConfirmation
+        ? submitStop(stopConfirmation, includeSubagents ? 'include_sub_agents' : 'main_only')
+        : Promise.resolve(false), [stopConfirmation, submitStop]);
 
     const reset = useCallback(() => {
         if (rehearsal) return;
@@ -1622,7 +1717,7 @@ export function useAiAssistantChat({
         setAcceptedInput(null);
         activeRequest.current = null;
         snapshotActiveRequest.current = null;
-        clearStopping();
+        clearStopping(true);
         contextRequest.current = null;
         if (contextTimer.current !== null) window.clearTimeout(contextTimer.current);
         contextTimer.current = null;
@@ -1657,6 +1752,9 @@ export function useAiAssistantChat({
         setPermissionRequests([]);
         setBackgroundTasks([]);
         setCommandTasks([]);
+        setSubagents({ active_tasks: [], task: null, tasks: null, parent_session_id: null, attention_tasks: [], attention_count: 0 });
+        setMainStopped(false);
+        setStopConfirmation(null);
         setCapabilityGrants([]);
         setOutcomeDisposing(false);
         setPermissionUpdating(false);
@@ -1692,10 +1790,15 @@ export function useAiAssistantChat({
     }, [remoteActive, contextUpdating, permissionUpdating, grantRevoking,
         hydrating, reset, conversationStorageScope, loadSnapshot, rehearsal]);
 
+    const refreshSnapshot = useCallback(() => {
+        if (conversationId.current) void loadSnapshot(conversationId.current);
+    }, [loadSnapshot]);
+
     return {
         conversationId: conversationId.current,
         sessionId: snapshotWatermark.current?.conversationId === conversationId.current ? snapshotWatermark.current.sessionId : undefined,
         inputRevision: snapshotWatermark.current?.conversationId === conversationId.current ? snapshotWatermark.current.inputRevision : undefined,
+        controlRevision: snapshotWatermark.current?.conversationId === conversationId.current ? snapshotWatermark.current.controlRevision : undefined,
         selectConversation,
         forgetConversation,
         contextUsage,
@@ -1728,6 +1831,9 @@ export function useAiAssistantChat({
         permissionRequests,
         backgroundTasks,
         commandTasks,
+        subagents,
+        mainStopped,
+        refreshSnapshot,
         taskCancelling,
         cancelTask,
         capabilityGrants,
@@ -1742,7 +1848,12 @@ export function useAiAssistantChat({
         sessionTargetResolving,
         stop,
         stopping,
-        canStop: connected !== false && !!(activeRequest.current ?? snapshotActiveRequest.current),
+        stopConfirmation,
+        dismissStopConfirmation: () => { if (!stopPending.current) setStopConfirmation(null); },
+        confirmStop,
+        canStop: !hydrating && !!snapshotWatermark.current && (!!(activeRequest.current ?? snapshotActiveRequest.current)
+            || (subagents.tasks?.unfinished ?? 0) > 0 || subagents.active_tasks.length > 0
+            || (!mainStopped && !!goal && !['completed', 'failed', 'cancelled'].includes(goal.state))),
         turnRunning: activeRequest.current !== null || remoteActive,
         running: activeRequest.current !== null || remoteActive || contextUpdating || permissionUpdating || outcomeDisposing,
         start,

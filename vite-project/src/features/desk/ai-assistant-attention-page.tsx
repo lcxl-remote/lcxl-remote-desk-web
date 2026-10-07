@@ -11,7 +11,7 @@ import { AiAssistantHubLayout } from './ai-assistant-hub-layout';
 
 type AttentionReason =
     | 'goal_open_approval' | 'permission_approval' | 'goal_needs_input'
-    | 'goal_budget' | 'goal_stalled' | 'goal_blocked' | 'goal_deadline_soon';
+    | 'goal_budget' | 'goal_stalled' | 'goal_blocked' | 'goal_deadline_soon' | 'subagent_result';
 
 type AttentionItem = {
     attentionId: string;

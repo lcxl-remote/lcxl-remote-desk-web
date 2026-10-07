@@ -20,6 +20,10 @@ pub struct Model {
     #[sea_orm(unique)]
     pub event_id: String,
     pub delivery_state: String,
+    /// Desired stop targets the immutable execution_generation above. It never
+    /// changes the native status, result, delivery, or dispatch deadline.
+    pub cancel_requested_at: Option<DateTimeUtc>,
+    pub cancel_requested_by: Option<String>,
     pub deadline: DateTimeUtc,
     pub created_at: DateTimeUtc,
     pub updated_at: DateTimeUtc,

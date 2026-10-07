@@ -16,6 +16,17 @@ pub struct AssistantTurnFence {
     pub device_id: String,
     pub input_revision: u64,
     pub lease_token: u64,
+    pub control_revision: u64,
+    pub delegation: Option<DelegatedActionFence>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DelegatedActionFence {
+    pub root_conversation_id: String,
+    pub group_id: String,
+    pub task_id: String,
+    pub source_epoch: u64,
 }
 
 impl AssistantTurnFence {
@@ -61,6 +72,16 @@ impl AssistantTurnFence {
             device_id: session.device_id.clone(),
             input_revision: session.input_revision,
             lease_token: session.lease_token,
+            control_revision: session.control_revision,
+            delegation: session
+                .agent_role
+                .binding()
+                .map(|binding| DelegatedActionFence {
+                    root_conversation_id: binding.root_conversation_id.clone(),
+                    group_id: binding.group_id.clone(),
+                    task_id: binding.task_id.clone(),
+                    source_epoch: binding.source_epoch,
+                }),
         };
         fence.validate()?;
         Ok(Some(fence))
@@ -72,6 +93,16 @@ impl AssistantTurnFence {
             || self.input_revision > i64::MAX as u64
             || self.lease_token == 0
             || self.lease_token > i64::MAX as u64
+            || self.control_revision == 0
+            || self.control_revision > i64::MAX as u64
+            || self.delegation.as_ref().is_some_and(|delegation| {
+                !crate::subagent::valid_id(&delegation.root_conversation_id)
+                    || !crate::subagent::valid_id(&delegation.group_id)
+                    || !crate::subagent::valid_id(&delegation.task_id)
+                    || delegation.root_conversation_id == self.conversation_id
+                    || delegation.source_epoch == 0
+                    || delegation.source_epoch > i64::MAX as u64
+            })
             || [
                 &self.conversation_id,
                 &self.turn_id,
@@ -104,6 +135,8 @@ mod tests {
     fn valid() -> AssistantTurnFence {
         AssistantTurnFence {
             schema_version: 1,
+            control_revision: 1,
+            delegation: None,
             conversation_id: "run".into(),
             turn_id: "turn".into(),
             actor_id: "actor".into(),

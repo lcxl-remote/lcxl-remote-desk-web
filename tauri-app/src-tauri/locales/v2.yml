@@ -27,6 +27,9 @@ ai_attention:
   deadline:
     en: An AI goal is nearing its deadline
     zh-CN: AI 目标即将到期
+  subagent_result:
+    en: A subagent result is ready to review
+    zh-CN: 子 agent 结果已就绪，等待查看
 tray_active_sessions:
   en: "LCXL Remote Desktop — %{count} remote session(s) active"
   zh-CN: "LCXL 远程桌面 — %{count} 个远程会话正在进行"

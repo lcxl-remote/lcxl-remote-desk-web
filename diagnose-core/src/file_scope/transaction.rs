@@ -229,7 +229,7 @@ impl FileScopeUpdate {
             &self.subject.device_id,
             &self.subject.conversation_id,
         )?;
-        if session.client_conversation_id.as_deref() != Some(self.client_conversation_id.as_str()) {
+        if session.file_scope_selector() != Some(self.client_conversation_id.as_str()) {
             return Err(FileScopeError::WrongSubject);
         }
         Ok(())

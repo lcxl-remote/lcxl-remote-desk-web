@@ -11,7 +11,7 @@ pub(crate) fn group_messages_for_policy(
     }
     for group in &mut groups {
         let message = &conversation[group.start];
-        if message.tool_calls.is_empty() {
+        if message.tool_calls.is_empty() && message.replay_disposition.is_none() {
             continue;
         }
         match &message.replay_disposition {
@@ -48,14 +48,15 @@ pub(crate) fn project_portable_replay(messages: &mut [ChatMessage], policy: &Pin
         return;
     }
     for message in messages {
-        if !message.tool_calls.is_empty()
+        if message.role == ChatRole::Assistant
+            && (!message.tool_calls.is_empty() || message.replay_disposition.is_some())
             && message
                 .replay_disposition
                 .as_ref()
                 .and_then(ReplayDisposition::source_context_key)
                 != Some(&policy.source_context_key)
         {
-            // Provider-specific signatures are not portable; tool calls/results are.
+            // Provider-specific replay is not portable; answers and tool facts are.
             message.replay_disposition = Some(ReplayDisposition::NotRequired {
                 source_context_key: policy.source_context_key.clone(),
             });
@@ -117,6 +118,42 @@ mod tests {
         policy.preserve_history = true;
         policy
     }
+    #[test]
+    fn plain_answer_keeps_replay_on_same_model_and_drops_foreign_opaque_material() {
+        let old = policy("old", 8192);
+        let new = policy("new", 8192);
+        let mut answer = ChatMessage::text("answer", ChatRole::Assistant, "historical answer");
+        answer.replay_disposition = Some(ReplayDisposition::Present {
+            envelope: crate::replay::ProviderReplayEnvelope::new(
+                crate::replay::ReplayCodec::OpenAiReasoningContent,
+                old.source_context_key.clone(),
+                serde_json::json!("provider specific reasoning"),
+            ),
+        });
+        let conversation = vec![answer.clone()];
+        let same = group_messages_for_policy(&conversation, &old).unwrap();
+        let switched = group_messages_for_policy(&conversation, &new).unwrap();
+        assert!(same[0].replay_safe && switched[0].replay_safe);
+        assert!(switched[0].cost < same[0].cost);
+        let mut projected = conversation.clone();
+        project_portable_replay(&mut projected, &old);
+        assert_eq!(projected, conversation);
+        project_portable_replay(&mut projected, &new);
+        assert_eq!(projected[0].text, "historical answer");
+        assert!(
+            matches!(&projected[0].replay_disposition, Some(ReplayDisposition::NotRequired { source_context_key }) if source_context_key == &new.source_context_key)
+        );
+        assert_eq!(
+            conversation[0].replay_disposition,
+            answer.replay_disposition
+        );
+        answer.replay_disposition = Some(ReplayDisposition::legacy_unknown());
+        assert!(matches!(
+            group_messages_for_policy(&[answer], &new),
+            Err(ModelContextError::ProtectedReplayUnsafe(_))
+        ));
+    }
+
     #[test]
     fn durable_window_rejects_overflow_instead_of_dropping_old_facts() {
         let policy = policy("model", 4096);

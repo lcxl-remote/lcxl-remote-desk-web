@@ -1,5 +1,6 @@
 //! Single-node scheduled dispatch using durable paired claims.
 mod fresh;
+mod subagents;
 use crate::owned_task;
 use crate::{
     ai_assistant_gate::AiAssistantGate,
@@ -44,6 +45,7 @@ pub struct ContinuationScanReport {
     pub goal_settled: usize,
     pub goal_deferred: usize,
     pub review_expired: u64,
+    pub review_usage_reconciled: u64,
 }
 
 #[derive(Clone)]
@@ -100,6 +102,12 @@ impl SignalScheduleExecutor {
             BATCH_SIZE,
         )
         .await?;
+        report.review_usage_reconciled = crate::agent_approval_usage::reconcile_usage(
+            &self.db,
+            chrono::Utc::now().timestamp_millis(),
+            BATCH_SIZE,
+        )
+        .await?;
         let mut tasks = stream::iter(
             candidates
                 .into_iter()
@@ -115,10 +123,8 @@ impl SignalScheduleExecutor {
                 DispatchResult::Reconcile => report.needs_reconciliation += 1,
             }
         }
-        crate::agent_goal_open_store::expire_due(&self.db, chrono::Utc::now(), BATCH_SIZE as u64)
-            .await?;
-        crate::agent_goal_store::expire_due(&self.db, chrono::Utc::now(), BATCH_SIZE as u64)
-            .await?;
+        crate::agent_goal_open_store::expire_due(&self.db, chrono::Utc::now(), BATCH_SIZE).await?;
+        crate::agent_goal_store::expire_due(&self.db, chrono::Utc::now(), BATCH_SIZE).await?;
         let after = self
             .goal_cursor
             .lock()
@@ -472,6 +478,9 @@ impl SignalScheduleExecutor {
     }
 
     pub async fn run(self) {
+        actix_web::rt::spawn(self.clone().run_subagent_tasks());
+        actix_web::rt::spawn(self.clone().run_subagent_waits());
+        actix_web::rt::spawn(self.clone().run_subagent_recovery());
         actix_web::rt::spawn(self.clone().run_approval_reviews());
         let mut cursor = 0;
         let mut rehearsal_cursor = 0;

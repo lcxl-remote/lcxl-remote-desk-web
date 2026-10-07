@@ -654,18 +654,27 @@ pub(crate) fn group_messages(
             });
             continue;
         }
-        if message.replay_disposition.is_some() {
+        if message.replay_disposition.is_some() && message.role != ChatRole::Assistant {
             return Err(ModelContextError::UnexpectedReplayDisposition(
                 message.message_id.clone(),
             ));
         }
+        let replay = if message.replay_disposition.is_some() {
+            classify_replay(message, source)
+        } else {
+            ReplayClassification {
+                replay_safe: true,
+                summary_eligible: true,
+                discard_only: false,
+            }
+        };
         groups.push(MessageGroup {
             start: index,
             end: index + 1,
             cost: model_context_cost(message),
-            replay_safe: true,
-            summary_eligible: true,
-            discard_only: false,
+            replay_safe: replay.replay_safe,
+            summary_eligible: replay.summary_eligible,
+            discard_only: replay.discard_only,
         });
         index += 1;
     }
@@ -776,7 +785,7 @@ impl std::fmt::Display for ModelContextError {
                 write!(f, "incomplete assistant tool-call group: {id}")
             }
             Self::UnexpectedReplayDisposition(id) => {
-                write!(f, "non-tool-call message carries replay disposition: {id}")
+                write!(f, "non-assistant message carries replay disposition: {id}")
             }
             Self::InvalidProtectionReference(id) => {
                 write!(
@@ -855,6 +864,38 @@ mod tests {
             ),
             ChatMessage::tool_result("t1", "c1", "ok"),
         ]
+    }
+
+    #[test]
+    fn plain_assistant_replay_obeys_source_shape_role_and_cost_guards() {
+        let mut message = ChatMessage::text("answer", ChatRole::Assistant, "done");
+        message.replay_disposition = Some(ReplayDisposition::Present {
+            envelope: crate::replay::ProviderReplayEnvelope::new(
+                crate::replay::ReplayCodec::OpenAiReasoningContent,
+                source("same"),
+                serde_json::json!("opaque reasoning"),
+            ),
+        });
+        let groups = group_messages(&[message.clone()], &source("same")).unwrap();
+        assert!(groups[0].replay_safe);
+        assert!(
+            groups[0].cost
+                > model_context_cost(&ChatMessage::text("answer", ChatRole::Assistant, "done"))
+        );
+        assert!(!group_messages(&[message.clone()], &source("other")).unwrap()[0].replay_safe);
+        message.role = ChatRole::User;
+        assert!(matches!(
+            group_messages(&[message.clone()], &source("same")),
+            Err(ModelContextError::UnexpectedReplayDisposition(_))
+        ));
+        message.role = ChatRole::Assistant;
+        if let Some(ReplayDisposition::Present { envelope }) = &mut message.replay_disposition {
+            envelope.payload = serde_json::json!([]);
+        }
+        let groups = group_messages(&[message], &source("same")).unwrap();
+        assert!(!groups[0].replay_safe);
+        assert!(!groups[0].summary_eligible);
+        assert!(groups[0].discard_only);
     }
 
     #[test]

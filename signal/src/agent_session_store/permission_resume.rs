@@ -293,6 +293,16 @@ impl SignalAgentSessionStore {
             return Ok(None);
         }
         current_decision(&session, &decision)?;
+        if !crate::agent_subagent_store::child_resume_admitted_on(
+            &txn,
+            &session,
+            now.timestamp_millis(),
+        )
+        .await
+        .map_err(storage)?
+        {
+            return Ok(None);
+        }
         if session.turn_state.is_active() {
             return Ok(None);
         }
@@ -366,6 +376,16 @@ impl SignalAgentSessionStore {
             return Err(ClaimError::Busy);
         }
         current_decision(&session, &decision).map_err(ClaimError::Backend)?;
+        if !crate::agent_subagent_store::child_resume_admitted_on(
+            &txn,
+            &session,
+            now.timestamp_millis(),
+        )
+        .await
+        .map_err(|error| ClaimError::Backend(storage(error)))?
+        {
+            return Err(ClaimError::Busy);
+        }
         let current_grants =
             crate::capability_grant_store::SignalCapabilityGrantStore::list_for_subject_on(
                 &txn,
@@ -397,6 +417,9 @@ impl SignalAgentSessionStore {
             )
             .map_err(|_| ClaimError::Busy)?;
         session.adopt_trigger(TriggerOrigin::PermissionDecision, &params.turn_id);
+        crate::agent_subagent_store::record_child_resume_on(&txn, &session, now.timestamp_millis())
+            .await
+            .map_err(|error| ClaimError::Backend(storage(error)))?;
         session.version = row
             .version
             .checked_add(1)

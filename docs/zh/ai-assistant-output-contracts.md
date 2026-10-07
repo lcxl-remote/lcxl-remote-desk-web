@@ -2,8 +2,17 @@
 
 由 `diagnose-core/src/output_contracts.rs` 生成。目录版本是映射版本，并不表示每个业务对象都有 `schema_version` 字段。错误可能以安全文本返回；结果外置时须先读取附件，再判断业务内容。
 
+`read_subagent_result` 返回 `SubAgentModelResult`：完整答复、冻结完成标准、任务身份和状态版本，以及非空运行事实或引用；省略 UI 元数据和空可选字段。`include_task=true` 补回冻结的原任务说明；用户界面仍保留完整存储结果。
+
 | 工具 | 业务出参类型 | 目录版本 | 可能的投递形态 |
 |---|---|---:|---|
+| `spawn_subagent` | `SubAgentSpawnReceipt` | 1 | inline |
+| `list_subagents` | `AiAssistantSubAgentPage` | 1 | inline |
+| `get_subagent_status` | `AiAssistantSubAgentSummary` | 1 | inline |
+| `read_subagent_result` | `SubAgentModelResult` | 1 | inline |
+| `wait_subagents` | `SubAgentWaitReceipt` | 1 | inline |
+| `cancel_subagent` | `SubAgentControlReceipt` | 1 | inline |
+| `send_subagent_message` | `SubAgentControlReceipt` | 1 | inline |
 | `update_task_status` | `TaskStatusUpdateReceipt` | 1 | inline |
 | `control_goal` | `GoalControlReceipt` | 1 | inline |
 | `request_goal` | `GoalRequestReceipt` | 1 | inline |

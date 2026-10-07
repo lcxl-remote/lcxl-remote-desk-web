@@ -68,6 +68,7 @@ mod tests {
             "cancelled",
             "superseded",
             "awaiting_permission",
+            "awaiting_children",
         ] {
             assert_eq!(public_issue(status, None), None);
         }

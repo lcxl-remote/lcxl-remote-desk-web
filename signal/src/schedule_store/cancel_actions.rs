@@ -62,6 +62,10 @@ impl ScheduleStore {
         {
             return Err(ScheduleStoreError::Conflict);
         }
+        crate::agent_subagent_store::SubAgentStore::new(self.db.clone())
+            .close_scheduled_source(run_id, &session.actor_id, &session.device_id)
+            .await
+            .map_err(|_| ScheduleStoreError::Conflict)?;
         let actions = action::Entity::find()
             .filter(action::Column::ConversationId.eq(run_id))
             .filter(action::Column::Kind.eq(crate::capability_grant_store::CAPABILITY_WORK_KIND))

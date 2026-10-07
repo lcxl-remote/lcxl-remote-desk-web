@@ -200,6 +200,9 @@ pub async fn init_db(config_dir: &str) -> Result<&'static DatabaseConnection, De
             crate::agent_exec_store::start_completion_publisher(db.clone());
             crate::agent_background_task_store::start_completion_publisher(db.clone());
             actix_web::rt::spawn(
+                crate::agent_subagent_store::SubAgentStore::new(db.clone()).run_usage_reconciler(),
+            );
+            actix_web::rt::spawn(
                 crate::schedule_store::ScheduleStore::new(db.clone())
                     .run_calendar_materializer(),
             );
@@ -209,7 +212,7 @@ pub async fn init_db(config_dir: &str) -> Result<&'static DatabaseConnection, De
         .await
 }
 
-const SIGNAL_SCHEMA_VERSION: i32 = 21;
+const SIGNAL_SCHEMA_VERSION: i32 = 22;
 const SCHEMA_LOCK_TABLE: &str = "signal_schema_init_lock";
 
 #[derive(Debug, FromQueryResult)]
@@ -270,6 +273,16 @@ async fn create_latest_schema<C: ConnectionTrait>(db: &C) -> Result<(), DbErr> {
     create_entity(db, &schema, usage_retention::Entity).await?;
     create_entity(db, &schema, host_remote_access_state::Entity).await?;
     create_entity(db, &schema, agent_session::Entity).await?;
+    create_entity(db, &schema, crate::entity::agent_delegation_group::Entity).await?;
+    create_entity(db, &schema, crate::entity::agent_subagent_run::Entity).await?;
+    create_entity(db, &schema, crate::entity::agent_subagent_inbox::Entity).await?;
+    create_entity(
+        db,
+        &schema,
+        crate::entity::agent_delegation_reservation::Entity,
+    )
+    .await?;
+    create_subagent_indexes(db).await?;
     create_entity(db, &schema, agent_goal_run::Entity).await?;
     create_entity(db, &schema, agent_goal_open_request::Entity).await?;
     create_entity(db, &schema, agent_approval_delegation::Entity).await?;
@@ -298,6 +311,7 @@ async fn create_latest_schema<C: ConnectionTrait>(db: &C) -> Result<(), DbErr> {
     create_entity(db, &schema, crate::entity::web_search_config::Entity).await?;
     create_entity(db, &schema, crate::entity::schedule_budget_policy::Entity).await?;
     create_entity(db, &schema, crate::entity::goal_budget_policy::Entity).await?;
+    create_entity(db, &schema, crate::entity::subagent_policy::Entity).await?;
     create_entity(
         db,
         &schema,
@@ -324,6 +338,14 @@ async fn create_latest_schema<C: ConnectionTrait>(db: &C) -> Result<(), DbErr> {
             .table(agent_exec_task::Entity)
             .col(agent_exec_task::Column::DeliveryState)
             .col(agent_exec_task::Column::Status)
+            .to_owned(),
+        Index::create()
+            .if_not_exists()
+            .name("idx_agent_exec_task_cancel")
+            .table(agent_exec_task::Entity)
+            .col(agent_exec_task::Column::Status)
+            .col(agent_exec_task::Column::CancelRequestedAt)
+            .col(agent_exec_task::Column::Id)
             .to_owned(),
         Index::create()
             .if_not_exists()
@@ -388,6 +410,85 @@ async fn create_latest_schema<C: ConnectionTrait>(db: &C) -> Result<(), DbErr> {
          ON agent_approval_review (status, lease_deadline, expires_at, id)",
     )
     .await?;
+    db.execute_unprepared(
+        "CREATE INDEX IF NOT EXISTS idx_agent_approval_review_usage \
+         ON agent_approval_review (usage_settlement_state, usage_reconcile_at_ms, id)",
+    )
+    .await?;
+    Ok(())
+}
+
+async fn create_subagent_indexes<C: ConnectionTrait>(db: &C) -> Result<(), DbErr> {
+    use crate::entity::{
+        agent_delegation_reservation as reservation, agent_subagent_inbox as inbox,
+        agent_subagent_run as run,
+    };
+    use sea_orm::sea_query::Index;
+    for index in [
+        Index::create()
+            .if_not_exists()
+            .name("idx_delegation_usage_pending")
+            .table(reservation::Entity)
+            .col(reservation::Column::State)
+            .col(reservation::Column::OperationKind)
+            .col(reservation::Column::Id)
+            .to_owned(),
+        Index::create()
+            .if_not_exists()
+            .name("idx_subagent_root_state")
+            .table(run::Entity)
+            .col(run::Column::RootConversationId)
+            .col(run::Column::State)
+            .col(run::Column::Id)
+            .to_owned(),
+        Index::create()
+            .if_not_exists()
+            .name("idx_subagent_due")
+            .table(run::Entity)
+            .col(run::Column::State)
+            .col(run::Column::NextAttemptAtMs)
+            .col(run::Column::Id)
+            .to_owned(),
+        Index::create()
+            .if_not_exists()
+            .name("idx_subagent_group_tasks")
+            .table(run::Entity)
+            .col(run::Column::GroupId)
+            .col(run::Column::Id)
+            .to_owned(),
+        Index::create()
+            .if_not_exists()
+            .name("idx_subagent_inbox_pending")
+            .table(inbox::Entity)
+            .col(inbox::Column::RootConversationId)
+            .col(inbox::Column::InterpretedAtMs)
+            .col(inbox::Column::Id)
+            .to_owned(),
+        Index::create()
+            .if_not_exists()
+            .name("idx_subagent_notification_due")
+            .table(inbox::Entity)
+            .col(inbox::Column::RootConversationId)
+            .col(inbox::Column::GroupId)
+            .col(inbox::Column::NotificationAttemptedTurnId)
+            .col(inbox::Column::ModelNotifiedAtMs)
+            .col(inbox::Column::EventKind)
+            .col(inbox::Column::Id)
+            .to_owned(),
+        Index::create()
+            .if_not_exists()
+            .name("idx_subagent_ui_attention")
+            .table(inbox::Entity)
+            .col(inbox::Column::RootConversationId)
+            .col(inbox::Column::ActorId)
+            .col(inbox::Column::DeviceId)
+            .col(inbox::Column::UiReadAtMs)
+            .col(inbox::Column::EventKind)
+            .col(inbox::Column::TaskId)
+            .to_owned(),
+    ] {
+        db.execute(&index).await?;
+    }
     Ok(())
 }
 
@@ -559,6 +660,10 @@ async fn validate_latest_schema<C: ConnectionTrait>(
     check_entity!(usage_retention);
     check_entity!(host_remote_access_state);
     check_entity!(agent_session);
+    check_entity!(agent_delegation_group);
+    check_entity!(agent_subagent_run);
+    check_entity!(agent_subagent_inbox);
+    check_entity!(agent_delegation_reservation);
     check_entity!(agent_goal_run);
     check_entity!(agent_goal_open_request);
     check_entity!(agent_approval_delegation);
@@ -578,6 +683,7 @@ async fn validate_latest_schema<C: ConnectionTrait>(
     check_entity!(context_management_config);
     check_entity!(schedule_budget_policy);
     check_entity!(goal_budget_policy);
+    check_entity!(subagent_policy);
     check_entity!(agent_schedule);
     check_entity!(agent_schedule_run);
     check_entity!(agent_task_contract);
@@ -767,6 +873,10 @@ mod tests {
             "usage_retention",
             "host_remote_access_state",
             "agent_session",
+            "agent_delegation_group",
+            "agent_subagent_run",
+            "agent_subagent_inbox",
+            "agent_delegation_reservation",
             "agent_goal_run",
             "agent_goal_open_request",
             "agent_approval_delegation",
@@ -915,7 +1025,17 @@ pub(crate) async fn ensure_lifecycle_tables(db: &DatabaseConnection) {
         schema.create_table_from_entity(agent_goal_run::Entity),
         schema.create_table_from_entity(agent_goal_open_request::Entity),
         schema.create_table_from_entity(agent_approval_delegation::Entity),
+        schema.create_table_from_entity(agent_approval_review::Entity),
         schema.create_table_from_entity(agent_schedule::Entity),
+        schema.create_table_from_entity(agent_delegation_group::Entity),
+        schema.create_table_from_entity(agent_subagent_run::Entity),
+        schema.create_table_from_entity(agent_subagent_inbox::Entity),
+        schema.create_table_from_entity(agent_delegation_reservation::Entity),
+        schema.create_table_from_entity(agent_file_recovery_cleanup::Entity),
+        schema.create_table_from_entity(agent_grant_reservation::Entity),
+        schema.create_table_from_entity(agent_capability_grant::Entity),
+        schema.create_table_from_entity(agent_run_event::Entity),
+        schema.create_table_from_entity(agent_permission_resume::Entity),
         schema.create_table_from_entity(agent_action_item::Entity),
         schema.create_table_from_entity(agent_capability_dispatch_outbox::Entity),
         schema.create_table_from_entity(agent_exec_task::Entity),

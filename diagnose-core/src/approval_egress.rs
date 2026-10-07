@@ -33,10 +33,38 @@ use desk_agent_protocol::capability_grant::CapabilityRiskTier;
 #[derive(Debug, Clone)]
 pub struct AuthorizedApprovalReview {
     pub prompt: String,
+    pub prompt_envelope: DataEnvelope,
     /// Identities and digests of original evidence authorized for this review.
     pub source_audit: SinkProjectionAudit,
     /// The exact derived prompt authorized for the independent reviewer.
     pub prompt_audit: SinkProjectionAudit,
+}
+
+impl AuthorizedApprovalReview {
+    pub fn model_request(
+        &self,
+        candidate: &ApprovalReviewCandidate,
+    ) -> Result<crate::seam::ModelRequest, ApprovalReviewError> {
+        let mut request =
+            crate::approval_review::reviewer_model_request(candidate, self.prompt.clone())?;
+        self.prompt_envelope
+            .validate()
+            .map_err(|_| ApprovalReviewError::InvalidContext)?;
+        if self.prompt_envelope.digest_sha256
+            != format!("{:x}", Sha256::digest(self.prompt.as_bytes()))
+            || self.prompt_audit.envelope_ids != vec![self.prompt_envelope.envelope_id.clone()]
+            || self.prompt_audit.digests_sha256 != vec![self.prompt_envelope.digest_sha256.clone()]
+            || self.prompt_audit.total_bytes != self.prompt.len()
+        {
+            return Err(ApprovalReviewError::InvalidContext);
+        }
+        request
+            .messages
+            .get_mut(1)
+            .ok_or(ApprovalReviewError::InvalidContext)?
+            .data_envelope = Some(self.prompt_envelope.clone());
+        Ok(request)
+    }
 }
 
 /// Call only with a candidate assembled from the current persisted permission
@@ -462,6 +490,7 @@ fn authorize_review_sources(
         .audit;
     Ok(AuthorizedApprovalReview {
         prompt,
+        prompt_envelope,
         source_audit,
         prompt_audit,
     })

@@ -1,5 +1,8 @@
 //! Shared browser/mobile wire DTOs and pure projections for AI Assistant sessions.
 
+mod subagents;
+pub use subagents::*;
+
 use desk_agent_protocol::communication::{
     CommunicationChannel, CommunicationDraftHandoff, GmailWebExactSendInput, SlackWebExactSendInput,
 };
@@ -549,6 +552,9 @@ fn stale_reason_name(reason: AttachmentStaleReason) -> &'static str {
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AiAssistantSessionSnapshotDto {
+    pub control_revision: u64,
+    pub main_stopped: bool,
+    pub subagents: desk_agent_protocol::ai_assistant::subagent::AiAssistantDelegationSnapshot,
     /// Original permission request reasons, keyed by the server-bound work ID.
     pub action_permission_reasons: std::collections::BTreeMap<String, String>,
     pub file_scope: FileScopeDto,
@@ -850,6 +856,16 @@ pub struct ContextUsageDto {
     pub used_bytes: u64,
     pub limit_bytes: u64,
     pub strategy: String,
+    pub breakdown: ContextUsageBreakdownDto,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextUsageBreakdownDto {
+    pub messages_bytes: u64,
+    pub tools_bytes: u64,
+    pub replay_bytes: u64,
+    pub projected_bytes: u64,
 }
 
 impl From<desk_diagnose_core::context_usage::ContextUsage> for ContextUsageDto {
@@ -858,6 +874,12 @@ impl From<desk_diagnose_core::context_usage::ContextUsage> for ContextUsageDto {
             used_bytes: value.used_bytes as u64,
             limit_bytes: value.limit_bytes as u64,
             strategy: value.strategy,
+            breakdown: ContextUsageBreakdownDto {
+                messages_bytes: value.breakdown.messages_bytes as u64,
+                tools_bytes: value.breakdown.tools_bytes as u64,
+                replay_bytes: value.breakdown.replay_bytes as u64,
+                projected_bytes: value.breakdown.projected_bytes as u64,
+            },
         }
     }
 }
@@ -1755,6 +1777,7 @@ pub enum AiAssistantAttentionReason {
     GoalStalled,
     GoalBlocked,
     GoalDeadlineSoon,
+    SubAgentResult,
 }
 
 impl AiAssistantAttentionReason {
@@ -1767,6 +1790,7 @@ impl AiAssistantAttentionReason {
             Self::GoalStalled => "goal_stalled",
             Self::GoalBlocked => "goal_blocked",
             Self::GoalDeadlineSoon => "goal_deadline_soon",
+            Self::SubAgentResult => "subagent_result",
         }
     }
 }
@@ -1997,11 +2021,18 @@ mod tests {
             used_bytes: 42,
             limit_bytes: 128,
             strategy: "checkpoint_summary".into(),
+            breakdown: desk_diagnose_core::context_usage::ContextUsageBreakdown {
+                messages_bytes: 12,
+                tools_bytes: 10,
+                replay_bytes: 20,
+                projected_bytes: 0,
+            },
         });
         assert_eq!(
             serde_json::to_value(dto).unwrap(),
             serde_json::json!({
-                "usedBytes": 42, "limitBytes": 128, "strategy": "checkpoint_summary"
+                "usedBytes": 42, "limitBytes": 128, "strategy": "checkpoint_summary",
+                "breakdown": {"messagesBytes": 12, "toolsBytes": 10, "replayBytes": 20, "projectedBytes": 0}
             })
         );
     }

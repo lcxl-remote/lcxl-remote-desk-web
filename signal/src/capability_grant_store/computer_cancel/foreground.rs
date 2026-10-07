@@ -105,15 +105,33 @@ impl SignalCapabilityGrantStore {
         request_id: &str,
         reason: &str,
     ) -> Result<bool, DbErr> {
+        let txn = crate::db::begin_write(&self.db, crate::entity::agent_session::Entity).await?;
+        let result = Self::request_computer_execution_cancel_on(
+            &txn, task, run, actor, device, request_id, reason,
+        )
+        .await?;
+        txn.commit().await?;
+        Ok(result)
+    }
+
+    /// Stop the original accepted action inside a caller-owned control transaction.
+    pub(crate) async fn request_computer_execution_cancel_on<C: sea_orm::ConnectionTrait>(
+        txn: &C,
+        task: &str,
+        run: &str,
+        actor: &str,
+        device: &str,
+        request_id: &str,
+        reason: &str,
+    ) -> Result<bool, DbErr> {
         if !valid_request_id(request_id) || reason.len() > 4096 {
             return Err(invalid());
         }
-        let txn = crate::db::begin_write(&self.db, crate::entity::agent_session::Entity).await?;
-        lock_task(&txn, task).await?;
+        lock_task(txn, task).await?;
         let Some(work) = agent_action_item::Entity::find()
             .filter(agent_action_item::Column::ActionRequestId.eq(task))
             .filter(agent_action_item::Column::Kind.eq(CAPABILITY_WORK_KIND))
-            .one(&txn)
+            .one(txn)
             .await?
         else {
             return Ok(false);
@@ -123,13 +141,13 @@ impl SignalCapabilityGrantStore {
             return Err(invalid());
         }
         let (outbox, work, payload) =
-            original_on(&txn, work.execution_id.as_deref().ok_or_else(invalid)?).await?;
+            original_on(txn, work.execution_id.as_deref().ok_or_else(invalid)?).await?;
         if outbox.computer_background_json.is_some() {
-            txn.rollback().await?;
-            return self
-                .request_computer_background_cancel(task, run, actor, device, request_id, reason)
-                .await
-                .map(|value| value.is_some());
+            return Self::request_computer_background_cancel_on(
+                txn, task, run, actor, device, request_id, reason,
+            )
+            .await
+            .map(|value| value.is_some());
         }
         bound(&outbox, &work, &payload)?;
         let digest = format!("{:x}", Sha256::digest(reason.as_bytes()));
@@ -137,7 +155,6 @@ impl SignalCapabilityGrantStore {
             if old.request_id != request_id || old.reason_sha256 != digest {
                 return Err(invalid());
             }
-            txn.commit().await?;
             return Ok(true);
         }
         if work.cancel_requested_at.is_some()
@@ -146,7 +163,8 @@ impl SignalCapabilityGrantStore {
                 work.status.as_str(),
                 CAPABILITY_WORK_DISPATCHING | CAPABILITY_WORK_OUTCOME_UNKNOWN
             )
-            || work.result_json.is_some()
+            || super::super::computer_completion::terminal_result(&outbox, work.clone(), &payload)?
+                .is_some()
         {
             return Ok(false);
         }
@@ -160,17 +178,19 @@ impl SignalCapabilityGrantStore {
             requested_at_unix_ms: now,
             observed_at_unix_ms: None,
         };
+        let has_result = work.result_json.is_some();
         let mut active: agent_action_item::ActiveModel = work.into();
         active.cancel_requested_at = Set(Some(timestamp(now)?));
         active.cancel_requested_by = Set(Some(actor.into()));
         active.cancel_generation = Set(Some(outbox.dispatch_id.clone()));
-        active.updated_at = Set(timestamp(now)?);
-        active.update(&txn).await?;
+        if !has_result {
+            active.updated_at = Set(timestamp(now)?);
+        }
+        active.update(txn).await?;
         let mut active: agent_capability_dispatch_outbox::ActiveModel = outbox.into();
         active.computer_cancel_json =
             Set(Some(serde_json::to_string(&value).map_err(|_| invalid())?));
-        active.update(&txn).await?;
-        txn.commit().await?;
+        active.update(txn).await?;
         Ok(true)
     }
 }

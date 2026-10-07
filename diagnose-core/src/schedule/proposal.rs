@@ -15,7 +15,8 @@ pub const REQUEST_SCHEDULE: &str = "request_scheduled_task";
 
 /// Trusted clock context only. Locale and device location are never timezones.
 pub fn clock_prompt(session: &PersistedAgentSession, now_unix_ms: u64) -> String {
-    if session.surface != AgentSessionSurface::AiAssistant
+    if !session.agent_role.is_main()
+        || session.surface != AgentSessionSurface::AiAssistant
         || session.trigger_origin != TriggerOrigin::User
     {
         return String::new();
@@ -36,9 +37,13 @@ pub fn registry() -> Vec<crate::registry::RegisteredTool> {
     std::iter::once(spec())
         .chain(super::management_tools::specs())
         .map(|spec| crate::registry::RegisteredTool {
+            effect: if spec.name == super::management_tools::LIST {
+                crate::registry::ToolEffect::ScheduleQuery
+            } else {
+                crate::registry::ToolEffect::SchedulePlanning
+            },
             spec,
             required_capability: desk_agent_protocol::Capability::SystemInfo,
-            effect: crate::registry::ToolEffect::SchedulePlanning,
         })
         .collect()
 }
@@ -93,6 +98,7 @@ pub fn draft(
     if call.name != REQUEST_SCHEDULE
         || call.id.is_empty()
         || call.id.len() > 256
+        || !session.agent_role.is_main()
         || session.surface != AgentSessionSurface::AiAssistant
         || session.trigger_origin != TriggerOrigin::User
         || !session.turn_state.is_active()

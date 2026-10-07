@@ -18,28 +18,18 @@ fn notification_state_path(app: &AppHandle) -> Option<PathBuf> {
         .map(|directory| directory.join("ai-assistant-attention-reminders.json"))
 }
 
-fn label(reason: AiAssistantAttentionReason) -> String {
-    match reason {
-        AiAssistantAttentionReason::GoalOpenApproval => {
-            rust_i18n::t!("ai_attention.goal_open").to_string()
-        }
-        AiAssistantAttentionReason::PermissionApproval => {
-            rust_i18n::t!("ai_attention.permission").to_string()
-        }
-        AiAssistantAttentionReason::GoalNeedsInput => {
-            rust_i18n::t!("ai_attention.needs_input").to_string()
-        }
-        AiAssistantAttentionReason::GoalBudget => rust_i18n::t!("ai_attention.budget").to_string(),
-        AiAssistantAttentionReason::GoalStalled => {
-            rust_i18n::t!("ai_attention.stalled").to_string()
-        }
-        AiAssistantAttentionReason::GoalBlocked => {
-            rust_i18n::t!("ai_attention.blocked").to_string()
-        }
-        AiAssistantAttentionReason::GoalDeadlineSoon => {
-            rust_i18n::t!("ai_attention.deadline").to_string()
-        }
-    }
+fn label(reason: AiAssistantAttentionReason, locale: &str) -> String {
+    let key = match reason {
+        AiAssistantAttentionReason::GoalOpenApproval => "ai_attention.goal_open",
+        AiAssistantAttentionReason::PermissionApproval => "ai_attention.permission",
+        AiAssistantAttentionReason::GoalNeedsInput => "ai_attention.needs_input",
+        AiAssistantAttentionReason::GoalBudget => "ai_attention.budget",
+        AiAssistantAttentionReason::GoalStalled => "ai_attention.stalled",
+        AiAssistantAttentionReason::GoalBlocked => "ai_attention.blocked",
+        AiAssistantAttentionReason::GoalDeadlineSoon => "ai_attention.deadline",
+        AiAssistantAttentionReason::SubAgentResult => "ai_attention.subagent_result",
+    };
+    rust_i18n::t!(key, locale = locale).to_string()
 }
 
 pub fn start(app: AppHandle, attention_url: String) {
@@ -86,7 +76,11 @@ pub fn start(app: AppHandle, attention_url: String) {
                     .notification()
                     .builder()
                     .title(rust_i18n::t!("ai_attention.title"))
-                    .body(format!("{}\n{}", label(item.reason), attention_url))
+                    .body(format!(
+                        "{}\n{}",
+                        label(item.reason, &rust_i18n::locale()),
+                        attention_url
+                    ))
                     .show();
                 match result {
                     Ok(()) => {
@@ -113,4 +107,33 @@ pub fn start(app: AppHandle, attention_url: String) {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn subagent_result_notification_uses_localized_status() {
+        assert_eq!(
+            label(AiAssistantAttentionReason::SubAgentResult, "en"),
+            "A subagent result is ready to review"
+        );
+        assert_eq!(
+            label(AiAssistantAttentionReason::SubAgentResult, "zh-CN"),
+            "子 agent 结果已就绪，等待查看"
+        );
+    }
+
+    #[test]
+    fn permission_notification_preserves_localized_approval_message() {
+        assert_eq!(
+            label(AiAssistantAttentionReason::PermissionApproval, "en"),
+            "AI requested a permission approval"
+        );
+        assert_eq!(
+            label(AiAssistantAttentionReason::PermissionApproval, "zh-CN"),
+            "AI 申请权限，需要审批"
+        );
+    }
 }

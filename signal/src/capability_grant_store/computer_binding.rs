@@ -5,7 +5,6 @@ use super::*;
 use desk_agent_protocol::capability_provider::{CapabilityEffect, ExecutionPolicy};
 use desk_agent_protocol::computer_use::{ComputerActionStarted, SealedComputerActionPlan};
 use desk_diagnose_core::{action_result::ActionResultOrigin, chat::ToolCall};
-use sea_orm::DatabaseTransaction;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -53,8 +52,8 @@ fn invalid() -> DbErr {
     DbErr::Custom("invalid original Computer Action binding".into())
 }
 
-pub(super) async fn original_on(
-    txn: &DatabaseTransaction,
+pub(crate) async fn original_on<C: sea_orm::ConnectionTrait>(
+    txn: &C,
     generation: &str,
 ) -> Result<
     (

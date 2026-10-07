@@ -9,6 +9,7 @@ pub mod goal_budget_policy;
 pub mod model_provider;
 pub mod schedule_budget_policy;
 pub mod signaling;
+pub mod subagent_policy;
 pub mod terminal;
 pub mod turn_usage;
 pub mod usage_retention;

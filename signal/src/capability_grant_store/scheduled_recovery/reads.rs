@@ -26,22 +26,42 @@ pub(super) async fn close_untracked_on(
         .collect();
     let open: BTreeSet<_> = session.unclosed_tool_call_ids().into_iter().collect();
     for (parent, call) in calls {
-        let capability = registry
-            .capability_for_tool(&call.name)
-            .ok_or_else(invalid)?;
-        if !matches!(
-            capability.wire.effect,
-            CapabilityEffect::ReadDevice
-                | CapabilityEffect::ReadFile
-                | CapabilityEffect::ReadExternal
-                | CapabilityEffect::CaptureScreen
-        ) || session
-            .conversation
-            .iter()
-            .flat_map(|message| &message.tool_calls)
-            .filter(|other| other.id == call.id)
-            .count()
-            != 1
+        if session.agent_role.binding().is_some() && !open.contains(&call.id) {
+            if !matched.insert(call.id) {
+                return Err(invalid());
+            }
+            continue;
+        }
+        let capability = registry.capability_for_tool(&call.name);
+        let internal = session.agent_role.binding().is_some()
+            && matches!(
+                call.name.as_str(),
+                "request_permissions"
+                    | "list_capabilities"
+                    | "describe_tools"
+                    | "list_scheduled_tasks"
+            );
+        let readable = capability.is_some_and(|capability| {
+            matches!(
+                capability.wire.effect,
+                CapabilityEffect::ReadDevice
+                    | CapabilityEffect::ReadFile
+                    | CapabilityEffect::ReadExternal
+                    | CapabilityEffect::CaptureScreen
+            )
+        });
+        // Children may close an unavailable mutation result only as unknown
+        // evidence. Completion facts retain it as incomplete; no replay occurs.
+        let unavailable_mutation = session.agent_role.binding().is_some()
+            && capability.is_some_and(|capability| capability.wire.effect.is_side_effecting());
+        if (!internal && !readable && !unavailable_mutation)
+            || session
+                .conversation
+                .iter()
+                .flat_map(|message| &message.tool_calls)
+                .filter(|other| other.id == call.id)
+                .count()
+                != 1
             || !matched.insert(call.id.clone())
         {
             return Err(invalid());
@@ -83,7 +103,11 @@ pub(super) async fn close_untracked_on(
                 parent.as_ref(),
                 &call.id,
                 &result.text,
-                "scheduled_read_unavailable",
+                if unavailable_mutation {
+                    "child_mutation_result_unavailable"
+                } else {
+                    "scheduled_read_unavailable"
+                },
             )
             .map_err(|_| invalid())?;
         session.conversation.push(result);

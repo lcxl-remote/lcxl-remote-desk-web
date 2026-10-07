@@ -240,6 +240,9 @@ async fn cleanup_agent_sessions(
         }
     }
 
+    crate::agent_subagent_store::redact_deleted_content(db, cutoff.timestamp_millis()).await?;
+    crate::agent_subagent_store::purge_groups(db, cutoff.timestamp_millis()).await?;
+    crate::agent_subagent_store::purge_authority(db, cutoff.timestamp_millis()).await?;
     purge_sessionless_records(db, cutoff).await?;
     let mut deleted = 0;
     for _ in 0..CLEANUP_MAX_BATCHES_PER_TICK {
@@ -247,6 +250,9 @@ async fn cleanup_agent_sessions(
         // batch made entirely of sessions that must be kept cannot starve
         // every later expired session.
         let rows = agent_session::Entity::find()
+            .filter(crate::agent_subagent_store::reclaim_condition(
+                cutoff.timestamp_millis(),
+            ))
             .filter(agent_session::Column::UpdatedAt.lt(cutoff))
             .filter(
                 sea_orm::Condition::any()
@@ -334,11 +340,12 @@ async fn purge_sessionless_records(
             .column(agent_session::Column::ConversationId)
             .into_query()
     };
-    let txn = crate::db::begin_write(&db, crate::entity::agent_session::Entity).await?;
+    let txn = crate::db::begin_write(db, crate::entity::agent_session::Entity).await?;
     let stale_work = agent_action_item::Entity::find()
         .select_only()
         .column(agent_action_item::Column::Id)
         .filter(agent_action_item::Column::UpdatedAt.lt(cutoff))
+        .filter(agent_action_item::Column::Status.is_not_in(UNRESOLVED_ACTION_STATES))
         .filter(agent_action_item::Column::ConversationId.not_in_subquery(live()))
         .into_query();
     agent_capability_dispatch_outbox::Entity::delete_many()
@@ -347,26 +354,44 @@ async fn purge_sessionless_records(
         .await?;
     agent_action_item::Entity::delete_many()
         .filter(agent_action_item::Column::UpdatedAt.lt(cutoff))
+        .filter(agent_action_item::Column::Status.is_not_in(UNRESOLVED_ACTION_STATES))
         .filter(agent_action_item::Column::ConversationId.not_in_subquery(live()))
         .exec(&txn)
         .await?;
     agent_exec_task::Entity::delete_many()
         .filter(agent_exec_task::Column::UpdatedAt.lt(cutoff))
+        .filter(agent_exec_task::Column::Status.is_not_in(UNRESOLVED_EXEC_STATES))
         .filter(agent_exec_task::Column::ConversationId.not_in_subquery(live()))
         .exec(&txn)
         .await?;
     agent_goal_run::Entity::delete_many()
+        .filter(
+            agent_goal_run::Column::GoalId
+                .not_in_subquery(crate::agent_subagent_store::pinned_goal_ids()),
+        )
         .filter(agent_goal_run::Column::Status.is_in(TERMINAL_GOAL_STATUS_CODES))
         .filter(agent_goal_run::Column::UpdatedAt.lt(cutoff_ms))
         .filter(agent_goal_run::Column::ConversationId.not_in_subquery(live()))
         .exec(&txn)
         .await?;
     agent_goal_open_request::Entity::delete_many()
+        .filter(
+            agent_goal_open_request::Column::ConversationId
+                .not_in_subquery(crate::agent_subagent_store::pinned_conversation_ids()),
+        )
         .filter(agent_goal_open_request::Column::CreatedAt.lt(cutoff_ms))
         .filter(agent_goal_open_request::Column::ConversationId.not_in_subquery(live()))
         .exec(&txn)
         .await?;
     agent_approval_delegation::Entity::delete_many()
+        .filter(
+            agent_approval_delegation::Column::DelegationId
+                .not_in_subquery(crate::agent_approval_usage::pinned_delegation_ids()),
+        )
+        .filter(
+            agent_approval_delegation::Column::ConversationId
+                .not_in_subquery(crate::agent_subagent_store::pinned_conversation_ids()),
+        )
         .filter(agent_approval_delegation::Column::UpdatedAt.lt(cutoff_ms))
         .filter(agent_approval_delegation::Column::ConversationId.not_in_subquery(live()))
         .exec(&txn)
@@ -382,10 +407,13 @@ async fn delete_expired_session_candidates(
     ids: &[i64],
     cutoff: DateTimeUtc,
 ) -> Result<u64, DbErr> {
-    let txn = crate::db::begin_write(&db, crate::entity::agent_session::Entity).await?;
+    let txn = crate::db::begin_write(db, crate::entity::agent_session::Entity).await?;
     let result = async {
         let rows = agent_session::Entity::find()
             .filter(agent_session::Column::Id.is_in(ids.iter().copied()))
+            .filter(crate::agent_subagent_store::reclaim_condition(
+                cutoff.timestamp_millis(),
+            ))
             .filter(agent_session::Column::UpdatedAt.lt(cutoff))
             .all(&txn)
             .await?;
@@ -435,6 +463,28 @@ async fn delete_expired_session_candidates(
         if rows.is_empty() {
             return Ok(0);
         }
+        for row in &rows {
+            let session =
+                desk_diagnose_core::session::PersistedAgentSession::decode_json(&row.state_json)
+                    .map_err(|_| DbErr::Custom("invalid expired conversation".into()))?;
+            if session.agent_role.is_main() {
+                crate::agent_subagent_store::close_root_on(
+                    &txn,
+                    &session,
+                    Utc::now().timestamp_millis(),
+                )
+                .await?;
+            } else {
+                crate::agent_subagent_store::tombstone_on(
+                    &txn,
+                    &row.conversation_id,
+                    &session.actor_id,
+                    &session.device_id,
+                    Utc::now().timestamp_millis(),
+                )
+                .await?;
+            }
+        }
         let run_ids: Vec<_> = rows.iter().map(|row| row.conversation_id.clone()).collect();
         // An approved continuation of a reclaimed conversation can no longer
         // run; end it with its source instead of letting it fail when it fires.
@@ -464,14 +514,30 @@ async fn delete_expired_session_candidates(
             .exec(&txn)
             .await?;
         agent_goal_run::Entity::delete_many()
+            .filter(
+                agent_goal_run::Column::GoalId
+                    .not_in_subquery(crate::agent_subagent_store::pinned_goal_ids()),
+            )
             .filter(agent_goal_run::Column::ConversationId.is_in(run_ids.clone()))
             .exec(&txn)
             .await?;
         agent_goal_open_request::Entity::delete_many()
+            .filter(
+                agent_goal_open_request::Column::ConversationId
+                    .not_in_subquery(crate::agent_subagent_store::pinned_conversation_ids()),
+            )
             .filter(agent_goal_open_request::Column::ConversationId.is_in(run_ids.clone()))
             .exec(&txn)
             .await?;
         agent_approval_delegation::Entity::delete_many()
+            .filter(
+                agent_approval_delegation::Column::DelegationId
+                    .not_in_subquery(crate::agent_approval_usage::pinned_delegation_ids()),
+            )
+            .filter(
+                agent_approval_delegation::Column::ConversationId
+                    .not_in_subquery(crate::agent_subagent_store::pinned_conversation_ids()),
+            )
             .filter(agent_approval_delegation::Column::ConversationId.is_in(run_ids.clone()))
             .exec(&txn)
             .await?;

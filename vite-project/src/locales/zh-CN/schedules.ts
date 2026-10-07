@@ -231,6 +231,7 @@ export default {
     "schedules.runStatus.waiting_device": "等待设备",
     "schedules.runStatus.running": "运行中",
     "schedules.runStatus.awaiting_permission": "等待授权",
+    "schedules.runStatus.awaiting_children": "等待子助手",
     "schedules.runStatus.succeeded": "成功",
     "schedules.runStatus.failed": "失败",
     "schedules.runStatus.missed": "错过执行",

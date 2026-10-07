@@ -97,6 +97,12 @@ impl SignalAgentRunEventStore {
                 .await
                 .map_err(|error| internal(format!("begin user follow-up transaction: {error}")))?;
 
+            if crate::agent_subagent_store::deleted_on(&txn, &params.run_id)
+                .await
+                .map_err(|_| internal("conversation deletion state unavailable"))?
+            {
+                return Err(internal("conversation was deleted"));
+            }
             crate::schedule_store::validate_rehearsal_input_on(
                 &txn,
                 &params.actor_id,
@@ -408,6 +414,18 @@ impl SignalAgentRunEventStore {
             } else {
                 0
             };
+            crate::agent_subagent_store::initialize_input_group_on(
+                &txn,
+                &mut session,
+                params.message.clone(),
+                params.read_context.clone(),
+                opened_goal
+                    .as_ref()
+                    .or_else(|| revised_goal.as_ref().map(|(goal, _)| goal)),
+                now.timestamp_millis(),
+            )
+            .await
+            .map_err(|error| internal(format!("initialize delegation source: {error}")))?;
             let state_json = session
                 .encode_json_for_storage()
                 .map_err(|error| internal(format!("encode user follow-up run: {error}")))?;
@@ -788,8 +806,11 @@ mod tests {
             },
             digest_sha256: digest,
             sensitivity: Sensitivity::UserContent,
-            allowed_destinations: vec![DestinationIdentity::LocalArtifact {
-                workspace_id: "test-workspace".into(),
+            allowed_destinations: vec![DestinationIdentity::Model {
+                connection_id: "gateway".into(),
+                connection_revision: 1,
+                model_id: "model".into(),
+                profile_revision: 1,
             }],
             retention: RetentionBoundary {
                 expires_at_unix_ms: None,

@@ -5,6 +5,16 @@ import { AssistantContextMeter, contextMeterValues } from './assistant-context-m
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ i18n: { language: 'en' }, t: (key: string, args?: { percent?: number; value?: string }) => `${key}${args?.value ?? args?.percent ?? ''}` }) }));
 
 describe('compression headroom meter', () => {
+    it('shows cost categories without adding replay again to total occupancy', async () => {
+        render(<AssistantContextMeter usage={{ usedBytes: 250, limitBytes: 1000, strategy: 'checkpoint_summary',
+            breakdown: { messagesBytes: 50, toolsBytes: 70, replayBytes: 120, projectedBytes: 10 } }} draft="" />);
+        expect(screen.getByRole('button')).toHaveAttribute('aria-label', expect.stringContaining('percent25'));
+        fireEvent.click(screen.getByRole('button'));
+        const panel = await screen.findByRole('dialog');
+        expect(panel).toHaveTextContent('breakdown.replayBytes');
+        expect(panel).toHaveTextContent('bytes120');
+        expect(panel).toHaveTextContent('bytes250');
+    });
     it('reveals budget details on tap without sending a message', async () => {
         render(<AssistantContextMeter usage={{ usedBytes: 250, limitBytes: 1000, strategy: 'checkpoint_summary' }} draft="" />);
         fireEvent.click(screen.getByRole('button'));

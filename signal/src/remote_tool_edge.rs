@@ -1905,6 +1905,14 @@ impl SignalAiAssistantTools {
             ));
         }
         let session = self.authoritative_session().await?;
+        if session.input_revision == 0 || session.latest_input_seq == 0 {
+            return Err(error(
+                AgentErrorKind::Internal,
+                "command execution requires an accepted run input",
+                false,
+                false,
+            ));
+        }
         let (canonical_input_json, canonical_input_digest_sha256) =
             Self::canonical_call_input(call)?;
         let confirmation =

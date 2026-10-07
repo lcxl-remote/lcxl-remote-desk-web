@@ -19,6 +19,8 @@ pub struct CurrentTaskAuthority {
     run: run::Model,
     verified_at: i64,
     valid_until: i64,
+    original_started_at_ms: i64,
+    authorization_expires_at_ms: Option<i64>,
 }
 impl CurrentTaskAuthority {
     pub fn provenance(&self) -> &TaskGrantProvenance {
@@ -33,10 +35,59 @@ impl CurrentTaskAuthority {
     pub fn verified_at(&self) -> i64 {
         self.verified_at
     }
+    /// Persistable source evidence excludes the renewable planner lease. Callers
+    /// must still reacquire current occurrence authority before any new dispatch.
+    pub fn delegation_source(
+        &self,
+    ) -> Result<desk_diagnose_core::subagent::creation::ScheduledCreationSource, ScheduleStoreError>
+    {
+        desk_diagnose_core::subagent::creation::ScheduledCreationSource::capture(
+            self.provenance.clone(),
+            &self.contract,
+            self.original_started_at_ms,
+            self.authorization_expires_at_ms,
+        )
+        .map_err(|_| ScheduleStoreError::Invalid)
+    }
+
     /// Upper bound for a derived grant, including parent, lease and runtime expiry.
     pub fn valid_until(&self) -> i64 {
         self.valid_until
     }
+}
+
+/// A current finite source is not a parent planner lease or a task grant.
+/// Only the occurrence budget module can inspect its execution-shaped backing.
+pub(crate) struct CurrentDelegationSourceAuthority {
+    current: CurrentTaskAuthority,
+}
+
+impl CurrentDelegationSourceAuthority {
+    pub fn provenance(&self) -> &TaskGrantProvenance {
+        self.current.provenance()
+    }
+    pub fn contract(&self) -> &ValidatedTaskContract {
+        self.current.contract()
+    }
+    pub fn run(&self) -> &run::Model {
+        self.current.run()
+    }
+    pub fn verified_at(&self) -> i64 {
+        self.current.verified_at()
+    }
+    pub fn deadline_ms(&self) -> i64 {
+        self.current.valid_until()
+    }
+    pub(super) fn budget_authority(&self) -> &CurrentTaskAuthority {
+        &self.current
+    }
+}
+
+#[derive(Clone, Copy)]
+enum AuthorityPurpose<'a> {
+    Planner { node: &'a str, lease_epoch: i64 },
+    Approval { node: &'a str, lease_epoch: i64 },
+    Delegation(&'a desk_diagnose_core::subagent::creation::ScheduledCreationSource),
 }
 
 /// PostgreSQL CURRENT_TIMESTAMP is the transaction start, which can precede a lock wait.
@@ -81,7 +132,14 @@ impl ScheduleStore {
         node: &str,
         lease_epoch: i64,
     ) -> Result<CurrentTaskAuthority, ScheduleStoreError> {
-        Self::lock_authority_for(txn, owner, device, run_id, node, lease_epoch, false).await
+        Self::lock_authority_for(
+            txn,
+            owner,
+            device,
+            run_id,
+            AuthorityPurpose::Planner { node, lease_epoch },
+        )
+        .await
     }
 
     pub(super) async fn lock_waiting_approval(
@@ -92,8 +150,14 @@ impl ScheduleStore {
         node: &str,
         lease_epoch: i64,
     ) -> Result<PendingTaskApproval, ScheduleStoreError> {
-        let current =
-            Self::lock_authority_for(txn, owner, device, run_id, node, lease_epoch, true).await?;
+        let current = Self::lock_authority_for(
+            txn,
+            owner,
+            device,
+            run_id,
+            AuthorityPurpose::Approval { node, lease_epoch },
+        )
+        .await?;
         Ok(PendingTaskApproval {
             contract: current.contract,
             verified_at: current.verified_at,
@@ -101,17 +165,47 @@ impl ScheduleStore {
         })
     }
 
+    /// Callers hold owner/root/child control before this publication fence and
+    /// recheck their own planner before dispatch. No device/model I/O is allowed.
+    pub(crate) async fn lock_delegation_source_authority(
+        txn: &DatabaseTransaction,
+        owner: i32,
+        device: &str,
+        source: &desk_diagnose_core::subagent::creation::ScheduledCreationSource,
+    ) -> Result<CurrentDelegationSourceAuthority, ScheduleStoreError> {
+        source.validate().map_err(|_| ScheduleStoreError::Invalid)?;
+        let current = Self::lock_authority_for(
+            txn,
+            owner,
+            device,
+            &source.provenance.scheduled_run_id,
+            AuthorityPurpose::Delegation(source),
+        )
+        .await?;
+        if current.delegation_source()? != *source {
+            return Err(ScheduleStoreError::Conflict);
+        }
+        Ok(CurrentDelegationSourceAuthority { current })
+    }
+
     async fn lock_authority_for(
         txn: &DatabaseTransaction,
         owner: i32,
         device: &str,
         run_id: &str,
-        node: &str,
-        lease_epoch: i64,
-        waiting_approval: bool,
+        purpose: AuthorityPurpose<'_>,
     ) -> Result<CurrentTaskAuthority, ScheduleStoreError> {
-        if owner <= 0 || device.is_empty() || node.is_empty() || lease_epoch <= 0 {
+        if owner <= 0 || device.is_empty() {
             return Err(ScheduleStoreError::Invalid);
+        }
+        match purpose {
+            AuthorityPurpose::Planner { node, lease_epoch }
+            | AuthorityPurpose::Approval { node, lease_epoch }
+                if node.is_empty() || lease_epoch <= 0 =>
+            {
+                return Err(ScheduleStoreError::Invalid);
+            }
+            _ => {}
         }
         let initial = run::Entity::find()
             .filter(run::Column::OwnerUserId.eq(owner))
@@ -157,21 +251,33 @@ impl ScheduleStore {
         if work.owner_user_id != owner
             || work.schedule_id != task.schedule_id
             || work.run_id != run_id
-            || work.status
-                != if waiting_approval {
-                    "awaiting_permission"
-                } else {
-                    "running"
-                }
+            || match purpose {
+                AuthorityPurpose::Planner { .. } => work.status != "running",
+                AuthorityPurpose::Approval { .. } => work.status != "awaiting_permission",
+                AuthorityPurpose::Delegation(_) => !matches!(
+                    work.status.as_str(),
+                    "running" | "awaiting_permission" | "awaiting_children"
+                ),
+            }
             || work.failure_accounted
             || work.finished_at.is_some()
             || work.cancel_requested_at.is_some()
-            || work.lease_owner.as_deref() != Some(node)
-            || work.lease_epoch != lease_epoch
-            || if waiting_approval {
-                work.lease_deadline.is_some()
-            } else {
-                work.lease_deadline.is_none_or(|deadline| deadline <= now)
+            || match purpose {
+                AuthorityPurpose::Planner { node, lease_epoch } => {
+                    work.lease_owner.as_deref() != Some(node)
+                        || work.lease_epoch != lease_epoch
+                        || work.lease_deadline.is_none_or(|deadline| deadline <= now)
+                }
+                AuthorityPurpose::Approval { node, lease_epoch } => {
+                    work.lease_owner.as_deref() != Some(node)
+                        || work.lease_epoch != lease_epoch
+                        || work.lease_deadline.is_some()
+                }
+                AuthorityPurpose::Delegation(source) => {
+                    work.conversation_id != work.run_id
+                        || work.turn_id != format!("{}-turn", work.run_id)
+                        || source.provenance.scheduled_run_id != work.run_id
+                }
             }
         {
             return Err(ScheduleStoreError::Conflict);
@@ -272,10 +378,11 @@ impl ScheduleStore {
             .and_then(|limit| started.checked_add(limit))
             .ok_or(ScheduleStoreError::Invalid)?;
         let valid_until = runtime
-            .min(if waiting_approval {
-                i64::MAX
-            } else {
-                work.lease_deadline.ok_or(ScheduleStoreError::Invalid)?
+            .min(match purpose {
+                AuthorityPurpose::Planner { .. } => {
+                    work.lease_deadline.ok_or(ScheduleStoreError::Invalid)?
+                }
+                AuthorityPurpose::Approval { .. } | AuthorityPurpose::Delegation(_) => i64::MAX,
             })
             .min(parent.expires_at.unwrap_or(i64::MAX));
         if valid_until <= now {
@@ -287,6 +394,8 @@ impl ScheduleStore {
             run: work,
             verified_at: now,
             valid_until,
+            original_started_at_ms: started,
+            authorization_expires_at_ms: parent.expires_at,
         })
     }
 }

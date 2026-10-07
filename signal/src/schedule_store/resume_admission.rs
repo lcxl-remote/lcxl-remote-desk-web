@@ -34,6 +34,7 @@ async fn lock_action_session_inner(
         return Ok(None);
     };
     let initial = decode(&peek)?;
+    crate::agent_subagent_store::lock_child_source_on(txn, &initial).await?;
     if initial.trigger_origin == TriggerOrigin::ScheduledTask {
         fresh_action_authority_on(txn, &initial).await?;
         let row = agent_session::Entity::find_by_id(peek.id)
@@ -149,7 +150,8 @@ pub(crate) async fn fresh_action_authority_on(
     txn: &DatabaseTransaction,
     session: &PersistedAgentSession,
 ) -> Result<super::CurrentTaskAuthority, DbErr> {
-    if session.trigger_origin != TriggerOrigin::ScheduledTask
+    if !session.agent_role.is_main()
+        || session.trigger_origin != TriggerOrigin::ScheduledTask
         || session.surface != AgentSessionSurface::AiAssistant
         || session.input_revision != 1
         || session.lease_token == 0

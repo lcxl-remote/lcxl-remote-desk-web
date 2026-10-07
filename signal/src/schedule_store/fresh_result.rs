@@ -11,6 +11,7 @@ use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect, Set};
 enum FreshResult<'a> {
     Answer(&'a str),
     Permission(&'a str),
+    Children(&'a str),
     Failure(&'a desk_agent_protocol::AgentError),
 }
 
@@ -43,6 +44,17 @@ impl ScheduleStore {
             .await
     }
 
+    /// Waiting releases only the parent's planning holder. Its original
+    /// occurrence, source deadline, authorization and shared quota remain fixed.
+    pub async fn await_fresh_task_children(
+        &self,
+        lease: FreshTaskLease<'_>,
+        wait_id: &str,
+    ) -> Result<run::Model, ScheduleStoreError> {
+        self.finish_fresh_result(lease, FreshResult::Children(wait_id))
+            .await
+    }
+
     async fn finish_fresh_result(
         &self,
         lease: FreshTaskLease<'_>,
@@ -55,7 +67,9 @@ impl ScheduleStore {
             return Err(ScheduleStoreError::Invalid);
         }
         let (state, expected_error) = match result {
-            FreshResult::Answer(_) | FreshResult::Permission(_) => (TurnState::Idle, None),
+            FreshResult::Answer(_) | FreshResult::Permission(_) | FreshResult::Children(_) => {
+                (TurnState::Idle, None)
+            }
             FreshResult::Failure(error) => (TurnState::Failed, Some(error)),
         };
         let txn = crate::db::begin_write(&self.db, crate::entity::agent_schedule::Entity).await?;
@@ -105,7 +119,71 @@ impl ScheduleStore {
         {
             return Err(ScheduleStoreError::Conflict);
         }
-        let reference = match result {
+        let mut child_planning_pending = false;
+        let mut delegated_unknown = false;
+        let mut delegated_pending = false;
+        if let Some(group_id) = &session.delegation_group_id {
+            use crate::entity::{agent_delegation_group as source, agent_subagent_run as child};
+            let group = source::Entity::find()
+                .filter(source::Column::GroupId.eq(group_id))
+                .filter(source::Column::RootConversationId.eq(lease.run_id))
+                .filter(source::Column::SourceOccurrenceId.eq(lease.run_id))
+                .filter(source::Column::ActorId.eq(&session.actor_id))
+                .filter(source::Column::DeviceId.eq(&session.device_id))
+                .one(&txn)
+                .await?
+                .ok_or(ScheduleStoreError::Conflict)?;
+            child_planning_pending = child::Entity::find()
+                .filter(child::Column::GroupId.eq(group_id))
+                .filter(child::Column::RootConversationId.eq(lease.run_id))
+                .filter(child::Column::ActorId.eq(&session.actor_id))
+                .filter(child::Column::DeviceId.eq(&session.device_id))
+                .filter(child::Column::State.is_not_in(["completed", "failed", "cancelled"]))
+                .one(&txn)
+                .await?
+                .is_some();
+            match crate::agent_subagent_store::scheduled_native_on(&txn, &group).await? {
+                crate::agent_subagent_store::ScheduledNativeDisposition::Pending => {
+                    delegated_pending = true
+                }
+                crate::agent_subagent_store::ScheduledNativeDisposition::Unknown => {
+                    delegated_unknown = true
+                }
+                crate::agent_subagent_store::ScheduledNativeDisposition::Settled => {}
+            }
+        }
+        let notification_retry = matches!(result, FreshResult::Failure(error)
+            if error.kind == desk_agent_protocol::AgentErrorKind::ModelUnavailable && error.retryable)
+            && session.is_subagent_result_turn()
+            && (session
+                .ready_subagent_notification
+                .as_ref()
+                .is_some_and(|notice| {
+                    notice.accepted_response_message_id.is_none() && notice.retry_after_ms.is_some()
+                })
+                || session
+                    .ready_subagent_wait
+                    .as_ref()
+                    .is_some_and(|wait| wait.retry_after_ms.is_some()))
+            && authority.run().result_ref.as_deref().is_some_and(|value| {
+                value.starts_with("answer-children:") || value.starts_with("children:")
+            })
+            && !delegated_unknown;
+        if matches!(result, FreshResult::Failure(_)) && delegated_pending && !notification_retry {
+            return Err(ScheduleStoreError::Conflict);
+        }
+        let answered_children_pending = matches!(result, FreshResult::Answer(_))
+            && !delegated_unknown
+            && (child_planning_pending || delegated_pending);
+        if matches!(result, FreshResult::Answer(_))
+            && session.delegation_group_id.is_some()
+            && !crate::agent_subagent_store::required_children_complete_on(&txn, &session)
+                .await
+                .map_err(|_| ScheduleStoreError::Conflict)?
+        {
+            return Err(ScheduleStoreError::Conflict);
+        }
+        let mut reference = match result {
             FreshResult::Answer(answer) => {
                 let message = session
                     .conversation
@@ -135,20 +213,63 @@ impl ScheduleStore {
                         .ok_or(ScheduleStoreError::Conflict)?,
                 )
             }
+            FreshResult::Children(id) => {
+                let wait = session
+                    .subagent_wait
+                    .as_ref()
+                    .or(session.ready_subagent_wait.as_ref())
+                    .ok_or(ScheduleStoreError::Conflict)?;
+                wait.validate().map_err(|_| ScheduleStoreError::Invalid)?;
+                if wait.wait_id != id
+                    || wait.parent_input_revision != session.input_revision
+                    || wait.parent_control_revision != session.control_revision
+                    || session.delegation_group_id.as_deref() != Some(wait.group_id.as_str())
+                {
+                    return Err(ScheduleStoreError::Conflict);
+                }
+                let reference = format!("children:{id}");
+                if reference.len() > 512 {
+                    return Err(ScheduleStoreError::Invalid);
+                }
+                Some(reference)
+            }
             FreshResult::Failure(_) => None,
         };
+        if notification_retry {
+            reference = authority.run().result_ref.clone();
+        } else if answered_children_pending {
+            let message = reference
+                .as_deref()
+                .and_then(|value| value.strip_prefix("message:"))
+                .ok_or(ScheduleStoreError::Conflict)?;
+            reference = Some(format!("answer-children:{message}"));
+        } else if delegated_unknown {
+            reference = Some(format!(
+                "delegated-effects:{}",
+                session
+                    .delegation_group_id
+                    .as_deref()
+                    .ok_or(ScheduleStoreError::Conflict)?
+            ));
+        }
+        if reference.as_ref().is_some_and(|value| value.len() > 512) {
+            return Err(ScheduleStoreError::Invalid);
+        }
         let actions = work_item::Entity::find()
             .filter(work_item::Column::ConversationId.eq(lease.run_id))
             .lock_exclusive()
             .all(&txn)
             .await?;
         use crate::capability_grant_store::*;
-        let mut unknown = false;
+        let mut unknown = delegated_unknown;
         for work in &actions {
             if work.status == CAPABILITY_WORK_SUCCEEDED {
                 continue;
             }
-            if matches!(result, FreshResult::Answer(_) | FreshResult::Permission(_)) {
+            if matches!(
+                result,
+                FreshResult::Answer(_) | FreshResult::Permission(_) | FreshResult::Children(_)
+            ) {
                 return Err(ScheduleStoreError::Conflict);
             }
             if !matches!(
@@ -176,8 +297,19 @@ impl ScheduleStore {
         }
         use desk_agent_protocol::schedule::ScheduledRunStatus;
         let (outcome, error_kind) = match result {
+            FreshResult::Answer(_) if unknown => (
+                ScheduledRunStatus::OutcomeUnknown,
+                Some("outcome_unknown".into()),
+            ),
+            FreshResult::Answer(_) if answered_children_pending => {
+                (ScheduledRunStatus::AwaitingChildren, None)
+            }
             FreshResult::Answer(_) => (ScheduledRunStatus::Succeeded, None),
             FreshResult::Permission(_) => (ScheduledRunStatus::AwaitingPermission, None),
+            FreshResult::Children(_) => (ScheduledRunStatus::AwaitingChildren, None),
+            FreshResult::Failure(_) if notification_retry => {
+                (ScheduledRunStatus::AwaitingChildren, None)
+            }
             FreshResult::Failure(_) if unknown => (
                 ScheduledRunStatus::OutcomeUnknown,
                 Some("outcome_unknown".into()),
@@ -222,10 +354,34 @@ impl ScheduleStore {
             .await
             .map_err(|_| ScheduleStoreError::Conflict)?;
         }
-        if matches!(result, FreshResult::Permission(_)) {
+        if matches!(
+            result,
+            FreshResult::Permission(_) | FreshResult::Children(_)
+        ) || answered_children_pending
+            || notification_retry
+        {
             let updated = run::Entity::update_many()
                 .set(run::ActiveModel {
-                    status: Set("awaiting_permission".into()),
+                    status: Set(
+                        if matches!(result, FreshResult::Children(_))
+                            || answered_children_pending
+                            || notification_retry
+                        {
+                            "awaiting_children".into()
+                        } else {
+                            "awaiting_permission".into()
+                        },
+                    ),
+                    lease_owner: Set(
+                        if matches!(result, FreshResult::Children(_))
+                            || answered_children_pending
+                            || notification_retry
+                        {
+                            None
+                        } else {
+                            current.run().lease_owner.clone()
+                        },
+                    ),
                     result_ref: Set(reference),
                     lease_deadline: Set(None),
                     updated_at: Set(current.verified_at()),

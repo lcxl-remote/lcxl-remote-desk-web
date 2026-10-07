@@ -27,6 +27,28 @@ pub(super) async fn match_current_on(
         .map(|row| PersistedAgentSession::decode_json(&row.state_json))
         .transpose()
         .map_err(|_| invalid())?;
+    if let Some(session) = &session
+        && !session.agent_role.is_main()
+    {
+        if session.actor_id != call.actor_id
+            || session.device_id != call.target_device_id
+            || session.input_revision != call.input_revision
+        {
+            return Err(invalid());
+        }
+        crate::agent_subagent_store::lock_child_source_on(txn, session).await?;
+        let fence =
+            desk_diagnose_core::action_turn_fence::AssistantTurnFence::from_session(session)
+                .map_err(|_| invalid())?
+                .ok_or_else(invalid)?;
+        let now_ms = i64::try_from(call.now_unix_ms)
+            .map_err(|_| invalid())?
+            .max(chrono::Utc::now().timestamp_millis());
+        if !crate::agent_subagent_store::check_child_action_on(txn, session, &fence, now_ms).await?
+        {
+            return Err(invalid());
+        }
+    }
     let fresh = session
         .as_ref()
         .is_some_and(|session| session.trigger_origin == TriggerOrigin::ScheduledTask);

@@ -53,6 +53,7 @@ pub(crate) struct OriginalResult {
     pub receipt: ActionResultReceipt,
     pub outcome: CapabilityDispatchOutcome,
     pub native_result: desk_agent_protocol::computer_use::ComputerActionResultClass,
+    pub native_verified: bool,
 }
 
 impl OriginalResult {
@@ -233,7 +234,7 @@ pub(super) fn terminal_result(
     };
     Ok(Some(OriginalResult {
         work,
-        original_call_id: binding.origin.tool_call_id,
+        original_call_id: binding.origin.tool_call_id.clone(),
         output: ToolRunOutput {
             format: desk_diagnose_core::seam::ToolOutputFormat::Json,
             content: terminal.projection.content,
@@ -243,10 +244,32 @@ pub(super) fn terminal_result(
         receipt: terminal.receipt,
         outcome: terminal.projection.outcome,
         native_result: terminal.observation.native.result,
+        native_verified: desk_diagnose_core::subagent::facts::computer_verified(
+            &terminal.observation.native,
+        ),
     }))
 }
 
 impl SignalCapabilityGrantStore {
+    /// Uses the caller's source/control transaction. Reading original facts never
+    /// consumes delivery, reserves a grant or opens a nested SQLite writer.
+    pub(crate) async fn computer_facts_on(
+        txn: &DatabaseTransaction,
+        generation: &str,
+    ) -> Result<
+        (
+            agent_action_item::Model,
+            desk_diagnose_core::action_result::ActionResultOrigin,
+            Option<OriginalResult>,
+        ),
+        DbErr,
+    > {
+        let (outbox, work, payload) = original_on(txn, generation).await?;
+        let frozen = binding(&outbox, &work, &payload)?;
+        let result = terminal_result(&outbox, work.clone(), &payload)?;
+        Ok((work, frozen.origin, result))
+    }
+
     pub(crate) async fn wait_computer_result(
         &self,
         action: &str,

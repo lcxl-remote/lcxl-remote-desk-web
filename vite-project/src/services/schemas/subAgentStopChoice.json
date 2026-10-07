@@ -1,0 +1,1 @@
+{"type":"string","enum":["include_sub_agents","main_only"],"x-readme-ref-name":"SubAgentStopChoice"}

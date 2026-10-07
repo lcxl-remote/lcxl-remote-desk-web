@@ -187,6 +187,8 @@ pub enum ScheduledRunStatus {
     WaitingDevice,
     Running,
     AwaitingPermission,
+    /// The original occurrence remains active while independent children work.
+    AwaitingChildren,
     Succeeded,
     Failed,
     Missed,

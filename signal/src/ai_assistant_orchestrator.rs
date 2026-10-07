@@ -57,7 +57,9 @@ use sha2::{Digest, Sha256};
 use crate::model_dial::SignalModelSeam;
 pub(crate) mod fresh;
 mod goal;
+mod subagents;
 pub use goal::resume_queued_goal;
+pub use subagents::resume_subagent_turn;
 mod scheduled;
 mod scheduled_dispatch;
 pub use fresh::resume_fresh_task;
@@ -883,6 +885,7 @@ async fn run_turn_inner(
         resume_conversation_id,
         None,
         None,
+        None,
     )
     .await;
 }
@@ -902,6 +905,7 @@ fn compose_turn(
     resume_conversation_id: Option<PermissionResume>,
     scheduled: Option<scheduled::PreparedResume>,
     goal_resume: Option<desk_diagnose_core::goal::GoalRun>,
+    delegated: Option<desk_diagnose_core::subagent::runtime::RuntimeTurn>,
 ) -> std::pin::Pin<Box<impl std::future::Future<Output = Result<Option<LoopOutcome>, AgentError>>>>
 {
     Box::pin(compose_turn_inner(
@@ -916,6 +920,7 @@ fn compose_turn(
         resume_conversation_id,
         scheduled,
         goal_resume,
+        delegated,
     ))
 }
 
@@ -932,7 +937,23 @@ async fn compose_turn_inner(
     resume_conversation_id: Option<PermissionResume>,
     mut scheduled: Option<scheduled::PreparedResume>,
     goal_resume: Option<desk_diagnose_core::goal::GoalRun>,
+    delegated: Option<desk_diagnose_core::subagent::runtime::RuntimeTurn>,
 ) -> Result<Option<LoopOutcome>, AgentError> {
+    if let Some(runtime) = &delegated {
+        runtime.validate()?;
+        if resume_conversation_id.is_some()
+            || scheduled.is_some()
+            || goal_resume.is_some()
+            || ask.start_goal
+            || actor_user_id.to_string() != runtime.session().actor_id
+            || target_device_id != runtime.session().device_id
+            || ask.question != runtime.source().owner_requirement.text
+            || ask.locale != runtime.session().response_locale
+            || !ask.selected_attachment_ids.is_empty()
+        {
+            return Err(transport_error("invalid delegated runtime composition"));
+        }
+    }
     let cancel_registration = cancellation::register(actor_user_id, &request_id);
     stream_event(
         connections.as_ref(),
@@ -944,7 +965,7 @@ async fn compose_turn_inner(
     let config = match crate::model_provider::load(&db).await {
         Ok(config) => config,
         Err(e) => {
-            if goal_resume.is_some() {
+            if goal_resume.is_some() || delegated.is_some() {
                 return Err(AgentError {
                     kind: AgentErrorKind::ModelUnavailable,
                     message: format!("failed to load model provider config: {e}"),
@@ -972,7 +993,7 @@ async fn compose_turn_inner(
             .with_context_db(db.clone())
             .with_cancellation(model_cancel.clone()),
         Err(error) => {
-            if goal_resume.is_some() {
+            if goal_resume.is_some() || delegated.is_some() {
                 return Err(model_rejected(error.message));
             }
             stream_event(
@@ -987,7 +1008,7 @@ async fn compose_turn_inner(
     let destination = match config.destination_identity() {
         Ok(destination) => destination,
         Err(error) => {
-            if goal_resume.is_some() {
+            if goal_resume.is_some() || delegated.is_some() {
                 return Err(model_rejected(format!(
                     "failed to resolve model destination: {error}"
                 )));
@@ -1006,15 +1027,27 @@ async fn compose_turn_inner(
         }
     };
     let actor_id = actor_user_id.to_string();
+    if let Some(runtime) = &delegated
+        && destination != runtime.source().model_destination
+    {
+        return Err(model_rejected(
+            "delegated task's frozen model destination changed",
+        ));
+    }
     let client_conversation_id = ask
         .conversation_id
         .as_deref()
         .map(str::trim)
         .filter(|id| is_valid_client_conversation_id(id))
         .map(str::to_string);
-    let conversation_id = scheduled
+    let conversation_id = delegated
         .as_ref()
-        .map(|resume| resume.claimed.session.conversation_id.clone())
+        .map(|runtime| runtime.session().conversation_id.clone())
+        .or_else(|| {
+            scheduled
+                .as_ref()
+                .map(|resume| resume.claimed.session.conversation_id.clone())
+        })
         .or_else(|| {
             resume_conversation_id
                 .as_ref()
@@ -1055,15 +1088,36 @@ async fn compose_turn_inner(
             return Ok(None);
         }
     };
+    let permission_child_context = if resume_conversation_id.is_some() {
+        let snapshot = snapshot
+            .as_ref()
+            .ok_or_else(|| transport_error("permission session is unavailable"))?;
+        crate::agent_subagent_store::SubAgentStore::new(db.clone())
+            .child_context_for_subject(&conversation_id, &actor_id, &target_device_id, snapshot.seq)
+            .await
+            .map_err(|_| transport_error("delegated permission source changed"))?
+    } else {
+        None
+    };
+    if let Some((creation, _)) = &permission_child_context
+        && creation.source.model_destination != destination
+    {
+        return Err(model_rejected(
+            "permission continuation changed the delegated model destination",
+        ));
+    }
     let event_store = crate::agent_run_event_store::SignalAgentRunEventStore::new(db.clone());
-    let client_conversation_id =
-        if resume_conversation_id.is_some() || scheduled.is_some() || goal_resume.is_some() {
-            snapshot
-                .as_ref()
-                .and_then(|session| session.client_conversation_id.clone())
-        } else {
-            client_conversation_id
-        };
+    let client_conversation_id = if resume_conversation_id.is_some()
+        || scheduled.is_some()
+        || goal_resume.is_some()
+        || delegated.is_some()
+    {
+        snapshot
+            .as_ref()
+            .and_then(|session| session.client_conversation_id.clone())
+    } else {
+        client_conversation_id
+    };
     let rehearsal_conversation = client_conversation_id
         .as_deref()
         .filter(|id| id.starts_with("rehearsal_"))
@@ -1075,7 +1129,9 @@ async fn compose_turn_inner(
         client_conversation_id: client_conversation_id.as_deref(),
     };
     let selection = async {
-        let original = if let Some(resume) = scheduled.as_ref() {
+        let original = if let Some(runtime) = &delegated {
+            runtime.read_context()
+        } else if let Some(resume) = scheduled.as_ref() {
             resume.original.clone()
         } else if goal_resume.is_some() {
             let session = snapshot
@@ -1109,22 +1165,25 @@ async fn compose_turn_inner(
         } else {
             None
         };
-        let objects =
-            if resume_conversation_id.is_some() || scheduled.is_some() || goal_resume.is_some() {
-                original
-                    .as_ref()
-                    .map(|selection| selection.object_attachments.clone())
-                    .unwrap_or_default()
-            } else {
-                event_store
-                    .select_objects(
-                        subject,
-                        &ask.client_message_id,
-                        &ask.selected_attachment_ids,
-                        now_unix_ms,
-                    )
-                    .await?
-            };
+        let objects = if resume_conversation_id.is_some()
+            || scheduled.is_some()
+            || goal_resume.is_some()
+            || delegated.is_some()
+        {
+            original
+                .as_ref()
+                .map(|selection| selection.object_attachments.clone())
+                .unwrap_or_default()
+        } else {
+            event_store
+                .select_objects(
+                    subject,
+                    &ask.client_message_id,
+                    &ask.selected_attachment_ids,
+                    now_unix_ms,
+                )
+                .await?
+        };
         Ok::<_, AgentError>((objects, original))
     }
     .await;
@@ -1141,13 +1200,32 @@ async fn compose_turn_inner(
         }
     };
     let mut ask = ask;
-    if resume_conversation_id.is_some() || scheduled.is_some() || goal_resume.is_some() {
-        ask.question = snapshot
+    if resume_conversation_id.is_some()
+        || scheduled.is_some()
+        || goal_resume.is_some()
+        || delegated.is_some()
+    {
+        if let Some((creation, _)) = &permission_child_context {
+            ask.locale = creation.response_locale.clone();
+        }
+        ask.question = permission_child_context
             .as_ref()
-            .and_then(|session| {
-                desk_diagnose_core::permission_resume::latest_user_requirement(&session.messages)
+            .map(|(creation, _)| creation.source.owner_requirement.text.clone())
+            .or_else(|| {
+                delegated
+                    .as_ref()
+                    .map(|runtime| runtime.source().owner_requirement.text.clone())
             })
-            .map(|message| message.text.clone())
+            .or_else(|| {
+                snapshot
+                    .as_ref()
+                    .and_then(|session| {
+                        desk_diagnose_core::permission_resume::latest_user_requirement(
+                            &session.messages,
+                        )
+                    })
+                    .map(|message| message.text.clone())
+            })
             .unwrap_or_default();
         let providers = ai_assistant_provider_registry();
         ask.selected_capability_ids = original_read_context
@@ -1487,12 +1565,15 @@ async fn compose_turn_inner(
                 },
             )
         });
-    let export_source =
-        if resume_conversation_id.is_some() || scheduled.is_some() || goal_resume.is_some() {
-            crate::assistant_model::ModelExportSource::Turn(&turn_id)
-        } else {
-            crate::assistant_model::ModelExportSource::Input(&ask.client_message_id)
-        };
+    let export_source = if resume_conversation_id.is_some()
+        || scheduled.is_some()
+        || goal_resume.is_some()
+        || delegated.is_some()
+    {
+        crate::assistant_model::ModelExportSource::Turn(&turn_id)
+    } else {
+        crate::assistant_model::ModelExportSource::Input(&ask.client_message_id)
+    };
     let export_authorization_id = crate::assistant_model::model_export_id(
         &actor_id,
         &target_device_id,
@@ -1508,6 +1589,28 @@ async fn compose_turn_inner(
                 .iter()
                 .map(|rule| rule.tool_name.clone()),
         );
+    }
+    if let Some(resume) = scheduled.as_mut()
+        && let Some(fresh) = resume.fresh.as_mut()
+    {
+        let (session, creation) = Box::pin(
+            crate::agent_subagent_store::SubAgentStore::new(db.clone())
+                .initialize_scheduled_source(
+                    &resume.claimed.session,
+                    resume
+                        .claimed
+                        .run
+                        .lease_owner
+                        .as_deref()
+                        .ok_or_else(|| transport_error("task executor missing"))?,
+                    resume.claimed.run.lease_epoch,
+                    &destination,
+                ),
+        )
+        .await
+        .map_err(|_| transport_error("published task source changed"))?;
+        resume.claimed.session = session;
+        fresh.creation = Some(creation);
     }
     let model = MeteredModel {
         fresh_task: scheduled.as_ref().and_then(|resume| {
@@ -1746,6 +1849,7 @@ async fn compose_turn_inner(
     // authority. It is always callable so the model can keep the user-visible
     // task assessment current even when no device context was selected.
     registry.extend(desk_diagnose_core::task_status_tools::task_status_tool_registry());
+    registry.extend(desk_diagnose_core::subagent::tools::registry());
     registry.extend(desk_diagnose_core::goal_tools::registry());
     registry.extend(desk_diagnose_core::goal_tools::open_registry());
     registry.extend(desk_diagnose_core::directory_tools::registry());
@@ -1943,7 +2047,15 @@ async fn compose_turn_inner(
         max_command_runtime_ms,
     )
     .with_model_egress_policy(model.model_egress_policy().expect("validated model policy"));
-    if (resume_conversation_id.is_some() || scheduled.is_some() || goal_resume.is_some())
+    if (resume_conversation_id.is_some()
+        || scheduled.is_some()
+        || goal_resume.is_some()
+        || delegated.as_ref().is_some_and(|runtime| {
+            matches!(
+                runtime,
+                desk_diagnose_core::subagent::runtime::RuntimeTurn::ParentCompletion { .. }
+            )
+        }))
         && let Some(original) = original_read_context
     {
         let result = async {
@@ -2092,6 +2204,65 @@ async fn compose_turn_inner(
         clock: &clock,
         heartbeat: Some(heartbeat.as_ref()),
     };
+    if let Some(runtime) = delegated {
+        let claim = ClaimTurnParams {
+            conversation_id,
+            actor_id,
+            device_id: target_device_id,
+            policy_revision: PERSONAL_ASSISTANT_POLICY_REVISION,
+            current_pdp_scope: scope,
+            turn_id: turn_id.clone(),
+            request_id: Some(request_id.clone()),
+            connection_id: None,
+            trigger_origin: runtime.origin(),
+            now: clock(),
+        };
+        let store = crate::agent_subagent_store::SubAgentStore::new(db.clone());
+        let mut sink = StreamingTurnSink::starting_at(|_event: AiAssistantEvent| {}, request_id, 0);
+        sink.set_provenance(AiProvenance::stamp(config.model, Some(clock())));
+        sink.turn_started(&turn_id);
+        let outcome = match runtime {
+            desk_diagnose_core::subagent::runtime::RuntimeTurn::Child { run, .. } => {
+                match store
+                    .claim_child(&claim, &run.binding.task_id, run.fence(), &destination)
+                    .await
+                    .map_err(|error| transport_error(format!("claim delegated task: {error}")))?
+                {
+                    crate::agent_subagent_store::SubAgentClaimOutcome::Claimed(claimed) => {
+                        desk_diagnose_core::agent_loop::run_preclaimed_subagent_turn(
+                            &deps,
+                            claimed.session,
+                            &mut sink,
+                        )
+                        .await?
+                    }
+                    crate::agent_subagent_store::SubAgentClaimOutcome::Blocked(_) => {
+                        LoopOutcome::TurnBusy
+                    }
+                }
+            }
+            desk_diagnose_core::subagent::runtime::RuntimeTurn::ParentCompletion { .. } => {
+                match store
+                    .claim_parent_completion(&claim, &destination)
+                    .await
+                    .map_err(|error| {
+                        transport_error(format!("claim delegated result interpretation: {error}"))
+                    })? {
+                    Some(claimed) => {
+                        desk_diagnose_core::agent_loop::run_preclaimed_subagent_completion(
+                            &deps,
+                            claimed.session,
+                            &mut sink,
+                        )
+                        .await?
+                    }
+                    None => LoopOutcome::TurnBusy,
+                }
+            }
+        };
+        sink.finish_outcome(&outcome);
+        return Ok(Some(outcome));
+    }
     if let Some(goal) = goal_resume {
         let bound = GoalModelBinding::from_destination(&destination)
             .map_err(|_| model_rejected("goal model binding is unavailable"))?;
@@ -2134,7 +2305,8 @@ async fn compose_turn_inner(
         let mut sink = StreamingTurnSink::starting_at(|_event: AiAssistantEvent| {}, request_id, 0);
         sink.set_provenance(AiProvenance::stamp(config.model, Some(clock())));
         sink.turn_started(&turn_id);
-        let outcome = run_preclaimed_goal_slice(&deps, claimed.session, &mut sink).await?;
+        let outcome =
+            Box::pin(run_preclaimed_goal_slice(&deps, claimed.session, &mut sink)).await?;
         sink.finish_outcome(&outcome);
         return Ok(Some(outcome));
     }
@@ -2157,6 +2329,15 @@ async fn compose_turn_inner(
     let accepted_at = clock();
     if resume_conversation_id.is_some() {
         let decision_message = match (|| {
+            let policy = model
+                .model_egress_policy()?
+                .ok_or_else(|| transport_error("permission model policy is unavailable"))?;
+            if let Some((creation, child)) = &permission_child_context {
+                return desk_diagnose_core::permission_resume::authorized_child_permission_resume_message(
+                    format!("{request_id}-decision"), &policy, creation,
+                    child.agent_role.binding().ok_or_else(|| transport_error("delegated permission role is unavailable"))?,
+                );
+            }
             let original = snapshot
                 .as_ref()
                 .and_then(|session| {
@@ -2165,9 +2346,6 @@ async fn compose_turn_inner(
                     )
                 })
                 .ok_or_else(|| transport_error("original permission input is unavailable"))?;
-            let policy = model
-                .model_egress_policy()?
-                .ok_or_else(|| transport_error("permission model policy is unavailable"))?;
             authorized_permission_resume_message(
                 format!("{request_id}-decision"),
                 &policy,
@@ -2198,7 +2376,14 @@ async fn compose_turn_inner(
             Some(chrono::Utc::now().to_rfc3339()),
         ));
         sink.turn_started(&turn_id);
-        match resume_agent_turn_after_permission(&deps, claim, decision_message, &mut sink).await {
+        match Box::pin(resume_agent_turn_after_permission(
+            &deps,
+            claim,
+            decision_message,
+            &mut sink,
+        ))
+        .await
+        {
             Ok(LoopOutcome::TurnBusy) => {
                 // A newer owner follow-up won the claim. Its input supersedes
                 // this grant-triggered resume, so no retry is appropriate.
@@ -2276,8 +2461,8 @@ async fn compose_turn_inner(
     };
     let event_store = crate::agent_run_event_store::SignalAgentRunEventStore::new(db.clone());
     let append_result = match goal_start {
-        Some(goal) => event_store.append_user_goal(input, goal).await,
-        None => event_store.append_user_followup(input).await,
+        Some(goal) => Box::pin(event_store.append_user_goal(input, goal)).await,
+        None => Box::pin(event_store.append_user_followup(input)).await,
     };
     let ack = match append_result {
         Ok(ack) => ack,
@@ -2402,7 +2587,7 @@ async fn compose_turn_inner(
         .map_err(|error| transport_error(format!("claim AI Assistant goal: {error}")))?;
         match claimed {
             Some(claimed) => {
-                match run_preclaimed_goal_slice(&deps, claimed.session, &mut sink).await {
+                match Box::pin(run_preclaimed_goal_slice(&deps, claimed.session, &mut sink)).await {
                     Ok(outcome) => sink.finish_outcome(&outcome),
                     Err(error) => sink.error(error),
                 }
@@ -2416,7 +2601,14 @@ async fn compose_turn_inner(
         return Ok(None);
     }
     loop {
-        match run_agent_turn(&deps, claim.clone(), user.clone(), &mut sink).await {
+        match Box::pin(run_agent_turn(
+            &deps,
+            claim.clone(),
+            user.clone(),
+            &mut sink,
+        ))
+        .await
+        {
             Ok(LoopOutcome::TurnBusy) => {
                 match sessions.read_snapshot(&claim.conversation_id).await {
                     Ok(Some(snapshot)) if snapshot.handled_input_seq >= ack.input_seq => {
@@ -2476,6 +2668,7 @@ mod tests {
     use super::*;
     mod compaction;
     mod desktop_permission;
+    mod live_subagents;
     mod original_input;
     mod permission_object;
     mod rehearsal_entry;
@@ -2825,6 +3018,7 @@ mod tests {
         };
         let db = Database::connect("sqlite::memory:").await.unwrap();
         crate::db::initialize_schema(&db).await.unwrap();
+        crate::ai_assistant_gate::enable_test_host();
         crate::model_provider::save(&db, config.clone())
             .await
             .unwrap();
@@ -2974,6 +3168,7 @@ mod tests {
         let destination = config.destination_identity().unwrap();
         let db = Database::connect("sqlite::memory:").await.unwrap();
         crate::db::initialize_schema(&db).await.unwrap();
+        crate::ai_assistant_gate::enable_test_host();
         crate::model_provider::save(&db, config.clone())
             .await
             .unwrap();
@@ -3062,7 +3257,10 @@ mod tests {
             .iter()
             .find(|entry| entry.source_tool_name == "inspect_desktop_ui")
             .unwrap();
-        assert_eq!(exported.source_envelope_ids, [original.envelope_id.clone()]);
+        assert_eq!(
+            exported.source_envelope_ids.as_slice(),
+            std::slice::from_ref(&original.envelope_id)
+        );
         assert_eq!(exported.digest_sha256, original.digest_sha256);
 
         let output = turn.provider_meta.data_envelope.as_ref().unwrap();
@@ -3252,6 +3450,7 @@ mod tests {
         let destination = config.destination_identity().unwrap();
         let db = Database::connect("sqlite::memory:").await.unwrap();
         crate::db::initialize_schema(&db).await.unwrap();
+        crate::ai_assistant_gate::enable_test_host();
         crate::model_provider::save(&db, config.clone())
             .await
             .unwrap();

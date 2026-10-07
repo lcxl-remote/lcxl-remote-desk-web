@@ -20,6 +20,7 @@ async fn production_input_entry_freezes_objects_and_rejects_changed_retry_withou
     };
     let db = Database::connect("sqlite::memory:").await.unwrap();
     crate::db::initialize_schema(&db).await.unwrap();
+    crate::ai_assistant_gate::enable_test_host();
     crate::model_provider::save(&db, config).await.unwrap();
     let client_id = "input-entry";
     let run_id = derive_conversation_key("7", "device", Some(client_id), "unused");

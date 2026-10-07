@@ -42,6 +42,9 @@ const FOREGROUND_THRESHOLD: Duration = Duration::from_secs(8);
 const WAIT_FOR_TASK_TIMEOUT: Duration = Duration::from_secs(10);
 const WAIT_FOR_TASK_POLL: Duration = Duration::from_millis(250);
 
+mod cancel;
+pub use cancel::SignalCommandCancelDispatcher;
+
 struct ApprovalPending {
     browser_connection_id: String,
     target_connection_id: String,
@@ -282,10 +285,15 @@ impl SignalAgentExecPending {
     }
 
     fn cancel_state_query(&self, execution_generation: &str) {
-        self.state_queries
-            .lock()
-            .expect("state query pending lock")
-            .remove(execution_generation);
+        let mut pending = self.state_queries.lock().expect("state query pending lock");
+        // A timed-out receiver may race with an already delivered reply and a
+        // fresh query. Remove only an abandoned waiter, never its replacement.
+        if pending
+            .get(execution_generation)
+            .is_some_and(|entry| entry.tx.is_closed())
+        {
+            pending.remove(execution_generation);
+        }
     }
 
     /// Wake every waiter bound to a signaling connection that just closed.
@@ -491,6 +499,7 @@ pub struct SignalAgentTools {
     max_command_runtime_ms: u32,
 }
 
+#[allow(clippy::large_enum_variant)]
 enum SignalDispatch {
     Settled {
         task: crate::entity::agent_exec_task::Model,
@@ -581,6 +590,7 @@ impl SignalAgentTools {
             None,
         );
         if let Err(error) = send_frame(&target, &frame).await {
+            drop(rx);
             self.pending.cancel_state_query(execution_generation);
             return Err(error);
         }
@@ -1488,5 +1498,30 @@ mod tests {
         assert!(!pending.deliver_state_reply("edge-b", reply.clone()));
         assert!(pending.deliver_state_reply("edge-a", reply));
         assert_eq!(rx.await.unwrap().state, ExecState::Running);
+    }
+    #[tokio::test]
+    async fn old_query_cleanup_never_removes_a_live_replacement_waiter() {
+        let pending = SignalAgentExecPending::new();
+        let old = pending
+            .register_state_query("generation".into(), "edge".into())
+            .unwrap();
+        drop(old);
+        pending.cancel_state_query("generation");
+        let next = pending
+            .register_state_query("generation".into(), "edge".into())
+            .unwrap();
+        pending.cancel_state_query("generation");
+        assert!(pending.deliver_state_reply(
+            "edge",
+            ExecStateReplyPayload {
+                execution_generation: "generation".into(),
+                state: ExecState::Running,
+                containment_identity: None,
+                running_ms: Some(1),
+                detail: None,
+                result_json: None,
+            }
+        ));
+        assert_eq!(next.await.unwrap().state, ExecState::Running);
     }
 }

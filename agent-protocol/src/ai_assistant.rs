@@ -13,6 +13,8 @@ use wincode::{SchemaRead, SchemaWrite};
 use crate::computer_use::{ObjectKind, ObjectRef};
 
 pub mod goal_budget;
+pub mod subagent;
+pub mod subagent_policy;
 
 /// Device-owned product switch projected to trusted central orchestrators.
 ///

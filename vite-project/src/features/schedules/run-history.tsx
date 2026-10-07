@@ -73,7 +73,7 @@ export function RunHistory({ client, scheduleId, connected, zone, selectedRun, o
             {!run.outcome_reviewed_at && run.status === 'outcome_unknown' &&
                 <OutcomeReview client={client} scheduleId={scheduleId} runId={run.run_id} connected={connected} onReload={() => load()} />}
             {run.cancel_requested_at && <p>{t('schedules.history.cancelRequested')}: {time(run.cancel_requested_at)}</p>}
-            {['queued', 'waiting_device', 'running', 'awaiting_permission'].includes(run.status) &&
+            {['queued', 'waiting_device', 'running', 'awaiting_permission', 'awaiting_children'].includes(run.status) &&
                 <Button variant="outline" disabled={!connected || busy || !!run.cancel_requested_at}
                     onClick={() => void cancelRun(run.run_id)}>{t('schedules.cancelRun')}</Button>}
             {run.started_at && <Button variant="outline" disabled={!connected} onClick={() => selectRun(run.run_id)}>{t('schedules.result.open')}</Button>}

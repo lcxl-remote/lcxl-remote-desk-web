@@ -36,7 +36,7 @@ function validDeviceUnavailableMax(value: number): boolean {
 const fields = [
     { key: 'activeTimeMs', label: 'goalBudgetActiveHours', scale: 3_600_000, maximum: 24, defaultValue: 2 },
     { key: 'deadlineMs', label: 'goalBudgetDeadlineDays', scale: 86_400_000, maximum: 30, defaultValue: 7 },
-    { key: 'modelTokens', label: 'goalBudgetTokens', scale: 1, maximum: 2_000_000, defaultValue: 100_000 },
+    { key: 'modelTokens', label: 'goalBudgetTokens', scale: 1, maximum: 10_000_000, defaultValue: 10_000_000 },
     { key: 'modelCalls', label: 'goalBudgetModelCalls', scale: 1, maximum: 1_000, defaultValue: 160 },
     { key: 'toolCalls', label: 'goalBudgetToolCalls', scale: 1, maximum: 2_000, defaultValue: 200 },
     { key: 'slices', label: 'goalBudgetSlices', scale: 1, maximum: 200, defaultValue: 20 },

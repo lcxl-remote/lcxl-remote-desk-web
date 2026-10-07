@@ -85,6 +85,29 @@ impl ScheduleStore {
         Ok(report)
     }
 
+    pub async fn scan_children_wait_settlement_once(
+        &self,
+        after_id: i64,
+    ) -> Result<ScheduleScanReport, ScheduleStoreError> {
+        let candidates = self.children_wait_candidates(after_id, BATCH_SIZE).await?;
+        let mut report = ScheduleScanReport {
+            scanned: candidates.len(),
+            next_cursor: (candidates.len() == BATCH_SIZE as usize)
+                .then(|| candidates.last().unwrap().id),
+            ..Default::default()
+        };
+        for candidate in candidates {
+            match self.settle_fresh_children_wait(&candidate.run_id).await {
+                Ok(true) => report.expired += 1,
+                Ok(false) | Err(ScheduleStoreError::Conflict | ScheduleStoreError::NotFound) => {
+                    report.deferred += 1
+                }
+                Err(_) => report.failed += 1,
+            }
+        }
+        Ok(report)
+    }
+
     pub async fn scan_approval_expiry_once(
         &self,
         after_id: i64,
@@ -210,6 +233,7 @@ impl ScheduleStore {
         let mut cursor = 0;
         let mut expiry_cursor = 0;
         let mut approval_cursor = 0;
+        let mut children_wait_cursor = 0;
         let mut recovery_cursor = 0;
         let mut fresh_recovery_cursor = 0;
         let mut late_receipt_cursor = 0;
@@ -264,6 +288,24 @@ impl ScheduleStore {
                 Err(_) => {
                     fresh_recovery_cursor = 0;
                     log::warn!("[schedule] fresh recovery scan unavailable; retrying");
+                }
+            }
+            match self
+                .scan_children_wait_settlement_once(children_wait_cursor)
+                .await
+            {
+                Ok(report) => {
+                    children_wait_cursor = report.next_cursor.unwrap_or(0);
+                    if report.failed > 0 {
+                        log::warn!(
+                            "[schedule] {} child waits could not be settled",
+                            report.failed
+                        );
+                    }
+                }
+                Err(_) => {
+                    children_wait_cursor = 0;
+                    log::warn!("[schedule] child wait settlement unavailable; retrying");
                 }
             }
             match self.scan_approval_expiry_once(approval_cursor).await {

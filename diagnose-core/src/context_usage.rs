@@ -18,6 +18,16 @@ pub struct ContextUsage {
     pub used_bytes: usize,
     pub limit_bytes: usize,
     pub strategy: String,
+    pub breakdown: ContextUsageBreakdown,
+}
+
+/// Costs of the prepared history only; contains no message or replay content.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ContextUsageBreakdown {
+    pub messages_bytes: usize,
+    pub tools_bytes: usize,
+    pub replay_bytes: usize,
+    pub projected_bytes: usize,
 }
 
 impl ContextUsageBasis {
@@ -68,17 +78,36 @@ impl ContextUsageBasis {
             return None;
         }
         let ids: std::collections::HashSet<_> = self.retained_ids.iter().collect();
-        let used_bytes = history
+        let mut breakdown = ContextUsageBreakdown {
+            projected_bytes: self.synthetic_bytes,
+            ..Default::default()
+        };
+        let mut used_bytes = self.synthetic_bytes;
+        for (_, message) in history
             .iter()
             .enumerate()
             .filter(|(i, m)| *i >= self.observed_len || ids.contains(&m.message_id))
-            .try_fold(self.synthetic_bytes, |n, (_, m)| {
-                n.checked_add(model_context_cost(m))
-            })?;
+        {
+            let cost = model_context_cost(message);
+            let replay = message
+                .replay_disposition
+                .as_ref()
+                .map_or(0, crate::replay::ReplayDisposition::model_context_cost);
+            breakdown.replay_bytes = breakdown.replay_bytes.checked_add(replay)?;
+            let category =
+                if message.role == crate::chat::ChatRole::Tool || !message.tool_calls.is_empty() {
+                    &mut breakdown.tools_bytes
+                } else {
+                    &mut breakdown.messages_bytes
+                };
+            *category = category.checked_add(cost.checked_sub(replay)?)?;
+            used_bytes = used_bytes.checked_add(cost)?;
+        }
         Some(ContextUsage {
             used_bytes,
             limit_bytes: self.limit_bytes,
             strategy: self.strategy.clone(),
+            breakdown,
         })
     }
 }
@@ -149,5 +178,63 @@ mod tests {
         let usage = basis.usage(&[message]).unwrap();
         assert_eq!(usage.strategy, "checkpoint_summary");
         assert!(usage.used_bytes > usage.limit_bytes);
+    }
+
+    #[test]
+    fn breakdown_counts_retained_replay_once_and_excludes_display_reasoning_and_omitted_history() {
+        use crate::{
+            chat::ToolCallRef,
+            replay::{ProviderReplayEnvelope, ReplayCodec, ReplayDisposition},
+        };
+        let policy = policy();
+        let old = ChatMessage::text("old", ChatRole::User, "omitted".repeat(1000));
+        let user = ChatMessage::text("u", ChatRole::User, "requirement");
+        let mut call = ChatMessage::assistant_tool_calls(
+            "call",
+            "",
+            vec![ToolCallRef {
+                id: "tool".into(),
+                name: "read_subagent_result".into(),
+                arguments_json: "{}".into(),
+            }],
+        );
+        call.reasoning = Some("display-only".repeat(1000));
+        let replay = ReplayDisposition::Present {
+            envelope: ProviderReplayEnvelope::new(
+                ReplayCodec::OpenAiReasoningContent,
+                policy.source_context_key.clone(),
+                serde_json::json!("required provider replay"),
+            ),
+        };
+        call.replay_disposition = Some(replay.clone());
+        let summary = ChatMessage::text("summary", ChatRole::ContextSummary, "compact history");
+        let mut history = vec![old, user.clone(), call.clone()];
+        let basis = ContextUsageBasis::observe(
+            &history,
+            &[summary.clone(), user.clone(), call.clone()],
+            &policy,
+        );
+        let result = ChatMessage::tool_result("result", "tool", "original receipt");
+        history.push(result.clone());
+        let usage = basis.usage(&history).unwrap();
+        assert_eq!(usage.breakdown.messages_bytes, model_context_cost(&user));
+        assert_eq!(usage.breakdown.replay_bytes, replay.model_context_cost());
+        assert_eq!(
+            usage.breakdown.tools_bytes,
+            model_context_cost(&call) - replay.model_context_cost() + model_context_cost(&result)
+        );
+        assert_eq!(
+            usage.breakdown.projected_bytes,
+            model_context_cost(&summary)
+        );
+        assert_eq!(
+            usage.used_bytes,
+            usage.breakdown.messages_bytes
+                + usage.breakdown.tools_bytes
+                + usage.breakdown.replay_bytes
+                + usage.breakdown.projected_bytes
+        );
+        call.reasoning = None;
+        assert_eq!(model_context_cost(&call), model_context_cost(&history[2]));
     }
 }

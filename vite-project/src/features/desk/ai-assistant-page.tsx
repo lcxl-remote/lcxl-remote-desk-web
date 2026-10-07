@@ -1,26 +1,24 @@
+import { AssistantTranscript } from './assistant-transcript';
 import { permissionToolLabel, permissionResourceLabel, permissionOperationLabel } from './assistant-permission-labels';
-import { AssistantAttachments, AssistantResultAttachments } from './assistant-attachments';
+import { AssistantAttachments } from './assistant-attachments';
 import { requireRecoveryZip } from '@/lib/file-recovery-error';
 import { Textarea } from '@/components/ui/textarea';
 import { AssistantObservationResult } from './assistant-observation-result';
-import { AssistantToolCall, isHistoricalPermissionSkip } from './assistant-tool-call';
 import { useFollowLatest } from '@/hooks/use-follow-latest';
 import './assistant-responsive.css';
 import { AssistantSchedules } from './assistant-schedules';
-import { AssistantImages } from './assistant-images';
 import { AssistantDocumentPreviews } from './assistant-document-preview';
-import { AssistantReasoning } from './assistant-reasoning';
 import { AssistantBackgroundTasks } from './assistant-background-tasks';
+import { AssistantSubagentApprovalNotice, AssistantSubagents, AssistantConversationTabs, AssistantSubagentMenu, type AssistantSubagentPanel } from './assistant-subagents';
+import { AssistantStopConfirmation } from './assistant-stop-confirmation';
+import { useAiAssistantSubagents } from './use-ai-assistant-subagents';
 import { ScheduleProposalCards } from '@/features/schedules/proposal-card';
 import { AssistantContextMeter } from './assistant-context-meter';
 import { AssistantDirectoryApproval } from './assistant-directory-approval';
-import { AssistantToolGroup } from './assistant-tool-group';
 import { AssistantFileScope } from './assistant-file-scope';
 import { AssistantConnectionIcon } from './assistant-connection-icon';
-import { AssistantCommandResult } from './assistant-command-result';
 import { exportDeviceFileRecovery } from '@/services/clients';
 import { FileRecoverySettings } from '@/features/settings/file-recovery-settings';
-import { AssistantContextNotices, noticeMessageId } from './assistant-context-notices';
 import { AssistantPermissionRequest } from './assistant-permission-request';
 import { AssistantPermissionRecords } from './assistant-permission-records';
 import { AssistantHistory } from './assistant-history';
@@ -29,7 +27,7 @@ import { useIsMobile } from '@/hooks/use-mobile';
 import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
 import { capabilityDescriptionKey } from './assistant-capability-copy';
-import { Fragment, type FormEvent, useEffect, useState } from 'react';
+import { type FormEvent, useEffect, useState } from 'react';
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { Check, AlertTriangle, ArrowDown, ArrowLeft, CalendarClock, Eye, FolderKey, ListTodo, LoaderCircle, Monitor, Paperclip, Plus, RefreshCw, Send, Settings2, ShieldCheck, X } from 'lucide-react';
@@ -55,7 +53,7 @@ import {
     ownerSelectableWindows,
     useAiAssistantObservation,
 } from './use-ai-assistant-observation';
-import { useAiAssistantChat, type AiAssistantMessage, type RehearsalConversation } from './use-ai-assistant-chat';
+import { useAiAssistantChat, type RehearsalConversation } from './use-ai-assistant-chat';
 import { fetchGoalBudgetPolicy, type GoalBudgetPolicy } from '../settings/goal-budget-policy-settings';
 import { AiAssistantRehearsalGate } from './ai-assistant-rehearsal-gate';
 import { SessionTargetDialog } from './session-target-selection';
@@ -268,14 +266,15 @@ export function AiAssistantWorkspace({
         subscribe,
         sendMessage,
     });
+    const subagents = useAiAssistantSubagents({ connection: deskId, conversation: chat.conversationId,
+        session: chat.sessionId, snapshot: chat.subagents, connected: isConnected, onChanged: chat.refreshSnapshot });
     const capabilities = useAiAssistantCapabilities({
         deskId, subscribe, sendMessage, enabled: assistantEnabled && isConnected,
     });
     const recoveryConnections = useListConnections();
-    const exportBackup = async (id: string) => {
+    const exportSessionBackup = async (conversation: string | undefined, id: string) => {
         // Recovery records use the durable server session key, not the client
         // conversation UUID used when submitting new assistant turns.
-        const conversation = chat.sessionId;
         const connection = recoveryConnections.data?.find(item => item.connection_id === deskId);
         if (!conversation || !connection) throw new Error('Backup target unavailable');
         const data = await exportDeviceFileRecovery({ connection: deskId, device_id: connection.device_id,
@@ -286,6 +285,7 @@ export function AiAssistantWorkspace({
         anchor.href = url; anchor.download = 'file-recovery.zip'; anchor.click();
         window.setTimeout(() => URL.revokeObjectURL(url), 60000);
     };
+    const exportBackup = (id: string) => exportSessionBackup(chat.sessionId, id);
     const exec = useConfirmExec({
         deskId,
         deviceId: stableDeviceId,
@@ -306,12 +306,25 @@ export function AiAssistantWorkspace({
     const [pendingScheduleCount, setPendingScheduleCount] = useState(0);
     const [deviceSettingsOpen, setDeviceSettingsOpen] = useState(false);
     const [panel, setPanel] = useState<AssistantPanelId | null>(null);
+    const [childPanel, setChildPanel] = useState<{ taskId: string; panel: AssistantSubagentPanel | null } | null>(null);
+    const setSelectedChildPanel = (panel: AssistantSubagentPanel | null) => {
+        if (subagents.selected) setChildPanel({ taskId: subagents.selected.task_id, panel });
+    };
+    useEffect(() => {
+        setChildPanel(null); setPanel(null); setAttachmentsOpen(false); setTaskPanelSession(null);
+        setPermissionHistorySession(null); setDirectorySession(null); setAddContextOpen(false);
+        setApprovalSettingsOpen(false); setDeviceSettingsOpen(false); setGoalDetailsOpen(false); setSchedulesOpen(false);
+    }, [subagents.selected?.task_id]);
     const [permissionHistorySession, setPermissionHistorySession] = useState<string | null>(null);
     const [directorySession, setDirectorySession] = useState<string | null>(null);
     const permissionHistoryKey = `${deskId}:${chat.conversationId}`;
-    const { scrollRef, contentRef, onScroll, showJumpToLatest, jumpToLatest } = useFollowLatest(true, permissionHistoryKey);
+    const [childDrafts, setChildDrafts] = useState<Record<string, { revision: number; text: string }>>({});
+    useEffect(() => { setChildDrafts({}); }, [permissionHistoryKey]);
+    const selectedChildTask = subagents.detail?.result.task ?? subagents.selected;
+    const selectedChildDraft = selectedChildTask && childDrafts[selectedChildTask.task_id];
+    const { scrollRef, contentRef, onScroll, showJumpToLatest, jumpToLatest } = useFollowLatest(!subagents.selected, permissionHistoryKey);
     const pendingDirectories = chat.fileScope.directories.filter(directory => directory.state === 'pending');
-    const pendingPermissionCount = chat.permissionRequests.filter(request => request.state === 'pending').length;
+    const pendingPermissionCount = chat.permissionRequests.filter(request => ['pending', 'needs_revalidation'].includes(request.state)).length;
     const pendingCount = pendingDirectories.length + pendingPermissionCount + pendingScheduleCount + Number(Boolean(chat.pendingGoalOpenRequest));
     const runningTaskCount = [...chat.commandTasks, ...chat.backgroundTasks]
         .filter(task => ['running', 'cancel_requested'].includes(task.state)).length;
@@ -432,36 +445,6 @@ export function AiAssistantWorkspace({
         const key = capabilities.snapshot?.entries.find(entry => entry.capability.tool_name === name)?.capability.display_name_key;
         return key ? t(key, { defaultValue: name }) : name;
     };
-    const displayNameForCall = (callId?: string) => {
-        const name = chat.tools.find(tool => tool.callId === callId)?.name;
-        return name ? displayNameForTool(name) : undefined;
-    };
-
-    const renderTranscriptMessage = (message: AiAssistantMessage) => (
-                            <Fragment key={message.id}>
-                            {(message.role !== 'assistant' || message.text || message.reasoning) && <div
-                                key={message.id}
-                                id={message.role === 'tool_call' ? `assistant-call-${message.toolCallId}` : undefined}
-                                tabIndex={message.role === 'tool_call' ? -1 : undefined}
-                                className={`rounded-lg px-3 py-2 text-sm ${
-                                    message.role === 'user'
-                                        ? 'ml-auto max-w-[90%] bg-muted'
-                                        : message.role === 'tool_result' ? 'w-full max-w-full border bg-muted/30 sm:max-w-[90%]' : 'w-full max-w-full bg-transparent sm:max-w-[90%]'
-                                }`}
-                            >
-                                {message.role === 'tool_call' ? <AssistantToolCall tool={chat.tools.find(tool => tool.callId === message.toolCallId)} running={chat.running}
-                                    displayName={displayNameForCall(message.toolCallId)} /> : message.role === 'tool_result' ? <>
-                                    {message.permissionReason && <p className="mb-2 text-sm">{t('pages.aiAssistant.permissionReasonLabel', { reason: message.permissionReason })}</p>}
-                                    {isHistoricalPermissionSkip(message.text) && <p className="mb-2 text-sm text-amber-700 dark:text-amber-300">{t('pages.aiAssistant.historicalPermissionSkip')}</p>}
-                                    <AssistantCommandResult text={message.text} tool={chat.tools.find(tool => tool.callId === message.toolCallId)} onLocateCall={message.toolCallId ? () => { const target = document.getElementById(`assistant-call-${message.toolCallId}`); target?.scrollIntoView({ block: 'center', behavior: 'smooth' }); target?.focus({ preventScroll: true }); } : undefined} onExportBackup={exportBackup} />
-                                    <AssistantResultAttachments sessionId={chat.sessionId} text={message.text} />
-                                </> : message.role === 'assistant'
-                                    ? <><AssistantReasoning text={message.reasoning} />{message.text && <MarkdownContent disableLinks>{message.text}</MarkdownContent>}</>
-                                    : <p className="whitespace-pre-wrap">{message.text}</p>}
-                            </div>}
-                            <AssistantContextNotices notices={chat.contextNotices.filter(notice => noticeMessageId(notice, chat.messages) === message.id)} />
-                            </Fragment>
-                        );
 
     const detailsContent = (
         <div className="space-y-4">
@@ -823,11 +806,13 @@ export function AiAssistantWorkspace({
                                     setSelectedCapabilityIds([]);
                                     return true;
                                 }} onNew={resetConversation} />
-                            <AssistantMoreMenu sections={moreSections} />
+                            {subagents.selected ? <AssistantSubagentMenu onSelect={setSelectedChildPanel} onDeviceSettings={() => setDeviceSettingsOpen(true)}
+                                onApprovalSettings={!rehearsal && featureProfile.approval_delegation ? () => setApprovalSettingsOpen(true) : undefined} /> : <AssistantMoreMenu sections={moreSections} />}
                         </div>
                     </div>
                 </CardHeader>
                 <CardContent className="flex min-h-0 flex-1 flex-col gap-2 px-3 pb-3 pt-0">
+                    <div role="tabpanel" id="assistant-main-panel" aria-labelledby="assistant-tab-main" hidden={!!subagents.selected} className={subagents.selected ? 'hidden' : 'contents'}>
                     {(pendingCount > 0 || runningTaskCount > 0 || chat.goal || chat.approvalDelegation?.status === 'active') && (
                         <div className="flex w-full min-w-0 shrink-0 items-center gap-2 overflow-x-auto px-1 text-xs">
                             {pendingCount > 0 && <Button type="button" size="sm" variant="outline" className="shrink-0 border-amber-500/50"
@@ -862,14 +847,9 @@ export function AiAssistantWorkspace({
                         )}
                         <AssistantDocumentPreviews previews={chat.documentPreviews}
                             requestPage={chat.requestDocumentPreviewPage} />
-                        <AssistantImages key={chat.conversationId} sessionId={chat.sessionId} evidence={chat.visualEvidence}
-                            messages={chat.messages} renderMessage={renderTranscriptMessage}
-                            renderReasoning={message => <div className="w-full max-w-full text-sm sm:max-w-[90%]">
-                                <AssistantReasoning text={message.reasoning} />
-                            </div>}
-                            renderToolGroup={messages => <AssistantToolGroup messages={messages} tools={chat.tools}
-                                renderMessage={renderTranscriptMessage} displayNameForTool={displayNameForTool} />} />
-                        <AssistantContextNotices historical notices={chat.contextNotices.filter(notice => !noticeMessageId(notice, chat.messages))} />
+                        <AssistantTranscript sessionId={chat.sessionId} messages={chat.messages} tools={chat.tools}
+                            running={chat.running} evidence={chat.visualEvidence} notices={chat.contextNotices}
+                            displayNameForTool={displayNameForTool} exportBackup={exportBackup} />
                         <ScheduleProposalCards key={`${deskId}:${chat.conversationId}`} tools={chat.tools} running={chat.running}
                             deviceId={stableDeviceId} connectionId={deskId} onPendingCountChange={setPendingScheduleCount} />
                         {chat.partial && (
@@ -1035,6 +1015,7 @@ export function AiAssistantWorkspace({
                                 {t('pages.aiAssistant.goalContinuesPrevious', { goalId: previousCompletedGoalId })}
                             </p>
                         )}
+                        <AssistantSubagentApprovalNotice agents={subagents} />
                         <Textarea
                             value={question}
                             readOnly={!!rehearsal}
@@ -1097,12 +1078,13 @@ export function AiAssistantWorkspace({
                             </Button>}
                             <div className="ml-auto flex shrink-0 items-center gap-1">
                                 <AssistantContextMeter usage={chat.contextUsage} draft={question} />
-                                {chat.turnRunning ? (
+                                {chat.canStop && (
                                     <Button type="button" className="assistant-action assistant-primary-action" aria-label={t(chat.stopping ? 'pages.aiAssistant.stopping' : 'pages.aiAssistant.stop')} onClick={chat.stop} disabled={!chat.canStop || chat.stopping}>
-                                        <LoaderCircle aria-hidden="true" className="h-4 w-4 shrink-0 animate-spin motion-reduce:animate-none" />
+                                        {chat.turnRunning || chat.stopping ? <LoaderCircle aria-hidden="true" className="h-4 w-4 shrink-0 animate-spin motion-reduce:animate-none" /> : <X aria-hidden="true" className="h-4 w-4 shrink-0" />}
                                         <span className="assistant-action-label">{t(chat.stopping ? 'pages.aiAssistant.stopping' : 'pages.aiAssistant.stop')}</span>
                                     </Button>
-                                ) : (
+                                )}
+                                {!chat.turnRunning && (
                                     <Button type="submit" className="assistant-action assistant-primary-action" aria-label={t(rehearsal ? 'schedules.rehearsal.begin' : 'pages.aiAssistant.send')} disabled={!!chat.deliveryState || !rehearsalCanStart || !assistantEnabled || !question.trim() || !isConnected || chat.hydrating || !chat.sessionTargetReady || chat.sessionTargetResolving || chat.contextUpdating || !providerConfig?.api_key_set || !providerConfig?.model || (startGoal && !goalBudgetPolicy)}>
                                         <Send className="h-4 w-4 shrink-0" />
                                         <span className="assistant-action-label">{t(rehearsal ? 'schedules.rehearsal.begin' : 'pages.aiAssistant.send')}</span>
@@ -1111,6 +1093,28 @@ export function AiAssistantWorkspace({
                             </div>
                         </div>
                     </form>
+                    </div>
+                    <div role="tabpanel" id="assistant-child-panel" hidden={!subagents.selected} aria-labelledby={subagents.selected ? `assistant-tab-${subagents.selected.task_id}` : undefined}
+                        className={subagents.selected ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}>
+                    <AssistantSubagents key={subagents.selected?.task_id} agents={subagents} connected={isConnected}
+                        adjustment={selectedChildDraft && selectedChildDraft.revision === selectedChildTask?.input_revision ? selectedChildDraft.text : ''}
+                        onAdjustmentChange={text => { if (selectedChildTask) setChildDrafts(previous => ({ ...previous,
+                            [selectedChildTask.task_id]: { revision: selectedChildTask.input_revision, text } })); }}
+                        panel={childPanel?.taskId === subagents.selected?.task_id ? childPanel?.panel ?? null : null}
+                        onPanelChange={setSelectedChildPanel} deskId={deskId}
+                        sessionTargetId={chat.sessionTargetReady ? (chat.sessionTarget?.target_id ?? null) : undefined}
+                        capabilityList={<AssistantCapabilityList entries={capabilities.snapshot?.entries ?? []}
+                            loading={capabilities.loading} error={Boolean(capabilities.error)}
+                            refreshDisabled={!assistantEnabled || !isConnected} onRefresh={capabilities.refresh} />}
+                        mainStopped={chat.mainStopped}
+                        exportBackup={exportSessionBackup}
+                        canDecide={assistantEnabled && featureProfile.permission_decision}
+                        interactive={featureProfile.exec_pty ? { browserConnectionId: chat.browserConnectionId, deviceId: stableDeviceId } : undefined} />
+                    </div>
+                    <AssistantConversationTabs agents={subagents} attentionTasks={chat.subagents.attention_tasks}
+                        mainNeedsApproval={pendingCount > 0 || Object.values(exec.entries).some(entry => entry.phase === 'awaiting')} />
+                    <AssistantStopConfirmation open={chat.stopConfirmation !== null} busy={chat.stopping}
+                        onDismiss={chat.dismissStopConfirmation} onConfirm={chat.confirmStop} />
                     <AssistantAttachments sessionId={chat.sessionId} open={attachmentsOpen}
                         onOpenChange={setAttachmentsOpen} showTrigger={false} />
                     <Sheet open={goalDetailsOpen} onOpenChange={setGoalDetailsOpen}>

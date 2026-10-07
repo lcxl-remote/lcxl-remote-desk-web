@@ -48,6 +48,9 @@ pub(super) async fn issue_on(
     {
         return Err(invalid());
     }
+    if session.is_subagent_result_turn() {
+        return Err(invalid());
+    }
     let authority = schedule_store::fresh_action_authority_on(txn, session).await?;
     let contract = authority.contract();
     let rule = contract

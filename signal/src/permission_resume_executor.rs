@@ -40,7 +40,16 @@ impl SignalPermissionResumeExecutor {
         }
     }
 
-    pub async fn scan_once(&self, after_id: i64) -> Result<ResumeScanReport, AgentError> {
+    pub fn scan_once(
+        &self,
+        after_id: i64,
+    ) -> std::pin::Pin<
+        Box<impl std::future::Future<Output = Result<ResumeScanReport, AgentError>> + '_>,
+    > {
+        Box::pin(self.scan_once_inner(after_id))
+    }
+
+    async fn scan_once_inner(&self, after_id: i64) -> Result<ResumeScanReport, AgentError> {
         let candidates = SignalAgentSessionStore::new(self.db.clone())
             .permission_resume_candidates(after_id, BATCH_SIZE)
             .await?;
@@ -65,7 +74,14 @@ impl SignalPermissionResumeExecutor {
         Ok(report)
     }
 
-    async fn process(
+    fn process(
+        &self,
+        candidate: crate::entity::agent_permission_resume::Model,
+    ) -> std::pin::Pin<Box<impl std::future::Future<Output = Result<bool, AgentError>> + '_>> {
+        Box::pin(self.process_inner(candidate))
+    }
+
+    async fn process_inner(
         &self,
         candidate: crate::entity::agent_permission_resume::Model,
     ) -> Result<bool, AgentError> {
@@ -128,12 +144,31 @@ impl SignalPermissionResumeExecutor {
         {
             return Ok(false);
         }
-        let Some(question) =
-            desk_diagnose_core::permission_resume::latest_user_requirement(&session.conversation)
+        let child_creation = crate::agent_subagent_store::SubAgentStore::new(self.db.clone())
+            .child_creation_context(&session)
+            .await
+            .map_err(|_| AgentError {
+                kind: desk_agent_protocol::AgentErrorKind::Internal,
+                message: "delegated permission source changed".into(),
+                retryable: false,
+                safe_for_model: false,
+                error_code: None,
+            })?;
+        let Some(question) = child_creation
+            .as_ref()
+            .map(|creation| creation.source.owner_requirement.text.clone())
+            .or_else(|| {
+                desk_diagnose_core::permission_resume::latest_user_requirement(
+                    &session.conversation,
+                )
                 .map(|message| message.text.clone())
+            })
         else {
             return Ok(false);
         };
+        let locale = child_creation
+            .as_ref()
+            .and_then(|creation| creation.response_locale.clone());
         crate::ai_assistant_orchestrator::resume_after_permission_decision(
             self.connections.clone(),
             self.db.clone(),
@@ -145,6 +180,7 @@ impl SignalPermissionResumeExecutor {
             candidate.request_id.clone(),
             AiAssistantAsk {
                 question,
+                locale,
                 client_message_id: candidate.permission_id.clone(),
                 conversation_id: session.client_conversation_id,
                 ..Default::default()

@@ -28,6 +28,21 @@ impl ScheduleStore {
         &self,
         run_id: &str,
     ) -> Result<bool, ScheduleStoreError> {
+        let waiting_children = run::Entity::find()
+            .filter(run::Column::RunId.eq(run_id))
+            .one(&self.db)
+            .await?
+            .is_some_and(|work| {
+                work.result_ref.as_deref().is_some_and(|reference| {
+                    reference.starts_with("children:")
+                        || reference.starts_with("stopped-children:")
+                        || reference.starts_with("answer-children:")
+                        || reference.starts_with("delegated-effects:")
+                })
+            });
+        if waiting_children {
+            return self.reconcile_fresh_children_receipts(run_id).await;
+        }
         let txn = crate::db::begin_write(&self.db, crate::entity::agent_schedule::Entity).await?;
 
         let initial = run::Entity::find()
@@ -94,7 +109,7 @@ impl ScheduleStore {
         {
             return Err(ScheduleStoreError::Conflict);
         }
-        if !session.execution_state.unknown().is_some() {
+        if session.execution_state.unknown().is_none() {
             return Ok(false);
         }
         let actions = action::Entity::find()

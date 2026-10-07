@@ -9,6 +9,8 @@ pub(super) fn original(output: &ToolRunOutput, ephemeral: bool) -> DataEnvelope 
         schema_version: 1,
         turn_fence: AssistantTurnFence {
             schema_version: 1,
+            control_revision: 1,
+            delegation: None,
             conversation_id: "conv".into(),
             turn_id: "original-turn".into(),
             actor_id: "actor".into(),

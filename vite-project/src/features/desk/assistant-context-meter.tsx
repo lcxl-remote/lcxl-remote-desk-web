@@ -39,6 +39,9 @@ export function AssistantContextMeter({ usage, draft }: { usage: AssistantContex
             <dl className="grid grid-cols-[1fr_auto] gap-x-4 gap-y-1">
                 <dt>{t(`pages.aiAssistant.contextMeter.limit.${usage.strategy}`)}</dt><dd>{bytes(usage.limitBytes)}</dd>
                 <dt>{t('pages.aiAssistant.contextMeter.used')}</dt><dd>{bytes(usage.usedBytes)}</dd>
+                {usage.breakdown && (['messagesBytes', 'toolsBytes', 'replayBytes', 'projectedBytes'] as const).map(key => <div key={key} className="contents">
+                    <dt className="pl-2 text-xs text-muted-foreground">{t(`pages.aiAssistant.contextMeter.breakdown.${key}`)}</dt><dd className="text-xs">{bytes(usage.breakdown[key])}</dd>
+                </div>)}
                 <dt>{t('pages.aiAssistant.contextMeter.remaining')}</dt><dd>{bytes(values.remaining)}</dd>
                 <dt>{t('pages.aiAssistant.contextMeter.draft')}</dt><dd>{bytes(values.draftBytes)}</dd>
             </dl>

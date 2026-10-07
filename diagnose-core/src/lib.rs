@@ -104,6 +104,7 @@ pub mod simulated_grant;
 pub mod sink_authorizer;
 pub mod spreadsheet_formula;
 pub mod stream;
+pub mod subagent;
 pub mod task_status_tools;
 pub mod terminal_ai_assistant;
 pub mod terminal_complete;

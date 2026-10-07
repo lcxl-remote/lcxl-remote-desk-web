@@ -73,6 +73,18 @@ pub(crate) async fn fixture_on(
     contract_row::Model,
     PublishTask,
 ) {
+    fixture_on_for_device(db, None).await
+}
+
+pub(crate) async fn fixture_on_for_device(
+    db: sea_orm::DatabaseConnection,
+    device: Option<&str>,
+) -> (
+    ScheduleStore,
+    entity::Model,
+    contract_row::Model,
+    PublishTask,
+) {
     let schema = Schema::new(db.get_database_backend());
     for mut table in [
         schema.create_table_from_entity(crate::entity::schedule_budget_policy::Entity),
@@ -98,10 +110,11 @@ pub(crate) async fn fixture_on(
     }
     let store = ScheduleStore::new(db);
     let now = database_now(&store.db).await.unwrap();
-    let task = store
-        .create_draft(1, &super::super::tests::draft(), now)
-        .await
-        .unwrap();
+    let mut draft = super::super::tests::draft();
+    if let Some(device) = device {
+        draft.target_device_id = device.into();
+    }
+    let task = store.create_draft(1, &draft, now).await.unwrap();
     let contract = store
         .save_contract(1, task.revision, &definition(&task))
         .await
@@ -656,4 +669,5 @@ async fn expired_or_corrupt_parent_snapshot_and_runtime_never_authorize_actions(
     }
 }
 
+mod delegation;
 mod timing;

@@ -4,7 +4,7 @@ use desk_diagnose_core::session::TurnState;
 
 async fn add_cleanup_tables(db: &DatabaseConnection) {
     let schema = Schema::new(db.get_database_backend());
-    for table in [
+    for mut table in [
         schema.create_table_from_entity(usage_retention::Entity),
         schema.create_table_from_entity(turn_usage::Entity),
         schema.create_table_from_entity(ai_usage::Entity),
@@ -12,7 +12,7 @@ async fn add_cleanup_tables(db: &DatabaseConnection) {
         schema.create_table_from_entity(agent_run_event::Entity),
         schema.create_table_from_entity(crate::entity::agent_permission_resume::Entity),
     ] {
-        db.execute(&table).await.unwrap();
+        db.execute(table.if_not_exists()).await.unwrap();
     }
     crate::db::ensure_lifecycle_tables(db).await;
 }

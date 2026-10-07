@@ -68,6 +68,7 @@ pub async fn resume_scheduled_turn(
         None,
         Some(prepared),
         None,
+        None,
     )
     .await?
     .ok_or_else(|| transport_error("scheduled continuation did not pass runtime preflight"))
@@ -85,7 +86,7 @@ pub(super) async fn prepare(
             "invalid scheduled continuation owner or lease",
         ));
     }
-    let txn = crate::db::begin_write(&db, crate::entity::agent_session::Entity)
+    let txn = crate::db::begin_write(db, crate::entity::agent_session::Entity)
         .await
         .map_err(|_| transport_error("scheduled input storage unavailable"))?;
     let row = crate::schedule_store::lock_action_session(&txn, &claimed.run.conversation_id)

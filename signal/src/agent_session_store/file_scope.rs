@@ -100,7 +100,10 @@ impl SignalAgentSessionStore {
                     &session.conversation_id,
                 )
                 .map_err(|_| failure())?,
-            client_conversation_id: session.client_conversation_id.clone().ok_or_else(failure)?,
+            client_conversation_id: session
+                .file_scope_selector()
+                .ok_or_else(failure)?
+                .to_owned(),
             client_request_id: proposal.request_id.clone(),
             expected_revision: session.file_scope.revision(),
             mutation: FileScopeMutation::Propose { proposal },
@@ -155,8 +158,9 @@ impl SignalAgentSessionStore {
         }
 
         if self.surface != AgentSessionSurface::AiAssistant
-            || self.client_conversation_id.as_deref()
-                != Some(update.client_conversation_id.as_str())
+            || (held.is_none()
+                && self.client_conversation_id.as_deref()
+                    != Some(update.client_conversation_id.as_str()))
         {
             return Err(failure());
         }
@@ -167,6 +171,12 @@ impl SignalAgentSessionStore {
             let txn = crate::db::begin_write(&self.db, crate::entity::agent_session::Entity)
                 .await
                 .map_err(storage)?;
+            if crate::agent_subagent_store::deleted_on(&txn, &update.subject.conversation_id)
+                .await
+                .map_err(storage)?
+            {
+                return Err(failure());
+            }
             let row = agent_session::Entity::find()
                 .filter(agent_session::Column::ConversationId.eq(&update.subject.conversation_id))
                 .one(&txn)
@@ -213,6 +223,46 @@ impl SignalAgentSessionStore {
                 session
             };
             update.validate_session(&session).map_err(|_| failure())?;
+            if session.agent_role.binding().is_some()
+                && matches!(
+                    update.mutation,
+                    FileScopeMutation::Decide { approve: true, .. }
+                        | FileScopeMutation::Select { .. }
+                        | FileScopeMutation::Propose { .. }
+                )
+            {
+                crate::agent_subagent_store::lock_child_source_on(&txn, &session)
+                    .await
+                    .map_err(storage)?;
+            }
+            if session.agent_role.binding().is_some()
+                && matches!(
+                    update.mutation,
+                    FileScopeMutation::Decide { approve: true, .. }
+                        | FileScopeMutation::Select { .. }
+                        | FileScopeMutation::Propose { .. }
+                )
+                && !crate::agent_subagent_store::check_child_permission_on(
+                    &txn,
+                    &session,
+                    now.timestamp_millis(),
+                )
+                .await
+                .map_err(storage)?
+            {
+                return Err(failure());
+            }
+            if held.is_some()
+                && !crate::agent_subagent_store::child_resume_admitted_on(
+                    &txn,
+                    &session,
+                    now.timestamp_millis(),
+                )
+                .await
+                .map_err(storage)?
+            {
+                return Err(failure());
+            }
             if held.is_some_and(|expected| expected != (session.version, session.lease_token)) {
                 return Err(failure());
             }

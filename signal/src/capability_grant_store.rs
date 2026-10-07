@@ -154,6 +154,7 @@ pub enum DispatchIntentResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
 pub enum DispatchClaimResult {
     Claimed(CapabilityDispatchPayload),
     OutcomeUnknown { dispatch_id: String },
@@ -878,6 +879,7 @@ impl SignalCapabilityGrantStore {
         .await
     }
 
+    #[allow(clippy::type_complexity)]
     async fn claim_dispatch_inner(
         &self,
         dispatch_id: &str,
@@ -1852,6 +1854,7 @@ mod tests {
         ] {
             db.execute(&statement).await.unwrap();
         }
+        crate::db::ensure_lifecycle_tables(&db).await;
         db
     }
 
@@ -2114,8 +2117,9 @@ mod tests {
         let path = directory.path().join("command-claim.db");
         let db = file_db(&path).await;
         db.execute(
-            &Schema::new(db.get_database_backend())
-                .create_table_from_entity(crate::entity::agent_exec_task::Entity),
+            Schema::new(db.get_database_backend())
+                .create_table_from_entity(crate::entity::agent_exec_task::Entity)
+                .if_not_exists(),
         )
         .await
         .unwrap();
@@ -2170,6 +2174,8 @@ mod tests {
             schema_version: 1,
             turn_fence: desk_diagnose_core::action_turn_fence::AssistantTurnFence {
                 schema_version: 1,
+                control_revision: 1,
+                delegation: None,
                 conversation_id: "run-1".into(),
                 turn_id: "turn-1".into(),
                 actor_id: "actor-1".into(),

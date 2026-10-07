@@ -137,6 +137,17 @@ export function SettingsOverview() {
                                 </CardHeader>
                             </Card>
                         </Link>
+                        <Link to="/system/subagent-policy" className="block outline-none">
+                            <Card className="hover:bg-muted/50 transition-colors h-full cursor-pointer">
+                                <CardHeader>
+                                    <div className="flex items-center gap-2">
+                                        <Layers3 className="h-5 w-5 text-primary" />
+                                        <CardTitle className="text-lg">{t('pages.aiAssistant.subagentPolicyTitle')}</CardTitle>
+                                    </div>
+                                    <CardDescription className="mt-2 line-clamp-2">{t('pages.aiAssistant.subagentPolicyDescription')}</CardDescription>
+                                </CardHeader>
+                            </Card>
+                        </Link>
                         <Link to="/system/goal-budget" className="block outline-none">
                             <Card className="hover:bg-muted/50 transition-colors h-full cursor-pointer">
                                 <CardHeader>

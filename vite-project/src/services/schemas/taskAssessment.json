@@ -1,0 +1,1 @@
+{"type":"string","enum":["complete","unable","pending"],"x-readme-ref-name":"TaskAssessment"}

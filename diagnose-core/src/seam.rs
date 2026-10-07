@@ -41,6 +41,9 @@ pub struct ModelRequest {
     /// limit; probe requests must leave it unset.
     pub caller_output_hard_cap: Option<i64>,
     pub previous_cache_projection: Option<crate::prompt_cache::WireObservation>,
+    /// Trusted admission receipt carried to the audited provider boundary. It
+    /// never becomes a wire parameter or a model-controlled tool argument.
+    pub delegation_call: Option<crate::subagent::reservation::DelegationCallReservation>,
 }
 
 /// Content-free size and cardinality measurements captured immediately before
@@ -75,6 +78,52 @@ pub struct ModelRequestProjectionMetrics {
 }
 
 impl ModelRequest {
+    pub fn validate_delegation_call(&self) -> Result<(), AgentError> {
+        let Some(receipt) = &self.delegation_call else {
+            return Ok(());
+        };
+        receipt.validate().map_err(crate::subagent::invalid)?;
+        let expected = match self.use_case {
+            ModelUseCase::ContextCompression => {
+                crate::subagent::reservation::DelegationCallKind::ContextSummary
+            }
+            ModelUseCase::Approval => {
+                crate::subagent::reservation::DelegationCallKind::ApprovalReview
+            }
+            ModelUseCase::Safety => crate::subagent::reservation::DelegationCallKind::SafetyReview,
+            ModelUseCase::Agent | ModelUseCase::Completion => {
+                crate::subagent::reservation::DelegationCallKind::Model
+            }
+            _ => {
+                return Err(crate::subagent::invalid(
+                    "this model purpose has no delegation admission",
+                ));
+            }
+        };
+        if receipt.kind != expected
+            || self.caller_output_hard_cap.is_none_or(|cap| cap <= 0)
+            || self
+                .caller_output_hard_cap
+                .is_some_and(|cap| cap as u64 > receipt.upper.tokens)
+        {
+            return Err(crate::subagent::invalid(
+                "model request does not match its delegation admission",
+            ));
+        }
+        if let Some(review) = &receipt.review_authority
+            && (crate::approval_review::reviewer_request_digest(self)
+                .ok()
+                .as_ref()
+                != Some(&receipt.arguments_sha256)
+                || review.request_sha256 != receipt.arguments_sha256)
+        {
+            return Err(crate::subagent::invalid(
+                "review request differs from its frozen authority",
+            ));
+        }
+        Ok(())
+    }
+
     /// A tool-free request (the single-turn diagnose shape): no tools advertised,
     /// the model is free to answer in text.
     pub fn text_only(messages: Vec<ChatMessage>, response_format: ResponseFormatSpec) -> Self {
@@ -86,6 +135,7 @@ impl ModelRequest {
             response_format,
             use_case: ModelUseCase::Agent,
             previous_cache_projection: None,
+            delegation_call: None,
             caller_output_hard_cap: None,
         }
     }
@@ -314,6 +364,14 @@ pub enum ContextCompressionAuditOutcome {
 /// (text + tool calls + stop reason + usage).
 #[async_trait(?Send)]
 pub trait ModelSeam {
+    /// Conservative input units for the rendered provider payload. Host-only
+    /// lineage and control fields must not inflate a physical request quote.
+    fn model_input_token_upper_bound(
+        &self,
+        _request: &ModelRequest,
+    ) -> Result<Option<u64>, AgentError> {
+        Ok(None)
+    }
     /// An absolute server-parsed Retry-After hint from the most recent failed
     /// provider call. It is never inferred from provider error-body text.
     fn retry_after_unix_ms(&self) -> Option<u64> {
@@ -844,6 +902,46 @@ pub enum ClaimError {
 /// in DB with optimistic-concurrency CAS and is the authority across instances.
 #[async_trait(?Send)]
 pub trait SessionSeam {
+    /// Group and source-goal limits reserve the same logical provider/tool call
+    /// atomically. Hosts without durable delegation leave ordinary turns on
+    /// their existing limits; a child cannot run without this accounting.
+    async fn reserve_delegation_call(
+        &self,
+        session: &PersistedAgentSession,
+        _logical_id: &str,
+        _kind: crate::subagent::reservation::DelegationCallKind,
+        _arguments_sha256: &str,
+        _upper: crate::goal::GoalUsage,
+        _now: &str,
+    ) -> Result<crate::subagent::reservation::CallAdmission, AgentError> {
+        if session.agent_role.binding().is_some() {
+            return Err(crate::subagent::invalid(
+                "durable child call accounting is unavailable",
+            ));
+        }
+        Ok(crate::subagent::reservation::CallAdmission::Untracked)
+    }
+
+    async fn settle_delegation_call(
+        &self,
+        _reservation: &crate::subagent::reservation::DelegationCallReservation,
+        _actual: Option<crate::goal::GoalUsage>,
+        _now: &str,
+    ) -> Result<(), AgentError> {
+        Err(crate::subagent::invalid(
+            "durable delegation settlement is unavailable",
+        ))
+    }
+
+    /// Delegation is implemented by durable central hosts. Transient runtimes
+    /// leave the tools unavailable rather than emulating background work inline.
+    fn subagents(
+        &self,
+        _session: &PersistedAgentSession,
+    ) -> Option<&dyn crate::subagent::seam::SubAgentSeam> {
+        None
+    }
+
     /// Publish a whole validated batch under the current session version/lease.
     /// A transient runtime must fail explicitly rather than inline large bodies.
     async fn store_attachment_batch(
@@ -1227,6 +1325,7 @@ mod tests {
             response_format: ResponseFormatSpec::None,
             use_case: ModelUseCase::Agent,
             previous_cache_projection: None,
+            delegation_call: None,
             caller_output_hard_cap: None,
         };
 

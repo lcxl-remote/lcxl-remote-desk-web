@@ -645,12 +645,13 @@ pub async fn admit_exec(ctx: &RouterContext, plan: &ExecPlan) -> ExecAdmission {
         .ai_policy
         .max_concurrent_executions as usize;
     let timeout = std::time::Duration::from_millis(u64::from(plan.timeout_ms));
-    if let Err(full) = ctx
+    let new_slot = match ctx
         .exec_capacity
         .try_admit(&plan.execution_generation, limit, timeout)
     {
-        return ExecAdmission::AtCapacity(full.to_string());
-    }
+        Ok(new_slot) => new_slot,
+        Err(full) => return ExecAdmission::AtCapacity(full.to_string()),
+    };
 
     let reservation = ctx
         .exec_ledger
@@ -663,7 +664,7 @@ pub async fn admit_exec(ctx: &RouterContext, plan: &ExecPlan) -> ExecAdmission {
         .await;
     // Anything other than a fresh reservation means nothing new will run, so the
     // slot goes straight back rather than waiting for a report that never comes.
-    if !matches!(reservation, Ok(Reservation::Granted)) {
+    if new_slot && !matches!(reservation, Ok(Reservation::Granted)) {
         ctx.exec_capacity.release(&plan.execution_generation);
     }
 

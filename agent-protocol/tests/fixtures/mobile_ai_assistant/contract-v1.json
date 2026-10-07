@@ -134,6 +134,7 @@
     "requestId": "request-2",
     "activeExecutionGeneration": "generation-1",
     "unresolvedOutcome": {"workId":7,"actionRequestId":"action-1","executionId":"execution-1","workKind":"provider_call"},
+    "controlRevision":1,"mainStopped":false,"subagents":{"parent_session_id":null,"task":null,"tasks":null,"active_tasks":[],"attention_tasks":[],"attention_count":0},
     "latestInputSeq": 2,
     "inputRevision": 3,
     "handledInputSeq": 1,

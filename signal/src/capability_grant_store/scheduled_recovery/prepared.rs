@@ -29,8 +29,13 @@ pub(in crate::capability_grant_store) async fn close_on(
     if stored != *work
         || outbox.is_some()
         || payload.generation == 0
-        || payload.input_revision != session.input_revision
-        || payload.input_watermark != session.latest_input_seq
+        || (if session.agent_role.is_main() {
+            payload.input_revision != session.input_revision
+                || payload.input_watermark != session.latest_input_seq
+        } else {
+            payload.input_revision > session.input_revision
+                || payload.input_watermark > session.latest_input_seq
+        })
         || payload.call_id != work.action_request_id
         || payload.call_id != work.tool_call_id
         || payload.grant_id != reservation.grant_id

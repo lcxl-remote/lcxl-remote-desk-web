@@ -7,6 +7,9 @@ use desk_diagnose_core::{
 pub(super) struct FreshContext {
     pub contract: ValidatedTaskContract,
     pub approval_reference: Option<String>,
+    pub children_wait_id: Option<String>,
+    pub children_notification_id: Option<String>,
+    pub creation: Option<desk_diagnose_core::subagent::creation::CreationEnvelope>,
     pub gate: std::sync::Arc<crate::ai_assistant_gate::AiAssistantGate>,
 }
 
@@ -68,7 +71,28 @@ pub async fn resume_fresh_task(
     if authority.run().lease_owner.as_deref() != Some(node_id) {
         return Err(transport_error("task executor changed"));
     }
-    let approval_reference = if current.version == 1 {
+    let children_wait_id = authority
+        .run()
+        .result_ref
+        .as_deref()
+        .and_then(|value| value.strip_prefix("children:"))
+        .filter(|id| {
+            current
+                .ready_subagent_wait
+                .as_ref()
+                .is_some_and(|wait| wait.wait_id == *id)
+        })
+        .map(str::to_owned);
+    let children_notification_id = authority
+        .run()
+        .result_ref
+        .as_deref()
+        .filter(|value| value.starts_with("answer-children:"))
+        .and(current.ready_subagent_notification.as_ref())
+        .map(|notice| notice.message_id.clone());
+    let approval_reference = if children_wait_id.is_some() || children_notification_id.is_some() {
+        None
+    } else if current.version == 1 {
         if current.conversation.len() != 1 || authority.run().result_ref.is_some() {
             return Err(transport_error("invalid initial task context"));
         }
@@ -96,6 +120,9 @@ pub async fn resume_fresh_task(
         fresh: Some(FreshContext {
             contract: authority.contract().clone(),
             approval_reference,
+            children_wait_id,
+            children_notification_id,
+            creation: None,
             gate,
         }),
     };
@@ -119,6 +146,7 @@ pub async fn resume_fresh_task(
         ask,
         None,
         Some(prepared),
+        None,
         None,
     )
     .await?

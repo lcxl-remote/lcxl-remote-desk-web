@@ -89,6 +89,14 @@ async fn fresh_task_gateway_accounts_usage_and_rejects_invalid_authority() {
             .await
             .unwrap();
         let held = &claimed.session;
+        let published_contract = desk_diagnose_core::schedule::contract::parse_contract(
+            &store
+                .read_contract(1, &task.schedule_id, task.contract_revision.unwrap())
+                .await
+                .unwrap()
+                .canonical_json,
+        )
+        .unwrap();
         let destination = config.destination_identity().unwrap();
         let mut model = MeteredModel {
             inner: crate::model_dial::SignalModelSeam::from_config(&config)
@@ -119,10 +127,20 @@ async fn fresh_task_gateway_accounts_usage_and_rejects_invalid_authority() {
             }),
         };
         let request = |text: &str| {
-            let message =
+            let message = if text == task.prompt {
+                desk_diagnose_core::schedule::published_input::model_bound_published_input(
+                    &run.run_id,
+                    text,
+                    &published_contract,
+                    destination.clone(),
+                )
+                .unwrap()
+            } else {
+                // Generic model-export permission cannot enlarge the occurrence quota.
                 model_bound_user_message("task-input".into(), text.into(), destination.clone())
                     .unwrap()
-                    .with_turn_id(held.current_turn_id.clone().unwrap());
+                    .with_turn_id(held.current_turn_id.clone().unwrap())
+            };
             ModelRequest::text_only(vec![message], ResponseFormatSpec::None)
         };
         let answer = model

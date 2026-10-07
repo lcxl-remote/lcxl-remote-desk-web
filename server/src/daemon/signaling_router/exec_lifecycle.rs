@@ -479,17 +479,30 @@ pub(super) async fn handle_exec_control_inbound(
         // Best-effort by design: the worker may be gone, or the command may
         // have just finished. Either way the ledger below reports what is
         // actually true, rather than this send's success standing in for it.
-        let result = if let Some(connection_id) = to.as_deref() {
-            ctx.worker_mgr
-                .send_to_connection_worker(
-                    connection_id,
-                    ServiceToWorker::ExecCancel(ExecCancelPayload {
-                        execution_generation: generation.clone(),
-                    }),
-                )
-                .await
-        } else {
-            Err("exec cancel has no selected desktop session".to_string())
+        let result = match ctx
+            .exec_capacity
+            .binding_for_owner(&generation, to.as_deref())
+        {
+            Some(binding) if binding.daemon_pty => match ctx.exec_pty_link.as_ref() {
+                Some(link) => link
+                    .registry
+                    .cancel_daemon_execution(link.link_id, &generation, &binding.target)
+                    .map_err(|error| format!("original daemon PTY stop unavailable: {error}")),
+                None => Err("original daemon PTY carrier is no longer current".into()),
+            },
+            Some(binding) => {
+                ctx.worker_mgr
+                    .send_to_exec_target(
+                        &binding.target,
+                        ServiceToWorker::ExecCancel(ExecCancelPayload {
+                            execution_generation: generation.clone(),
+                        }),
+                    )
+                    .await
+            }
+            None => {
+                Err("exec cancel has no original destination for this controlling channel".into())
+            }
         };
         if let Err(e) = result {
             log::warn!("[router] could not pass the cancel to the worker: {e}");
@@ -871,7 +884,53 @@ pub(super) async fn dispatch_exec_plan(
         }
     }
 
-    let dispatch = if plan.io_mode.is_pty() {
+    let target = match ctx
+        .worker_mgr
+        .exec_worker_target_for_connection(to_connection_id.as_deref())
+        .await
+    {
+        Ok(target) => target,
+        Err(reason) => {
+            ctx.exec_capacity.release(&plan_generation);
+            if let Err(error) = ctx
+                .exec_ledger
+                .mark_terminal(
+                    &plan_generation,
+                    crate::daemon::exec_ledger::Terminal::SpawnFailed(reason.clone()),
+                )
+                .await
+            {
+                log::error!("[exec-ledger] could not record unavailable original worker: {error}");
+            }
+            send_execution_completed(
+                &ctx.outbound_tx,
+                request_id,
+                to_connection_id,
+                ExecResultPayload {
+                    exec_request_id,
+                    outcome: AgentOutcome::Err(agent_error(
+                        AgentErrorKind::TargetOffline,
+                        &reason,
+                        true,
+                        true,
+                    )),
+                },
+            );
+            return;
+        }
+    };
+
+    let binding = ctx.exec_capacity.bind(
+        &plan_generation,
+        crate::daemon::exec_capacity::ExecBinding {
+            target: target.clone(),
+            owner_connection_id: to_connection_id.clone(),
+            daemon_pty: false,
+        },
+    );
+    let dispatch = if let Err(error) = binding {
+        Err(error)
+    } else if plan.io_mode.is_pty() {
         let carrier_id = carrier_id
             .filter(|value| !value.is_empty())
             .ok_or_else(|| "approved PTY execution has no live carrier".to_string());
@@ -881,59 +940,39 @@ pub(super) async fn dispatch_exec_plan(
             .ok_or_else(|| "this signaling link has no PTY binary carrier".to_string());
         match (carrier_id, link) {
             (Ok(stream_id), Ok(link)) => {
-                match ctx
-                    .worker_mgr
-                    .exec_worker_target_for_connection(to_connection_id.as_deref())
-                    .await
-                {
-                    Ok(target) => {
-                        let payload = desk_ipc_protocol::message::ExecPtyStartPayload {
-                            request_id: request_id.to_string(),
-                            connection_id: to_connection_id.clone(),
-                            exec_pty: pty_capabilities.exec_pty,
-                            exec_pty_elevation: pty_capabilities.exec_pty_elevation,
-                            stream_id: stream_id.clone(),
-                            session_target_id: target.session_target_id,
-                            registration_generation: target.registration_generation,
-                            worker_incarnation: target.wire_worker_incarnation,
-                            plan,
-                            audit_source_request_id,
-                        };
-                        match link.registry.bind(
-                            link.link_id,
-                            &payload,
-                            target.worker_key.clone(),
-                            target.source_incarnation,
-                            link.outbound,
-                        ) {
-                            Ok(()) => {
-                                let send = match target.worker_key.as_ref() {
-                                    Some(key) => {
-                                        ctx.worker_mgr
-                                            .send_to_session_worker(
-                                                &key.session,
-                                                ServiceToWorker::ExecPtyStart(payload),
-                                            )
-                                            .await
-                                    }
-                                    None => {
-                                        ctx.worker_mgr
-                                            .send_to_worker(ServiceToWorker::ExecPtyStart(payload))
-                                            .await
-                                    }
-                                };
-                                if send.is_err() {
-                                    link.registry.remove_stream(
-                                        &stream_id,
-                                        desk_agent_protocol::exec_pty::PtyCloseReason::SessionStale,
-                                    );
-                                }
-                                send
-                            }
-                            Err(error) => Err(format!("PTY carrier binding failed: {error}")),
+                let payload = desk_ipc_protocol::message::ExecPtyStartPayload {
+                    request_id: request_id.to_string(),
+                    connection_id: to_connection_id.clone(),
+                    exec_pty: pty_capabilities.exec_pty,
+                    exec_pty_elevation: pty_capabilities.exec_pty_elevation,
+                    stream_id: stream_id.clone(),
+                    session_target_id: target.session_target_id.clone(),
+                    registration_generation: target.registration_generation,
+                    worker_incarnation: target.wire_worker_incarnation,
+                    plan,
+                    audit_source_request_id,
+                };
+                match link.registry.bind(
+                    link.link_id,
+                    &payload,
+                    target.worker_key.clone(),
+                    target.source_incarnation,
+                    link.outbound,
+                ) {
+                    Ok(()) => {
+                        let send = ctx
+                            .worker_mgr
+                            .send_to_exec_target(&target, ServiceToWorker::ExecPtyStart(payload))
+                            .await;
+                        if send.is_err() {
+                            link.registry.remove_stream(
+                                &stream_id,
+                                desk_agent_protocol::exec_pty::PtyCloseReason::SessionStale,
+                            );
                         }
+                        send
                     }
-                    Err(error) => Err(error),
+                    Err(error) => Err(format!("PTY carrier binding failed: {error}")),
                 }
             }
             (Err(error), _) | (_, Err(error)) => Err(error),
@@ -945,17 +984,25 @@ pub(super) async fn dispatch_exec_plan(
             plan,
             audit_source_request_id,
         };
-        if let Some(connection_id) = to_connection_id.as_deref() {
-            ctx.worker_mgr
-                .send_to_connection_worker(connection_id, ServiceToWorker::ExecPlan(payload))
-                .await
-        } else {
-            Err("exec request has no selected desktop session".to_string())
-        }
+        ctx.worker_mgr
+            .send_to_exec_target(&target, ServiceToWorker::ExecPlan(payload))
+            .await
     };
     if let Err(e) = dispatch {
         // Nothing was started, so the slot is free again immediately.
         ctx.exec_capacity.release(&plan_generation);
+        if let Err(error) = ctx
+            .exec_ledger
+            .mark_terminal(
+                &plan_generation,
+                crate::daemon::exec_ledger::Terminal::SpawnFailed(e.clone()),
+            )
+            .await
+        {
+            log::error!(
+                "[exec-ledger] could not record pre-spawn failure {plan_generation}: {error}"
+            );
+        }
         send_execution_completed(
             &ctx.outbound_tx,
             request_id,

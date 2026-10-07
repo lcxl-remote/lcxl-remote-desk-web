@@ -349,6 +349,39 @@ impl SignalModelSeam {
         self
     }
 
+    pub(crate) fn dispatch_cancelled(&self) -> bool {
+        self.cancel.is_cancelled()
+    }
+
+    pub(crate) async fn acquire_admission(
+        &self,
+    ) -> Result<crate::model_admission::ModelPermit, AgentError> {
+        crate::model_admission::acquire(&self.cancel).await
+    }
+
+    /// The wrapper acquires capacity before committing provider-start authority.
+    pub(crate) async fn call_admitted(
+        &self,
+        request: ModelRequest,
+        sink: &mut dyn TurnSink,
+        _permit: crate::model_admission::ModelPermit,
+    ) -> Result<ModelTurn, AgentError> {
+        let cancelled = || AgentError {
+            kind: AgentErrorKind::Cancelled,
+            message: "The model request was cancelled.".into(),
+            retryable: false,
+            safe_for_model: true,
+            error_code: None,
+        };
+        tokio::select! {
+            biased;
+            _ = self.cancel.cancelled() => Err(cancelled()),
+            result = self.call_uncancelled(request, sink) => {
+                if self.cancel.is_cancelled() { Err(cancelled()) } else { result }
+            },
+        }
+    }
+
     async fn call_uncancelled(
         &self,
         request: ModelRequest,
@@ -645,6 +678,26 @@ fn non_empty(value: Option<&str>) -> Option<String> {
 
 #[async_trait(?Send)]
 impl ModelSeam for SignalModelSeam {
+    fn model_input_token_upper_bound(
+        &self,
+        request: &ModelRequest,
+    ) -> Result<Option<u64>, AgentError> {
+        let (_, units) = self.task_request_budget(request)?;
+        let body = self.build_body(request)?;
+        let output = self
+            .profile
+            .output_limit_field
+            .read_positive(&body)
+            .map_err(|_| config_error("invalid model output limit"))?
+            .get();
+        Ok(Some(
+            units
+                .checked_sub(
+                    u64::try_from(output).map_err(|_| config_error("invalid output limit"))?,
+                )
+                .ok_or_else(|| config_error("model input budget overflow"))?,
+        ))
+    }
     fn retry_after_unix_ms(&self) -> Option<u64> {
         self.retry_after_unix_ms.get()
     }
@@ -713,20 +766,8 @@ impl ModelSeam for SignalModelSeam {
         request: ModelRequest,
         sink: &mut dyn TurnSink,
     ) -> Result<ModelTurn, AgentError> {
-        let cancelled = || AgentError {
-            kind: AgentErrorKind::Cancelled,
-            message: "The model request was cancelled.".into(),
-            retryable: false,
-            safe_for_model: true,
-            error_code: None,
-        };
-        tokio::select! {
-            biased;
-            _ = self.cancel.cancelled() => Err(cancelled()),
-            result = self.call_uncancelled(request, sink) => {
-                if self.cancel.is_cancelled() { Err(cancelled()) } else { result }
-            },
-        }
+        let permit = self.acquire_admission().await?;
+        self.call_admitted(request, sink, permit).await
     }
 }
 
@@ -916,12 +957,13 @@ fn openai_message_to_json(m: &ChatMessage) -> Value {
                 })
                 .collect(),
         );
-        if let Some(ReplayDisposition::Present { envelope }) = &m.replay_disposition
-            && envelope.codec == ReplayCodec::OpenAiReasoningContent
-            && let Some(reasoning_content) = envelope.payload.as_str()
-        {
-            obj["reasoning_content"] = json!(reasoning_content);
-        }
+    }
+    if m.role == ChatRole::Assistant
+        && let Some(ReplayDisposition::Present { envelope }) = &m.replay_disposition
+        && envelope.codec == ReplayCodec::OpenAiReasoningContent
+        && let Some(reasoning_content) = envelope.payload.as_str()
+    {
+        obj["reasoning_content"] = json!(reasoning_content);
     }
     obj
 }
@@ -1135,16 +1177,18 @@ impl OpenAiStreamState {
             .collect();
         let display_reasoning =
             desk_diagnose_core::reasoning_display::bounded(&self.reasoning_content);
-        let replay = (!tool_calls.is_empty()).then(|| match self.source_context_key {
-            Some(source_context_key) if self.reasoning_observed => ReplayDisposition::Present {
-                envelope: ProviderReplayEnvelope::new(
-                    ReplayCodec::OpenAiReasoningContent,
-                    source_context_key,
-                    json!(self.reasoning_content),
-                ),
-            },
-            Some(source_context_key) => ReplayDisposition::NotRequired { source_context_key },
-            None => ReplayDisposition::legacy_unknown(),
+        let replay = (!tool_calls.is_empty() || self.reasoning_observed).then(|| {
+            match self.source_context_key {
+                Some(source_context_key) if self.reasoning_observed => ReplayDisposition::Present {
+                    envelope: ProviderReplayEnvelope::new(
+                        ReplayCodec::OpenAiReasoningContent,
+                        source_context_key,
+                        json!(self.reasoning_content),
+                    ),
+                },
+                Some(source_context_key) => ReplayDisposition::NotRequired { source_context_key },
+                None => ReplayDisposition::legacy_unknown(),
+            }
         });
         let reasoning_tokens = self
             .usage
@@ -1554,6 +1598,8 @@ fn append_block_string(
 
 #[cfg(test)]
 mod tests {
+    mod thinking_replay;
+
     #[test]
     fn desktop_model_wire_exposes_ids_without_reference_metadata() {
         let mut request = ModelRequest::text_only(vec![ChatMessage::tool_result("observation", "read", json!({"ReadContext":{"DesktopSessionInspect":{
@@ -1907,6 +1953,7 @@ mod tests {
             response_format: ResponseFormatSpec::None,
             use_case: desk_diagnose_core::model_profile::ModelUseCase::Agent,
             previous_cache_projection: None,
+            delegation_call: None,
             caller_output_hard_cap: None,
         }
     }
@@ -2520,15 +2567,26 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_display_survives_final_answer_without_replay() {
-        let mut openai = OpenAiStreamState::default();
+    fn reasoning_display_survives_final_answer_with_replay() {
+        let mut openai = OpenAiStreamState {
+            source_context_key: Some(SourceContextKey::derive(
+                WireProtocol::OpenAiChatCompletions,
+                "connection",
+                "model",
+                "test",
+            )),
+            ..Default::default()
+        };
         openai.apply(r#"{"choices":[{"delta":{"reasoning_content":"visible thought","content":"answer"},"finish_reason":"stop"}]}"#);
         let turn = openai.into_turn();
         assert_eq!(
             turn.provider_meta.display_reasoning.as_deref(),
             Some("visible thought")
         );
-        assert!(turn.provider_meta.replay.is_none());
+        assert!(matches!(
+            turn.provider_meta.replay,
+            Some(ReplayDisposition::Present { .. })
+        ));
         assert_eq!(turn.text, "answer");
         let mut anthropic = AnthropicStreamState::default();
         for payload in [
@@ -2546,6 +2604,39 @@ mod tests {
                 .display_reasoning
                 .as_deref(),
             Some("visible")
+        );
+    }
+
+    #[test]
+    fn plain_thinking_answer_round_trips_full_replay_without_display_fallback() {
+        let reasoning = "opaque reasoning ".repeat(4096);
+        let mut scan = OpenAiStreamState {
+            source_context_key: Some(SourceContextKey::derive(
+                WireProtocol::OpenAiChatCompletions,
+                "connection",
+                "model",
+                "test",
+            )),
+            ..Default::default()
+        };
+        scan.apply(&json!({"choices":[{"delta":{"reasoning_content":reasoning,"content":"answer"},"finish_reason":"stop"}]}).to_string());
+        let turn = scan.into_turn();
+        assert!(turn.provider_meta.display_reasoning.as_ref().unwrap().len() < reasoning.len());
+        assert_eq!(
+            desk_diagnose_core::chat::classify_model_turn(&turn).unwrap(),
+            desk_diagnose_core::chat::TurnDisposition::Answer
+        );
+        let mut message = ChatMessage::text("answer", ChatRole::Assistant, turn.text);
+        message.replay_disposition = turn.provider_meta.replay;
+        message.reasoning = Some("display cannot supply protocol replay".into());
+        let wire = openai_message_to_json(&message);
+        assert_eq!(wire["reasoning_content"].as_str(), Some(reasoning.as_str()));
+        assert!(wire.get("tool_calls").is_none());
+        message.replay_disposition = None;
+        assert!(
+            openai_message_to_json(&message)
+                .get("reasoning_content")
+                .is_none()
         );
     }
 
@@ -2668,6 +2759,7 @@ mod tests {
                 response_format: ResponseFormatSpec::None,
                 use_case: desk_diagnose_core::model_profile::ModelUseCase::Agent,
                 previous_cache_projection: None,
+                delegation_call: None,
                 caller_output_hard_cap: Some(1024),
             };
             let mut sink = desk_diagnose_core::seam::NullTurnSink;
@@ -3076,6 +3168,7 @@ mod tests {
                 response_format: ResponseFormatSpec::None,
                 use_case: desk_diagnose_core::model_profile::ModelUseCase::Agent,
                 previous_cache_projection: None,
+                delegation_call: None,
                 caller_output_hard_cap: Some(1024),
             };
             let mut sink = desk_diagnose_core::seam::NullTurnSink;

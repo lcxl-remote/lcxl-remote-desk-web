@@ -508,7 +508,8 @@ pub fn validate_read_permission_input(
     };
     validate_read_selector(session, &call)?;
     if uses_session_file_read(&call).map_err(|_| invalid())? {
-        let destinations = crate::permission_resume::latest_user_requirement(&session.conversation)
+        let destinations = session
+            .authorization_requirement()
             .and_then(|m| m.data_envelope.as_ref())
             .map(|envelope| envelope.allowed_destinations.as_slice())
             .ok_or_else(invalid)?;
@@ -932,7 +933,8 @@ impl ResultFileRead {
             if arguments.get("cursor").is_some() && !paginated {
                 return Err(unavailable());
             }
-            let owner = crate::permission_resume::latest_user_requirement(&session.conversation)
+            let owner = session
+                .authorization_requirement()
                 .and_then(|m| m.data_envelope.as_ref())
                 .ok_or_else(unavailable)?;
             if !matches!(
@@ -962,7 +964,8 @@ impl ResultFileRead {
             .filter_map(|m| m.data_envelope.as_ref())
             .find(|e| e.envelope_id == source_id)
             .ok_or_else(unavailable)?;
-        let owner = crate::permission_resume::latest_user_requirement(&session.conversation)
+        let owner = session
+            .authorization_requirement()
             .and_then(|m| m.data_envelope.as_ref())
             .ok_or_else(unavailable)?;
         // Native receipts intentionally have no pre-approved model sink. A

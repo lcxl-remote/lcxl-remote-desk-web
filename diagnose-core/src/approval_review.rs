@@ -181,6 +181,22 @@ pub fn reviewer_model_request(
     Ok(request)
 }
 
+/// Digest the exact reviewer messages, independently of provider wire dialect.
+pub fn reviewer_request_digest(request: &ModelRequest) -> Result<String, ApprovalReviewError> {
+    if !request.tools.is_empty()
+        || request.use_case != ModelUseCase::Approval
+        || !matches!(request.response_format, ResponseFormatSpec::JsonObject)
+        || request.tool_choice != crate::chat::ToolChoice::Auto
+        || request.previous_cache_projection.is_some()
+        || request.caller_output_hard_cap != Some(2048)
+    {
+        return Err(ApprovalReviewError::InvalidContext);
+    }
+    let encoded =
+        serde_json::to_vec(&request.messages).map_err(|_| ApprovalReviewError::InvalidContext)?;
+    Ok(format!("{:x}", Sha256::digest(encoded)))
+}
+
 pub fn reviewer_model_decision(
     candidate: &ApprovalReviewCandidate,
     turn: &ModelTurn,
@@ -2343,6 +2359,18 @@ mod tests {
         ));
         assert_eq!(request.messages[1].text, prompt);
         assert!(reviewer_model_request(&candidate, "different prompt".into()).is_err());
+        let digest = reviewer_request_digest(&request).unwrap();
+        let mut changed = request.clone();
+        changed.messages[1].text.push_str("changed");
+        assert_ne!(reviewer_request_digest(&changed).unwrap(), digest);
+        changed.response_format = ResponseFormatSpec::None;
+        assert!(reviewer_request_digest(&changed).is_err());
+        let mut changed = request.clone();
+        changed.caller_output_hard_cap = Some(4096);
+        assert!(reviewer_request_digest(&changed).is_err());
+        let mut changed = request.clone();
+        changed.tool_choice = crate::chat::ToolChoice::Required;
+        assert!(reviewer_request_digest(&changed).is_err());
 
         let mut turn = ModelTurn {
             text: serde_json::json!({

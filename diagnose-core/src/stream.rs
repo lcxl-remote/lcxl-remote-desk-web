@@ -359,7 +359,9 @@ pub fn terminal_error_for(outcome: &LoopOutcome) -> Option<AgentError> {
         | LoopOutcome::Superseded { .. }
         | LoopOutcome::PermissionRequested { .. }
         | LoopOutcome::GoalOpenRequested { .. }
-        | LoopOutcome::GoalBudgetReached => return None,
+        | LoopOutcome::GoalBudgetReached
+        | LoopOutcome::SubAgentsWaiting { .. }
+        | LoopOutcome::DelegationSourcePaused => return None,
         LoopOutcome::ContentRejected(_) => crate::content_safety::content_blocked_error(),
         LoopOutcome::ContentSafetyUnavailable(error) => error.clone(),
         LoopOutcome::Truncated => AgentError {

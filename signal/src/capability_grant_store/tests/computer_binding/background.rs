@@ -21,7 +21,11 @@ async fn prepare_delivery(f: &Fixture) {
     let schema = Schema::new(f.store.db.get_database_backend());
     f.store
         .db
-        .execute(&schema.create_table_from_entity(agent_exec_task::Entity))
+        .execute(
+            schema
+                .create_table_from_entity(agent_exec_task::Entity)
+                .if_not_exists(),
+        )
         .await
         .unwrap();
     let row = agent_session::Entity::find()

@@ -307,7 +307,8 @@ pub fn build_permission_grants(
         let result_read =
             crate::provider_preflight::text_file::uses_session_file_read(&result_read_call)?;
         let original_read = if result_read {
-            let message = crate::permission_resume::latest_user_requirement(&session.conversation)
+            let message = session
+                .authorization_requirement()
                 .ok_or_else(|| internal("original file read input missing"))?;
             let destination = message
                 .data_envelope
@@ -326,7 +327,8 @@ pub fn build_permission_grants(
             let original = original_reads
                 .ok_or_else(|| internal("original live read selection is missing"))?;
             original.validate()?;
-            let message = crate::permission_resume::latest_user_requirement(&session.conversation)
+            let message = session
+                .authorization_requirement()
                 .ok_or_else(|| internal("original live input is missing"))?;
             let destination = message
                 .data_envelope

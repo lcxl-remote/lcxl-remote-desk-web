@@ -1,0 +1,1 @@
+{"type":"string","enum":["queued","running","waiting_approval","waiting_work","waiting_resource","waiting_source","cancelling","completed","failed","cancelled"],"x-readme-ref-name":"SubAgentState"}

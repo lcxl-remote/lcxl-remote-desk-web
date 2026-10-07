@@ -64,9 +64,7 @@ pub async fn list_goal_attention(
         if session.surface != AgentSessionSurface::AiAssistant || session.turn_state.is_active() {
             continue;
         }
-        if delegated.contains(&row.conversation_id)
-            && session.trigger_origin.allows_delegated_review()
-        {
+        if delegated.contains(&row.conversation_id) && session.allows_delegated_review() {
             continue;
         }
         for request in &session.permission_requests {
@@ -88,6 +86,7 @@ pub async fn list_goal_attention(
             .cloned()
             .flatten();
     }
+    crate::agent_subagent_store::augment_owner_attention_on(db, actor_id, None, &mut items).await?;
     items.sort_by(|left, right| {
         right
             .updated_at_unix_ms

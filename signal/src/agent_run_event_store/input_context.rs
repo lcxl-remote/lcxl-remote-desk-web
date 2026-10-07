@@ -331,6 +331,12 @@ async fn original_with_time_on(
     txn: &sea_orm::DatabaseTransaction,
     session: &PersistedAgentSession,
 ) -> Result<(Option<ReadContextSelection>, DateTime<Utc>), AgentError> {
+    if let Some((creation, created_at)) = crate::agent_subagent_store::task_context_on(txn, session)
+        .await
+        .map_err(|_| internal("delegated input context changed"))?
+    {
+        return Ok((creation.source.child_read_context(), created_at));
+    }
     let rows = agent_run_event::Entity::find()
         .filter(agent_run_event::Column::RunId.eq(&session.conversation_id))
         .filter(

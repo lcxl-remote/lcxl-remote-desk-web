@@ -47,7 +47,7 @@ impl crate::seam::LeaseHeartbeat for ScheduledHeartbeat {
         self.healthy.get()
     }
 }
-fn scheduled_policy() -> crate::model_egress::ModelEgressPolicy {
+pub(super) fn scheduled_policy() -> crate::model_egress::ModelEgressPolicy {
     crate::model_egress::ModelEgressPolicy {
         destination: desk_agent_protocol::data_lineage::DestinationIdentity::Model {
             connection_id: "gateway".into(),
@@ -62,7 +62,7 @@ fn scheduled_policy() -> crate::model_egress::ModelEgressPolicy {
         permission_resume: true,
     }
 }
-struct ScheduledModel<'a>(&'a dyn ModelSeam);
+pub(super) struct ScheduledModel<'a>(pub(super) &'a dyn ModelSeam);
 #[async_trait(?Send)]
 impl ModelSeam for ScheduledModel<'_> {
     fn model_egress_policy(
@@ -618,6 +618,33 @@ async fn fresh_task_turn_rejects_extra_state_and_drives_without_reclaiming() {
         drops: Rc::new(Cell::new(0)),
     };
     let model_seam = ScheduledModel(&model);
+    let published = crate::subagent::creation::ScheduledCreationSource::capture(
+        desk_agent_protocol::capability_grant::TaskGrantProvenance {
+            schedule_id: "task".into(),
+            scheduled_run_id: session.conversation_id.clone(),
+            task_revision: 1,
+            contract_revision: 1,
+            contract_sha256: contract.digest().into(),
+            authorization_id: "authorization-first".into(),
+            authorization_revision: 1,
+            recovery_epoch: 1,
+        },
+        &contract,
+        chrono::DateTime::parse_from_rfc3339(&session.created_at)
+            .unwrap()
+            .timestamp_millis(),
+        None,
+    )
+    .unwrap();
+    let creation = crate::subagent::creation::CreationEnvelope::capture_scheduled(
+        &session,
+        published,
+        scheduled_policy().destination,
+    )
+    .unwrap();
+    session.delegation_group_id = Some(format!("dg-{}", creation.source_key().unwrap()));
+    session.conversation[0] = creation.owner_requirement.clone();
+    session.version = 2;
     let mut deps = deps(&mem, &model_seam, &tools, &[], &clock);
     deps.session_seam = &store;
     let mut sink = Collector(Rc::new(RefCell::new(String::new())));
@@ -626,6 +653,7 @@ async fn fresh_task_turn_rejects_extra_state_and_drives_without_reclaiming() {
             &deps,
             session.clone(),
             &contract,
+            &creation,
             "schedule-run-first",
             &mut sink
         )
@@ -633,7 +661,9 @@ async fn fresh_task_turn_rejects_extra_state_and_drives_without_reclaiming() {
         .is_err()
     );
     deps.heartbeat = Some(&heartbeat);
-    for change in ["message", "origin", "handled", "chain", "run"] {
+    for change in [
+        "message", "origin", "handled", "chain", "run", "unbound", "group", "label",
+    ] {
         let mut changed = session.clone();
         let mut run = "schedule-run-first";
         match change {
@@ -646,10 +676,13 @@ async fn fresh_task_turn_rejects_extra_state_and_drives_without_reclaiming() {
             "handled" => changed.handled_input_seq = 1,
             "chain" => changed.automation_turns_used = 1,
             "run" => run = "schedule-run-other",
+            "unbound" => changed.version = 1,
+            "group" => changed.delegation_group_id = Some("dg-other".into()),
+            "label" => changed.conversation[0].data_envelope = None,
             _ => unreachable!(),
         }
         assert!(
-            resume_claimed_fresh_task_turn(&deps, changed, &contract, run, &mut sink)
+            resume_claimed_fresh_task_turn(&deps, changed, &contract, &creation, run, &mut sink)
                 .await
                 .is_err(),
             "{change}"
@@ -658,16 +691,48 @@ async fn fresh_task_turn_rejects_extra_state_and_drives_without_reclaiming() {
     assert!(model.requests.borrow().is_empty());
     assert!(mem.inner.borrow().is_none());
     let lease = session.lease_token;
-    let result =
-        resume_claimed_fresh_task_turn(&deps, session, &contract, "schedule-run-first", &mut sink)
-            .await
-            .unwrap();
+    let result = resume_claimed_fresh_task_turn(
+        &deps,
+        session,
+        &contract,
+        &creation,
+        "schedule-run-first",
+        &mut sink,
+    )
+    .await
+    .unwrap();
     assert!(matches!(result, LoopOutcome::Answered(_)));
     assert_eq!(model.requests.borrow().len(), 1);
     let saved = mem.inner.borrow().as_ref().unwrap().clone();
     assert_eq!(saved.trigger_origin, TriggerOrigin::ScheduledTask);
     assert_eq!(saved.lease_token, lease);
     assert_eq!(saved.input_revision, 1);
+    let input = saved.conversation.first().unwrap();
+    assert_eq!(
+        input
+            .data_envelope
+            .as_ref()
+            .unwrap()
+            .provenance
+            .source_provider_id,
+        crate::schedule::published_input::PUBLISHED_INPUT_PROVIDER
+    );
+    let destination = input.data_envelope.as_ref().unwrap().allowed_destinations[0].clone();
+    crate::schedule::published_input::validate_published_input(
+        input,
+        "schedule-run-first",
+        &contract,
+        &destination,
+    )
+    .unwrap();
+    assert!(
+        crate::schedule::rehearsal::fixed_input::fixed_task_input_source(
+            &saved,
+            "schedule-run-first:input",
+            &contract,
+        )
+        .is_ok()
+    );
     assert_eq!(
         saved
             .conversation

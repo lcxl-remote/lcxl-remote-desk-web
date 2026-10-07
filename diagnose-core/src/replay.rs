@@ -1,4 +1,4 @@
-//! Opaque provider replay material carried with assistant tool-call groups.
+//! Opaque provider replay material carried with assistant replies.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -137,7 +137,7 @@ pub enum ReplayUnavailableReason {
     UnsupportedCodec,
 }
 
-/// Replay decision frozen when an assistant tool-call response is parsed.
+/// Replay decision frozen when an assistant response is parsed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ReplayDisposition {
@@ -226,7 +226,7 @@ impl ProviderResponseMeta {
     }
 
     pub fn validate_for_tool_calls(&self, has_tool_calls: bool) -> Result<(), ReplayError> {
-        if has_tool_calls != self.replay.is_some() {
+        if has_tool_calls && self.replay.is_none() {
             return Err(ReplayError::MissingOrUnexpectedDisposition);
         }
         if let Some(ReplayDisposition::Present { envelope }) = &self.replay {
@@ -253,7 +253,7 @@ impl std::fmt::Display for ReplayError {
             Self::UnsupportedCodec(codec) => write!(f, "unsupported replay codec: {codec:?}"),
             Self::InvalidPayload(detail) => write!(f, "invalid replay payload: {detail}"),
             Self::MissingOrUnexpectedDisposition => {
-                f.write_str("assistant tool-call responses require exactly one replay disposition")
+                f.write_str("assistant tool-call responses require a replay disposition")
             }
         }
     }
@@ -385,5 +385,22 @@ mod tests {
         let meta = ProviderResponseMeta::without_reasoning(StopReason::ToolUse);
         assert!(meta.validate_for_tool_calls(true).is_err());
         assert!(meta.validate_for_tool_calls(false).is_ok());
+        let meta = ProviderResponseMeta {
+            replay: Some(ReplayDisposition::Present {
+                envelope: ProviderReplayEnvelope::new(
+                    ReplayCodec::OpenAiReasoningContent,
+                    source(),
+                    json!("full reasoning"),
+                ),
+            }),
+            ..meta
+        };
+        assert!(meta.validate_for_tool_calls(false).is_ok());
+        assert!(meta.validate_for_tool_calls(true).is_ok());
+        let mut invalid = meta;
+        if let Some(ReplayDisposition::Present { envelope }) = &mut invalid.replay {
+            envelope.payload = json!({"wrong":"shape"});
+        }
+        assert!(invalid.validate_for_tool_calls(false).is_err());
     }
 }

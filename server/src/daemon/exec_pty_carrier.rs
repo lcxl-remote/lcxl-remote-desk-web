@@ -536,6 +536,48 @@ impl ExecPtyCarrierRegistry {
             .unwrap_or_else(|error| error.into_inner())
             .contains_key(stream_id)
     }
+
+    /// Cancel the daemon's original PTY containment by its admitted identity.
+    /// Removal also closes the pre-spawn window guarded by `start_daemon`.
+    pub fn cancel_daemon_execution(
+        &self,
+        link_id: PtyCarrierLinkId,
+        generation: &str,
+        target: &super::worker_manager::ExecWorkerTarget,
+    ) -> Result<(), CarrierError> {
+        let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        let (stream_id, entry) = inner
+            .iter()
+            .find(|(_, entry)| entry.link_id == link_id && entry.execution_generation == generation)
+            .ok_or(CarrierError::MissingStream)?;
+        if entry.session_target_id != target.session_target_id
+            || entry.registration_generation != target.registration_generation
+            || entry.wire_worker_incarnation != target.wire_worker_incarnation
+        {
+            return Err(CarrierError::StaleBinding);
+        }
+        let CarrierDestination::Daemon { control } = &entry.destination else {
+            return Err(CarrierError::StaleWorker);
+        };
+        let stream_id = stream_id.clone();
+        control
+            .try_send(PtyWireFrame::Cancel(
+                desk_agent_protocol::exec_pty::PtyCancelFrame {
+                    stream_id: stream_id.clone(),
+                    execution_generation: generation.to_string(),
+                    session_target_id: entry.session_target_id.clone(),
+                    registration_generation: entry.registration_generation,
+                    worker_incarnation: entry.wire_worker_incarnation,
+                    reason: PtyCloseReason::Cancelled,
+                },
+            ))
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => CarrierError::SlowConsumer,
+                mpsc::error::TrySendError::Closed(_) => CarrierError::LinkClosed,
+            })?;
+        inner.remove(&stream_id);
+        Ok(())
+    }
 }
 
 fn cancellation(
@@ -786,5 +828,42 @@ mod tests {
         );
         assert!(matches!(result, Err(CarrierError::MissingStream)));
         assert!(!called.get());
+    }
+    #[tokio::test]
+    async fn daemon_stop_checks_original_identity_and_closes_pre_spawn_window() {
+        let registry = ExecPtyCarrierRegistry::new();
+        let link = PtyCarrierLinkId::new();
+        let (outbound, _output) = mpsc::channel(16);
+        let (control, mut received) = mpsc::channel(8);
+        registry
+            .bind_daemon(link, &start(), control, outbound)
+            .unwrap();
+        let target = super::super::worker_manager::ExecWorkerTarget {
+            worker_key: Some(key()),
+            source_incarnation: WorkerIncarnation::for_test(9),
+            session_target_id: "session-1".into(),
+            registration_generation: 7,
+            wire_worker_incarnation: 9,
+        };
+        let mut stale = target.clone();
+        stale.wire_worker_incarnation += 1;
+        assert_eq!(
+            registry.cancel_daemon_execution(link, "generation-1", &stale),
+            Err(CarrierError::StaleBinding)
+        );
+        assert!(registry.contains("stream-1"));
+        assert!(received.try_recv().is_err());
+        registry
+            .cancel_daemon_execution(link, "generation-1", &target)
+            .unwrap();
+        assert!(
+            matches!(received.try_recv().unwrap(), PtyWireFrame::Cancel(cancel)
+            if cancel.reason == PtyCloseReason::Cancelled && cancel.execution_generation == "generation-1")
+        );
+        assert!(!registry.contains("stream-1"));
+        assert_eq!(
+            registry.cancel_daemon_execution(link, "generation-1", &target),
+            Err(CarrierError::MissingStream)
+        );
     }
 }

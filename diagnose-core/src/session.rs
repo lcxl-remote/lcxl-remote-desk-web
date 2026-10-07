@@ -24,7 +24,7 @@ use std::collections::HashSet;
 use desk_agent_protocol::AgentScope;
 use serde::{Deserialize, Serialize};
 
-use crate::chat::{ChatRole, TokenUsage};
+use crate::chat::{ChatMessage, ChatRole, TokenUsage};
 use crate::context_attachment::{
     AttachmentRuntimeBinding, AttachmentStaleReason, AttachmentState, ContextAttachment,
     ContextAttachmentError, ContextAttachmentEvent, revalidate_attachments,
@@ -33,7 +33,7 @@ use crate::context_attachment::{
 use crate::model_context::{ContextNotice, MAX_CONTEXT_NOTICES, ModelContextState};
 use crate::replay::{ReplayDisposition, ReplayUnavailableReason};
 
-pub const CONVERSATION_SCHEMA_VERSION: u16 = 5;
+pub const CONVERSATION_SCHEMA_VERSION: u16 = 6;
 /// Opaque replay is bounded independently from visible transcript text.
 pub const MAX_REPLAY_ENVELOPE_BYTES: usize = 256 * 1024;
 pub const MAX_SESSION_REPLAY_BYTES: usize = 2 * 1024 * 1024;
@@ -392,6 +392,12 @@ pub enum TriggerOrigin {
     /// A server-claimed slice of a persisted long-running goal. The coordinator
     /// must claim the goal and session together before this origin is adopted.
     GoalContinuation,
+    /// A finite child task claimed by the trusted delegation coordinator.
+    /// Source, budget and review eligibility remain bound by its persisted role.
+    DelegatedTask,
+    /// A durable child-result dependency woke its original main wait. This
+    /// origin can inspect existing results but cannot spawn new executable work.
+    SubAgentCompletion,
     /// A manager-fired automation turn reacting to a completed background command.
     /// Retained only to deserialize sessions written before generic work origins.
     ExecCompletion,
@@ -422,6 +428,7 @@ impl TriggerOrigin {
             TriggerOrigin::User
                 | TriggerOrigin::PermissionDecision
                 | TriggerOrigin::GoalContinuation
+                | TriggerOrigin::DelegatedTask
         )
     }
 
@@ -437,6 +444,7 @@ impl TriggerOrigin {
                 | TriggerOrigin::ScheduledContinuation
                 | TriggerOrigin::ScheduledTask
                 | TriggerOrigin::GoalContinuation
+                | TriggerOrigin::DelegatedTask
         )
     }
 }
@@ -480,6 +488,30 @@ pub type PendingAutoTrigger = PendingWorkTrigger;
 /// Direct runtime keeps in memory).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PersistedAgentSession {
+    /// Trusted identity retained independently of model-visible history.
+    pub agent_role: crate::subagent::AgentRole,
+    /// Authentic source evidence for ordinary business preflights. It is never
+    /// inserted as a User turn and never conveys parent grants or consent.
+    pub delegated_owner_requirement: Option<ChatMessage>,
+    /// Owner controls fence main waits and interpretation without changing child input.
+    pub control_revision: u64,
+    /// Explicit owner stop blocks automatic claims until a new owner input or
+    /// an explicit goal resume. Children use their independent task control.
+    pub main_stopped: bool,
+    pub delegation_group_id: Option<String>,
+    pub subagent_wait: Option<crate::subagent::wait::ParentWait>,
+    /// Resolved wait awaiting its source-qualified coordinator, never owner input.
+    pub ready_subagent_wait: Option<crate::subagent::wait::ParentWait>,
+    pub ready_subagent_notification: Option<crate::subagent::notification::ParentNotification>,
+    /// A published result segment stays read-only across subsequent dependency
+    /// waits, even after the individual notification has been acknowledged.
+    pub subagent_result_only: bool,
+    /// Tool reads staged for delivery; they have not necessarily reached a model.
+    pub observed_subagent_results: Vec<crate::subagent::seam::ObservedResult>,
+    pub accepted_subagent_observations: Vec<crate::subagent::seam::AcceptedResultObservation>,
+    pub interpreted_subagent_results: Vec<crate::subagent::seam::AcceptedResultObservation>,
+    // Historical audit count; text answers never consume a report-repair call.
+    pub subagent_report_corrections_used: u8,
     /// Presentation preference only; never used as execution authority.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_locale: Option<String>,
@@ -599,13 +631,14 @@ pub struct PersistedAgentSession {
     pub pending_auto_triggers: Vec<PendingAutoTrigger>,
 
     // ---- Dynamic run input ledger projection (Stage 2) ----
-    /// Latest durably accepted user-input sequence for this run.
+    /// Latest durably accepted input sequence for this run, including the initial
+    /// delegated requirement and explicit child-task adjustments.
     #[serde(default)]
     pub latest_input_seq: u64,
     /// Revision fence advanced whenever a user follow-up is durably committed.
     #[serde(default)]
     pub input_revision: u64,
-    /// Highest user-input sequence included in a successfully persisted model
+    /// Highest input sequence included in a successfully persisted model
     /// result. It may never exceed `latest_input_seq`.
     #[serde(default)]
     pub handled_input_seq: u64,
@@ -746,6 +779,158 @@ impl PersistedAgentSession {
             // AI Assistant has not shipped with this persisted schema. Do
             // not infer a working set or re-enable the old full catalog.
             return Err(SessionDecodeError::UnsupportedVersion(version));
+        }
+        if session.control_revision == 0
+            || session
+                .delegation_group_id
+                .as_ref()
+                .is_some_and(|id| !crate::subagent::valid_id(id))
+            || session.observed_subagent_results.len() > 64
+            || session.accepted_subagent_observations.len() > 64
+            || session.interpreted_subagent_results.len() > 64
+            || session.subagent_report_corrections_used > 1
+        {
+            return Err(SessionDecodeError::InvalidDynamicRun(
+                "invalid delegation control state".into(),
+            ));
+        }
+        if let Some(binding) = session.agent_role.binding() {
+            binding
+                .validate(&session.conversation_id)
+                .map_err(|error| SessionDecodeError::InvalidDynamicRun(error.into()))?;
+            if session.surface != AgentSessionSurface::AiAssistant
+                || session.input_revision != binding.input_revision
+                || session.control_revision != binding.control_revision
+                || session.client_conversation_id.is_some()
+                || session.delegation_group_id.as_ref() != Some(&binding.group_id)
+                || session.subagent_wait.is_some()
+                || session.ready_subagent_wait.is_some()
+                || session.ready_subagent_notification.is_some()
+                || session.main_stopped
+                || !session.observed_subagent_results.is_empty()
+                || !session.accepted_subagent_observations.is_empty()
+                || !session.interpreted_subagent_results.is_empty()
+            {
+                return Err(SessionDecodeError::InvalidDynamicRun(
+                    "invalid child session ownership".into(),
+                ));
+            }
+            if session
+                .delegated_owner_requirement
+                .as_ref()
+                .is_some_and(|source| {
+                    source.role != crate::chat::ChatRole::User
+                        || crate::permission_resume::is_resume_control_message(source)
+                        || source.text.trim().is_empty()
+                        || !source.tool_calls.is_empty()
+                        || source.tool_call_id.is_some()
+                        || source.image_data_url.is_some()
+                        || source
+                            .data_envelope
+                            .as_ref()
+                            .is_none_or(|label| label.validate().is_err())
+                })
+            {
+                return Err(SessionDecodeError::InvalidDynamicRun(
+                    "invalid child owner source".into(),
+                ));
+            }
+        } else if session.delegated_owner_requirement.is_some() {
+            return Err(SessionDecodeError::InvalidDynamicRun(
+                "main session cannot adopt child owner source".into(),
+            ));
+        }
+        for observed in &session.observed_subagent_results {
+            observed
+                .validate()
+                .map_err(|error| SessionDecodeError::InvalidDynamicRun(error.into()))?;
+        }
+        for accepted in session
+            .accepted_subagent_observations
+            .iter()
+            .chain(&session.interpreted_subagent_results)
+        {
+            accepted
+                .validate()
+                .map_err(|error| SessionDecodeError::InvalidDynamicRun(error.into()))?;
+            if !session.observed_subagent_results.contains(&accepted.result) {
+                return Err(SessionDecodeError::InvalidDynamicRun(
+                    "unbound subagent observation".into(),
+                ));
+            }
+        }
+        if session
+            .interpreted_subagent_results
+            .iter()
+            .any(|interpretation| {
+                !session
+                    .accepted_subagent_observations
+                    .iter()
+                    .any(|accepted| accepted.result == interpretation.result)
+            })
+        {
+            return Err(SessionDecodeError::InvalidDynamicRun(
+                "unobserved subagent interpretation".into(),
+            ));
+        }
+        if session.subagent_wait.is_some() && session.ready_subagent_wait.is_some() {
+            return Err(SessionDecodeError::InvalidDynamicRun(
+                "conflicting parent waits".into(),
+            ));
+        }
+        if session.subagent_result_only
+            && (!session.agent_role.is_main()
+                || session.surface != AgentSessionSurface::AiAssistant
+                || !matches!(
+                    session.trigger_origin,
+                    TriggerOrigin::ScheduledTask | TriggerOrigin::SubAgentCompletion
+                ))
+        {
+            return Err(SessionDecodeError::InvalidDynamicRun(
+                "invalid result-only task authority".into(),
+            ));
+        }
+        if let Some(notification) = &session.ready_subagent_notification {
+            notification
+                .validate()
+                .map_err(|error| SessionDecodeError::InvalidDynamicRun(error.into()))?;
+            if session.subagent_wait.is_some()
+                || session.ready_subagent_wait.is_some()
+                || session.main_stopped
+                || !session.agent_role.is_main()
+                || session.surface != AgentSessionSurface::AiAssistant
+                || session.delegation_group_id.as_ref() != Some(&notification.group_id)
+                || session.input_revision != notification.parent_input_revision
+                || session.control_revision != notification.parent_control_revision
+                || !session.conversation.iter().any(|message| {
+                    message.message_id == notification.message_id
+                        && message.role == crate::chat::ChatRole::SystemEvent
+                        && message
+                            .data_envelope
+                            .as_ref()
+                            .is_some_and(|label| label.validate().is_ok())
+                })
+            {
+                return Err(SessionDecodeError::InvalidDynamicRun(
+                    "invalid parent notification fence".into(),
+                ));
+            }
+        }
+        for wait in session
+            .subagent_wait
+            .iter()
+            .chain(&session.ready_subagent_wait)
+        {
+            wait.validate()
+                .map_err(|error| SessionDecodeError::InvalidDynamicRun(error.into()))?;
+            if session.delegation_group_id.as_ref() != Some(&wait.group_id)
+                || wait.parent_input_revision != session.input_revision
+                || wait.parent_control_revision != session.control_revision
+            {
+                return Err(SessionDecodeError::InvalidDynamicRun(
+                    "invalid parent wait fence".into(),
+                ));
+            }
         }
         session
             .execution_state
@@ -954,6 +1139,19 @@ impl PersistedAgentSession {
         now: impl Into<String> + Clone,
     ) -> Self {
         Self {
+            agent_role: crate::subagent::AgentRole::Main,
+            delegated_owner_requirement: None,
+            control_revision: 1,
+            main_stopped: false,
+            delegation_group_id: None,
+            subagent_wait: None,
+            ready_subagent_wait: None,
+            ready_subagent_notification: None,
+            subagent_result_only: false,
+            observed_subagent_results: Vec::new(),
+            accepted_subagent_observations: Vec::new(),
+            interpreted_subagent_results: Vec::new(),
+            subagent_report_corrections_used: 0,
             conversation_id: conversation_id.into(),
             response_locale: None,
             client_conversation_id: None,
@@ -1007,6 +1205,98 @@ impl PersistedAgentSession {
         }
     }
 
+    /// Construct an independent child. No conversation, grant, directory scope,
+    /// pending approval, background action or lease is copied from the parent.
+    pub fn new_subagent(
+        conversation_id: impl Into<String>,
+        actor_id: impl Into<String>,
+        device_id: impl Into<String>,
+        policy_revision: i64,
+        scope: AgentScope,
+        binding: crate::subagent::DelegatedTaskBinding,
+        now: impl Into<String> + Clone,
+    ) -> Result<Self, &'static str> {
+        let mut session = Self::new(
+            conversation_id,
+            actor_id,
+            device_id,
+            policy_revision,
+            scope,
+            now,
+        );
+        binding.validate(&session.conversation_id)?;
+        session.surface = AgentSessionSurface::AiAssistant;
+        // A delegated requirement is the child's first independent input. It is
+        // carried by its creation envelope rather than a copied user queue item.
+        session.latest_input_seq = 1;
+        session.input_revision = binding.input_revision;
+        session.control_revision = binding.control_revision;
+        session.delegation_group_id = Some(binding.group_id.clone());
+        session.agent_role = crate::subagent::AgentRole::SubAgent {
+            binding: Box::new(binding),
+        };
+        session.begin_focus_epoch(session.input_revision, Vec::new())?;
+        Ok(session)
+    }
+
+    /// Published result delivery retains its original scheduled provenance but
+    /// has only the authority to interpret existing child facts.
+    pub fn is_subagent_result_turn(&self) -> bool {
+        self.agent_role.is_main()
+            && (self.trigger_origin == TriggerOrigin::SubAgentCompletion
+                || (self.trigger_origin == TriggerOrigin::ScheduledTask
+                    && (self.subagent_result_only || self.ready_subagent_notification.is_some())))
+    }
+
+    pub fn allows_new_mutation(&self) -> bool {
+        self.trigger_origin.allows_new_mutation() && !self.is_subagent_result_turn()
+    }
+
+    pub fn allows_delegated_review(&self) -> bool {
+        !self.is_subagent_result_turn()
+            && self.trigger_origin.allows_delegated_review()
+            && self
+                .agent_role
+                .binding()
+                .is_none_or(|binding| binding.source.allows_delegated_review())
+    }
+
+    /// The child source is authenticated separately from its delegated objective.
+    /// This accessor does not treat a model task or resume bridge as owner input.
+    pub fn authorization_requirement(&self) -> Option<&ChatMessage> {
+        if self.agent_role.is_main() {
+            crate::permission_resume::latest_user_requirement(&self.conversation)
+        } else {
+            self.delegated_owner_requirement.as_ref()
+        }
+    }
+
+    pub fn bind_delegated_owner_requirement(
+        &mut self,
+        source: &crate::subagent::creation::CreationEnvelope,
+    ) -> Result<(), &'static str> {
+        source
+            .validate()
+            .map_err(|_| "invalid delegated owner evidence")?;
+        let binding = self
+            .agent_role
+            .binding()
+            .ok_or("only a child may bind delegated owner evidence")?;
+        if source.root_conversation_id != binding.root_conversation_id
+            || source.source != binding.source
+            || source.actor_id != self.actor_id
+            || source.device_id != self.device_id
+            || self
+                .delegated_owner_requirement
+                .as_ref()
+                .is_some_and(|previous| previous != &source.owner_requirement)
+        {
+            return Err("delegated owner evidence differs from the original source");
+        }
+        self.delegated_owner_requirement = Some(source.owner_requirement.clone());
+        Ok(())
+    }
+
     /// Attach validated client-facing metadata to a new session, or upgrade a
     /// legacy row when it is next claimed from a known surface.
     pub fn adopt_client_metadata(
@@ -1014,6 +1304,9 @@ impl PersistedAgentSession {
         client_conversation_id: Option<&str>,
         surface: AgentSessionSurface,
     ) {
+        if !self.agent_role.is_main() {
+            return;
+        }
         if self.client_conversation_id.is_none() {
             self.client_conversation_id = client_conversation_id.map(str::to_string);
         }
@@ -1031,7 +1324,18 @@ impl PersistedAgentSession {
         next_input_revision: u64,
         selected_attachment_ids: impl IntoIterator<Item = String>,
     ) -> Result<usize, &'static str> {
+        if self
+            .agent_role
+            .binding()
+            .is_some_and(|binding| binding.input_revision != next_input_revision)
+        {
+            return Err("child input must be adjusted through its durable task control");
+        }
         if self.surface == AgentSessionSurface::AiAssistant {
+            // Durable input stores advance input_revision before resetting the
+            // focus. Compare the previous focus epoch so old parent waits and
+            // observations cannot survive with a stale input fence.
+            let input_changed = self.focus_epoch.input_revision != next_input_revision;
             let selected_attachment_ids = selected_attachment_ids.into_iter().collect::<Vec<_>>();
             if selected_attachment_ids.iter().any(|id| {
                 !self.context_attachments.iter().any(|attachment| {
@@ -1043,11 +1347,23 @@ impl PersistedAgentSession {
             }
             let mut focus_epoch = crate::focus_epoch::FocusEpochState::default();
             focus_epoch.reset(next_input_revision, selected_attachment_ids)?;
+            if self.agent_role.is_main() && next_input_revision > self.focus_epoch.input_revision {
+                self.main_stopped = false;
+                self.subagent_result_only = false;
+            }
             self.focus_epoch = focus_epoch;
             self.capability_disclosure
                 .reset_for_input(next_input_revision);
             self.task_status_projection = None;
             self.pending_visual_verification = None;
+            if input_changed {
+                self.subagent_wait = None;
+                self.ready_subagent_wait = None;
+                self.ready_subagent_notification = None;
+                self.observed_subagent_results.clear();
+                self.accepted_subagent_observations.clear();
+                self.interpreted_subagent_results.clear();
+            }
         }
         Ok(self
             .permission_requests
@@ -1066,7 +1382,8 @@ impl PersistedAgentSession {
         goal_revision: u64,
         lease_epoch: u64,
     ) -> Result<(), &'static str> {
-        if self.surface != AgentSessionSurface::AiAssistant
+        if !self.agent_role.is_main()
+            || self.surface != AgentSessionSurface::AiAssistant
             || self.input_revision == 0
             || self.focus_epoch.input_revision != self.input_revision
             || self.focus_epoch.selected_attachment_ids.iter().any(|id| {
@@ -1365,7 +1682,7 @@ impl PersistedAgentSession {
         current_pdp_scope: AgentScope,
         now: impl Into<String>,
     ) -> Result<(), TurnClaimError> {
-        if !self.turn_state.can_claim() {
+        if self.main_stopped || !self.turn_state.can_claim() {
             return Err(TurnClaimError::Busy);
         }
         // Rotate the fencing token: this claim becomes the sole owner, and any
@@ -1435,6 +1752,9 @@ impl PersistedAgentSession {
         if let Some(segment) = &self.focus_epoch.goal_segment {
             protection.protect_message(segment.source_message_id.clone());
         }
+        if let Some(notification) = &self.ready_subagent_notification {
+            protection.protect_message(notification.message_id.clone());
+        }
         for pending in &self.pending_auto_triggers {
             protection.protect_message(pending.event_id.clone());
             protection.protect_tool_call(pending.tool_call_id.clone());
@@ -1501,6 +1821,9 @@ impl PersistedAgentSession {
     /// consumes budget, so a turn that dies mid-run cannot be retried without bound.
     pub fn adopt_trigger(&mut self, origin: TriggerOrigin, turn_id: &str) {
         self.trigger_origin = origin;
+        if origin == TriggerOrigin::User {
+            self.subagent_result_only = false;
+        }
         match origin {
             TriggerOrigin::User | TriggerOrigin::ScheduledTask => {
                 self.chain_id = turn_id.to_string();
@@ -1509,6 +1832,11 @@ impl PersistedAgentSession {
             TriggerOrigin::PermissionDecision
             | TriggerOrigin::ScheduledContinuation
             | TriggerOrigin::GoalContinuation => {}
+            TriggerOrigin::DelegatedTask | TriggerOrigin::SubAgentCompletion => {
+                if self.chain_id.is_empty() {
+                    self.chain_id = turn_id.to_string();
+                }
+            }
             TriggerOrigin::ExecCompletion | TriggerOrigin::WorkCompletion { .. } => {
                 self.automation_turns_used = self.automation_turns_used.saturating_add(1);
             }

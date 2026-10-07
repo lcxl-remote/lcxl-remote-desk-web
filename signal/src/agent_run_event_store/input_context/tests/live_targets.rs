@@ -181,7 +181,12 @@ async fn live_target_survives_sqlite_reopen_and_new_input_supersedes_it() {
     );
     let mut next = params.clone();
     next.event_id = "next-input".into();
-    next.message.message_id = "next-input".into();
+    next.message = desk_diagnose_core::model_message_labels::model_bound_user_message(
+        "next-input".into(),
+        next.message.text.clone(),
+        destination(),
+    )
+    .unwrap();
     next.read_context.as_mut().unwrap().tool_names.clear();
     next.read_context.as_mut().unwrap().live_targets.clear();
     reopened.append_user_followup(next).await.unwrap();

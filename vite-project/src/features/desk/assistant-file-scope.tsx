@@ -22,7 +22,7 @@ export type AssistantDirectoryOperation =
     | { kind: 'revoke_directory'; directory_request_id: string; expected_revision: number };
 
 export function AssistantFileScope({ scope, open, onOpenChange, disabled, onUpdate, deskId, sessionTargetId,
-    showPendingActions = true, onPendingJump }: {
+    showPendingActions = true, onPendingJump, selectionDisabled = false }: {
     deskId?: string;
     // undefined: unresolved; null: selected anonymous in-process worker.
     sessionTargetId?: string | null;
@@ -30,6 +30,7 @@ export function AssistantFileScope({ scope, open, onOpenChange, disabled, onUpda
     open: boolean;
     onOpenChange: (open: boolean) => void;
     disabled: boolean;
+    selectionDisabled?: boolean;
     onUpdate: (operation: AssistantDirectoryOperation, timeoutMessage: string) => boolean;
     showPendingActions?: boolean;
     onPendingJump?: (requestId: string) => void;
@@ -44,12 +45,12 @@ export function AssistantFileScope({ scope, open, onOpenChange, disabled, onUpda
                 <SheetDescription>{t('pages.aiAssistant.directories.hint')}</SheetDescription>
             </SheetHeader>
             <div className="space-y-2 px-4">
-                <Button type="button" disabled={disabled || !deskId || sessionTargetId === undefined} onClick={() => setBrowsing(value => !value)}>
+                <Button type="button" disabled={disabled || selectionDisabled || !deskId || sessionTargetId === undefined} onClick={() => setBrowsing(value => !value)}>
                     {t('pages.aiAssistant.directories.add')}
                 </Button>
                 {open && browsing && deskId && sessionTargetId !== undefined && <RemoteDirectoryPicker
                     key={`${deskId}:${sessionTargetId}`} deskId={deskId} sessionTargetId={sessionTargetId}
-                    disabled={disabled} onSelect={path => submit({ kind: 'select_directory', path,
+                    disabled={disabled || selectionDisabled} onSelect={path => submit({ kind: 'select_directory', path,
                         purpose: t('pages.aiAssistant.directories.manualPurpose'), expected_revision: scope.revision })}
                     onCancel={() => setBrowsing(false)} />}
             </div>

@@ -364,6 +364,66 @@ pub(super) async fn dispatch_fleet_exec_plan(
         }
     }
 
+    let target = match ctx
+        .worker_mgr
+        .exec_worker_target_for_session(selected_session.as_ref())
+        .await
+    {
+        Ok(target) => target,
+        Err(reason) => {
+            ctx.exec_capacity.release(&plan.execution_generation);
+            if let Err(error) = ctx
+                .exec_ledger
+                .mark_terminal(
+                    &plan.execution_generation,
+                    crate::daemon::exec_ledger::Terminal::SpawnFailed(reason.clone()),
+                )
+                .await
+            {
+                log::error!("[exec-ledger] could not record unavailable original worker: {error}");
+            }
+            send_edge_execution_completed(
+                &ctx.outbound_tx,
+                request_id,
+                EdgeExecDisposition::DispatchFailedBeforeWorker {
+                    error: agent_error(AgentErrorKind::SessionUnavailable, &reason, true, true),
+                },
+            );
+            return;
+        }
+    };
+
+    if let Err(error) = ctx.exec_capacity.bind(
+        &plan.execution_generation,
+        crate::daemon::exec_capacity::ExecBinding {
+            target: target.clone(),
+            owner_connection_id: None,
+            daemon_pty: cfg!(target_os = "linux") && plan.requires_root_pty_containment(),
+        },
+    ) {
+        ctx.exec_capacity.release(&plan.execution_generation);
+        if let Err(ledger_error) = ctx
+            .exec_ledger
+            .mark_terminal(
+                &plan.execution_generation,
+                crate::daemon::exec_ledger::Terminal::SpawnFailed(error.clone()),
+            )
+            .await
+        {
+            log::error!(
+                "[exec-ledger] could not record original target binding failure: {ledger_error}"
+            );
+        }
+        send_edge_execution_completed(
+            &ctx.outbound_tx,
+            request_id,
+            EdgeExecDisposition::DispatchFailedBeforeWorker {
+                error: agent_error(AgentErrorKind::SessionUnavailable, &error, true, true),
+            },
+        );
+        return;
+    }
+
     // Register the in-flight correlation BEFORE sending so a fast worker reply
     // cannot race ahead of the marker.
     if let Ok(mut pending) = ctx.edge_exec_pending.lock() {
@@ -376,7 +436,7 @@ pub(super) async fn dispatch_fleet_exec_plan(
             request_id,
             plan,
             selected_session.as_ref(),
-            session_connection_id,
+            &target,
             carrier_id,
             pty_capabilities,
         )
@@ -419,60 +479,42 @@ pub(super) async fn dispatch_fleet_exec_plan(
     }
     let dispatch = if plan.io_mode.is_pty() {
         match (carrier_id, ctx.exec_pty_link.clone()) {
-            (Some(stream_id), Some(link)) => match ctx
-                .worker_mgr
-                .exec_worker_target_for_connection(session_connection_id)
-                .await
-            {
-                Ok(target) => {
-                    let payload = desk_ipc_protocol::message::ExecPtyStartPayload {
-                        request_id: request_id.to_string(),
-                        connection_id: None,
-                        exec_pty: pty_capabilities.exec_pty,
-                        exec_pty_elevation: pty_capabilities.exec_pty_elevation,
-                        stream_id: stream_id.clone(),
-                        session_target_id: target.session_target_id,
-                        registration_generation: target.registration_generation,
-                        worker_incarnation: target.wire_worker_incarnation,
-                        plan,
-                        audit_source_request_id: Some(request_id.to_string()),
-                    };
-                    match link.registry.bind(
-                        link.link_id,
-                        &payload,
-                        target.worker_key.clone(),
-                        target.source_incarnation,
-                        link.outbound,
-                    ) {
-                        Ok(()) => {
-                            let sent = match target.worker_key.as_ref() {
-                                Some(key) => {
-                                    ctx.worker_mgr
-                                        .send_to_session_worker(
-                                            &key.session,
-                                            ServiceToWorker::ExecPtyStart(payload),
-                                        )
-                                        .await
-                                }
-                                None => {
-                                    ctx.worker_mgr
-                                        .send_to_worker(ServiceToWorker::ExecPtyStart(payload))
-                                        .await
-                                }
-                            };
-                            if sent.is_err() {
-                                link.registry.remove_stream(
-                                    &stream_id,
-                                    desk_agent_protocol::exec_pty::PtyCloseReason::SessionStale,
-                                );
-                            }
-                            sent
+            (Some(stream_id), Some(link)) => {
+                let payload = desk_ipc_protocol::message::ExecPtyStartPayload {
+                    request_id: request_id.to_string(),
+                    connection_id: None,
+                    exec_pty: pty_capabilities.exec_pty,
+                    exec_pty_elevation: pty_capabilities.exec_pty_elevation,
+                    stream_id: stream_id.clone(),
+                    session_target_id: target.session_target_id.clone(),
+                    registration_generation: target.registration_generation,
+                    worker_incarnation: target.wire_worker_incarnation,
+                    plan,
+                    audit_source_request_id: Some(request_id.to_string()),
+                };
+                match link.registry.bind(
+                    link.link_id,
+                    &payload,
+                    target.worker_key.clone(),
+                    target.source_incarnation,
+                    link.outbound,
+                ) {
+                    Ok(()) => {
+                        let sent = ctx
+                            .worker_mgr
+                            .send_to_exec_target(&target, ServiceToWorker::ExecPtyStart(payload))
+                            .await;
+                        if sent.is_err() {
+                            link.registry.remove_stream(
+                                &stream_id,
+                                desk_agent_protocol::exec_pty::PtyCloseReason::SessionStale,
+                            );
                         }
-                        Err(error) => Err(format!("PTY carrier binding failed: {error}")),
+                        sent
                     }
+                    Err(error) => Err(format!("PTY carrier binding failed: {error}")),
                 }
-                Err(error) => Err(error),
-            },
+            }
             (None, _) => Err("approved PTY execution has no live carrier".to_string()),
             (_, None) => Err("trusted central link has no PTY binary carrier".to_string()),
         }
@@ -485,15 +527,9 @@ pub(super) async fn dispatch_fleet_exec_plan(
             plan,
             audit_source_request_id: Some(request_id.to_string()),
         };
-        if let Some(session) = selected_session.as_ref() {
-            ctx.worker_mgr
-                .send_to_session_worker(session, ServiceToWorker::ExecPlan(payload))
-                .await
-        } else {
-            ctx.worker_mgr
-                .send_to_worker(ServiceToWorker::ExecPlan(payload))
-                .await
-        }
+        ctx.worker_mgr
+            .send_to_exec_target(&target, ServiceToWorker::ExecPlan(payload))
+            .await
     };
     if let Err(e) = dispatch {
         if let Ok(mut pending) = ctx.edge_exec_pending.lock() {
@@ -501,6 +537,18 @@ pub(super) async fn dispatch_fleet_exec_plan(
         }
         // Nothing was started, so the slot is free again immediately.
         ctx.exec_capacity.release(request_id);
+        if let Err(ledger_error) = ctx
+            .exec_ledger
+            .mark_terminal(
+                request_id,
+                crate::daemon::exec_ledger::Terminal::SpawnFailed(e.clone()),
+            )
+            .await
+        {
+            log::error!(
+                "[exec-ledger] could not record pre-worker dispatch failure: {ledger_error}"
+            );
+        }
         send_edge_execution_completed(
             &ctx.outbound_tx,
             request_id,
@@ -523,7 +571,7 @@ async fn dispatch_root_fleet_pty(
     request_id: &str,
     plan: ExecPlan,
     selected_session: Option<&desk_ipc_protocol::message::SessionKey>,
-    session_connection_id: Option<&str>,
+    target: &crate::daemon::worker_manager::ExecWorkerTarget,
     carrier_id: Option<String>,
     capabilities: crate::worker::exec_pty::ExecPtyCapabilities,
 ) -> Result<(), String> {
@@ -531,10 +579,6 @@ async fn dispatch_root_fleet_pty(
         return Err("interactive elevation runtime is not ready".into());
     }
     let session = selected_session.ok_or("root PTY requires a registered Linux session")?;
-    let target = ctx
-        .worker_mgr
-        .exec_worker_target_for_connection(session_connection_id)
-        .await?;
     if target.worker_key.as_ref().map(|key| &key.session) != Some(session) {
         return Err("root PTY session target changed before dispatch".into());
     }
@@ -559,7 +603,7 @@ async fn dispatch_root_fleet_pty(
         exec_pty: capabilities.exec_pty,
         exec_pty_elevation: capabilities.exec_pty_elevation,
         stream_id: stream_id.clone(),
-        session_target_id: target.session_target_id,
+        session_target_id: target.session_target_id.clone(),
         registration_generation: target.registration_generation,
         worker_incarnation: target.wire_worker_incarnation,
         plan,

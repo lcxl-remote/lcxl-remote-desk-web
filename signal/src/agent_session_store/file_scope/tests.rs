@@ -12,6 +12,7 @@ async fn setup() -> SignalAgentSessionStore {
     ] {
         db.execute(&table).await.unwrap();
     }
+    crate::db::ensure_lifecycle_tables(&db).await;
     scoped(db)
 }
 

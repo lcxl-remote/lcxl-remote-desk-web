@@ -46,7 +46,7 @@ use crate::model_message_labels::internal_tool_result_envelope as derive_interna
 use desk_agent_protocol::{AgentError, AgentErrorKind};
 
 use crate::chat::{ChatMessage, ChatRole, ModelTurnError, TurnDisposition, classify_model_turn};
-use crate::registry::{RegisteredTool, ToolEffect, exposed_tools, lookup_exposed};
+use crate::registry::{RegisteredTool, ToolEffect, exposed_for_session, lookup_for_session};
 use crate::seam::{
     ClaimError, ClaimTurnParams, ExecContext, ExecOutcome, ModelRequest, ModelSeam, ReadOutcome,
     SessionSeam, ToolSeam, TurnSink, WaitOutcome,
@@ -303,6 +303,10 @@ pub enum LoopOutcome {
     },
     /// A hard total-goal budget could not reserve the next model/tool call.
     GoalBudgetReached,
+    /// A durable main dependency wait releases this turn's lease and model slot.
+    SubAgentsWaiting { wait_id: String },
+    /// The child's source group closed admission while its original task persists.
+    DelegationSourcePaused,
 }
 
 /// The seams + config the loop runs over, borrowed for one turn.
@@ -389,8 +393,12 @@ pub async fn resume_agent_turn(
 }
 
 mod artifact_registry;
+mod call_budget;
 mod fresh_task;
-pub use fresh_task::{resume_claimed_fresh_task_permission_turn, resume_claimed_fresh_task_turn};
+pub use fresh_task::{
+    resume_claimed_fresh_task_children_turn, resume_claimed_fresh_task_notification_turn,
+    resume_claimed_fresh_task_permission_turn, resume_claimed_fresh_task_turn,
+};
 
 /// Drive a continuation already claimed atomically with its durable occurrence.
 /// The central runtime must supply the returned session directly, bind its
@@ -436,6 +444,7 @@ async fn resume_claimed_scheduled(
     if scheduled_run_id.is_empty()
         || scheduled_run_id.len() > 256
         || session.trigger_origin != crate::session::TriggerOrigin::ScheduledContinuation
+        || !session.agent_role.is_main()
         || session.surface != AgentSessionSurface::AiAssistant
         || session.turn_state != TurnState::Running
         || session.input_revision == 0
@@ -546,6 +555,7 @@ pub async fn run_preclaimed_goal_slice(
     sink: &mut dyn TurnSink,
 ) -> Result<LoopOutcome, AgentError> {
     if session.trigger_origin != TriggerOrigin::GoalContinuation
+        || !session.agent_role.is_main()
         || session.focus_epoch.goal_segment.is_none()
         || !session.turn_state.is_active()
     {
@@ -564,6 +574,91 @@ pub async fn run_preclaimed_goal_slice(
         safe_for_model: false,
         error_code: None,
     })?;
+    drive_claimed(deps, session, turn_id, None, sink).await
+}
+
+/// Execute only an existing child claimed by its durable coordinator. The role
+/// and input are never reconstructed from a completion or model tool argument.
+pub async fn run_preclaimed_subagent_turn(
+    deps: &LoopDeps<'_>,
+    session: PersistedAgentSession,
+    sink: &mut dyn TurnSink,
+) -> Result<LoopOutcome, AgentError> {
+    if session.agent_role.binding().is_none()
+        || session.trigger_origin != TriggerOrigin::DelegatedTask
+        || session.surface != AgentSessionSurface::AiAssistant
+        || !session.turn_state.is_active()
+        || session.lease_token == 0
+        || deps.heartbeat.is_none()
+        || deps.session_seam.subagents(&session).is_none()
+    {
+        return Err(crate::subagent::invalid(
+            "delegated task requires a durable child claim and heartbeat",
+        ));
+    }
+    let turn_id = session
+        .current_turn_id
+        .clone()
+        .ok_or_else(|| crate::subagent::invalid("claimed child has no turn identity"))?;
+    drive_claimed(deps, session, turn_id, None, sink).await
+}
+
+/// Original command interpretation has its own source-qualified claim. It
+/// cannot dispatch tools or count an intermediate explanation as a task report.
+pub async fn run_preclaimed_child_completion(
+    deps: &LoopDeps<'_>,
+    session: PersistedAgentSession,
+    sink: &mut dyn TurnSink,
+) -> Result<LoopOutcome, AgentError> {
+    if session.agent_role.binding().is_none()
+        || !session.turn_state.is_active()
+        || session.lease_token == 0
+        || deps.heartbeat.is_none()
+        || deps.model.command_completion_event_id().is_none()
+        || !matches!(
+            session.trigger_origin,
+            TriggerOrigin::ExecCompletion
+                | TriggerOrigin::WorkCompletion {
+                    kind: crate::session::WorkKind::AgentExec
+                }
+        )
+    {
+        return Err(crate::subagent::invalid(
+            "child command interpretation requires its original qualified claim",
+        ));
+    }
+    let turn_id = session
+        .current_turn_id
+        .clone()
+        .ok_or_else(|| crate::subagent::invalid("child interpretation has no turn identity"))?;
+    drive_claimed(deps, session, turn_id, None, sink).await
+}
+
+/// Result interpretation is claimed by the durable root coordinator. It does
+/// not recreate the original User trigger or start a new mutation chain.
+pub async fn run_preclaimed_subagent_completion(
+    deps: &LoopDeps<'_>,
+    session: PersistedAgentSession,
+    sink: &mut dyn TurnSink,
+) -> Result<LoopOutcome, AgentError> {
+    if !session.agent_role.is_main()
+        || session.trigger_origin != TriggerOrigin::SubAgentCompletion
+        || session.surface != AgentSessionSurface::AiAssistant
+        || !session.turn_state.is_active()
+        || (session.ready_subagent_wait.is_none() && session.ready_subagent_notification.is_none())
+        || session.subagent_wait.is_some()
+        || session.lease_token == 0
+        || deps.heartbeat.is_none()
+        || deps.session_seam.subagents(&session).is_none()
+    {
+        return Err(crate::subagent::invalid(
+            "subagent result interpretation requires a durable root claim",
+        ));
+    }
+    let turn_id = session
+        .current_turn_id
+        .clone()
+        .ok_or_else(|| crate::subagent::invalid("root interpretation has no turn identity"))?;
     drive_claimed(deps, session, turn_id, None, sink).await
 }
 
@@ -702,6 +797,12 @@ async fn drive_claimed_inner(
     } else {
         run_inner(deps, &mut session, &turn_id, sink).await
     };
+    if matches!(&result, Ok(LoopOutcome::DelegationSourcePaused)) {
+        // The source-control transaction already released and fenced this child
+        // claim. Its old history must not overwrite that committed pause.
+        sink.on_turn_discarded();
+        return result;
+    }
     if let Some(outcome) = settle_if_superseded(deps, &session, sink).await? {
         return Ok(outcome);
     }
@@ -723,6 +824,51 @@ async fn drive_claimed_inner(
         crate::conversation_attachment::model_read::release_consumed(&mut session.conversation)?;
     }
     let settled_at = (deps.clock)();
+    if session.is_subagent_result_turn() {
+        if matches!(&result, Err(error) if error.kind == AgentErrorKind::ModelUnavailable && error.retryable)
+            && session.unclosed_tool_call_ids().is_empty()
+            && session.execution_state.states().is_empty()
+        {
+            if let Some(wait) = session.ready_subagent_wait.as_mut() {
+                let now_ms = chrono::DateTime::parse_from_rfc3339(&settled_at)
+                    .map_err(|_| crate::subagent::invalid("invalid root interpretation clock"))?
+                    .timestamp_millis();
+                wait.retry_after_ms = Some(
+                    now_ms
+                        .checked_add(30_000)
+                        .ok_or_else(|| crate::subagent::invalid("root retry clock overflow"))?,
+                );
+            }
+            if let Some(notification) = session.ready_subagent_notification.as_mut() {
+                let now_ms = chrono::DateTime::parse_from_rfc3339(&settled_at)
+                    .map_err(|_| crate::subagent::invalid("invalid root interpretation clock"))?
+                    .timestamp_millis();
+                notification.retry_after_ms = Some(
+                    now_ms
+                        .checked_add(30_000)
+                        .ok_or_else(|| crate::subagent::invalid("root retry clock overflow"))?,
+                );
+            }
+            if session
+                .ready_subagent_notification
+                .as_ref()
+                .is_some_and(|notification| notification.accepted_response_message_id.is_some())
+            {
+                session.ready_subagent_notification = None;
+            }
+        } else {
+            session.ready_subagent_wait = None;
+            session.ready_subagent_notification = None;
+        }
+    }
+    if session.agent_role.is_main()
+        && session.trigger_origin == TriggerOrigin::ScheduledTask
+        && !session.is_subagent_result_turn()
+    {
+        // A consumed dependency belongs to this segment. A new wait remains in
+        // subagent_wait and is acknowledged by the original occurrence coordinator.
+        session.ready_subagent_wait = None;
+    }
     session.finish_turn(terminal, settled_at.clone());
     session.terminal_permission_request_id = match &result {
         Ok(LoopOutcome::PermissionRequested { request_id }) => Some(request_id.clone()),
@@ -748,7 +894,53 @@ async fn drive_claimed_inner(
     // Commit their terminal transition together, including the ledger event.
     // The ordinary save would expose an idle session while the goal is still
     // running after a process crash.
-    let save = if session.trigger_origin == crate::session::TriggerOrigin::GoalContinuation {
+    let save = if session.agent_role.binding().is_some()
+        && deps.model.command_completion_event_id().is_none()
+        && let Ok(LoopOutcome::Answered(text)) = &result
+    {
+        let binding = session.agent_role.binding().expect("checked child binding");
+        let fence = crate::subagent::state::PlanningFence {
+            input_revision: binding.input_revision,
+            control_revision: binding.control_revision,
+            source_epoch: binding.source_epoch,
+        };
+        deps.session_seam
+            .subagents(&session)
+            .ok_or_else(|| crate::subagent::invalid("durable child settlement is unavailable"))?
+            .settle_child_answer(&mut session, fence, text.clone())
+            .await
+            .map(|_| ())
+    } else if session.agent_role.binding().is_some() {
+        let reason = match &result {
+            Err(error)
+                if error.kind == AgentErrorKind::ModelUnavailable
+                    && error.retryable
+                    && session.unclosed_tool_call_ids().is_empty()
+                    && session.execution_state.states().is_empty() =>
+            {
+                Some("delegated_model_unavailable")
+            }
+            Err(_)
+            | Ok(LoopOutcome::ProtocolError(_))
+            | Ok(LoopOutcome::ContentSafetyUnavailable(_)) => Some("delegated_turn_failed"),
+            Ok(LoopOutcome::ContentRejected(_)) => Some("delegated_content_rejected"),
+            Ok(LoopOutcome::ContextWindowExceeded) => Some("delegated_context_window_exceeded"),
+            Ok(LoopOutcome::PermissionRequested { .. })
+            | Ok(LoopOutcome::CircuitBreak(_))
+            | Ok(LoopOutcome::Truncated)
+            | Ok(LoopOutcome::Answered(_)) => None,
+            _ => Some("delegated_turn_unsupported_outcome"),
+        };
+        let allow_continue = deps.model.command_completion_event_id().is_some()
+            && matches!(&result, Ok(LoopOutcome::Answered(_)));
+        deps.session_seam
+            .subagents(&session)
+            .ok_or_else(|| {
+                crate::subagent::invalid("durable child turn settlement is unavailable")
+            })?
+            .settle_child_turn(&mut session, reason, allow_continue)
+            .await
+    } else if session.trigger_origin == crate::session::TriggerOrigin::GoalContinuation {
         if let Ok(LoopOutcome::GoalControlled { call_id, .. }) = &result {
             record_tool_completion(&mut session, call_id, true);
         }
@@ -765,6 +957,12 @@ async fn drive_claimed_inner(
                 crate::goal::GoalSegmentEnd::Control(crate::goal::GoalControl::Wait {
                     reason: crate::goal::GoalWaitReason::Approval,
                     reference_id: request_id.clone(),
+                })
+            }
+            Ok(LoopOutcome::SubAgentsWaiting { wait_id }) => {
+                crate::goal::GoalSegmentEnd::Control(crate::goal::GoalControl::Wait {
+                    reason: crate::goal::GoalWaitReason::Work,
+                    reference_id: wait_id.clone(),
                 })
             }
             Ok(LoopOutcome::ContextWindowExceeded) => {
@@ -1409,6 +1607,24 @@ async fn deliver_pending_results(
     Ok(())
 }
 
+async fn project_command_completion(
+    deps: &LoopDeps<'_>,
+    session: &PersistedAgentSession,
+    event_id: &str,
+    request: ModelRequest,
+) -> Result<ModelRequest, AgentError> {
+    if session.agent_role.binding().is_some() {
+        let seam = deps
+            .session_seam
+            .subagents(session)
+            .ok_or_else(|| crate::subagent::invalid("child runtime seam is unavailable"))?;
+        let creation = seam.child_creation_context(session).await?;
+        crate::command_completion::project_child_request(request, session, event_id, &creation)
+    } else {
+        crate::command_completion::project_request(request, session, event_id)
+    }
+}
+
 async fn prepare_model_context(
     deps: &LoopDeps<'_>,
     session: &mut crate::session::PersistedAgentSession,
@@ -1418,11 +1634,13 @@ async fn prepare_model_context(
     sink: &mut dyn TurnSink,
 ) -> Result<crate::model_context::ModelContextView, AgentError> {
     if let Some(event_id) = deps.model.command_completion_event_id() {
-        let projected = crate::command_completion::project_request(
-            ModelRequest::text_only(Vec::new(), deps.response_format.clone()),
+        let projected = project_command_completion(
+            deps,
             session,
             event_id,
-        )?;
+            ModelRequest::text_only(Vec::new(), deps.response_format.clone()),
+        )
+        .await?;
         // This is an ephemeral exact-result view, not a replacement history
         // checkpoint. The assembled request below still enforces the byte cap.
         return Ok(crate::model_context::ModelContextView {
@@ -1667,7 +1885,7 @@ async fn prepare_model_context(
                     },
                     None => None,
                 };
-                let request = ModelRequest {
+                let mut request = ModelRequest {
                     messages: authorized_input.as_ref().map_or_else(
                         || crate::model_context::compression_request_messages(&plan),
                         |input| input.messages.clone(),
@@ -1678,12 +1896,24 @@ async fn prepare_model_context(
                     response_format: crate::prompt::ResponseFormatSpec::None,
                     use_case: crate::model_profile::ModelUseCase::ContextCompression,
                     previous_cache_projection: None,
+                    delegation_call: None,
                     caller_output_hard_cap: Some(
                         crate::model_context::CONTEXT_SUMMARY_OUTPUT_HARD_CAP_TOKENS,
                     ),
                 };
+                let identity = format!("compression:{turn_id}:{}", plan.generation);
+                let budget = call_budget::reserve_model(
+                    deps,
+                    session,
+                    &mut request,
+                    &identity,
+                    crate::subagent::reservation::DelegationCallKind::ContextSummary,
+                )
+                .await?;
                 let mut compression_sink = crate::seam::NullTurnSink;
-                let turn = match deps.model.call(request, &mut compression_sink).await {
+                let dial_result = deps.model.call(request, &mut compression_sink).await;
+                call_budget::settle_model(deps, session, budget, &dial_result).await?;
+                let turn = match dial_result {
                     Ok(turn) => turn,
                     Err(error) => {
                         let kind = compression_failure_for_provider_error(&error);
@@ -1953,6 +2183,24 @@ async fn ensure_lease_healthy(deps: &LoopDeps<'_>) -> Result<(), AgentError> {
     Ok(())
 }
 
+async fn child_source_paused(
+    deps: &LoopDeps<'_>,
+    session: &PersistedAgentSession,
+) -> Result<bool, AgentError> {
+    if session.agent_role.is_main() {
+        return Ok(false);
+    }
+    let admission = deps
+        .session_seam
+        .subagents(session)
+        .ok_or_else(|| {
+            crate::subagent::invalid("child planning requires durable delegation admission")
+        })?
+        .validate_child_admission(session)
+        .await?;
+    Ok(admission == crate::subagent::seam::ChildAdmission::SourcePaused)
+}
+
 // Keep the growing per-tool state machine on the heap for every entry point,
 // including scheduled and permission continuations on small runtime stacks.
 #[inline(never)]
@@ -1990,6 +2238,7 @@ async fn run_inner_impl(
     let mut post_tool_permission_protocol_retries: u8 = 0;
     let mut goal_correction_attempted = false;
     let mut goal_required_choice_rejected = false;
+    let mut physical_model_attempt = 0u32;
     // A permission decision resumes at the authorization boundary, not at the
     // beginning of the user's workflow. Keep a recency-edge checkpoint in
     // model requests until the model proposes the exact Provider call made
@@ -2004,6 +2253,27 @@ async fn run_inner_impl(
         session.trigger_origin == crate::session::TriggerOrigin::PermissionDecision;
 
     loop {
+        if child_source_paused(deps, session).await? {
+            return Ok(LoopOutcome::DelegationSourcePaused);
+        }
+        let subagent_projection = match deps.session_seam.subagents(session) {
+            Some(seam) if session.surface == AgentSessionSurface::AiAssistant => {
+                seam.planning_projection(session).await?
+            }
+            _ => None,
+        };
+        let child_runtime_label = session
+            .agent_role
+            .binding()
+            .and(subagent_projection.as_ref())
+            .and_then(|message| message.data_envelope.clone());
+        if subagent_projection.as_ref().is_some_and(|message| {
+            message.role != ChatRole::SystemEvent || message.data_envelope.is_none()
+        }) {
+            return Err(crate::subagent::invalid(
+                "delegation projection requires a labelled runtime data message",
+            ));
+        }
         if session.turn_step_budget_exhausted(deps.max_steps_per_turn) {
             return Ok(LoopOutcome::CircuitBreak(CircuitBreakReason::StepBudget));
         }
@@ -2073,6 +2343,7 @@ async fn run_inner_impl(
         continuation_tools.sort();
         continuation_tools.dedup();
         let planning_goal = if session.surface == AgentSessionSurface::AiAssistant
+            && session.agent_role.is_main()
             && session.trigger_origin == TriggerOrigin::User
         {
             deps.session_seam.load_goal_for_planning(session).await?
@@ -2080,6 +2351,7 @@ async fn run_inner_impl(
             None
         };
         let latest_completed_goal = if session.surface == AgentSessionSurface::AiAssistant
+            && session.agent_role.is_main()
             && session.trigger_origin == TriggerOrigin::User
             && planning_goal.is_none()
         {
@@ -2089,12 +2361,10 @@ async fn run_inner_impl(
         } else {
             None
         };
-        let mut exposed = exposed_tools(
-            deps.registry,
-            &session.scope_snapshot,
-            &session.execution_state,
-            session.trigger_origin,
-        );
+        let mut exposed = exposed_for_session(deps.registry, session);
+        if deps.session_seam.subagents(session).is_none() {
+            exposed.retain(|tool| crate::subagent::tools::effect(tool.name()).is_none());
+        }
         let policy_read_names = if planning_goal.is_some() {
             Vec::new()
         } else if let Some(snapshot) = &authority {
@@ -2231,18 +2501,20 @@ async fn run_inner_impl(
         let tool_requirements = crate::model_capability::ModelRequirements::for_registered_tools(
             exposed.iter().copied(),
         );
-        let completion_messages = deps
-            .model
-            .command_completion_event_id()
-            .map(|event_id| {
-                crate::command_completion::project_request(
-                    ModelRequest::text_only(Vec::new(), deps.response_format.clone()),
+        let completion_messages = if let Some(event_id) = deps.model.command_completion_event_id() {
+            Some(
+                project_command_completion(
+                    deps,
                     session,
                     event_id,
+                    ModelRequest::text_only(Vec::new(), deps.response_format.clone()),
                 )
-                .map(|request| request.messages)
-            })
-            .transpose()?;
+                .await?
+                .messages,
+            )
+        } else {
+            None
+        };
         let request_requirements =
             tool_requirements.union(crate::model_capability::ModelRequirements::for_messages(
                 completion_messages
@@ -2343,6 +2615,28 @@ async fn run_inner_impl(
             .map(|tool| tool.spec.clone())
             .collect::<Vec<_>>();
         let mut stable_system = deps.system_prompt.clone();
+        let disclosed_provider_tools = exposed
+            .iter()
+            .filter(|tool| {
+                deps.provider_registry
+                    .is_some_and(|registry| registry.capability_for_tool(tool.name()).is_some())
+            })
+            .map(|tool| tool.name())
+            .collect::<Vec<_>>();
+        if deps.provider_registry.is_some() {
+            crate::ai_assistant::scope_disclosed_instructions(
+                &mut stable_system,
+                &disclosed_provider_tools,
+            );
+        }
+        if session.agent_role.binding().is_some()
+            && deps.model.command_completion_event_id().is_none()
+        {
+            stable_system.text.push_str("\n\n");
+            stable_system
+                .text
+                .push_str(crate::subagent::report::REPORT_INSTRUCTION);
+        }
         let split_runtime = session.surface == AgentSessionSurface::AiAssistant;
         let mut system_prompt = if split_runtime {
             crate::runtime_context::take(&mut stable_system)
@@ -2516,8 +2810,10 @@ async fn run_inner_impl(
         }
         deliver_pending_results(deps, session).await?;
         if split_runtime && system_prompt.data_envelope.is_none() {
-            let parent = crate::permission_resume::latest_user_requirement(&session.conversation)
-                .and_then(|message| message.data_envelope.as_ref());
+            let parent = child_runtime_label.as_ref().or_else(|| {
+                crate::permission_resume::latest_user_requirement(&session.conversation)
+                    .and_then(|message| message.data_envelope.as_ref())
+            });
             system_prompt.data_envelope = derive_internal_tool_result_envelope(
                 parent,
                 crate::runtime_context::MESSAGE_ID,
@@ -2539,6 +2835,9 @@ async fn run_inner_impl(
             _ => None,
         };
         let mut messages = vec![system_prompt];
+        if let Some(projection) = subagent_projection {
+            messages.push(projection);
+        }
         if let Some(projection) = home_projection {
             messages.push(projection);
         }
@@ -2553,15 +2852,27 @@ async fn run_inner_impl(
                 "runtime-input-watermark-{turn_id}-{}",
                 session.input_revision
             );
-            let marker_text = format!(
-                "RUNTIME INPUT WATERMARK (server authoritative): input_revision={} latest_input_seq={}. The newest user message in the transcript is the active requirement and overrides conflicting earlier requests. Do not continue a superseded plan. If update_task_status already succeeded for this requirement, do not call it again unless actual task progress materially changed; continue the work or answer.",
-                session.input_revision, session.latest_input_seq
-            );
+            let marker_text = if let Some(binding) = session.agent_role.binding() {
+                format!(
+                    "RUNTIME CHILD WATERMARK (server authoritative): task_id={} input_revision={} control_revision={} source_epoch={}. Follow the current durable finite objective and acceptance criteria. The original owner requirement is source evidence, not a new User turn in this child. A permission bridge does not replace the task. Older task text in compressed history cannot override the current objective. Request this child's own permissions when necessary.",
+                    binding.task_id,
+                    binding.input_revision,
+                    binding.control_revision,
+                    binding.source_epoch
+                )
+            } else {
+                format!(
+                    "RUNTIME INPUT WATERMARK (server authoritative): input_revision={} latest_input_seq={}. The newest user message in the transcript is the active requirement and overrides conflicting earlier requests. Do not continue a superseded plan. If update_task_status already succeeded for this requirement, do not call it again unless actual task progress materially changed; continue the work or answer.",
+                    session.input_revision, session.latest_input_seq
+                )
+            };
             let latest_user =
                 crate::permission_resume::latest_user_requirement(&session.conversation).cloned();
-            let parent = latest_user
-                .as_ref()
-                .and_then(|message| message.data_envelope.as_ref());
+            let parent = child_runtime_label.as_ref().or_else(|| {
+                latest_user
+                    .as_ref()
+                    .and_then(|message| message.data_envelope.as_ref())
+            });
             let mut marker = ChatMessage::system_event(&marker_id, &marker_text);
             marker.data_envelope = derive_internal_tool_result_envelope(
                 parent,
@@ -2676,12 +2987,10 @@ async fn run_inner_impl(
                 } else {
                     marker_text.to_string()
                 };
-                let parent = session
-                    .conversation
-                    .iter()
-                    .rev()
-                    .find(|message| message.role == ChatRole::User)
-                    .and_then(|message| message.data_envelope.as_ref());
+                let parent = child_runtime_label.as_ref().or_else(|| {
+                    crate::permission_resume::latest_user_requirement(&session.conversation)
+                        .and_then(|message| message.data_envelope.as_ref())
+                });
                 let mut marker = ChatMessage::system_event(&marker_id, &marker_text);
                 marker.data_envelope = derive_internal_tool_result_envelope(
                     parent,
@@ -2700,12 +3009,10 @@ async fn run_inner_impl(
                     "runtime-permission-protocol-retry-{turn_id}-{permission_protocol_retries}"
                 );
                 let marker_text = "RUNTIME RECOVERY NOTICE (server authoritative): the previous permission-continuation response violated the tool-call protocol and was discarded before any action was recorded or executed. Return exactly one exposed tool call now, with no prose, no second JSON value, and no trailing characters. Choose the next authorized action in dependency order. If that tool has approved_exact_input, copy it byte-for-byte as the complete arguments; otherwise stay within its active grant scope. This notice grants no authority, and the server will still require the matching active grant and final validation.";
-                let parent = session
-                    .conversation
-                    .iter()
-                    .rev()
-                    .find(|message| message.role == ChatRole::User)
-                    .and_then(|message| message.data_envelope.as_ref());
+                let parent = child_runtime_label.as_ref().or_else(|| {
+                    crate::permission_resume::latest_user_requirement(&session.conversation)
+                        .and_then(|message| message.data_envelope.as_ref())
+                });
                 let mut marker = ChatMessage::system_event(&marker_id, marker_text);
                 marker.data_envelope = derive_internal_tool_result_envelope(
                     parent,
@@ -2726,12 +3033,10 @@ async fn run_inner_impl(
             let marker_id =
                 format!("runtime-empty-end-turn-retry-{turn_id}-{empty_end_turn_retries}");
             let marker_text = "RUNTIME RECOVERY NOTICE (server authoritative): the previous provider response contained reasoning but no assistant text or tool call. Continue the same requirement now with either a visible answer or a valid exposed tool call. This notice grants no permission. If a prior tool was denied for missing authorization, request the exact bounded grant before retrying it.";
-            let parent = session
-                .conversation
-                .iter()
-                .rev()
-                .find(|message| message.role == ChatRole::User)
-                .and_then(|message| message.data_envelope.as_ref());
+            let parent = child_runtime_label.as_ref().or_else(|| {
+                crate::permission_resume::latest_user_requirement(&session.conversation)
+                    .and_then(|message| message.data_envelope.as_ref())
+            });
             let mut marker = ChatMessage::system_event(&marker_id, marker_text);
             marker.data_envelope = derive_internal_tool_result_envelope(
                 parent,
@@ -2750,12 +3055,10 @@ async fn run_inner_impl(
             let marker_id =
                 format!("runtime-truncated-turn-retry-{turn_id}-{truncated_turn_retries}");
             let marker_text = "RUNTIME RECOVERY NOTICE (server authoritative): the previous provider response reached its output-token limit and was discarded before any assistant text or tool call was committed. Continue the same requirement now. Do not repeat prior reasoning. Produce only the minimum valid exposed tool call(s) needed for the next step, or a concise visible answer if no tool is needed. Re-read current authorized grants and preserve approved exact inputs. This notice grants no permission.";
-            let parent = session
-                .conversation
-                .iter()
-                .rev()
-                .find(|message| message.role == ChatRole::User)
-                .and_then(|message| message.data_envelope.as_ref());
+            let parent = child_runtime_label.as_ref().or_else(|| {
+                crate::permission_resume::latest_user_requirement(&session.conversation)
+                    .and_then(|message| message.data_envelope.as_ref())
+            });
             let mut marker = ChatMessage::system_event(&marker_id, marker_text);
             marker.data_envelope = derive_internal_tool_result_envelope(
                 parent,
@@ -2775,18 +3078,14 @@ async fn run_inner_impl(
                 "runtime-post-tool-permission-protocol-retry-{turn_id}-{post_tool_permission_protocol_retries}"
             );
             let marker_text = "RUNTIME RECOVERY NOTICE (server authoritative): the previous request_permissions call had invalid JSON arguments and was discarded before it was recorded or executed. Rebuild exactly one valid request_permissions call from the current capability catalog and CURRENT REUSABLE PROVIDER RESULTS. Copy complete opaque page and element references verbatim, keep the exact downstream tool input bounded, and do not repeat the preceding Provider action. This notice grants no authority; normal permission planning and final server validation remain authoritative.";
-            let parent = session
-                .conversation
-                .iter()
-                .rev()
-                // The recovery notice contains no Provider output bytes. It
-                // only points at separately projected, independently
-                // authorized context, so inherit the current user request's
-                // model destination instead of the preceding Provider
-                // receipt, whose empty destination is intentionally
-                // fail-closed until an explicit export is selected.
-                .find(|message| message.role == ChatRole::User)
-                .and_then(|message| message.data_envelope.as_ref());
+            // This server-authored notice contains no Provider output bytes.
+            // Inherit the delegated projection or owner requirement, keeping
+            // the same model destination and retention without fabricating a
+            // User message in a child or exporting the preceding receipt.
+            let parent = child_runtime_label.as_ref().or_else(|| {
+                crate::permission_resume::latest_user_requirement(&session.conversation)
+                    .and_then(|message| message.data_envelope.as_ref())
+            });
             let mut marker = ChatMessage::system_event(&marker_id, marker_text);
             marker.data_envelope = derive_internal_tool_result_envelope(
                 parent,
@@ -2831,7 +3130,7 @@ async fn run_inner_impl(
             session,
         )
         .await?;
-        let mut context_view = prepare_model_context(
+        let mut context_view = match prepare_model_context(
             deps,
             session,
             turn_id,
@@ -2839,7 +3138,17 @@ async fn run_inner_impl(
             &mut compression_attempted,
             sink,
         )
-        .await?;
+        .await
+        {
+            Ok(view) => view,
+            Err(error)
+                if call_budget::is_exhausted(&error)
+                    && session.trigger_origin == TriggerOrigin::GoalContinuation =>
+            {
+                return Ok(LoopOutcome::GoalBudgetReached);
+            }
+            Err(error) => return Err(error),
+        };
         crate::schedule::review_result::project(&mut context_view.messages)?;
         // Completion-only projections do not replace the regular conversation's
         // occupancy baseline. New results/replies still count via usage().
@@ -3008,14 +3317,21 @@ async fn run_inner_impl(
             } else {
                 crate::chat::ToolChoice::Auto
             },
-            response_format: deps.response_format.clone(),
+            response_format: if session.agent_role.binding().is_some() {
+                crate::prompt::ResponseFormatSpec::None
+            } else {
+                deps.response_format.clone()
+            },
             use_case: crate::model_profile::ModelUseCase::Agent,
             previous_cache_projection: session.cache_projection.clone(),
-            caller_output_hard_cap: (session.trigger_origin == TriggerOrigin::GoalContinuation)
-                .then_some(8_192),
+            delegation_call: None,
+            caller_output_hard_cap: (session.trigger_origin == TriggerOrigin::GoalContinuation
+                || session.delegation_group_id.is_some()
+                || session.agent_role.binding().is_some())
+            .then_some(call_budget::OUTPUT_HARD_CAP),
         };
-        let request = if let Some(event_id) = deps.model.command_completion_event_id() {
-            crate::command_completion::project_request(request, session, event_id)?
+        let mut request = if let Some(event_id) = deps.model.command_completion_event_id() {
+            project_command_completion(deps, session, event_id, request).await?
         } else {
             request
         };
@@ -3147,52 +3463,27 @@ async fn run_inner_impl(
         projection_rebuilds = 0;
         // Interpretation is published only after protocol and safety validation.
         let completion_only = deps.model.command_completion_event_id().is_some();
-        let goal_budget = if session.trigger_origin == TriggerOrigin::GoalContinuation {
-            let upper = crate::goal::GoalUsage {
-                // A byte-level tokenization cannot exceed the serialized input
-                // byte count. Cache read/write and uncached input share this
-                // one envelope; output is separately capped above.
-                input_tokens: u64::try_from(assembled_request_cost)
-                    .unwrap_or(u64::MAX)
-                    .saturating_add(8_192),
-                model_calls: 1,
-                active_time_ms: 600_000,
-                ..crate::goal::GoalUsage::default()
-            };
-            let goal = deps.session_seam.load_claimed_goal(session).await?;
-            match goal.available_for(upper) {
-                Ok(()) => {}
-                Err(crate::goal::GoalError::BudgetExceeded) => {
-                    return Ok(LoopOutcome::GoalBudgetReached);
-                }
-                Err(error) => {
-                    return Err(AgentError {
-                        kind: AgentErrorKind::Internal,
-                        message: format!("invalid goal model budget: {error:?}"),
-                        retryable: false,
-                        safe_for_model: false,
-                        error_code: None,
-                    });
-                }
-            }
-            let identity = format!(
-                "model:{turn_id}:{}",
-                session.current_turn_steps.saturating_add(1)
-            );
-            if let Err(error) = deps
-                .session_seam
-                .reserve_goal_budget(session, &identity, upper, &(deps.clock)())
-                .await
+        physical_model_attempt = physical_model_attempt
+            .checked_add(1)
+            .ok_or_else(|| crate::subagent::invalid("physical model attempt counter exhausted"))?;
+        let identity = format!("model:{turn_id}:{physical_model_attempt}");
+        let budget = match call_budget::reserve_model(
+            deps,
+            session,
+            &mut request,
+            &identity,
+            crate::subagent::reservation::DelegationCallKind::Model,
+        )
+        .await
+        {
+            Ok(budget) => budget,
+            Err(error)
+                if call_budget::is_exhausted(&error)
+                    && session.trigger_origin == TriggerOrigin::GoalContinuation =>
             {
-                let latest = deps.session_seam.load_claimed_goal(session).await?;
-                if latest.available_for(upper) == Err(crate::goal::GoalError::BudgetExceeded) {
-                    return Ok(LoopOutcome::GoalBudgetReached);
-                }
-                return Err(error);
+                return Ok(LoopOutcome::GoalBudgetReached);
             }
-            Some((identity, upper, std::time::Instant::now()))
-        } else {
-            None
+            Err(error) => return Err(error),
         };
         let dial_result = if completion_only {
             deps.model
@@ -3201,37 +3492,7 @@ async fn run_inner_impl(
         } else {
             deps.model.call(request, sink).await
         };
-        if let Some((identity, upper, started)) = goal_budget {
-            let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-            let actual = match &dial_result {
-                Ok(turn) => match (turn.usage.input_tokens, turn.usage.output_tokens) {
-                    (Some(input), Some(output)) if input >= 0 && output >= 0 => {
-                        crate::goal::GoalUsage {
-                            input_tokens: input as u64,
-                            output_tokens: output as u64,
-                            cache_read_tokens: turn.usage.cache_read_tokens.unwrap_or(0).max(0)
-                                as u64,
-                            cache_write_tokens: turn.usage.cache_write_tokens.unwrap_or(0).max(0)
-                                as u64,
-                            model_calls: 1,
-                            active_time_ms: elapsed_ms,
-                            ..crate::goal::GoalUsage::default()
-                        }
-                    }
-                    _ => crate::goal::GoalUsage {
-                        active_time_ms: elapsed_ms,
-                        ..upper
-                    },
-                },
-                Err(_) => crate::goal::GoalUsage {
-                    active_time_ms: elapsed_ms,
-                    ..upper
-                },
-            };
-            deps.session_seam
-                .settle_goal_budget(session, &identity, actual, &(deps.clock)())
-                .await?;
-        }
+        call_budget::settle_model(deps, session, budget, &dial_result).await?;
         if goal_control_only
             && !goal_required_choice_rejected
             && dial_result
@@ -3246,6 +3507,10 @@ async fn run_inner_impl(
             continue;
         }
         let turn = dial_result?;
+        if child_source_paused(deps, session).await? {
+            sink.on_turn_discarded();
+            return Ok(LoopOutcome::DelegationSourcePaused);
+        }
         if let Some(current_input_revision) = input_revision_advanced(deps, session).await? {
             return Ok(LoopOutcome::Superseded {
                 previous_input_revision: session.input_revision,
@@ -3417,19 +3682,48 @@ async fn run_inner_impl(
             .saturating_sub(assembled_request_cost.saturating_add(4096));
         match disposition {
             TurnDisposition::Answer => {
+                if let Some(binding) = session.agent_role.binding()
+                    && deps.model.command_completion_event_id().is_none()
+                {
+                    deps.session_seam
+                        .subagents(session)
+                        .ok_or_else(|| {
+                            crate::subagent::invalid(
+                                "durable child answer validation is unavailable",
+                            )
+                        })?
+                        .evaluate_child_answer(
+                            session,
+                            crate::subagent::state::PlanningFence {
+                                input_revision: binding.input_revision,
+                                control_revision: binding.control_revision,
+                                source_epoch: binding.source_epoch,
+                            },
+                            &turn.text,
+                        )
+                        .await?;
+                }
                 let mut message =
                     ChatMessage::text(mint(), crate::chat::ChatRole::Assistant, turn.text.clone())
                         .with_turn_id(session.current_turn_id.clone().unwrap_or_default());
                 message.data_envelope = turn.provider_meta.data_envelope.clone();
+                message.replay_disposition = turn.provider_meta.replay.clone();
                 message.reasoning = turn
                     .provider_meta
                     .display_reasoning
                     .as_deref()
                     .and_then(crate::reasoning_display::bounded);
+                let response_message_id = message.message_id.clone();
                 session.conversation.push(message);
                 // The model reacted to this request; drop any pending auto-trigger
                 // whose completion it saw here so it does not also fire a turn.
                 session.clear_reacted_auto_triggers(&request_message_ids);
+                stage_subagent_observations(
+                    session,
+                    &request_message_ids,
+                    &response_message_id,
+                    true,
+                )?;
                 deps.session_seam.save(session).await?;
                 if session.trigger_origin == TriggerOrigin::GoalContinuation
                     && !goal_correction_attempted
@@ -3469,7 +3763,14 @@ async fn run_inner_impl(
                     .display_reasoning
                     .as_deref()
                     .and_then(crate::reasoning_display::bounded);
+                let response_message_id = message.message_id.clone();
                 session.conversation.push(message);
+                stage_subagent_observations(
+                    session,
+                    &request_message_ids,
+                    &response_message_id,
+                    false,
+                )?;
                 // The model reacted to this request (with tool calls); drop any
                 // pending auto-trigger whose completion it saw here. Persisted with
                 // the tool results at the save below.
@@ -3481,70 +3782,35 @@ async fn run_inner_impl(
                     sink.on_partial_committed();
                 }
 
-                if session.trigger_origin == TriggerOrigin::GoalContinuation {
-                    let tool_calls =
-                        u32::try_from(turn.tool_calls.len()).map_err(|_| AgentError {
-                            kind: AgentErrorKind::OutputLimitExceeded,
-                            message: "goal tool call batch is too large".into(),
-                            retryable: false,
-                            safe_for_model: true,
-                            error_code: None,
-                        })?;
-                    let charge = crate::goal::GoalUsage {
-                        tool_calls,
-                        ..crate::goal::GoalUsage::default()
-                    };
-                    let goal = deps.session_seam.load_claimed_goal(session).await?;
-                    let mut budget_reached = match goal.available_for(charge) {
-                        Ok(()) => false,
-                        Err(crate::goal::GoalError::BudgetExceeded) => true,
-                        Err(error) => {
-                            return Err(AgentError {
-                                kind: AgentErrorKind::Internal,
-                                message: format!("invalid goal tool budget: {error:?}"),
-                                retryable: false,
-                                safe_for_model: false,
-                                error_code: None,
-                            });
-                        }
-                    };
-                    if !budget_reached {
-                        let identity = format!("tools:{turn_id}:{}", session.current_turn_steps);
-                        if let Err(error) = deps
-                            .session_seam
-                            .reserve_goal_budget(session, &identity, charge, &(deps.clock)())
-                            .await
-                        {
-                            let latest = deps.session_seam.load_claimed_goal(session).await?;
-                            if latest.available_for(charge)
-                                != Err(crate::goal::GoalError::BudgetExceeded)
-                            {
-                                return Err(error);
-                            }
-                            budget_reached = true;
-                        } else {
-                            deps.session_seam
-                                .settle_goal_budget(session, &identity, charge, &(deps.clock)())
-                                .await?;
-                        }
+                let mut tool_budget_error = None;
+                for call in &turn.tool_calls {
+                    if let Err(error) = call_budget::charge_tool(deps, session, turn_id, call).await
+                    {
+                        tool_budget_error = Some(error);
+                        break;
                     }
-                    if budget_reached {
-                        for call in &turn.tool_calls {
-                            append_internal_tool_result(
-                                session,
-                                turn.provider_meta.data_envelope.as_ref(),
-                                mint(),
-                                &call.id,
-                                "not executed: the total goal tool-call budget is exhausted".into(),
-                                "goal_tool_budget_reached",
-                            )?;
-                        }
-                        deps.session_seam.save(session).await?;
-                        for call in &turn.tool_calls {
-                            finish_tool(session, &call.id, false, sink);
-                        }
+                }
+                if let Some(error) = tool_budget_error {
+                    for call in &turn.tool_calls {
+                        append_internal_tool_result(
+                            session,
+                            turn.provider_meta.data_envelope.as_ref(),
+                            mint(),
+                            &call.id,
+                            "not executed: call budget admission failed before dispatch".into(),
+                            "tool_budget_admission_failed",
+                        )?;
+                    }
+                    deps.session_seam.save(session).await?;
+                    for call in &turn.tool_calls {
+                        finish_tool(session, &call.id, false, sink);
+                    }
+                    if call_budget::is_exhausted(&error)
+                        && session.trigger_origin == TriggerOrigin::GoalContinuation
+                    {
                         return Ok(LoopOutcome::GoalBudgetReached);
                     }
+                    return Err(error);
                 }
 
                 if turn.tool_calls.len() != 1
@@ -3575,6 +3841,19 @@ async fn run_inner_impl(
                 // calls are not executed (§3). `halted` holds the skip note.
                 let mut halted: Option<String> = None;
                 for (call_index, call) in turn.tool_calls.iter().enumerate() {
+                    if child_source_paused(deps, session).await? {
+                        for skipped in &turn.tool_calls[call_index..] {
+                            append_internal_tool_result(
+                                session,
+                                turn.provider_meta.data_envelope.as_ref(),
+                                mint(),
+                                &skipped.id,
+                                "not executed: the delegated task source is paused".into(),
+                                "delegation_source_paused",
+                            )?;
+                        }
+                        return Ok(LoopOutcome::DelegationSourcePaused);
+                    }
                     if let Some(note) = &halted {
                         append_internal_tool_result(
                             session,
@@ -3683,13 +3962,7 @@ async fn run_inner_impl(
                     // A call naming a tool not exposed under the current scope/state
                     // becomes an error tool-result so the conversation stays
                     // well-formed and the model can adjust.
-                    let Some(tool) = lookup_exposed(
-                        deps.registry,
-                        &call.name,
-                        &session.scope_snapshot,
-                        &session.execution_state,
-                        session.trigger_origin,
-                    ) else {
+                    let Some(tool) = lookup_for_session(deps.registry, &call.name, session) else {
                         append_internal_tool_result(
                             session,
                             turn.provider_meta.data_envelope.as_ref(),
@@ -3845,6 +4118,82 @@ async fn run_inner_impl(
                     }
 
                     match tool.effect {
+                        ToolEffect::SubAgentPlanning
+                        | ToolEffect::SubAgentControl
+                        | ToolEffect::SubAgentQuery
+                        | ToolEffect::SubAgentWait => {
+                            sink.on_tool_started(&call.name, &call.id, &call.arguments_json);
+                            let result_message_id = mint();
+                            let result = match crate::subagent::tools::parse(session, call) {
+                                Ok(operation)
+                                    if call.name != crate::subagent::tools::WAIT
+                                        || turn.tool_calls.len() == 1 =>
+                                {
+                                    match deps.session_seam.subagents(session) {
+                                        Some(seam) => {
+                                            seam.execute(
+                                                session,
+                                                call,
+                                                operation,
+                                                &result_message_id,
+                                            )
+                                            .await
+                                        }
+                                        None => Err(crate::subagent::invalid(
+                                            "durable delegation is unavailable",
+                                        )),
+                                    }
+                                }
+                                Ok(_) => Err(crate::subagent::invalid(
+                                    "wait_subagents must be called alone",
+                                )),
+                                Err(error) => Err(error),
+                            };
+                            match result {
+                                Ok(receipt) => {
+                                    let payload_text = receipt.payload.to_string();
+                                    let committed = session
+                                        .conversation
+                                        .iter()
+                                        .find(|message| {
+                                            message.message_id == receipt.result_message_id
+                                        })
+                                        .is_some_and(|message| {
+                                            message.role == ChatRole::Tool
+                                                && message.tool_call_id.as_deref()
+                                                    == Some(call.id.as_str())
+                                                && message.data_envelope.is_some()
+                                                && message.text == payload_text
+                                        });
+                                    if !committed {
+                                        return Err(crate::subagent::invalid(
+                                            "delegation tool receipt was not durably committed",
+                                        ));
+                                    }
+                                    finish_tool(session, &call.id, true, sink);
+                                    if let Some(wait) = &session.subagent_wait {
+                                        return Ok(LoopOutcome::SubAgentsWaiting {
+                                            wait_id: wait.wait_id.clone(),
+                                        });
+                                    }
+                                }
+                                Err(error) => {
+                                    append_internal_tool_result(
+                                        session,
+                                        turn.provider_meta.data_envelope.as_ref(),
+                                        mint(),
+                                        &call.id,
+                                        crate::model_input::describe_error(
+                                            &call.name,
+                                            &error.message,
+                                        ),
+                                        &call.name,
+                                    )?;
+                                    deps.session_seam.save(session).await?;
+                                    finish_tool(session, &call.id, false, sink);
+                                }
+                            }
+                        }
                         ToolEffect::ReadOnly => {
                             // A read tool error is reported back as a tool result;
                             // the backend transport itself does not fail the turn.
@@ -4063,6 +4412,17 @@ async fn run_inner_impl(
                             sink.on_tool_started(&call.name, &call.id, &call.arguments_json);
                             match crate::goal_tools::parse(call) {
                                 Ok(control) => {
+                                    if matches!(control, crate::goal::GoalControl::Complete { .. })
+                                        && let Some(seam) = deps.session_seam.subagents(session)
+                                        && !seam.required_children_complete(session).await?
+                                    {
+                                        append_internal_tool_result(session, turn.provider_meta.data_envelope.as_ref(), mint(), &call.id,
+                                            "required_subagents_incomplete: read_subagent_result for each required child at its current state revision and assess its answer against the goal. Finished means the child returned, not that the goal was achieved. Use wait_subagents for unfinished dependencies. A failed or cancelled required dependency cannot be claimed as complete.".into(),
+                                            crate::goal_tools::CONTROL_GOAL_TOOL_NAME)?;
+                                        deps.session_seam.save(session).await?;
+                                        finish_tool(session, &call.id, false, sink);
+                                        continue;
+                                    }
                                     let claimed_goal =
                                         deps.session_seam.load_claimed_goal(session).await?;
                                     append_internal_tool_result(
@@ -4100,6 +4460,18 @@ async fn run_inner_impl(
                                     message.data_envelope =
                                         turn.provider_meta.data_envelope.clone();
                                     session.conversation.push(message);
+                                    if matches!(
+                                        control,
+                                        crate::goal::GoalControl::Complete { .. }
+                                            | crate::goal::GoalControl::Blocked { .. }
+                                    ) {
+                                        stage_subagent_observations(
+                                            session,
+                                            &request_message_ids,
+                                            &response_message_id,
+                                            true,
+                                        )?;
+                                    }
                                     return Ok(LoopOutcome::GoalControlled {
                                         control,
                                         call_id: call.id.clone(),
@@ -4387,7 +4759,7 @@ async fn run_inner_impl(
                                 }
                             }
                         }
-                        ToolEffect::SchedulePlanning => {
+                        ToolEffect::SchedulePlanning | ToolEffect::ScheduleQuery => {
                             sink.on_tool_started(&call.name, &call.id, &call.arguments_json);
                             // Persist the model call before a separate transaction
                             // compares the exact version and lease and records its result.
@@ -5849,6 +6221,63 @@ fn validate_permission_request_availability(
 /// Emit a tool's terminal UI event from the authoritative result that was just
 /// appended to the conversation. Tool output reaches the UI through the same
 /// redacted, bounded path used for model context.
+fn stage_subagent_observations(
+    session: &mut PersistedAgentSession,
+    request_message_ids: &HashSet<String>,
+    response_message_id: &str,
+    interpreted: bool,
+) -> Result<(), AgentError> {
+    if !session.agent_role.is_main() {
+        return Ok(());
+    }
+    if let Some(notification) = session.ready_subagent_notification.as_mut()
+        && notification.parent_input_revision == session.input_revision
+        && notification.parent_control_revision == session.control_revision
+        && notification.accepted_response_message_id.is_none()
+        && request_message_ids.contains(&notification.message_id)
+    {
+        notification.accepted_response_message_id = Some(response_message_id.into());
+    }
+    for result in &session.observed_subagent_results {
+        if result.parent_input_revision != session.input_revision
+            || result.parent_control_revision != session.control_revision
+            || !request_message_ids.contains(&result.result_message_id)
+        {
+            continue;
+        }
+        let accepted = crate::subagent::seam::AcceptedResultObservation {
+            result: result.clone(),
+            response_message_id: response_message_id.into(),
+        };
+        if !session
+            .accepted_subagent_observations
+            .iter()
+            .any(|previous| previous.result == *result)
+        {
+            if session.accepted_subagent_observations.len() >= 64 {
+                return Err(crate::subagent::invalid("too many subagent observations"));
+            }
+            session
+                .accepted_subagent_observations
+                .push(accepted.clone());
+        }
+        if interpreted
+            && !session
+                .interpreted_subagent_results
+                .iter()
+                .any(|previous| previous.result == *result)
+        {
+            if session.interpreted_subagent_results.len() >= 64 {
+                return Err(crate::subagent::invalid(
+                    "too many subagent interpretations",
+                ));
+            }
+            session.interpreted_subagent_results.push(accepted);
+        }
+    }
+    Ok(())
+}
+
 fn finish_tool(
     session: &mut crate::session::PersistedAgentSession,
     call_id: &str,
@@ -6358,7 +6787,7 @@ async fn run_mutating<F: FnMut() -> String>(
     // advertised to an automation turn ([`lookup_exposed`] would already reject
     // it), but should one still reach here it is refused before any work is
     // created, so a completion can never self-trigger a new command.
-    if !session.trigger_origin.allows_new_mutation() {
+    if !session.allows_new_mutation() {
         append_mutating_result(
             deps,
             session,

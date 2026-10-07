@@ -11,6 +11,7 @@ const request = { schemaVersion: 1, requestId: 'permission', inputRevision: 3, s
 const subscribe = () => () => undefined;
 const sendMessage = () => 'request';
 const snapshot = (active = false) => ({ ok: true, json: async () => ({ data: {
+    controlRevision: 1, mainStopped: false, subagents: { active_tasks: [], task: null, tasks: null, parent_session_id: null, attention_tasks: [], attention_count: 0 },
     sessionId: 'session', seq: 1, inputRevision: 3, active, requestId: active ? 'running' : undefined,
     messages: [], contextAttachments: [], permissionRequests: [request],
 } }) });
