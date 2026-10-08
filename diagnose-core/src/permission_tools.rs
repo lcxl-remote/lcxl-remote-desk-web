@@ -738,25 +738,41 @@ pub fn canonical_tool_permission_input_json(
             .entry("max_results".to_string())
             .or_insert_with(|| serde_json::json!(5));
     }
-    if tool_name == "read_current_screen"
+    let reference_selector = match tool_name {
+        "read_current_screen" => Some(("window", "window_id")),
+        "inspect_desktop_ui" => Some(("root", "root_id")),
+        _ => None,
+    };
+    if let Some((reference_field, id_field)) = reference_selector
         && let Some(input) = value.as_object_mut()
-        && !input.contains_key("window_id")
-        && let Some(window) = input.get("window").and_then(serde_json::Value::as_object)
-        && window.len() == 4
+        && !input.contains_key(id_field)
+        && let Some(reference) = input
+            .get(reference_field)
+            .and_then(serde_json::Value::as_object)
+        && reference.len() == 4
         && let Ok(reference) = serde_json::from_value::<desk_agent_protocol::computer_use::ObjectRef>(
-            serde_json::Value::Object(window.clone()),
+            serde_json::Value::Object(reference.clone()),
         )
-        && reference.object_kind == desk_agent_protocol::computer_use::ObjectKind::Window
+        && match tool_name {
+            "read_current_screen" => {
+                reference.object_kind == desk_agent_protocol::computer_use::ObjectKind::Window
+            }
+            "inspect_desktop_ui" => matches!(
+                reference.object_kind,
+                desk_agent_protocol::computer_use::ObjectKind::DesktopSession
+                    | desk_agent_protocol::computer_use::ObjectKind::Application
+                    | desk_agent_protocol::computer_use::ObjectKind::Window
+                    | desk_agent_protocol::computer_use::ObjectKind::UiElement
+            ),
+            _ => false,
+        }
         && !reference.token.is_empty()
     {
         // The model approves an observed ID; the server later expands it into
         // a native reference. Bind permission to the same ID on both paths.
         // Do not collapse conflicting selectors, wrong kinds or extra fields.
-        input.remove("window");
-        input.insert(
-            "window_id".into(),
-            serde_json::Value::String(reference.token),
-        );
+        input.remove(reference_field);
+        input.insert(id_field.into(), serde_json::Value::String(reference.token));
     }
     canonical_permission_input_json(value)
 }
@@ -1685,6 +1701,45 @@ mod tests {
         assert_eq!(
             unchanged_ai_denied_item(&[request], &[decision], &retry),
             None
+        );
+    }
+
+    #[test]
+    fn ui_inspection_exact_permission_matches_server_resolved_root_only() {
+        let canonical =
+            |value| canonical_tool_permission_input_json("inspect_desktop_ui", value).unwrap();
+        let approved = canonical(json!({"root_id":"root-1","queries":["计算器","Calculator"]}));
+        for kind in ["desktop_session", "application", "window", "ui_element"] {
+            let reference = json!({"token":"root-1","snapshot_id":"identity-1","object_kind":kind,"expires_at":""});
+            assert_eq!(
+                approved,
+                canonical(json!({"root":reference.clone(),"queries":["计算器","Calculator"]}))
+            );
+            let mut refreshed = reference.clone();
+            refreshed["snapshot_id"] = json!("identity-2");
+            assert_eq!(
+                approved,
+                canonical(json!({"root":refreshed,"queries":["计算器","Calculator"]}))
+            );
+            let mut other = reference.clone();
+            other["token"] = json!("root-2");
+            let mut extra = reference.clone();
+            extra["unexpected"] = json!(true);
+            for unapproved in [
+                json!({"queries":["计算器","Calculator"]}),
+                json!({"root":other,"queries":["计算器","Calculator"]}),
+                json!({"root":extra,"queries":["计算器","Calculator"]}),
+                json!({"root":reference,"root_id":"root-1","queries":["计算器","Calculator"]}),
+                json!({"root":reference,"queries":["another application"]}),
+                json!({"root":reference,"queries":["计算器","Calculator"],"max_depth":20}),
+            ] {
+                assert_ne!(approved, canonical(unapproved));
+            }
+        }
+        let wrong_kind = json!({"token":"root-1","snapshot_id":"identity-1","object_kind":"browser_page","expires_at":""});
+        assert_ne!(
+            approved,
+            canonical(json!({"root":wrong_kind,"queries":["计算器","Calculator"]}))
         );
     }
 

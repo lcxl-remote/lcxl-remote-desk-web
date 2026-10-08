@@ -390,33 +390,9 @@ pub async fn get_ai_assistant_session(
         Some(snapshot) => {
             let background_tasks = snapshot.background_tasks;
             let capability_grants = snapshot.capability_grants;
+            let goal = snapshot.goal;
+            let pending_goal_open_request = snapshot.pending_goal_open_request;
             let snapshot = snapshot.session;
-            let goal = crate::agent_goal_store::load_latest_for_subject(
-                crate::db::get_db(),
-                &session_id,
-                &actor_id,
-                &target_audience,
-            )
-            .await
-            .map_err(|_| {
-                DeskSignalError::new_custom_error(
-                    DeskErrorCode::SYSTEM_ERROR,
-                    "goal snapshot unavailable",
-                )
-            })?;
-            let pending_goal_open_request = crate::agent_goal_open_store::pending_for_subject(
-                crate::db::get_db(),
-                &session_id,
-                &actor_id,
-                &target_audience,
-            )
-            .await
-            .map_err(|_| {
-                DeskSignalError::new_custom_error(
-                    DeskErrorCode::SYSTEM_ERROR,
-                    "goal opening request snapshot unavailable",
-                )
-            })?;
             let approval_delegation = crate::agent_approval_store::load_latest_for_subject(
                 crate::db::get_db(),
                 &session_id,

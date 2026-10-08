@@ -119,7 +119,7 @@ async fn model_waits_for_explicit_schedule_decision_and_stop_interrupts_wait() {
         let model = ScriptModel {
             turns: RefCell::new(
                 [
-                    tool_use("create", crate::schedule::proposal::REQUEST_SCHEDULE),
+                    tool_use_args("create", crate::schedule::proposal::REQUEST_SCHEDULE, r#"{"kind":"conversation_resume","title":"Reminder","prompt":"Remind me","rule":{"kind":"after_confirmation","delay_seconds":60}}"#),
                     answer("decision received"),
                 ]
                 .into(),

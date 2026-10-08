@@ -134,7 +134,8 @@ async fn validate_observation_on(
                 name: reference.name.clone(),
                 arguments_json: reference.arguments_json.clone(),
             };
-            let decision = desk_diagnose_core::goal_tools::parse(&call).map_err(|_| invalid())?;
+            let decision =
+                desk_diagnose_core::goal_tools::recorded_decision(&call).map_err(|_| invalid())?;
             let group = super::main_tools::current_group_on(txn, parent).await?;
             if parent.trigger_origin != desk_diagnose_core::session::TriggerOrigin::GoalContinuation
                 || group.source.goal_id().is_none()
@@ -146,8 +147,8 @@ async fn validate_observation_on(
                         .map(|segment| segment.goal_id.as_str())
                 || !matches!(
                     decision,
-                    desk_diagnose_core::goal::GoalControl::Complete { .. }
-                        | desk_diagnose_core::goal::GoalControl::Blocked { .. }
+                    desk_diagnose_core::goal_tools::GoalDecision::Complete
+                        | desk_diagnose_core::goal_tools::GoalDecision::Blocked
                 )
             {
                 return Err(invalid());

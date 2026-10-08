@@ -287,7 +287,7 @@ impl GoalOpenRequest {
             || self.expires_at_unix_ms <= self.created_at_unix_ms
             || self.expires_at_unix_ms - self.created_at_unix_ms > GOAL_OPEN_REQUEST_TTL_MS
             || self.goal_text.trim().is_empty()
-            || self.goal_text.len() > 16 * 1_024
+            || self.goal_text.chars().count() > 16 * 1_024
             || self.target_goal_id.is_some() != self.target_goal_revision.is_some()
             || (self.target_goal_id.is_some() && self.previous_completed_goal_id.is_some())
             || self.target_goal_revision == Some(0)
@@ -1214,9 +1214,9 @@ impl GoalRun {
         self.model_binding.validate()?;
         self.limits.validate()?;
         if self.goal_text.trim().is_empty()
-            || self.goal_text.len() > 16 * 1_024
+            || self.goal_text.chars().count() > 16 * 1_024
             || self.original_goal_text.trim().is_empty()
-            || self.original_goal_text.len() > 16 * 1_024
+            || self.original_goal_text.chars().count() > 16 * 1_024
         {
             return Err(GoalError::InvalidIdentity);
         }
@@ -1273,7 +1273,7 @@ impl GoalRun {
         model_binding.validate()?;
         opening.validate()?;
         if goal_text.trim().is_empty()
-            || goal_text.len() > 16 * 1_024
+            || goal_text.chars().count() > 16 * 1_024
             || input_revision == 0
             || created_at_unix_ms == 0
         {
@@ -2167,7 +2167,7 @@ impl GoalRun {
         self.can_propose_revision(input_revision)?;
         valid_id(source_message_id)?;
         if text.trim().is_empty()
-            || text.len() > 16 * 1_024
+            || text.chars().count() > 16 * 1_024
             || now_unix_ms < self.updated_at_unix_ms
             || now_unix_ms >= self.deadline_unix_ms
         {

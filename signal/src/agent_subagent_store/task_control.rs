@@ -45,7 +45,8 @@ fn validate_control(request: &AiAssistantSubAgentControl) -> Result<(), DbErr> {
             SubAgentControlAction::Cancel => false,
             SubAgentControlAction::Adjust { message } => {
                 message.trim().is_empty()
-                    || message.len() > desk_diagnose_core::subagent::MAX_DELEGATED_TASK_BYTES
+                    || message.chars().count()
+                        > desk_diagnose_core::subagent::MAX_DELEGATED_TASK_CHARS
             }
         }
     {

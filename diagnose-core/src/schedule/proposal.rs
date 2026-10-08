@@ -105,17 +105,17 @@ pub fn draft(
         || session.input_revision == 0
         || session.actor_id.is_empty()
         || session.device_id.is_empty()
-        || call.arguments_json.len() > 24 * 1024
+        || call.arguments_json.len() > 96 * 1024
     {
         return Err("schedule proposal is unavailable");
     }
     let input: Input =
         serde_json::from_str(&call.arguments_json).map_err(|_| "invalid schedule proposal")?;
     if input.title.trim().is_empty()
-        || input.title.len() > 240
+        || input.title.chars().count() > 240
         || input.title.chars().any(char::is_control)
         || input.prompt.trim().is_empty()
-        || input.prompt.len() > 16384
+        || input.prompt.chars().count() > 16384
         || input
             .prompt
             .chars()

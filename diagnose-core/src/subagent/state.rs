@@ -129,7 +129,7 @@ impl SubAgentRun {
             || self.actor_id.is_empty()
             || self.device_id.is_empty()
             || self.name.trim().is_empty()
-            || self.name.len() > super::MAX_SUBAGENT_NAME_BYTES
+            || self.name.chars().count() > super::MAX_SUBAGENT_NAME_CHARS
             || self.state_revision == 0
             || self.report_corrections_used > 1
             || self.dependencies.len() > 64

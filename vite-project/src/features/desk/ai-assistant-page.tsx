@@ -1,3 +1,4 @@
+import { AssistantGoalPanel, goalPlanningAction } from './assistant-goal-panel';
 import { AssistantTranscript } from './assistant-transcript';
 import { permissionToolLabel, permissionResourceLabel, permissionOperationLabel } from './assistant-permission-labels';
 import { AssistantAttachments } from './assistant-attachments';
@@ -27,7 +28,7 @@ import { useIsMobile } from '@/hooks/use-mobile';
 import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
 import { capabilityDescriptionKey } from './assistant-capability-copy';
-import { type FormEvent, useEffect, useState } from 'react';
+import { type FormEvent, useEffect, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { Check, AlertTriangle, ArrowDown, ArrowLeft, CalendarClock, Eye, FolderKey, ListTodo, LoaderCircle, Monitor, Paperclip, Plus, RefreshCw, Send, Settings2, ShieldCheck, X } from 'lucide-react';
@@ -301,6 +302,22 @@ export function AiAssistantWorkspace({
     const [taskPanelSession, setTaskPanelSession] = useState<string | null>(null);
     const [attachmentsOpen, setAttachmentsOpen] = useState(false);
     const [goalDetailsOpen, setGoalDetailsOpen] = useState(false);
+    const goalReplyRef = useRef<HTMLTextAreaElement>(null);
+    const goalComposerRequested = useRef(false);
+    const focusGoalComposer = () => {
+        if (goalDetailsOpen) {
+            goalComposerRequested.current = true;
+            setGoalDetailsOpen(false);
+        } else goalReplyRef.current?.focus();
+    };
+    const continueCompletedGoal = () => {
+        setStartGoal(true);
+        setPreviousCompletedGoalId(chat.goal?.goalId ?? null);
+        const draft = t('pages.aiAssistant.goalStillIncompletePrompt', { goal: chat.goal?.goalText ?? '' });
+        setQuestion(new TextEncoder().encode(draft).length <= 16_384
+            ? draft : t('pages.aiAssistant.goalStillIncompletePromptShort'));
+        focusGoalComposer();
+    };
     const [approvalSettingsOpen, setApprovalSettingsOpen] = useState(false);
     const [addContextOpen, setAddContextOpen] = useState(false);
     const [pendingScheduleCount, setPendingScheduleCount] = useState(0);
@@ -812,15 +829,18 @@ export function AiAssistantWorkspace({
                     </div>
                 </CardHeader>
                 <CardContent className="flex min-h-0 flex-1 flex-col gap-2 px-3 pb-3 pt-0">
+                    {chat.goal && <AssistantGoalPanel goal={chat.goal} connected={isConnected}
+                        main={!subagents.selected} enabled={assistantEnabled && isConnected && !chat.pendingGoalOpenRequest}
+                        busy={chat.goalUpdating || chat.turnRunning || !!chat.deliveryState}
+                        onDetails={() => setGoalDetailsOpen(true)} onAction={action => void chat.controlGoal(action)}
+                        onReply={focusGoalComposer} onContinue={continueCompletedGoal} />}
                     <div role="tabpanel" id="assistant-main-panel" aria-labelledby="assistant-tab-main" hidden={!!subagents.selected} className={subagents.selected ? 'hidden' : 'contents'}>
-                    {(pendingCount > 0 || runningTaskCount > 0 || chat.goal || chat.approvalDelegation?.status === 'active') && (
+                    {(pendingCount > 0 || runningTaskCount > 0 || chat.approvalDelegation?.status === 'active') && (
                         <div className="flex w-full min-w-0 shrink-0 items-center gap-2 overflow-x-auto px-1 text-xs">
                             {pendingCount > 0 && <Button type="button" size="sm" variant="outline" className="shrink-0 border-amber-500/50"
                                 onClick={() => jumpToPending()}>{t('pages.aiAssistant.workspace.pendingCount', { count: pendingCount })}</Button>}
                             {runningTaskCount > 0 && <Button type="button" size="sm" variant="ghost" className="shrink-0" onClick={() => setTaskPanelSession(permissionHistoryKey)}>
                                 {t('pages.aiAssistant.workspace.runningTasks', { count: runningTaskCount })}</Button>}
-                            {chat.goal && <Button type="button" size="sm" variant="ghost" className="max-w-[min(70vw,22rem)] shrink-0 truncate" onClick={() => setGoalDetailsOpen(true)}>
-                                {t(`pages.aiAssistant.goalStates.${chat.goal.state}`)} · {chat.goal.goalText}</Button>}
                             {chat.approvalDelegation?.status === 'active' && <Button type="button" size="sm" variant="ghost" className="shrink-0" onClick={() => setApprovalSettingsOpen(true)}>
                                 {t('pages.aiAssistant.workspace.autoApprovalActive')}</Button>}
                         </div>
@@ -1017,6 +1037,7 @@ export function AiAssistantWorkspace({
                         )}
                         <AssistantSubagentApprovalNotice agents={subagents} />
                         <Textarea
+                            ref={goalReplyRef}
                             value={question}
                             readOnly={!!rehearsal}
                             onChange={(event) => setQuestion(event.target.value)}
@@ -1118,7 +1139,13 @@ export function AiAssistantWorkspace({
                     <AssistantAttachments sessionId={chat.sessionId} open={attachmentsOpen}
                         onOpenChange={setAttachmentsOpen} showTrigger={false} />
                     <Sheet open={goalDetailsOpen} onOpenChange={setGoalDetailsOpen}>
-                        <SheetContent className="w-full overflow-y-auto sm:max-w-xl">
+                        <SheetContent className="w-full overflow-y-auto sm:max-w-xl" onCloseAutoFocus={event => {
+                            if (goalComposerRequested.current) {
+                                event.preventDefault();
+                                goalComposerRequested.current = false;
+                                goalReplyRef.current?.focus();
+                            }
+                        }}>
                             <SheetHeader><SheetTitle>{t('pages.aiAssistant.goalStart')}</SheetTitle></SheetHeader>
                     {chat.goal && (
                         <div data-testid="ai-assistant-goal" className="rounded-md border bg-muted/30 px-3 py-2 text-xs">
@@ -1162,32 +1189,24 @@ export function AiAssistantWorkspace({
                             {chat.goal.nextAttemptUnixMs && <p className="mt-1 text-muted-foreground">
                                 {t('pages.aiAssistant.goalNextAttempt', { time: new Date(chat.goal.nextAttemptUnixMs).toLocaleString() })}
                             </p>}
-                            {!['completed', 'failed', 'cancelled'].includes(chat.goal.state) && (
+                            {!subagents.selected && !['completed', 'failed', 'cancelled'].includes(chat.goal.state) && (
                                 <div className="mt-2 flex flex-wrap gap-2">
-                                    {['paused', 'waiting_user'].includes(chat.goal.state)
-                                        ? <Button size="sm" variant="outline" disabled={chat.goalUpdating || chat.turnRunning || Boolean(chat.pendingGoalOpenRequest)}
-                                            onClick={() => void chat.controlGoal(chat.goal?.pauseReason === 'stalled' ? 'retry_stalled' : 'resume')}>
-                                            {t(chat.goal.pauseReason === 'stalled' ? 'pages.aiAssistant.goalRetry' : 'pages.aiAssistant.goalResume')}
-                                        </Button>
-                                        : <Button size="sm" variant="outline" disabled={chat.goalUpdating || chat.turnRunning}
-                                            onClick={() => void chat.controlGoal('pause')}>
-                                            {t('pages.aiAssistant.goalPause')}
-                                        </Button>}
-                                    <Button size="sm" variant="destructive" disabled={chat.goalUpdating || chat.turnRunning}
-                                        onClick={() => void chat.controlGoal('cancel')}>
-                                        {t('pages.aiAssistant.goalCancel')}
-                                    </Button>
+                                    {chat.goal.state === 'waiting_user' && <Button size="sm" variant="outline"
+                                        disabled={chat.goalUpdating || chat.turnRunning || !isConnected}
+                                        onClick={focusGoalComposer}>
+                                        {t('pages.aiAssistant.goalReply')}</Button>}
+                                    {goalPlanningAction(chat.goal) && <Button size="sm" variant="outline"
+                                        disabled={chat.goalUpdating || chat.turnRunning || Boolean(chat.pendingGoalOpenRequest) || !isConnected}
+                                        onClick={() => void chat.controlGoal(goalPlanningAction(chat.goal!)!)}>
+                                        {t(chat.goal.state === 'paused' ? chat.goal.pauseReason === 'stalled' ? 'pages.aiAssistant.goalRetry' : 'pages.aiAssistant.goalResume' : 'pages.aiAssistant.goalPause')}
+                                    </Button>}
+                                    <Button size="sm" variant="destructive" disabled={chat.goalUpdating || chat.turnRunning || !isConnected}
+                                        onClick={() => void chat.controlGoal('cancel')}>{t('pages.aiAssistant.goalCancel')}</Button>
                                 </div>
                             )}
-                            {chat.goal.state === 'completed' && !chat.pendingGoalOpenRequest && <Button type="button" size="sm" variant="outline" className="mt-2"
+                            {!subagents.selected && chat.goal.state === 'completed' && !chat.pendingGoalOpenRequest && <Button type="button" size="sm" variant="outline" className="mt-2"
                                 disabled={chat.turnRunning || !!chat.deliveryState}
-                                onClick={() => {
-                                    setStartGoal(true);
-                                    setPreviousCompletedGoalId(chat.goal?.goalId ?? null);
-                                    const draft = t('pages.aiAssistant.goalStillIncompletePrompt', { goal: chat.goal?.goalText ?? '' });
-                                    setQuestion(new TextEncoder().encode(draft).length <= 16_384
-                                        ? draft : t('pages.aiAssistant.goalStillIncompletePromptShort'));
-                                }}>
+                                onClick={() => { setGoalDetailsOpen(false); continueCompletedGoal(); }}>
                                 {t('pages.aiAssistant.goalStillIncomplete')}
                             </Button>}
                         </div>

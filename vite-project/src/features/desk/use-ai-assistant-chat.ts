@@ -512,6 +512,7 @@ export function useAiAssistantChat({
             activeRequestAck.current = { requestId, order: snapshotRequestOrder.current };
         }
     };
+    const snapshotAcceptanceFloor = useRef(0);
     const snapshotWatermark = useRef<{
         conversationId: string;
         sessionId: string;
@@ -598,6 +599,7 @@ export function useAiAssistantChat({
             if (reportFailure && !Array.isArray(body?.data?.messages)) throw new Error('Snapshot unavailable');
             if (
                 snapshotEpoch.current !== expectedEpoch
+                || expectedRequestOrder < snapshotAcceptanceFloor.current
                 || conversationId.current !== expectedConversationId
                 || !Array.isArray(body?.data?.messages)
             ) return;
@@ -625,7 +627,8 @@ export function useAiAssistantChat({
                     watermark.conversationId !== expectedConversationId
                     || (
                         watermark.sessionId === snapshot.sessionId
-                        && snapshot.seq < watermark.seq
+                        && (snapshot.seq < watermark.seq || (snapshot.seq === watermark.seq
+                            && expectedRequestOrder <= watermark.requestOrder))
                     )
                     || (
                         watermark.sessionId !== snapshot.sessionId
@@ -1514,6 +1517,7 @@ export function useAiAssistantChat({
                 throw new Error(result?.message ?? 'Goal control was rejected.');
             }
             if (conversationId.current === selected) {
+                snapshotAcceptanceFloor.current = ++snapshotRequestOrder.current;
                 setGoal(result.data as AiAssistantGoal);
                 await loadSnapshot(selected);
             }
@@ -1551,6 +1555,7 @@ export function useAiAssistantChat({
                 throw new Error(result?.message ?? 'Goal decision was rejected.');
             }
             if (conversationId.current === selected) {
+                snapshotAcceptanceFloor.current = ++snapshotRequestOrder.current;
                 setPendingGoalOpenRequest(null);
                 if (result.data.goal) setGoal(result.data.goal as AiAssistantGoal);
                 await loadSnapshot(selected);

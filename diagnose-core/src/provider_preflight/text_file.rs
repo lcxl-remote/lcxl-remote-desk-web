@@ -245,13 +245,20 @@ pub fn resolve_file_result(
     result_call_id: &str,
     now_unix_ms: u64,
 ) -> Result<VerifiedTextFile, AgentError> {
+    resolve_file_result_from_history(&session.conversation, result_call_id, now_unix_ms)
+}
+
+pub(crate) fn resolve_file_result_from_history(
+    history: &[crate::chat::ChatMessage],
+    result_call_id: &str,
+    now_unix_ms: u64,
+) -> Result<VerifiedTextFile, AgentError> {
     use crate::chat::ChatRole;
     use desk_agent_protocol::computer_use::{
         ComputerActionCompleted, ComputerActionOutput, ComputerActionResultClass,
     };
     let registry = crate::ai_assistant::ai_assistant_provider_registry();
-    let mut source_calls = session
-        .conversation
+    let mut source_calls = history
         .iter()
         .filter(|message| message.role == ChatRole::Assistant)
         .flat_map(|message| &message.tool_calls)
@@ -275,7 +282,7 @@ pub fn resolve_file_result(
         .provider_for_capability(&descriptor.wire.capability_id)
         .ok_or_else(unavailable)?;
     let mut selected: Option<VerifiedTextFile> = None;
-    for message in &session.conversation {
+    for message in history {
         if !matches!(message.role, ChatRole::Tool | ChatRole::UntrustedOutput)
             || message.tool_call_id.as_deref() != Some(result_call_id)
         {
@@ -342,6 +349,9 @@ pub fn resolve_file_result(
 }
 
 impl VerifiedTextFile {
+    pub(crate) fn sha256(&self) -> &str {
+        &self.sha256
+    }
     pub fn reference(&self) -> &ObjectRef {
         &self.reference
     }
@@ -474,7 +484,7 @@ pub fn validate_mutation_permission_input(
     {
         return Err(error(
             AgentErrorKind::InvalidInput,
-            r#"A directory metadata result cannot authorize a text mutation. First request read_text_file with exact_input={"file_result_call_id":"<metadata call ID>","entry_name":"<exact file name>"}, then execute that read. For delete_text_file, required exact_input fields are {"file_result_call_id":"<successful read/create/update call ID>","expected_sha256":"<full SHA-256 from that result>"}. update_text_file also requires change and the approved directory selector from its tool definition. If an existing successful read/create/update result already supplies the needed file and SHA-256, reuse it directly. No approval card was created; correct the source rather than asking the user to confirm again."#,
+            r#"A directory metadata result cannot authorize a text mutation. First request read_text_file with exact_input={"file_result_call_id":"<metadata call ID>","entry_name":"<exact file name>"}, then execute that read. For delete_text_file, use exact_input={"file_version_id":"<file_version_id from successful read/create/update result>"}; the server restores the complete file reference and SHA-256. update_text_file also requires change and the approved directory selector from its tool definition. If an existing successful read/create/update result already supplies the needed file and SHA-256, reuse it directly. No approval card was created; correct the source rather than asking the user to confirm again."#,
             false,
             true,
         ));
@@ -1477,7 +1487,7 @@ mod tests {
             assert!(
                 error
                     .message
-                    .contains("successful read/create/update call ID")
+                    .contains("file_version_id from successful read/create/update result")
             );
             assert!(error.message.contains("No approval card was created"));
         }

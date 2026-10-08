@@ -296,19 +296,139 @@ pub fn record_response(
     }
 }
 
-/// Validate the encoded request after role/schema/cache projection. Cached input
-/// occupies the same context budget as uncached input.
+fn inline_image_bytes(block: &Value) -> usize {
+    match block["type"].as_str() {
+        Some("image_url") => block
+            .pointer("/image_url/url")
+            .and_then(Value::as_str)
+            .filter(|url| crate::image_input::validate_image_data_url(url).is_ok())
+            .map_or(0, str::len),
+        Some("image")
+            if block.pointer("/source/type").and_then(Value::as_str) == Some("base64") =>
+        {
+            let Some(media_type) = block.pointer("/source/media_type").and_then(Value::as_str)
+            else {
+                return 0;
+            };
+            let Some(data) = block.pointer("/source/data").and_then(Value::as_str) else {
+                return 0;
+            };
+            let url = format!("data:{media_type};base64,{data}");
+            if crate::image_input::validate_image_data_url(&url).is_ok() {
+                data.len()
+            } else {
+                0
+            }
+        }
+        Some("tool_result") => block["content"]
+            .as_array()
+            .map_or(0, |blocks| blocks.iter().map(inline_image_bytes).sum()),
+        _ => 0,
+    }
+}
+
+/// Validate encoded text, replay and framing after role/schema/cache projection.
+/// Inline image payloads use the independently enforced image budget. Image-like
+/// strings in text, tool arguments and schemas remain charged as text. Cached
+/// input occupies the same context budget as uncached input.
 pub fn validate_wire_budget(
     body: &Value,
     maximum: usize,
 ) -> Result<(), crate::model_profile::ProfileError> {
-    let actual = serde_json::to_vec(body).map_or(usize::MAX, |bytes| bytes.len());
+    let image_bytes = body["messages"].as_array().map_or(0, |messages| {
+        messages
+            .iter()
+            .filter_map(|message| message["content"].as_array())
+            .flatten()
+            .map(inline_image_bytes)
+            .sum::<usize>()
+    });
+    let actual = serde_json::to_vec(body)
+        .ok()
+        .and_then(|bytes| bytes.len().checked_sub(image_bytes))
+        .unwrap_or(usize::MAX);
     if actual > maximum {
         return Err(crate::model_profile::ProfileError::InvalidRequestOption(
             format!("encoded model request exceeds context byte budget ({actual} > {maximum})"),
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod wire_budget_tests {
+    use super::*;
+    use base64::Engine as _;
+
+    fn image() -> String {
+        base64::engine::general_purpose::STANDARD.encode(vec![7; 109_684])
+    }
+
+    #[test]
+    fn wire_budget_excludes_inline_images_but_keeps_text_and_framing() {
+        let data = image();
+        let url = format!("data:image/jpeg;base64,{data}");
+        let openai = json!({"messages":[{"role":"user","content":[
+            {"type":"text","text":"x".repeat(136_000)},
+            {"type":"image_url","image_url":{"url":url,"detail":"auto"}}
+        ]}]});
+        let anthropic = json!({"messages":[{"role":"user","content":[
+            {"type":"text","text":"x".repeat(136_000)},
+            {"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":data}}
+        ]}]});
+        for body in [openai, anthropic] {
+            assert!(serde_json::to_vec(&body).unwrap().len() > 262_144);
+            assert!(validate_wire_budget(&body, 262_144).is_ok());
+            assert!(validate_wire_budget(&body, 136_000).is_err());
+        }
+    }
+
+    #[test]
+    fn wire_budget_excludes_anthropic_nested_tool_result_images() {
+        let body = json!({"messages":[{"role":"user","content":[
+            {"type":"tool_result","tool_use_id":"read-screen","content":[
+                {"type":"text","text":"screen result"},
+                {"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":image()}}
+            ]}
+        ]}]});
+        assert!(validate_wire_budget(&body, 4096).is_ok());
+    }
+
+    #[test]
+    fn wire_budget_never_exempts_image_like_text_or_tool_arguments() {
+        let url = format!("data:image/jpeg;base64,{}", image());
+        for body in [
+            json!({"messages":[{"role":"user","content":url}]}),
+            json!({"messages":[{"role":"user","content":[{"type":"text","text":url}]}]}),
+            json!({"messages":[{"role":"assistant","tool_calls":[{"function":{"arguments":json!({"type":"image_url","image_url":{"url":url}}).to_string()}}]}]}),
+            json!({"messages":[{"role":"user","content":[{"type":"tool_result","content":json!({"type":"image_url","image_url":{"url":url}}).to_string()}]}]}),
+            json!({"tools":[{"name":"image_tool","input_schema":{"type":"image_url","image_url":{"url":url}}}]}),
+        ] {
+            assert!(validate_wire_budget(&body, 4096).is_err());
+        }
+    }
+
+    #[test]
+    fn wire_budget_retains_invalid_and_remote_image_payloads() {
+        for url in [
+            format!("https://example.test/{}", "a".repeat(5000)),
+            format!("data:image/svg+xml;base64,{}", image()),
+            format!("data:image/jpeg;base64,{}", "!".repeat(5000)),
+        ] {
+            let body = json!({"messages":[{"role":"user","content":[
+                {"type":"image_url","image_url":{"url":url}}
+            ]}]});
+            assert!(validate_wire_budget(&body, 4096).is_err());
+        }
+    }
+
+    #[test]
+    fn wire_budget_still_charges_cache_metadata_and_escaped_text() {
+        let body = json!({"system":[{"type":"text","text":"\"\n\\中文".repeat(500),"cache_control":{"type":"ephemeral"}}]});
+        let exact = serde_json::to_vec(&body).unwrap().len();
+        assert!(validate_wire_budget(&body, exact).is_ok());
+        assert!(validate_wire_budget(&body, exact - 1).is_err());
+    }
 }
 
 #[cfg(test)]

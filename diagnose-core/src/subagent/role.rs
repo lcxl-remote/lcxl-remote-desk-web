@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::{
-    MAX_ACCEPTANCE_CRITERIA, MAX_ACCEPTANCE_CRITERION_BYTES, MAX_DELEGATED_TASK_BYTES, valid_id,
+    MAX_ACCEPTANCE_CRITERIA, MAX_ACCEPTANCE_CRITERION_CHARS, MAX_DELEGATED_TASK_CHARS, valid_id,
 };
 use crate::registry::ToolEffect;
 
@@ -81,13 +81,14 @@ impl DelegatedTaskBinding {
 }
 
 pub fn validate_task(objective: &str, criteria: &[String]) -> Result<(), &'static str> {
-    if objective.trim().is_empty() || objective.len() > MAX_DELEGATED_TASK_BYTES {
+    if objective.trim().is_empty() || objective.chars().count() > MAX_DELEGATED_TASK_CHARS {
         return Err("invalid delegated objective");
     }
     if criteria.is_empty()
         || criteria.len() > MAX_ACCEPTANCE_CRITERIA
         || criteria.iter().any(|criterion| {
-            criterion.trim().is_empty() || criterion.len() > MAX_ACCEPTANCE_CRITERION_BYTES
+            criterion.trim().is_empty()
+                || criterion.chars().count() > MAX_ACCEPTANCE_CRITERION_CHARS
         })
     {
         return Err("invalid delegated acceptance criteria");

@@ -2278,6 +2278,43 @@ mod tests {
     }
 
     #[test]
+    fn screenshot_payload_uses_independent_image_budget() {
+        use base64::Engine as _;
+        let data = base64::engine::general_purpose::STANDARD.encode(vec![7; 109_684]);
+        let image = format!("data:image/jpeg;base64,{data}");
+        let request = ModelRequest::text_only(
+            vec![
+                ChatMessage::tool_result("screen", "read", "x".repeat(96 * 1024))
+                    .with_image(&image),
+            ],
+            ResponseFormatSpec::None,
+        );
+        for (body, pointer, expected) in [
+            (
+                build_openai_body("model", &request),
+                "/messages/1/content/1/image_url/url",
+                &image,
+            ),
+            (
+                build_anthropic_body("model", &request),
+                "/messages/0/content/1/source/data",
+                &data,
+            ),
+        ] {
+            assert!(
+                serde_json::to_vec(&body).unwrap().len()
+                    > test_profile().max_context_bytes as usize
+            );
+            assert_eq!(
+                body.pointer(pointer).and_then(Value::as_str),
+                Some(expected.as_str())
+            );
+        }
+        assert!(validate_image_request([image.as_str()]).is_ok());
+        assert!(validate_image_request(std::iter::repeat_n(image.as_str(), 5)).is_err());
+    }
+
+    #[test]
     fn agentic_tool_images_serialize_in_both_provider_dialects() {
         let image = "data:image/jpeg;base64,AQID";
         let request = ModelRequest::text_only(

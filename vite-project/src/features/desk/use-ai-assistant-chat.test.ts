@@ -24,6 +24,30 @@ const snapshotFields = { controlRevision: 1, inputRevision: 1, mainStopped: fals
     subagents: { active_tasks: [], task: null, tasks: null, parent_session_id: null, attention_tasks: [], attention_count: 0 } };
 
 describe('useAiAssistantChat', () => {
+    it('does not let a read started before goal control overwrite its committed state', async () => {
+        vi.useFakeTimers();
+        localStorage.setItem('ai-assistant-conversation:desk-1', 'conversation-1');
+        const pending: Array<(value: unknown) => void> = [];
+        const goal = { goalId: 'goal', state: 'running', stateVersion: 1, goalText: 'Calculate 6+8' };
+        vi.stubGlobal('fetch', vi.fn((url: string) => url.endsWith('/goal/control')
+            ? Promise.resolve({ ok: true, json: async () => ({ success: true, data: { ...goal, state: 'paused', stateVersion: 2 } }) })
+            : new Promise(resolve => pending.push(resolve))));
+        const { result, unmount } = renderHook(() => useAiAssistantChat({ deskId: 'desk-1', subscribe: () => () => undefined, sendMessage: () => 'request' }));
+        const response = (seq: number, value: typeof goal) => ({ ok: true, json: async () => ({ data: {
+            ...snapshotFields, sessionId: 'session', seq, active: false, messages: [], goal: value,
+        } }) });
+        await act(async () => { pending[0](response(1, goal)); });
+        await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+        let action: Promise<boolean>;
+        await act(async () => { action = result.current.controlGoal('pause'); await Promise.resolve(); });
+        expect(result.current.goal?.state).toBe('paused');
+        expect(pending).toHaveLength(3);
+        await act(async () => { pending[1](response(2, goal)); });
+        expect(result.current.goal?.state).toBe('paused');
+        await act(async () => { pending[2](response(3, { ...goal, state: 'paused', stateVersion: 2 })); await action!; });
+        expect(result.current.goal?.stateVersion).toBe(2);
+        unmount();
+    });
     it('sends explicit goal intent with the completed goal being continued', async () => {
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: null }) }));
         const sendMessage = vi.fn((_type: number, _data: unknown, _to?: string, id?: string) => id!);
@@ -803,6 +827,101 @@ describe('useAiAssistantChat', () => {
         expect(result.current.messages.at(-1)?.text).toBe('newest answer');
         expect(result.current.backgroundTasks[0]?.state).toBe('succeeded');
         expect(result.current.running).toBe(false);
+        expect(result.current.contextNotices.map(notice => notice.id)).toEqual(['new-notice']);
+    });
+
+    it('ignores a tied goal snapshot that resolves after a later request', async () => {
+        vi.useFakeTimers();
+        localStorage.setItem('ai-assistant-conversation:desk-1', 'conversation-1');
+        const pending: Array<(response: {
+            ok: boolean;
+            json: () => Promise<unknown>;
+        }) => void> = [];
+        vi.stubGlobal('fetch', vi.fn(() => new Promise((resolve) => pending.push(resolve))));
+        const { result } = renderHook(() => useAiAssistantChat({
+            deskId: 'desk-1',
+            subscribe: () => () => undefined,
+            sendMessage: () => 'request',
+        }));
+
+        await act(async () => {
+            await Promise.resolve();
+        });
+        expect(pending).toHaveLength(1);
+        await act(async () => {
+            await vi.advanceTimersByTimeAsync(2_000);
+        });
+        expect(pending).toHaveLength(2);
+
+        await act(async () => {
+            pending[1]({
+                ok: true,
+                json: async () => ({
+                    data: {
+                        ...snapshotFields,
+                        sessionId: 'session-1',
+                        seq: 12,
+                        active: false,
+                        messages: [{ id: 'answer-12', role: 'assistant', text: 'newest answer' }],
+                        contextNotices: [{ id: 'new-notice', turnId: 'new-turn', kind: 'compacted' }],
+                        contextAttachments: [],
+                        backgroundTasks: [{
+                            taskId: 'task-1',
+                            callId: 'call-1',
+                            providerId: 'browser.control',
+                            capabilityId: 'browser.control.semantic',
+                            toolName: 'browser_take_snapshot',
+                            effect: 'read_device',
+                            state: 'succeeded',
+                            progressSequence: 12,
+                            supportsCancel: false,
+                            updatedAt: '2026-08-31T00:00:12Z',
+                        }],
+                    },
+                }),
+            });
+            await Promise.resolve();
+            await Promise.resolve();
+        });
+        expect(result.current.messages.at(-1)?.text).toBe('newest answer');
+        expect(result.current.backgroundTasks[0]?.state).toBe('succeeded');
+
+        await act(async () => {
+            pending[0]({
+                ok: true,
+                json: async () => ({
+                    data: {
+                        ...snapshotFields,
+                        sessionId: 'session-1',
+                        seq: 12,
+                        active: true,
+                        goal: { goalId: 'obsolete', state: 'running', goalText: 'Old goal' },
+                        messages: [{ id: 'answer-11', role: 'assistant', text: 'older answer' }],
+                        contextNotices: [{ id: 'old-notice', turnId: 'old-turn', kind: 'trimmed' }],
+                        contextAttachments: [],
+                        backgroundTasks: [{
+                            taskId: 'task-1',
+                            callId: 'call-1',
+                            providerId: 'browser.control',
+                            capabilityId: 'browser.control.semantic',
+                            toolName: 'browser_take_snapshot',
+                            effect: 'read_device',
+                            state: 'running',
+                            progressSequence: 11,
+                            supportsCancel: false,
+                            updatedAt: '2026-08-31T00:00:11Z',
+                        }],
+                    },
+                }),
+            });
+            await Promise.resolve();
+            await Promise.resolve();
+        });
+
+        expect(result.current.messages.at(-1)?.text).toBe('newest answer');
+        expect(result.current.backgroundTasks[0]?.state).toBe('succeeded');
+        expect(result.current.running).toBe(false);
+        expect(result.current.goal).toBeNull();
         expect(result.current.contextNotices.map(notice => notice.id)).toEqual(['new-notice']);
     });
 

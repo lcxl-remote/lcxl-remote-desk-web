@@ -411,7 +411,7 @@ async fn permission_resume_keeps_scoped_prerequisites_and_validates_exact_grants
                 tool_use_args(
                     "create",
                     "create_text_file",
-                    r#"{"filename":"hello.py","content":"print('hello world')"}"#,
+                    r#"{"file_name":"hello.py","content_utf8":"print('hello world')"}"#,
                 ),
                 tool_use_args("launch", action_name, exact),
                 answer("done"),

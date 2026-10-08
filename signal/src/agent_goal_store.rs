@@ -19,8 +19,8 @@ use desk_diagnose_core::session::{
 };
 use sea_orm::sea_query::Expr;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, Condition, DatabaseConnection, DatabaseTransaction, DbErr,
-    EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set,
+    ActiveModelTrait, ColumnTrait, Condition, ConnectionTrait, DatabaseConnection,
+    DatabaseTransaction, DbErr, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set,
 };
 
 fn invalid() -> DbErr {
@@ -206,8 +206,8 @@ pub async fn load_for_subject(
 
 /// Owner-visible latest goal, including a terminal goal that the user may
 /// inspect after the assistant has stopped running.
-pub async fn load_latest_for_subject(
-    db: &DatabaseConnection,
+pub async fn load_latest_for_subject<C: ConnectionTrait>(
+    db: &C,
     conversation_id: &str,
     actor_id: &str,
     device_id: &str,

@@ -157,7 +157,11 @@ pub fn load_history_page(
             .map(|message| HistoryMessageProjection {
                 message_id: message.message_id.clone(),
                 role: message.role.as_str().into(),
-                text: message.text.clone(),
+                text: {
+                    let mut projected = (**message).clone();
+                    crate::ui_model_ids::project_tool_message(&mut projected);
+                    projected.text
+                },
             })
             .collect(),
         has_more: start > 0,

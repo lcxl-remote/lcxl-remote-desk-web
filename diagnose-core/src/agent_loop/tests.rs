@@ -968,6 +968,64 @@ fn tool_use_args(id: &str, name: &str, args: &str) -> ModelTurn {
     }
 }
 
+#[tokio::test]
+async fn model_format_errors_stop_dispatch_and_allow_a_corrected_call() {
+    let mut seeded = PersistedAgentSession::new(
+        "conv",
+        "actor",
+        "device",
+        1,
+        scope(),
+        "2026-06-20T00:00:00Z",
+    );
+    seeded.surface = AgentSessionSurface::AiAssistant;
+    seeded.input_revision = 1;
+    seeded.latest_input_seq = 1;
+    seeded.focus_epoch.input_revision = 1;
+    let sess = MemSession {
+        inner: RefCell::new(Some(seeded)),
+        ..Default::default()
+    };
+    let mut tool = read_tool("sysinfo", Capability::SystemInfo);
+    tool.spec.parameters_schema = serde_json::json!({"type":"object","additionalProperties":false,"required":["fields"],"properties":{"fields":{"type":"array","minItems":1,"uniqueItems":true,"items":{"type":"string","enum":["os","cpu"]}}}});
+    let registry = vec![tool];
+    let requests = Rc::new(RefCell::new(Vec::new()));
+    let model = ScriptModel {
+        turns: RefCell::new(
+            [
+                tool_use_args("bad", "sysinfo", r#"{"fields":["os","os"]}"#),
+                tool_use_args("good", "sysinfo", r#"{"fields":["os"]}"#),
+                answer("corrected"),
+            ]
+            .into(),
+        ),
+        requests: requests.clone(),
+    };
+    let tools = RecordingTools {
+        calls: Rc::new(RefCell::new(Vec::new())),
+        reply: "observed".into(),
+    };
+    let clock = || "2026-06-20T00:00:01Z".to_string();
+    let outcome = run_agent_turn(
+        &deps(&sess, &model, &tools, &registry, &clock),
+        claim(),
+        ChatMessage::text("user", ChatRole::User, "read the OS"),
+        &mut NullTurnSink,
+    )
+    .await
+    .unwrap();
+    assert_eq!(outcome, LoopOutcome::Answered("corrected".into()));
+    assert_eq!(*tools.calls.borrow(), vec!["sysinfo"]);
+    let requests = requests.borrow();
+    assert!(
+        requests[1]
+            .messages
+            .iter()
+            .any(|message| message.tool_call_id.as_deref() == Some("bad")
+                && message.text.contains("duplicate array item"))
+    );
+}
+
 struct Collector(Rc<RefCell<String>>);
 impl TurnSink for Collector {
     fn on_text_delta(&mut self, delta: &str) {
@@ -2223,7 +2281,7 @@ async fn permission_planning_records_request_without_dispatch_or_grant() {
             [tool_use_args(
                 "permission-call",
                 crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME,
-                r#"{"items":[{"item_id":"inspect","provider_id":"desktop.session","tool_name":"inspect_desktop_session","expected_effect":"read_device","resource_scope":["target:device"],"suggested_ttl_seconds":300,"suggested_max_uses":1,"reason":"Inspect the target requested by the user"}]}"#,
+                r#"{"items":[{"item_id":"inspect","tool_name":"inspect_desktop_session","suggested_ttl_seconds":300,"suggested_max_uses":1,"reason":"Inspect the target requested by the user"}]}"#,
             )]
             .into(),
         ),
@@ -2390,7 +2448,7 @@ async fn permission_planning_accepts_valid_request_without_prior_loading() {
                 tool_use_args(
                     "permission-call",
                     crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME,
-                    r#"{"items":[{"item_id":"inspect","provider_id":"desktop.session","tool_name":"inspect_desktop_session","expected_effect":"read_device","resource_scope":["target:device"],"suggested_ttl_seconds":300,"suggested_max_uses":1,"reason":"Inspect the target requested by the user"}]}"#,
+                    r#"{"items":[{"item_id":"inspect","tool_name":"inspect_desktop_session","suggested_ttl_seconds":300,"suggested_max_uses":1,"reason":"Inspect the target requested by the user"}]}"#,
                 ),
                 answer("I need to load that capability first."),
             ]

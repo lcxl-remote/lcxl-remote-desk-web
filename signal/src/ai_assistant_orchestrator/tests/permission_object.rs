@@ -146,13 +146,10 @@ async fn run_case_with_live_inner(change: Option<&str>, mode: ResumeMode, live: 
         "inspect_files"
     };
     let capability = registry.capability_for_tool(read_name).unwrap();
-    let provider = registry
-        .provider_for_capability(&capability.wire.capability_id)
-        .unwrap();
     let mut replies = vec![
         tool_reply("request_permissions", serde_json::json!({"items":[{
-            "item_id":"read", "provider_id":provider.wire.provider_id,
-            "tool_name":read_name, "expected_effect":capability.wire.effect,
+            "item_id":"read",
+            "tool_name":read_name,
             "suggested_ttl_seconds":120, "suggested_max_uses":1, "reason":"Read the selected file metadata"
         }]})),
         tool_reply(read_name, serde_json::json!({})),

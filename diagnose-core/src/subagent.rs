@@ -36,11 +36,11 @@ pub const UNFINISHED_SUBAGENT_CAPACITY: &str = "delegation_unfinished_capacity";
 /// Transport batch bounds do not limit cumulative child creation.
 pub const MAX_SUBAGENT_WAIT_TASKS: usize = 128;
 pub const MAX_SUBAGENT_NOTIFICATION_EVENTS: usize = 128;
-pub const MAX_SUBAGENT_NAME_BYTES: usize = 128;
-pub const MAX_DELEGATED_TASK_BYTES: usize = 8 * 1024;
+pub const MAX_SUBAGENT_NAME_CHARS: usize = 128;
+pub const MAX_DELEGATED_TASK_CHARS: usize = 8 * 1024;
 pub const MAX_ACCEPTANCE_CRITERIA: usize = 16;
-pub const MAX_ACCEPTANCE_CRITERION_BYTES: usize = 1024;
-pub const MAX_TOOL_ARGUMENT_BYTES: usize = 16 * 1024;
+pub const MAX_ACCEPTANCE_CRITERION_CHARS: usize = 1024;
+pub const MAX_TOOL_ARGUMENT_BYTES: usize = 128 * 1024;
 
 pub fn capacity_storage_message(limit: u32) -> String {
     format!("{UNFINISHED_SUBAGENT_CAPACITY}:{limit}")

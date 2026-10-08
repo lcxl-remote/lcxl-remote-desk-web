@@ -1,3 +1,4 @@
+mod goal_snapshot;
 use super::*;
 use crate::{agent_session_store::SignalAgentSessionStore, entity::agent_exec_task};
 use desk_diagnose_core::{dynamic_run::BackgroundTaskState, seam::WaitOutcome};

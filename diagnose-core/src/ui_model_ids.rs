@@ -31,6 +31,8 @@ pub fn needs_resolution(tool: &str) -> bool {
     !fields(tool).is_empty()
         || tool == "request_permissions"
         || crate::browser_model_ids::supports(tool)
+        || crate::result_model_ids::supports(tool)
+        || crate::document_model_ids::supports(tool)
 }
 
 fn references(value: &Value, result: &mut Vec<ObjectRef>) {
@@ -119,6 +121,20 @@ pub fn resolve_call(
     resolve_single_call(call, history, now_ms)
 }
 
+/// Resolve IDs and directory consent from the same authoritative session.
+pub fn resolve_session_call(
+    call: &ToolCall,
+    session: &crate::session::PersistedAgentSession,
+    now_ms: u64,
+) -> Result<ToolCall, AgentError> {
+    let mut resolved = resolve_call(call, &session.conversation, now_ms)?;
+    let mut value = serde_json::from_str(&resolved.arguments_json)
+        .map_err(|_| invalid("Tool arguments must be a JSON object."))?;
+    crate::document_model_ids::resolve_directories(&call.name, &mut value, session, now_ms)?;
+    resolved.arguments_json = value.to_string();
+    Ok(resolved)
+}
+
 pub(crate) fn resolve_single_call(
     call: &ToolCall,
     history: &[ChatMessage],
@@ -142,6 +158,9 @@ pub(crate) fn resolve_single_call(
     }
     let mut value: Value = serde_json::from_str(&call.arguments_json)
         .map_err(|_| invalid("Tool arguments must be a JSON object."))?;
+    crate::model_actions::resolve(&call.name, &mut value)?;
+    crate::result_model_ids::resolve(&call.name, &mut value, history, now_ms)?;
+    crate::document_model_ids::resolve(&call.name, &mut value, history, now_ms)?;
     if crate::browser_model_ids::supports(&call.name) {
         crate::browser_model_ids::resolve(call, &mut value, history, now_ms)?;
         crate::model_input::fill_versions(&call.name, &mut value);
@@ -299,7 +318,10 @@ pub(crate) fn resolve_single_call(
     {
         for item in items {
             if let Some(tool) = item["tool_name"].as_str().map(str::to_owned)
-                && crate::browser_model_ids::supports(&tool)
+                && (crate::browser_model_ids::supports(&tool)
+                    || crate::result_model_ids::supports(&tool)
+                    || crate::document_model_ids::supports(&tool)
+                    || !fields(&tool).is_empty())
                 && let Some(exact) = item.get_mut("exact_input")
             {
                 let nested = ToolCall {
@@ -365,6 +387,7 @@ pub(crate) fn resolve_single_call(
             );
         }
     }
+    crate::model_input::fill_versions(&call.name, &mut value);
     Ok(ToolCall {
         arguments_json: value.to_string(),
         ..call.clone()
@@ -372,6 +395,10 @@ pub(crate) fn resolve_single_call(
 }
 
 fn project_arguments(tool: &str, value: &mut Value) {
+    crate::model_actions::project_arguments(tool, value);
+    crate::model_input::project_fixed_arguments(tool, value);
+    crate::result_model_ids::project_arguments(tool, value);
+    crate::document_model_ids::project_arguments(tool, value);
     if crate::browser_model_ids::supports(tool) {
         crate::browser_model_ids::project_arguments(tool, value);
         return;
@@ -401,12 +428,6 @@ fn project_arguments(tool: &str, value: &mut Value) {
             project_arguments(tool, item);
         }
         let mut result = json!({"application_id":all[0]["application_id"],"steps":[]});
-        if tool == crate::ai_assistant::linux::OUTPUT_TOOL
-            && let Some(action) = value.get_mut("action").and_then(Value::as_object_mut)
-        {
-            action.remove("screen");
-            action.remove("frame");
-        }
         if tool == "send_background_input" {
             result["window_id"] = all[0]["window_id"].clone();
         }
@@ -418,6 +439,12 @@ fn project_arguments(tool: &str, value: &mut Value) {
         result["steps"] = json!(all);
         *value = result;
         return;
+    }
+    if tool == crate::ai_assistant::linux::OUTPUT_TOOL
+        && let Some(action) = value.get_mut("action").and_then(Value::as_object_mut)
+    {
+        action.remove("screen");
+        action.remove("frame");
     }
     if tool == "send_background_input" {
         if let Some(object) = value.as_object_mut() {
@@ -447,7 +474,12 @@ fn project_arguments(tool: &str, value: &mut Value) {
                 if let Some(tool) = item["tool_name"]
                     .as_str()
                     .map(str::to_owned)
-                    .filter(|tool| crate::browser_model_ids::supports(tool))
+                    .filter(|tool| {
+                        crate::browser_model_ids::supports(tool)
+                            || crate::result_model_ids::supports(tool)
+                            || crate::document_model_ids::supports(tool)
+                            || !fields(tool).is_empty()
+                    })
                     && let Some(exact) = item.get_mut("exact_input")
                 {
                     project_arguments(&tool, exact);
@@ -491,6 +523,10 @@ pub fn same_call_input(tool: &str, original: &str, resolved: &str) -> bool {
     if left == right {
         return true;
     }
+    if !crate::result_model_ids::preserves_explicit_evidence(tool, &left, &right) {
+        return false;
+    }
+    project_arguments(tool, &mut left);
     project_arguments(tool, &mut right);
     left == right
 }
@@ -542,6 +578,8 @@ pub(crate) fn project_tool_message(message: &mut ChatMessage) {
         }
     }
     crate::browser_model_ids::project_result_message(message);
+    crate::document_model_ids::project_result_message(message);
+    crate::result_model_ids::project_result_message(message);
     crate::output_contracts::project_status(message);
     if message.role == ChatRole::Tool
         && let Ok(mut value) = serde_json::from_str::<Value>(&message.text)
@@ -624,10 +662,16 @@ pub fn project_request(request: &crate::seam::ModelRequest) -> crate::seam::Mode
                     let end = start + stream.byte_offset();
                     for entry in &mut entries {
                         project_scope(entry);
+                        if let Some(object) = entry.as_object_mut() {
+                            object.remove("canonical_input_digest_sha256");
+                        }
                         if let Some(tool) = entry["tool_name"].as_str().map(str::to_owned)
                             && (tool == "send_raw_input"
                                 || tool == "execute_wayland_output_input"
-                                || crate::browser_model_ids::supports(&tool))
+                                || crate::browser_model_ids::supports(&tool)
+                                || crate::result_model_ids::supports(&tool)
+                                || crate::document_model_ids::supports(&tool)
+                                || !fields(&tool).is_empty())
                             && let Some(exact) = entry.get_mut("approved_exact_input")
                         {
                             project_arguments(&tool, exact);
@@ -648,6 +692,9 @@ pub fn project_request(request: &crate::seam::ModelRequest) -> crate::seam::Mode
 
 pub fn project_tool(tool: &mut crate::chat::ToolSpec) {
     crate::model_input::hide_versions(&mut tool.parameters_schema);
+    crate::model_input::project_defaults(tool);
+    crate::result_model_ids::project_tool(tool);
+    crate::document_model_ids::project_tool(tool);
     if crate::application_batch::supports(&tool.name)
         && tool
             .parameters_schema
@@ -704,6 +751,8 @@ pub fn project_tool(tool: &mut crate::chat::ToolSpec) {
         _ => {}
     }
     crate::application_batch::project_schema(tool);
+    crate::model_actions::project_tool(tool);
+    crate::model_constraints::project(tool);
 }
 
 #[cfg(test)]
@@ -892,7 +941,12 @@ mod tests {
                 .contains("wrong object kind")
         );
         let unscoped = call("inspect_desktop_ui", json!({"queries":["Calendar"]}));
-        assert_eq!(resolve_call(&unscoped, &[], 1).unwrap(), unscoped);
+        let resolved = resolve_call(&unscoped, &[], 1).unwrap();
+        assert!(same_call_input(
+            &unscoped.name,
+            &unscoped.arguments_json,
+            &resolved.arguments_json
+        ));
         let screen = call("read_current_screen", json!({}));
         assert_eq!(resolve_call(&screen, &[], 1).unwrap(), screen);
     }

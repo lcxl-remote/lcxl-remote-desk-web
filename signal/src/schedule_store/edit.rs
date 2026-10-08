@@ -164,7 +164,7 @@ impl ScheduleStore {
         prompt: &str,
     ) -> Result<entity::Model, ScheduleStoreError> {
         if prompt.trim().is_empty()
-            || prompt.len() > desk_diagnose_core::schedule::MAX_SCHEDULE_PROMPT_BYTES
+            || prompt.len() > desk_diagnose_core::schedule::MAX_SCHEDULE_PROMPT_CHARS
         {
             return Err(ScheduleStoreError::Invalid);
         }

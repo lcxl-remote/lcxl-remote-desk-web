@@ -16,8 +16,8 @@ use desk_diagnose_core::session::{
 };
 use sea_orm::sea_query::Expr;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, DatabaseTransaction, DbErr, EntityTrait,
-    QueryFilter, QueryOrder, QuerySelect, Set,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbErr,
+    EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set,
 };
 use sha2::{Digest, Sha256};
 
@@ -289,8 +289,8 @@ pub(crate) async fn replace_pending_on(
     Ok(result.rows_affected == 1)
 }
 
-pub(crate) async fn pending_for_subject(
-    db: &DatabaseConnection,
+pub(crate) async fn pending_for_subject<C: ConnectionTrait>(
+    db: &C,
     conversation_id: &str,
     actor_id: &str,
     device_id: &str,

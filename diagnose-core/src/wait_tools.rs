@@ -24,6 +24,7 @@ pub const BACKGROUND_TASK_GUIDANCE: &str = "\n\nBackground results arrive automa
 
 /// The wait tool's model-facing arguments.
 #[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 struct WaitTaskParams {
     /// The id of the background task to wait on — the `background_task_id` field
     /// returned by the dispatch tool result.
@@ -50,8 +51,8 @@ pub fn wait_tool_registry() -> Vec<RegisteredTool> {
         spec: ToolSpec {
             name: WAIT_TOOL_NAME.to_string(),
             description: "Wait for a previously dispatched background command to \
-                finish and return its result. Pass `background_task_id` from the \
-                structured dispatch result. Completion results are delivered automatically; \
+                finish and return its result. Use {\"task_id\":\"<background_task_id from the dispatch result>\"}. \
+                Completion results are delivered automatically; \
                 polling is not required. Use only for an explicit user wait/status request \
                 or a brief check needed for an immediate dependent step. If still running, \
                 do not immediately wait again: continue independent work or end this turn \
@@ -62,10 +63,13 @@ pub fn wait_tool_registry() -> Vec<RegisteredTool> {
                 "properties": {
                     "task_id": {
                         "type": "string",
+                        "minLength": 1,
+                        "maxLength": 256,
                         "description": "The background task id to wait on."
                     }
                 },
-                "required": ["task_id"]
+                "required": ["task_id"],
+                "additionalProperties": false
             }),
         },
         // Unused for WaitTask exposure; a benign placeholder.
@@ -93,7 +97,7 @@ pub fn parse_wait_task_id(call: &ToolCall) -> Result<String, AgentError> {
         serde_json::from_str(trimmed).map_err(bad_arguments)?
     };
     let task_id = params.task_id.trim();
-    if task_id.is_empty() {
+    if task_id.is_empty() || task_id.len() > 256 {
         return Err(bad_arguments("`task_id` is required and must be non-empty"));
     }
     Ok(task_id.to_string())
@@ -135,5 +139,19 @@ mod tests {
         assert!(parse_wait_task_id(&call(WAIT_TOOL_NAME, r#"{"task_id":"  "}"#)).is_err());
         assert!(parse_wait_task_id(&call(WAIT_TOOL_NAME, "{not json")).is_err());
         assert!(parse_wait_task_id(&call("read_system_info", r#"{"task_id":"x"}"#)).is_err());
+        assert!(
+            parse_wait_task_id(&call(
+                WAIT_TOOL_NAME,
+                r#"{"task_id":"x","background_task_id":"x"}"#
+            ))
+            .is_err()
+        );
+        assert!(
+            parse_wait_task_id(&call(
+                WAIT_TOOL_NAME,
+                &json!({"task_id":"x".repeat(257)}).to_string()
+            ))
+            .is_err()
+        );
     }
 }

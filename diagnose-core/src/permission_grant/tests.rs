@@ -406,6 +406,112 @@ fn compile(
 }
 
 #[test]
+fn approved_ui_root_id_matches_resolved_read_on_both_surfaces() {
+    use crate::chat::{ChatMessage, ToolCall, ToolCallRef};
+    use crate::provider_preflight::{ProviderCallSubject, read::ReadCallPreflight};
+    let (session, _, _) = decision_fixture();
+    let registry = crate::ai_assistant::ai_assistant_provider_registry();
+    let input = serde_json::json!({"root_id":"session-id","queries":["计算器","Calculator"]});
+    let request = crate::permission_tools::build_permission_request(
+        &ToolCall { id: "request".into(), name: "request_permissions".into(), arguments_json: serde_json::json!({"items":[{"item_id":"inspect","tool_name":"inspect_desktop_ui","exact_input":input,"reason":"Find Calculator"}]}).to_string() },
+        &registry, "permission-1".into(), 1, "2026-08-30T00:00:00Z".into(),
+    ).unwrap();
+    let item = &request.items[0];
+    let decisions = vec![PermissionDecisionItem {
+        item_id: item.item_id.clone(),
+        decision: PermissionItemDecision::Approve {
+            resource_scope: item.resource_scope.clone(),
+            operation_scope: item.operation_scope.clone(),
+            export_destinations: vec![],
+            ttl_seconds: 60,
+            max_uses: 1,
+        },
+    }];
+    let inventory = vec![CapabilityAvailability {
+        provider_id: item.provider_id.clone(),
+        capability_id: "desktop.ui.inspect".into(),
+        tool_name: item.tool_name.clone(),
+        compiled: true,
+        enabled: true,
+        connected: true,
+        ready: true,
+        reason: None,
+    }];
+    let history = vec![
+        ChatMessage::assistant_tool_calls("observation-call", "", vec![ToolCallRef { id: "observe".into(), name: "inspect_desktop_session".into(), arguments_json: "{}".into() }]),
+        ChatMessage::tool_result("observation", "observe", serde_json::json!({"ReadContext":{"DesktopSessionInspect":{"session":{"token":"session-id","snapshot_id":"identity-1","object_kind":"desktop_session","expires_at":""}}}}).to_string()),
+    ];
+    let original = ReadContextSelection {
+        tool_names: vec![],
+        expires_at: None,
+        object_attachments: vec![],
+        live_targets: vec![],
+    };
+    let destination = DestinationIdentity::Model {
+        connection_id: "model".into(),
+        connection_revision: 1,
+        model_id: "model".into(),
+        profile_revision: 1,
+    };
+    let binding = ObjectReadBinding {
+        original: &original,
+        destination: &destination,
+        now_unix_ms: 1000,
+    };
+    for surface in [
+        ProductSurface::OssPersonalOwner,
+        ProductSurface::ManagerPersonalOwner,
+    ] {
+        let grants = build_permission_grants(
+            &session,
+            &request,
+            &decisions,
+            &PermissionGrantIssuanceContext {
+                surface,
+                registry: &registry,
+                inventory: &inventory,
+                readiness_revision: 7,
+                now_unix_ms: 1000,
+                implicit_fresh_object_refs: &[],
+            },
+            None,
+        )
+        .unwrap();
+        let subject = ProviderCallSubject {
+            actor_id: &session.actor_id,
+            run_id: &session.conversation_id,
+            input_revision: 1,
+            target_device_id: &session.device_id,
+            policy_revision: 1,
+            readiness_revision: 7,
+            now_unix_ms: 1000,
+        };
+        for changed in [false, true] {
+            let mut arguments = input.clone();
+            if changed {
+                arguments["queries"] = serde_json::json!(["another application"]);
+            }
+            let call = crate::ui_model_ids::resolve_call(
+                &ToolCall {
+                    id: "inspect".into(),
+                    name: "inspect_desktop_ui".into(),
+                    arguments_json: arguments.to_string(),
+                },
+                &history,
+                1000,
+            )
+            .unwrap();
+            let preflight = ReadCallPreflight::build(&registry, surface, &call, &binding).unwrap();
+            let result = crate::capability_grant::match_capability_grant(
+                &grants[0],
+                &preflight.grant_call(&subject).unwrap(),
+            );
+            assert_eq!(result.is_ok(), !changed);
+        }
+    }
+}
+
+#[test]
 fn oss_and_manager_compile_identical_narrowed_authority_except_surface() {
     let (session, request, decisions) = decision_fixture();
     let original = session.clone();

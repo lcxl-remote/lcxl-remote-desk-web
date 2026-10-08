@@ -291,7 +291,7 @@ pub fn ai_assistant_read_tool_registry() -> Vec<RegisteredTool> {
                 "properties": {
                     "file_extensions": {
                         "type": "array",
-                        "items": {"type": "string", "pattern": "^\\.[A-Za-z0-9][A-Za-z0-9._-]{0,15}$"},
+                        "items": {"type": "string", "pattern": r"^\.[A-Za-z0-9][A-Za-z0-9._-]{0,15}$"},
                         "maxItems": 16,
                         "uniqueItems": true,
                         "default": []

@@ -6569,7 +6569,10 @@ mod tests {
             SignalAiAssistantTools::canonical_call_input(&first).unwrap();
         let (second_json, second_digest) =
             SignalAiAssistantTools::canonical_call_input(&second).unwrap();
-        assert_eq!(first_json, r#"{"a":true,"z":{"a":1,"b":2}}"#);
+        assert_eq!(
+            first_json,
+            r#"{"a":true,"include_active_application":true,"z":{"a":1,"b":2}}"#
+        );
         assert_eq!(first_json, second_json);
         assert_eq!(first_digest, second_digest);
     }

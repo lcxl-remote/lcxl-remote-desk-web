@@ -154,7 +154,7 @@ fn limits_sorting_and_overflow_fail_closed() {
 }
 
 #[test]
-fn task_requirement_limit_matches_conversation_input_bytes() {
+fn task_requirement_limit_matches_unicode_character_input() {
     use desk_agent_protocol::schedule::*;
     let mut draft = ScheduleDraft {
         time_confirmation: None,
@@ -162,7 +162,7 @@ fn task_requirement_limit_matches_conversation_input_bytes() {
         kind: ScheduledTaskKind::FreshTask,
         target_device_id: "device".into(),
         title: "Task".into(),
-        prompt: "x".repeat(MAX_SCHEDULE_PROMPT_BYTES),
+        prompt: "x".repeat(MAX_SCHEDULE_PROMPT_CHARS),
         locale: None,
         model_id: None,
         spec: spec(ScheduleRule::Daily {
@@ -175,7 +175,7 @@ fn task_requirement_limit_matches_conversation_input_bytes() {
     assert!(normalize_draft(&draft).is_ok());
     draft.prompt.push('x');
     assert_eq!(normalize_draft(&draft), Err(ScheduleError::InvalidDraft));
-    draft.prompt = "中".repeat(MAX_SCHEDULE_PROMPT_BYTES / 3);
+    draft.prompt = "中".repeat(MAX_SCHEDULE_PROMPT_CHARS);
     assert!(normalize_draft(&draft).is_ok());
     draft.prompt.push('中');
     assert_eq!(normalize_draft(&draft), Err(ScheduleError::InvalidDraft));

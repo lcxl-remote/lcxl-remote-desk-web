@@ -92,11 +92,14 @@ pub fn text_page(
         return Err(invalid("Use the image read path"));
     }
     let mut request = input.request()?;
+    part.metadata.verify(&part.content)?;
+    let projected = project_json_part(part)?;
+    let page_part = projected.as_ref().unwrap_or(part);
     let mut upper = request.max_bytes;
     // Reduce only the new read; never discard an earlier read to make it fit.
     loop {
         request.max_bytes = upper;
-        let page = read_page(&part.metadata, &part.content, &request)?;
+        let page = read_page(&page_part.metadata, &page_part.content, &request)?;
         let content =
             serde_json::to_string(&page).map_err(|_| invalid("Cannot encode attachment page"))?;
         if crate::trim::model_context_cost(&ChatMessage::tool_result(
@@ -112,7 +115,7 @@ pub fn text_page(
                 ReadReceipt {
                     input: selected,
                     source_sha256: part.metadata.sha256.clone(),
-                    projection_version: 1,
+                    projection_version: if projected.is_some() { 2 } else { 1 },
                     page_sha256: digest(content.as_bytes()),
                     body_bytes: page.body_bytes,
                     original_envelope: None,
@@ -128,6 +131,39 @@ pub fn text_page(
         }
         upper = (upper / 2).max(4);
     }
+}
+
+/// Model paging uses the same reducing view as inline results. Source proof and
+/// storage remain bound to the original bytes, not the derived page representation.
+fn project_json_part(part: &PreparedAttachment) -> Result<Option<PreparedAttachment>, AgentError> {
+    if part.metadata.kind != ContentKind::Json {
+        return Ok(None);
+    }
+    let Some(source) = &part.metadata.source_envelope else {
+        return Ok(None);
+    };
+    let mut message = ChatMessage::tool_result(
+        &part.metadata.message_id,
+        &part.metadata.tool_call_id,
+        std::str::from_utf8(&part.content)
+            .map_err(|_| invalid("Invalid JSON attachment encoding"))?,
+    );
+    message.data_envelope = Some(source.clone());
+    crate::ui_model_ids::project_tool_message(&mut message);
+    if message.text.as_bytes() == part.content.as_slice() {
+        return Ok(None);
+    }
+    let mut projected = part.clone();
+    projected.content = message.text.into_bytes();
+    projected.metadata.sha256 = digest(&projected.content);
+    projected.metadata.original_sha256 = projected.metadata.sha256.clone();
+    projected.metadata.size_bytes = projected.content.len() as u64;
+    projected.metadata.original_bytes = projected.metadata.size_bytes;
+    projected.metadata.storage_truncated = false;
+    // This is a derived local view. The receipt retains the original source
+    // proof; its signed label must never be relabelled as the projected bytes.
+    projected.metadata.source_envelope = None;
+    Ok(Some(projected))
 }
 
 fn receipt_content(receipt: &ReadReceipt) -> String {
@@ -178,7 +214,9 @@ pub async fn validate_pending_reads(
             .read_attachment(session, &receipt.input.attachment_id, false)
             .await?;
         part.metadata.verify(&part.content)?;
-        if part.metadata.sha256 != receipt.source_sha256 || receipt.projection_version != 1 {
+        if part.metadata.sha256 != receipt.source_sha256
+            || !matches!(receipt.projection_version, 1 | 2)
+        {
             return Err(invalid(
                 "Attachment source or page representation changed; the unfinished read cannot be replayed",
             ));
@@ -231,6 +269,58 @@ pub fn release_consumed(messages: &mut [ChatMessage]) -> Result<(), AgentError> 
 mod tests {
     use super::*;
     use crate::conversation_attachment::batch::*;
+    #[test]
+    fn json_paging_uses_short_ids_and_keeps_original_storage_proof() {
+        let source = serde_json::json!({"title":"Observed title","url":"https://example.test/a"});
+        let history = crate::result_model_ids::tests::evidence(
+            "search_public_web",
+            "search-call",
+            serde_json::json!({"query":"test"}),
+            serde_json::json!({"results":[source],"padding":"x".repeat(12000)}),
+        );
+        let result = history.last().unwrap();
+        let mut delivery = prepare_delivery(
+            &DeliveryIdentity {
+                conversation_id: "run",
+                actor_id: "owner",
+                device_id: "device",
+                message_id: "message",
+                tool_call_id: "search-call",
+            },
+            vec![OutputPart {
+                name: "result".into(),
+                content: PartContent::Json(result.text.clone()),
+                source_truncated: false,
+            }],
+            1,
+        )
+        .unwrap();
+        let mut part = delivery.attachments.remove(0);
+        part.metadata.source_envelope = result.data_envelope.clone();
+        let original = part.content.clone();
+        let original_digest = part.metadata.sha256.clone();
+        let input = Input {
+            attachment_id: part.metadata.attachment_id.clone(),
+            cursor: None,
+            queries: None,
+            start_line: None,
+            end_line: None,
+            ignore_case: false,
+            before_context: 0,
+            after_context: 0,
+            max_bytes: Some(32768),
+        };
+        let (content, receipt) = text_page(&part, &input, "read-part", 100000).unwrap();
+        assert!(content.contains("search_result_id"));
+        assert!(content.contains("source_id"));
+        assert_eq!(receipt.projection_version, 2);
+        assert_eq!(receipt.source_sha256, original_digest);
+        assert_eq!(part.content, original);
+        part.metadata.verify(&part.content).unwrap();
+        let (again, proof) = text_page(&part, &input, "read-again", 100000).unwrap();
+        assert_eq!(again, content);
+        assert_eq!(proof.page_sha256, receipt.page_sha256);
+    }
     fn fixture() -> (PreparedAttachment, Input) {
         let mut delivery = prepare_delivery(
             &DeliveryIdentity {

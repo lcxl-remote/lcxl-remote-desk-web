@@ -145,7 +145,7 @@ async fn edits_preserve_running_snapshot_and_do_not_reactivate_a_changed_require
                 1,
                 &task.schedule_id,
                 current.revision,
-                &"x".repeat(desk_diagnose_core::schedule::MAX_SCHEDULE_PROMPT_BYTES + 1)
+                &"x".repeat(desk_diagnose_core::schedule::MAX_SCHEDULE_PROMPT_CHARS + 1)
             )
             .await
             .is_err()

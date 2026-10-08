@@ -73,9 +73,9 @@ pub fn parse(call: &ToolCall) -> Result<DirectoryInput, AgentError> {
         serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?;
     if call.name != REQUEST_DIRECTORY
         || input.path.is_empty()
-        || input.path.len() > 4096
+        || input.path.chars().count() > 4096
         || input.purpose.is_empty()
-        || input.purpose.len() > 2048
+        || input.purpose.chars().count() > 2048
         || input.path.chars().any(char::is_control)
         || input.purpose.chars().any(char::is_control)
     {

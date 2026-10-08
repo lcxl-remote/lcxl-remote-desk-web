@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use super::{
-    MAX_SUBAGENT_NAME_BYTES, MAX_SUBAGENT_WAIT_TASKS, MAX_TOOL_ARGUMENT_BYTES, invalid,
+    MAX_SUBAGENT_NAME_CHARS, MAX_SUBAGENT_WAIT_TASKS, MAX_TOOL_ARGUMENT_BYTES, invalid,
     role::validate_task, valid_id, wait::WaitMode,
 };
 use crate::{
@@ -107,9 +107,9 @@ pub fn registry() -> Vec<RegisteredTool> {
             json!({
                 "type":"object","additionalProperties":false,"required":["name","task","acceptance_criteria","required_for_completion"],
                 "properties":{
-                    "name":{"type":"string","minLength":1,"maxLength":MAX_SUBAGENT_NAME_BYTES},
-                    "task":{"type":"string","minLength":1,"maxLength":super::MAX_DELEGATED_TASK_BYTES,"description":"The requested deliverable and only context the child needs; routine runtime and permission rules are already provided."},
-                    "acceptance_criteria":{"type":"array","minItems":1,"maxItems":super::MAX_ACCEPTANCE_CRITERIA,"items":{"type":"string","minLength":1,"maxLength":super::MAX_ACCEPTANCE_CRITERION_BYTES}},
+                    "name":{"type":"string","minLength":1,"maxLength":MAX_SUBAGENT_NAME_CHARS},
+                    "task":{"type":"string","minLength":1,"maxLength":super::MAX_DELEGATED_TASK_CHARS,"description":"The requested deliverable and only context the child needs; routine runtime and permission rules are already provided."},
+                    "acceptance_criteria":{"type":"array","minItems":1,"maxItems":super::MAX_ACCEPTANCE_CRITERIA,"items":{"type":"string","minLength":1,"maxLength":super::MAX_ACCEPTANCE_CRITERION_CHARS}},
                     "required_for_completion":{"type":"boolean"}
                 }
             }),
@@ -142,7 +142,7 @@ pub fn registry() -> Vec<RegisteredTool> {
         tool(
             MESSAGE,
             "Explicitly adjust a nonterminal subagent's existing task using current input and control revisions. The server fences prior planning and retains the original budget and deadline. A terminal task cannot be reopened; create a new task for subsequent work.",
-            json!({"type":"object","additionalProperties":false,"required":["task_id","expected_input_revision","expected_control_revision","message"],"properties":{"task_id":id,"expected_input_revision":revision.clone(),"expected_control_revision":revision,"message":{"type":"string","minLength":1,"maxLength":super::MAX_DELEGATED_TASK_BYTES}}}),
+            json!({"type":"object","additionalProperties":false,"required":["task_id","expected_input_revision","expected_control_revision","message"],"properties":{"task_id":id,"expected_input_revision":revision.clone(),"expected_control_revision":revision,"message":{"type":"string","minLength":1,"maxLength":super::MAX_DELEGATED_TASK_CHARS}}}),
         ),
     ]
 }
@@ -199,7 +199,9 @@ pub fn parse(session: &PersistedAgentSession, call: &ToolCall) -> Result<Operati
         SPAWN => {
             let request: SpawnRequest = decode(call)?;
             validate_task(&request.task, &request.acceptance_criteria).map_err(invalid)?;
-            if request.name.trim().is_empty() || request.name.len() > MAX_SUBAGENT_NAME_BYTES {
+            if request.name.trim().is_empty()
+                || request.name.chars().count() > MAX_SUBAGENT_NAME_CHARS
+            {
                 return Err(invalid("invalid subagent name"));
             }
             Ok(Operation::Spawn(request))
@@ -302,7 +304,7 @@ pub fn parse(session: &PersistedAgentSession, call: &ToolCall) -> Result<Operati
                 || message.expected_input_revision == 0
                 || message.expected_control_revision == 0
                 || message.message.trim().is_empty()
-                || message.message.len() > super::MAX_DELEGATED_TASK_BYTES
+                || message.message.chars().count() > super::MAX_DELEGATED_TASK_CHARS
             {
                 return Err(invalid("invalid delegated task adjustment"));
             }

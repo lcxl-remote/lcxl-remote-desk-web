@@ -13,6 +13,8 @@ pub(crate) struct AssistantSnapshot {
     pub session: SessionSnapshot,
     pub background_tasks: Vec<BackgroundTaskRecord>,
     pub capability_grants: Vec<CapabilityGrant>,
+    pub goal: Option<desk_diagnose_core::goal::GoalRun>,
+    pub pending_goal_open_request: Option<desk_diagnose_core::goal::GoalOpenRequest>,
 }
 
 impl SignalAgentSessionStore {
@@ -110,6 +112,11 @@ impl SignalAgentSessionStore {
                 SignalCapabilityGrantStore::list_for_subject_on(&txn, run, actor, device).await?;
             let subagents = crate::agent_subagent_store::presentation_on(&txn, &session).await?;
 
+            let goal =
+                crate::agent_goal_store::load_latest_for_subject(&txn, run, actor, device).await?;
+            let pending_goal_open_request =
+                crate::agent_goal_open_store::pending_for_subject(&txn, run, actor, device).await?;
+
             let fingerprint = format!(
                 "{:x}",
                 Sha256::digest(
@@ -118,7 +125,9 @@ impl SignalAgentSessionStore {
                         row.version,
                         &tasks,
                         &grants,
-                        &subagents
+                        &subagents,
+                        &goal,
+                        &pending_goal_open_request
                     ))
                     .map_err(|_| sea_orm::DbErr::Custom(
                         "encode Assistant snapshot failed".into()
@@ -159,6 +168,8 @@ impl SignalAgentSessionStore {
                 session: snapshot,
                 background_tasks: tasks,
                 capability_grants: grants,
+                goal,
+                pending_goal_open_request,
             }))
         }
         .await;

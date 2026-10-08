@@ -263,6 +263,8 @@ impl ProviderRegistry {
                     }
                     capability.tool_spec.parameters_schema["properties"]["shell"]["enum"] =
                         serde_json::json!(policy.available_shells);
+                    capability.tool_spec.parameters_schema["properties"]["timeout_ms"]["maximum"] =
+                        serde_json::json!(policy.max_runtime_ms.min(7_200_000));
                     capability.tool_spec.description.push_str(&format!(
                         " Current device shells: {}. Effective runtime ceiling: {} ms; stdout/stderr each bounded to 65536 bytes. Changes require fresh approval.",
                         policy.available_shells.join(", "), policy.max_runtime_ms));

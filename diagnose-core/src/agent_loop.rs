@@ -395,6 +395,7 @@ pub async fn resume_agent_turn(
 mod artifact_registry;
 mod call_budget;
 mod fresh_task;
+mod goal_control;
 pub use fresh_task::{
     resume_claimed_fresh_task_children_turn, resume_claimed_fresh_task_notification_turn,
     resume_claimed_fresh_task_permission_turn, resume_claimed_fresh_task_turn,
@@ -1027,7 +1028,7 @@ async fn drive_claimed_inner(
 }
 
 /// Progress is a new result actually recorded by the server, not the model's
-/// `control_goal.progress` prose. Ignore volatile receipt metadata for inline
+/// `control_goal.message` prose. Ignore volatile receipt metadata for inline
 /// JSON so polling the same resource cannot reset the stagnation counter.
 fn stable_goal_result_json(value: &mut serde_json::Value) {
     match value {
@@ -3292,7 +3293,7 @@ async fn run_inner_impl(
         }
         if goal_correction_attempted {
             let marker_id = format!("goal-control-correction-{turn_id}");
-            let marker_text = "The preceding answer did not end this goal segment. Call control_goal now with a factual continue, wait, complete, or blocked decision. Do not call a device tool in this response.";
+            let marker_text = "The preceding answer did not end this goal segment. Call control_goal now with a factual continue, ask_user, complete, or blocked decision using exactly decision and message. Do not call a device tool in this response.";
             let parent = crate::permission_resume::latest_user_requirement(&session.conversation)
                 .and_then(|message| message.data_envelope.as_ref());
             let mut marker = ChatMessage::system_event(&marker_id, marker_text);
@@ -3485,6 +3486,15 @@ async fn run_inner_impl(
             }
             Err(error) => return Err(error),
         };
+        let model_tool_definitions = request
+            .tools
+            .iter()
+            .cloned()
+            .map(|mut spec| {
+                crate::ui_model_ids::project_tool(&mut spec);
+                (spec.name.clone(), spec)
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
         let dial_result = if completion_only {
             deps.model
                 .call(request, &mut crate::seam::NullTurnSink)
@@ -4001,12 +4011,65 @@ async fn run_inner_impl(
                         )?;
                         continue;
                     };
+                    if session.surface == AgentSessionSurface::AiAssistant {
+                        let validation = model_tool_definitions.get(&call.name).map(|spec| {
+                            serde_json::from_str::<serde_json::Value>(&call.arguments_json)
+                                .map_err(|error| {
+                                    crate::model_input::describe_error_with_schema(
+                                        &call.name,
+                                        &spec.parameters_schema,
+                                        &format!("invalid JSON: {error}"),
+                                    )
+                                })
+                                .and_then(|input| {
+                                    crate::model_input::validate_format_with_schema(
+                                        &call.name,
+                                        &spec.parameters_schema,
+                                        &input,
+                                    )?;
+                                    if call.name == "request_permissions"
+                                        && let Some(registry) = deps.provider_registry
+                                        && let Some(items) = input["items"].as_array()
+                                    {
+                                        for item in items {
+                                            if let Some(name) = item["tool_name"].as_str()
+                                                && let Some(exact) = item.get("exact_input")
+                                                && let Some(capability) =
+                                                    registry.capability_for_tool(name)
+                                            {
+                                                let mut target = capability.tool_spec.clone();
+                                                crate::ui_model_ids::project_tool(&mut target);
+                                                crate::model_input::validate_format_with_schema(
+                                                    name,
+                                                    &target.parameters_schema,
+                                                    exact,
+                                                )?;
+                                            }
+                                        }
+                                    }
+                                    Ok(())
+                                })
+                        });
+                        if let Some(Err(error)) = validation {
+                            append_internal_tool_result(
+                                session,
+                                turn.provider_meta.data_envelope.as_ref(),
+                                mint(),
+                                &call.id,
+                                error,
+                                "invalid_tool_arguments",
+                            )?;
+                            deps.session_seam.save(session).await?;
+                            finish_tool(session, &call.id, false, sink);
+                            continue;
+                        }
+                    }
                     session
                         .capability_disclosure
                         .record_use(std::slice::from_ref(&call.name));
-                    let resolved_call = match crate::ui_model_ids::resolve_call(
+                    let resolved_call = match crate::ui_model_ids::resolve_session_call(
                         call,
-                        &session.conversation,
+                        session,
                         if crate::ui_model_ids::needs_resolution(&call.name) {
                             current_unix_ms(deps.clock)?
                         } else {
@@ -4411,8 +4474,9 @@ async fn run_inner_impl(
                         ToolEffect::GoalControl => {
                             sink.on_tool_started(&call.name, &call.id, &call.arguments_json);
                             match crate::goal_tools::parse(call) {
-                                Ok(control) => {
-                                    if matches!(control, crate::goal::GoalControl::Complete { .. })
+                                Ok(proposal) => {
+                                    if proposal.decision
+                                        == crate::goal_tools::GoalDecision::Complete
                                         && let Some(seam) = deps.session_seam.subagents(session)
                                         && !seam.required_children_complete(session).await?
                                     {
@@ -4425,6 +4489,20 @@ async fn run_inner_impl(
                                     }
                                     let claimed_goal =
                                         deps.session_seam.load_claimed_goal(session).await?;
+                                    let sources = if proposal.decision
+                                        == crate::goal_tools::GoalDecision::Complete
+                                    {
+                                        goal_control::completion_sources(
+                                            session,
+                                            &claimed_goal,
+                                            &request_message_ids,
+                                            &response_message_id,
+                                            deps.registry,
+                                        )?
+                                    } else {
+                                        Vec::new()
+                                    };
+                                    let control = proposal.into_control(sources)?;
                                     append_internal_tool_result(
                                         session,
                                         turn.provider_meta.data_envelope.as_ref(),
@@ -6509,6 +6587,13 @@ pub(crate) fn bind_tool_input_envelopes(
     let mut preview_ids = HashSet::new();
     collect_identity_values(&arguments, &mut artifact_ids, &mut preview_ids);
     let mut source_ids = envelope.provenance.source_envelope_ids.clone();
+    if session.surface == AgentSessionSurface::AiAssistant {
+        source_ids.extend(crate::result_model_ids::input_envelope_ids(
+            &call.name,
+            &arguments,
+            &session.conversation,
+        )?);
+    }
     let has_explicit_input_lineage = !source_ids.is_empty();
 
     if crate::provider_preflight::text_file::TextMutationPreflight::supports(&call.name)

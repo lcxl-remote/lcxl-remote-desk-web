@@ -27,7 +27,7 @@ pub fn model_bound_published_input(
     if !run_id.starts_with("schedule-run-")
         || !crate::subagent::valid_id(&message_id)
         || text.trim().is_empty()
-        || text.len() > super::MAX_SCHEDULE_PROMPT_BYTES
+        || text.chars().count() > super::MAX_SCHEDULE_PROMPT_CHARS
         || !matches!(&destination, DestinationIdentity::Model { .. })
     {
         return Err(denied());

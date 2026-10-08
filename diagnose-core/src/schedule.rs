@@ -6,7 +6,7 @@ use desk_agent_protocol::schedule::{
 };
 
 /// Requirements must fit the existing conversation input admission limit.
-pub const MAX_SCHEDULE_PROMPT_BYTES: usize = 16 * 1024;
+pub const MAX_SCHEDULE_PROMPT_CHARS: usize = 16 * 1024;
 
 pub const SCHEDULE_CALC_VERSION: &str = "utc-v1";
 /// Initial server policy and draft budget; deployed policy is read from storage.
@@ -58,9 +58,9 @@ pub fn normalize_draft(
     if !valid_id(&draft.client_create_key)
         || !valid_id(&draft.target_device_id)
         || draft.title.trim().is_empty()
-        || draft.title.len() > 240
+        || draft.title.chars().count() > 240
         || draft.prompt.trim().is_empty()
-        || draft.prompt.len() > MAX_SCHEDULE_PROMPT_BYTES
+        || draft.prompt.chars().count() > MAX_SCHEDULE_PROMPT_CHARS
         || draft
             .locale
             .as_ref()

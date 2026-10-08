@@ -95,6 +95,140 @@ fn intact_output_observation_allows_best_effort_without_relabeling() {
 }
 
 #[test]
+fn output_id_call_and_permission_preserve_model_input_and_exact_frame() {
+    let history = history();
+    let original = crate::chat::ToolCall {
+        id: "input".into(),
+        name: crate::ai_assistant::linux::OUTPUT_TOOL.into(),
+        arguments_json: json!({"output_id":"output", "action":{"step":
+            desk_agent_protocol::computer_use::RawInputStep::KeyPress {
+                key: desk_agent_protocol::computer_use::RawInputKey::Enter,
+            }
+        }})
+        .to_string(),
+    };
+    let resolved = crate::ui_model_ids::resolve_call(&original, &history, 2).unwrap();
+    assert!(crate::ui_model_ids::same_call_input(
+        &original.name,
+        &original.arguments_json,
+        &resolved.arguments_json
+    ));
+
+    let permission = crate::chat::ToolCall {
+        id: "permission".into(),
+        name: "request_permissions".into(),
+        arguments_json: json!({"items":[{"tool_name":original.name,
+            "exact_input":serde_json::from_str::<serde_json::Value>(&original.arguments_json).unwrap()
+        }]}).to_string(),
+    };
+    let resolved_permission = crate::ui_model_ids::resolve_call(&permission, &history, 2).unwrap();
+    assert!(crate::ui_model_ids::same_call_input(
+        &permission.name,
+        &permission.arguments_json,
+        &resolved_permission.arguments_json
+    ));
+    let permission_value: serde_json::Value =
+        serde_json::from_str(&resolved_permission.arguments_json).unwrap();
+    let resolved_value: serde_json::Value = serde_json::from_str(&resolved.arguments_json).unwrap();
+    assert_eq!(permission_value["items"][0]["exact_input"], resolved_value);
+
+    let replay = ChatMessage::assistant_tool_calls(
+        "replay",
+        "",
+        vec![
+            ToolCallRef {
+                id: resolved.id.clone(),
+                name: resolved.name.clone(),
+                arguments_json: resolved.arguments_json.clone(),
+            },
+            ToolCallRef {
+                id: resolved_permission.id.clone(),
+                name: resolved_permission.name.clone(),
+                arguments_json: resolved_permission.arguments_json.clone(),
+            },
+        ],
+    );
+    let request =
+        crate::seam::ModelRequest::text_only(vec![replay], crate::prompt::ResponseFormatSpec::None);
+    let durable = serde_json::to_string(&request.messages).unwrap();
+    let projected = crate::ui_model_ids::project_request(&request);
+    for (call, expected) in projected.messages[0]
+        .tool_calls
+        .iter()
+        .zip([&original, &permission])
+    {
+        assert!(crate::ui_model_ids::same_call_input(
+            &expected.name,
+            &expected.arguments_json,
+            &call.arguments_json
+        ));
+    }
+    assert_eq!(serde_json::to_string(&request.messages).unwrap(), durable);
+    assert_eq!(
+        serde_json::to_string(&crate::ui_model_ids::project_request(&projected).messages).unwrap(),
+        serde_json::to_string(&projected.messages).unwrap(),
+    );
+
+    let registry = crate::ai_assistant::ai_assistant_provider_registry();
+    for surface in [
+        ProductSurface::OssPersonalOwner,
+        ProductSurface::ManagerPersonalOwner,
+    ] {
+        let preflight =
+            WaylandOutputInputPreflight::from_history(&registry, surface, &resolved, &history, 2)
+                .unwrap();
+        assert_eq!(
+            preflight.canonical_input_json(),
+            crate::permission_tools::canonical_tool_permission_input_json(
+                &original.name,
+                permission_value["items"][0]["exact_input"].clone()
+            )
+            .unwrap()
+        );
+        let mut altered = resolved_value.clone();
+        altered["action"]["frame"]["observation_id"] = json!("invented");
+        assert!(
+            WaylandOutputInputPreflight::from_history(
+                &registry,
+                surface,
+                &crate::chat::ToolCall {
+                    arguments_json: altered.to_string(),
+                    ..resolved.clone()
+                },
+                &history,
+                2
+            )
+            .is_err()
+        );
+    }
+    for (pointer, changed) in [
+        ("/target/token", json!("another-output")),
+        ("/action/step/params/key", json!("escape")),
+    ] {
+        let mut altered = resolved_value.clone();
+        *altered.pointer_mut(pointer).unwrap() = changed;
+        assert!(!crate::ui_model_ids::same_call_input(
+            &original.name,
+            &original.arguments_json,
+            &altered.to_string()
+        ));
+    }
+    let mut invented = serde_json::from_str::<serde_json::Value>(&original.arguments_json).unwrap();
+    invented["action"]["frame"] = resolved_value["action"]["frame"].clone();
+    assert!(
+        crate::ui_model_ids::resolve_call(
+            &crate::chat::ToolCall {
+                arguments_json: invented.to_string(),
+                ..original
+            },
+            &history,
+            2
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn altered_or_wrong_source_observations_cannot_supply_output_references() {
     for alteration in 0..4 {
         let mut history = history();
