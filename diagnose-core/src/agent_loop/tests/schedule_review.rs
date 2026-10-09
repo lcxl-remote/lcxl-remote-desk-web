@@ -28,6 +28,7 @@ impl SessionSeam for ReviewStore<'_> {
         &self,
         session: &mut PersistedAgentSession,
         call: &ToolCall,
+        _observation: crate::model_observability::tool::ToolObservation,
     ) -> Result<String, AgentError> {
         let parent = crate::model_message_labels::model_bound_user_message(
             "model-input".into(),
@@ -57,6 +58,7 @@ impl SessionSeam for ReviewStore<'_> {
         &self,
         session: &mut PersistedAgentSession,
         id: &str,
+        _observation: crate::model_observability::tool::ToolObservation,
     ) -> Result<bool, AgentError> {
         assert_eq!(id, "timer");
         assert_eq!(

@@ -1,0 +1,1 @@
+{"type":"string","enum":["five_minutes","hour"],"x-readme-ref-name":"Granularity"}

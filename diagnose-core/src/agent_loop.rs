@@ -1887,6 +1887,10 @@ async fn prepare_model_context(
                     None => None,
                 };
                 let mut request = ModelRequest {
+                    observation: deps.model.observation_context(
+                        crate::model_profile::ModelUseCase::ContextCompression,
+                        crate::model_observability::Origin::System,
+                    ),
                     messages: authorized_input.as_ref().map_or_else(
                         || crate::model_context::compression_request_messages(&plan),
                         |input| input.messages.clone(),
@@ -1902,6 +1906,9 @@ async fn prepare_model_context(
                         crate::model_context::CONTEXT_SUMMARY_OUTPUT_HARD_CAP_TOKENS,
                     ),
                 };
+                let _observation_preflight = crate::model_observability::PreflightObservation::new(
+                    request.observation.clone(),
+                );
                 let identity = format!("compression:{turn_id}:{}", plan.generation);
                 let budget = call_budget::reserve_model(
                     deps,
@@ -1912,6 +1919,7 @@ async fn prepare_model_context(
                 )
                 .await?;
                 let mut compression_sink = crate::seam::NullTurnSink;
+                let compression_observation = request.observation.clone();
                 let dial_result = deps.model.call(request, &mut compression_sink).await;
                 call_budget::settle_model(deps, session, budget, &dial_result).await?;
                 let turn = match dial_result {
@@ -1935,6 +1943,12 @@ async fn prepare_model_context(
                 let disposition = match classify_model_turn(&turn) {
                     Ok(disposition) => disposition,
                     Err(_) => {
+                        if let Some(context) = &compression_observation {
+                            context.output(
+                                crate::model_observability::OutputOutcome::InvalidProtocol,
+                                crate::model_observability::tool::now_ms(),
+                            );
+                        }
                         return Err(report_context_compression_failure(
                             deps.model,
                             FailureKind::InvalidSchema,
@@ -1953,6 +1967,13 @@ async fn prepare_model_context(
                     }
                 };
                 if let Some(kind) = disposition_failure {
+                    if let Some(context) = &compression_observation {
+                        context.output(match disposition {
+                            TurnDisposition::Discard => crate::model_observability::OutputOutcome::OutputTruncated,
+                            TurnDisposition::ContextWindowExceeded => crate::model_observability::OutputOutcome::ContextLimit,
+                            _ => crate::model_observability::OutputOutcome::InvalidStructuredOutput,
+                        }, crate::model_observability::tool::now_ms());
+                    }
                     return Err(report_context_compression_failure(
                         deps.model,
                         kind,
@@ -1982,6 +2003,12 @@ async fn prepare_model_context(
                 ) {
                     Ok(validated) => validated,
                     Err(error) => {
+                        if let Some(context) = &compression_observation {
+                            context.output(
+                                crate::model_observability::OutputOutcome::InvalidStructuredOutput,
+                                crate::model_observability::tool::now_ms(),
+                            );
+                        }
                         let kind = compression_failure_for_context_error(&error);
                         return Err(report_context_compression_failure(
                             deps.model,
@@ -2026,8 +2053,21 @@ async fn prepare_model_context(
                     }
                 };
                 match review_context_summary(deps, candidate).await {
-                    Ok(ContentSafetyDecision::Allow) => {}
+                    Ok(ContentSafetyDecision::Allow) => {
+                        if let Some(context) = &compression_observation {
+                            context.output(
+                                crate::model_observability::OutputOutcome::Accepted,
+                                crate::model_observability::tool::now_ms(),
+                            );
+                        }
+                    }
                     Ok(_) | Err(_) => {
+                        if let Some(context) = &compression_observation {
+                            context.output(
+                                crate::model_observability::OutputOutcome::PolicyRejected,
+                                crate::model_observability::tool::now_ms(),
+                            );
+                        }
                         return Err(report_context_compression_failure(
                             deps.model,
                             FailureKind::UnsafeOutput,
@@ -2232,6 +2272,10 @@ async fn run_inner_impl(
     let mut same_tool: HashMap<String, u32> = HashMap::new();
     let mut compression_attempted = false;
     let mut projection_rebuilds = 0u8;
+    use crate::model_observability::protocol_correction::{
+        PendingProtocolCorrection, ProtocolCorrectionCheck, ProtocolCorrectionReason,
+    };
+    let mut pending_protocol_correction: Option<PendingProtocolCorrection> = None;
     let mut completion_protocol_retries: u8 = 0;
     let mut empty_end_turn_retries: u8 = 0;
     let mut truncated_turn_retries: u8 = 0;
@@ -3309,7 +3353,11 @@ async fn run_inner_impl(
         // message is in this request is cleared once the model reacts to it (the
         // assistant answer / tool-call save below), so it never fires an automation
         // turn for a result the model already handled.
-        let request = ModelRequest {
+        let mut request = ModelRequest {
+            observation: deps.model.observation_context(
+                crate::model_profile::ModelUseCase::Agent,
+                crate::model_observability::Origin::from(session.trigger_origin),
+            ),
             messages,
             tools: specs,
             tool_requirements,
@@ -3331,6 +3379,13 @@ async fn run_inner_impl(
                 || session.agent_role.binding().is_some())
             .then_some(call_budget::OUTPUT_HARD_CAP),
         };
+        if session.surface == crate::session::AgentSessionSurface::TerminalAiAssistant
+            && let Some(context) = &mut request.observation
+        {
+            context.attribution.surface = crate::model_observability::Surface::Terminal;
+        }
+        let _observation_preflight =
+            crate::model_observability::PreflightObservation::new(request.observation.clone());
         let mut request = if let Some(event_id) = deps.model.command_completion_event_id() {
             project_command_completion(deps, session, event_id, request).await?
         } else {
@@ -3495,6 +3550,46 @@ async fn run_inner_impl(
                 (spec.name.clone(), spec)
             })
             .collect::<std::collections::BTreeMap<_, _>>();
+        if let Some(context) = &mut request.observation {
+            context.attribution.contract_revision = format!(
+                "{}.{}",
+                crate::model_observability::DEFINITION_VERSION,
+                session.capability_disclosure.definition_revision
+            );
+            if session.surface == AgentSessionSurface::TerminalAiAssistant {
+                context.attribution.surface = crate::model_observability::Surface::Terminal;
+            }
+        }
+        let observation = request.observation.clone();
+        let correction_fence = observation.as_ref().and_then(|context| {
+            crate::model_observability::correction::CorrectionFence::new(context, session)
+        });
+        let mut correction_projection =
+            crate::model_observability::correction::CorrectionProjection::new(
+                observation.clone(),
+                correction_fence.clone(),
+                &request.messages,
+            );
+        let mut protocol_correction=pending_protocol_correction.take().and_then(|pending| {
+            let marker=match pending.reason {
+                ProtocolCorrectionReason::EmptyResponse=>Some(format!("runtime-empty-end-turn-retry-{turn_id}-{empty_end_turn_retries}")),
+                ProtocolCorrectionReason::TruncatedOutput=>Some(format!("runtime-truncated-turn-retry-{turn_id}-{truncated_turn_retries}")),
+                ProtocolCorrectionReason::PermissionProtocol | ProtocolCorrectionReason::PermissionActionMissing=>Some(format!("runtime-permission-protocol-retry-{turn_id}-{permission_protocol_retries}")),
+                ProtocolCorrectionReason::PermissionPlanProtocol=>Some(format!("runtime-post-tool-permission-protocol-retry-{turn_id}-{post_tool_permission_protocol_retries}")),
+                ProtocolCorrectionReason::GoalControlMissing=>Some(format!("goal-control-correction-{turn_id}")),
+                ProtocolCorrectionReason::CompletionInterpretation | ProtocolCorrectionReason::ToolChoiceFallback=>None,
+            };
+            let cue_present=if let Some(marker)=marker {
+                request.messages.iter().any(|message|message.role==ChatRole::SystemEvent && message.message_id==marker)
+            } else { match pending.reason {
+                ProtocolCorrectionReason::CompletionInterpretation=>completion_only && completion_protocol_retries>0
+                    && request.messages.iter().any(|message|message.role==ChatRole::System),
+                ProtocolCorrectionReason::ToolChoiceFallback=>goal_control_only && goal_required_choice_rejected
+                    && matches!(request.tool_choice,crate::chat::ToolChoice::Auto),
+                _=>false,
+            } };
+            pending.project(observation.clone(),correction_fence.clone(),cue_present)
+        });
         let dial_result = if completion_only {
             deps.model
                 .call(request, &mut crate::seam::NullTurnSink)
@@ -3502,6 +3597,14 @@ async fn run_inner_impl(
         } else {
             deps.model.call(request, sink).await
         };
+        if dial_result.is_ok()
+            && let Some(projection) = &mut correction_projection
+        {
+            projection.model_returned();
+        }
+        if let Some(correction) = &mut protocol_correction {
+            correction.dial_result(dial_result.is_ok());
+        }
         call_budget::settle_model(deps, session, budget, &dial_result).await?;
         if goal_control_only
             && !goal_required_choice_rejected
@@ -3514,9 +3617,19 @@ async fn run_inner_impl(
             // control tool exposed and retry once with normal tool selection;
             // this failed request has already been conservatively charged.
             goal_required_choice_rejected = true;
+            pending_protocol_correction = PendingProtocolCorrection::open(
+                observation.clone(),
+                correction_fence.clone(),
+                ProtocolCorrectionReason::ToolChoiceFallback,
+            );
             continue;
         }
         let turn = dial_result?;
+        let tool_batch = crate::model_observability::tool::ToolBatch::new(
+            observation.clone(),
+            &turn.tool_calls,
+            &model_tool_definitions,
+        );
         if child_source_paused(deps, session).await? {
             sink.on_turn_discarded();
             return Ok(LoopOutcome::DelegationSourcePaused);
@@ -3534,10 +3647,24 @@ async fn run_inner_impl(
             && (!turn.tool_calls.is_empty()
                 || crate::command_completion::contains_tool_invocation(&turn.text))
         {
+            if let Some(context) = &observation {
+                context.output(
+                    crate::model_observability::OutputOutcome::InvalidStructuredOutput,
+                    crate::model_observability::tool::now_ms(),
+                );
+            }
+            if let Some(correction) = &mut protocol_correction {
+                correction.check(ProtocolCorrectionCheck::Rejected);
+            }
             if completion_protocol_retries >= 1 {
                 return Err(crate::command_completion::invalid_interpretation_error());
             }
             completion_protocol_retries += 1;
+            pending_protocol_correction = PendingProtocolCorrection::open(
+                observation.clone(),
+                correction_fence.clone(),
+                ProtocolCorrectionReason::CompletionInterpretation,
+            );
             continue;
         }
 
@@ -3555,6 +3682,15 @@ async fn run_inner_impl(
             } else {
                 sink.on_turn_discarded();
             }
+            if let Some(context) = &observation {
+                context.output(
+                    crate::model_observability::OutputOutcome::OutputTruncated,
+                    crate::model_observability::tool::now_ms(),
+                );
+            }
+            if let Some(correction) = &mut protocol_correction {
+                correction.check(ProtocolCorrectionCheck::Rejected);
+            }
             return Err(reasoning_output_budget_error());
         }
 
@@ -3567,16 +3703,68 @@ async fn run_inner_impl(
             } else {
                 sink.on_turn_discarded();
             }
+            if let Some(context) = &observation {
+                context.output(
+                    crate::model_observability::OutputOutcome::EmptyResponse,
+                    crate::model_observability::tool::now_ms(),
+                );
+            }
+            if let Some(correction) = &mut protocol_correction {
+                correction.check(ProtocolCorrectionCheck::Rejected);
+            }
             if empty_end_turn_retries >= 1 {
                 return Err(empty_end_turn_recovery_error());
             }
             empty_end_turn_retries += 1;
+            pending_protocol_correction = PendingProtocolCorrection::open(
+                observation.clone(),
+                correction_fence.clone(),
+                ProtocolCorrectionReason::EmptyResponse,
+            );
             continue;
         }
 
         let disposition = match classify_model_turn(&turn) {
-            Ok(disposition) => disposition,
+            Ok(disposition) => {
+                tool_batch.protocol(None);
+                if let Some(projection) = &mut correction_projection {
+                    projection.response(
+                        &tool_batch,
+                        matches!(
+                            disposition,
+                            TurnDisposition::InvokeTools | TurnDisposition::Answer
+                        ),
+                    );
+                }
+                disposition
+            }
             Err(error) => {
+                if let Some(correction) = &mut protocol_correction {
+                    correction.check(ProtocolCorrectionCheck::Rejected);
+                }
+                tool_batch.protocol(Some(&error));
+                if let Some(projection) = &mut correction_projection {
+                    projection.response(
+                        &tool_batch,
+                        matches!(
+                            error,
+                            crate::chat::ModelTurnError::InvalidToolArguments { .. }
+                        ),
+                    );
+                }
+                if let Some(context) = &observation {
+                    context.output(
+                        if matches!(
+                            error,
+                            crate::chat::ModelTurnError::InvalidToolArguments { .. }
+                        ) {
+                            crate::model_observability::OutputOutcome::InvalidStructuredOutput
+                        } else {
+                            crate::model_observability::OutputOutcome::InvalidProtocol
+                        },
+                        crate::model_observability::tool::now_ms(),
+                    );
+                }
                 if deps.content_safety.is_enforced() {
                     sink.on_turn_retracted(StreamRetractionReason::Incomplete, None);
                 } else {
@@ -3594,6 +3782,11 @@ async fn run_inner_impl(
                     && permission_protocol_retries < 1
                 {
                     permission_protocol_retries += 1;
+                    pending_protocol_correction = PendingProtocolCorrection::open(
+                        observation.clone(),
+                        correction_fence.clone(),
+                        ProtocolCorrectionReason::PermissionProtocol,
+                    );
                     continue;
                 }
                 let follows_tool_result = session.conversation.last().is_some_and(|message| {
@@ -3611,6 +3804,11 @@ async fn run_inner_impl(
                     && post_tool_permission_protocol_retries < 1
                 {
                     post_tool_permission_protocol_retries += 1;
+                    pending_protocol_correction = PendingProtocolCorrection::open(
+                        observation.clone(),
+                        correction_fence.clone(),
+                        ProtocolCorrectionReason::PermissionPlanProtocol,
+                    );
                     continue;
                 }
                 return Ok(LoopOutcome::ProtocolError(error));
@@ -3626,10 +3824,24 @@ async fn run_inner_impl(
             } else {
                 sink.on_turn_discarded();
             }
+            if let Some(correction) = &mut protocol_correction {
+                correction.check(ProtocolCorrectionCheck::Rejected);
+            }
+            if let Some(context) = &observation {
+                context.output(
+                    crate::model_observability::OutputOutcome::InvalidStructuredOutput,
+                    crate::model_observability::tool::now_ms(),
+                );
+            }
             if permission_protocol_retries >= 1 {
                 return Err(permission_continuation_recovery_error());
             }
             permission_protocol_retries += 1;
+            pending_protocol_correction = PendingProtocolCorrection::open(
+                observation.clone(),
+                correction_fence.clone(),
+                ProtocolCorrectionReason::PermissionActionMissing,
+            );
             continue;
         }
         if matches!(
@@ -3641,8 +3853,26 @@ async fn run_inner_impl(
             } else {
                 sink.on_turn_discarded();
             }
+            if let Some(context) = &observation {
+                context.output(
+                    if disposition == TurnDisposition::Discard {
+                        crate::model_observability::OutputOutcome::OutputTruncated
+                    } else {
+                        crate::model_observability::OutputOutcome::ContextLimit
+                    },
+                    crate::model_observability::tool::now_ms(),
+                );
+            }
+            if let Some(correction) = &mut protocol_correction {
+                correction.check(ProtocolCorrectionCheck::Rejected);
+            }
             if disposition == TurnDisposition::Discard && truncated_turn_retries < 1 {
                 truncated_turn_retries += 1;
+                pending_protocol_correction = PendingProtocolCorrection::open(
+                    observation.clone(),
+                    correction_fence.clone(),
+                    ProtocolCorrectionReason::TruncatedOutput,
+                );
                 continue;
             }
             return Ok(match disposition {
@@ -3664,6 +3894,12 @@ async fn run_inner_impl(
         };
         ensure_lease_healthy(deps).await?;
         if safety_decision != ContentSafetyDecision::Allow {
+            if let Some(context) = &observation {
+                context.output(
+                    crate::model_observability::OutputOutcome::PolicyRejected,
+                    crate::model_observability::tool::now_ms(),
+                );
+            }
             append_refusal_placeholder(session, &mut mint, safety_decision);
             session.clear_reacted_auto_triggers(&request_message_ids);
             deps.session_seam.save(session).await?;
@@ -3683,6 +3919,42 @@ async fn run_inner_impl(
             permission_continuation_pending = false;
         }
 
+        let terminal_answer = session.surface
+            == crate::session::AgentSessionSurface::TerminalAiAssistant
+            && disposition == TurnDisposition::Answer;
+        if !terminal_answer && let Some(context) = &observation {
+            context.output(
+                crate::model_observability::OutputOutcome::Accepted,
+                crate::model_observability::tool::now_ms(),
+            );
+        }
+        if let Some(correction) = &mut protocol_correction {
+            let passed = match correction.reason {
+                ProtocolCorrectionReason::GoalControlMissing => {
+                    turn.tool_calls.len() == 1
+                        && turn.tool_calls[0].name == crate::goal_tools::CONTROL_GOAL_TOOL_NAME
+                }
+                ProtocolCorrectionReason::PermissionPlanProtocol => {
+                    turn.tool_calls.len() == 1
+                        && turn.tool_calls[0].name
+                            == crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME
+                }
+                ProtocolCorrectionReason::PermissionProtocol
+                | ProtocolCorrectionReason::PermissionActionMissing => {
+                    disposition == TurnDisposition::InvokeTools
+                        && turn.tool_calls.len() == 1
+                        && model_tool_definitions.contains_key(&turn.tool_calls[0].name)
+                }
+                _ => true,
+            };
+            correction.check(if passed {
+                ProtocolCorrectionCheck::Passed
+            } else {
+                ProtocolCorrectionCheck::Rejected
+            });
+        }
+        let mut observed_sink = tool_batch.observe_sink(sink);
+        let sink: &mut dyn TurnSink = &mut observed_sink;
         crate::conversation_attachment::model_read::mark_consumed(
             &mut session.conversation,
             &request_message_ids,
@@ -3741,8 +4013,18 @@ async fn run_inner_impl(
                     && !session.focus_epoch.step_budget_exhausted()
                 {
                     goal_correction_attempted = true;
+                    pending_protocol_correction = PendingProtocolCorrection::open(
+                        observation.clone(),
+                        correction_fence.clone(),
+                        ProtocolCorrectionReason::GoalControlMissing,
+                    );
                     sink.on_partial_committed();
                     continue;
+                }
+                if terminal_answer && let Some(context) = observation.clone() {
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        sink.on_answer_observation(context)
+                    }));
                 }
                 sink.on_answer_committed(&turn.text);
                 return Ok(LoopOutcome::Answered(turn.text));
@@ -3788,6 +4070,7 @@ async fn run_inner_impl(
                 // Persist every assistant tool-call and its replay disposition
                 // before any tool lifecycle event or external action.
                 deps.session_seam.save(session).await?;
+                tool_batch.bind_message(&response_message_id);
                 if deps.content_safety.is_enforced() {
                     sink.on_partial_committed();
                 }
@@ -3950,6 +4233,16 @@ async fn run_inner_impl(
                         .iter()
                         .any(|advertised| advertised.name() == call.name)
                     {
+                        tool_batch.reject(
+                            call_index,
+                            crate::model_observability::Stage::Exposure,
+                            if deps.registry.iter().any(|tool| tool.name() == call.name) {
+                                crate::model_observability::InputIssue::UnexposedTool
+                            } else {
+                                crate::model_observability::InputIssue::UnknownTool
+                            },
+                            None,
+                        );
                         append_internal_tool_result(
                             session,
                             turn.provider_meta.data_envelope.as_ref(),
@@ -4011,18 +4304,25 @@ async fn run_inner_impl(
                         )?;
                         continue;
                     };
+                    tool_batch.stage(
+                        call_index,
+                        crate::model_observability::Stage::Exposure,
+                        crate::model_observability::StageOutcome::Passed,
+                    );
                     if session.surface == AgentSessionSurface::AiAssistant {
                         let validation = model_tool_definitions.get(&call.name).map(|spec| {
                             serde_json::from_str::<serde_json::Value>(&call.arguments_json)
-                                .map_err(|error| {
-                                    crate::model_input::describe_error_with_schema(
+                                .map_err(|error| crate::model_input::FormatError {
+                                    message: crate::model_input::describe_error_with_schema(
                                         &call.name,
                                         &spec.parameters_schema,
                                         &format!("invalid JSON: {error}"),
-                                    )
+                                    ),
+                                    issue: crate::model_observability::InputIssue::InvalidJson,
+                                    schema_path: None,
                                 })
                                 .and_then(|input| {
-                                    crate::model_input::validate_format_with_schema(
+                                    crate::model_input::validate_format_reported(
                                         &call.name,
                                         &spec.parameters_schema,
                                         &input,
@@ -4039,7 +4339,7 @@ async fn run_inner_impl(
                                             {
                                                 let mut target = capability.tool_spec.clone();
                                                 crate::ui_model_ids::project_tool(&mut target);
-                                                crate::model_input::validate_format_with_schema(
+                                                crate::model_input::validate_format_reported(
                                                     name,
                                                     &target.parameters_schema,
                                                     exact,
@@ -4050,19 +4350,47 @@ async fn run_inner_impl(
                                     Ok(())
                                 })
                         });
+                        let schema_observed = validation.is_some();
                         if let Some(Err(error)) = validation {
+                            tool_batch.reject(
+                                call_index,
+                                if error.issue
+                                    == crate::model_observability::InputIssue::InvalidJson
+                                {
+                                    crate::model_observability::Stage::Json
+                                } else {
+                                    crate::model_observability::Stage::Schema
+                                },
+                                error.issue,
+                                error.schema_path.as_deref(),
+                            );
                             append_internal_tool_result(
                                 session,
                                 turn.provider_meta.data_envelope.as_ref(),
                                 mint(),
                                 &call.id,
-                                error,
+                                error.message,
                                 "invalid_tool_arguments",
                             )?;
                             deps.session_seam.save(session).await?;
                             finish_tool(session, &call.id, false, sink);
                             continue;
                         }
+                        tool_batch.stage(
+                            call_index,
+                            crate::model_observability::Stage::Schema,
+                            if schema_observed {
+                                crate::model_observability::StageOutcome::Passed
+                            } else {
+                                crate::model_observability::StageOutcome::NotApplicable
+                            },
+                        );
+                    } else {
+                        tool_batch.stage(
+                            call_index,
+                            crate::model_observability::Stage::Schema,
+                            crate::model_observability::StageOutcome::NotApplicable,
+                        );
                     }
                     session
                         .capability_disclosure
@@ -4078,6 +4406,12 @@ async fn run_inner_impl(
                     ) {
                         Ok(call) => call,
                         Err(error) => {
+                            tool_batch.reject(
+                                call_index,
+                                crate::model_observability::Stage::Reference,
+                                crate::model_observability::InputIssue::ReferenceUnavailable,
+                                None,
+                            );
                             append_internal_tool_result(
                                 session,
                                 turn.provider_meta.data_envelope.as_ref(),
@@ -4091,6 +4425,13 @@ async fn run_inner_impl(
                             continue;
                         }
                     };
+                    if crate::ui_model_ids::needs_resolution(&call.name) {
+                        tool_batch.stage(
+                            call_index,
+                            crate::model_observability::Stage::Reference,
+                            crate::model_observability::StageOutcome::Attempted,
+                        );
+                    }
                     let call = &resolved_call;
 
                     if disclosure_enabled
@@ -4118,6 +4459,21 @@ async fn run_inner_impl(
                                 || snapshot
                                     .policy_read_capabilities
                                     .contains(&tool.required_capability));
+                        let denial = if ready
+                            && session.trigger_origin
+                                != crate::session::TriggerOrigin::ScheduledTask
+                            && !active.contains(&call.name)
+                            && !policy_read
+                        {
+                            crate::permission_tools::latest_tool_request_denial(
+                                &session.permission_requests,
+                                &session.permission_decisions,
+                                &call.name,
+                                session.input_revision,
+                            )
+                        } else {
+                            None
+                        };
                         let reason = if !ready {
                             Some("capability_not_ready")
                         } else if session.trigger_origin
@@ -4125,27 +4481,25 @@ async fn run_inner_impl(
                             && !active.contains(&call.name)
                             && !policy_read
                         {
-                            Some(
-                                if crate::permission_tools::latest_tool_request_denied(
-                                    &session.permission_requests,
-                                    &session.permission_decisions,
+                            Some(if denial.is_some() {
+                                "permission_denied"
+                            } else {
+                                crate::grant_disclosure::inactive_grant_reason(
+                                    &grants,
                                     &call.name,
-                                    session.input_revision,
-                                ) {
-                                    "permission_denied"
-                                } else {
-                                    crate::grant_disclosure::inactive_grant_reason(
-                                        &grants,
-                                        &call.name,
-                                        current_unix_ms(deps.clock)?,
-                                        snapshot.readiness_revision,
-                                    )
-                                },
-                            )
+                                    current_unix_ms(deps.clock)?,
+                                    snapshot.readiness_revision,
+                                )
+                            })
                         } else {
                             None
                         };
                         if let Some(reason) = reason {
+                            if ready {
+                                tool_batch.permission(call_index,if let Some(denial)=denial {
+                                    crate::model_observability::permission::state_outcome(crate::dynamic_run::PermissionRequestState::Denied,denial.actor)
+                                } else { crate::model_observability::PermissionOutcome::PolicyRejected });
+                            }
                             append_internal_tool_result(
                                 session,
                                 turn.provider_meta.data_envelope.as_ref(),
@@ -4169,6 +4523,12 @@ async fn run_inner_impl(
                     if let Err(validation_error) =
                         resolve_word_report_web_source_envelope(session, call)
                     {
+                        tool_batch.reject(
+                            call_index,
+                            crate::model_observability::Stage::Preflight,
+                            crate::model_observability::InputIssue::Semantic,
+                            None,
+                        );
                         append_internal_tool_result(
                             session,
                             turn.provider_meta.data_envelope.as_ref(),
@@ -4180,6 +4540,11 @@ async fn run_inner_impl(
                         continue;
                     }
 
+                    let tool_observation = tool_batch.input(call_index);
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        deps.tools
+                            .observe_tool_input(call, tool_observation.clone());
+                    }));
                     match tool.effect {
                         ToolEffect::SubAgentPlanning
                         | ToolEffect::SubAgentControl
@@ -4187,11 +4552,19 @@ async fn run_inner_impl(
                         | ToolEffect::SubAgentWait => {
                             sink.on_tool_started(&call.name, &call.id, &call.arguments_json);
                             let result_message_id = mint();
-                            let result = match crate::subagent::tools::parse(session, call) {
+                            let result = match crate::subagent::tools::parse_observed(
+                                session,
+                                call,
+                                &tool_observation,
+                            ) {
                                 Ok(operation)
                                     if call.name != crate::subagent::tools::WAIT
                                         || turn.tool_calls.len() == 1 =>
                                 {
+                                    tool_observation.stage(
+                                        crate::model_observability::Stage::Preflight,
+                                        crate::model_observability::StageOutcome::Attempted,
+                                    );
                                     match deps.session_seam.subagents(session) {
                                         Some(seam) => {
                                             seam.execute(
@@ -4199,6 +4572,7 @@ async fn run_inner_impl(
                                                 call,
                                                 operation,
                                                 &result_message_id,
+                                                &tool_observation,
                                             )
                                             .await
                                         }
@@ -4207,11 +4581,25 @@ async fn run_inner_impl(
                                         )),
                                     }
                                 }
-                                Ok(_) => Err(crate::subagent::invalid(
-                                    "wait_subagents must be called alone",
-                                )),
+                                Ok(_) => {
+                                    tool_batch.reject(
+                                        call_index,
+                                        crate::model_observability::Stage::Preflight,
+                                        crate::model_observability::InputIssue::Semantic,
+                                        None,
+                                    );
+                                    Err(crate::subagent::invalid(
+                                        "wait_subagents must be called alone",
+                                    ))
+                                }
                                 Err(error) => Err(error),
                             };
+                            if result.is_ok() {
+                                tool_observation.stage(
+                                    crate::model_observability::Stage::Preflight,
+                                    crate::model_observability::StageOutcome::Passed,
+                                );
+                            }
                             match result {
                                 Ok(receipt) => {
                                     let payload_text = receipt.payload.to_string();
@@ -4308,6 +4696,7 @@ async fn run_inner_impl(
                                             request,
                                             &mut mint,
                                             sink,
+                                            &tool_observation,
                                         )
                                         .await;
                                     }
@@ -4450,6 +4839,7 @@ async fn run_inner_impl(
                                 &mut mint,
                                 &mut halted,
                                 sink,
+                                &tool_observation,
                             )
                             .await?
                             {
@@ -4465,6 +4855,7 @@ async fn run_inner_impl(
                                 &mut mint,
                                 &mut halted,
                                 sink,
+                                &tool_observation,
                             )
                             .await?
                             {
@@ -4480,6 +4871,10 @@ async fn run_inner_impl(
                                         && let Some(seam) = deps.session_seam.subagents(session)
                                         && !seam.required_children_complete(session).await?
                                     {
+                                        tool_observation.reject(
+                                            crate::model_observability::Stage::Preflight,
+                                            crate::model_observability::InputIssue::Precondition,
+                                        );
                                         append_internal_tool_result(session, turn.provider_meta.data_envelope.as_ref(), mint(), &call.id,
                                             "required_subagents_incomplete: read_subagent_result for each required child at its current state revision and assess its answer against the goal. Finished means the child returned, not that the goal was achieved. Use wait_subagents for unfinished dependencies. A failed or cancelled required dependency cannot be claimed as complete.".into(),
                                             crate::goal_tools::CONTROL_GOAL_TOOL_NAME)?;
@@ -4489,20 +4884,31 @@ async fn run_inner_impl(
                                     }
                                     let claimed_goal =
                                         deps.session_seam.load_claimed_goal(session).await?;
-                                    let sources = if proposal.decision
-                                        == crate::goal_tools::GoalDecision::Complete
-                                    {
-                                        goal_control::completion_sources(
-                                            session,
-                                            &claimed_goal,
-                                            &request_message_ids,
-                                            &response_message_id,
-                                            deps.registry,
-                                        )?
-                                    } else {
-                                        Vec::new()
-                                    };
-                                    let control = proposal.into_control(sources)?;
+                                    let sources =
+                                        if proposal.decision
+                                            == crate::goal_tools::GoalDecision::Complete
+                                        {
+                                            goal_control::completion_sources(
+                                                session,
+                                                &claimed_goal,
+                                                &request_message_ids,
+                                                &response_message_id,
+                                                deps.registry,
+                                            )
+                                            .inspect_err(|error| {
+                                                tool_observation.input_error(error);
+                                            })?
+                                        } else {
+                                            Vec::new()
+                                        };
+                                    let control =
+                                        proposal.into_control(sources).inspect_err(|error| {
+                                            tool_observation.input_error(error);
+                                        })?;
+                                    tool_observation.stage(
+                                        crate::model_observability::Stage::Preflight,
+                                        crate::model_observability::StageOutcome::Passed,
+                                    );
                                     append_internal_tool_result(
                                         session,
                                         turn.provider_meta.data_envelope.as_ref(),
@@ -4556,6 +4962,7 @@ async fn run_inner_impl(
                                     });
                                 }
                                 Err(error) => {
+                                    tool_observation.input_error(&error);
                                     append_internal_tool_result(
                                         session,
                                         turn.provider_meta.data_envelope.as_ref(),
@@ -4580,12 +4987,14 @@ async fn run_inner_impl(
                                 .task_status_projection
                                 .as_ref()
                                 .map_or(0, |projection| projection.revision);
-                            match crate::task_status_tools::build_task_status_projection(
+                            let projection = crate::task_status_tools::build_task_status_projection(
                                 call,
                                 current_revision,
                                 updated_at.clone(),
                                 step_id,
-                            ) {
+                            );
+                            tool_observation.preflight_result(&projection);
+                            match projection {
                                 Ok(projection) => {
                                     let content = serde_json::json!({
                                         "status": "updated",
@@ -4687,7 +5096,10 @@ async fn run_inner_impl(
                                 {
                                     return Err(crate::goal_tools::unavailable());
                                 }
-                                let proposal = crate::goal_tools::parse_open(call)?;
+                                let proposal =
+                                    crate::goal_tools::parse_open(call).inspect_err(|error| {
+                                        tool_observation.input_error(error);
+                                    })?;
                                 let user = crate::permission_resume::latest_user_requirement(
                                     &session.conversation,
                                 )
@@ -4734,6 +5146,7 @@ async fn run_inner_impl(
                                 );
                                 let mut request = if let Some(goal) = planning_goal.as_ref() {
                                     if proposal.previous_completed_goal_id.is_some() {
+                                        tool_observation.reject(crate::model_observability::Stage::Preflight,crate::model_observability::InputIssue::Combination);
                                         return Err(crate::goal_tools::invalid("a revision cannot reference a completed goal"));
                                     }
                                     crate::goal::GoalOpenRequest::new_revision(
@@ -4773,6 +5186,10 @@ async fn run_inner_impl(
                             })();
                             match prepared {
                                 Ok(event) => {
+                                    tool_observation.stage(
+                                        crate::model_observability::Stage::Preflight,
+                                        crate::model_observability::StageOutcome::Passed,
+                                    );
                                     let before = session.clone();
                                     let content = serde_json::json!({
                                         "status": "pending_user_decision",
@@ -4797,6 +5214,10 @@ async fn run_inner_impl(
                                         .await
                                     {
                                         Ok(()) => {
+                                            if let Some(alias)=crate::model_observability::ObservationAlias::goal_open_request(
+                                                &session.conversation_id,&event.request.request_id,
+                                            ) { tool_observation.bind(alias); }
+                                            tool_observation.permission(crate::model_observability::PermissionOutcome::Waiting);
                                             finish_tool(session, &call.id, true, sink);
                                             return Ok(LoopOutcome::GoalOpenRequested {
                                                 request_id: event.request.request_id,
@@ -4842,8 +5263,10 @@ async fn run_inner_impl(
                             // Persist the model call before a separate transaction
                             // compares the exact version and lease and records its result.
                             deps.session_seam.save(session).await?;
-                            if let Err(error) =
-                                deps.session_seam.manage_schedule_tool(session, call).await
+                            if let Err(error) = deps
+                                .session_seam
+                                .manage_schedule_tool(session, call, tool_observation.clone())
+                                .await
                             {
                                 append_internal_tool_result(
                                     session,
@@ -4864,7 +5287,11 @@ async fn run_inner_impl(
                                         ensure_lease_healthy(deps).await?;
                                         if deps
                                             .session_seam
-                                            .poll_schedule_review(session, &schedule_id)
+                                            .poll_schedule_review(
+                                                session,
+                                                &schedule_id,
+                                                tool_observation.clone(),
+                                            )
                                             .await?
                                         {
                                             break;
@@ -4889,6 +5316,7 @@ async fn run_inner_impl(
                                     .map(|resolved| (input, resolved)),
                                 Err(error) => Err(error),
                             };
+                            tool_observation.preflight_result(&resolved);
                             let (input, resolved) = match resolved {
                                 Ok(value) => value,
                                 Err(error) => {
@@ -4929,6 +5357,14 @@ async fn run_inner_impl(
                                     current_unix_ms(deps.clock)?,
                                 )
                                 .await?;
+                            if let Some(alias) =
+                                crate::model_observability::ObservationAlias::directory_request(
+                                    &session.conversation_id,
+                                    &request_id,
+                                )
+                            {
+                                tool_observation.bind(alias);
+                            }
                             let task_approved = session.file_scope.records().iter().any(|record| {
                                 record.proposal.request_id == request_id
                                     && record.proposal.source
@@ -4937,6 +5373,9 @@ async fn run_inner_impl(
                                         == crate::file_scope::DirectoryConsentState::Approved
                             });
                             if task_approved {
+                                tool_observation.permission(
+                                    crate::model_observability::PermissionOutcome::Approved,
+                                );
                                 append_internal_tool_result(
                                     session,
                                     turn.provider_meta.data_envelope.as_ref(),
@@ -4950,6 +5389,8 @@ async fn run_inner_impl(
                                 finish_tool(session, &call.id, true, sink);
                                 continue;
                             }
+                            tool_observation
+                                .permission(crate::model_observability::PermissionOutcome::Waiting);
                             // Fresh automation approvals belong to the scheduler's durable
                             // contract review flow. Interactive directory requests wait in
                             // this turn, like schedule reviews, without another model call.
@@ -5116,6 +5557,7 @@ async fn run_inner_impl(
                                     .map(|()| request),
                                 Err(error) => Err(error),
                             };
+                            tool_observation.preflight_result(&request);
                             let request = match request {
                                 Ok(request) => {
                                     if let Some((denied_request, denied_item)) =
@@ -5125,6 +5567,7 @@ async fn run_inner_impl(
                                             &request,
                                         )
                                     {
+                                        tool_observation.permission(crate::model_observability::PermissionOutcome::PolicyRejected);
                                         Err(AgentError {
                                             kind: AgentErrorKind::InvalidInput,
                                             message: format!(
@@ -5175,6 +5618,21 @@ async fn run_inner_impl(
                                         other => other,
                                     };
                                     if let Some(existing) = existing {
+                                        let actor = session
+                                            .permission_decisions
+                                            .iter()
+                                            .find(|decision| {
+                                                decision.request_id == existing.request_id
+                                                    && decision.input_revision
+                                                        == existing.input_revision
+                                            })
+                                            .map(|decision| decision.actor);
+                                        tool_observation.permission(
+                                            crate::model_observability::permission::state_outcome(
+                                                existing.state,
+                                                actor,
+                                            ),
+                                        );
                                         let decision_state = match existing.state {
                                             crate::dynamic_run::PermissionRequestState::Pending => {
                                                 "pending"
@@ -5324,6 +5782,12 @@ async fn run_inner_impl(
                                     deps.session_seam
                                         .save_permission_request(session, &event)
                                         .await?;
+                                    if let Some(alias)=crate::model_observability::ObservationAlias::permission_request(&session.conversation_id,&request.request_id) {
+                                        tool_observation.bind(alias);
+                                    }
+                                    tool_observation.permission(
+                                        crate::model_observability::PermissionOutcome::Waiting,
+                                    );
                                     finish_tool(session, &call.id, true, sink);
                                     sink.on_permission_requested(
                                         &request.request_id,
@@ -5396,6 +5860,7 @@ async fn run_inner_impl(
                                     permission_candidates,
                                 },
                             );
+                            tool_observation.preflight_result(&result);
                             let (content, ok) = match result {
                                 Ok(content) => (content, true),
                                 Err(error) => (
@@ -5424,6 +5889,7 @@ async fn run_inner_impl(
                                     call,
                                     turn.provider_meta.data_envelope.as_ref(),
                                     &mut attachment_read_budget,
+                                    &tool_observation,
                                 ))
                                 .await;
                                 let (message, ok) = match result {
@@ -5471,6 +5937,7 @@ async fn run_inner_impl(
                                     })?;
                                 Ok(result)
                             });
+                            tool_observation.preflight_result(&result);
                             let (content, source_messages, ok) = match result {
                                 Ok(result) => (result.content, result.source_messages, true),
                                 Err(error) => (
@@ -5495,6 +5962,7 @@ async fn run_inner_impl(
                     }
                 }
                 deps.session_seam.save(session).await?;
+                tool_batch.correction_feedback(correction_fence);
                 // Loop again with the tool results in context.
             }
         }
@@ -6867,12 +7335,14 @@ async fn run_mutating<F: FnMut() -> String>(
     mint: &mut F,
     halted: &mut Option<String>,
     sink: &mut dyn TurnSink,
+    observation: &crate::model_observability::tool::ToolObservation,
 ) -> Result<Option<LoopOutcome>, AgentError> {
     // Defence in depth behind the exposure gate: a mutating tool is never
     // advertised to an automation turn ([`lookup_exposed`] would already reject
     // it), but should one still reach here it is refused before any work is
     // created, so a completion can never self-trigger a new command.
     if !session.allows_new_mutation() {
+        observation.permission(crate::model_observability::PermissionOutcome::PolicyRejected);
         append_mutating_result(
             deps,
             session,
@@ -6996,8 +7466,17 @@ async fn run_mutating<F: FnMut() -> String>(
         }
         Ok(ExecOutcome::PermissionRequired { request }) => {
             terminal_outcome = Some(
-                task_permission::pause(deps, session, call, remaining_calls, request, mint, sink)
-                    .await?,
+                task_permission::pause(
+                    deps,
+                    session,
+                    call,
+                    remaining_calls,
+                    request,
+                    mint,
+                    sink,
+                    observation,
+                )
+                .await?,
             );
         }
         Ok(ExecOutcome::Rejected { reason }) => {
@@ -7157,11 +7636,13 @@ async fn run_wait<F: FnMut() -> String>(
     mint: &mut F,
     halted: &mut Option<String>,
     sink: &mut dyn TurnSink,
+    observation: &crate::model_observability::tool::ToolObservation,
 ) -> Result<Option<LoopOutcome>, AgentError> {
     // A model-safe argument error becomes an error tool result; the turn continues.
     let task_id = match crate::wait_tools::parse_wait_task_id(call) {
         Ok(id) => id,
         Err(e) => {
+            observation.input_error(&e);
             append_mutating_result(
                 deps,
                 session,
@@ -7174,6 +7655,10 @@ async fn run_wait<F: FnMut() -> String>(
     // Only the session's own in-flight task may be waited on, matched by its stable
     // id. No task, or a mismatched id, is a well-formed error result.
     let Some(action) = session.execution_state.task(&task_id).cloned() else {
+        observation.reject(
+            crate::model_observability::Stage::Reference,
+            crate::model_observability::InputIssue::UnknownReference,
+        );
         append_mutating_result(
             deps,
             session,
@@ -7187,6 +7672,10 @@ async fn run_wait<F: FnMut() -> String>(
         return Ok(None);
     };
     if task_id != action.action_request_id {
+        observation.reject(
+            crate::model_observability::Stage::Reference,
+            crate::model_observability::InputIssue::UnknownReference,
+        );
         append_mutating_result(
             deps,
             session,
@@ -7200,6 +7689,14 @@ async fn run_wait<F: FnMut() -> String>(
         return Ok(None);
     }
 
+    observation.stage(
+        crate::model_observability::Stage::Reference,
+        crate::model_observability::StageOutcome::Passed,
+    );
+    observation.stage(
+        crate::model_observability::Stage::Preflight,
+        crate::model_observability::StageOutcome::Passed,
+    );
     sink.on_tool_started(&call.name, &call.id, &call.arguments_json);
     let outcome = deps
         .tools
@@ -7440,51 +7937,72 @@ async fn read_conversation_attachment(
     call: &crate::chat::ToolCall,
     _parent: Option<&desk_agent_protocol::data_lineage::DataEnvelope>,
     remaining_budget: &mut usize,
+    observation: &crate::model_observability::tool::ToolObservation,
 ) -> Result<ChatMessage, AgentError> {
     use crate::conversation_attachment::{ContentKind, digest, invalid, model_read};
-    let input: model_read::Input = serde_json::from_str(&call.arguments_json)
-        .map_err(|_| invalid("Invalid attachment read input"))?;
-    input.request()?;
+    use crate::model_observability::{InputIssue, PermissionOutcome, Stage, StageOutcome};
+    let input: model_read::Input = serde_json::from_str(&call.arguments_json).map_err(|_| {
+        observation.reject(Stage::Preflight, InputIssue::Semantic);
+        invalid("Invalid attachment read input")
+    })?;
+    input.request().inspect_err(|error| {
+        observation.input_error(error);
+    })?;
+    observation.stage(Stage::Reference, StageOutcome::Attempted);
     let mut part = deps
         .session_seam
         .read_attachment(session, &input.attachment_id, false)
         .await?;
     let policy = deps.model.model_egress_policy()?;
     let mut message = if part.metadata.kind == ContentKind::Image {
-        input.validate_image()?;
-        let source = part
-            .metadata
-            .image_source
-            .as_ref()
-            .ok_or_else(|| invalid("Image source authorization is unavailable"))?;
-        let message = source.restore(&part.content)?;
-        crate::conversation_image::authorize_read(&message, policy.as_ref())?;
-        let url = message
-            .image_data_url
-            .as_deref()
-            .ok_or_else(|| invalid("Image pixels unavailable"))?;
-        let info = crate::image_input::validate_image_data_url(url).map_err(image_input_error)?;
-        if !matches!(
-            review_image(deps, url, &info.media_type).await,
-            Ok(ContentSafetyDecision::Allow)
-        ) {
+        input.validate_image().inspect_err(|error| {
+            observation.input_error(error);
+        })?;
+        let source = part.metadata.image_source.as_ref().ok_or_else(|| {
+            observation.reject(Stage::Reference, InputIssue::ReferenceUnavailable);
+            invalid("Image source authorization is unavailable")
+        })?;
+        let message = source.restore(&part.content).inspect_err(|_| {
+            observation.reject(Stage::Reference, InputIssue::ReferenceUnavailable);
+        })?;
+        crate::conversation_image::authorize_read_observed(&message, policy.as_ref(), observation)?;
+        let url = message.image_data_url.as_deref().ok_or_else(|| {
+            observation.reject(Stage::Reference, InputIssue::ReferenceUnavailable);
+            invalid("Image pixels unavailable")
+        })?;
+        let info = crate::image_input::validate_image_data_url(url).map_err(|error| {
+            observation.reject(Stage::Reference, InputIssue::ReferenceUnavailable);
+            image_input_error(error)
+        })?;
+        let review = review_image(deps, url, &info.media_type).await;
+        if !matches!(&review, Ok(ContentSafetyDecision::Allow)) {
+            if matches!(
+                &review,
+                Ok(ContentSafetyDecision::Block | ContentSafetyDecision::SafeRedirect)
+            ) {
+                observation.permission(PermissionOutcome::PolicyRejected);
+            }
             return Err(invalid("Stored image was blocked by content safety policy"));
         }
+        observation.stage(Stage::Reference, StageOutcome::Passed);
+        observation.stage(Stage::Preflight, StageOutcome::Passed);
         message
     } else {
-        let envelope = part
-            .metadata
-            .source_envelope
-            .as_ref()
-            .ok_or_else(|| invalid("Attachment source authorization is unavailable"))?;
+        let envelope = part.metadata.source_envelope.as_ref().ok_or_else(|| {
+            observation.reject(Stage::Reference, InputIssue::ReferenceUnavailable);
+            invalid("Attachment source authorization is unavailable")
+        })?;
         if let Some(policy) = &policy
             && !policy.has_gateway_authority(envelope)
         {
+            observation.permission(PermissionOutcome::PolicyRejected);
             return Err(invalid(
                 "Attachment is not authorized for the current model gateway",
             ));
         }
-        part.metadata.verify(&part.content)?;
+        part.metadata.verify(&part.content).inspect_err(|_| {
+            observation.reject(Stage::Reference, InputIssue::ReferenceUnavailable);
+        })?;
         let source_envelope = envelope.clone();
         // Keep original authorization/hash separate from the stable model representation.
         if part.metadata.kind == ContentKind::Json {
@@ -7504,7 +8022,7 @@ async fn read_conversation_attachment(
             part.metadata.source_envelope = None;
         }
         let (content, mut receipt) =
-            model_read::text_page(&part, &input, &call.id, *remaining_budget)?;
+            model_read::text_page(&part, &input, &call.id, *remaining_budget, observation)?;
         let mut message = ChatMessage::tool_result("attachment-page", &call.id, content);
         message.data_envelope = crate::model_message_labels::internal_tool_result_envelope(
             Some(&source_envelope),

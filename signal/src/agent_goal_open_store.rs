@@ -537,6 +537,11 @@ pub async fn decide_for_subject(
         .await?;
     }
     txn.commit().await?;
+    desk_diagnose_core::model_observability::permission::goal_open_closed(
+        &request,
+        now.timestamp_millis(),
+        crate::model_metrics::runtime::submit,
+    );
     Ok(Some((request, goal)))
 }
 

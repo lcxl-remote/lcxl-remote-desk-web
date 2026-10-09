@@ -1,4 +1,7 @@
+import modelMetrics from './model-metrics';
+
 export default {
+    ...modelMetrics,
     "pages.aiAssistantAttention.title": "AI 助手待办",
     "pages.aiAssistantAttention.description": "需要你处理的目标、权限和会话事项",
     "pages.aiAssistantAttention.refresh": "刷新",
@@ -1050,7 +1053,7 @@ export default {
   'pages.usageRange.effective': '当前范围：{{from}} — {{to}}',
   'pages.usageRange.dayUtcNote': '按 UTC 自然日聚合',
   'pages.usageRetention.title': '用量数据保留',
-  'pages.usageRetention.description': '设置本地 TURN 流量、AI Token 用量汇总数据和AI助手会话的保留天数。超期数据会被后台定期清理。',
+  'pages.usageRetention.description': '设置本机 TURN 流量和 AI 助手会话的保留时间。模型调用统计的保留时间在设置页面单独管理。',
   'pages.usageRetention.turnDays': 'TURN 流量保留天数',
   'pages.usageRetention.aiDays': 'AI Token 用量保留天数',
   'pages.usageRetention.agentSessionDays': 'AI助手会话保留天数',

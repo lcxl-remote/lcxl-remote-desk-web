@@ -317,6 +317,7 @@ impl SignalAgentSessionStore {
             crate::schedule_store::validate_task_directory_on(&txn, &session, &update.mutation)
                 .await
                 .map_err(|_| failure())?;
+            let observation=desk_diagnose_core::model_observability::permission::PendingDirectoryUpdate::capture(&session,update);
             let (next, receipt) =
                 transaction::prepare(&session, update, now_ms).map_err(|_| failure())?;
             session = next;
@@ -377,6 +378,11 @@ impl SignalAgentSessionStore {
             .await
             .map_err(storage)?;
             txn.commit().await.map_err(storage)?;
+            observation.submit(
+                &receipt,
+                now.timestamp_millis(),
+                crate::model_metrics::runtime::submit,
+            );
             return Ok(receipt);
         }
         Err(AgentError {

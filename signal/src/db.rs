@@ -14,7 +14,7 @@ use crate::entity::{
     agent_action_item, agent_approval_delegation, agent_approval_review,
     agent_capability_dispatch_outbox, agent_capability_grant, agent_exec_task,
     agent_goal_open_request, agent_goal_run, agent_grant_reservation, agent_run_event,
-    agent_session, ai_usage, approval_review_secret, device_code, host_remote_access_state,
+    agent_session, approval_review_secret, device_code, host_remote_access_state,
     model_egress_receipt, turn_usage, usage_retention,
 };
 use crate::error::DeskSignalError;
@@ -212,7 +212,7 @@ pub async fn init_db(config_dir: &str) -> Result<&'static DatabaseConnection, De
         .await
 }
 
-const SIGNAL_SCHEMA_VERSION: i32 = 22;
+const SIGNAL_SCHEMA_VERSION: i32 = 23;
 const SCHEMA_LOCK_TABLE: &str = "signal_schema_init_lock";
 
 #[derive(Debug, FromQueryResult)]
@@ -264,7 +264,6 @@ async fn create_latest_schema<C: ConnectionTrait>(db: &C) -> Result<(), DbErr> {
     create_schedule_schema(db).await?;
     create_entity(db, &schema, device_code::Entity).await?;
     create_entity(db, &schema, turn_usage::Entity).await?;
-    create_entity(db, &schema, ai_usage::Entity).await?;
     create_latest_model_provider(db).await?;
     create_latest_probe_observation(db).await?;
     create_latest_approval_model_provider(db).await?;
@@ -325,12 +324,6 @@ async fn create_latest_schema<C: ConnectionTrait>(db: &C) -> Result<(), DbErr> {
             .name("idx_turn_usage_hour")
             .table(turn_usage::Entity)
             .col(turn_usage::Column::HourBucket)
-            .to_owned(),
-        Index::create()
-            .if_not_exists()
-            .name("idx_ai_usage_hour")
-            .table(ai_usage::Entity)
-            .col(ai_usage::Column::HourBucket)
             .to_owned(),
         Index::create()
             .if_not_exists()
@@ -651,7 +644,6 @@ async fn validate_latest_schema<C: ConnectionTrait>(
     }
     check_entity!(device_code);
     check_entity!(turn_usage);
-    check_entity!(ai_usage);
     check_entity!(model_provider);
     check_entity!(model_probe_observation);
     check_entity!(approval_model_provider);
@@ -863,7 +855,6 @@ mod tests {
         for required in [
             "device_code",
             "turn_usage_hourly",
-            "ai_usage_hourly",
             "model_provider",
             "model_probe_observation",
             "approval_model_provider",
@@ -899,7 +890,6 @@ mod tests {
             "model_egress_receipt",
             "agent_run_event",
             "idx_turn_usage_hour",
-            "idx_ai_usage_hour",
             "idx-agent-exec-task-delivery",
             "idx-model-egress-export-call",
             "idx-agent-run-event-sequence",

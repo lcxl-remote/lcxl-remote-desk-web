@@ -2,6 +2,9 @@
 use super::{ScheduleStoreError, entity};
 use crate::entity::agent_schedule_run as run;
 use desk_diagnose_core::{
+    model_observability::{
+        InputIssue, PermissionOutcome, Stage, StageOutcome, tool::ToolObservation,
+    },
     schedule::management_tools::{Action, proposed_ids},
     session::PersistedAgentSession,
 };
@@ -100,33 +103,44 @@ pub(super) async fn cancel(
     task: Option<entity::Model>,
     expected: i64,
     now: i64,
+    observation: &ToolObservation,
 ) -> Result<String, ScheduleStoreError> {
     let Some(task) = task else {
+        observation.reject(Stage::Reference, InputIssue::UnknownReference);
         return Ok(json!({"ok":false,"reason":"task_not_in_current_conversation"}).to_string());
     };
     if task.creation_source != "ai_proposal" {
+        observation.stage(Stage::Reference, StageOutcome::Passed);
+        observation.permission(PermissionOutcome::PolicyRejected);
         return Ok(json!({"ok":false,"reason":"manual_task_cannot_be_cancelled_by_ai","task":view(&task),"message":"Only the user can cancel this manually created task in the task manager. Do not request permission to bypass this restriction."}).to_string());
     }
     if task.status == "deleted" {
+        observation.stage(Stage::Reference, StageOutcome::Passed);
+        observation.stage(Stage::Preflight, StageOutcome::Passed);
         return Ok(json!({"ok":true,"state":"already_cancelled","task":view(&task)}).to_string());
     }
     if task.status == "completed" {
+        observation.reject(Stage::Reference, InputIssue::ReferenceUnavailable);
         return Ok(
             json!({"ok":false,"reason":"task_already_completed","task":view(&task)}).to_string(),
         );
     }
     if task.status == "expired" {
+        observation.reject(Stage::Reference, InputIssue::ReferenceExpired);
         return Ok(
             json!({"ok":false,"reason":"task_expired_with_source_conversation","task":view(&task)})
                 .to_string(),
         );
     }
     if task.revision != expected {
+        observation.reject(Stage::Reference, InputIssue::ReferenceExpired);
         return Ok(
             json!({"ok":false,"reason":"revision_changed_query_again","task":view(&task)})
                 .to_string(),
         );
     }
+    observation.stage(Stage::Reference, StageOutcome::Passed);
+    observation.stage(Stage::Preflight, StageOutcome::Passed);
     let work = if let Some(id) = task.active_run_id.as_deref() {
         Some(
             run::Entity::find()

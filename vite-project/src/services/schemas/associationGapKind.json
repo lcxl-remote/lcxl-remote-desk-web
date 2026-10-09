@@ -1,0 +1,1 @@
+{"type":"string","enum":["attribution","operation_start","correction_prerequisite"],"x-readme-ref-name":"AssociationGapKind"}

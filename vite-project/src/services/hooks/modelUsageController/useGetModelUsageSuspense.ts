@@ -27,7 +27,7 @@ export function getModelUsageSuspenseQueryOptions(params?: GetModelUsageQueryPar
 }
 
 /**
- * @summary Query local per-model AI gateway token usage
+ * @summary Query local model usage from current observations
  * {@link /api/model/usage}
  */
 export function useGetModelUsageSuspense<TData = GetModelUsageQueryResponse, TQueryKey extends QueryKey = GetModelUsageSuspenseQueryKey>(params?: GetModelUsageQueryParams, options: 

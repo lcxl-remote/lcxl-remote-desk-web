@@ -129,7 +129,6 @@ async fn live_project_model_subagent_completion() {
             .unwrap()
             .with_context_db(db.clone()),
         db: db.clone(),
-        model_name: config.model.clone().unwrap(),
         destination: policy.destination.clone(),
         selected_source_tools: policy.selected_source_tools.clone(),
         export_authorization_id: "final-child-report-export".into(),

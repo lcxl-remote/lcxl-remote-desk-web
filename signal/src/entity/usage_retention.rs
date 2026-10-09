@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 /// The portable signal server is single-node and single-account (it never runs
 /// multi-instance — that is a manager-only concern), so there is exactly one
 /// retention config row (id = [`SINGLETON_ID`]). It controls how many days of
-/// `turn_usage_hourly` / `ai_usage_hourly` rollups and idle AI diagnosis
+/// `turn_usage_hourly` rollups and idle AI diagnosis
 /// conversations are kept before the cleanup loop deletes them.
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
 #[sea_orm(table_name = "usage_retention")]
@@ -16,8 +16,6 @@ pub struct Model {
     pub id: i32,
     /// Retention window for TURN traffic rollups, in days.
     pub turn_days: i32,
-    /// Retention window for AI token rollups, in days.
-    pub ai_days: i32,
     /// Idle retention window for AI diagnosis conversations, in days.
     pub agent_session_days: i32,
     pub updated_at: DateTimeUtc,

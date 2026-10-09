@@ -803,6 +803,7 @@ pub struct SignalAiAssistantToolState {
     model_egress_policy: Option<desk_diagnose_core::model_egress::ModelEgressPolicy>,
     original_input: OnceLock<object_read::OriginalInput>,
     verified_read_labels: Mutex<HashMap<String, VerifiedReadLabel>>,
+    observation: desk_diagnose_core::model_observability::tool::ToolObservationSlot,
 }
 
 #[derive(Clone)]
@@ -1006,6 +1007,7 @@ impl SignalAiAssistantTools {
             model_egress_policy: None,
             original_input: OnceLock::new(),
             verified_read_labels: Mutex::new(HashMap::new()),
+            observation: Default::default(),
         }))
     }
 
@@ -1017,6 +1019,56 @@ impl SignalAiAssistantTools {
             .expect("configure Provider before sharing")
             .model_egress_policy = policy;
         self
+    }
+
+    fn observed(
+        &self,
+        call: &ToolCall,
+    ) -> desk_diagnose_core::model_observability::tool::ToolObservation {
+        self.observation.get(call)
+    }
+
+    fn observe_ready(
+        &self,
+        call: &ToolCall,
+        session: &desk_diagnose_core::session::PersistedAgentSession,
+        work_id: i64,
+    ) {
+        use desk_diagnose_core::model_observability::{
+            InputIssue, ObservationAlias, ObservationEvent, ObservationPhase, PermissionOutcome,
+            Stage, StageOutcome,
+        };
+        let observation = self.observed(call);
+        observation.stage(Stage::Preflight, StageOutcome::Passed);
+        observation.permission(PermissionOutcome::Approved);
+        if let Some(alias) = ObservationAlias::provider_work(&work_id.to_string()) {
+            observation.bind(alias.clone());
+            if let Some(source) =
+                desk_diagnose_core::model_observability::relation::original_tool_alias(
+                    session, &call.id,
+                )
+            {
+                let now = desk_diagnose_core::model_observability::tool::now_ms();
+                crate::model_metrics::runtime::submit(ObservationEvent::link_alias(
+                    source,
+                    alias.clone(),
+                    now,
+                ));
+                crate::model_metrics::runtime::submit(ObservationEvent::deferred_tool(
+                    alias,
+                    ObservationPhase::Stage,
+                    0,
+                    now,
+                    std::collections::BTreeMap::from([
+                        (Stage::Preflight, StageOutcome::Passed),
+                        (Stage::Permission, StageOutcome::Passed),
+                    ]),
+                    PermissionOutcome::Approved,
+                    None,
+                    InputIssue::None,
+                ));
+            }
+        }
     }
 
     fn canonical_call_input(call: &ToolCall) -> Result<(String, String), AgentError> {
@@ -1408,7 +1460,7 @@ impl SignalAiAssistantTools {
                     call,
                     &self.object_binding()?,
                     &session,
-                )?,
+                ).inspect_err(|error| { self.observed(call).input_error(error); })?,
             )
             } else if capability.wire.execution_locality == ExecutionLocality::Edge {
                 self.validate_original_objects().await?;
@@ -1418,7 +1470,10 @@ impl SignalAiAssistantTools {
                         ProductSurface::OssPersonalOwner,
                         call,
                         &self.object_binding()?,
-                    )?,
+                    )
+                    .inspect_err(|error| {
+                        self.observed(call).input_error(error);
+                    })?,
                 )
             } else {
                 None
@@ -1631,10 +1686,20 @@ impl SignalAiAssistantTools {
                     true,
                 )
             })?;
-        if let crate::capability_grant_store::CapabilityPreparation::PermissionRequired(request) =
-            preparation
-        {
-            return Ok(ReadOutcome::PermissionRequired { request });
+        match preparation {
+            crate::capability_grant_store::CapabilityPreparation::PermissionRequired(request) => {
+                self.observed(call).stage(
+                    desk_diagnose_core::model_observability::Stage::Preflight,
+                    desk_diagnose_core::model_observability::StageOutcome::Passed,
+                );
+                self.observed(call).permission(
+                    desk_diagnose_core::model_observability::PermissionOutcome::Waiting,
+                );
+                return Ok(ReadOutcome::PermissionRequired { request });
+            }
+            crate::capability_grant_store::CapabilityPreparation::Ready(work) => {
+                self.observe_ready(call, &session, work.work_id)
+            }
         }
         let dispatch_id = match store
             .record_dispatch_intent(prepare(now_unix_ms))
@@ -2061,8 +2126,18 @@ impl SignalAiAssistantTools {
                 )
             })?;
         let _prepared = match _prepared {
-            crate::capability_grant_store::CapabilityPreparation::Ready(work) => work,
+            crate::capability_grant_store::CapabilityPreparation::Ready(work) => {
+                self.observe_ready(call, &session, work.work_id);
+                work
+            }
             crate::capability_grant_store::CapabilityPreparation::PermissionRequired(request) => {
+                self.observed(call).stage(
+                    desk_diagnose_core::model_observability::Stage::Preflight,
+                    desk_diagnose_core::model_observability::StageOutcome::Passed,
+                );
+                self.observed(call).permission(
+                    desk_diagnose_core::model_observability::PermissionOutcome::Waiting,
+                );
                 return Ok(ExecOutcome::PermissionRequired { request });
             }
         };
@@ -2427,11 +2502,16 @@ impl SignalAiAssistantTools {
             )
         })?;
         let shared_launch = if call.name == desk_diagnose_core::application_launch::TOOL_NAME {
-            Some(desk_diagnose_core::application_launch::approved_binding(
-                &self.authoritative_session().await?,
-                call,
-                self.readiness_revision,
-            )?)
+            Some(
+                desk_diagnose_core::application_launch::approved_binding(
+                    &self.authoritative_session().await?,
+                    call,
+                    self.readiness_revision,
+                )
+                .inspect_err(|error| {
+                    self.observed(call).input_error(error);
+                })?,
+            )
         } else {
             None
         };
@@ -2451,7 +2531,10 @@ impl SignalAiAssistantTools {
                         &self.authoritative_session().await?,
                         &current.readiness.interactive_session_incarnation,
                         now_unix_ms,
-                    )?,
+                    )
+                    .inspect_err(|error| {
+                        self.observed(call).input_error(error);
+                    })?,
                 )
             } else {
                 None
@@ -2460,7 +2543,7 @@ impl SignalAiAssistantTools {
             if desk_diagnose_core::provider_preflight::text_file::TextMutationPreflight::supports(
                 &call.name,
             ) {
-                Some(desk_diagnose_core::provider_preflight::text_file::TextMutationPreflight::from_session(&self.authoritative_session().await?, ProductSurface::OssPersonalOwner, call, now_unix_ms)?)
+                Some(desk_diagnose_core::provider_preflight::text_file::TextMutationPreflight::from_session(&self.authoritative_session().await?, ProductSurface::OssPersonalOwner, call, now_unix_ms).inspect_err(|error| { self.observed(call).input_error(error); })?)
             } else {
                 None
             };
@@ -2471,7 +2554,10 @@ impl SignalAiAssistantTools {
                     ProductSurface::OssPersonalOwner,
                     call,
                     now_unix_ms,
-                )?,
+                )
+                .inspect_err(|error| {
+                    self.observed(call).input_error(error);
+                })?,
             )
         } else {
             None
@@ -2483,24 +2569,28 @@ impl SignalAiAssistantTools {
                     ProductSurface::OssPersonalOwner,
                     call,
                     now_unix_ms,
-                )?,
+                )
+                .inspect_err(|error| {
+                    self.observed(call).input_error(error);
+                })?,
             )
         } else {
             None
         };
-        let shared_output = if call.name == desk_diagnose_core::ai_assistant::linux::OUTPUT_TOOL {
-            Some(
+        let shared_output =
+            if call.name == desk_diagnose_core::ai_assistant::linux::OUTPUT_TOOL {
+                Some(
                 desk_diagnose_core::provider_preflight::WaylandOutputInputPreflight::from_history(
                     &self.provider_registry,
                     ProductSurface::OssPersonalOwner,
                     call,
                     &self.authoritative_session().await?.conversation,
                     now_unix_ms,
-                )?,
+                ).inspect_err(|error| { self.observed(call).input_error(error); })?,
             )
-        } else {
-            None
-        };
+            } else {
+                None
+            };
         let shared_raw_input = if call.name == EXECUTE_CONFIRMED_RAW_INPUT_TOOL {
             Some(
                 desk_diagnose_core::provider_preflight::RawInputCallPreflight::build(
@@ -2508,7 +2598,10 @@ impl SignalAiAssistantTools {
                     ProductSurface::OssPersonalOwner,
                     call,
                     now_unix_ms,
-                )?,
+                )
+                .inspect_err(|error| {
+                    self.observed(call).input_error(error);
+                })?,
             )
         } else {
             None
@@ -2940,8 +3033,18 @@ impl SignalAiAssistantTools {
                 )
             })?;
         let prepared = match prepared {
-            crate::capability_grant_store::CapabilityPreparation::Ready(work) => work,
+            crate::capability_grant_store::CapabilityPreparation::Ready(work) => {
+                self.observe_ready(call, &session, work.work_id);
+                work
+            }
             crate::capability_grant_store::CapabilityPreparation::PermissionRequired(request) => {
+                self.observed(call).stage(
+                    desk_diagnose_core::model_observability::Stage::Preflight,
+                    desk_diagnose_core::model_observability::StageOutcome::Passed,
+                );
+                self.observed(call).permission(
+                    desk_diagnose_core::model_observability::PermissionOutcome::Waiting,
+                );
                 return Ok(ExecOutcome::PermissionRequired { request });
             }
         };
@@ -3599,7 +3702,10 @@ impl SignalAiAssistantTools {
                 canonical_call,
                 &selected_directories,
                 now_ms,
-            )?
+            )
+            .inspect_err(|error| {
+                self.observed(call).input_error(error);
+            })?
         };
         if artifact_preflight.required_capability() != required_capability
             || artifact_preflight.target() != &selected_directories[0]
@@ -3728,8 +3834,18 @@ impl SignalAiAssistantTools {
                 )
             })?;
         let prepared = match prepared {
-            crate::capability_grant_store::CapabilityPreparation::Ready(work) => work,
+            crate::capability_grant_store::CapabilityPreparation::Ready(work) => {
+                self.observe_ready(call, &session, work.work_id);
+                work
+            }
             crate::capability_grant_store::CapabilityPreparation::PermissionRequired(request) => {
+                self.observed(call).stage(
+                    desk_diagnose_core::model_observability::Stage::Preflight,
+                    desk_diagnose_core::model_observability::StageOutcome::Passed,
+                );
+                self.observed(call).permission(
+                    desk_diagnose_core::model_observability::PermissionOutcome::Waiting,
+                );
                 return Ok(ExecOutcome::PermissionRequired { request });
             }
         };
@@ -4214,7 +4330,10 @@ impl SignalAiAssistantTools {
             &server_call_id,
             &surface,
             now_unix_ms,
-        )?;
+        )
+        .inspect_err(|error| {
+            self.observed(call).input_error(error);
+        })?;
         let subject = desk_diagnose_core::provider_preflight::ProviderCallSubject {
             actor_id: &self.actor_id,
             run_id: &self.run_id,
@@ -4422,8 +4541,18 @@ impl SignalAiAssistantTools {
                 )
             })?;
         let prepared = match prepared {
-            crate::capability_grant_store::CapabilityPreparation::Ready(work) => work,
+            crate::capability_grant_store::CapabilityPreparation::Ready(work) => {
+                self.observe_ready(call, &session, work.work_id);
+                work
+            }
             crate::capability_grant_store::CapabilityPreparation::PermissionRequired(request) => {
+                self.observed(call).stage(
+                    desk_diagnose_core::model_observability::Stage::Preflight,
+                    desk_diagnose_core::model_observability::StageOutcome::Passed,
+                );
+                self.observed(call).permission(
+                    desk_diagnose_core::model_observability::PermissionOutcome::Waiting,
+                );
                 return Ok(ExecOutcome::PermissionRequired { request });
             }
         };
@@ -4799,7 +4928,10 @@ impl SignalAiAssistantTools {
             self.readiness_revision,
             &surface_ref,
             now_unix_ms,
-        )?;
+        )
+        .inspect_err(|error| {
+            self.observed(call).input_error(error);
+        })?;
         if evaluated.canonical_input_json() != canonical_input_json {
             return Err(error(
                 AgentErrorKind::PermissionDenied,
@@ -5024,8 +5156,18 @@ impl SignalAiAssistantTools {
                 )
             })?;
         let prepared = match prepared {
-            crate::capability_grant_store::CapabilityPreparation::Ready(work) => work,
+            crate::capability_grant_store::CapabilityPreparation::Ready(work) => {
+                self.observe_ready(call, &session, work.work_id);
+                work
+            }
             crate::capability_grant_store::CapabilityPreparation::PermissionRequired(request) => {
+                self.observed(call).stage(
+                    desk_diagnose_core::model_observability::Stage::Preflight,
+                    desk_diagnose_core::model_observability::StageOutcome::Passed,
+                );
+                self.observed(call).permission(
+                    desk_diagnose_core::model_observability::PermissionOutcome::Waiting,
+                );
                 return Ok(ExecOutcome::PermissionRequired { request });
             }
         };
@@ -5786,6 +5928,14 @@ impl SignalAiAssistantTools {
 
 #[async_trait(?Send)]
 impl ToolSeam for SignalAiAssistantTools {
+    fn observe_tool_input(
+        &self,
+        call: &ToolCall,
+        observation: desk_diagnose_core::model_observability::tool::ToolObservation,
+    ) {
+        self.observation.set(call, observation.clone());
+        self.exec_tools.observe_tool_input(call, observation);
+    }
     async fn current_grant_disclosure(
         &self,
     ) -> Result<Option<desk_diagnose_core::grant_disclosure::GrantDisclosureSnapshot>, AgentError>

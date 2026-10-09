@@ -361,64 +361,124 @@ pub fn validate_format(name: &str, input: &Value) -> Result<(), String> {
     let Some(tool) = tools().get(name) else {
         return Ok(());
     };
-    check(&tool.parameters_schema, input, "$", 0).map_err(|reason| describe_error(name, &reason))
+    check(&tool.parameters_schema, input, "$", 0)
+        .map_err(|reason| describe_error(name, &reason.message))
 }
 pub fn validate_format_with_schema(
     name: &str,
     schema: &Value,
     input: &Value,
 ) -> Result<(), String> {
-    check(schema, input, "$", 0).map_err(|reason| describe_error_with_schema(name, schema, &reason))
+    validate_format_reported(name, schema, input).map_err(|reason| reason.message)
 }
-fn check(schema: &Value, value: &Value, path: &str, depth: usize) -> Result<(), String> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FormatError {
+    pub message: String,
+    pub issue: crate::model_observability::InputIssue,
+    pub schema_path: Option<String>,
+}
+
+impl FormatError {
+    fn new(
+        issue: crate::model_observability::InputIssue,
+        schema_path: &str,
+        message: String,
+    ) -> Self {
+        Self {
+            message,
+            issue,
+            schema_path: (schema_path.len() <= 192).then(|| schema_path.to_string()),
+        }
+    }
+}
+
+pub fn validate_format_reported(
+    name: &str,
+    schema: &Value,
+    input: &Value,
+) -> Result<(), FormatError> {
+    check(schema, input, "$", 0).map_err(|mut error| {
+        error.message = describe_error_with_schema(name, schema, &error.message);
+        error
+    })
+}
+
+fn check(schema: &Value, value: &Value, path: &str, depth: usize) -> Result<(), FormatError> {
+    check_at(schema, value, path, "$", depth)
+}
+
+fn check_at(
+    schema: &Value,
+    value: &Value,
+    path: &str,
+    schema_path: &str,
+    depth: usize,
+) -> Result<(), FormatError> {
+    use crate::model_observability::InputIssue as Issue;
     if schema == &Value::Bool(false) {
-        return Err(format!("Invalid input at {path}: value is forbidden"));
+        return Err(FormatError::new(
+            Issue::Combination,
+            schema_path,
+            format!("Invalid input at {path}: value is forbidden"),
+        ));
     }
     if depth > 32 {
-        return Err(format!(
-            "Invalid input at {path}: nesting exceeds 32 levels"
+        return Err(FormatError::new(
+            Issue::Length,
+            schema_path,
+            format!("Invalid input at {path}: nesting exceeds 32 levels"),
         ));
     }
     for key in ["oneOf", "anyOf"] {
         if let Some(variants) = schema[key].as_array() {
             let errors: Vec<_> = variants
                 .iter()
-                .filter_map(|s| check(s, value, path, depth + 1).err())
+                .filter_map(|s| check_at(s, value, path, schema_path, depth + 1).err())
                 .collect();
             let matches = variants.len() - errors.len();
             if matches == 0 || (key == "oneOf" && matches != 1) {
-                return Err(format!(
-                    "Invalid input at {path}: {key} requires {} matching variant(s), observed {matches}: {}",
-                    if key == "oneOf" {
-                        "exactly one"
-                    } else {
-                        "at least one"
-                    },
-                    errors.join("; ")
+                return Err(FormatError::new(
+                    Issue::Combination,
+                    schema_path,
+                    format!(
+                        "Invalid input at {path}: {key} requires {} matching variant(s), observed {matches}: {}",
+                        if key == "oneOf" {
+                            "exactly one"
+                        } else {
+                            "at least one"
+                        },
+                        errors
+                            .iter()
+                            .map(|error| error.message.as_str())
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    ),
                 ));
             }
         }
     }
     if let Some(variants) = schema["allOf"].as_array() {
         for variant in variants {
-            check(variant, value, path, depth + 1)?;
+            check_at(variant, value, path, schema_path, depth + 1)?;
         }
     }
     if let Some(negated) = schema.get("not")
-        && check(negated, value, path, depth + 1).is_ok()
+        && check_at(negated, value, path, schema_path, depth + 1).is_ok()
     {
-        return Err(format!(
-            "Invalid input at {path}: forbidden parameter combination"
+        return Err(FormatError::new(
+            Issue::Combination,
+            schema_path,
+            format!("Invalid input at {path}: forbidden parameter combination"),
         ));
     }
     if let Some(condition) = schema.get("if") {
-        let branch = if check(condition, value, path, depth + 1).is_ok() {
+        let branch = if check_at(condition, value, path, schema_path, depth + 1).is_ok() {
             "then"
         } else {
             "else"
         };
         if let Some(branch) = schema.get(branch) {
-            check(branch, value, path, depth + 1)?;
+            check_at(branch, value, path, schema_path, depth + 1)?;
         }
     }
     let matches_type = |kind: &str| match kind {
@@ -437,22 +497,28 @@ fn check(schema: &Value, value: &Value, path: &str, depth: usize) -> Result<(), 
         _ => true,
     };
     if !valid {
-        return Err(format!(
-            "Invalid input at {path}: expected type {}",
-            schema["type"]
+        return Err(FormatError::new(
+            Issue::Type,
+            schema_path,
+            format!("Invalid input at {path}: expected type {}", schema["type"]),
         ));
     }
     if let Some(expected) = schema.get("const")
         && expected != value
     {
-        return Err(format!("Invalid input at {path}: expected {expected}"));
+        return Err(FormatError::new(
+            Issue::Enum,
+            schema_path,
+            format!("Invalid input at {path}: expected {expected}"),
+        ));
     }
     if let Some(allowed) = schema["enum"].as_array()
         && !allowed.contains(value)
     {
-        return Err(format!(
-            "Invalid input at {path}: allowed values {}",
-            schema["enum"]
+        return Err(FormatError::new(
+            Issue::Enum,
+            schema_path,
+            format!("Invalid input at {path}: allowed values {}", schema["enum"]),
         ));
     }
     if let Some(object) = value.as_object() {
@@ -466,8 +532,10 @@ fn check(schema: &Value, value: &Value, path: &str, depth: usize) -> Result<(), 
                         .filter_map(Value::as_str)
                     {
                         if !object.contains_key(field) {
-                            return Err(format!(
-                                "Invalid input at {path}.{field}: required with {key}"
+                            return Err(FormatError::new(
+                                Issue::MissingField,
+                                &format!("{schema_path}.{field}"),
+                                format!("Invalid input at {path}.{field}: required with {key}"),
                             ));
                         }
                     }
@@ -477,22 +545,35 @@ fn check(schema: &Value, value: &Value, path: &str, depth: usize) -> Result<(), 
         if let Some(required) = schema["required"].as_array() {
             for key in required.iter().filter_map(Value::as_str) {
                 if !object.contains_key(key) {
-                    return Err(format!(
-                        "Invalid input at {path}.{key}: missing required field"
+                    return Err(FormatError::new(
+                        Issue::MissingField,
+                        &format!("{schema_path}.{key}"),
+                        format!("Invalid input at {path}.{key}: missing required field"),
                     ));
                 }
             }
         }
         for (key, value) in object {
             if let Some(child) = schema["properties"].get(key) {
-                check(child, value, &format!("{path}.{key}"), depth + 1)?;
+                check_at(
+                    child,
+                    value,
+                    &format!("{path}.{key}"),
+                    &format!("{schema_path}.{key}"),
+                    depth + 1,
+                )?;
             } else if schema["additionalProperties"] == false {
-                return Err(format!("Invalid input at {path}.{key}: unknown field"));
+                return Err(FormatError::new(
+                    Issue::UnknownField,
+                    &format!("{schema_path}.*"),
+                    format!("Invalid input at {path}.{key}: unknown field"),
+                ));
             } else if schema["additionalProperties"].is_object() {
-                check(
+                check_at(
                     &schema["additionalProperties"],
                     value,
                     &format!("{path}.{key}"),
+                    &format!("{schema_path}.*"),
                     depth + 1,
                 )?;
             }
@@ -502,14 +583,22 @@ fn check(schema: &Value, value: &Value, path: &str, depth: usize) -> Result<(), 
         if schema["uniqueItems"] == true {
             for (i, item) in array.iter().enumerate() {
                 if array[..i].contains(item) {
-                    return Err(format!(
-                        "Invalid input at {path}[{i}]: duplicate array item"
+                    return Err(FormatError::new(
+                        Issue::Combination,
+                        schema_path,
+                        format!("Invalid input at {path}[{i}]: duplicate array item"),
                     ));
                 }
             }
         }
         for (i, value) in array.iter().enumerate() {
-            check(&schema["items"], value, &format!("{path}[{i}]"), depth + 1)?;
+            check_at(
+                &schema["items"],
+                value,
+                &format!("{path}[{i}]"),
+                &format!("{schema_path}[]"),
+                depth + 1,
+            )?;
         }
     }
     if let Some(text) = value.as_str() {
@@ -517,24 +606,37 @@ fn check(schema: &Value, value: &Value, path: &str, depth: usize) -> Result<(), 
             .as_u64()
             .is_some_and(|limit| text.len() as u64 > limit)
         {
-            return Err(format!(
-                "Invalid input at {path}: maximum {} UTF-8 bytes, observed {}",
-                schema["x-maxUtf8Bytes"],
-                text.len()
+            return Err(FormatError::new(
+                Issue::Length,
+                schema_path,
+                format!(
+                    "Invalid input at {path}: maximum {} UTF-8 bytes, observed {}",
+                    schema["x-maxUtf8Bytes"],
+                    text.len()
+                ),
             ));
         }
         if let Some(pattern) = schema["pattern"].as_str() {
-            let regex = regex::Regex::new(pattern)
-                .map_err(|_| format!("Invalid schema pattern at {path}"))?;
+            let regex = regex::Regex::new(pattern).map_err(|_| {
+                FormatError::new(
+                    Issue::SchemaUnavailable,
+                    schema_path,
+                    format!("Invalid schema pattern at {path}"),
+                )
+            })?;
             if !regex.is_match(text) {
-                return Err(format!(
-                    "Invalid input at {path}: expected pattern {pattern}"
+                return Err(FormatError::new(
+                    Issue::Pattern,
+                    schema_path,
+                    format!("Invalid input at {path}: expected pattern {pattern}"),
                 ));
             }
         }
         if schema["format"] == "date-time" && chrono::DateTime::parse_from_rfc3339(text).is_err() {
-            return Err(format!(
-                "Invalid input at {path}: expected RFC3339 date-time"
+            return Err(FormatError::new(
+                Issue::Pattern,
+                schema_path,
+                format!("Invalid input at {path}: expected RFC3339 date-time"),
             ));
         }
     }
@@ -555,9 +657,13 @@ fn check(schema: &Value, value: &Value, path: &str, depth: usize) -> Result<(), 
             && (schema[min].as_f64().is_some_and(|m| n < m)
                 || schema[max].as_f64().is_some_and(|m| n > m))
         {
-            return Err(format!(
-                "Invalid input at {path}: bounds {min}={}, {max}={}",
-                schema[min], schema[max]
+            return Err(FormatError::new(
+                Issue::Length,
+                schema_path,
+                format!(
+                    "Invalid input at {path}: bounds {min}={}, {max}={}",
+                    schema[min], schema[max]
+                ),
             ));
         }
     }
@@ -606,6 +712,42 @@ pub fn describe_error_with_schema(name: &str, schema: &Value, reason: &str) -> S
 mod tests {
     use super::*;
     #[test]
+    fn reported_errors_expose_schema_paths_without_dynamic_property_values() {
+        use crate::model_observability::InputIssue;
+        let schema = json!({"type":"object", "properties":{"items":{"type":"array", "items":{"type":"object", "properties":{"count":{"type":"integer"}}, "additionalProperties":false}}}});
+        let error = validate_format_reported(
+            "test",
+            &schema,
+            &json!({"items":[{"secret-user-key":"secret-value"}]}),
+        )
+        .unwrap_err();
+        assert_eq!(error.issue, InputIssue::UnknownField);
+        assert_eq!(error.schema_path.as_deref(), Some("$.items[].*"));
+        let error = validate_format_reported(
+            "test",
+            &schema,
+            &json!({"items":[{"count":"secret-value"}]}),
+        )
+        .unwrap_err();
+        assert_eq!(error.issue, InputIssue::Type);
+        assert_eq!(error.schema_path.as_deref(), Some("$.items[].count"));
+        assert!(!error.schema_path.unwrap().contains("secret"));
+    }
+
+    #[test]
+    fn unavailable_server_pattern_is_not_a_model_input_error() {
+        let error = validate_format_reported(
+            "test",
+            &json!({"type":"string", "pattern":"["}),
+            &json!("value"),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.issue,
+            crate::model_observability::InputIssue::SchemaUnavailable
+        );
+    }
+    #[test]
     fn every_model_schema_has_a_valid_structural_example_and_projection_is_stable() {
         let mut failures = Vec::new();
         for original in tools().values() {
@@ -613,7 +755,7 @@ mod tests {
             crate::ui_model_ids::project_tool(&mut tool);
             let sample = example(&tool.parameters_schema);
             if let Err(error) = check(&tool.parameters_schema, &sample, "$", 0) {
-                failures.push(format!("{}: {error}: {sample}", tool.name));
+                failures.push(format!("{}: {error:?}: {sample}", tool.name));
             }
             let mut again = tool.clone();
             crate::ui_model_ids::project_tool(&mut again);

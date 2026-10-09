@@ -1,0 +1,1 @@
+{"type":"object","required":["stage","outcome"],"properties":{"outcome":{"type":"string"},"stage":{"type":"string"}},"x-readme-ref-name":"StageResult"}

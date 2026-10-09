@@ -179,12 +179,31 @@ pub fn authorize_read(
     message: &ChatMessage,
     policy: Option<&ModelEgressPolicy>,
 ) -> Result<(), AgentError> {
+    authorize_read_observed(
+        message,
+        policy,
+        &crate::model_observability::tool::ToolObservation::default(),
+    )
+}
+
+pub fn authorize_read_observed(
+    message: &ChatMessage,
+    policy: Option<&ModelEgressPolicy>,
+    observation: &crate::model_observability::tool::ToolObservation,
+) -> Result<(), AgentError> {
+    use crate::model_observability::{InputIssue, PermissionOutcome, Stage};
     let policy = policy.ok_or_else(|| error("Current model authorization is unavailable"))?;
-    let envelope = message
-        .data_envelope
-        .as_ref()
-        .ok_or_else(|| error("Screenshot authorization is missing"))?;
-    if envelope.validate().is_err() || !policy.has_gateway_authority(envelope) {
+    let envelope = message.data_envelope.as_ref().ok_or_else(|| {
+        observation.reject(Stage::Reference, InputIssue::ReferenceUnavailable);
+        error("Screenshot authorization is missing")
+    })?;
+    let invalid_label = envelope.validate().is_err();
+    if invalid_label || !policy.has_gateway_authority(envelope) {
+        if invalid_label {
+            observation.reject(Stage::Reference, InputIssue::ReferenceUnavailable);
+        } else {
+            observation.permission(PermissionOutcome::PolicyRejected);
+        }
         return Err(error(
             "Stored screenshot is not authorized for the current model. Ask the owner for fresh authorized evidence.",
         ));

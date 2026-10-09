@@ -21,9 +21,9 @@ pub(crate) async fn save_child_session(
         run.updated_at = now.to_rfc3339();
     }
     let mut next = session.clone();
-    if now.timestamp_millis() >= run.binding.deadline_ms
-        || now.timestamp_millis() >= group.limits.deadline_ms
-    {
+    let deadline_reached = now.timestamp_millis() >= run.binding.deadline_ms
+        || now.timestamp_millis() >= group.limits.deadline_ms;
+    if deadline_reached {
         run.fail("delegation_deadline_reached", &now.to_rfc3339())
             .map_err(|_| invalid())?;
         next.finish_turn(
@@ -48,8 +48,18 @@ pub(crate) async fn save_child_session(
         replace_run_on(&txn, &row, &run, now.timestamp_millis()).await?;
         append_state_event_on(&txn, &group, &run, now.timestamp_millis()).await?;
     }
+    let permission_ends =
+        desk_diagnose_core::model_observability::permission::PendingEnds::task_control(
+            session,
+            &run,
+            deadline_reached,
+        );
     let version = write_child_session_on(&txn, &next, now).await?;
     txn.commit().await?;
+    permission_ends.submit(
+        now.timestamp_millis(),
+        crate::model_metrics::runtime::submit,
+    );
     next.version = version;
     *session = next;
     Ok(())

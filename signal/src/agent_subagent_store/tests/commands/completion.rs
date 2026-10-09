@@ -219,7 +219,6 @@ async fn completed_fixture_with_delivery(
     for mut statement in [
         schema.create_table_from_entity(crate::entity::model_provider::Entity),
         schema.create_table_from_entity(crate::entity::model_probe_observation::Entity),
-        schema.create_table_from_entity(crate::entity::ai_usage::Entity),
         schema.create_table_from_entity(crate::entity::context_management_config::Entity),
     ] {
         db.execute(statement.if_not_exists()).await.unwrap();

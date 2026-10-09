@@ -1,6 +1,8 @@
 //! Publish an exact, undispatched operation for owner approval.
 use super::*;
 
+// The approval transition uses the original turn inputs and its observation handle.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn pause<F: FnMut() -> String>(
     deps: &LoopDeps<'_>,
     held_session: &mut crate::session::PersistedAgentSession,
@@ -9,6 +11,7 @@ pub(super) async fn pause<F: FnMut() -> String>(
     request: crate::dynamic_run::PermissionRequest,
     mint: &mut F,
     sink: &mut dyn TurnSink,
+    observation: &crate::model_observability::tool::ToolObservation,
 ) -> Result<LoopOutcome, AgentError> {
     // Publish from a staged copy. Validation or persistence failure must not
     // leave an in-memory pending request for the outer error path to save.
@@ -107,6 +110,13 @@ pub(super) async fn pause<F: FnMut() -> String>(
     deps.session_seam
         .save_permission_request(session, &event)
         .await?;
+    if let Some(alias) = crate::model_observability::ObservationAlias::permission_request(
+        &session.conversation_id,
+        &request.request_id,
+    ) {
+        observation.bind(alias);
+    }
+    observation.permission(crate::model_observability::PermissionOutcome::Waiting);
     finish_tool(session, &call.id, true, sink);
     sink.on_permission_requested(&request.request_id, 1);
     *held_session = staged;

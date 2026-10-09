@@ -1,0 +1,1 @@
+{"type":"object","required":["from","to","granularity"],"properties":{"from":{"type":"string"},"granularity":{"type":"string"},"to":{"type":"string"}},"x-readme-ref-name":"ModelUsageRange"}

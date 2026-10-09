@@ -631,6 +631,18 @@ impl SignalAgentRunEventStore {
             txn.commit()
                 .await
                 .map_err(|error| internal(format!("commit user follow-up: {error}")))?;
+            desk_diagnose_core::model_observability::permission::input_superseded(
+                &session,
+                now.timestamp_millis(),
+                crate::model_metrics::runtime::submit,
+            );
+            if let Some(decision) = &closed_request {
+                desk_diagnose_core::model_observability::permission::goal_open_closed(
+                    &decision.request,
+                    now.timestamp_millis(),
+                    crate::model_metrics::runtime::submit,
+                );
+            }
             return Ok(UserFollowupAck {
                 event_id: event.event_id,
                 event_seq: event.event_seq,

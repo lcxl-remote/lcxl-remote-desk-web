@@ -4,7 +4,7 @@
 */
 
 import fetch from "@/lib/kubb-client";
-import type { AckSecurityApprovalMutationRequest, AckSecurityApprovalMutationResponse, BatchDeleteDeviceCodesMutationRequest, BatchDeleteDeviceCodesMutationResponse, ChangePasswordMutationRequest, ChangePasswordMutationResponse, ChangePassword401, ChangePassword403, GetContextManagementQueryResponse, UpdateContextManagementMutationRequest, UpdateContextManagementMutationResponse, GetGoalBudgetPolicyQueryResponse, UpdateGoalBudgetPolicyMutationRequest, UpdateGoalBudgetPolicyMutationResponse, GetScheduleBudgetPolicyQueryResponse, UpdateScheduleBudgetPolicyMutationRequest, UpdateScheduleBudgetPolicyMutationResponse, GetSubagentPolicyQueryResponse, UpdateSubagentPolicyMutationRequest, UpdateSubagentPolicyMutationResponse, GetWebSearchQueryResponse, UpdateWebSearchMutationRequest, UpdateWebSearchMutationResponse, TestWebSearchMutationRequest, TestWebSearchMutationResponse, LoginAccountMutationRequest, LoginAccountMutationResponse, LogoutAccountMutationResponse, GetCurrentUserQueryResponse, GetCurrentUser401, LoginTauriMutationResponse, LoginTauriQueryParams, VerifyConnectionMutationRequest, VerifyConnectionMutationResponse, QueryBackendInfoQueryResponse, CreateBrowserExtensionPairingMutationRequest, CreateBrowserExtensionPairingMutationResponse, CreateBrowserExtensionPairing500, ListConnectionsQueryResponse, ListDeviceCodesQueryResponse, ListDeviceCodesQueryParams, CreateDeviceCodeMutationRequest, CreateDeviceCodeMutationResponse, UpdateDeviceCodeMutationRequest, UpdateDeviceCodeMutationResponse, UpdateDeviceCodePathParams, DeleteDeviceCodeMutationResponse, DeleteDeviceCodePathParams, OpenExecPtyCarrierQueryResponse, RetryLocalFileRecoveryCleanupMutationResponse, ConfirmLocalFileRecoveryClockMutationRequest, ConfirmLocalFileRecoveryClockMutationResponse, DiscardLocalFileRecoveryMutationRequest, DiscardLocalFileRecoveryMutationResponse, ExportLocalFileRecoveryMutationRequest, ExportLocalFileRecoveryMutationResponse, UpdateLocalFileRecoveryPolicyMutationRequest, UpdateLocalFileRecoveryPolicyMutationResponse, QueryLocalFileRecoveryMutationRequest, QueryLocalFileRecoveryMutationResponse, QueryMacosAutologinQueryResponse, RetryManagerLinkMutationResponse, QueryManagerLinkStatusQueryResponse, RedeemCodeMutationRequest, RedeemCodeMutationResponse, QuerySecuritySettingsQueryResponse, UpdateSecuritySettingsMutationRequest, UpdateSecuritySettingsMutationResponse, SubmitSecurityApprovalMutationRequest, SubmitSecurityApprovalMutationResponse, QuerySettingsQueryResponse, UpdateSettingsMutationRequest, UpdateSettingsMutationResponse, QueryAiAssistantSettingsQueryResponse, UpdateAiAssistantSettingsMutationRequest, UpdateAiAssistantSettingsMutationResponse, QueryAiPolicySettingsQueryResponse, UpdateAiPolicySettingsMutationRequest, UpdateAiPolicySettingsMutationResponse, QueryCollectionPolicySettingsQueryResponse, UpdateCollectionPolicySettingsMutationRequest, UpdateCollectionPolicySettingsMutationResponse, UpdateComputerUseApplicationPolicyMutationRequest, UpdateComputerUseApplicationPolicyMutationResponse, QueryComputerUseApplicationPolicyMutationResponse, UpdateComputerUseCommunicationPolicyMutationRequest, UpdateComputerUseCommunicationPolicyMutationResponse, QueryComputerUseCommunicationPolicyMutationResponse, QueryLogSettingsQueryResponse, UpdateLogSettingsMutationRequest, UpdateLogSettingsMutationResponse, QueryTurnSettingsQueryResponse, UpdateTurnSettingsMutationRequest, UpdateTurnSettingsMutationResponse, QueryTurnClientSettingsQueryResponse, UpdateTurnClientSettingsMutationRequest, UpdateTurnClientSettingsMutationResponse, RegenerateTurnSecretMutationResponse, QueryVirtualDisplaySettingsQueryResponse, UpdateVirtualDisplaySettingsMutationRequest, UpdateVirtualDisplaySettingsMutationResponse, OpenSignalingHandleQueryResponse, OpenSignalingHandleQueryParams, StartSupportMutationResponse, SupportStatusQueryResponse, StopSupportMutationResponse, QuerySysinfoQueryResponse, UpdateTelemetryConsentMutationRequest, UpdateTelemetryConsentMutationResponse, QueryTelemetryStatusQueryResponse, OpenTerminalSessionQueryResponse, OpenTerminalSessionPathParams, OpenTerminalSessionQueryParams, ListTerminalQueryResponse, ListTerminalPathParams, ListTerminalQueryParams, RequestMacosPermissionsMutationResponse, AuthorizeWaylandMutationRequest, AuthorizeWaylandMutationResponse, CancelWaylandMutationRequest, CancelWaylandMutationResponse, InitSystemMutationRequest, InitSystemMutationResponse, InitSystem403, InitRequirementsQueryResponse, GetApprovalModelProviderQueryResponse, UpdateApprovalModelProviderMutationRequest, UpdateApprovalModelProviderMutationResponse, TestApprovalModelProviderMutationRequest, TestApprovalModelProviderMutationResponse, GetModelProviderQueryResponse, UpdateModelProviderMutationRequest, UpdateModelProviderMutationResponse, TestModelProviderMutationRequest, TestModelProviderMutationResponse, GetModelUsageQueryResponse, GetModelUsageQueryParams, ListAiAssistantAttentionQueryResponse, ListAiAssistantAttentionQueryParams, GetAiAssistantSessionQueryResponse, GetAiAssistantSessionQueryParams, CloseAiAssistantApprovalDelegationMutationRequest, CloseAiAssistantApprovalDelegationMutationResponse, OpenAiAssistantApprovalDelegationMutationRequest, OpenAiAssistantApprovalDelegationMutationResponse, GetAssistantAttachmentQueryResponse, GetAssistantAttachmentQueryParams, ReadAssistantAttachmentMutationRequest, ReadAssistantAttachmentMutationResponse, ListAssistantAttachmentsQueryResponse, ListAssistantAttachmentsQueryParams, DeleteAssistantAttachmentsMutationRequest, DeleteAssistantAttachmentsMutationResponse, CancelAiAssistantBackgroundTaskMutationRequest, CancelAiAssistantBackgroundTaskMutationResponse, RevokeAiAssistantCapabilityGrantMutationRequest, RevokeAiAssistantCapabilityGrantMutationResponse, CancelAiAssistantCommandMutationRequest, CancelAiAssistantCommandMutationResponse, DeleteAiAssistantSessionMutationRequest, DeleteAiAssistantSessionMutationResponse, ControlAiAssistantDirectoryMutationRequest, ControlAiAssistantDirectoryMutationResponse, GetMyGoalBudgetPolicyQueryResponse, ControlAiAssistantGoalMutationRequest, ControlAiAssistantGoalMutationResponse, DecideAiAssistantGoalOpenMutationRequest, DecideAiAssistantGoalOpenMutationResponse, GetAssistantImageQueryResponse, GetAssistantImageQueryParams, GetAssistantImage404, DeleteAssistantImageMutationResponse, DeleteAssistantImageQueryParams, ListAssistantImagesQueryResponse, ListAssistantImagesQueryParams, DecideAiAssistantPermissionMutationRequest, DecideAiAssistantPermissionMutationResponse, StopAiAssistantSessionMutationRequest, StopAiAssistantSessionMutationResponse, GetMySubagentPolicyQueryResponse, ListAiAssistantSubagentsQueryResponse, ListAiAssistantSubagentsQueryParams, ControlAiAssistantSubagentMutationRequest, ControlAiAssistantSubagentMutationResponse, MarkAiAssistantSubagentReadMutationRequest, MarkAiAssistantSubagentReadMutationResponse, ReadAiAssistantSubagentResultQueryResponse, ReadAiAssistantSubagentResultQueryParams, GetAiAssistantSubagentStatusQueryResponse, GetAiAssistantSubagentStatusQueryParams, ListAiAssistantSessionsQueryResponse, ListAiAssistantSessionsQueryParams, RetryFileRecoveryCleanupMutationRequest, RetryFileRecoveryCleanupMutationResponse, ListFileRecoveryCleanupQueryResponse, ListFileRecoveryCleanupQueryParams, ExportDeviceFileRecoveryMutationRequest, ExportDeviceFileRecoveryMutationResponse, ManageDeviceFileRecoveryMutationRequest, ManageDeviceFileRecoveryMutationResponse, QueryServerInfoQueryResponse, InstallServiceMutationRequest, InstallServiceMutationResponse, InstallService503, QueryServiceOperationQueryResponse, QueryServiceOperationPathParams, QueryServiceOperation404, UninstallServiceMutationResponse, UninstallService503, CreateTokenMutationRequest, CreateTokenMutationResponse, GetTurnInfoQueryResponse, GetTurnMetricsQueryResponse, GetTurnMetrics503, GetTurnSessionStatisticsQueryResponse, GetTurnSessionStatisticsQueryParams, GetTurnUsageQueryResponse, GetTurnUsageQueryParams, GetUsageRetentionQueryResponse, UpdateUsageRetentionMutationRequest, UpdateUsageRetentionMutationResponse, InstallDriverMutationResponse, QueryDriverStatusQueryResponse, UninstallDriverMutationResponse } from "./types.ts";
+import type { AckSecurityApprovalMutationRequest, AckSecurityApprovalMutationResponse, BatchDeleteDeviceCodesMutationRequest, BatchDeleteDeviceCodesMutationResponse, ChangePasswordMutationRequest, ChangePasswordMutationResponse, ChangePassword401, ChangePassword403, GetContextManagementQueryResponse, UpdateContextManagementMutationRequest, UpdateContextManagementMutationResponse, GetGoalBudgetPolicyQueryResponse, UpdateGoalBudgetPolicyMutationRequest, UpdateGoalBudgetPolicyMutationResponse, GetScheduleBudgetPolicyQueryResponse, UpdateScheduleBudgetPolicyMutationRequest, UpdateScheduleBudgetPolicyMutationResponse, GetSubagentPolicyQueryResponse, UpdateSubagentPolicyMutationRequest, UpdateSubagentPolicyMutationResponse, GetWebSearchQueryResponse, UpdateWebSearchMutationRequest, UpdateWebSearchMutationResponse, TestWebSearchMutationRequest, TestWebSearchMutationResponse, LoginAccountMutationRequest, LoginAccountMutationResponse, LogoutAccountMutationResponse, GetCurrentUserQueryResponse, GetCurrentUser401, LoginTauriMutationResponse, LoginTauriQueryParams, VerifyConnectionMutationRequest, VerifyConnectionMutationResponse, QueryBackendInfoQueryResponse, CreateBrowserExtensionPairingMutationRequest, CreateBrowserExtensionPairingMutationResponse, CreateBrowserExtensionPairing500, ListConnectionsQueryResponse, ListDeviceCodesQueryResponse, ListDeviceCodesQueryParams, CreateDeviceCodeMutationRequest, CreateDeviceCodeMutationResponse, UpdateDeviceCodeMutationRequest, UpdateDeviceCodeMutationResponse, UpdateDeviceCodePathParams, DeleteDeviceCodeMutationResponse, DeleteDeviceCodePathParams, OpenExecPtyCarrierQueryResponse, RetryLocalFileRecoveryCleanupMutationResponse, ConfirmLocalFileRecoveryClockMutationRequest, ConfirmLocalFileRecoveryClockMutationResponse, DiscardLocalFileRecoveryMutationRequest, DiscardLocalFileRecoveryMutationResponse, ExportLocalFileRecoveryMutationRequest, ExportLocalFileRecoveryMutationResponse, UpdateLocalFileRecoveryPolicyMutationRequest, UpdateLocalFileRecoveryPolicyMutationResponse, QueryLocalFileRecoveryMutationRequest, QueryLocalFileRecoveryMutationResponse, QueryMacosAutologinQueryResponse, RetryManagerLinkMutationResponse, QueryManagerLinkStatusQueryResponse, RedeemCodeMutationRequest, RedeemCodeMutationResponse, QuerySecuritySettingsQueryResponse, UpdateSecuritySettingsMutationRequest, UpdateSecuritySettingsMutationResponse, SubmitSecurityApprovalMutationRequest, SubmitSecurityApprovalMutationResponse, QuerySettingsQueryResponse, UpdateSettingsMutationRequest, UpdateSettingsMutationResponse, QueryAiAssistantSettingsQueryResponse, UpdateAiAssistantSettingsMutationRequest, UpdateAiAssistantSettingsMutationResponse, QueryAiPolicySettingsQueryResponse, UpdateAiPolicySettingsMutationRequest, UpdateAiPolicySettingsMutationResponse, QueryCollectionPolicySettingsQueryResponse, UpdateCollectionPolicySettingsMutationRequest, UpdateCollectionPolicySettingsMutationResponse, UpdateComputerUseApplicationPolicyMutationRequest, UpdateComputerUseApplicationPolicyMutationResponse, QueryComputerUseApplicationPolicyMutationResponse, UpdateComputerUseCommunicationPolicyMutationRequest, UpdateComputerUseCommunicationPolicyMutationResponse, QueryComputerUseCommunicationPolicyMutationResponse, QueryLogSettingsQueryResponse, UpdateLogSettingsMutationRequest, UpdateLogSettingsMutationResponse, QueryTurnSettingsQueryResponse, UpdateTurnSettingsMutationRequest, UpdateTurnSettingsMutationResponse, QueryTurnClientSettingsQueryResponse, UpdateTurnClientSettingsMutationRequest, UpdateTurnClientSettingsMutationResponse, RegenerateTurnSecretMutationResponse, QueryVirtualDisplaySettingsQueryResponse, UpdateVirtualDisplaySettingsMutationRequest, UpdateVirtualDisplaySettingsMutationResponse, OpenSignalingHandleQueryResponse, OpenSignalingHandleQueryParams, StartSupportMutationResponse, SupportStatusQueryResponse, StopSupportMutationResponse, QuerySysinfoQueryResponse, UpdateTelemetryConsentMutationRequest, UpdateTelemetryConsentMutationResponse, QueryTelemetryStatusQueryResponse, OpenTerminalSessionQueryResponse, OpenTerminalSessionPathParams, OpenTerminalSessionQueryParams, ListTerminalQueryResponse, ListTerminalPathParams, ListTerminalQueryParams, RequestMacosPermissionsMutationResponse, AuthorizeWaylandMutationRequest, AuthorizeWaylandMutationResponse, CancelWaylandMutationRequest, CancelWaylandMutationResponse, InitSystemMutationRequest, InitSystemMutationResponse, InitSystem403, InitRequirementsQueryResponse, GetApprovalModelProviderQueryResponse, UpdateApprovalModelProviderMutationRequest, UpdateApprovalModelProviderMutationResponse, TestApprovalModelProviderMutationRequest, TestApprovalModelProviderMutationResponse, GetModelMetricsCallsQueryResponse, GetModelMetricsCallsQueryParams, GetModelMetricsCallQueryResponse, GetModelMetricsCallPathParams, GetModelMetricsModelsQueryResponse, GetModelMetricsModelsQueryParams, GetModelMetricsOverviewQueryResponse, GetModelMetricsOverviewQueryParams, GetModelMetricsRuntimeQueryResponse, GetModelMetricsRuntimeQueryParams, GetModelMetricsSeriesQueryResponse, GetModelMetricsSeriesQueryParams, GetModelMetricsSettingsQueryResponse, UpdateModelMetricsSettingsMutationRequest, UpdateModelMetricsSettingsMutationResponse, GetModelMetricsStatusQueryResponse, GetModelMetricsToolsQueryResponse, GetModelMetricsToolsQueryParams, GetModelMetricsUnassociatedQueryResponse, GetModelMetricsUnassociatedQueryParams, GetModelProviderQueryResponse, UpdateModelProviderMutationRequest, UpdateModelProviderMutationResponse, TestModelProviderMutationRequest, TestModelProviderMutationResponse, GetModelUsageQueryResponse, GetModelUsageQueryParams, ListAiAssistantAttentionQueryResponse, ListAiAssistantAttentionQueryParams, GetAiAssistantSessionQueryResponse, GetAiAssistantSessionQueryParams, CloseAiAssistantApprovalDelegationMutationRequest, CloseAiAssistantApprovalDelegationMutationResponse, OpenAiAssistantApprovalDelegationMutationRequest, OpenAiAssistantApprovalDelegationMutationResponse, GetAssistantAttachmentQueryResponse, GetAssistantAttachmentQueryParams, ReadAssistantAttachmentMutationRequest, ReadAssistantAttachmentMutationResponse, ListAssistantAttachmentsQueryResponse, ListAssistantAttachmentsQueryParams, DeleteAssistantAttachmentsMutationRequest, DeleteAssistantAttachmentsMutationResponse, CancelAiAssistantBackgroundTaskMutationRequest, CancelAiAssistantBackgroundTaskMutationResponse, RevokeAiAssistantCapabilityGrantMutationRequest, RevokeAiAssistantCapabilityGrantMutationResponse, CancelAiAssistantCommandMutationRequest, CancelAiAssistantCommandMutationResponse, DeleteAiAssistantSessionMutationRequest, DeleteAiAssistantSessionMutationResponse, ControlAiAssistantDirectoryMutationRequest, ControlAiAssistantDirectoryMutationResponse, GetMyGoalBudgetPolicyQueryResponse, ControlAiAssistantGoalMutationRequest, ControlAiAssistantGoalMutationResponse, DecideAiAssistantGoalOpenMutationRequest, DecideAiAssistantGoalOpenMutationResponse, GetAssistantImageQueryResponse, GetAssistantImageQueryParams, GetAssistantImage404, DeleteAssistantImageMutationResponse, DeleteAssistantImageQueryParams, ListAssistantImagesQueryResponse, ListAssistantImagesQueryParams, DecideAiAssistantPermissionMutationRequest, DecideAiAssistantPermissionMutationResponse, StopAiAssistantSessionMutationRequest, StopAiAssistantSessionMutationResponse, GetMySubagentPolicyQueryResponse, ListAiAssistantSubagentsQueryResponse, ListAiAssistantSubagentsQueryParams, ControlAiAssistantSubagentMutationRequest, ControlAiAssistantSubagentMutationResponse, MarkAiAssistantSubagentReadMutationRequest, MarkAiAssistantSubagentReadMutationResponse, ReadAiAssistantSubagentResultQueryResponse, ReadAiAssistantSubagentResultQueryParams, GetAiAssistantSubagentStatusQueryResponse, GetAiAssistantSubagentStatusQueryParams, ListAiAssistantSessionsQueryResponse, ListAiAssistantSessionsQueryParams, RetryFileRecoveryCleanupMutationRequest, RetryFileRecoveryCleanupMutationResponse, ListFileRecoveryCleanupQueryResponse, ListFileRecoveryCleanupQueryParams, ExportDeviceFileRecoveryMutationRequest, ExportDeviceFileRecoveryMutationResponse, ManageDeviceFileRecoveryMutationRequest, ManageDeviceFileRecoveryMutationResponse, QueryServerInfoQueryResponse, InstallServiceMutationRequest, InstallServiceMutationResponse, InstallService503, QueryServiceOperationQueryResponse, QueryServiceOperationPathParams, QueryServiceOperation404, UninstallServiceMutationResponse, UninstallService503, CreateTokenMutationRequest, CreateTokenMutationResponse, GetTurnInfoQueryResponse, GetTurnMetricsQueryResponse, GetTurnMetrics503, GetTurnSessionStatisticsQueryResponse, GetTurnSessionStatisticsQueryParams, GetTurnUsageQueryResponse, GetTurnUsageQueryParams, GetUsageRetentionQueryResponse, UpdateUsageRetentionMutationRequest, UpdateUsageRetentionMutationResponse, InstallDriverMutationResponse, QueryDriverStatusQueryResponse, UninstallDriverMutationResponse } from "./types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 
 function getGetContextManagementUrl() {
@@ -1408,6 +1408,204 @@ export async function testApprovalModelProvider(data: TestApprovalModelProviderM
   return res.data
 }
 
+function getGetModelMetricsCallsUrl() {
+  const res = { method: 'GET', url: `/api/model/metrics/calls` as const }
+  return res
+}
+
+/**
+ * @summary Query model observation calls
+ * {@link /api/model/metrics/calls}
+ */
+export async function getModelMetricsCalls(params?: GetModelMetricsCallsQueryParams, config: Partial<RequestConfig> & { client?: Client } = {}) {
+  const { client: request = fetch, ...requestConfig } = config
+
+
+
+  const res = await request<GetModelMetricsCallsQueryResponse, ResponseErrorConfig<Error>, unknown>({ method : "GET", url : getGetModelMetricsCallsUrl().url.toString(), params, ... requestConfig })
+  return res.data
+}
+
+function getGetModelMetricsCallUrl(observation_id: GetModelMetricsCallPathParams["observation_id"]) {
+  const res = { method: 'GET', url: `/api/model/metrics/calls/${observation_id}` as const }
+  return res
+}
+
+/**
+ * @summary Get content-free model observation details
+ * {@link /api/model/metrics/calls/:observation_id}
+ */
+export async function getModelMetricsCall(observation_id: GetModelMetricsCallPathParams["observation_id"], config: Partial<RequestConfig> & { client?: Client } = {}) {
+  const { client: request = fetch, ...requestConfig } = config
+
+
+
+  const res = await request<GetModelMetricsCallQueryResponse, ResponseErrorConfig<Error>, unknown>({ method : "GET", url : getGetModelMetricsCallUrl(observation_id).url.toString(), ... requestConfig })
+  return res.data
+}
+
+function getGetModelMetricsModelsUrl() {
+  const res = { method: 'GET', url: `/api/model/metrics/models` as const }
+  return res
+}
+
+/**
+ * @summary Query model observation models
+ * {@link /api/model/metrics/models}
+ */
+export async function getModelMetricsModels(params?: GetModelMetricsModelsQueryParams, config: Partial<RequestConfig> & { client?: Client } = {}) {
+  const { client: request = fetch, ...requestConfig } = config
+
+
+
+  const res = await request<GetModelMetricsModelsQueryResponse, ResponseErrorConfig<Error>, unknown>({ method : "GET", url : getGetModelMetricsModelsUrl().url.toString(), params, ... requestConfig })
+  return res.data
+}
+
+function getGetModelMetricsOverviewUrl() {
+  const res = { method: 'GET', url: `/api/model/metrics/overview` as const }
+  return res
+}
+
+/**
+ * @summary Query model observation overview
+ * {@link /api/model/metrics/overview}
+ */
+export async function getModelMetricsOverview(params?: GetModelMetricsOverviewQueryParams, config: Partial<RequestConfig> & { client?: Client } = {}) {
+  const { client: request = fetch, ...requestConfig } = config
+
+
+
+  const res = await request<GetModelMetricsOverviewQueryResponse, ResponseErrorConfig<Error>, unknown>({ method : "GET", url : getGetModelMetricsOverviewUrl().url.toString(), params, ... requestConfig })
+  return res.data
+}
+
+function getGetModelMetricsRuntimeUrl() {
+  const res = { method: 'GET', url: `/api/model/metrics/runtime` as const }
+  return res
+}
+
+/**
+ * @summary Query typed runtime observations
+ * {@link /api/model/metrics/runtime}
+ */
+export async function getModelMetricsRuntime(params?: GetModelMetricsRuntimeQueryParams, config: Partial<RequestConfig> & { client?: Client } = {}) {
+  const { client: request = fetch, ...requestConfig } = config
+
+
+
+  const res = await request<GetModelMetricsRuntimeQueryResponse, ResponseErrorConfig<Error>, unknown>({ method : "GET", url : getGetModelMetricsRuntimeUrl().url.toString(), params, ... requestConfig })
+  return res.data
+}
+
+function getGetModelMetricsSeriesUrl() {
+  const res = { method: 'GET', url: `/api/model/metrics/series` as const }
+  return res
+}
+
+/**
+ * @summary Query model observation series
+ * {@link /api/model/metrics/series}
+ */
+export async function getModelMetricsSeries(params?: GetModelMetricsSeriesQueryParams, config: Partial<RequestConfig> & { client?: Client } = {}) {
+  const { client: request = fetch, ...requestConfig } = config
+
+
+
+  const res = await request<GetModelMetricsSeriesQueryResponse, ResponseErrorConfig<Error>, unknown>({ method : "GET", url : getGetModelMetricsSeriesUrl().url.toString(), params, ... requestConfig })
+  return res.data
+}
+
+function getGetModelMetricsSettingsUrl() {
+  const res = { method: 'GET', url: `/api/model/metrics/settings` as const }
+  return res
+}
+
+/**
+ * @summary Get shared model observation settings
+ * {@link /api/model/metrics/settings}
+ */
+export async function getModelMetricsSettings(config: Partial<RequestConfig> & { client?: Client } = {}) {
+  const { client: request = fetch, ...requestConfig } = config
+
+
+
+  const res = await request<GetModelMetricsSettingsQueryResponse, ResponseErrorConfig<Error>, unknown>({ method : "GET", url : getGetModelMetricsSettingsUrl().url.toString(), ... requestConfig })
+  return res.data
+}
+
+function getUpdateModelMetricsSettingsUrl() {
+  const res = { method: 'PUT', url: `/api/model/metrics/settings` as const }
+  return res
+}
+
+/**
+ * @summary Update shared model observation settings with revision CAS
+ * {@link /api/model/metrics/settings}
+ */
+export async function updateModelMetricsSettings(data: UpdateModelMetricsSettingsMutationRequest, config: Partial<RequestConfig<UpdateModelMetricsSettingsMutationRequest>> & { client?: Client } = {}) {
+  const { client: request = fetch, ...requestConfig } = config
+
+  const requestData = data
+
+  const res = await request<UpdateModelMetricsSettingsMutationResponse, ResponseErrorConfig<Error>, UpdateModelMetricsSettingsMutationRequest>({ method : "PUT", url : getUpdateModelMetricsSettingsUrl().url.toString(), data : requestData, ... requestConfig })
+  return res.data
+}
+
+function getGetModelMetricsStatusUrl() {
+  const res = { method: 'GET', url: `/api/model/metrics/status` as const }
+  return res
+}
+
+/**
+ * @summary Get model observation health
+ * {@link /api/model/metrics/status}
+ */
+export async function getModelMetricsStatus(config: Partial<RequestConfig> & { client?: Client } = {}) {
+  const { client: request = fetch, ...requestConfig } = config
+
+
+
+  const res = await request<GetModelMetricsStatusQueryResponse, ResponseErrorConfig<Error>, unknown>({ method : "GET", url : getGetModelMetricsStatusUrl().url.toString(), ... requestConfig })
+  return res.data
+}
+
+function getGetModelMetricsToolsUrl() {
+  const res = { method: 'GET', url: `/api/model/metrics/tools` as const }
+  return res
+}
+
+/**
+ * @summary Query model observation tools
+ * {@link /api/model/metrics/tools}
+ */
+export async function getModelMetricsTools(params?: GetModelMetricsToolsQueryParams, config: Partial<RequestConfig> & { client?: Client } = {}) {
+  const { client: request = fetch, ...requestConfig } = config
+
+
+
+  const res = await request<GetModelMetricsToolsQueryResponse, ResponseErrorConfig<Error>, unknown>({ method : "GET", url : getGetModelMetricsToolsUrl().url.toString(), params, ... requestConfig })
+  return res.data
+}
+
+function getGetModelMetricsUnassociatedUrl() {
+  const res = { method: 'GET', url: `/api/model/metrics/unassociated` as const }
+  return res
+}
+
+/**
+ * @summary Query content-free facts missing original attribution or dispatch start
+ * {@link /api/model/metrics/unassociated}
+ */
+export async function getModelMetricsUnassociated(params?: GetModelMetricsUnassociatedQueryParams, config: Partial<RequestConfig> & { client?: Client } = {}) {
+  const { client: request = fetch, ...requestConfig } = config
+
+
+
+  const res = await request<GetModelMetricsUnassociatedQueryResponse, ResponseErrorConfig<Error>, unknown>({ method : "GET", url : getGetModelMetricsUnassociatedUrl().url.toString(), params, ... requestConfig })
+  return res.data
+}
+
 function getGetModelProviderUrl() {
   const res = { method: 'GET', url: `/api/model/provider` as const }
   return res
@@ -1468,7 +1666,7 @@ function getGetModelUsageUrl() {
 }
 
 /**
- * @summary Query local per-model AI gateway token usage
+ * @summary Query local model usage from current observations
  * {@link /api/model/usage}
  */
 export async function getModelUsage(params?: GetModelUsageQueryParams, config: Partial<RequestConfig> & { client?: Client } = {}) {

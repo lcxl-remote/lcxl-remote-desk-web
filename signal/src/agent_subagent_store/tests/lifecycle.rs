@@ -243,7 +243,7 @@ async fn committed_source_pause_rejects_old_report_and_old_history() {
     replace_run_on(&txn, &row, &task, now.timestamp_millis())
         .await
         .unwrap();
-    synchronize_control_on(&txn, &task, now.timestamp_millis())
+    synchronize_control_on(&txn, &task, now.timestamp_millis(), false)
         .await
         .unwrap();
     append_state_event_on(&txn, &group, &task, now.timestamp_millis())

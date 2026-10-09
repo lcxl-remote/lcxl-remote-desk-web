@@ -27,15 +27,15 @@ export function UsageOverview() {
                             </CardHeader>
                         </Card>
                     </Link>
-                    <Link to="/usage/model" className="block outline-none">
+                    <Link to="/model-metrics" className="block outline-none">
                         <Card className="hover:bg-muted/50 transition-colors h-full cursor-pointer">
                             <CardHeader>
                                 <div className="flex items-center gap-2">
                                     <AiAssistantIcon className="h-5 w-5 text-violet-500" />
-                                    <CardTitle className="text-lg">{t('menu.usage.model')}</CardTitle>
+                                    <CardTitle className="text-lg">{t('modelMetrics.title')}</CardTitle>
                                 </div>
                                 <CardDescription className="mt-2 line-clamp-2">
-                                    {t('pages.modelUsage.description')}
+                                    {t('modelMetrics.description')}
                                 </CardDescription>
                             </CardHeader>
                         </Card>

@@ -78,9 +78,14 @@ impl SubAgentStore {
         run.fail("delegation_deadline_reached", &now.to_rfc3339())
             .map_err(|_| invalid())?;
         replace_run_on(&txn, &row, &run, now.timestamp_millis()).await?;
-        synchronize_control_on(&txn, &run, now.timestamp_millis()).await?;
+        let permission_ends =
+            synchronize_control_on(&txn, &run, now.timestamp_millis(), true).await?;
         append_state_event_on(&txn, &group, &run, now.timestamp_millis()).await?;
         txn.commit().await?;
+        permission_ends.submit(
+            now.timestamp_millis(),
+            crate::model_metrics::runtime::submit,
+        );
         Ok(true)
     }
 
@@ -163,6 +168,8 @@ impl SubAgentStore {
             .map_err(|_| invalid())?;
         }
         replace_run_on(&txn, &row, &run, now.timestamp_millis()).await?;
+        let mut permission_ends =
+            desk_diagnose_core::model_observability::permission::PendingEnds::default();
         if resource.is_some() {
             run_row::Entity::update_many()
                 .set(run_row::ActiveModel {
@@ -178,10 +185,15 @@ impl SubAgentStore {
                 .exec(&txn)
                 .await?;
         } else {
-            synchronize_control_on(&txn, &run, now.timestamp_millis()).await?;
+            permission_ends =
+                synchronize_control_on(&txn, &run, now.timestamp_millis(), false).await?;
         }
         append_state_event_on(&txn, &group, &run, now.timestamp_millis()).await?;
         txn.commit().await?;
+        permission_ends.submit(
+            now.timestamp_millis(),
+            crate::model_metrics::runtime::submit,
+        );
         Ok(true)
     }
 

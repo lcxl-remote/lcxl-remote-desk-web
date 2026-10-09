@@ -1,0 +1,1 @@
+{"type":"string","enum":["ready","initializing","disabled","cache_expired","degraded","unavailable"],"x-readme-ref-name":"ComponentState"}

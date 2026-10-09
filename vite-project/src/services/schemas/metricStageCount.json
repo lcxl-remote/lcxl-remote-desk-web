@@ -1,0 +1,1 @@
+{"type":"object","required":["stage","outcome","count"],"properties":{"count":{"type":"string"},"outcome":{"type":"string"},"stage":{"type":"string"}},"x-readme-ref-name":"MetricStageCount"}

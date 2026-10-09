@@ -310,7 +310,7 @@ impl SignalCapabilityGrantStore {
                 }
                 // This is metadata replay only; callers retain their original
                 // one-shot claim and cannot use this return value to resend.
-                return Ok(());
+                return Ok(None);
             }
             if outbox.state != DISPATCH_OUTBOX_SENDING
                 || work.status != CAPABILITY_WORK_DISPATCHING
@@ -337,11 +337,27 @@ impl SignalCapabilityGrantStore {
             }
             #[cfg(test)]
             pause_crash_fixture_before_commit("computer_binding_before_commit");
-            Ok(())
+            Ok(Some((work.id, outbox.updated_at.timestamp_millis())))
         }
         .await;
         match result {
-            Ok(()) => txn.commit().await,
+            Ok(observation) => {
+                txn.commit().await?;
+                if let Some((work_id, started_at)) = observation
+                    && let Some(alias) =
+                        desk_diagnose_core::model_observability::ObservationAlias::provider_work(
+                            &work_id.to_string(),
+                        )
+                {
+                    desk_diagnose_core::model_observability::operations::provider_dispatch(
+                        alias,
+                        plan.actions.len(),
+                        started_at,
+                        crate::model_metrics::runtime::submit,
+                    );
+                }
+                Ok(())
+            }
             Err(error) => {
                 txn.rollback().await.ok();
                 Err(error)

@@ -1,4 +1,7 @@
+import modelMetrics from './model-metrics';
+
 export default {
+    ...modelMetrics,
     "pages.aiAssistantAttention.title": "AI Assistant attention",
     "pages.aiAssistantAttention.description": "Goals, permissions, and conversations that need your action",
     "pages.aiAssistantAttention.refresh": "Refresh",
@@ -1052,7 +1055,7 @@ export default {
   'pages.usageRange.effective': 'Showing {{from}} — {{to}}',
   'pages.usageRange.dayUtcNote': 'aggregated by UTC calendar day',
   'pages.usageRetention.title': 'Usage Data Retention',
-  'pages.usageRetention.description': 'Set how many days of local TURN traffic, AI token usage rollups, and AI Assistant conversations are kept. Older data is pruned periodically in the background.',
+  'pages.usageRetention.description': 'Set how long to keep local TURN traffic and AI Assistant conversations. Model call statistics retention is managed separately on the settings page.',
   'pages.usageRetention.turnDays': 'TURN traffic retention (days)',
   'pages.usageRetention.aiDays': 'AI token usage retention (days)',
   'pages.usageRetention.agentSessionDays': 'AI Assistant retention (days)',

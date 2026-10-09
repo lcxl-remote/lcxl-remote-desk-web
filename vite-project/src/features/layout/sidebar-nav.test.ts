@@ -64,6 +64,15 @@ describe('buildNavItems', () => {
     it('offers nothing to a device code with no target', () => {
         expect(urls({ access: 'device_user', startupMode: startupModeEnum.default })).toEqual([]);
     });
+
+    it('keeps model statistics under usage instead of repeating a primary entry', () => {
+        for (const mode of [startupModeEnum.default, startupModeEnum.signaling, startupModeEnum['service-daemon']]) {
+            const entries = urls({ access: 'admin', startupMode: mode });
+            expect(entries).toContain('/usage');
+            expect(entries).not.toContain('/model-metrics');
+            expect(entries.filter((url) => url === '/usage')).toHaveLength(1);
+        }
+    });
 });
 
 describe('startupModeLabel', () => {

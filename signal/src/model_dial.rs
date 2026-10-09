@@ -366,6 +366,16 @@ impl SignalModelSeam {
         sink: &mut dyn TurnSink,
         _permit: crate::model_admission::ModelPermit,
     ) -> Result<ModelTurn, AgentError> {
+        use desk_diagnose_core::model_observability::{
+            Origin, OutputOutcome, RequestObservation, RequestOutcome,
+        };
+        let context = request
+            .observation
+            .clone()
+            .or_else(|| self.observation_context(request.use_case, Origin::Unknown));
+        let mut observation = context.map(|context| {
+            RequestObservation::new(context, request.messages.len(), request.tools.len())
+        });
         let cancelled = || AgentError {
             kind: AgentErrorKind::Cancelled,
             message: "The model request was cancelled.".into(),
@@ -373,25 +383,55 @@ impl SignalModelSeam {
             safe_for_model: true,
             error_code: None,
         };
-        tokio::select! {
+        let result = tokio::select! {
             biased;
             _ = self.cancel.cancelled() => Err(cancelled()),
-            result = self.call_uncancelled(request, sink) => {
+            result = self.call_uncancelled(request, sink, &mut observation) => {
                 if self.cancel.is_cancelled() { Err(cancelled()) } else { result }
             },
+        };
+        if let (Some(observation), Err(error)) = (&mut observation, &result) {
+            if !observation.has_started() {
+                observation.not_started(
+                    if error.kind == AgentErrorKind::Cancelled {
+                        desk_diagnose_core::model_observability::NotStartedReason::Cancelled
+                    } else {
+                        desk_diagnose_core::model_observability::NotStartedReason::Unknown
+                    },
+                    chrono::Utc::now().timestamp_millis(),
+                );
+            }
+            let outcome = if error.kind == AgentErrorKind::Cancelled {
+                RequestOutcome::Cancelled
+            } else {
+                RequestOutcome::ObservationIncomplete
+            };
+            observation.finish(
+                outcome,
+                OutputOutcome::NotEvaluated,
+                chrono::Utc::now().timestamp_millis(),
+            );
         }
+        result
     }
 
     async fn call_uncancelled(
         &self,
         request: ModelRequest,
         sink: &mut dyn TurnSink,
+        observation: &mut Option<desk_diagnose_core::model_observability::RequestObservation>,
     ) -> Result<ModelTurn, AgentError> {
         use futures_util::StreamExt;
         self.retry_after_unix_ms.set(None);
 
         let requirements = ModelRequirements::for_messages(&request.messages);
         if !self.capabilities.satisfies(requirements) {
+            if let Some(observation) = observation {
+                observation.not_started(
+                    desk_diagnose_core::model_observability::NotStartedReason::RequestValidation,
+                    chrono::Utc::now().timestamp_millis(),
+                );
+            }
             return Err(AgentError {
                 kind: AgentErrorKind::ModelRejected,
                 message: "The selected AI model does not support image input.".to_string(),
@@ -408,12 +448,20 @@ impl SignalModelSeam {
                 .iter()
                 .filter_map(|message| message.image_data_url.as_deref()),
         )
-        .map_err(|error| AgentError {
-            kind: AgentErrorKind::ModelRejected,
-            message: format!("invalid model image attachment: {error}"),
-            retryable: false,
-            safe_for_model: false,
-            error_code: None,
+        .map_err(|error| {
+            if let Some(observation) = observation {
+                observation.not_started(
+                    desk_diagnose_core::model_observability::NotStartedReason::RequestValidation,
+                    chrono::Utc::now().timestamp_millis(),
+                );
+            }
+            AgentError {
+                kind: AgentErrorKind::ModelRejected,
+                message: format!("invalid model image attachment: {error}"),
+                retryable: false,
+                safe_for_model: false,
+                error_code: None,
+            }
         })?;
 
         // The actix-tls resolver short-circuits an IP-literal host before the custom
@@ -425,7 +473,15 @@ impl SignalModelSeam {
             base_url_scheme_is_tls(&self.base_url),
             configured_enforce_public_tls(),
         )
-        .map_err(|e| config_error(format!("model request failed: {e}")))?;
+        .map_err(|e| {
+            if let Some(observation) = observation {
+                observation.not_started(
+                    desk_diagnose_core::model_observability::NotStartedReason::Policy,
+                    chrono::Utc::now().timestamp_millis(),
+                );
+            }
+            config_error(format!("model request failed: {e}"))
+        })?;
 
         // Guard the outbound dial with the transport resolver: every resolved IP is
         // validated just before connecting (authoritative anti-rebinding check),
@@ -466,7 +522,14 @@ impl SignalModelSeam {
             self.dialect,
             request.tools.len()
         );
-        let mut body = self.build_body(&request)?;
+        let mut body = self.build_body(&request).inspect_err(|_| {
+            if let Some(observation) = observation {
+                observation.not_started(
+                    desk_diagnose_core::model_observability::NotStartedReason::RequestValidation,
+                    chrono::Utc::now().timestamp_millis(),
+                );
+            }
+        })?;
         let mut cache_projection = desk_diagnose_core::prompt_cache::observe(
             &mut body,
             request.previous_cache_projection.as_ref(),
@@ -486,17 +549,52 @@ impl SignalModelSeam {
         };
 
         if let Some(db) = &self.context_db {
-            self.validate_current_on(db).await?;
+            self.validate_current_on(db).await.inspect_err(|_| {
+                if let Some(observation) = observation {
+                    observation.not_started(
+                        desk_diagnose_core::model_observability::NotStartedReason::Configuration,
+                        chrono::Utc::now().timestamp_millis(),
+                    );
+                }
+            })?;
+        }
+        if let Some(observation) = observation {
+            observation.outbound(chrono::Utc::now().timestamp_millis());
         }
         let mut response = http
             .insert_header(("Content-Type", "application/json"))
             .insert_header(("Accept", "text/event-stream"))
             .send_json(&body)
             .await
-            .map_err(|e| transport_error(format!("model request failed: {e}")))?;
+            .map_err(|e| {
+                if let Some(observation) = observation {
+                    let outcome = if matches!(e, awc::error::SendRequestError::Timeout) {
+                        desk_diagnose_core::model_observability::RequestOutcome::Timeout
+                    } else {
+                        desk_diagnose_core::model_observability::RequestOutcome::TransportError
+                    };
+                    observation.finish(
+                        outcome,
+                        desk_diagnose_core::model_observability::OutputOutcome::NotEvaluated,
+                        chrono::Utc::now().timestamp_millis(),
+                    );
+                }
+                transport_error(format!("model request failed: {e}"))
+            })?;
+
+        if let Some(observation) = observation {
+            observation.headers(response.status().as_u16());
+        }
 
         if !response.status().is_success() {
             let status = response.status();
+            if let Some(observation) = observation {
+                observation.finish(
+                    desk_diagnose_core::model_observability::RequestOutcome::HttpError,
+                    desk_diagnose_core::model_observability::OutputOutcome::NotEvaluated,
+                    chrono::Utc::now().timestamp_millis(),
+                );
+            }
             let retry_after = response
                 .headers()
                 .get("retry-after")
@@ -530,19 +628,51 @@ impl SignalModelSeam {
         let mut decoder = SseDecoder::new();
         let mut state = StreamState::new(self.dialect, self.source_context_key.clone());
         while let Some(item) = response.next().await {
-            let chunk =
-                item.map_err(|e| transport_error(format!("model stream interrupted: {e}")))?;
+            let chunk = item.map_err(|e| {
+                if let Some(observation) = observation {
+                    observation.finish(
+                        desk_diagnose_core::model_observability::RequestOutcome::StreamError,
+                        desk_diagnose_core::model_observability::OutputOutcome::NotEvaluated,
+                        chrono::Utc::now().timestamp_millis(),
+                    );
+                }
+                transport_error(format!("model stream interrupted: {e}"))
+            })?;
             for data in decoder.push(&chunk) {
                 if let Some(delta) = state.apply(&data) {
                     sink.on_text_delta(&delta);
                 }
+                if state.content_observed()
+                    && let Some(observation) = observation
+                {
+                    observation.content();
+                }
             }
             if let Some(err) = state.take_error() {
+                if let Some(observation) = observation {
+                    observation.finish(
+                        desk_diagnose_core::model_observability::RequestOutcome::ProviderError,
+                        desk_diagnose_core::model_observability::OutputOutcome::NotEvaluated,
+                        chrono::Utc::now().timestamp_millis(),
+                    );
+                }
                 return Err(transport_error(err));
             }
         }
         let completion_reason = state.completion_reason();
         let mut turn = state.into_turn();
+        if let Some(observation) = observation {
+            observation.snapshot.usage.normalized = turn.usage;
+            observation.snapshot.usage.cache_write_applicable =
+                matches!(self.dialect, Dialect::Anthropic);
+            observation.snapshot.generated_tool_count =
+                Some(turn.tool_calls.len().min(u32::MAX as usize) as u32);
+            observation.finish(
+                desk_diagnose_core::model_observability::RequestOutcome::Returned,
+                desk_diagnose_core::model_observability::OutputOutcome::NotEvaluated,
+                chrono::Utc::now().timestamp_millis(),
+            );
+        }
         desk_diagnose_core::prompt_cache::record_response(
             &mut cache_projection,
             &turn,
@@ -678,6 +808,40 @@ fn non_empty(value: Option<&str>) -> Option<String> {
 
 #[async_trait(?Send)]
 impl ModelSeam for SignalModelSeam {
+    fn observation_context(
+        &self,
+        use_case: desk_diagnose_core::model_profile::ModelUseCase,
+        origin: desk_diagnose_core::model_observability::Origin,
+    ) -> Option<desk_diagnose_core::model_observability::ObservationContext> {
+        use desk_diagnose_core::model_observability::*;
+        let slot = match self.configuration_source {
+            ModelConfigurationSource::Agent => "agent",
+            ModelConfigurationSource::Approval { .. } => "approval",
+        };
+        crate::model_metrics::runtime::context(Attribution {
+            provider_id: format!("local.{slot}.{}", self.connection_revision),
+            model_id: format!("local.{slot}.{}", self.connection_revision),
+            model_name: bounded_label(&self.model, 128),
+            configuration_revision: self.connection_revision.to_string(),
+            contract_revision: DEFINITION_VERSION.to_string(),
+            surface: match use_case {
+                desk_diagnose_core::model_profile::ModelUseCase::Probe => Surface::Probe,
+                desk_diagnose_core::model_profile::ModelUseCase::Completion => Surface::Terminal,
+                desk_diagnose_core::model_profile::ModelUseCase::Safety => Surface::Safety,
+                desk_diagnose_core::model_profile::ModelUseCase::FleetNaturalLanguage => {
+                    Surface::Fleet
+                }
+                _ => Surface::Assistant,
+            },
+            purpose: use_case.into(),
+            origin,
+            configuration_scope: ConfigurationScope::Local,
+            protocol: match self.dialect {
+                Dialect::OpenAiCompatible => Protocol::OpenAiChatCompletions,
+                Dialect::Anthropic => Protocol::AnthropicMessages,
+            },
+        })
+    }
     fn model_input_token_upper_bound(
         &self,
         request: &ModelRequest,
@@ -763,10 +927,34 @@ impl ModelSeam for SignalModelSeam {
 
     async fn call(
         &self,
-        request: ModelRequest,
+        mut request: ModelRequest,
         sink: &mut dyn TurnSink,
     ) -> Result<ModelTurn, AgentError> {
-        let permit = self.acquire_admission().await?;
+        use desk_diagnose_core::model_observability::*;
+        if request.observation.is_none() {
+            request.observation = self.observation_context(request.use_case, Origin::Unknown);
+        }
+        let permit = match self.acquire_admission().await {
+            Ok(permit) => permit,
+            Err(error) => {
+                if let Some(context) = &request.observation {
+                    context.call(
+                        ObservationPhase::Terminal,
+                        0,
+                        chrono::Utc::now().timestamp_millis(),
+                        CallSnapshot {
+                            not_started_reason: Some(if error.kind == AgentErrorKind::Cancelled {
+                                NotStartedReason::Cancelled
+                            } else {
+                                NotStartedReason::Admission
+                            }),
+                            ..Default::default()
+                        },
+                    );
+                }
+                return Err(error);
+            }
+        };
         self.call_admitted(request, sink, permit).await
     }
 }
@@ -848,6 +1036,12 @@ enum StreamState {
 }
 
 impl StreamState {
+    fn content_observed(&self) -> bool {
+        match self {
+            Self::OpenAi(state) => state.content_observed,
+            Self::Anthropic(state) => state.content_observed,
+        }
+    }
     fn new(dialect: Dialect, source_context_key: SourceContextKey) -> Self {
         match dialect {
             Dialect::OpenAiCompatible => StreamState::OpenAi(OpenAiStreamState {
@@ -1085,6 +1279,7 @@ fn openai_usage(usage: Option<&Value>) -> TokenUsage {
 /// Accumulates an OpenAI `/chat/completions` SSE stream into a [`ModelTurn`].
 #[derive(Default)]
 struct OpenAiStreamState {
+    content_observed: bool,
     text: String,
     finish_reason: Option<String>,
     usage: Option<Value>,
@@ -1126,6 +1321,7 @@ impl OpenAiStreamState {
         }
         let delta = choice.get("delta")?;
         if let Some(reasoning) = delta.get("reasoning_content").and_then(Value::as_str) {
+            self.content_observed |= !reasoning.is_empty();
             self.reasoning_observed = true;
             self.reasoning_content.push_str(reasoning);
         }
@@ -1139,6 +1335,7 @@ impl OpenAiStreamState {
             return None;
         }
         self.text.push_str(delta);
+        self.content_observed = true;
         Some(delta.to_string())
     }
 
@@ -1160,6 +1357,7 @@ impl OpenAiStreamState {
             builder.name = name.to_string();
         }
         if let Some(arguments) = call["function"]["arguments"].as_str() {
+            self.content_observed |= !arguments.is_empty();
             builder.arguments.push_str(arguments);
         }
     }
@@ -1403,6 +1601,7 @@ fn anthropic_stop_reason(reason: Option<&str>) -> StopReason {
 /// `message_delta` (stop reason + output usage), and `error`.
 #[derive(Default)]
 struct AnthropicStreamState {
+    content_observed: bool,
     text: String,
     tool_uses: BTreeMap<usize, ToolCallBuilder>,
     stop_reason: Option<String>,
@@ -1474,10 +1673,12 @@ impl AnthropicStreamState {
                             return None;
                         }
                         self.text.push_str(text);
+                        self.content_observed = true;
                         Some(text.to_string())
                     }
                     Some("input_json_delta") => {
                         let fragment = d.get("partial_json").and_then(Value::as_str)?;
+                        self.content_observed |= !fragment.is_empty();
                         self.tool_uses
                             .entry(index)
                             .or_default()
@@ -1487,6 +1688,7 @@ impl AnthropicStreamState {
                     }
                     Some("thinking_delta") => {
                         let thinking = d.get("thinking")?.as_str()?;
+                        self.content_observed |= !thinking.is_empty();
                         self.reasoning_observed = true;
                         append_block_string(&mut self.content_blocks, index, "thinking", thinking);
                         None
@@ -1633,6 +1835,115 @@ mod tests {
     }
 
     use super::*;
+    #[derive(Default)]
+    struct TransportMetrics(
+        std::sync::Mutex<Vec<desk_diagnose_core::model_observability::ObservationEvent>>,
+    );
+    impl desk_diagnose_core::model_observability::ObservabilitySeam for TransportMetrics {
+        fn submit(&self, event: desk_diagnose_core::model_observability::ObservationEvent) {
+            self.0.lock().unwrap().push(event);
+        }
+    }
+
+    fn observed_transport(
+        recorder: std::sync::Arc<TransportMetrics>,
+        id: &str,
+        purpose: desk_diagnose_core::model_observability::Purpose,
+    ) -> desk_diagnose_core::model_observability::ObservationContext {
+        use desk_diagnose_core::model_observability::*;
+        ObservationContext::new(
+            id.into(),
+            1_000,
+            Attribution {
+                provider_id: "local.agent.1".into(),
+                model_id: "local.agent.1".into(),
+                model_name: "test".into(),
+                configuration_revision: "1".into(),
+                contract_revision: "1".into(),
+                surface: Surface::Assistant,
+                purpose,
+                origin: Origin::User,
+                configuration_scope: ConfigurationScope::Local,
+                protocol: Protocol::OpenAiChatCompletions,
+            },
+            recorder,
+        )
+    }
+
+    #[actix_web::test]
+    async fn actual_image_preflight_observes_validation_rejection_without_outbound_or_business_changes()
+     {
+        use desk_diagnose_core::model_observability::*;
+        use desk_diagnose_core::seam::NullTurnSink;
+        for image_supported in [false, true] {
+            let config = ModelProviderConfig {
+                base_url: Some("https://example.test/v1".into()),
+                api_key: Some("private-api-key".into()),
+                model: Some("test".into()),
+                wire_protocol: Some(WireProtocol::OpenAiChatCompletions),
+                max_context_bytes: Some(131_072),
+                ..Default::default()
+            };
+            let mut plain = SignalModelSeam::from_config(&config).unwrap();
+            let mut observed = SignalModelSeam::from_config(&config).unwrap();
+            plain.capabilities.image_input = image_supported;
+            observed.capabilities.image_input = image_supported;
+            let mut request = ModelRequest::text_only(
+                vec![
+                    ChatMessage::text("user", ChatRole::User, "private image request")
+                        .with_image("private-invalid-image"),
+                ],
+                ResponseFormatSpec::None,
+            );
+            let baseline = plain
+                .call(request.clone(), &mut NullTurnSink)
+                .await
+                .unwrap_err();
+            let recorder = std::sync::Arc::new(TransportMetrics::default());
+            request.observation = Some(observed_transport(
+                recorder.clone(),
+                "preflight_image",
+                Purpose::Agent,
+            ));
+            let error = observed.call(request, &mut NullTurnSink).await.unwrap_err();
+            assert_eq!(
+                (
+                    error.kind,
+                    error.message,
+                    error.retryable,
+                    error.safe_for_model,
+                    error.error_code
+                ),
+                (
+                    baseline.kind,
+                    baseline.message,
+                    baseline.retryable,
+                    baseline.safe_for_model,
+                    baseline.error_code
+                )
+            );
+            let events = recorder.0.lock().unwrap();
+            let terminal: Vec<_> = events
+                .iter()
+                .filter(|event| event.phase == ObservationPhase::Terminal)
+                .collect();
+            assert_eq!(terminal.len(), 1);
+            assert!(
+                matches!(&terminal[0].payload, ObservationPayload::Call(call)
+                if call.outcome == RequestOutcome::NotStarted && call.not_started_reason == Some(NotStartedReason::RequestValidation))
+            );
+            assert!(events.iter().all(|event| event.is_bounded()
+                && event.attribution.model_id == "local.agent.1"
+                && !matches!(
+                    &event.payload,
+                    ObservationPayload::Attempt(_)
+                        | ObservationPayload::Tool(_)
+                        | ObservationPayload::Operation(_)
+                )));
+            assert!(!serde_json::to_string(&*events).unwrap().contains("private"));
+        }
+    }
+
     #[actix_web::test]
     async fn compression_transport_records_real_call_provenance_without_tools() {
         use desk_diagnose_core::model_context::*;
@@ -1715,6 +2026,12 @@ mod tests {
         request.tool_choice = ToolChoice::None;
         request.caller_output_hard_cap =
             Some(desk_diagnose_core::model_context::CONTEXT_SUMMARY_OUTPUT_HARD_CAP_TOKENS);
+        let metrics = std::sync::Arc::new(TransportMetrics::default());
+        request.observation = Some(observed_transport(
+            metrics.clone(),
+            "compression_call",
+            desk_diagnose_core::model_observability::Purpose::ContextCompression,
+        ));
         let result = seam
             .call(request, &mut desk_diagnose_core::seam::NullTurnSink)
             .await
@@ -1722,6 +2039,45 @@ mod tests {
         server.join().unwrap();
         assert_eq!(result.stop_reason, StopReason::EndTurn);
         assert!(result.tool_calls.is_empty());
+        {
+            use desk_diagnose_core::model_observability::*;
+            let events = metrics.0.lock().unwrap();
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| event.phase == ObservationPhase::Terminal
+                        && matches!(&event.payload, ObservationPayload::Attempt(_)))
+                    .count(),
+                1
+            );
+            let calls: Vec<_> = events
+                .iter()
+                .filter(|event| {
+                    event.phase == ObservationPhase::Terminal
+                        && matches!(&event.payload, ObservationPayload::Call(_))
+                })
+                .collect();
+            assert_eq!(calls.len(), 1);
+            let ObservationPayload::Call(call) = &calls[0].payload else {
+                panic!("call");
+            };
+            assert_eq!(call.outcome, RequestOutcome::Returned);
+            assert_eq!(call.output, OutputOutcome::NotEvaluated);
+            assert_eq!(call.usage.normalized.input_tokens, Some(10));
+            assert_eq!(call.usage.normalized.output_tokens, Some(5));
+            assert_eq!(call.generated_tool_count, Some(0));
+            assert!(call.timing.headers_ms.is_some() && call.timing.first_content_ms.is_some());
+            assert!(
+                events
+                    .iter()
+                    .all(|event| event.attribution.purpose == Purpose::ContextCompression)
+            );
+            assert!(
+                !serde_json::to_string(&*events)
+                    .unwrap()
+                    .contains("Earlier goal")
+            );
+        }
         let provenance = seam
             .context_compression_provenance("turn", "2026-09-05T00:00:00Z")
             .unwrap();
@@ -1926,6 +2282,7 @@ mod tests {
 
     fn tool_request(choice: ToolChoice) -> ModelRequest {
         ModelRequest {
+            observation: None,
             messages: vec![
                 ChatMessage::text("s", ChatRole::System, "you are a diagnostician"),
                 ChatMessage::text("u", ChatRole::User, "inspect the system"),
@@ -2008,6 +2365,13 @@ mod tests {
             let seam = SignalModelSeam::from_config(&config)
                 .unwrap()
                 .with_cancellation(cancel.clone());
+            let metrics = std::sync::Arc::new(TransportMetrics::default());
+            let mut request = text_request(ResponseFormatSpec::None);
+            request.observation = Some(observed_transport(
+                metrics.clone(),
+                "cancelled_call",
+                desk_diagnose_core::model_observability::Purpose::Agent,
+            ));
             let mut sink = CancellingSink(cancel.clone());
             let result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
                 let (_, result) = tokio::join!(
@@ -2017,7 +2381,7 @@ mod tests {
                             cancel.cancel();
                         }
                     },
-                    seam.call(text_request(ResponseFormatSpec::None), &mut sink)
+                    seam.call(request, &mut sink)
                 );
                 result
             })
@@ -2026,14 +2390,74 @@ mod tests {
             let error = result.unwrap().unwrap_err();
             assert_eq!(error.kind, AgentErrorKind::Cancelled);
             assert!(!error.retryable);
+            {
+                use desk_diagnose_core::model_observability::*;
+                let events = metrics.0.lock().unwrap();
+                let terminal_calls: Vec<_> = events
+                    .iter()
+                    .filter(|event| {
+                        event.phase == ObservationPhase::Terminal
+                            && matches!(&event.payload, ObservationPayload::Call(_))
+                    })
+                    .collect();
+                assert_eq!(terminal_calls.len(), 1);
+                let ObservationPayload::Call(call) = &terminal_calls[0].payload else {
+                    panic!("call");
+                };
+                if complete_body {
+                    assert!(matches!(
+                        call.outcome,
+                        RequestOutcome::Cancelled | RequestOutcome::Returned
+                    ));
+                } else {
+                    assert_eq!(call.outcome, RequestOutcome::Cancelled);
+                }
+                assert_eq!(call.output, OutputOutcome::NotEvaluated);
+                assert_eq!(
+                    events
+                        .iter()
+                        .filter(|event| event.phase == ObservationPhase::Started
+                            && matches!(&event.payload, ObservationPayload::Attempt(_)))
+                        .count(),
+                    1
+                );
+                assert_eq!(
+                    events
+                        .iter()
+                        .filter(|event| event.phase == ObservationPhase::Terminal
+                            && matches!(&event.payload, ObservationPayload::Attempt(_)))
+                        .count(),
+                    1
+                );
+                assert!(events.iter().all(|event| !matches!(
+                    &event.payload,
+                    ObservationPayload::Tool(_) | ObservationPayload::Operation(_)
+                )));
+                assert!(!serde_json::to_string(&*events).unwrap().contains("partial"));
+            }
             // A cancelled instance cannot send another request.
+            let rejected_metrics = std::sync::Arc::new(TransportMetrics::default());
+            let mut rejected = text_request(ResponseFormatSpec::None);
+            rejected.observation = Some(observed_transport(
+                rejected_metrics.clone(),
+                "not_started_call",
+                desk_diagnose_core::model_observability::Purpose::Agent,
+            ));
             assert_eq!(
-                seam.call(text_request(ResponseFormatSpec::None), &mut sink)
-                    .await
-                    .unwrap_err()
-                    .kind,
+                seam.call(rejected, &mut sink).await.unwrap_err().kind,
                 AgentErrorKind::Cancelled
             );
+            {
+                use desk_diagnose_core::model_observability::*;
+                let events = rejected_metrics.0.lock().unwrap();
+                assert!(
+                    events
+                        .iter()
+                        .all(|event| !matches!(&event.payload, ObservationPayload::Attempt(_)))
+                );
+                assert!(events.iter().any(|event| matches!(&event.payload, ObservationPayload::Call(call)
+                    if call.outcome == RequestOutcome::NotStarted && call.not_started_reason == Some(NotStartedReason::Cancelled))));
+            }
         }
     }
 
@@ -2785,6 +3209,7 @@ mod tests {
             tools: Vec<ToolSpec>,
         ) -> (ModelTurn, u64) {
             let request = ModelRequest {
+                observation: None,
                 messages: vec![
                     ChatMessage::text("eval-system", ChatRole::System, system),
                     ChatMessage::text("eval-user", ChatRole::User, user),
@@ -3197,6 +3622,7 @@ mod tests {
             tools: Vec<ToolSpec>,
         ) -> ModelTurn {
             let request = ModelRequest {
+                observation: None,
                 messages,
                 tool_requirements:
                     desk_diagnose_core::model_capability::ModelRequirements::TEXT_ONLY,

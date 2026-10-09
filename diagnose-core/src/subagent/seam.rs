@@ -99,6 +99,7 @@ pub trait SubAgentSeam {
         call: &ToolCall,
         operation: Operation,
         result_message_id: &str,
+        observation: &crate::model_observability::tool::ToolObservation,
     ) -> Result<ToolReceipt, AgentError>;
 
     /// Read-only preflight improves recovery from a premature goal-complete

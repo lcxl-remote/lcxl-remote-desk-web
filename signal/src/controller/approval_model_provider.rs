@@ -6,9 +6,10 @@ use std::time::Instant;
 
 use actix_web::{HttpResponse, get, post, web};
 use desk_diagnose_core::approval_review::{
-    APPROVAL_REVIEW_SYSTEM_PROMPT, approval_probe_cases, parse_review_decision, review_user_prompt,
+    APPROVAL_REVIEW_SYSTEM_PROMPT, ApprovalProbeError, approval_probe_cases, review_user_prompt,
+    validate_approval_probe_observed,
 };
-use desk_diagnose_core::chat::{ChatMessage, ChatRole, StopReason};
+use desk_diagnose_core::chat::{ChatMessage, ChatRole};
 use desk_diagnose_core::model_profile::{ModelUseCase, OutputLimitField, WireProtocol};
 use desk_diagnose_core::prompt::ResponseFormatSpec;
 use desk_diagnose_core::seam::{ModelRequest, ModelSeam, NullTurnSink};
@@ -198,28 +199,40 @@ pub async fn test_approval_model_provider(
             ResponseFormatSpec::JsonObject,
         );
         request.use_case = ModelUseCase::Probe;
+        request.observation = seam.observation_context(
+            request.use_case,
+            desk_diagnose_core::model_observability::Origin::User,
+        );
+        if let Some(context) = &mut request.observation {
+            context.attribution.surface = desk_diagnose_core::model_observability::Surface::Probe;
+            context.attribution.configuration_scope =
+                desk_diagnose_core::model_observability::ConfigurationScope::Candidate;
+        }
+        let observation = request.observation.clone();
         let mut sink = NullTurnSink;
         let turn = seam.call(request, &mut sink).await.map_err(|error| {
             DeskSignalError::new_custom_error(DeskErrorCode::SYSTEM_ERROR, &error.message)
         })?;
-        if turn.stop_reason != StopReason::EndTurn || !turn.tool_calls.is_empty() {
-            return Err(DeskSignalError::new_custom_error(
-                DeskErrorCode::SYSTEM_ERROR,
-                "approval model probe did not finish with one text decision",
-            ));
-        }
-        let decision = parse_review_decision(&probe.candidate, &turn.text).map_err(|error| {
-            DeskSignalError::new_custom_error(
-                DeskErrorCode::SYSTEM_ERROR,
-                &format!("approval model returned an invalid probe decision: {error:?}"),
-            )
+        validate_approval_probe_observed(
+            &probe,
+            &turn,
+            observation.as_ref(),
+            chrono::Utc::now().timestamp_millis(),
+        )
+        .map_err(|error| {
+            let message = match error {
+                ApprovalProbeError::Protocol => {
+                    "approval model probe did not finish with one text decision".to_string()
+                }
+                ApprovalProbeError::Decision(error) => {
+                    format!("approval model returned an invalid probe decision: {error:?}")
+                }
+                ApprovalProbeError::Verdict => {
+                    "approval model returned the wrong probe verdict".to_string()
+                }
+            };
+            DeskSignalError::new_custom_error(DeskErrorCode::SYSTEM_ERROR, &message)
         })?;
-        if decision.verdict != probe.expected_verdict {
-            return Err(DeskSignalError::new_custom_error(
-                DeskErrorCode::SYSTEM_ERROR,
-                "approval model returned the wrong probe verdict",
-            ));
-        }
         capabilities.push(probe.key.to_owned());
         reasoning_observed |= turn.provider_meta.reasoning_observed;
         reasoning_tokens =

@@ -133,9 +133,9 @@ impl SubAgentStore {
             )
             .map_err(|_| invalid())?;
         }
-        let failure = if now.timestamp_millis() >= run.binding.deadline_ms
-            || now.timestamp_millis() >= group.limits.deadline_ms
-        {
+        let deadline_reached = now.timestamp_millis() >= run.binding.deadline_ms
+            || now.timestamp_millis() >= group.limits.deadline_ms;
+        let failure = if deadline_reached {
             Some("delegation_deadline_reached")
         } else if failure_reason.is_some() && !resource_wait {
             failure_reason
@@ -167,9 +167,19 @@ impl SubAgentStore {
                 .exec(&txn)
                 .await?;
         }
+        let permission_ends =
+            desk_diagnose_core::model_observability::permission::PendingEnds::task_control(
+                held,
+                &run,
+                deadline_reached,
+            );
         let version = write_child_session_on(&txn, &next, now).await?;
         append_state_event_on(&txn, &group, &run, now.timestamp_millis()).await?;
         txn.commit().await?;
+        permission_ends.submit(
+            now.timestamp_millis(),
+            crate::model_metrics::runtime::submit,
+        );
         next.version = version;
         *held = next;
         Ok(())

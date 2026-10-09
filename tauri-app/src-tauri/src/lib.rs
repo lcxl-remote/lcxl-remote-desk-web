@@ -882,7 +882,9 @@ pub fn run_tauri_app(settings: &Settings) -> Result<(), DeskTauriError> {
                             // completes; dropping earlier closes the
                             // non-blocking log writer thread and silently
                             // discards all subsequent lines.
-                            if let Err(e) = server.await {
+                            let result = server.await;
+                            lcxl_remote_desk_server::shutdown_model_metrics().await;
+                            if let Err(e) = result {
                                 log::error!("Server error: {}", e);
                             }
                         }

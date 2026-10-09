@@ -12,7 +12,6 @@ pub mod agent_run_event;
 pub mod agent_schedule;
 pub mod agent_schedule_run;
 pub mod agent_session;
-pub mod ai_usage;
 pub mod approval_model_probe_observation;
 pub mod approval_model_provider;
 pub mod approval_review_secret;

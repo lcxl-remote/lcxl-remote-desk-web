@@ -43,18 +43,21 @@ describe("SettingsOverview AI settings placement", () => {
     // on a desk-server-only edge.
     it("shows the AI model card in signaling mode (Signal category)", () => {
         const c = renderFor("signaling")
+        expect(c.querySelector('a[href="/system/model-metrics-settings"]')).not.toBeNull()
         expect(aiModelLink(c)).not.toBeNull()
         expect(aiPolicyLink(c)).toBeNull()
     })
 
     it("shows the AI model card in default mode", () => {
         const c = renderFor("default")
+        expect(c.querySelector('a[href="/system/model-metrics-settings"]')).not.toBeNull()
         expect(aiModelLink(c)).not.toBeNull()
         expect(aiPolicyLink(c)).not.toBeNull()
     })
 
     it("shows only the local AI policy card on a desk-server edge", () => {
         const c = renderFor("desk-server")
+        expect(c.querySelector('a[href="/system/model-metrics-settings"]')).toBeNull()
         expect(aiModelLink(c)).toBeNull()
         expect(aiPolicyLink(c)).not.toBeNull()
     })
@@ -66,6 +69,7 @@ describe("SettingsOverview AI settings placement", () => {
             ["schedule-budget", "Set runtime budget limits for independent automatic tasks."],
             ["goal-budget", "Set runtime budget limits for long-running goals."],
             ["context-management", "Choose summary and trimming settings for long conversations."],
+            ["model-metrics-settings", "Choose whether to collect model call statistics, how long to keep records and storage limits."],
         ]
         for (const [path, description] of cards) {
             const card = c.querySelector(`a[href="/system/${path}"]`)

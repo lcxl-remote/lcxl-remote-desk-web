@@ -262,6 +262,16 @@ async fn run_probe(
     let mut request =
         ModelRequest::text_only(vec![expectation.message.clone()], ResponseFormatSpec::None);
     request.use_case = ModelUseCase::Probe;
+    request.observation = seam.observation_context(
+        request.use_case,
+        desk_diagnose_core::model_observability::Origin::User,
+    );
+    if let Some(context) = &mut request.observation {
+        context.attribution.surface = desk_diagnose_core::model_observability::Surface::Probe;
+        context.attribution.configuration_scope =
+            desk_diagnose_core::model_observability::ConfigurationScope::Candidate;
+    }
+    let observation = request.observation.clone();
 
     let started = Instant::now();
     let mut sink = NullTurnSink;
@@ -276,12 +286,25 @@ async fn run_probe(
         && turn.stop_reason == desk_diagnose_core::chat::StopReason::MaxTokens
         && turn.text.trim().is_empty()
     {
+        desk_diagnose_core::model_observability::record_structured_output(
+            &turn,
+            false,
+            observation.as_ref(),
+            chrono::Utc::now().timestamp_millis(),
+        );
         return Err(DeskSignalError::new_custom_error(
             DeskErrorCode::PRECONDITION_FAILED,
             "Test failed: the reasoning budget exhausted the probe output limit before any answer was produced; increase probe_max_output_tokens",
         ));
     }
-    verify_probe_response(&expectation, &turn.text).map_err(|message| {
+    let validation = verify_probe_response(&expectation, &turn.text);
+    desk_diagnose_core::model_observability::record_structured_output(
+        &turn,
+        validation.is_ok(),
+        observation.as_ref(),
+        chrono::Utc::now().timestamp_millis(),
+    );
+    validation.map_err(|message| {
         DeskSignalError::new_custom_error(
             if expectation.required_marker.is_some() {
                 DeskErrorCode::AI_MODEL_IMAGE_INPUT_UNSUPPORTED
@@ -569,5 +592,172 @@ mod tests {
             .await
             .expect_err("a generic reply does not prove image access");
         assert!(error.to_string().contains("did not prove image access"));
+    }
+
+    #[tokio::test]
+    async fn probe_observes_final_validation_once_in_its_candidate_scope() {
+        use desk_diagnose_core::chat::StopReason;
+        use desk_diagnose_core::model_observability::*;
+        use std::cell::Cell;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Default)]
+        struct Recorder(Mutex<Vec<ObservationEvent>>);
+        impl ObservabilitySeam for Recorder {
+            fn submit(&self, event: ObservationEvent) {
+                self.0.lock().unwrap().push(event);
+            }
+        }
+        struct ObservedProbe {
+            context: ObservationContext,
+            turn: Option<ModelTurn>,
+            calls: Cell<usize>,
+        }
+        #[async_trait::async_trait(?Send)]
+        impl ModelSeam for ObservedProbe {
+            fn observation_context(
+                &self,
+                use_case: ModelUseCase,
+                origin: Origin,
+            ) -> Option<ObservationContext> {
+                assert_eq!(use_case, ModelUseCase::Probe);
+                assert_eq!(origin, Origin::User);
+                Some(self.context.clone())
+            }
+            async fn call(
+                &self,
+                request: ModelRequest,
+                _: &mut dyn TurnSink,
+            ) -> Result<ModelTurn, AgentError> {
+                self.calls.set(self.calls.get() + 1);
+                let context = request.observation.unwrap();
+                assert_eq!(context.attribution.surface, Surface::Probe);
+                assert_eq!(
+                    context.attribution.configuration_scope,
+                    ConfigurationScope::Candidate
+                );
+                let mut dial = RequestObservation::new(context, request.messages.len(), 0);
+                dial.outbound(1_001);
+                if let Some(turn) = &self.turn {
+                    dial.finish(RequestOutcome::Returned, OutputOutcome::NotEvaluated, 1_002);
+                    Ok(turn.clone())
+                } else {
+                    dial.finish(
+                        RequestOutcome::TransportError,
+                        OutputOutcome::NotEvaluated,
+                        1_002,
+                    );
+                    Err(AgentError {
+                        kind: AgentErrorKind::TransportError,
+                        message: "upstream unavailable".into(),
+                        retryable: false,
+                        safe_for_model: true,
+                        error_code: None,
+                    })
+                }
+            }
+        }
+        for (text, vision, stop, expected, success) in [
+            (
+                Some("pong"),
+                false,
+                StopReason::EndTurn,
+                Some(OutputOutcome::Accepted),
+                true,
+            ),
+            (
+                Some("LCXL7F"),
+                true,
+                StopReason::EndTurn,
+                Some(OutputOutcome::Accepted),
+                true,
+            ),
+            (
+                Some("private wrong marker"),
+                true,
+                StopReason::EndTurn,
+                Some(OutputOutcome::InvalidStructuredOutput),
+                false,
+            ),
+            (
+                Some(""),
+                false,
+                StopReason::EndTurn,
+                Some(OutputOutcome::EmptyResponse),
+                false,
+            ),
+            (
+                Some(""),
+                false,
+                StopReason::MaxTokens,
+                Some(OutputOutcome::OutputTruncated),
+                false,
+            ),
+            (None, false, StopReason::EndTurn, None, false),
+        ] {
+            let recorder = Arc::new(Recorder::default());
+            let turn = text.map(|text| {
+                let mut turn = ModelTurn {
+                    text: text.into(),
+                    stop_reason: stop,
+                    ..Default::default()
+                };
+                turn.provider_meta.reasoning_observed = stop == StopReason::MaxTokens;
+                turn
+            });
+            let probe = ObservedProbe {
+                context: ObservationContext::new(
+                    "actual_probe".into(),
+                    1_000,
+                    Attribution {
+                        provider_id: "candidate".into(),
+                        model_id: "candidate".into(),
+                        model_name: "model".into(),
+                        configuration_revision: "2".into(),
+                        contract_revision: "1".into(),
+                        surface: Surface::Assistant,
+                        purpose: Purpose::Probe,
+                        origin: Origin::User,
+                        configuration_scope: ConfigurationScope::Local,
+                        protocol: Protocol::OpenAiChatCompletions,
+                    },
+                    recorder.clone(),
+                ),
+                turn,
+                calls: Cell::new(0),
+            };
+            assert_eq!(
+                run_probe(&probe, Some("model".into()), vision)
+                    .await
+                    .is_ok(),
+                success
+            );
+            assert_eq!(probe.calls.get(), 1);
+            let events = recorder.0.lock().unwrap();
+            let outputs: Vec<_> = events
+                .iter()
+                .filter(|event| event.phase == ObservationPhase::Output)
+                .collect();
+            assert_eq!(outputs.len(), usize::from(expected.is_some()));
+            if let Some(expected) = expected {
+                assert!(
+                    matches!(&outputs[0].payload, ObservationPayload::Call(call) if call.output == expected)
+                );
+            }
+            assert!(
+                events
+                    .iter()
+                    .all(|event| event.attribution.purpose == Purpose::Probe
+                        && !matches!(
+                            &event.payload,
+                            ObservationPayload::Tool(_) | ObservationPayload::Operation(_)
+                        ))
+            );
+            assert!(
+                !serde_json::to_string(&*events)
+                    .unwrap()
+                    .contains("private wrong marker")
+            );
+        }
     }
 }

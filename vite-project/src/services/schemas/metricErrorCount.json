@@ -1,0 +1,1 @@
+{"type":"object","required":["metric","error","count"],"properties":{"count":{"type":"string"},"error":{"type":"string"},"metric":{"type":"string"}},"x-readme-ref-name":"MetricErrorCount"}

@@ -1,7 +1,10 @@
 //! Wait one bounded tick for the owner decision without holding a DB transaction.
 use super::{ScheduleStore, ScheduleStoreError};
 use crate::entity::agent_session;
-use desk_diagnose_core::session::PersistedAgentSession;
+use desk_diagnose_core::{
+    model_observability::{PermissionOutcome, tool::ToolObservation},
+    session::PersistedAgentSession,
+};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
 impl ScheduleStore {
@@ -9,6 +12,7 @@ impl ScheduleStore {
         &self,
         session: &mut PersistedAgentSession,
         schedule_id: &str,
+        observation: &ToolObservation,
     ) -> Result<bool, ScheduleStoreError> {
         if session.pending_schedule_review.as_deref() != Some(schedule_id)
             || !session.turn_state.is_active()
@@ -70,7 +74,13 @@ impl ScheduleStore {
         if expected != current || current.version != row.version {
             return Err(ScheduleStoreError::Conflict);
         }
+        let approved = decision["event"].as_str() == Some("scheduled_task_activated");
         *session = current;
+        observation.permission(if approved {
+            PermissionOutcome::Approved
+        } else {
+            PermissionOutcome::Denied
+        });
         Ok(true)
     }
 }

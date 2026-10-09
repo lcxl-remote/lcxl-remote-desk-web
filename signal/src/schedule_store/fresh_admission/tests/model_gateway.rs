@@ -103,7 +103,6 @@ async fn fresh_task_gateway_accounts_usage_and_rejects_invalid_authority() {
                 .unwrap()
                 .with_context_db(db.clone()),
             db: db.clone(),
-            model_name: "task-test".into(),
             destination: destination.clone(),
             selected_source_tools: Default::default(),
             export_authorization_id: model_export_id(

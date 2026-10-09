@@ -3,6 +3,9 @@ use super::*;
 use desk_agent_protocol::data_lineage::DataEnvelope;
 use desk_diagnose_core::{
     chat::{ChatMessage, ChatRole, ToolCall},
+    model_observability::{
+        InputIssue, PermissionOutcome, Stage, StageOutcome, tool::ToolObservation,
+    },
     subagent::{
         creation::TaskCreationEnvelope,
         seam::{ObservedResult, ToolReceipt},
@@ -25,11 +28,24 @@ pub(crate) async fn task_for_parent_on(
     parent: &PersistedAgentSession,
     task_id: &str,
 ) -> Result<run_row::Model, DbErr> {
+    task_for_parent_observed_on(txn, parent, task_id, &ToolObservation::default()).await
+}
+
+async fn task_for_parent_observed_on(
+    txn: &DatabaseTransaction,
+    parent: &PersistedAgentSession,
+    task_id: &str,
+    observation: &ToolObservation,
+) -> Result<run_row::Model, DbErr> {
+    observation.stage(Stage::Reference, StageOutcome::Attempted);
     task_query(parent)
         .filter(run_row::Column::TaskId.eq(task_id))
         .one(txn)
         .await?
-        .ok_or_else(invalid)
+        .ok_or_else(|| {
+            observation.reject(Stage::Reference, InputIssue::UnknownReference);
+            invalid()
+        })
 }
 
 fn task_labels(row: &run_row::Model) -> Result<Vec<DataEnvelope>, DbErr> {
@@ -72,6 +88,7 @@ async fn begin_main_tool(
     held: &PersistedAgentSession,
     call: &ToolCall,
     operation: &Operation,
+    input_observation: &ToolObservation,
 ) -> Result<DatabaseTransaction, DbErr> {
     let txn = crate::db::begin_write(&store.db, session_row::Entity).await?;
     let child_id = match operation {
@@ -94,7 +111,7 @@ async fn begin_main_tool(
             Some(format!("sa-{key}"))
         }
         Operation::Cancel { task_id, .. } | Operation::Message { task_id, .. } => Some(
-            task_for_parent_on(&txn, held, task_id)
+            task_for_parent_observed_on(&txn, held, task_id, input_observation)
                 .await?
                 .child_conversation_id,
         ),
@@ -242,6 +259,7 @@ impl SubAgentStore {
         Ok(message)
     }
 
+    #[cfg(test)]
     pub async fn execute_main_tool(
         &self,
         held: &mut PersistedAgentSession,
@@ -249,12 +267,30 @@ impl SubAgentStore {
         operation: Operation,
         result_message_id: &str,
     ) -> Result<ToolReceipt, DbErr> {
-        if tools::parse(held, call).map_err(|_| invalid())? != operation
+        self.execute_main_tool_observed(
+            held,
+            call,
+            operation,
+            result_message_id,
+            &ToolObservation::default(),
+        )
+        .await
+    }
+
+    pub async fn execute_main_tool_observed(
+        &self,
+        held: &mut PersistedAgentSession,
+        call: &ToolCall,
+        operation: Operation,
+        result_message_id: &str,
+        input_observation: &ToolObservation,
+    ) -> Result<ToolReceipt, DbErr> {
+        if tools::parse_observed(held, call, input_observation).map_err(|_| invalid())? != operation
             || !desk_diagnose_core::subagent::valid_id(result_message_id)
         {
             return Err(invalid());
         }
-        let txn = begin_main_tool(self, held, call, &operation).await?;
+        let txn = begin_main_tool(self, held, call, &operation, input_observation).await?;
         let now = chrono::Utc::now();
         let parent = parent_planning_on(&txn, held, now.timestamp_millis()).await?;
         let caller = parent
@@ -296,6 +332,8 @@ impl SubAgentStore {
         let mut labels = vec![caller];
         let mut next = held.clone();
         let mut observation = None;
+        let mut permission_ends =
+            desk_diagnose_core::model_observability::permission::PendingEnds::default();
         let payload = match operation {
             Operation::Spawn(request) => {
                 let summary = super::creation::spawn_on(&txn, &parent, call, &request).await?;
@@ -310,22 +348,31 @@ impl SubAgentStore {
                     &parent,
                     call,
                     now.timestamp_millis(),
+                    input_observation,
                 )
                 .await?;
                 labels.extend(task_labels(
-                    &task_for_parent_on(&txn, &parent, &controlled.task.task_id).await?,
+                    &task_for_parent_on(&txn, &parent, &controlled.outcome.task.task_id).await?,
                 )?);
-                serde_json::to_value(controlled.task).map_err(|_| invalid())?
+                permission_ends = controlled.permission_ends;
+                serde_json::to_value(controlled.outcome.task).map_err(|_| invalid())?
             }
             Operation::List { cursor, limit } => {
                 let before = cursor
                     .as_deref()
                     .map(str::parse::<i64>)
                     .transpose()
-                    .map_err(|_| invalid())?
+                    .map_err(|_| {
+                        input_observation.reject(Stage::Reference, InputIssue::UnknownReference);
+                        invalid()
+                    })?
                     .unwrap_or(i64::MAX);
                 if before <= 0 {
+                    input_observation.reject(Stage::Reference, InputIssue::UnknownReference);
                     return Err(invalid());
+                }
+                if cursor.is_some() {
+                    input_observation.stage(Stage::Reference, StageOutcome::Passed);
                 }
                 let query = task_query(&parent);
                 let total = query.clone().count(&txn).await?;
@@ -357,7 +404,8 @@ impl SubAgentStore {
                 .map_err(|_| invalid())?
             }
             Operation::Status { task_id } => {
-                let row = task_for_parent_on(&txn, &parent, &task_id).await?;
+                let row =
+                    task_for_parent_observed_on(&txn, &parent, &task_id, input_observation).await?;
                 labels.extend(task_labels(&row)?);
                 serde_json::to_value(decode_run(&row)?.summary()).map_err(|_| invalid())?
             }
@@ -365,7 +413,8 @@ impl SubAgentStore {
                 task_id,
                 include_task,
             } => {
-                let row = task_for_parent_on(&txn, &parent, &task_id).await?;
+                let row =
+                    task_for_parent_observed_on(&txn, &parent, &task_id, input_observation).await?;
                 let run = decode_run(&row)?;
                 let result = run.result();
                 labels.extend(task_labels(&row)?);
@@ -394,18 +443,26 @@ impl SubAgentStore {
                 .map_err(|_| invalid())?
             }
             Operation::Wait { task_ids, mode } => {
+                if now.timestamp_millis() >= group.limits.deadline_ms {
+                    input_observation.permission(PermissionOutcome::PolicyRejected);
+                }
                 if parent.subagent_wait.is_some()
                     || (parent.ready_subagent_wait.is_some()
                         && parent.trigger_origin
                             != desk_diagnose_core::session::TriggerOrigin::SubAgentCompletion)
                     || now.timestamp_millis() >= group.limits.deadline_ms
                 {
+                    if now.timestamp_millis() < group.limits.deadline_ms {
+                        input_observation.reject(Stage::Preflight, InputIssue::Precondition);
+                    }
                     return Err(invalid());
                 }
                 let mut current = Vec::new();
                 let mut summaries = Vec::new();
                 for task_id in task_ids {
-                    let row = task_for_parent_on(&txn, &parent, &task_id).await?;
+                    let row =
+                        task_for_parent_observed_on(&txn, &parent, &task_id, input_observation)
+                            .await?;
                     let run = decode_run(&row)?;
                     labels.extend(task_labels(&row)?);
                     summaries.push(run.summary());
@@ -456,6 +513,13 @@ impl SubAgentStore {
                 payload
             }
         };
+        if matches!(
+            call.name.as_str(),
+            tools::STATUS | tools::RESULT | tools::WAIT
+        ) {
+            input_observation.stage(Stage::Reference, StageOutcome::Passed);
+        }
+        input_observation.stage(Stage::Preflight, StageOutcome::Passed);
         let text = payload.to_string();
         if text.len() as u64 > group.limits.max_context_bytes {
             return Err(invalid());
@@ -487,6 +551,10 @@ impl SubAgentStore {
         }
         let version = write_child_session_on(&txn, &next, now).await?;
         txn.commit().await?;
+        permission_ends.submit(
+            now.timestamp_millis(),
+            crate::model_metrics::runtime::submit,
+        );
         next.version = version;
         *held = next;
         Ok(ToolReceipt {

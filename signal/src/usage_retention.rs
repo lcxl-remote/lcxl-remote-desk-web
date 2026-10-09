@@ -3,7 +3,7 @@
 //! The portable signal server is single-node and single-account, so there is
 //! exactly one retention config (the singleton row in
 //! [`crate::entity::usage_retention`]). It controls how many days of
-//! `turn_usage_hourly` / `ai_usage_hourly` rollups and idle AI diagnosis
+//! `turn_usage_hourly` rollups and idle AI diagnosis
 //! conversations are kept before the cleanup loop deletes them.
 //!
 //! Unlike the manager's cluster-shared config (optimistic-concurrency `revision`
@@ -70,8 +70,6 @@ pub const MAX_RETENTION_DAYS: u32 = 10_000;
 pub struct UsageRetentionConfig {
     /// Retention window for TURN traffic rollups (`turn_usage_hourly`), in days.
     pub turn_days: u32,
-    /// Retention window for AI token rollups (`ai_usage_hourly`), in days.
-    pub ai_days: u32,
     /// Idle retention window for AI diagnosis conversations, in days.
     pub agent_session_days: u32,
 }
@@ -80,7 +78,6 @@ impl Default for UsageRetentionConfig {
     fn default() -> Self {
         Self {
             turn_days: DEFAULT_RETENTION_DAYS,
-            ai_days: DEFAULT_RETENTION_DAYS,
             agent_session_days: DEFAULT_RETENTION_DAYS,
         }
     }
@@ -90,7 +87,6 @@ impl UsageRetentionConfig {
     fn from_entity(row: usage_retention::Model) -> Self {
         Self {
             turn_days: row.turn_days.max(0) as u32,
-            ai_days: row.ai_days.max(0) as u32,
             agent_session_days: row.agent_session_days.max(0) as u32,
         }
     }
@@ -99,7 +95,6 @@ impl UsageRetentionConfig {
     pub fn validate(&self) -> Result<(), String> {
         for (label, days) in [
             ("turn_days", self.turn_days),
-            ("ai_days", self.ai_days),
             ("agent_session_days", self.agent_session_days),
         ] {
             if days < MIN_RETENTION_DAYS {
@@ -118,7 +113,6 @@ impl UsageRetentionConfig {
         usage_retention::ActiveModel {
             id: Set(SINGLETON_ID),
             turn_days: Set(self.turn_days.min(i32::MAX as u32) as i32),
-            ai_days: Set(self.ai_days.min(i32::MAX as u32) as i32),
             agent_session_days: Set(self.agent_session_days.min(i32::MAX as u32) as i32),
             updated_at: Set(chrono::Utc::now()),
         }
@@ -145,7 +139,6 @@ pub async fn save(db: &DatabaseConnection, config: UsageRetentionConfig) -> Resu
             OnConflict::column(usage_retention::Column::Id)
                 .update_columns([
                     usage_retention::Column::TurnDays,
-                    usage_retention::Column::AiDays,
                     usage_retention::Column::AgentSessionDays,
                     usage_retention::Column::UpdatedAt,
                 ])
@@ -168,7 +161,6 @@ const CLEANUP_INTERVAL: Duration = Duration::from_secs(3600);
 const AGENT_SESSION_BATCH_ROWS: u64 = 1000;
 
 const TURN_USAGE_TABLE: &str = "turn_usage_hourly";
-const AI_USAGE_TABLE: &str = "ai_usage_hourly";
 
 /// Delete rollup rows in `table` older than `cutoff`, in bounded batches. The
 /// signal rollups are collect-only telemetry with no billing coupling, so cleanup
@@ -408,6 +400,7 @@ async fn delete_expired_session_candidates(
     cutoff: DateTimeUtc,
 ) -> Result<u64, DbErr> {
     let txn = crate::db::begin_write(db, crate::entity::agent_session::Entity).await?;
+    let mut permission_ends = Vec::new();
     let result = async {
         let rows = agent_session::Entity::find()
             .filter(agent_session::Column::Id.is_in(ids.iter().copied()))
@@ -468,12 +461,14 @@ async fn delete_expired_session_candidates(
                 desk_diagnose_core::session::PersistedAgentSession::decode_json(&row.state_json)
                     .map_err(|_| DbErr::Custom("invalid expired conversation".into()))?;
             if session.agent_role.is_main() {
-                crate::agent_subagent_store::close_root_on(
-                    &txn,
-                    &session,
-                    Utc::now().timestamp_millis(),
-                )
-                .await?;
+                permission_ends.push(
+                    crate::agent_subagent_store::close_root_on(
+                        &txn,
+                        &session,
+                        Utc::now().timestamp_millis(),
+                    )
+                    .await?,
+                );
             } else {
                 crate::agent_subagent_store::tombstone_on(
                     &txn,
@@ -483,6 +478,12 @@ async fn delete_expired_session_candidates(
                     Utc::now().timestamp_millis(),
                 )
                 .await?;
+                permission_ends.push(
+                    desk_diagnose_core::model_observability::permission::PendingEnds::waiting(
+                        &session,
+                        desk_diagnose_core::model_observability::PermissionOutcome::Cancelled,
+                    ),
+                );
             }
         }
         let run_ids: Vec<_> = rows.iter().map(|row| row.conversation_id.clone()).collect();
@@ -584,6 +585,10 @@ async fn delete_expired_session_candidates(
     match result {
         Ok(deleted) => {
             txn.commit().await?;
+            let now_ms = Utc::now().timestamp_millis();
+            for prepared in permission_ends {
+                prepared.submit(now_ms, crate::model_metrics::runtime::submit);
+            }
             Ok(deleted)
         }
         Err(error) => {
@@ -593,12 +598,12 @@ async fn delete_expired_session_candidates(
     }
 }
 
-/// Run one cleanup pass over both rollup tables using the current retention config.
-/// Returns `(turn_rows, ai_rows, settled_sessions, deleted_sessions)`.
+/// Run one cleanup pass over the TURN rollup table using the current retention config.
+/// Returns `(turn_rows, settled_sessions, deleted_sessions)`.
 pub async fn cleanup_once(
     db: &DatabaseConnection,
     now: DateTimeUtc,
-) -> Result<(u64, u64, u64, u64), DbErr> {
+) -> Result<(u64, u64, u64), DbErr> {
     if let Err(error) = crate::agent_attachment_store::cleanup(db).await {
         log::warn!("Conversation attachment cleanup failed: {error}");
     }
@@ -609,19 +614,13 @@ pub async fn cleanup_once(
         now - chrono::Duration::days(cfg.turn_days as i64),
     )
     .await?;
-    let ai = cleanup_table(
-        db,
-        AI_USAGE_TABLE,
-        now - chrono::Duration::days(cfg.ai_days as i64),
-    )
-    .await?;
     let (settled, sessions) = cleanup_agent_sessions(
         db,
         now - chrono::Duration::days(cfg.agent_session_days as i64),
         now,
     )
     .await?;
-    Ok((turn, ai, settled, sessions))
+    Ok((turn, settled, sessions))
 }
 
 /// Run the retention cleanup forever on a fixed interval. Spawned once after the
@@ -632,9 +631,9 @@ pub async fn run_retention_cleanup_loop(db: DatabaseConnection) {
     loop {
         ticker.tick().await;
         match cleanup_once(&db, Utc::now()).await {
-            Ok((t, a, settled, sessions)) if t > 0 || a > 0 || settled > 0 || sessions > 0 => {
+            Ok((t, settled, sessions)) if t > 0 || settled > 0 || sessions > 0 => {
                 log::info!(
-                    "Signal retention cleanup deleted {t} TURN + {a} AI rollup rows, \
+                    "Signal retention cleanup deleted {t} TURN rollup rows, \
                      settled {settled} lapsed and deleted {sessions} agent sessions"
                 );
             }
@@ -663,7 +662,6 @@ mod tests {
         let cfg = load(&db).await.unwrap();
         assert_eq!(cfg, UsageRetentionConfig::default());
         assert_eq!(cfg.turn_days, DEFAULT_RETENTION_DAYS);
-        assert_eq!(cfg.ai_days, DEFAULT_RETENTION_DAYS);
     }
 
     #[tokio::test]
@@ -673,7 +671,6 @@ mod tests {
             &db,
             UsageRetentionConfig {
                 turn_days: 90,
-                ai_days: 45,
                 agent_session_days: 60,
             },
         )
@@ -681,7 +678,6 @@ mod tests {
         .unwrap();
         let loaded = load(&db).await.unwrap();
         assert_eq!(loaded.turn_days, 90);
-        assert_eq!(loaded.ai_days, 45);
         assert_eq!(loaded.agent_session_days, 60);
     }
 
@@ -692,7 +688,6 @@ mod tests {
             &db,
             UsageRetentionConfig {
                 turn_days: 30,
-                ai_days: 30,
                 agent_session_days: 30,
             },
         )
@@ -702,7 +697,6 @@ mod tests {
             &db,
             UsageRetentionConfig {
                 turn_days: 7,
-                ai_days: 7,
                 agent_session_days: 14,
             },
         )
@@ -712,7 +706,6 @@ mod tests {
         let rows = usage_retention::Entity::find().all(&db).await.unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].turn_days, 7);
-        assert_eq!(rows[0].ai_days, 7);
         assert_eq!(rows[0].agent_session_days, 14);
     }
 
@@ -721,7 +714,6 @@ mod tests {
         assert!(
             UsageRetentionConfig {
                 turn_days: 0,
-                ai_days: 30,
                 agent_session_days: 30,
             }
             .validate()
@@ -729,8 +721,7 @@ mod tests {
         );
         assert!(
             UsageRetentionConfig {
-                turn_days: 30,
-                ai_days: MAX_RETENTION_DAYS + 1,
+                turn_days: MAX_RETENTION_DAYS + 1,
                 agent_session_days: 30,
             }
             .validate()
@@ -739,7 +730,6 @@ mod tests {
         assert!(
             UsageRetentionConfig {
                 turn_days: 1,
-                ai_days: MAX_RETENTION_DAYS,
                 agent_session_days: 30,
             }
             .validate()
@@ -749,7 +739,7 @@ mod tests {
 
     // ---- cleanup ----
 
-    use crate::entity::{ai_usage, turn_usage};
+    use crate::entity::turn_usage;
     use sea_orm::ActiveModelTrait;
 
     async fn cleanup_db() -> DatabaseConnection {
@@ -758,7 +748,6 @@ mod tests {
         for stmt in [
             schema.create_table_from_entity(usage_retention::Entity),
             schema.create_table_from_entity(turn_usage::Entity),
-            schema.create_table_from_entity(ai_usage::Entity),
             schema.create_table_from_entity(agent_session::Entity),
             schema.create_table_from_entity(agent_exec_task::Entity),
             schema.create_table_from_entity(agent_action_item::Entity),
@@ -1153,9 +1142,8 @@ mod tests {
         // Default config = 30d for both.
         seed_turn(&db, "d1", days_ago(0)).await;
         seed_turn(&db, "d1", days_ago(400)).await;
-        let (turn, ai, settled, sessions) = cleanup_once(&db, now()).await.unwrap();
+        let (turn, settled, sessions) = cleanup_once(&db, now()).await.unwrap();
         assert_eq!(turn, 1);
-        assert_eq!(ai, 0);
         assert_eq!(settled, 0);
         assert_eq!(sessions, 0);
         assert_eq!(turn_hours(&db).await, vec![days_ago(0)]);

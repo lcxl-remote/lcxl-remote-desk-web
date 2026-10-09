@@ -18,12 +18,13 @@ import {
  */
 export interface ModelUsageRow {
     dimension: string;
+    dimensionKey: string;
     hourBucket: string;
-    inputTokens: number;
-    outputTokens: number;
-    cacheReadTokens: number;
-    cacheWriteTokens: number;
-    requestCount: number;
+    inputTokens: string;
+    outputTokens: string;
+    cacheReadTokens: string;
+    cacheWriteTokens: string;
+    requestCount: string;
 }
 
 export interface ModelUsageChartProps {
@@ -32,28 +33,37 @@ export interface ModelUsageChartProps {
     rows: ModelUsageRow[];
 }
 
-/** Human-readable token count (compact for large magnitudes). */
-function formatTokens(tokens: number): string {
-    if (tokens <= 0) {
-        return '0';
-    }
-    if (tokens < 1000) {
-        return tokens.toLocaleString();
-    }
-    const units = ['', 'K', 'M', 'B'];
-    const exp = Math.min(units.length - 1, Math.floor(Math.log(tokens) / Math.log(1000)));
-    const value = tokens / Math.pow(1000, exp);
-    return `${value.toFixed(exp === 0 ? 0 : 2)}${units[exp]}`;
+function formatTokens(tokens: bigint): string {
+    return tokens.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
 }
 
-interface DimensionTotals {
+export interface DimensionTotals {
     dimension: string;
-    inputTokens: number;
-    outputTokens: number;
-    cacheReadTokens: number;
-    cacheWriteTokens: number;
-    requestCount: number;
+    dimensionKey: string;
+    inputTokens: bigint;
+    outputTokens: bigint;
+    cacheReadTokens: bigint;
+    cacheWriteTokens: bigint;
+    requestCount: bigint;
 }
+
+export function aggregateModelUsageRows(rows: ModelUsageRow[]): DimensionTotals[] {
+    const byDimension = new Map<string,DimensionTotals>();
+    for (const row of rows) {
+        const entry = byDimension.get(row.dimensionKey) ?? {
+            dimension: row.dimension, dimensionKey: row.dimensionKey,
+            inputTokens: 0n, outputTokens: 0n, cacheReadTokens: 0n, cacheWriteTokens: 0n, requestCount: 0n,
+        };
+        entry.inputTokens += BigInt(row.inputTokens);
+        entry.outputTokens += BigInt(row.outputTokens);
+        entry.cacheReadTokens += BigInt(row.cacheReadTokens);
+        entry.cacheWriteTokens += BigInt(row.cacheWriteTokens);
+        entry.requestCount += BigInt(row.requestCount);
+        byDimension.set(row.dimensionKey,entry);
+    }
+    return Array.from(byDimension.values()).sort((a,b) => total(a)<total(b) ? 1 : total(a)>total(b) ? -1 : a.dimensionKey.localeCompare(b.dimensionKey));
+}
+function total(d: DimensionTotals): bigint { return d.inputTokens+d.outputTokens+d.cacheReadTokens+d.cacheWriteTokens; }
 
 /**
  * Pure presentation of per-dimension AI gateway token usage: a relative-magnitude
@@ -63,29 +73,8 @@ interface DimensionTotals {
 export function ModelUsageChart({ dimensionLabel, rows }: ModelUsageChartProps) {
     const { t } = useTranslation();
 
-    // Aggregate the hourly rows up to per-dimension totals for the overview.
-    const byDimension = new Map<string, DimensionTotals>();
-    for (const row of rows) {
-        const entry = byDimension.get(row.dimension) ?? {
-            dimension: row.dimension,
-            inputTokens: 0,
-            outputTokens: 0,
-            cacheReadTokens: 0,
-            cacheWriteTokens: 0,
-            requestCount: 0,
-        };
-        entry.inputTokens += row.inputTokens;
-        entry.outputTokens += row.outputTokens;
-        entry.cacheReadTokens += row.cacheReadTokens;
-        entry.cacheWriteTokens += row.cacheWriteTokens;
-        entry.requestCount += row.requestCount;
-        byDimension.set(row.dimension, entry);
-    }
-
-    const total = (d: DimensionTotals) =>
-        d.inputTokens + d.outputTokens + d.cacheReadTokens + d.cacheWriteTokens;
-    const totals = Array.from(byDimension.values()).sort((a, b) => total(b) - total(a));
-    const maxTotal = totals.reduce((max, d) => Math.max(max, total(d)), 0);
+    const totals = aggregateModelUsageRows(rows);
+    const maxTotal = totals.reduce((max,d) => total(d)>max ? total(d) : max, 0n);
 
     if (totals.length === 0) {
         return (
@@ -122,10 +111,10 @@ export function ModelUsageChart({ dimensionLabel, rows }: ModelUsageChartProps) 
                 <TableBody>
                     {totals.map((d) => {
                         const sum = total(d);
-                        const pct = maxTotal > 0 ? (sum / maxTotal) * 100 : 0;
-                        const inPct = sum > 0 ? (d.inputTokens / sum) * 100 : 0;
+                        const pct = maxTotal > 0n ? Number(sum) / Number(maxTotal) * 100 : 0;
+                        const inPct = sum > 0n ? Number(d.inputTokens) / Number(sum) * 100 : 0;
                         return (
-                            <TableRow key={d.dimension}>
+                            <TableRow key={d.dimensionKey}>
                                 <TableCell className="font-mono">{d.dimension}</TableCell>
                                 <TableCell>
                                     <div className="h-3 w-40 rounded bg-muted overflow-hidden">
@@ -149,7 +138,7 @@ export function ModelUsageChart({ dimensionLabel, rows }: ModelUsageChartProps) 
                                     {formatTokens(d.cacheWriteTokens)}
                                 </TableCell>
                                 <TableCell className="text-right">
-                                    {d.requestCount.toLocaleString()}
+                                    {formatTokens(d.requestCount)}
                                 </TableCell>
                             </TableRow>
                         );

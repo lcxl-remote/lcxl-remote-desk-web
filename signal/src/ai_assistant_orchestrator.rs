@@ -1630,7 +1630,6 @@ async fn compose_turn_inner(
         }),
         inner: seam,
         db: db.clone(),
-        model_name: model_name.clone(),
         destination: destination.clone(),
         selected_source_tools,
         export_authorization_id,
@@ -3031,7 +3030,6 @@ mod tests {
                 .unwrap()
                 .with_context_db(db.clone()),
             db: db.clone(),
-            model_name: "fake-model".into(),
             destination: config.destination_identity().unwrap(),
             selected_source_tools: Default::default(),
             export_authorization_id: "original-compression-export".into(),
@@ -3178,7 +3176,6 @@ mod tests {
                 .unwrap()
                 .with_context_db(db.clone()),
             db: db.clone(),
-            model_name: "fake-model".into(),
             destination: destination.clone(),
             selected_source_tools: ["inspect_desktop_ui".to_string()].into_iter().collect(),
             export_authorization_id: crate::assistant_model::model_export_id(
@@ -3460,7 +3457,6 @@ mod tests {
                 .unwrap()
                 .with_context_db(db.clone()),
             db: db.clone(),
-            model_name: "fake-model".into(),
             destination: destination.clone(),
             selected_source_tools: Default::default(),
             export_authorization_id: "empty-http-export".into(),

@@ -16,3 +16,5 @@ pub mod usage_retention;
 pub mod web_search;
 
 pub mod file_recovery;
+
+pub mod model_metrics;

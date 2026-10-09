@@ -24,6 +24,12 @@ docker compose up -d
 
 丢失 `./data` 会一并丢掉信令侧状态、访问码、AI 服务商配置与审计记录，请与 `./conf` 一起备份。
 
+[模型调用指标](/zh/features/model-metrics)使用 signal 数据目录内独立的
+`model-metrics.sqlite`。从当前空观测 schema 开始采集，不导入旧 Token 桶或日志。
+使用一致的 SQLite 备份，或停服务后复制文件；只复制运行中的数据库主文件可能遗漏已提交的
+WAL 数据。指标存储故障不影响模型调用及业务信令、执行账本。恢复组件访问或当前格式备份即可，
+不要通过删除业务库或重置会话处理统计故障。
+
 ### TURN 中继端口
 
 中继端口范围（`[turn]` 的 `relay_min_port` / `relay_max_port`，默认 `50000-50050`）**默认

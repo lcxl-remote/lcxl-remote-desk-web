@@ -9,6 +9,7 @@ mod input_sources;
 mod lifecycle;
 mod main_stop;
 mod main_tools;
+mod model_input_metrics;
 mod native_cancel;
 mod notification;
 mod observation;

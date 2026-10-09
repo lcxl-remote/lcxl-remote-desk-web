@@ -269,7 +269,9 @@ async fn retained_children_do_not_fill_the_main_conversation_history_page() {
             .unwrap();
         task.settle_cancel("1970-01-01T00:00:01Z").unwrap();
         replace_run_on(&db, &row, &task, 1000).await.unwrap();
-        synchronize_control_on(&db, &task, 1000).await.unwrap();
+        synchronize_control_on(&db, &task, 1000, false)
+            .await
+            .unwrap();
     }
     let history = crate::agent_session_store::SignalAgentSessionStore::new(db.clone())
         .list_ai_assistant_sessions("1", "1", 1)

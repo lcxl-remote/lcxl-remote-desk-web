@@ -986,6 +986,7 @@ impl SignalCapabilityGrantStore {
             txn.rollback().await.ok();
             return Err(DbErr::Custom("capability dispatch claim conflicted".into()));
         }
+        let mut command_task_id = None;
         if let Some((target, conversation, call, timeout, origin, model_export)) = command {
             if payload.tool_name != desk_diagnose_core::command_confirmation::COMMAND_TOOL {
                 return Err(DbErr::Custom(
@@ -1012,7 +1013,7 @@ impl SignalCapabilityGrantStore {
                 return Err(DbErr::Custom("command claim subject mismatch".into()));
             }
             use crate::entity::agent_exec_task;
-            agent_exec_task::ActiveModel {
+            let task = agent_exec_task::ActiveModel {
                 exec_request_id: Set(payload.call_id.clone()),
                 execution_generation: Set(dispatch_id.into()),
                 conversation_id: Set(conversation.into()),
@@ -1028,6 +1029,7 @@ impl SignalCapabilityGrantStore {
             }
             .insert(&txn)
             .await?;
+            command_task_id = Some(task.id);
             payload.command_origin = Some(origin.clone());
             payload.command_export = model_export.cloned();
             agent_capability_dispatch_outbox::Entity::update_many()
@@ -1040,6 +1042,24 @@ impl SignalCapabilityGrantStore {
                 .await?;
         }
         txn.commit().await?;
+        if let Some(task_id) = command_task_id
+            && let Some(source) =
+                desk_diagnose_core::model_observability::ObservationAlias::provider_work(
+                    &work.id.to_string(),
+                )
+            && let Some(target) =
+                desk_diagnose_core::model_observability::ObservationAlias::command_work(
+                    &task_id.to_string(),
+                )
+        {
+            crate::model_metrics::runtime::submit(
+                desk_diagnose_core::model_observability::ObservationEvent::link_alias(
+                    source,
+                    target,
+                    now.timestamp_millis(),
+                ),
+            );
+        }
         Ok(DispatchClaimResult::Claimed(payload))
     }
 

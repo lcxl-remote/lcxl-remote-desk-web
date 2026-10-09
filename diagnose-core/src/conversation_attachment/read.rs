@@ -1,5 +1,6 @@
 //! Bounded reads over an already-authorized immutable model-visible attachment.
 use super::{AttachmentMetadata, ContentKind, MAX_PAGE_BYTES, digest, invalid, utf8_end};
+use crate::model_observability::{InputIssue, Stage, StageOutcome, tool::ToolObservation};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use desk_agent_protocol::AgentError;
 use serde::{Deserialize, Serialize};
@@ -68,19 +69,36 @@ pub fn read_page(
     bytes: &[u8],
     request: &ReadRequest,
 ) -> Result<ReadPage, AgentError> {
-    metadata.verify(bytes)?;
+    read_page_observed(metadata, bytes, request, &ToolObservation::default())
+}
+
+/// Only model reads provide a handle; owner UI reads do not create model samples.
+pub fn read_page_observed(
+    metadata: &AttachmentMetadata,
+    bytes: &[u8],
+    request: &ReadRequest,
+    observation: &ToolObservation,
+) -> Result<ReadPage, AgentError> {
+    metadata.verify(bytes).inspect_err(|_| {
+        observation.reject(Stage::Reference, InputIssue::ReferenceUnavailable);
+    })?;
     if request.attachment_id != metadata.attachment_id
         || request.max_bytes < 4
         || request.max_bytes > MAX_PAGE_BYTES
         || request.limit == 0
         || request.limit > 1000
     {
+        observation.reject(Stage::Preflight, InputIssue::Semantic);
         return Err(invalid("Invalid attachment read budget or identity"));
     }
     match metadata.kind {
-        ContentKind::Image => return Err(invalid("Image attachments require image reading")),
+        ContentKind::Image => {
+            observation.reject(Stage::Reference, InputIssue::ReferenceType);
+            return Err(invalid("Image attachments require image reading"));
+        }
         ContentKind::Json => {
             if !matches!(request.selection, ReadMode::Read { .. }) {
+                observation.reject(Stage::Preflight, InputIssue::Combination);
                 return Err(invalid(
                     "JSON attachments cannot be searched; narrow the source tool's query instead",
                 ));
@@ -91,7 +109,9 @@ pub fn read_page(
     let content = std::str::from_utf8(bytes).map_err(|_| invalid("Invalid attachment encoding"))?;
     // Keep terminators so concatenating a complete range reproduces its bytes.
     let lines = content.split_inclusive('\n').collect::<Vec<_>>();
-    let (selected, hits) = select_lines(&lines, &request.selection)?;
+    let (selected, hits) = select_lines(&lines, &request.selection).inspect_err(|error| {
+        observation.input_error(error);
+    })?;
     let binding = digest(
         &serde_json::to_vec(&(
             &metadata.attachment_id,
@@ -109,14 +129,19 @@ pub fn read_page(
         },
         Some(encoded) => {
             if encoded.len() > 1024 {
+                observation.reject(Stage::Reference, InputIssue::UnknownReference);
                 return Err(invalid("Invalid attachment cursor"));
             }
-            let decoded = URL_SAFE_NO_PAD
-                .decode(encoded)
-                .map_err(|_| invalid("Invalid attachment cursor"))?;
-            let cursor: Cursor = serde_json::from_slice(&decoded)
-                .map_err(|_| invalid("Invalid attachment cursor"))?;
+            let decoded = URL_SAFE_NO_PAD.decode(encoded).map_err(|_| {
+                observation.reject(Stage::Reference, InputIssue::UnknownReference);
+                invalid("Invalid attachment cursor")
+            })?;
+            let cursor: Cursor = serde_json::from_slice(&decoded).map_err(|_| {
+                observation.reject(Stage::Reference, InputIssue::UnknownReference);
+                invalid("Invalid attachment cursor")
+            })?;
             if cursor.binding != binding || cursor.index >= selected.len() {
+                observation.reject(Stage::Reference, InputIssue::ReferenceExpired);
                 return Err(invalid("Attachment cursor does not match this query"));
             }
             cursor
@@ -144,6 +169,7 @@ pub fn read_page(
     while let Some(&line_index) = selected.get(position.index) {
         let line = lines[line_index];
         if position.byte_offset >= line.len() || !line.is_char_boundary(position.byte_offset) {
+            observation.reject(Stage::Reference, InputIssue::UnknownReference);
             return Err(invalid("Invalid attachment cursor offset"));
         }
         let hit = !hits[line_index].is_empty();
@@ -206,6 +232,8 @@ pub fn read_page(
     }
     page.json_fragment = metadata.kind == ContentKind::Json
         && (request.cursor.is_some() || page.body_bytes != bytes.len());
+    observation.stage(Stage::Reference, StageOutcome::Passed);
+    observation.stage(Stage::Preflight, StageOutcome::Passed);
     Ok(page)
 }
 

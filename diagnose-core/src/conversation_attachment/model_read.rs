@@ -87,6 +87,7 @@ pub fn text_page(
     input: &Input,
     call_id: &str,
     budget: usize,
+    observation: &crate::model_observability::tool::ToolObservation,
 ) -> Result<(String, ReadReceipt), AgentError> {
     if part.metadata.kind == ContentKind::Image {
         return Err(invalid("Use the image read path"));
@@ -99,7 +100,12 @@ pub fn text_page(
     // Reduce only the new read; never discard an earlier read to make it fit.
     loop {
         request.max_bytes = upper;
-        let page = read_page(&page_part.metadata, &page_part.content, &request)?;
+        let page = read_page_observed(
+            &page_part.metadata,
+            &page_part.content,
+            &request,
+            observation,
+        )?;
         let content =
             serde_json::to_string(&page).map_err(|_| invalid("Cannot encode attachment page"))?;
         if crate::trim::model_context_cost(&ChatMessage::tool_result(
@@ -310,14 +316,28 @@ mod tests {
             after_context: 0,
             max_bytes: Some(32768),
         };
-        let (content, receipt) = text_page(&part, &input, "read-part", 100000).unwrap();
+        let (content, receipt) = text_page(
+            &part,
+            &input,
+            "read-part",
+            100000,
+            &crate::model_observability::tool::ToolObservation::default(),
+        )
+        .unwrap();
         assert!(content.contains("search_result_id"));
         assert!(content.contains("source_id"));
         assert_eq!(receipt.projection_version, 2);
         assert_eq!(receipt.source_sha256, original_digest);
         assert_eq!(part.content, original);
         part.metadata.verify(&part.content).unwrap();
-        let (again, proof) = text_page(&part, &input, "read-again", 100000).unwrap();
+        let (again, proof) = text_page(
+            &part,
+            &input,
+            "read-again",
+            100000,
+            &crate::model_observability::tool::ToolObservation::default(),
+        )
+        .unwrap();
         assert_eq!(again, content);
         assert_eq!(proof.page_sha256, receipt.page_sha256);
     }
@@ -355,7 +375,14 @@ mod tests {
     #[test]
     fn page_budget_counts_escaped_protocol_text_and_read_receipt_waits_for_consumption() {
         let (part, input) = fixture();
-        let (content, receipt) = text_page(&part, &input, "read-call", 2500).unwrap();
+        let (content, receipt) = text_page(
+            &part,
+            &input,
+            "read-call",
+            2500,
+            &crate::model_observability::tool::ToolObservation::default(),
+        )
+        .unwrap();
         let mut message = ChatMessage::tool_result("page", "read-call", &content);
         message.attachment_read = Some(Box::new(receipt));
         assert!(crate::trim::model_context_cost(&message) <= 2500);
@@ -397,6 +424,15 @@ mod tests {
         input.start_line = None;
         assert!(input.validate_image().is_err());
         input.queries = None;
-        assert!(text_page(&part, &input, "call", 20).is_err());
+        assert!(
+            text_page(
+                &part,
+                &input,
+                "call",
+                20,
+                &crate::model_observability::tool::ToolObservation::default()
+            )
+            .is_err()
+        );
     }
 }

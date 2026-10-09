@@ -69,6 +69,9 @@ use desk_input_injection::model::data_channel::{KeyboardEventData, MouseEventDat
     // wire. Publishing the enum anyway is what lets the generated client expose
     // named constants instead of the numbers being mirrored by hand.
     DeskErrorCode,
+    desk_signal_facade::model::model_metrics::MetricGroupSort,
+                desk_signal_facade::model::model_metrics::MetricRecordKind,
+                desk_signal_facade::model::model_metrics::MetricLatency,
     MediaPipelineStateData,
     SuggestedSessionSettings,
     RemoteSessionSettings,

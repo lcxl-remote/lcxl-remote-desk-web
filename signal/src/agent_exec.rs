@@ -497,6 +497,7 @@ pub struct SignalAgentTools {
     max_risk: RiskLevel,
     available_exec_shells: Vec<String>,
     max_command_runtime_ms: u32,
+    observation: desk_diagnose_core::model_observability::tool::ToolObservationSlot,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -510,6 +511,13 @@ enum SignalDispatch {
 }
 
 impl SignalAgentTools {
+    fn observed(
+        &self,
+        call: &ToolCall,
+    ) -> desk_diagnose_core::model_observability::tool::ToolObservation {
+        self.observation.get(call)
+    }
+
     pub fn new(
         db: DatabaseConnection,
         connections: Arc<SharedConnectionMap>,
@@ -533,6 +541,7 @@ impl SignalAgentTools {
             max_risk,
             available_exec_shells: sanitize_available_exec_shells(&available_exec_shells),
             max_command_runtime_ms,
+            observation: Default::default(),
         }
     }
 
@@ -646,6 +655,12 @@ impl SignalAgentTools {
                 )
                 .await?
         };
+        let observation = self.observation.get_by_call_id(&ctx.tool_call_id);
+        if let Some(alias) = desk_diagnose_core::model_observability::ObservationAlias::command_work(
+            &task.id.to_string(),
+        ) {
+            observation.bind(alias);
+        }
         let Some(rx) = self
             .pending
             .register_result(request_id.clone(), self.target_connection_id.clone())
@@ -694,6 +709,11 @@ impl SignalAgentTools {
                 "the interactive carrier disconnected before dispatch",
             ));
         }
+        observation.stage(
+            desk_diagnose_core::model_observability::Stage::Dispatch,
+            desk_diagnose_core::model_observability::StageOutcome::Attempted,
+        );
+        let dispatch_started_at = chrono::Utc::now().timestamp_millis();
         if let Err(error) = send_frame(&target, &frame).await {
             if let Some(carrier_id) = dispatch_carrier_id.as_deref() {
                 crate::exec_pty_carrier::global_exec_pty_carriers()
@@ -707,6 +727,15 @@ impl SignalAgentTools {
                 );
             }
             return Err(error);
+        }
+        if let Some(alias) = desk_diagnose_core::model_observability::ObservationAlias::command_work(
+            &task.id.to_string(),
+        ) {
+            desk_diagnose_core::model_observability::operations::command_dispatch(
+                alias,
+                dispatch_started_at,
+                crate::model_metrics::runtime::submit,
+            );
         }
         if let Err(error) = exec_store.mark_running(&request_id).await {
             // The frame may already be executing on the host. Never turn a
@@ -761,6 +790,10 @@ impl SignalAgentTools {
             &mut validation_input,
             self.max_command_runtime_ms,
         );
+        self.observation.get_by_call_id(&ctx.tool_call_id).stage(
+            desk_diagnose_core::model_observability::Stage::Preflight,
+            desk_diagnose_core::model_observability::StageOutcome::Passed,
+        );
         let requested_shell = match &validation_input.target {
             desk_agent_protocol::ExecTarget::Shell { shell } => shell.as_str(),
             _ => "",
@@ -778,6 +811,11 @@ impl SignalAgentTools {
             self.admission_policy,
         );
         let Some(draft) = classified.draft else {
+            self.observation
+                .get_by_call_id(&ctx.tool_call_id)
+                .permission(
+                    desk_diagnose_core::model_observability::PermissionOutcome::PolicyRejected,
+                );
             return Ok(ExecOutcome::Rejected {
                 reason: Some(classified.classification.impact),
             });
@@ -786,6 +824,11 @@ impl SignalAgentTools {
             || draft.risk > self.max_risk
             || draft != confirmation.plan
         {
+            self.observation
+                .get_by_call_id(&ctx.tool_call_id)
+                .permission(
+                    desk_diagnose_core::model_observability::PermissionOutcome::PolicyRejected,
+                );
             return Ok(ExecOutcome::Rejected {
                 reason: Some(
                     "the command is not admitted by its approved plan and current policy".into(),
@@ -804,6 +847,9 @@ impl SignalAgentTools {
             .execution_mode;
         let effective_mode = ctx.scope.mode.restrict_to(current_mode);
         if effective_mode != desk_agent_protocol::ExecutionMode::ConfirmEachAction {
+            self.observation
+                .get_by_call_id(&ctx.tool_call_id)
+                .permission(desk_diagnose_core::model_observability::PermissionOutcome::Revoked);
             return Ok(ExecOutcome::Rejected {
                 reason: Some("confirmed command execution is disabled by current policy".into()),
             });
@@ -815,6 +861,9 @@ impl SignalAgentTools {
             self.admission_policy,
         );
         if refreshed.draft.as_ref() != Some(&draft) {
+            self.observation
+                .get_by_call_id(&ctx.tool_call_id)
+                .permission(desk_diagnose_core::model_observability::PermissionOutcome::Revoked);
             return Ok(ExecOutcome::Rejected {
                 reason: Some("execution policy changed; request permission again".into()),
             });
@@ -918,8 +967,22 @@ impl SignalAgentTools {
 
 #[async_trait(?Send)]
 impl ToolSeam for SignalAgentTools {
+    fn observe_tool_input(
+        &self,
+        call: &ToolCall,
+        observation: desk_diagnose_core::model_observability::tool::ToolObservation,
+    ) {
+        self.observation.set(call, observation);
+    }
+
     async fn run_read(&self, call: &ToolCall) -> Result<ToolRunOutput, AgentError> {
-        let (capability, _) = build_read_operation(call)?;
+        let (capability, _) = build_read_operation(call).inspect_err(|error| {
+            self.observed(call).input_error(error);
+        })?;
+        self.observed(call).stage(
+            desk_diagnose_core::model_observability::Stage::Preflight,
+            desk_diagnose_core::model_observability::StageOutcome::Passed,
+        );
         let Some(entry) = self
             .snapshot
             .contexts
@@ -947,7 +1010,9 @@ impl ToolSeam for SignalAgentTools {
         call: &ToolCall,
         ctx: &ExecContext,
     ) -> Result<ExecOutcome, AgentError> {
-        let (operation, _) = build_exec_input(call)?;
+        let (operation, _) = build_exec_input(call).inspect_err(|error| {
+            self.observed(call).input_error(error);
+        })?;
         let mut validation_input = match operation {
             OperationInput::Exec(input) => input,
             _ => {
@@ -960,6 +1025,10 @@ impl ToolSeam for SignalAgentTools {
         desk_diagnose_core::exec_tools::apply_exec_runtime_ceiling(
             &mut validation_input,
             self.max_command_runtime_ms,
+        );
+        self.observed(call).stage(
+            desk_diagnose_core::model_observability::Stage::Preflight,
+            desk_diagnose_core::model_observability::StageOutcome::Passed,
         );
         let classified = classify_command_with_policy(
             &validation_input,
@@ -981,6 +1050,9 @@ impl ToolSeam for SignalAgentTools {
             ));
         }
         let Some(draft) = classified.draft else {
+            self.observed(call).permission(
+                desk_diagnose_core::model_observability::PermissionOutcome::PolicyRejected,
+            );
             return Ok(ExecOutcome::Rejected {
                 reason: Some(classified.classification.impact),
             });
@@ -996,6 +1068,9 @@ impl ToolSeam for SignalAgentTools {
         if classified.classification.decision != ExecDecision::ConfirmRequired
             || draft.risk > self.max_risk
         {
+            self.observed(call).permission(
+                desk_diagnose_core::model_observability::PermissionOutcome::PolicyRejected,
+            );
             return Ok(ExecOutcome::Rejected {
                 reason: Some("the command is not admitted by the current policy".into()),
             });
@@ -1049,21 +1124,33 @@ impl ToolSeam for SignalAgentTools {
             self.pending.cancel_approval(&exec_request_id.0);
             return Err(error);
         }
+        self.observed(call)
+            .permission(desk_diagnose_core::model_observability::PermissionOutcome::Waiting);
         let approval = match tokio::time::timeout(approval_timeout, approval_rx).await {
             Ok(Ok(data)) => data,
             Ok(Err(_)) => {
+                self.observed(call).permission(
+                    desk_diagnose_core::model_observability::PermissionOutcome::Cancelled,
+                );
                 return Ok(ExecOutcome::Cancelled {
                     reason: Some("the approval session was cancelled".into()),
                 });
             }
             Err(_) => {
                 self.pending.cancel_approval(&exec_request_id.0);
+                self.observed(call).permission(
+                    desk_diagnose_core::model_observability::PermissionOutcome::Expired,
+                );
                 return Ok(ExecOutcome::ApprovalTimeout);
             }
         };
         if approval.decision != ApprovalDecision::Approve {
+            self.observed(call)
+                .permission(desk_diagnose_core::model_observability::PermissionOutcome::Denied);
             return Ok(ExecOutcome::Rejected { reason: None });
         }
+        self.observed(call)
+            .permission(desk_diagnose_core::model_observability::PermissionOutcome::Approved);
         let carrier_id = if draft.io_mode.is_pty() {
             match approval.carrier_id.filter(|value| !value.is_empty()) {
                 Some(value) => Some(value),
@@ -1100,6 +1187,8 @@ impl ToolSeam for SignalAgentTools {
             desk_agent_protocol::ExecutionMode::ConfirmEachAction
                 | desk_agent_protocol::ExecutionMode::SessionApproved
         ) {
+            self.observed(call)
+                .permission(desk_diagnose_core::model_observability::PermissionOutcome::Revoked);
             return Ok(ExecOutcome::Rejected {
                 reason: Some("execution policy changed; preview the command again".into()),
             });
@@ -1111,6 +1200,8 @@ impl ToolSeam for SignalAgentTools {
             self.admission_policy,
         );
         if refreshed.draft.as_ref() != Some(&draft) {
+            self.observed(call)
+                .permission(desk_diagnose_core::model_observability::PermissionOutcome::Revoked);
             return Ok(ExecOutcome::Rejected {
                 reason: Some("execution policy changed; preview the command again".into()),
             });

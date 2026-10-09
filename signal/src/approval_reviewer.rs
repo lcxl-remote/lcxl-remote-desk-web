@@ -3,10 +3,10 @@
 
 use desk_agent_protocol::{AgentError, AgentErrorKind};
 use desk_diagnose_core::approval_review::{
-    ApprovalReviewCandidate, ApprovalReviewDecision, reviewer_model_decision,
+    ApprovalReviewCandidate, ApprovalReviewDecision, reviewer_model_decision_observed,
 };
 use desk_diagnose_core::chat::TokenUsage;
-use desk_diagnose_core::seam::NullTurnSink;
+use desk_diagnose_core::seam::{ModelSeam, NullTurnSink};
 use sea_orm::DatabaseConnection;
 
 use crate::agent_approval_store::ClaimedPermissionReview;
@@ -129,6 +129,11 @@ pub async fn call_claimed_permission_review(
     }
     txn.commit().await.map_err(|_| reviewer_unavailable())?;
     let store = crate::model_egress_store::SignalModelEgressStore::new(db.clone());
+    request.observation = seam.observation_context(
+        request.use_case,
+        desk_diagnose_core::model_observability::Origin::System,
+    );
+    let observation = request.observation.clone();
     let turn = match seam.call_admitted(request, &mut NullTurnSink, permit).await {
         Ok(turn) => turn,
         Err(error) => {
@@ -144,6 +149,9 @@ pub async fn call_claimed_permission_review(
         .record_terminal_usage(&receipt_id, &turn.usage)
         .await
         .map_err(|_| reviewer_unavailable())?;
+    if let Some(observation) = &observation {
+        observation.metered(chrono::Utc::now().timestamp_millis());
+    }
     let output_policy = desk_diagnose_core::model_egress::ModelEgressPolicy {
         destination: claim.model_destination.clone(),
         selected_source_tools: Default::default(),
@@ -162,9 +170,21 @@ pub async fn call_claimed_permission_review(
                 .mark_succeeded(&receipt_id, &output)
                 .await
                 .map_err(|_| reviewer_unavailable())?;
-            reviewer_model_decision(candidate, &turn).ok()
+            reviewer_model_decision_observed(
+                candidate,
+                &turn,
+                observation.as_ref(),
+                chrono::Utc::now().timestamp_millis(),
+            )
+            .ok()
         }
         Err(_) => {
+            if let Some(observation) = &observation {
+                observation.output(
+                    desk_diagnose_core::model_observability::OutputOutcome::PolicyRejected,
+                    chrono::Utc::now().timestamp_millis(),
+                );
+            }
             store
                 .mark_failed(&receipt_id)
                 .await

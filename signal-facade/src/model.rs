@@ -11,6 +11,8 @@ pub mod files;
 pub mod image_capture;
 pub mod media_capability;
 pub mod media_pipeline;
+pub mod model_metrics;
+pub mod model_usage;
 pub mod os;
 pub mod policy_snapshot;
 pub mod private_screen;

@@ -1,0 +1,1 @@
+{"type":"object","required":["path","count"],"properties":{"count":{"type":"string"},"path":{"type":"string"}},"x-readme-ref-name":"MetricSchemaPath"}

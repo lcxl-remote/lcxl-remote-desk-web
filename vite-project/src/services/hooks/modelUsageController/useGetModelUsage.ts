@@ -27,7 +27,7 @@ export function getModelUsageQueryOptions(params?: GetModelUsageQueryParams, con
 }
 
 /**
- * @summary Query local per-model AI gateway token usage
+ * @summary Query local model usage from current observations
  * {@link /api/model/usage}
  */
 export function useGetModelUsage<TData = GetModelUsageQueryResponse, TQueryData = GetModelUsageQueryResponse, TQueryKey extends QueryKey = GetModelUsageQueryKey>(params?: GetModelUsageQueryParams, options: 

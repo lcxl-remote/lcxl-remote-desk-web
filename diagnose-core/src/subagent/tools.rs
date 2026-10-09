@@ -148,16 +148,37 @@ pub fn registry() -> Vec<RegisteredTool> {
 }
 
 pub fn parse(session: &PersistedAgentSession, call: &ToolCall) -> Result<Operation, AgentError> {
-    let effect = effect(&call.name).ok_or_else(|| invalid("unknown delegation tool"))?;
-    if !session.agent_role.is_main()
+    parse_observed(
+        session,
+        call,
+        &crate::model_observability::tool::ToolObservation::default(),
+    )
+}
+
+pub fn parse_observed(
+    session: &PersistedAgentSession,
+    call: &ToolCall,
+    observation: &crate::model_observability::tool::ToolObservation,
+) -> Result<Operation, AgentError> {
+    use crate::model_observability::{InputIssue, PermissionOutcome, Stage, StageOutcome};
+    let effect = effect(&call.name).ok_or_else(|| {
+        observation.reject(Stage::Exposure, InputIssue::UnknownTool);
+        invalid("unknown delegation tool")
+    })?;
+    let outside_scope = !session.agent_role.is_main()
         || session.surface != AgentSessionSurface::AiAssistant
         || !session.turn_state.is_active()
         || session.input_revision == 0
         || session.actor_id.is_empty()
-        || session.device_id.is_empty()
-        || !valid_id(&call.id)
-        || call.arguments_json.len() > MAX_TOOL_ARGUMENT_BYTES
-    {
+        || session.device_id.is_empty();
+    if outside_scope || !valid_id(&call.id) || call.arguments_json.len() > MAX_TOOL_ARGUMENT_BYTES {
+        if outside_scope {
+            observation.permission(PermissionOutcome::PolicyRejected);
+        } else if !valid_id(&call.id) {
+            observation.reject(Stage::Protocol, InputIssue::InvalidProtocol);
+        } else {
+            observation.reject(Stage::Preflight, InputIssue::Length);
+        }
         return Err(invalid(
             "delegation tools require an active main assistant task",
         ));
@@ -167,6 +188,7 @@ pub fn parse(session: &PersistedAgentSession, call: &ToolCall) -> Result<Operati
         ToolEffect::SubAgentPlanning | ToolEffect::SubAgentControl
     ) && !session.allows_new_mutation()
     {
+        observation.permission(PermissionOutcome::PolicyRejected);
         return Err(invalid(
             "completion input cannot create or adjust delegated tasks",
         ));
@@ -175,6 +197,7 @@ pub fn parse(session: &PersistedAgentSession, call: &ToolCall) -> Result<Operati
         session.trigger_origin,
         TriggerOrigin::ExecCompletion | TriggerOrigin::WorkCompletion { .. }
     ) {
+        observation.permission(PermissionOutcome::PolicyRejected);
         return Err(invalid(
             "command completion interpretation has no delegation tools",
         ));
@@ -195,7 +218,7 @@ pub fn parse(session: &PersistedAgentSession, call: &ToolCall) -> Result<Operati
         expected_input_revision: u64,
         expected_control_revision: u64,
     }
-    match call.name.as_str() {
+    let result = (|| match call.name.as_str() {
         SPAWN => {
             let request: SpawnRequest = decode(call)?;
             validate_task(&request.task, &request.acceptance_criteria).map_err(invalid)?;
@@ -316,5 +339,10 @@ pub fn parse(session: &PersistedAgentSession, call: &ToolCall) -> Result<Operati
             })
         }
         _ => Err(invalid("unknown delegation operation")),
+    })();
+    match &result {
+        Ok(_) => observation.stage(Stage::Preflight, StageOutcome::Attempted),
+        Err(error) => observation.input_error(error),
     }
+    result
 }

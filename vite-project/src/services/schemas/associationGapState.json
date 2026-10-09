@@ -1,0 +1,1 @@
+{"type":"string","enum":["waiting","unavailable","conflict","outside_window"],"x-readme-ref-name":"AssociationGapState"}

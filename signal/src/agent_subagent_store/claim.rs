@@ -130,9 +130,14 @@ impl SubAgentStore {
             run.fail("delegation_deadline_reached", &params.now)
                 .map_err(|_| invalid())?;
             replace_run_on(&txn, &row, &run, now.timestamp_millis()).await?;
-            synchronize_control_on(&txn, &run, now.timestamp_millis()).await?;
+            let permission_ends =
+                synchronize_control_on(&txn, &run, now.timestamp_millis(), true).await?;
             append_state_event_on(&txn, &group, &run, now.timestamp_millis()).await?;
             txn.commit().await?;
+            permission_ends.submit(
+                now.timestamp_millis(),
+                crate::model_metrics::runtime::submit,
+            );
             return Ok(SubAgentClaimOutcome::Blocked(
                 SubAgentClaimBlock::DeadlineReached,
             ));

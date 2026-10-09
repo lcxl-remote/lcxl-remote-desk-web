@@ -35,7 +35,9 @@ async fn request(
         expected_revision: revision,
     };
     let task = lock_target(&txn, owner, session, &action).await.unwrap();
-    let reply = cancel(&txn, task, revision, now).await.unwrap();
+    let reply = cancel(&txn, task, revision, now, &ToolObservation::default())
+        .await
+        .unwrap();
     txn.commit().await.unwrap();
     serde_json::from_str(&reply).unwrap()
 }
@@ -246,7 +248,13 @@ async fn tool_turn_commits_cancellation_and_receipt_together_and_rejects_stale_s
             use sea_orm::ConnectionTrait;
             store.db.execute_unprepared("CREATE TRIGGER reject_tool_receipt BEFORE UPDATE OF state_json ON agent_session BEGIN SELECT RAISE(ABORT, 'injected receipt failure'); END").await.unwrap();
         }
-        let reply = store.manage_from_session(&mut session, &call).await;
+        let reply = store
+            .manage_from_session(
+                &mut session,
+                &call,
+                &desk_diagnose_core::model_observability::tool::ToolObservation::default(),
+            )
+            .await;
         if case != 0 {
             assert!(reply.is_err());
             assert_eq!(store.read(1, &work.schedule_id).await.unwrap(), task);

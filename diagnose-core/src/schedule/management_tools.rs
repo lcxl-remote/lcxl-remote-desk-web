@@ -1,5 +1,8 @@
 //! Conversation-scoped schedule inspection and cancellation, without tool grants.
 use super::proposal;
+use crate::model_observability::{
+    InputIssue, PermissionOutcome, Stage, StageOutcome, tool::ToolObservation,
+};
 use crate::{
     chat::{ChatRole, ToolCall, ToolSpec},
     session::{AgentSessionSurface, PersistedAgentSession, TriggerOrigin},
@@ -35,7 +38,11 @@ pub fn specs() -> Vec<ToolSpec> {
     }]
 }
 
-pub fn parse(session: &PersistedAgentSession, call: &ToolCall) -> Result<Action, &'static str> {
+pub fn parse(
+    session: &PersistedAgentSession,
+    call: &ToolCall,
+    observation: &ToolObservation,
+) -> Result<Action, &'static str> {
     let inspection = call.name == LIST;
     let delegated_inspection = inspection
         && !session.agent_role.is_main()
@@ -43,17 +50,26 @@ pub fn parse(session: &PersistedAgentSession, call: &ToolCall) -> Result<Action,
             session.trigger_origin,
             TriggerOrigin::DelegatedTask | TriggerOrigin::PermissionDecision
         );
-    if ((!session.agent_role.is_main() || session.trigger_origin != TriggerOrigin::User)
+    let outside_scope = ((!session.agent_role.is_main()
+        || session.trigger_origin != TriggerOrigin::User)
         && !delegated_inspection)
         || session.surface != AgentSessionSurface::AiAssistant
         || !session.turn_state.is_active()
         || session.input_revision == 0
         || session.actor_id.is_empty()
-        || session.device_id.is_empty()
+        || session.device_id.is_empty();
+    if outside_scope
         || call.id.is_empty()
         || call.id.len() > 256
         || call.arguments_json.len() > 24 * 1024
     {
+        if outside_scope {
+            observation.permission(PermissionOutcome::PolicyRejected);
+        } else if call.id.is_empty() || call.id.len() > 256 {
+            observation.reject(Stage::Protocol, InputIssue::InvalidProtocol);
+        } else {
+            observation.reject(Stage::Preflight, InputIssue::Length);
+        }
         return Err("schedule management is unavailable");
     }
     #[derive(Deserialize)]
@@ -75,22 +91,28 @@ pub fn parse(session: &PersistedAgentSession, call: &ToolCall) -> Result<Action,
     }
     match call.name.as_str() {
         proposal::REQUEST_SCHEDULE => {
-            proposal::draft(session, call).map(|draft| Action::Create(Box::new(draft)))
+            proposal::draft(session, call, observation).map(|draft| Action::Create(Box::new(draft)))
         }
         LIST => {
-            let input: List =
-                serde_json::from_str(&call.arguments_json).map_err(|_| "invalid query")?;
+            let input: List = serde_json::from_str(&call.arguments_json).map_err(|_| {
+                observation.reject(Stage::Preflight, InputIssue::Semantic);
+                "invalid query"
+            })?;
             if input.after < 0 || !(1..=20).contains(&input.limit) {
+                observation.reject(Stage::Preflight, InputIssue::Semantic);
                 return Err("invalid page");
             }
+            observation.stage(Stage::Preflight, StageOutcome::Attempted);
             Ok(Action::List {
                 after: input.after,
                 limit: input.limit,
             })
         }
         CANCEL => {
-            let input: Cancel =
-                serde_json::from_str(&call.arguments_json).map_err(|_| "invalid cancellation")?;
+            let input: Cancel = serde_json::from_str(&call.arguments_json).map_err(|_| {
+                observation.reject(Stage::Preflight, InputIssue::Semantic);
+                "invalid cancellation"
+            })?;
             if input.expected_revision < 1
                 || input.schedule_id.len() != 36
                 || !input
@@ -98,14 +120,19 @@ pub fn parse(session: &PersistedAgentSession, call: &ToolCall) -> Result<Action,
                     .bytes()
                     .all(|c| c.is_ascii_hexdigit() || c == b'-')
             {
+                observation.reject(Stage::Preflight, InputIssue::Semantic);
                 return Err("invalid cancellation");
             }
+            observation.stage(Stage::Preflight, StageOutcome::Attempted);
             Ok(Action::Cancel {
                 schedule_id: input.schedule_id,
                 expected_revision: input.expected_revision,
             })
         }
-        _ => Err("unknown schedule operation"),
+        _ => {
+            observation.reject(Stage::Exposure, InputIssue::UnknownTool);
+            Err("unknown schedule operation")
+        }
     }
 }
 
@@ -177,19 +204,44 @@ mod tests {
             arguments_json: "{}".into(),
         };
         assert!(matches!(
-            parse(&session, &call),
+            parse(
+                &session,
+                &call,
+                &crate::model_observability::tool::ToolObservation::default()
+            ),
             Ok(Action::List {
                 after: 0,
                 limit: 10
             })
         ));
         call.arguments_json = r#"{"owner":2}"#.into();
-        assert!(parse(&session, &call).is_err());
+        assert!(
+            parse(
+                &session,
+                &call,
+                &crate::model_observability::tool::ToolObservation::default()
+            )
+            .is_err()
+        );
         call.arguments_json = r#"{"limit":21}"#.into();
-        assert!(parse(&session, &call).is_err());
+        assert!(
+            parse(
+                &session,
+                &call,
+                &crate::model_observability::tool::ToolObservation::default()
+            )
+            .is_err()
+        );
         call.arguments_json = "{}".into();
         session.trigger_origin = TriggerOrigin::ScheduledContinuation;
-        assert!(parse(&session, &call).is_err());
+        assert!(
+            parse(
+                &session,
+                &call,
+                &crate::model_observability::tool::ToolObservation::default()
+            )
+            .is_err()
+        );
         assert_eq!(proposal::registry().len(), 3);
     }
     #[test]

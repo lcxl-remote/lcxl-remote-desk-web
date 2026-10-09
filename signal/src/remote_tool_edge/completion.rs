@@ -165,6 +165,13 @@ pub(crate) struct Projection {
     pub content: String,
 }
 
+/// Ephemeral facts from the same validation that produces the business receipt.
+/// This wrapper is never serialized into execution state or receipt digests.
+pub(crate) struct ReportedProjection {
+    pub projection: Option<Projection>,
+    pub batch: Option<desk_diagnose_core::application_batch::BatchExecutionObservation>,
+}
+
 pub(crate) fn invalid() -> AgentError {
     error(
         AgentErrorKind::Internal,
@@ -180,6 +187,37 @@ pub(crate) fn project(
     run_id: &str,
     canonical_input: &str,
     completed: &ComputerActionCompleted,
+) -> Result<Option<Projection>, AgentError> {
+    project_reported(plan, tool_name, run_id, canonical_input, completed)
+        .map(|value| value.projection)
+}
+
+pub(crate) fn project_reported(
+    plan: &SealedComputerActionPlan,
+    tool_name: &str,
+    run_id: &str,
+    canonical_input: &str,
+    completed: &ComputerActionCompleted,
+) -> Result<ReportedProjection, AgentError> {
+    let mut batch = None;
+    let projection = project_with_observation(
+        plan,
+        tool_name,
+        run_id,
+        canonical_input,
+        completed,
+        &mut batch,
+    )?;
+    Ok(ReportedProjection { projection, batch })
+}
+
+fn project_with_observation(
+    plan: &SealedComputerActionPlan,
+    tool_name: &str,
+    run_id: &str,
+    canonical_input: &str,
+    completed: &ComputerActionCompleted,
+    batch: &mut Option<desk_diagnose_core::application_batch::BatchExecutionObservation>,
 ) -> Result<Option<Projection>, AgentError> {
     plan.validate().map_err(|_| invalid())?;
     let content = serde_json::to_string(completed).map_err(|_| invalid())?;
@@ -198,10 +236,12 @@ pub(crate) fn project(
         return Err(invalid());
     }
     if desk_diagnose_core::application_batch::supports(tool_name) {
-        if let Some((failed, content)) = desk_diagnose_core::application_batch::completion_receipt(
+        let reported = desk_diagnose_core::application_batch::completion_receipt_reported(
             completed,
             Some(plan.actions.len()),
-        )? {
+        )?;
+        *batch = reported.observation;
+        if let Some((failed, content)) = reported.receipt {
             return Ok(Some(Projection {
                 outcome: if failed {
                     CapabilityDispatchOutcome::Failed

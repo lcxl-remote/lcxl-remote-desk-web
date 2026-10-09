@@ -2964,6 +2964,7 @@ dependencies = [
  "actix-session",
  "desk-signal-facade",
  "serde",
+ "serde_json",
  "utoipa",
 ]
 

@@ -107,6 +107,7 @@ pub async fn run_service_daemon_inner(
     let signal_db = desk_signal::db::init_db(&signal_db_dir)
         .await
         .map_err(|e| format!("Failed to init signal DB: {e}"))?;
+    desk_signal::model_metrics::runtime::initialize(&signal_db_dir);
     info!("Signal database initialized at {signal_db_dir}");
     let exec_ledger = open_exec_ledger(&paths).await?;
     // Age-based retention cleanup for the local usage rollups (collect-only
@@ -412,6 +413,7 @@ pub async fn run_service_daemon_inner(
     watchdog_handle.abort();
     api_handle.abort();
 
+    desk_signal::model_metrics::runtime::shutdown().await;
     info!("ServiceDaemon stopped");
     Ok(())
 }

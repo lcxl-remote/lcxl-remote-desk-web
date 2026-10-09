@@ -11,3 +11,6 @@ serde = { workspace = true }
 utoipa = { workspace = true }
 actix-session = { workspace = true }
 desk-signal-facade = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

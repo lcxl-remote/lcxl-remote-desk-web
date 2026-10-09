@@ -348,13 +348,15 @@ pub(crate) async fn apply_goal_source_on<C: ConnectionTrait>(
     goal_id: &str,
     goal_state: GoalState,
     now_ms: i64,
-) -> Result<(), DbErr> {
+) -> Result<desk_diagnose_core::model_observability::permission::PendingEnds, DbErr> {
     let admission = match goal_state {
         GoalState::Paused(_) => SourceAdmission::Paused,
         GoalState::Queued => SourceAdmission::Open,
         GoalState::Cancelled | GoalState::Failed => SourceAdmission::Closed,
-        _ => return Ok(()),
+        _ => return Ok(Default::default()),
     };
+    let mut permission_ends =
+        desk_diagnose_core::model_observability::permission::PendingEnds::default();
     let now = chrono::DateTime::from_timestamp_millis(now_ms)
         .ok_or_else(invalid)?
         .to_rfc3339();
@@ -425,11 +427,19 @@ pub(crate) async fn apply_goal_source_on<C: ConnectionTrait>(
                 _ => continue,
             }
             replace_run_on(db, &row, &run, now_ms).await?;
-            synchronize_control_on(db, &run, now_ms).await?;
+            permission_ends.extend(
+                synchronize_control_on(
+                    db,
+                    &run,
+                    now_ms,
+                    admission == SourceAdmission::Open && now_ms >= run.binding.deadline_ms,
+                )
+                .await?,
+            );
             append_state_event_on(db, &group, &run, now_ms).await?;
         }
     }
-    Ok(())
+    Ok(permission_ends)
 }
 
 pub(crate) async fn replace_run_on<C: ConnectionTrait>(

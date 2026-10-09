@@ -1,0 +1,1 @@
+{"type":"string","enum":["unsupported_tool_filter","unsupported_error_domain","arithmetic_unavailable","retention_trim"],"x-readme-ref-name":"MetricRateReason"}

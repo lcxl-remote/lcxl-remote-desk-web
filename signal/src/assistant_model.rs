@@ -26,7 +26,6 @@ pub(crate) struct MeteredModel {
     pub(crate) fresh_task: Option<FreshTaskModelContext>,
     pub(crate) inner: SignalModelSeam,
     pub(crate) db: DatabaseConnection,
-    pub(crate) model_name: String,
     pub(crate) destination: DestinationIdentity,
     pub(crate) selected_source_tools: std::collections::BTreeSet<String>,
     pub(crate) export_authorization_id: String,
@@ -37,6 +36,13 @@ pub(crate) struct MeteredModel {
 
 #[async_trait::async_trait(?Send)]
 impl ModelSeam for MeteredModel {
+    fn observation_context(
+        &self,
+        use_case: desk_diagnose_core::model_profile::ModelUseCase,
+        origin: desk_diagnose_core::model_observability::Origin,
+    ) -> Option<desk_diagnose_core::model_observability::ObservationContext> {
+        self.inner.observation_context(use_case, origin)
+    }
     fn model_input_token_upper_bound(
         &self,
         request: &ModelRequest,
@@ -107,16 +113,33 @@ impl ModelSeam for MeteredModel {
 
     async fn call(
         &self,
-        request: ModelRequest,
+        mut request: ModelRequest,
         sink: &mut dyn TurnSink,
     ) -> Result<desk_diagnose_core::chat::ModelTurn, AgentError> {
+        if request.observation.is_none() {
+            request.observation = self.observation_context(
+                request.use_case,
+                desk_diagnose_core::model_observability::Origin::Unknown,
+            );
+        }
+        let observation = request.observation.clone();
+        let mut preflight =
+            desk_diagnose_core::model_observability::PreflightObservation::new(observation.clone());
+        preflight.reason(desk_diagnose_core::model_observability::NotStartedReason::Permission);
         request.validate_delegation_call()?;
         let is_compression =
             request.use_case == desk_diagnose_core::model_profile::ModelUseCase::ContextCompression;
         if is_compression {
             *self.completed_compression_receipt.borrow_mut() = None;
         }
-        let permit = self.inner.acquire_admission().await?;
+        preflight.reason(desk_diagnose_core::model_observability::NotStartedReason::Admission);
+        let permit = self.inner.acquire_admission().await.inspect_err(|error| {
+            if error.kind == AgentErrorKind::Cancelled {
+                preflight
+                    .reason(desk_diagnose_core::model_observability::NotStartedReason::Cancelled);
+            }
+        })?;
+        preflight.reason(desk_diagnose_core::model_observability::NotStartedReason::Permission);
         let policy = self
             .model_egress_policy()?
             .ok_or_else(|| transport_error("AI assistant model egress policy is unavailable"))?;
@@ -139,10 +162,14 @@ impl ModelSeam for MeteredModel {
             )
         );
         let egress_store = crate::model_egress_store::SignalModelEgressStore::new(self.db.clone());
+        preflight.reason(desk_diagnose_core::model_observability::NotStartedReason::Unknown);
         let receipt_id = self
             .record_dispatch(&authorized, model_call_ordinal, ordinary_receipt_id)
             .await
             .map_err(|error| {
+                if matches!(&error, desk_diagnose_core::schedule::model_admission::ModelAdmissionError::BudgetExceeded) {
+                    preflight.reason(desk_diagnose_core::model_observability::NotStartedReason::Budget);
+                }
                 error.into_agent_error(|error| {
                     log::warn!("[ai-assistant] failed to persist model egress: {error}");
                     AgentError {
@@ -205,7 +232,7 @@ impl ModelSeam for MeteredModel {
                         error_code: None,
                     }
                 })?;
-            crate::agent_runtime::record_usage(&self.db, &self.model_name, &turn.usage).await;
+            crate::agent_runtime::record_metered(observation.as_ref());
             return Ok(turn);
         }
         // A provider call may outlive an ephemeral input that was valid at
@@ -259,7 +286,7 @@ impl ModelSeam for MeteredModel {
             *self.completed_compression_receipt.borrow_mut() = Some(receipt_id);
         }
         turn.provider_meta.data_envelope = Some(output_envelope);
-        crate::agent_runtime::record_usage(&self.db, &self.model_name, &turn.usage).await;
+        crate::agent_runtime::record_metered(observation.as_ref());
         Ok(turn)
     }
 }

@@ -1,0 +1,1 @@
+{"type":"string","enum":["duration","first_content"],"x-readme-ref-name":"MetricLatency"}

@@ -317,7 +317,7 @@ pub async fn apply_owner_action(
         .map_err(|_| invalid())?;
     goal.apply_owner_action(action, now_ms)
         .map_err(|_| invalid())?;
-    crate::agent_subagent_store::apply_goal_source_on(
+    let permission_ends = crate::agent_subagent_store::apply_goal_source_on(
         &txn,
         conversation_id,
         actor_id,
@@ -389,6 +389,10 @@ pub async fn apply_owner_action(
     .insert(&txn)
     .await?;
     txn.commit().await?;
+    permission_ends.submit(
+        now.timestamp_millis(),
+        crate::model_metrics::runtime::submit,
+    );
     Ok(Some(goal))
 }
 

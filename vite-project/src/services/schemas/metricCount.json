@@ -1,0 +1,1 @@
+{"type":"object","required":["key","count"],"properties":{"count":{"type":"string"},"key":{"type":"string"}},"x-readme-ref-name":"MetricCount"}

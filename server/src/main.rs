@@ -318,7 +318,9 @@ fn main() {
                         // Hold _telemetry_guard until server.await completes;
                         // dropping earlier closes the non-blocking log writer
                         // thread and silently discards all subsequent lines.
-                        if let Err(e) = server.await {
+                        let result = server.await;
+                        desk_signal::model_metrics::runtime::shutdown().await;
+                        if let Err(e) = result {
                             eprintln!("Server error: {e}");
                             1
                         } else {

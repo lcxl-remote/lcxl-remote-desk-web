@@ -20,9 +20,9 @@ import {
 } from '@/features/usage/usage-retention-validation';
 
 /**
- * Retention config for the portable/signal server's local usage rollups. The
+ * Retention config for the portable/signal server's TURN rollups and sessions. The
  * single-node server keeps last-writer-wins config (no revision), so this is a
- * plain read-then-save form: three windows in days, clamped client-side to a sane
+ * plain read-then-save form: two windows in days, clamped client-side to a sane
  * range and re-validated by the backend.
  */
 export function UsageRetentionPage() {
@@ -34,7 +34,6 @@ export function UsageRetentionPage() {
     const update = useUpdateUsageRetention();
 
     const [turnDays, setTurnDays] = useState('');
-    const [aiDays, setAiDays] = useState('');
     const [agentSessionDays, setAgentSessionDays] = useState('');
 
     // Seed the form once the current config loads.
@@ -42,18 +41,15 @@ export function UsageRetentionPage() {
         const cfg = data?.data;
         if (cfg) {
             setTurnDays(String(cfg.turn_days));
-            setAiDays(String(cfg.ai_days));
             setAgentSessionDays(String(cfg.agent_session_days));
         }
     }, [data]);
 
     const onSave = () => {
         const turn = Number(turnDays);
-        const ai = Number(aiDays);
         const agentSession = Number(agentSessionDays);
         if (
             !isValidRetentionDays(turn) ||
-            !isValidRetentionDays(ai) ||
             !isValidRetentionDays(agentSession)
         ) {
             toast({ variant: 'destructive', title: t('pages.usageRetention.invalidRange') });
@@ -63,7 +59,6 @@ export function UsageRetentionPage() {
             {
                 data: {
                     turn_days: turn,
-                    ai_days: ai,
                     agent_session_days: agentSession,
                 },
             },
@@ -110,18 +105,6 @@ export function UsageRetentionPage() {
                                     value={turnDays}
                                     disabled={update.isPending}
                                     onChange={(e) => setTurnDays(e.target.value)}
-                                />
-                            </div>
-                            <div className="flex flex-col gap-1 max-w-xs">
-                                <Label htmlFor="ai-days">{t('pages.usageRetention.aiDays')}</Label>
-                                <Input
-                                    id="ai-days"
-                                    type="number"
-                                    min={MIN_DAYS}
-                                    max={MAX_DAYS}
-                                    value={aiDays}
-                                    disabled={update.isPending}
-                                    onChange={(e) => setAiDays(e.target.value)}
                                 />
                             </div>
                             <div className="flex flex-col gap-1 max-w-xs">

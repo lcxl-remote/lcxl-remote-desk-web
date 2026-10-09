@@ -39,7 +39,9 @@ pub struct CurrentUser {
     pub unread_count: Option<u32>,
     pub country: Option<String>,
     pub access: Option<String>,
-    #[serde(rename(serialize = "targetConnectionId"))]
+    // Session storage serializes and deserializes this same public identity.
+    // Losing the target fence would broaden a scoped user's authority.
+    #[serde(rename = "targetConnectionId")]
     #[schema(rename = "targetConnectionId")]
     pub target_connection_id: Option<String>,
     pub geographic: Option<Geographic>,
@@ -83,6 +85,27 @@ impl SignalingUser for CurrentUser {
 
     fn get_target_connection_id(&self) -> Option<&str> {
         self.target_connection_id.as_deref()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_round_trip_preserves_the_target_authority_fence() {
+        let mut scoped = CurrentUser::new_admin("scoped");
+        scoped.target_connection_id = Some("one-device".into());
+        let serialized = serde_json::to_value(&scoped).unwrap();
+        assert_eq!(serialized["targetConnectionId"], "one-device");
+        assert!(serialized.get("target_connection_id").is_none());
+        let restored: CurrentUser = serde_json::from_value(serialized).unwrap();
+        assert_eq!(restored.get_target_connection_id(), Some("one-device"));
+        assert_eq!(restored.get_access(), Some(USER_ADMIN));
+        let owner: CurrentUser =
+            serde_json::from_value(serde_json::to_value(CurrentUser::new_admin("owner")).unwrap())
+                .unwrap();
+        assert_eq!(owner.get_target_connection_id(), None);
     }
 }
 

@@ -22,7 +22,9 @@ async fn ui_read_is_subject_scoped_monotonic_and_independent_of_model_consumptio
     task.fail("unable-to-complete", "1970-01-01T00:00:01Z")
         .unwrap();
     replace_run_on(&db, &row, &task, 1000).await.unwrap();
-    synchronize_control_on(&db, &task, 1000).await.unwrap();
+    synchronize_control_on(&db, &task, 1000, false)
+        .await
+        .unwrap();
     append_state_event_on(&db, &group, &task, 1000)
         .await
         .unwrap();

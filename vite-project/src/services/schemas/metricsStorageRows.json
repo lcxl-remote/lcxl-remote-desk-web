@@ -1,0 +1,1 @@
+{"type":"object","required":["kind","rows","budget","cleanup_active"],"properties":{"budget":{"type":"string"},"cleanup_active":{"type":"boolean"},"kind":{"type":"string","enum":["event","compact","detail","rollup"],"x-readme-ref-name":"MetricsStorageKind"},"rows":{"type":"string"}},"x-readme-ref-name":"MetricsStorageRows"}

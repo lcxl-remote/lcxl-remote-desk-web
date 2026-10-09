@@ -43,12 +43,20 @@ async fn reject_writes(db: &DatabaseConnection, id: &str) {
             if spoof {
                 // Valid input must reach the persisted-state comparison, not fail JSON parsing.
                 assert!(
-                    desk_diagnose_core::schedule::management_tools::parse(&scheduled, &call)
-                        .is_ok()
+                    desk_diagnose_core::schedule::management_tools::parse(
+                        &scheduled,
+                        &call,
+                        &desk_diagnose_core::model_observability::tool::ToolObservation::default()
+                    )
+                    .is_ok()
                 );
             }
             let result = ScheduleStore::new(db.clone())
-                .manage_from_session(&mut scheduled, &call)
+                .manage_from_session(
+                    &mut scheduled,
+                    &call,
+                    &desk_diagnose_core::model_observability::tool::ToolObservation::default(),
+                )
                 .await;
             if spoof {
                 assert!(matches!(result, Err(ScheduleStoreError::Conflict)));

@@ -65,6 +65,8 @@ impl SubAgentStore {
         }
         let now = chrono::Utc::now();
         let mut closed = 0;
+        let mut permission_ends =
+            desk_diagnose_core::model_observability::permission::PendingEnds::default();
         for row in rows {
             super::scheduled_budget::lock_historical_on(&txn, &row).await?;
             let group = decode_group(&row)?;
@@ -84,9 +86,16 @@ impl SubAgentStore {
             if !source_withdrawn {
                 return Err(invalid());
             }
-            closed += close_scheduled_group_on(&txn, &row, now.timestamp_millis()).await?;
+            let (count, prepared) =
+                close_scheduled_group_on(&txn, &row, now.timestamp_millis()).await?;
+            closed += count;
+            permission_ends.extend(prepared);
         }
         txn.commit().await?;
+        permission_ends.submit(
+            now.timestamp_millis(),
+            crate::model_metrics::runtime::submit,
+        );
         Ok(closed)
     }
 }
@@ -98,7 +107,13 @@ pub(crate) async fn close_scheduled_group_on(
     txn: &sea_orm::DatabaseTransaction,
     row: &group_row::Model,
     now_ms: i64,
-) -> Result<usize, DbErr> {
+) -> Result<
+    (
+        usize,
+        desk_diagnose_core::model_observability::permission::PendingEnds,
+    ),
+    DbErr,
+> {
     let mut group = decode_group(row)?;
     if !matches!(&group.source, desk_diagnose_core::subagent::DelegationSource::ScheduledOccurrence {
         schedule_id, occurrence_id,
@@ -117,6 +132,8 @@ pub(crate) async fn close_scheduled_group_on(
     }
     let children = super::group_children_on(txn, &group).await?;
     let mut closed = 0;
+    let mut permission_ends =
+        desk_diagnose_core::model_observability::permission::PendingEnds::default();
     for child in children {
         let mut run = decode_run(&child)?;
         if run.state.is_terminal() {
@@ -128,9 +145,9 @@ pub(crate) async fn close_scheduled_group_on(
         run.settle_cancel(&now.to_rfc3339())
             .map_err(|_| invalid())?;
         replace_run_on(txn, &child, &run, now_ms).await?;
-        synchronize_control_on(txn, &run, now_ms).await?;
+        permission_ends.extend(synchronize_control_on(txn, &run, now_ms, false).await?);
         append_state_event_on(txn, &group, &run, now_ms).await?;
         closed += 1;
     }
-    Ok(closed)
+    Ok((closed, permission_ends))
 }

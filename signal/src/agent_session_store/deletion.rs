@@ -58,7 +58,7 @@ impl SignalAgentSessionStore {
             return Err(internal("Only a main conversation can be deleted"));
         }
         let now_ms = chrono::Utc::now().timestamp_millis();
-        crate::agent_subagent_store::close_root_on(&txn, &session, now_ms)
+        let permission_ends = crate::agent_subagent_store::close_root_on(&txn, &session, now_ms)
             .await
             .map_err(save_backend)?;
         agent_schedule::Entity::update_many()
@@ -169,6 +169,7 @@ impl SignalAgentSessionStore {
             .await
             .map_err(save_backend)?;
         txn.commit().await.map_err(save_backend)?;
+        permission_ends.submit(now_ms, crate::model_metrics::runtime::submit);
         Ok(session.current_request_id)
     }
 }

@@ -18,7 +18,6 @@ use desk_utils::error::DeskErrorCode;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
 use sha2::{Digest, Sha256};
 
-use crate::ai_usage::{self, AiUsageDelta};
 use crate::model_dial::SignalModelSeam;
 use crate::model_provider;
 
@@ -67,34 +66,27 @@ fn transport_error(message: impl Into<String>) -> AgentError {
     }
 }
 
-/// Best-effort hourly accounting shared by every central model dial.
-pub(crate) async fn record_usage(
-    db: &DatabaseConnection,
-    model_name: &str,
-    usage: &desk_diagnose_core::chat::TokenUsage,
+pub(crate) fn record_metered(
+    context: Option<&desk_diagnose_core::model_observability::ObservationContext>,
 ) {
-    let delta = AiUsageDelta {
-        model_name: model_name.to_string(),
-        input_tokens: usage.input_tokens.unwrap_or(0),
-        output_tokens: usage.output_tokens.unwrap_or(0),
-        cache_read_tokens: usage.cache_read_tokens.unwrap_or(0),
-        cache_write_tokens: usage.cache_write_tokens.unwrap_or(0),
-        request_count: 1,
-    };
-    let bucket = ai_usage::truncate_to_hour(chrono::Utc::now());
-    if let Err(error) = ai_usage::upsert_ai_usage(db, bucket, &delta).await {
-        log::warn!("[ai-assistant] failed to record model usage: {error}");
+    if let Some(context) = context {
+        context.metered(chrono::Utc::now().timestamp_millis());
     }
 }
 
 struct MeteredSignalModel {
     inner: SignalModelSeam,
-    db: DatabaseConnection,
-    model_name: String,
 }
 
 #[async_trait::async_trait(?Send)]
 impl ModelSeam for MeteredSignalModel {
+    fn observation_context(
+        &self,
+        use_case: desk_diagnose_core::model_profile::ModelUseCase,
+        origin: desk_diagnose_core::model_observability::Origin,
+    ) -> Option<desk_diagnose_core::model_observability::ObservationContext> {
+        self.inner.observation_context(use_case, origin)
+    }
     fn context_compression_provenance(
         &self,
         turn_id: &str,
@@ -133,8 +125,16 @@ impl ModelSeam for MeteredSignalModel {
         request: ModelRequest,
         sink: &mut dyn TurnSink,
     ) -> Result<desk_diagnose_core::chat::ModelTurn, AgentError> {
+        let mut request = request;
+        if request.observation.is_none() {
+            request.observation = self.observation_context(
+                request.use_case,
+                desk_diagnose_core::model_observability::Origin::WorkCompletion,
+            );
+        }
+        let observation = request.observation.clone();
         let turn = self.inner.call(request, sink).await?;
-        record_usage(&self.db, &self.model_name, &turn.usage).await;
+        record_metered(observation.as_ref());
         Ok(turn)
     }
 }
@@ -163,6 +163,14 @@ struct CompletionModel {
 
 #[async_trait::async_trait(?Send)]
 impl ModelSeam for CompletionModel {
+    fn observation_context(
+        &self,
+        use_case: desk_diagnose_core::model_profile::ModelUseCase,
+        origin: desk_diagnose_core::model_observability::Origin,
+    ) -> Option<desk_diagnose_core::model_observability::ObservationContext> {
+        self.inner.observation_context(use_case, origin)
+    }
+
     fn context_compression_provenance(
         &self,
         turn_id: &str,
@@ -391,7 +399,6 @@ pub async fn resume_completion_turn(
                 fresh_task: None,
                 inner: seam,
                 db: db.clone(),
-                model_name: config.model.clone().unwrap_or_default(),
                 destination,
                 selected_source_tools: export.selected_source_tools.clone(),
                 export_authorization_id: format!(
@@ -411,11 +418,7 @@ pub async fn resume_completion_turn(
             export,
         })
     } else {
-        Box::new(MeteredSignalModel {
-            inner: seam,
-            db: db.clone(),
-            model_name: config.model.clone().unwrap_or_default(),
-        })
+        Box::new(MeteredSignalModel { inner: seam })
     };
     let sessions = crate::agent_session_store::SignalAgentSessionStore::new(db.clone())
         .with_client_metadata(session.client_conversation_id.clone(), session.surface);

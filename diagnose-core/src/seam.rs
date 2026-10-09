@@ -27,6 +27,8 @@ use crate::session::{PersistedAgentSession, SubjectMismatch};
 /// wire shape (OpenAI vs Anthropic) is the [`ModelSeam`] implementation's concern.
 #[derive(Debug, Clone)]
 pub struct ModelRequest {
+    /// Host-only observation lineage; never serialized into the provider body.
+    pub observation: Option<crate::model_observability::ObservationContext>,
     pub messages: Vec<ChatMessage>,
     pub tools: Vec<ToolSpec>,
     /// Requirements derived from the server-authoritative metadata of the tools
@@ -128,6 +130,7 @@ impl ModelRequest {
     /// the model is free to answer in text.
     pub fn text_only(messages: Vec<ChatMessage>, response_format: ResponseFormatSpec) -> Self {
         Self {
+            observation: None,
             messages,
             tools: Vec::new(),
             tool_requirements: crate::model_capability::ModelRequirements::TEXT_ONLY,
@@ -186,12 +189,12 @@ pub trait TurnSink {
         let _ = (reason, error);
     }
 
-    /// A read tool call was dispatched (about to run).
+    /// Tool processing started; input validation and native dispatch are separate.
     fn on_tool_started(&mut self, tool_name: &str, call_id: &str, arguments_json: &str) {
         let _ = (tool_name, call_id, arguments_json);
     }
 
-    /// A mutating tool call is waiting for the operator's approval decision.
+    /// Display approval progress while the runtime validates and creates a request.
     fn on_awaiting_approval(&mut self, tool_name: &str, call_id: &str, arguments_json: &str) {
         let _ = (tool_name, call_id, arguments_json);
     }
@@ -236,6 +239,10 @@ pub trait TurnSink {
     fn on_answer_committed(&mut self, text: &str) {
         let _ = text;
     }
+
+    /// Host-only handle for a committed answer whose caller performs the final
+    /// output parsing. This callback must not emit a UI or device frame.
+    fn on_answer_observation(&mut self, _context: crate::model_observability::ObservationContext) {}
 
     /// The persisted floor for this turn advanced before the provider dial.
     fn on_context_trimmed(&mut self, turn_id: &str) {
@@ -364,6 +371,14 @@ pub enum ContextCompressionAuditOutcome {
 /// (text + tool calls + stop reason + usage).
 #[async_trait(?Send)]
 pub trait ModelSeam {
+    /// Uses already-resolved host metadata; this must never query storage.
+    fn observation_context(
+        &self,
+        _use_case: ModelUseCase,
+        _origin: crate::model_observability::Origin,
+    ) -> Option<crate::model_observability::ObservationContext> {
+        None
+    }
     /// Conservative input units for the rendered provider payload. Host-only
     /// lineage and control fields must not inflate a physical request quote.
     fn model_input_token_upper_bound(
@@ -707,6 +722,14 @@ pub struct ExecContext {
 /// approval + real execution via [`confirm_and_exec`](ToolSeam::confirm_and_exec).
 #[async_trait(?Send)]
 pub trait ToolSeam {
+    /// Nonserialized observation only; implementations must never await storage
+    /// here or use this handle as an authorization or execution requirement.
+    fn observe_tool_input(
+        &self,
+        _call: &ToolCall,
+        _observation: crate::model_observability::tool::ToolObservation,
+    ) {
+    }
     /// Durable Provider runtimes refresh balances before every model request.
     /// Non-Provider seams have no grant projection.
     async fn current_grant_disclosure(
@@ -1028,6 +1051,7 @@ pub trait SessionSeam {
         &self,
         _session: &mut PersistedAgentSession,
         _call: &crate::chat::ToolCall,
+        _observation: crate::model_observability::tool::ToolObservation,
     ) -> Result<String, AgentError> {
         Err(crate::schedule::proposal::unavailable())
     }
@@ -1038,6 +1062,7 @@ pub trait SessionSeam {
         &self,
         _session: &mut PersistedAgentSession,
         _schedule_id: &str,
+        _observation: crate::model_observability::tool::ToolObservation,
     ) -> Result<bool, AgentError> {
         Err(crate::schedule::proposal::unavailable())
     }
@@ -1310,6 +1335,7 @@ mod tests {
     #[test]
     fn registered_tool_requirement_survives_model_facing_rename() {
         let request = ModelRequest {
+            observation: None,
             messages: vec![ChatMessage::text(
                 "u1",
                 ChatRole::User,

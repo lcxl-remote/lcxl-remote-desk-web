@@ -2,7 +2,7 @@
 
 use super::computer_binding::{ComputerBinding, original_on, validate_binding};
 use super::*;
-use crate::remote_tool_edge::completion::{Projection, project};
+use crate::remote_tool_edge::completion::{Projection, project, project_reported};
 use desk_agent_protocol::computer_use::ComputerActionCompleted;
 use desk_diagnose_core::{
     action_result::ActionResultReceipt,
@@ -44,6 +44,47 @@ pub(crate) enum CompletionObservation {
     Duplicate,
     InlineOrLegacy,
     Stale,
+}
+
+struct CompletionReport {
+    observation: CompletionObservation,
+    operations: Option<OperationReport>,
+}
+
+struct OperationReport {
+    work_id: i64,
+    steps: usize,
+    received_at_ms: i64,
+    batch: Option<desk_diagnose_core::application_batch::BatchExecutionObservation>,
+}
+
+impl From<CompletionObservation> for CompletionReport {
+    fn from(observation: CompletionObservation) -> Self {
+        Self {
+            observation,
+            operations: None,
+        }
+    }
+}
+
+impl CompletionReport {
+    fn submit(&self, native: &ComputerActionCompleted) {
+        if let Some(operation) = &self.operations
+            && let Some(alias) =
+                desk_diagnose_core::model_observability::ObservationAlias::provider_work(
+                    &operation.work_id.to_string(),
+                )
+        {
+            desk_diagnose_core::model_observability::operations::provider_completion_from_dispatch(
+                alias,
+                operation.steps,
+                operation.received_at_ms,
+                native,
+                operation.batch,
+                crate::model_metrics::runtime::submit,
+            );
+        }
+    }
 }
 
 pub(crate) struct OriginalResult {
@@ -364,7 +405,12 @@ impl SignalCapabilityGrantStore {
                         .saturating_mul(2)
                         .min(SQLITE_COMPLETION_BUSY_MAX_DELAY_MS);
                 }
-                other => return other,
+                Ok(report) => {
+                    // Only committed, authenticated facts enter the side channel.
+                    report.submit(completed);
+                    return Ok(report.observation);
+                }
+                Err(error) => return Err(error),
             }
         }
     }
@@ -376,7 +422,7 @@ impl SignalCapabilityGrantStore {
         audience: &str,
         frame: &str,
         completed: &ComputerActionCompleted,
-    ) -> Result<CompletionObservation, DbErr> {
+    ) -> Result<CompletionReport, DbErr> {
         if frame != completed.execution_generation {
             return Err(invalid());
         }
@@ -391,15 +437,23 @@ impl SignalCapabilityGrantStore {
             // Pre-binding work and the two inline browser reads cannot acquire
             // new provenance retrospectively. Their existing waiter still checks
             // its own connection and handles the original inline completion.
-            return Ok(CompletionObservation::InlineOrLegacy);
+            return Ok(CompletionObservation::InlineOrLegacy.into());
         }
         let binding = binding(&outbox, &work, &payload)?;
         if binding.connection_id != connection || binding.plan.device_id != audience {
             return Err(invalid());
         }
-        let projection = project_on(&binding, &work, &payload, completed)?;
+        let reported = project_reported(
+            &binding.plan,
+            &payload.tool_name,
+            &work.conversation_id,
+            &payload.canonical_input_json,
+            completed,
+        )
+        .map_err(|_| invalid())?;
+        let projection = reported.projection;
         if work.result_json.is_some() && work.result_schema_version != Some(2) {
-            return Ok(CompletionObservation::Stale);
+            return Ok(CompletionObservation::Stale.into());
         }
         let mut record = if work.result_json.is_some() {
             decode(&outbox, &work, &payload, &binding)?
@@ -421,20 +475,22 @@ impl SignalCapabilityGrantStore {
             }
         };
         if let Some(terminal) = &record.terminal {
-            return Ok(if terminal.observation.native == *completed {
+            return Ok((if terminal.observation.native == *completed {
                 CompletionObservation::Duplicate
             } else {
                 CompletionObservation::Stale
-            });
+            })
+            .into());
         }
         if projection.is_none()
             && let Some(unknown) = &record.unknown
         {
-            return Ok(if unknown.native == *completed {
+            return Ok((if unknown.native == *completed {
                 CompletionObservation::Duplicate
             } else {
                 CompletionObservation::Stale
-            });
+            })
+            .into());
         }
         if !matches!(
             outbox.state.as_str(),
@@ -443,7 +499,7 @@ impl SignalCapabilityGrantStore {
             work.status.as_str(),
             CAPABILITY_WORK_DISPATCHING | CAPABILITY_WORK_OUTCOME_UNKNOWN
         ) {
-            return Ok(CompletionObservation::Stale);
+            return Ok(CompletionObservation::Stale.into());
         }
         let now = Utc::now();
         let now_ms = u64::try_from(now.timestamp_millis()).map_err(|_| invalid())?;
@@ -526,7 +582,15 @@ impl SignalCapabilityGrantStore {
         }
         #[cfg(test)]
         pause_crash_fixture_before_commit("computer_completion_before_commit");
-        Ok(result)
+        Ok(CompletionReport {
+            observation: result,
+            operations: Some(OperationReport {
+                work_id: work.id,
+                steps: binding.plan.actions.len(),
+                received_at_ms: now.timestamp_millis(),
+                batch: reported.batch,
+            }),
+        })
     }
 
     pub(crate) async fn read_computer_result(

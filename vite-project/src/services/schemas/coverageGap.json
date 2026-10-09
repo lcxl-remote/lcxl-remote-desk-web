@@ -1,0 +1,1 @@
+{"type":"object","required":["from","reason"],"properties":{"from":{"type":"string"},"reason":{"type":"string"},"to":{"type":["string","null"]}},"x-readme-ref-name":"CoverageGap"}

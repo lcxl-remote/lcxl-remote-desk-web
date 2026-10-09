@@ -298,7 +298,8 @@ impl SignalAgentExecStore {
         };
         let disposition_json = serde_json::to_string(disposition)
             .map_err(|e| internal(format!("encode agent execution result: {e}")))?;
-        agent_exec_task::Entity::update_many()
+        let received_at = Utc::now();
+        let changed = agent_exec_task::Entity::update_many()
             .col_expr(agent_exec_task::Column::Status, Expr::value(status))
             .col_expr(
                 agent_exec_task::Column::DispositionJson,
@@ -312,7 +313,7 @@ impl SignalAgentExecStore {
                 agent_exec_task::Column::DeliveryState,
                 Expr::value(DELIVERY_PENDING),
             )
-            .col_expr(agent_exec_task::Column::UpdatedAt, Expr::value(Utc::now()))
+            .col_expr(agent_exec_task::Column::UpdatedAt, Expr::value(received_at))
             .filter(agent_exec_task::Column::Id.eq(row.id))
             .filter(agent_exec_task::Column::Status.is_in([
                 STATUS_DISPATCHING,
@@ -322,6 +323,19 @@ impl SignalAgentExecStore {
             .exec(&self.db)
             .await
             .map_err(|e| internal(format!("finalize agent execution: {e}")))?;
+        if changed.rows_affected == 1
+            && let Some(alias) =
+                desk_diagnose_core::model_observability::ObservationAlias::command_work(
+                    &row.id.to_string(),
+                )
+        {
+            desk_diagnose_core::model_observability::operations::command_completion(
+                alias,
+                received_at.timestamp_millis(),
+                disposition,
+                crate::model_metrics::runtime::submit,
+            );
+        }
         self.find_by_generation(execution_generation).await
     }
 

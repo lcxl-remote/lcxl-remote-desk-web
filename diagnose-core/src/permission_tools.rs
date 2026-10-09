@@ -124,33 +124,46 @@ pub(crate) fn latest_tool_request_denied(
     tool: &str,
     revision: u64,
 ) -> bool {
-    requests
+    latest_tool_request_denial(requests, decisions, tool, revision).is_some()
+}
+
+/// The denial branch and observation share the same scoped decision evidence.
+pub(crate) struct ToolRequestDenial {
+    pub actor: Option<crate::dynamic_run::PermissionDecisionActor>,
+}
+
+pub(crate) fn latest_tool_request_denial(
+    requests: &[PermissionRequest],
+    decisions: &[crate::dynamic_run::PermissionDecisionProjection],
+    tool: &str,
+    revision: u64,
+) -> Option<ToolRequestDenial> {
+    let request = requests.iter().rev().find(|request| {
+        request.input_revision == revision
+            && request.items.iter().any(|item| item.tool_name == tool)
+    })?;
+    let decision = decisions
         .iter()
-        .rev()
-        .find(|request| {
-            request.input_revision == revision
-                && request.items.iter().any(|item| item.tool_name == tool)
-        })
-        .is_some_and(|request| {
-            decisions
+        .find(|decision| decision.request_id == request.request_id);
+    let denied = decision.map_or(
+        request.state == PermissionRequestState::Denied,
+        |decision| {
+            // A mixed decision is not a refusal of the entire tool.
+            request
+                .items
                 .iter()
-                .find(|decision| decision.request_id == request.request_id)
-                .map_or(
-                    request.state == PermissionRequestState::Denied,
-                    |decision| {
-                        // A mixed decision is not a refusal of the entire tool.
-                        request
-                            .items
-                            .iter()
-                            .filter(|item| item.tool_name == tool)
-                            .all(|item| {
-                                decision.items.iter().any(|outcome| {
-                                    outcome.item_id == item.item_id && !outcome.approved
-                                })
-                            })
-                    },
-                )
-        })
+                .filter(|item| item.tool_name == tool)
+                .all(|item| {
+                    decision
+                        .items
+                        .iter()
+                        .any(|outcome| outcome.item_id == item.item_id && !outcome.approved)
+                })
+        },
+    );
+    denied.then(|| ToolRequestDenial {
+        actor: decision.map(|decision| decision.actor),
+    })
 }
 
 /// Reject an unchanged AI-denied item even if the model changes item ids,
@@ -1633,6 +1646,95 @@ mod tests {
             "read_current_screen",
             3
         ));
+    }
+
+    #[test]
+    fn tool_denial_retains_actual_decider_and_missing_evidence_stays_unknown() {
+        let registry = crate::ai_assistant::ai_assistant_provider_registry();
+        let mut request=build_permission_request(
+            &call(r#"{"items":[{"item_id":"capture","tool_name":"read_current_screen","exact_input":{"display":"private-display"},"suggested_ttl_seconds":300,"suggested_max_uses":1,"reason":"private-reason"}]}"#),
+            &registry,"permission-denial-source".into(),3,"2026-09-17T00:00:00Z".into(),
+        ).unwrap();
+        request.state = PermissionRequestState::Denied;
+        for (actor, expected) in [
+            (
+                PermissionDecisionActor::Owner,
+                crate::model_observability::PermissionOutcome::Denied,
+            ),
+            (
+                PermissionDecisionActor::AiApproval,
+                crate::model_observability::PermissionOutcome::PolicyRejected,
+            ),
+            (
+                PermissionDecisionActor::System,
+                crate::model_observability::PermissionOutcome::Unavailable,
+            ),
+        ] {
+            let decision = PermissionDecisionProjection {
+                request_id: request.request_id.clone(),
+                input_revision: 3,
+                actor,
+                items: vec![PermissionItemDisposition {
+                    item_id: "capture".into(),
+                    approved: false,
+                }],
+            };
+            decision.validate_for(&request).unwrap();
+            let denial = latest_tool_request_denial(
+                std::slice::from_ref(&request),
+                std::slice::from_ref(&decision),
+                "read_current_screen",
+                3,
+            )
+            .unwrap();
+            assert_eq!(denial.actor, Some(actor));
+            assert_eq!(
+                crate::model_observability::permission::state_outcome(
+                    PermissionRequestState::Denied,
+                    denial.actor
+                ),
+                expected
+            );
+            assert!(latest_tool_request_denied(
+                std::slice::from_ref(&request),
+                std::slice::from_ref(&decision),
+                "read_current_screen",
+                3
+            ));
+            assert!(
+                latest_tool_request_denial(
+                    std::slice::from_ref(&request),
+                    std::slice::from_ref(&decision),
+                    "read_current_screen",
+                    4
+                )
+                .is_none()
+            );
+            let mut mixed = request.clone();
+            mixed.state = PermissionRequestState::PartiallyApproved;
+            let mut second = mixed.items[0].clone();
+            second.item_id = "approved-capture".into();
+            mixed.items.push(second);
+            let mut mixed_decision = decision;
+            mixed_decision.items.push(PermissionItemDisposition {
+                item_id: "approved-capture".into(),
+                approved: true,
+            });
+            mixed_decision.validate_for(&mixed).unwrap();
+            assert!(
+                latest_tool_request_denial(&[mixed], &[mixed_decision], "read_current_screen", 3)
+                    .is_none()
+            );
+        }
+        let denial = latest_tool_request_denial(&[request], &[], "read_current_screen", 3).unwrap();
+        assert!(denial.actor.is_none());
+        assert_eq!(
+            crate::model_observability::permission::state_outcome(
+                PermissionRequestState::Denied,
+                denial.actor
+            ),
+            crate::model_observability::PermissionOutcome::Unavailable
+        );
     }
 
     #[test]

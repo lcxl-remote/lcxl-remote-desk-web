@@ -137,7 +137,9 @@ impl SubAgentStore {
                 .ok_or_else(invalid)?;
             session.finish_turn(TurnState::Idle, now.to_rfc3339());
         }
-        if now_ms >= run.binding.deadline_ms || now_ms >= group.limits.deadline_ms {
+        let deadline_reached =
+            now_ms >= run.binding.deadline_ms || now_ms >= group.limits.deadline_ms;
+        if deadline_reached {
             run.fail("delegation_deadline_reached", &now.to_rfc3339())
                 .map_err(|_| invalid())?;
             session.finish_turn(TurnState::Failed, now.to_rfc3339());
@@ -222,7 +224,21 @@ impl SubAgentStore {
         if changed.rows_affected != 1 {
             return Err(invalid());
         }
+        let permission_ends =
+            if !deadline_reached && group.source_admission == SourceAdmission::Closed {
+                desk_diagnose_core::model_observability::permission::PendingEnds::waiting(
+                    &original_session,
+                    desk_diagnose_core::model_observability::PermissionOutcome::Cancelled,
+                )
+            } else {
+                desk_diagnose_core::model_observability::permission::PendingEnds::task_control(
+                    &original_session,
+                    &run,
+                    deadline_reached,
+                )
+            };
         txn.commit().await?;
+        permission_ends.submit(now_ms, crate::model_metrics::runtime::submit);
         Ok(true)
     }
 }

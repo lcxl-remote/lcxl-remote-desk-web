@@ -36,6 +36,15 @@ impl ScheduleStore {
         &self,
         run_id: &str,
     ) -> Result<bool, ScheduleStoreError> {
+        self.settle_fresh_children_wait_with_observer(run_id, crate::model_metrics::runtime::submit)
+            .await
+    }
+
+    async fn settle_fresh_children_wait_with_observer(
+        &self,
+        run_id: &str,
+        mut submit: impl FnMut(desk_diagnose_core::model_observability::ObservationEvent),
+    ) -> Result<bool, ScheduleStoreError> {
         let peek = run::Entity::find()
             .filter(run::Column::RunId.eq(run_id))
             .one(&self.db)
@@ -222,7 +231,20 @@ impl ScheduleStore {
         }
         // Closing planning and native stop intents commit even while the real
         // command is still running. Returning false never rolls these back.
-        children::close_scheduled_group_on(&txn, group_row, now).await?;
+        let (_, mut permission_ends) =
+            children::close_scheduled_group_on(&txn, group_row, now).await?;
+        permission_ends.extend(
+            desk_diagnose_core::model_observability::permission::PendingEnds::waiting(
+                &session,
+                if cancelled {
+                    desk_diagnose_core::model_observability::PermissionOutcome::Cancelled
+                } else if expired {
+                    desk_diagnose_core::model_observability::PermissionOutcome::Expired
+                } else {
+                    desk_diagnose_core::model_observability::PermissionOutcome::Revoked
+                },
+            ),
+        );
         let current_group = group_row::Entity::find_by_id(group_row.id)
             .one(&txn)
             .await?
@@ -230,6 +252,7 @@ impl ScheduleStore {
         let native = children::scheduled_native_on(&txn, &current_group).await?;
         if native == children::ScheduledNativeDisposition::Pending {
             txn.commit().await?;
+            permission_ends.submit(now, &mut submit);
             return Ok(false);
         }
 
@@ -328,6 +351,7 @@ impl ScheduleStore {
             ),
         })
         .await?;
+        permission_ends.submit(now, &mut submit);
         Ok(true)
     }
 }
@@ -505,6 +529,10 @@ impl ScheduleStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../signal-facade/tests/fixtures/model_metrics_scheduled_permissions.rs"
+    ));
     use crate::entity::agent_task_authorization as authorization;
     use desk_agent_protocol::ai_assistant::subagent::{AiAssistantStopControl, SubAgentStopChoice};
 
@@ -726,6 +754,8 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+        let metric_aliases =
+            seed_observed_schedule_waits(&db, &parent, &child.child_conversation_id).await;
         let original = original_run(&db, &parent.conversation_id).await;
         run::Entity::update_many()
             .set(run::ActiveModel {
@@ -736,12 +766,16 @@ mod tests {
             .exec(&db)
             .await
             .unwrap();
+        let mut metric_events = Vec::new();
         assert!(
             !schedule
-                .settle_fresh_children_wait(&parent.conversation_id)
+                .settle_fresh_children_wait_with_observer(&parent.conversation_id, |event| {
+                    metric_events.push(event)
+                })
                 .await
                 .unwrap()
         );
+        assert_observed_schedule_waits_ended(&metric_events, &metric_aliases);
         let before_unknown = original_run(&db, &parent.conversation_id).await;
         assert_eq!(before_unknown.status, "awaiting_children");
         let retained = native::Entity::find_by_id(command.id)

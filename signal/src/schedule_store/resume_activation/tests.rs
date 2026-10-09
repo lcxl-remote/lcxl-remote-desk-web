@@ -368,7 +368,11 @@ async fn live_review_delivers_approval_or_rejection_to_the_same_turn() {
         changed.lease_deadline = Set(Some(chrono::Utc::now() + chrono::Duration::minutes(5)));
         changed.update(&store.db).await.unwrap();
         store
-            .manage_from_session(&mut session, &call)
+            .manage_from_session(
+                &mut session,
+                &call,
+                &desk_diagnose_core::model_observability::tool::ToolObservation::default(),
+            )
             .await
             .unwrap();
         let proposal: serde_json::Value =
@@ -381,7 +385,11 @@ async fn live_review_delivers_approval_or_rejection_to_the_same_turn() {
         PersistedAgentSession::decode_json(&session.encode_json_for_storage().unwrap()).unwrap();
         assert!(
             !store
-                .poll_review_decision(&mut session, &task.schedule_id)
+                .poll_review_decision(
+                    &mut session,
+                    &task.schedule_id,
+                    &desk_diagnose_core::model_observability::tool::ToolObservation::default()
+                )
                 .await
                 .unwrap()
         );
@@ -399,7 +407,11 @@ async fn live_review_delivers_approval_or_rejection_to_the_same_turn() {
         }
         assert!(
             store
-                .poll_review_decision(&mut session, &task.schedule_id)
+                .poll_review_decision(
+                    &mut session,
+                    &task.schedule_id,
+                    &desk_diagnose_core::model_observability::tool::ToolObservation::default()
+                )
                 .await
                 .unwrap()
         );
@@ -446,7 +458,11 @@ async fn live_review_cannot_adopt_new_input_or_a_changed_lease() {
         changed.update(&store.db).await.unwrap();
         assert!(matches!(
             store
-                .poll_review_decision(&mut session, &task.schedule_id)
+                .poll_review_decision(
+                    &mut session,
+                    &task.schedule_id,
+                    &desk_diagnose_core::model_observability::tool::ToolObservation::default()
+                )
                 .await,
             Err(ScheduleStoreError::Conflict)
         ));

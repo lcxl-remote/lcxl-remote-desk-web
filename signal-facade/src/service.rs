@@ -1,5 +1,6 @@
 pub mod computer_turn;
 pub mod file_recovery;
+pub mod model_metrics;
 pub mod schedule_management;
 use std::{
     net::{IpAddr, SocketAddr},

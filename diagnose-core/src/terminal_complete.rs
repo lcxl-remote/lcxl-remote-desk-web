@@ -23,6 +23,7 @@ use crate::exec_classify::classify_command;
 use crate::prompt::ResponseFormatSpec;
 use crate::redaction::Redactor;
 use crate::seam::ModelRequest;
+pub use crate::text_parse::ParseOutcome as CompletionParseOutcome;
 use crate::text_parse::{extract_json_object, truncate_on_char_boundary};
 
 /// Max command-line candidates kept from one completion turn. Ghost-text shows the
@@ -249,10 +250,35 @@ pub fn parse_completions(
     prefix: &str,
     default_shell: &str,
 ) -> Vec<CommandCompletion> {
+    parse_completions_detailed(content, prefix, default_shell).0
+}
+
+pub fn parse_completions_observed(
+    turn: &crate::chat::ModelTurn,
+    prefix: &str,
+    default_shell: &str,
+    observation: Option<&crate::model_observability::ObservationContext>,
+    now_ms: i64,
+) -> Vec<CommandCompletion> {
+    let (completions, outcome) = parse_completions_detailed(&turn.text, prefix, default_shell);
+    crate::model_observability::record_structured_output(
+        turn,
+        outcome == crate::text_parse::ParseOutcome::Structured,
+        observation,
+        now_ms,
+    );
+    completions
+}
+
+pub fn parse_completions_detailed(
+    content: &str,
+    prefix: &str,
+    default_shell: &str,
+) -> (Vec<CommandCompletion>, CompletionParseOutcome) {
     let Some(raw) =
         extract_json_object(content).and_then(|j| serde_json::from_str::<RawCompletions>(j).ok())
     else {
-        return Vec::new();
+        return (Vec::new(), crate::text_parse::ParseOutcome::Degraded);
     };
 
     let mut out: Vec<CommandCompletion> = Vec::new();
@@ -286,7 +312,7 @@ pub fn parse_completions(
             break;
         }
     }
-    out
+    (out, crate::text_parse::ParseOutcome::Structured)
 }
 
 /// The risk / decision the shared classifier computes for one full command line.

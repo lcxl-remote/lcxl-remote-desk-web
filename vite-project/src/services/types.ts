@@ -3268,6 +3268,27 @@ export type ApprovalModelUpdate = {
 */
 export type AssistantImageBytes = Blob;
 
+export const associationGapKindEnum = {
+    attribution: "attribution",
+    operation_start: "operation_start",
+    correction_prerequisite: "correction_prerequisite"
+} as const;
+
+export type AssociationGapKindEnumKey = (typeof associationGapKindEnum)[keyof typeof associationGapKindEnum];
+
+export type AssociationGapKind = AssociationGapKindEnumKey;
+
+export const associationGapStateEnum = {
+    waiting: "waiting",
+    unavailable: "unavailable",
+    conflict: "conflict",
+    outside_window: "outside_window"
+} as const;
+
+export type AssociationGapStateEnumKey = (typeof associationGapStateEnum)[keyof typeof associationGapStateEnum];
+
+export type AssociationGapState = AssociationGapStateEnumKey;
+
 /**
  * @description Binary download only; failures use the standard JSON business-error body.
 */
@@ -3878,6 +3899,19 @@ export type CommunicationSurfaceScope = ({
     kind: CommunicationSurfaceScopeKindEnum2Key;
 });
 
+export const componentStateEnum = {
+    ready: "ready",
+    initializing: "initializing",
+    disabled: "disabled",
+    cache_expired: "cache_expired",
+    degraded: "degraded",
+    unavailable: "unavailable"
+} as const;
+
+export type ComponentStateEnumKey = (typeof componentStateEnum)[keyof typeof componentStateEnum];
+
+export type ComponentState = ComponentStateEnumKey;
+
 export type ComputerUseApplicationPolicy = {
     /**
      * @type array
@@ -4218,6 +4252,52 @@ export type ContextManagementDto = {
      * @type string
     */
     strategy: ContextManagementStrategyDto;
+};
+
+export type CorrectionGroupRecord = {
+    /**
+     * @type string
+    */
+    category: string;
+    /**
+     * @type string
+    */
+    last_input_id: string;
+    /**
+     * @type string
+    */
+    linked_attempts: string;
+    /**
+     * @type string
+    */
+    outcome: string;
+    /**
+     * @type string,null
+    */
+    reason?: string | null;
+    /**
+     * @type string
+    */
+    root_id: string;
+    /**
+     * @type string
+    */
+    updated_at: string;
+};
+
+export type CoverageGap = {
+    /**
+     * @type string
+    */
+    from: string;
+    /**
+     * @type string
+    */
+    reason: string;
+    /**
+     * @type string,null
+    */
+    to?: string | null;
 };
 
 /**
@@ -5733,6 +5813,15 @@ export type GoalBudgetPolicy = {
     schemaVersion: number;
 };
 
+export const granularityEnum = {
+    five_minutes: "five_minutes",
+    hour: "hour"
+} as const;
+
+export type GranularityEnumKey = (typeof granularityEnum)[keyof typeof granularityEnum];
+
+export type Granularity = GranularityEnumKey;
+
 export type InitParams = {
     /**
      * @description Deployment bootstrap token. Required only when the server process was\nstarted with `LRD_BOOTSTRAP_TOKEN`.
@@ -5851,6 +5940,54 @@ export type KeyboardEventData = {
      * @type boolean
     */
     shift_key: boolean;
+};
+
+export type LatencySummary = {
+    /**
+     * @type number,null, double
+    */
+    average_ms?: number | null;
+    /**
+     * @type string
+    */
+    count: string;
+    /**
+     * @type boolean
+    */
+    estimated_percentiles: boolean;
+    /**
+     * @type boolean
+    */
+    extrema_unavailable: boolean;
+    /**
+     * @minLength 0
+     * @type integer,null, int64
+    */
+    max_ms?: number | null;
+    /**
+     * @minLength 0
+     * @type integer,null, int64
+    */
+    min_ms?: number | null;
+    /**
+     * @type string
+    */
+    overflow_count: string;
+    /**
+     * @minLength 0
+     * @type integer,null, int64
+    */
+    p50_ms?: number | null;
+    /**
+     * @minLength 0
+     * @type integer,null, int64
+    */
+    p95_ms?: number | null;
+    /**
+     * @minLength 0
+     * @type integer,null, int64
+    */
+    p99_ms?: number | null;
 };
 
 /**
@@ -6188,6 +6325,1062 @@ export type MediaPipelineStateData = {
     source_resolution?: (null | Resolution);
 };
 
+export type MetricAssociatedModel = {
+    /**
+     * @type string
+    */
+    model_id: string;
+    /**
+     * @type string
+    */
+    model_name: string;
+    /**
+     * @type string
+    */
+    provider_id: string;
+    /**
+     * @type string
+    */
+    tool_inputs: string;
+};
+
+export type MetricConfigurationSample = {
+    /**
+     * @type string
+    */
+    model_id: string;
+    /**
+     * @type string
+    */
+    model_name: string;
+    /**
+     * @type string
+    */
+    provider_id: string;
+    /**
+     * @description Observed revisions in this query cohort, never current catalog values.
+     * @type array
+    */
+    revisions: string[];
+};
+
+export type MetricCount = {
+    /**
+     * @type string
+    */
+    count: string;
+    /**
+     * @type string
+    */
+    key: string;
+};
+
+export type MetricErrorCount = {
+    /**
+     * @type string
+    */
+    count: string;
+    /**
+     * @type string
+    */
+    error: string;
+    /**
+     * @type string
+    */
+    metric: string;
+};
+
+export const metricFilterEnum = {
+    time: "time",
+    provider_id: "provider_id",
+    model_id: "model_id",
+    surface: "surface",
+    purpose: "purpose",
+    origin: "origin",
+    tool: "tool",
+    error: "error",
+    contract_revision: "contract_revision",
+    include_probe: "include_probe"
+} as const;
+
+export type MetricFilterEnumKey = (typeof metricFilterEnum)[keyof typeof metricFilterEnum];
+
+export type MetricFilter = MetricFilterEnumKey;
+
+export const metricGroupSortEnum = {
+    calls: "calls",
+    request_errors: "request_errors",
+    request_failure_rate: "request_failure_rate",
+    input_rejected: "input_rejected",
+    input_rejection_rate: "input_rejection_rate"
+} as const;
+
+export type MetricGroupSortEnumKey = (typeof metricGroupSortEnum)[keyof typeof metricGroupSortEnum];
+
+export type MetricGroupSort = MetricGroupSortEnumKey;
+
+export const metricLatencyEnum = {
+    duration: "duration",
+    first_content: "first_content"
+} as const;
+
+export type MetricLatencyEnumKey = (typeof metricLatencyEnum)[keyof typeof metricLatencyEnum];
+
+export type MetricLatency = MetricLatencyEnumKey;
+
+export type MetricQuantity = {
+    /**
+     * @type string
+    */
+    key: string;
+    /**
+     * @type string
+    */
+    sample_count: string;
+    /**
+     * @type string
+    */
+    sum: string;
+};
+
+export const metricRateReasonEnum = {
+    unsupported_tool_filter: "unsupported_tool_filter",
+    unsupported_error_domain: "unsupported_error_domain",
+    arithmetic_unavailable: "arithmetic_unavailable",
+    retention_trim: "retention_trim"
+} as const;
+
+export type MetricRateReasonEnumKey = (typeof metricRateReasonEnum)[keyof typeof metricRateReasonEnum];
+
+export type MetricRateReason = MetricRateReasonEnumKey;
+
+export const sampleStatusEnum = {
+    complete: "complete",
+    partial: "partial",
+    no_samples: "no_samples",
+    not_collected: "not_collected",
+    unknown: "unknown",
+    unavailable: "unavailable",
+    not_applicable: "not_applicable"
+} as const;
+
+export type SampleStatusEnumKey = (typeof sampleStatusEnum)[keyof typeof sampleStatusEnum];
+
+export type SampleStatus = SampleStatusEnumKey;
+
+export type MetricRate = {
+    /**
+     * @type array
+    */
+    applied_filters: MetricFilter[];
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    definition_version: number;
+    /**
+     * @type string,null
+    */
+    denominator?: string | null;
+    /**
+     * @type string
+    */
+    denominator_scope: string;
+    /**
+     * @type string
+    */
+    key: string;
+    /**
+     * @type string,null
+    */
+    numerator?: string | null;
+    /**
+     * @type string,null
+    */
+    numerator_error?: string | null;
+    reason?: (null | MetricRateReason);
+    /**
+     * @type string
+    */
+    sample_status: SampleStatus;
+    /**
+     * @type array
+    */
+    unsupported_filters: MetricFilter[];
+    /**
+     * @type number,null, double
+    */
+    value?: number | null;
+};
+
+export const metricRecordKindEnum = {
+    call: "call",
+    attempt: "attempt",
+    tool: "tool",
+    operation: "operation",
+    runtime: "runtime"
+} as const;
+
+export type MetricRecordKindEnumKey = (typeof metricRecordKindEnum)[keyof typeof metricRecordKindEnum];
+
+export type MetricRecordKind = MetricRecordKindEnumKey;
+
+export type MetricSchemaPath = {
+    /**
+     * @type string
+    */
+    count: string;
+    /**
+     * @type string
+    */
+    path: string;
+};
+
+export type NamedLatency = {
+    /**
+     * @type string
+    */
+    kind: string;
+    /**
+     * @type object
+    */
+    summary: LatencySummary;
+};
+
+export type MetricStageCount = {
+    /**
+     * @type string
+    */
+    count: string;
+    /**
+     * @type string
+    */
+    outcome: string;
+    /**
+     * @type string
+    */
+    stage: string;
+};
+
+export type MetricsSummary = {
+    /**
+     * @type array
+    */
+    counts: MetricCount[];
+    /**
+     * @type object
+    */
+    duration: LatencySummary;
+    /**
+     * @type array
+    */
+    errors: MetricErrorCount[];
+    /**
+     * @type object
+    */
+    first_content: LatencySummary;
+    /**
+     * @type array
+    */
+    other_duration: NamedLatency[];
+    /**
+     * @type string,null
+    */
+    other_schema_errors?: string | null;
+    /**
+     * @type array
+    */
+    quantities: MetricQuantity[];
+    /**
+     * @type array
+    */
+    rates: MetricRate[];
+    /**
+     * @type array
+    */
+    schema_paths: MetricSchemaPath[];
+    /**
+     * @type boolean
+    */
+    schema_paths_limited: boolean;
+    /**
+     * @type array
+    */
+    stages: MetricStageCount[];
+};
+
+export type MetricSeriesPoint = {
+    /**
+     * @type string
+    */
+    bucket: string;
+    /**
+     * @type object
+    */
+    summary: MetricsSummary;
+};
+
+export type StageResult = {
+    /**
+     * @type string
+    */
+    outcome: string;
+    /**
+     * @type string
+    */
+    stage: string;
+};
+
+export type ObservationRecord = {
+    /**
+     * @type string,null
+    */
+    cache_read_tokens?: string | null;
+    /**
+     * @type string,null
+    */
+    cache_write_tokens?: string | null;
+    /**
+     * @type string,null
+    */
+    call_id?: string | null;
+    /**
+     * @type string
+    */
+    configuration_revision: string;
+    /**
+     * @type string
+    */
+    configuration_scope: string;
+    /**
+     * @type string
+    */
+    contract_revision: string;
+    correction_group?: (null | CorrectionGroupRecord);
+    /**
+     * @type string,null
+    */
+    correction_group_root?: string | null;
+    /**
+     * @type boolean
+    */
+    correction_group_unavailable: boolean;
+    /**
+     * @type string,null
+    */
+    correction_input?: string | null;
+    /**
+     * @type string,null
+    */
+    correction_of?: string | null;
+    /**
+     * @type string,null
+    */
+    correction_status?: string | null;
+    /**
+     * @type boolean
+    */
+    detail_trimmed: boolean;
+    /**
+     * @type boolean,null
+    */
+    dispatched?: boolean | null;
+    /**
+     * @minLength 0
+     * @type integer,null, int64
+    */
+    duration_ms?: number | null;
+    /**
+     * @minLength 0
+     * @type integer,null, int64
+    */
+    first_content_ms?: number | null;
+    /**
+     * @description Adapter-observed tool generation count, absent if not observed.
+     * @type string,null
+    */
+    generated_tool_count?: string | null;
+    /**
+     * @minLength 0
+     * @type integer,null, int64
+    */
+    headers_ms?: number | null;
+    /**
+     * @minLength 0
+     * @type integer,null, int32
+    */
+    http_status?: number | null;
+    /**
+     * @type string
+    */
+    id: string;
+    /**
+     * @type string,null
+    */
+    input_conclusion?: string | null;
+    /**
+     * @type string,null
+    */
+    input_issue?: string | null;
+    /**
+     * @type string,null
+    */
+    input_rejected_count?: string | null;
+    /**
+     * @type string,null
+    */
+    input_tokens?: string | null;
+    /**
+     * @type string
+    */
+    kind: string;
+    /**
+     * @type string
+    */
+    model_id: string;
+    /**
+     * @type string
+    */
+    model_name: string;
+    /**
+     * @type string,null
+    */
+    not_started_reason?: string | null;
+    /**
+     * @minLength 0
+     * @type integer,null, int32
+    */
+    ordinal?: number | null;
+    /**
+     * @type string
+    */
+    origin: string;
+    /**
+     * @type string
+    */
+    outcome: string;
+    /**
+     * @type string,null
+    */
+    output?: string | null;
+    /**
+     * @type string,null
+    */
+    output_tokens?: string | null;
+    /**
+     * @type string,null
+    */
+    permission?: string | null;
+    /**
+     * @type string
+    */
+    protocol: string;
+    /**
+     * @type string
+    */
+    provider_id: string;
+    /**
+     * @type string
+    */
+    purpose: string;
+    /**
+     * @type string,null
+    */
+    schema_path?: string | null;
+    /**
+     * @type array
+    */
+    stages: StageResult[];
+    /**
+     * @type string
+    */
+    started_at: string;
+    /**
+     * @type string
+    */
+    surface: string;
+    /**
+     * @type string,null
+    */
+    tool?: string | null;
+    /**
+     * @description Collected current input objects, derived from retained compact state.
+     * @type string,null
+    */
+    tool_count?: string | null;
+    /**
+     * @type string
+    */
+    tool_counts_status: SampleStatus;
+    /**
+     * @type string,null
+    */
+    tool_observation_id?: string | null;
+    /**
+     * @type string
+    */
+    updated_at: string;
+    /**
+     * @type boolean,null
+    */
+    usage_complete?: boolean | null;
+};
+
+export type MetricsCallDetail = {
+    /**
+     * @type object
+    */
+    call: ObservationRecord;
+    /**
+     * @type array
+    */
+    related: ObservationRecord[];
+    /**
+     * @type boolean
+    */
+    related_truncated: boolean;
+};
+
+export type QueryCoverage = {
+    /**
+     * @type string
+    */
+    as_of: string;
+    /**
+     * @type string
+    */
+    available_from: string;
+    /**
+     * @type string
+    */
+    cohort_basis: string;
+    /**
+     * @type string
+    */
+    effective_from: string;
+    /**
+     * @type string
+    */
+    effective_to: string;
+    /**
+     * @type string
+    */
+    granularity: Granularity;
+    /**
+     * @type boolean
+    */
+    live_pagination: boolean;
+    /**
+     * @type string,null
+    */
+    not_collected_before?: string | null;
+    /**
+     * @type string
+    */
+    requested_from: string;
+    /**
+     * @type string
+    */
+    requested_to: string;
+    /**
+     * @type string
+    */
+    sample_status: SampleStatus;
+    /**
+     * @type string,null
+    */
+    trimmed_before?: string | null;
+    /**
+     * @type array
+    */
+    usage_filter_dimensions: string[];
+    /**
+     * @type string
+    */
+    usage_source: string;
+};
+
+export type MetricsCalls = {
+    /**
+     * @type object
+    */
+    coverage: QueryCoverage;
+    /**
+     * @type string,null
+    */
+    next_cursor?: string | null;
+    /**
+     * @description Immutable first-page reception cutoff; terminal states remain live.
+     * @type string
+    */
+    received_before: string;
+    /**
+     * @type array
+    */
+    records: ObservationRecord[];
+};
+
+export type MetricsGroup = {
+    /**
+     * @type array
+    */
+    associated_models: MetricAssociatedModel[];
+    /**
+     * @type array
+    */
+    configurations: MetricConfigurationSample[];
+    /**
+     * @type boolean
+    */
+    configurations_limited: boolean;
+    /**
+     * @type string
+    */
+    key: string;
+    /**
+     * @type string,null
+    */
+    model_id?: string | null;
+    /**
+     * @type string,null
+    */
+    model_name?: string | null;
+    /**
+     * @type string
+    */
+    other_model_count: string;
+    /**
+     * @type string,null
+    */
+    provider_id?: string | null;
+    /**
+     * @type object
+    */
+    summary: MetricsSummary;
+    /**
+     * @type string,null
+    */
+    tool?: string | null;
+};
+
+export type MetricsGroups = {
+    /**
+     * @type object
+    */
+    coverage: QueryCoverage;
+    /**
+     * @type array
+    */
+    groups: MetricsGroup[];
+    other?: (null | MetricsSummary);
+};
+
+export type MetricsOverview = {
+    /**
+     * @type object
+    */
+    coverage: QueryCoverage;
+    previous?: (null | MetricsSummary);
+    /**
+     * @type object
+    */
+    summary: MetricsSummary;
+};
+
+export type MetricsRuntimeGroup = {
+    /**
+     * @type string
+    */
+    category: string;
+    /**
+     * @type string,null
+    */
+    contract_revision?: string | null;
+    /**
+     * @type string
+    */
+    definition: string;
+    /**
+     * @type object
+    */
+    labels: {
+        [key: string]: string;
+    };
+    /**
+     * @type object
+    */
+    summary: MetricsSummary;
+};
+
+export type MetricsRuntimeGroups = {
+    /**
+     * @type object
+    */
+    coverage: QueryCoverage;
+    /**
+     * @type array
+    */
+    groups: MetricsRuntimeGroup[];
+    other?: (null | MetricsSummary);
+};
+
+export type MetricsSeries = {
+    /**
+     * @type object
+    */
+    coverage: QueryCoverage;
+    /**
+     * @type array
+    */
+    points: MetricSeriesPoint[];
+};
+
+export type MetricsSettings = {
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    compact_row_budget: number;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    detail_days: number;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    detail_row_budget: number;
+    /**
+     * @type boolean
+    */
+    enabled: boolean;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    event_row_budget: number;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    five_minute_days: number;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    hourly_days: number;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    mutable_days: number;
+    /**
+     * @type string
+    */
+    revision: string;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    rollup_row_budget: number;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    series_per_bucket: number;
+    /**
+     * @type string
+    */
+    storage_budget_bytes: string;
+};
+
+export const metricsStorageKindEnum = {
+    event: "event",
+    compact: "compact",
+    detail: "detail",
+    rollup: "rollup"
+} as const;
+
+export type MetricsStorageKindEnumKey = (typeof metricsStorageKindEnum)[keyof typeof metricsStorageKindEnum];
+
+export type MetricsStorageKind = MetricsStorageKindEnumKey;
+
+export type MetricsStorageRows = {
+    /**
+     * @type string
+    */
+    budget: string;
+    /**
+     * @type boolean
+    */
+    cleanup_active: boolean;
+    /**
+     * @type string
+    */
+    kind: MetricsStorageKind;
+    /**
+     * @type string
+    */
+    rows: string;
+};
+
+export type MetricsStorage = {
+    /**
+     * @type string
+    */
+    budget_bytes: string;
+    /**
+     * @description Conservative quota charge, separate from physical database allocation.
+     * @type string
+    */
+    charged_bytes: string;
+    /**
+     * @type boolean
+    */
+    cleanup_active: boolean;
+    /**
+     * @type string
+    */
+    dropped_pending_events: string;
+    /**
+     * @type string,null
+    */
+    frozen_before?: string | null;
+    /**
+     * @type string,null
+    */
+    physical_allocated_bytes?: string | null;
+    /**
+     * @type string,null
+    */
+    physical_sampled_at?: string | null;
+    /**
+     * @type string
+    */
+    reserved_bytes: string;
+    /**
+     * @type string,null
+    */
+    rollup_trim_before?: string | null;
+    /**
+     * @type array
+    */
+    rows: MetricsStorageRows[];
+    /**
+     * @type string
+    */
+    trimmed_details: string;
+};
+
+export type MetricsStatus = {
+    /**
+     * @type string
+    */
+    as_of: string;
+    /**
+     * @type string,null
+    */
+    available_from?: string | null;
+    /**
+     * @type string,null
+    */
+    backlog?: string | null;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    definition_version: number;
+    /**
+     * @type string,null
+    */
+    discarded_events?: string | null;
+    /**
+     * @type string,null
+    */
+    dropped_events?: string | null;
+    /**
+     * @type boolean,null
+    */
+    enabled?: boolean | null;
+    /**
+     * @type array
+    */
+    gaps: CoverageGap[];
+    /**
+     * @type array
+    */
+    instrumented_surfaces: string[];
+    /**
+     * @type string,null
+    */
+    last_aggregated?: string | null;
+    /**
+     * @type string,null
+    */
+    last_persisted?: string | null;
+    /**
+     * @type string,null
+    */
+    oldest_pending?: string | null;
+    /**
+     * @type string,null
+    */
+    reason?: string | null;
+    retention?: (null | MetricsSettings);
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    schema_version: number;
+    /**
+     * @type boolean
+    */
+    settings_effective: boolean;
+    /**
+     * @type string,null
+    */
+    settings_revision?: string | null;
+    /**
+     * @type string
+    */
+    state: ComponentState;
+    storage?: (null | MetricsStorage);
+    /**
+     * @description Retained facts excluded from all model/input/operation denominators.
+     * @type string,null
+    */
+    unassociated_records?: string | null;
+    /**
+     * @type array
+    */
+    unsupported_surfaces: string[];
+};
+
+export type UnassociatedModel = {
+    /**
+     * @type string
+    */
+    configuration_revision: string;
+    /**
+     * @type string
+    */
+    configuration_scope: string;
+    /**
+     * @type string
+    */
+    contract_revision: string;
+    /**
+     * @type string
+    */
+    model_id: string;
+    /**
+     * @type string
+    */
+    model_name: string;
+    /**
+     * @type string
+    */
+    origin: string;
+    /**
+     * @type string
+    */
+    protocol: string;
+    /**
+     * @type string
+    */
+    provider_id: string;
+    /**
+     * @type string
+    */
+    purpose: string;
+    /**
+     * @type string
+    */
+    surface: string;
+};
+
+export type UnassociatedRecord = {
+    /**
+     * @type string,null
+    */
+    call_id?: string | null;
+    /**
+     * @type string,null
+    */
+    fact_outcome?: string | null;
+    /**
+     * @type string
+    */
+    id: string;
+    /**
+     * @type string
+    */
+    kind: string;
+    /**
+     * @type string
+    */
+    missing: AssociationGapKind;
+    /**
+     * @type string
+    */
+    occurred_at: string;
+    /**
+     * @minLength 0
+     * @type integer,null, int32
+    */
+    ordinal?: number | null;
+    original_model?: (null | UnassociatedModel);
+    /**
+     * @type string,null
+    */
+    permission?: string | null;
+    /**
+     * @type string
+    */
+    phase: string;
+    /**
+     * @type string
+    */
+    received_at: string;
+    /**
+     * @description No reception timestamp is substituted for an unknown original start.
+     * @type string,null
+    */
+    started_at?: string | null;
+    /**
+     * @type string
+    */
+    state: AssociationGapState;
+    /**
+     * @type string,null
+    */
+    tool?: string | null;
+    /**
+     * @type string,null
+    */
+    tool_observation_id?: string | null;
+    /**
+     * @type string
+    */
+    updated_at: string;
+};
+
+export type MetricsUnassociated = {
+    /**
+     * @type object
+    */
+    coverage: QueryCoverage;
+    /**
+     * @type string,null
+    */
+    next_cursor?: string | null;
+    /**
+     * @type array
+    */
+    records: UnassociatedRecord[];
+};
+
 export const responseFormatModeEnum = {
     none: "none",
     json_object: "json_object",
@@ -6374,44 +7567,62 @@ export type ModelProviderUpdate = {
     wire_protocol?: string | null;
 };
 
-/**
- * @description One per-model hourly usage row, projected for the frontend chart.
-*/
 export type ModelUsageItem = {
     /**
-     * @type integer, int64
+     * @type string
     */
-    cacheReadTokens: number;
+    cacheReadTokens: string;
     /**
-     * @type integer, int64
+     * @type string
     */
-    cacheWriteTokens: number;
+    cacheWriteTokens: string;
     /**
      * @type string
     */
     hourBucket: string;
     /**
-     * @type integer, int64
+     * @type string
     */
-    inputTokens: number;
+    inputTokens: string;
+    /**
+     * @type string
+    */
+    modelId: string;
     /**
      * @type string
     */
     modelName: string;
     /**
-     * @type integer, int64
+     * @type string
     */
-    outputTokens: number;
+    outputTokens: string;
     /**
-     * @type integer, int64
+     * @type string
     */
-    requestCount: number;
+    providerId: string;
+    /**
+     * @type string
+    */
+    purpose: string;
+    /**
+     * @type string
+    */
+    requestCount: string;
+    /**
+     * @type integer,null, int32
+    */
+    subjectOrgId?: number | null;
+    /**
+     * @type string,null
+    */
+    subjectTier?: string | null;
+    /**
+     * @type integer,null, int32
+    */
+    subjectUserId?: number | null;
 };
 
-/**
- * @description The effective range returned to the console alongside the usage rows.
-*/
-export type UsageRangeDto = {
+export type ModelUsageRange = {
     /**
      * @type string
     */
@@ -6428,14 +7639,25 @@ export type UsageRangeDto = {
 
 export type ModelUsageResult = {
     /**
+     * @type string,null
+    */
+    available_from?: string | null;
+    /**
      * @type array
     */
     items: ModelUsageItem[];
     /**
-     * @description The effective range returned to the console alongside the usage rows.
+     * @type boolean
+    */
+    partial: boolean;
+    /**
      * @type object
     */
-    range: UsageRangeDto;
+    range: ModelUsageRange;
+    /**
+     * @type string
+    */
+    usage_source: string;
 };
 
 /**
@@ -9295,6 +10517,400 @@ export type RestResponseManagerLinkStatus = {
     success: boolean;
 };
 
+export type RestResponseMetricsCallDetail = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @type object
+        */
+        call: ObservationRecord;
+        /**
+         * @type array
+        */
+        related: ObservationRecord[];
+        /**
+         * @type boolean
+        */
+        related_truncated: boolean;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponseMetricsCalls = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @type object
+        */
+        coverage: QueryCoverage;
+        /**
+         * @type string,null
+        */
+        next_cursor?: string | null;
+        /**
+         * @description Immutable first-page reception cutoff; terminal states remain live.
+         * @type string
+        */
+        received_before: string;
+        /**
+         * @type array
+        */
+        records: ObservationRecord[];
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponseMetricsGroups = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @type object
+        */
+        coverage: QueryCoverage;
+        /**
+         * @type array
+        */
+        groups: MetricsGroup[];
+        other?: (null | MetricsSummary);
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponseMetricsOverview = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @type object
+        */
+        coverage: QueryCoverage;
+        previous?: (null | MetricsSummary);
+        /**
+         * @type object
+        */
+        summary: MetricsSummary;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponseMetricsRuntimeGroups = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @type object
+        */
+        coverage: QueryCoverage;
+        /**
+         * @type array
+        */
+        groups: MetricsRuntimeGroup[];
+        other?: (null | MetricsSummary);
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponseMetricsSeries = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @type object
+        */
+        coverage: QueryCoverage;
+        /**
+         * @type array
+        */
+        points: MetricSeriesPoint[];
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponseMetricsSettings = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @minLength 0
+         * @type integer, int32
+        */
+        compact_row_budget: number;
+        /**
+         * @minLength 0
+         * @type integer, int32
+        */
+        detail_days: number;
+        /**
+         * @minLength 0
+         * @type integer, int32
+        */
+        detail_row_budget: number;
+        /**
+         * @type boolean
+        */
+        enabled: boolean;
+        /**
+         * @minLength 0
+         * @type integer, int32
+        */
+        event_row_budget: number;
+        /**
+         * @minLength 0
+         * @type integer, int32
+        */
+        five_minute_days: number;
+        /**
+         * @minLength 0
+         * @type integer, int32
+        */
+        hourly_days: number;
+        /**
+         * @minLength 0
+         * @type integer, int32
+        */
+        mutable_days: number;
+        /**
+         * @type string
+        */
+        revision: string;
+        /**
+         * @minLength 0
+         * @type integer, int32
+        */
+        rollup_row_budget: number;
+        /**
+         * @minLength 0
+         * @type integer, int32
+        */
+        series_per_bucket: number;
+        /**
+         * @type string
+        */
+        storage_budget_bytes: string;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponseMetricsStatus = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @type string
+        */
+        as_of: string;
+        /**
+         * @type string,null
+        */
+        available_from?: string | null;
+        /**
+         * @type string,null
+        */
+        backlog?: string | null;
+        /**
+         * @minLength 0
+         * @type integer, int32
+        */
+        definition_version: number;
+        /**
+         * @type string,null
+        */
+        discarded_events?: string | null;
+        /**
+         * @type string,null
+        */
+        dropped_events?: string | null;
+        /**
+         * @type boolean,null
+        */
+        enabled?: boolean | null;
+        /**
+         * @type array
+        */
+        gaps: CoverageGap[];
+        /**
+         * @type array
+        */
+        instrumented_surfaces: string[];
+        /**
+         * @type string,null
+        */
+        last_aggregated?: string | null;
+        /**
+         * @type string,null
+        */
+        last_persisted?: string | null;
+        /**
+         * @type string,null
+        */
+        oldest_pending?: string | null;
+        /**
+         * @type string,null
+        */
+        reason?: string | null;
+        retention?: (null | MetricsSettings);
+        /**
+         * @minLength 0
+         * @type integer, int32
+        */
+        schema_version: number;
+        /**
+         * @type boolean
+        */
+        settings_effective: boolean;
+        /**
+         * @type string,null
+        */
+        settings_revision?: string | null;
+        /**
+         * @type string
+        */
+        state: ComponentState;
+        storage?: (null | MetricsStorage);
+        /**
+         * @description Retained facts excluded from all model/input/operation denominators.
+         * @type string,null
+        */
+        unassociated_records?: string | null;
+        /**
+         * @type array
+        */
+        unsupported_surfaces: string[];
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponseMetricsUnassociated = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @type object
+        */
+        coverage: QueryCoverage;
+        /**
+         * @type string,null
+        */
+        next_cursor?: string | null;
+        /**
+         * @type array
+        */
+        records: UnassociatedRecord[];
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
 export type RestResponseModelProviderPublic = {
     /**
      * @type integer, int32
@@ -9410,14 +11026,25 @@ export type RestResponseModelUsageResult = {
     */
     data?: {
         /**
+         * @type string,null
+        */
+        available_from?: string | null;
+        /**
          * @type array
         */
         items: ModelUsageItem[];
         /**
-         * @description The effective range returned to the console alongside the usage rows.
+         * @type boolean
+        */
+        partial: boolean;
+        /**
          * @type object
         */
-        range: UsageRangeDto;
+        range: ModelUsageRange;
+        /**
+         * @type string
+        */
+        usage_source: string;
     };
     /**
      * @type string,null
@@ -10563,6 +12190,24 @@ export type TurnUsageItem = {
     relaySentPkts: number;
 };
 
+/**
+ * @description The effective range returned to the console alongside the usage rows.
+*/
+export type UsageRangeDto = {
+    /**
+     * @type string
+    */
+    from: string;
+    /**
+     * @type string
+    */
+    granularity: string;
+    /**
+     * @type string
+    */
+    to: string;
+};
+
 export type RestResponseTurnUsageResult = {
     /**
      * @type integer, int32
@@ -10608,12 +12253,6 @@ export type RestResponseUsageRetentionConfig = {
          * @type integer, int32
         */
         agent_session_days: number;
-        /**
-         * @description Retention window for AI token rollups (`ai_usage_hourly`), in days.
-         * @minLength 0
-         * @type integer, int32
-        */
-        ai_days: number;
         /**
          * @description Retention window for TURN traffic rollups (`turn_usage_hourly`), in days.
          * @minLength 0
@@ -13514,12 +15153,6 @@ export type UsageRetentionConfig = {
     */
     agent_session_days: number;
     /**
-     * @description Retention window for AI token rollups (`ai_usage_hourly`), in days.
-     * @minLength 0
-     * @type integer, int32
-    */
-    ai_days: number;
-    /**
      * @description Retention window for TURN traffic rollups (`turn_usage_hourly`), in days.
      * @minLength 0
      * @type integer, int32
@@ -14783,6 +16416,750 @@ export type TestApprovalModelProviderMutation = {
     Errors: any;
 };
 
+export type GetModelMetricsCallsQueryParams = {
+    /**
+     * @description Runtime endpoint only.
+     * @type string,null
+    */
+    category?: string | null;
+    /**
+     * @description Runtime endpoint only: a closed registered definition.
+     * @type string,null
+    */
+    definition?: string | null;
+    /**
+     * @type string,null
+    */
+    from?: string | null;
+    /**
+     * @type string,null
+    */
+    to?: string | null;
+    granularity?: (null | Granularity);
+    /**
+     * @type string,null
+    */
+    provider_id?: string | null;
+    /**
+     * @type string,null
+    */
+    model_id?: string | null;
+    /**
+     * @type string,null
+    */
+    surface?: string | null;
+    /**
+     * @type string,null
+    */
+    purpose?: string | null;
+    /**
+     * @type string,null
+    */
+    origin?: string | null;
+    /**
+     * @type string,null
+    */
+    tool?: string | null;
+    /**
+     * @description Closed domain and category, for example request.http_error or input.invalid_json.
+     * @type string,null
+    */
+    error?: string | null;
+    /**
+     * @type string,null
+    */
+    contract_revision?: string | null;
+    /**
+     * @type boolean,null
+    */
+    include_probe?: boolean | null;
+    /**
+     * @type string,null
+    */
+    cursor?: string | null;
+    /**
+     * @minLength 0
+     * @type integer,null, int32
+    */
+    limit?: number | null;
+    /**
+     * @description Model/tool grouping endpoints only; applied before Top N selection.
+    */
+    group_sort?: (null | MetricGroupSort);
+    /**
+     * @description Calls endpoint only; selects one closed observation type.
+    */
+    record_kind?: (null | MetricRecordKind);
+    /**
+     * @description Calls endpoint only; a type-specific conclusion or request_error.
+     * @type string,null
+    */
+    outcome?: string | null;
+    /**
+     * @description Calls endpoint only; inclusive observed latency threshold.
+     * @minLength 0
+     * @type integer,null, int32
+    */
+    min_duration_ms?: number | null;
+    /**
+     * @description Calls endpoint only; defaults to duration when a threshold is provided.
+    */
+    latency?: (null | MetricLatency);
+    /**
+     * @description Calls endpoint only; a closed tool permission conclusion.
+     * @type string,null
+    */
+    permission?: string | null;
+    /**
+     * @description Calls endpoint only; an observed native operation dispatch conclusion.
+     * @type boolean,null
+    */
+    dispatched?: boolean | null;
+};
+
+export type GetModelMetricsCalls200 = RestResponseMetricsCalls;
+
+export type GetModelMetricsCallsQueryResponse = GetModelMetricsCalls200;
+
+export type GetModelMetricsCallsQuery = {
+    Response: GetModelMetricsCalls200;
+    QueryParams: GetModelMetricsCallsQueryParams;
+    Errors: any;
+};
+
+export type GetModelMetricsCallPathParams = {
+    /**
+     * @description Server-issued observation id
+     * @type string
+    */
+    observation_id: string;
+};
+
+export type GetModelMetricsCall200 = RestResponseMetricsCallDetail;
+
+export type GetModelMetricsCallQueryResponse = GetModelMetricsCall200;
+
+export type GetModelMetricsCallQuery = {
+    Response: GetModelMetricsCall200;
+    PathParams: GetModelMetricsCallPathParams;
+    Errors: any;
+};
+
+export type GetModelMetricsModelsQueryParams = {
+    /**
+     * @description Runtime endpoint only.
+     * @type string,null
+    */
+    category?: string | null;
+    /**
+     * @description Runtime endpoint only: a closed registered definition.
+     * @type string,null
+    */
+    definition?: string | null;
+    /**
+     * @type string,null
+    */
+    from?: string | null;
+    /**
+     * @type string,null
+    */
+    to?: string | null;
+    granularity?: (null | Granularity);
+    /**
+     * @type string,null
+    */
+    provider_id?: string | null;
+    /**
+     * @type string,null
+    */
+    model_id?: string | null;
+    /**
+     * @type string,null
+    */
+    surface?: string | null;
+    /**
+     * @type string,null
+    */
+    purpose?: string | null;
+    /**
+     * @type string,null
+    */
+    origin?: string | null;
+    /**
+     * @type string,null
+    */
+    tool?: string | null;
+    /**
+     * @description Closed domain and category, for example request.http_error or input.invalid_json.
+     * @type string,null
+    */
+    error?: string | null;
+    /**
+     * @type string,null
+    */
+    contract_revision?: string | null;
+    /**
+     * @type boolean,null
+    */
+    include_probe?: boolean | null;
+    /**
+     * @type string,null
+    */
+    cursor?: string | null;
+    /**
+     * @minLength 0
+     * @type integer,null, int32
+    */
+    limit?: number | null;
+    /**
+     * @description Model/tool grouping endpoints only; applied before Top N selection.
+    */
+    group_sort?: (null | MetricGroupSort);
+    /**
+     * @description Calls endpoint only; selects one closed observation type.
+    */
+    record_kind?: (null | MetricRecordKind);
+    /**
+     * @description Calls endpoint only; a type-specific conclusion or request_error.
+     * @type string,null
+    */
+    outcome?: string | null;
+    /**
+     * @description Calls endpoint only; inclusive observed latency threshold.
+     * @minLength 0
+     * @type integer,null, int32
+    */
+    min_duration_ms?: number | null;
+    /**
+     * @description Calls endpoint only; defaults to duration when a threshold is provided.
+    */
+    latency?: (null | MetricLatency);
+    /**
+     * @description Calls endpoint only; a closed tool permission conclusion.
+     * @type string,null
+    */
+    permission?: string | null;
+    /**
+     * @description Calls endpoint only; an observed native operation dispatch conclusion.
+     * @type boolean,null
+    */
+    dispatched?: boolean | null;
+};
+
+export type GetModelMetricsModels200 = RestResponseMetricsGroups;
+
+export type GetModelMetricsModelsQueryResponse = GetModelMetricsModels200;
+
+export type GetModelMetricsModelsQuery = {
+    Response: GetModelMetricsModels200;
+    QueryParams: GetModelMetricsModelsQueryParams;
+    Errors: any;
+};
+
+export type GetModelMetricsOverviewQueryParams = {
+    /**
+     * @description Runtime endpoint only.
+     * @type string,null
+    */
+    category?: string | null;
+    /**
+     * @description Runtime endpoint only: a closed registered definition.
+     * @type string,null
+    */
+    definition?: string | null;
+    /**
+     * @type string,null
+    */
+    from?: string | null;
+    /**
+     * @type string,null
+    */
+    to?: string | null;
+    granularity?: (null | Granularity);
+    /**
+     * @type string,null
+    */
+    provider_id?: string | null;
+    /**
+     * @type string,null
+    */
+    model_id?: string | null;
+    /**
+     * @type string,null
+    */
+    surface?: string | null;
+    /**
+     * @type string,null
+    */
+    purpose?: string | null;
+    /**
+     * @type string,null
+    */
+    origin?: string | null;
+    /**
+     * @type string,null
+    */
+    tool?: string | null;
+    /**
+     * @description Closed domain and category, for example request.http_error or input.invalid_json.
+     * @type string,null
+    */
+    error?: string | null;
+    /**
+     * @type string,null
+    */
+    contract_revision?: string | null;
+    /**
+     * @type boolean,null
+    */
+    include_probe?: boolean | null;
+    /**
+     * @type string,null
+    */
+    cursor?: string | null;
+    /**
+     * @minLength 0
+     * @type integer,null, int32
+    */
+    limit?: number | null;
+    /**
+     * @description Model/tool grouping endpoints only; applied before Top N selection.
+    */
+    group_sort?: (null | MetricGroupSort);
+    /**
+     * @description Calls endpoint only; selects one closed observation type.
+    */
+    record_kind?: (null | MetricRecordKind);
+    /**
+     * @description Calls endpoint only; a type-specific conclusion or request_error.
+     * @type string,null
+    */
+    outcome?: string | null;
+    /**
+     * @description Calls endpoint only; inclusive observed latency threshold.
+     * @minLength 0
+     * @type integer,null, int32
+    */
+    min_duration_ms?: number | null;
+    /**
+     * @description Calls endpoint only; defaults to duration when a threshold is provided.
+    */
+    latency?: (null | MetricLatency);
+    /**
+     * @description Calls endpoint only; a closed tool permission conclusion.
+     * @type string,null
+    */
+    permission?: string | null;
+    /**
+     * @description Calls endpoint only; an observed native operation dispatch conclusion.
+     * @type boolean,null
+    */
+    dispatched?: boolean | null;
+};
+
+export type GetModelMetricsOverview200 = RestResponseMetricsOverview;
+
+export type GetModelMetricsOverviewQueryResponse = GetModelMetricsOverview200;
+
+export type GetModelMetricsOverviewQuery = {
+    Response: GetModelMetricsOverview200;
+    QueryParams: GetModelMetricsOverviewQueryParams;
+    Errors: any;
+};
+
+export type GetModelMetricsRuntimeQueryParams = {
+    /**
+     * @description Runtime endpoint only.
+     * @type string,null
+    */
+    category?: string | null;
+    /**
+     * @description Runtime endpoint only: a closed registered definition.
+     * @type string,null
+    */
+    definition?: string | null;
+    /**
+     * @type string,null
+    */
+    from?: string | null;
+    /**
+     * @type string,null
+    */
+    to?: string | null;
+    granularity?: (null | Granularity);
+    /**
+     * @type string,null
+    */
+    provider_id?: string | null;
+    /**
+     * @type string,null
+    */
+    model_id?: string | null;
+    /**
+     * @type string,null
+    */
+    surface?: string | null;
+    /**
+     * @type string,null
+    */
+    purpose?: string | null;
+    /**
+     * @type string,null
+    */
+    origin?: string | null;
+    /**
+     * @type string,null
+    */
+    tool?: string | null;
+    /**
+     * @description Closed domain and category, for example request.http_error or input.invalid_json.
+     * @type string,null
+    */
+    error?: string | null;
+    /**
+     * @type string,null
+    */
+    contract_revision?: string | null;
+    /**
+     * @type boolean,null
+    */
+    include_probe?: boolean | null;
+    /**
+     * @type string,null
+    */
+    cursor?: string | null;
+    /**
+     * @minLength 0
+     * @type integer,null, int32
+    */
+    limit?: number | null;
+    /**
+     * @description Model/tool grouping endpoints only; applied before Top N selection.
+    */
+    group_sort?: (null | MetricGroupSort);
+    /**
+     * @description Calls endpoint only; selects one closed observation type.
+    */
+    record_kind?: (null | MetricRecordKind);
+    /**
+     * @description Calls endpoint only; a type-specific conclusion or request_error.
+     * @type string,null
+    */
+    outcome?: string | null;
+    /**
+     * @description Calls endpoint only; inclusive observed latency threshold.
+     * @minLength 0
+     * @type integer,null, int32
+    */
+    min_duration_ms?: number | null;
+    /**
+     * @description Calls endpoint only; defaults to duration when a threshold is provided.
+    */
+    latency?: (null | MetricLatency);
+    /**
+     * @description Calls endpoint only; a closed tool permission conclusion.
+     * @type string,null
+    */
+    permission?: string | null;
+    /**
+     * @description Calls endpoint only; an observed native operation dispatch conclusion.
+     * @type boolean,null
+    */
+    dispatched?: boolean | null;
+};
+
+export type GetModelMetricsRuntime200 = RestResponseMetricsRuntimeGroups;
+
+export type GetModelMetricsRuntimeQueryResponse = GetModelMetricsRuntime200;
+
+export type GetModelMetricsRuntimeQuery = {
+    Response: GetModelMetricsRuntime200;
+    QueryParams: GetModelMetricsRuntimeQueryParams;
+    Errors: any;
+};
+
+export type GetModelMetricsSeriesQueryParams = {
+    /**
+     * @description Runtime endpoint only.
+     * @type string,null
+    */
+    category?: string | null;
+    /**
+     * @description Runtime endpoint only: a closed registered definition.
+     * @type string,null
+    */
+    definition?: string | null;
+    /**
+     * @type string,null
+    */
+    from?: string | null;
+    /**
+     * @type string,null
+    */
+    to?: string | null;
+    granularity?: (null | Granularity);
+    /**
+     * @type string,null
+    */
+    provider_id?: string | null;
+    /**
+     * @type string,null
+    */
+    model_id?: string | null;
+    /**
+     * @type string,null
+    */
+    surface?: string | null;
+    /**
+     * @type string,null
+    */
+    purpose?: string | null;
+    /**
+     * @type string,null
+    */
+    origin?: string | null;
+    /**
+     * @type string,null
+    */
+    tool?: string | null;
+    /**
+     * @description Closed domain and category, for example request.http_error or input.invalid_json.
+     * @type string,null
+    */
+    error?: string | null;
+    /**
+     * @type string,null
+    */
+    contract_revision?: string | null;
+    /**
+     * @type boolean,null
+    */
+    include_probe?: boolean | null;
+    /**
+     * @type string,null
+    */
+    cursor?: string | null;
+    /**
+     * @minLength 0
+     * @type integer,null, int32
+    */
+    limit?: number | null;
+    /**
+     * @description Model/tool grouping endpoints only; applied before Top N selection.
+    */
+    group_sort?: (null | MetricGroupSort);
+    /**
+     * @description Calls endpoint only; selects one closed observation type.
+    */
+    record_kind?: (null | MetricRecordKind);
+    /**
+     * @description Calls endpoint only; a type-specific conclusion or request_error.
+     * @type string,null
+    */
+    outcome?: string | null;
+    /**
+     * @description Calls endpoint only; inclusive observed latency threshold.
+     * @minLength 0
+     * @type integer,null, int32
+    */
+    min_duration_ms?: number | null;
+    /**
+     * @description Calls endpoint only; defaults to duration when a threshold is provided.
+    */
+    latency?: (null | MetricLatency);
+    /**
+     * @description Calls endpoint only; a closed tool permission conclusion.
+     * @type string,null
+    */
+    permission?: string | null;
+    /**
+     * @description Calls endpoint only; an observed native operation dispatch conclusion.
+     * @type boolean,null
+    */
+    dispatched?: boolean | null;
+};
+
+export type GetModelMetricsSeries200 = RestResponseMetricsSeries;
+
+export type GetModelMetricsSeriesQueryResponse = GetModelMetricsSeries200;
+
+export type GetModelMetricsSeriesQuery = {
+    Response: GetModelMetricsSeries200;
+    QueryParams: GetModelMetricsSeriesQueryParams;
+    Errors: any;
+};
+
+export type GetModelMetricsSettings200 = RestResponseMetricsSettings;
+
+export type GetModelMetricsSettingsQueryResponse = GetModelMetricsSettings200;
+
+export type GetModelMetricsSettingsQuery = {
+    Response: GetModelMetricsSettings200;
+    Errors: any;
+};
+
+export type UpdateModelMetricsSettings200 = RestResponseMetricsSettings;
+
+export type UpdateModelMetricsSettingsMutationRequest = MetricsSettings;
+
+export type UpdateModelMetricsSettingsMutationResponse = UpdateModelMetricsSettings200;
+
+export type UpdateModelMetricsSettingsMutation = {
+    Response: UpdateModelMetricsSettings200;
+    Request: UpdateModelMetricsSettingsMutationRequest;
+    Errors: any;
+};
+
+export type GetModelMetricsStatus200 = RestResponseMetricsStatus;
+
+export type GetModelMetricsStatusQueryResponse = GetModelMetricsStatus200;
+
+export type GetModelMetricsStatusQuery = {
+    Response: GetModelMetricsStatus200;
+    Errors: any;
+};
+
+export type GetModelMetricsToolsQueryParams = {
+    /**
+     * @description Runtime endpoint only.
+     * @type string,null
+    */
+    category?: string | null;
+    /**
+     * @description Runtime endpoint only: a closed registered definition.
+     * @type string,null
+    */
+    definition?: string | null;
+    /**
+     * @type string,null
+    */
+    from?: string | null;
+    /**
+     * @type string,null
+    */
+    to?: string | null;
+    granularity?: (null | Granularity);
+    /**
+     * @type string,null
+    */
+    provider_id?: string | null;
+    /**
+     * @type string,null
+    */
+    model_id?: string | null;
+    /**
+     * @type string,null
+    */
+    surface?: string | null;
+    /**
+     * @type string,null
+    */
+    purpose?: string | null;
+    /**
+     * @type string,null
+    */
+    origin?: string | null;
+    /**
+     * @type string,null
+    */
+    tool?: string | null;
+    /**
+     * @description Closed domain and category, for example request.http_error or input.invalid_json.
+     * @type string,null
+    */
+    error?: string | null;
+    /**
+     * @type string,null
+    */
+    contract_revision?: string | null;
+    /**
+     * @type boolean,null
+    */
+    include_probe?: boolean | null;
+    /**
+     * @type string,null
+    */
+    cursor?: string | null;
+    /**
+     * @minLength 0
+     * @type integer,null, int32
+    */
+    limit?: number | null;
+    /**
+     * @description Model/tool grouping endpoints only; applied before Top N selection.
+    */
+    group_sort?: (null | MetricGroupSort);
+    /**
+     * @description Calls endpoint only; selects one closed observation type.
+    */
+    record_kind?: (null | MetricRecordKind);
+    /**
+     * @description Calls endpoint only; a type-specific conclusion or request_error.
+     * @type string,null
+    */
+    outcome?: string | null;
+    /**
+     * @description Calls endpoint only; inclusive observed latency threshold.
+     * @minLength 0
+     * @type integer,null, int32
+    */
+    min_duration_ms?: number | null;
+    /**
+     * @description Calls endpoint only; defaults to duration when a threshold is provided.
+    */
+    latency?: (null | MetricLatency);
+    /**
+     * @description Calls endpoint only; a closed tool permission conclusion.
+     * @type string,null
+    */
+    permission?: string | null;
+    /**
+     * @description Calls endpoint only; an observed native operation dispatch conclusion.
+     * @type boolean,null
+    */
+    dispatched?: boolean | null;
+};
+
+export type GetModelMetricsTools200 = RestResponseMetricsGroups;
+
+export type GetModelMetricsToolsQueryResponse = GetModelMetricsTools200;
+
+export type GetModelMetricsToolsQuery = {
+    Response: GetModelMetricsTools200;
+    QueryParams: GetModelMetricsToolsQueryParams;
+    Errors: any;
+};
+
+export type GetModelMetricsUnassociatedQueryParams = {
+    /**
+     * @type string | undefined
+    */
+    from?: string;
+    /**
+     * @type string | undefined
+    */
+    to?: string;
+    /**
+     * @type string | undefined
+    */
+    cursor?: string;
+    /**
+     * @minLength 0
+     * @type integer | undefined, int32
+    */
+    limit?: number;
+};
+
+export type GetModelMetricsUnassociated200 = RestResponseMetricsUnassociated;
+
+export type GetModelMetricsUnassociatedQueryResponse = GetModelMetricsUnassociated200;
+
+export type GetModelMetricsUnassociatedQuery = {
+    Response: GetModelMetricsUnassociated200;
+    QueryParams: GetModelMetricsUnassociatedQueryParams;
+    Errors: any;
+};
+
 /**
  * @description Masked provider config (never carries the api_key)
 */
@@ -14827,23 +17204,35 @@ export type TestModelProviderMutation = {
 
 export type GetModelUsageQueryParams = {
     /**
-     * @type string,null
+     * @type string | undefined
     */
-    from?: string | null;
+    from?: string;
     /**
-     * @type string,null
+     * @type string | undefined
     */
-    to?: string | null;
+    to?: string;
     /**
-     * @description Time-bucket granularity (`hour` / `day`). Omitted defaults to `hour`; a\nrange wider than the day threshold forces `day` regardless.
-     * @type string,null
+     * @type string | undefined
     */
-    granularity?: string | null;
+    provider_id?: string;
+    /**
+     * @type string | undefined
+    */
+    model_id?: string;
+    /**
+     * @type string | undefined
+    */
+    model_name?: string;
+    /**
+     * @type string | undefined
+    */
+    purpose?: string;
+    /**
+     * @type string | undefined
+    */
+    granularity?: string;
 };
 
-/**
- * @description Per-model hourly token usage
-*/
 export type GetModelUsage200 = RestResponseModelUsageResult;
 
 export type GetModelUsageQueryResponse = GetModelUsage200;

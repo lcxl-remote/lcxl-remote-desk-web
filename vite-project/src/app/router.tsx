@@ -215,7 +215,15 @@ export const router = createBrowserRouter([
                         path: 'context-management',
                         lazy: async () => ({ Component: (await import('@/features/settings/context-management-settings')).ContextManagementSettings }),
                     },
+                    {
+                        path: 'model-metrics-settings',
+                        lazy: async () => ({ Component: (await import('@/features/settings/model-metrics-settings')).default }),
+                    },
                 ]
+            },
+            {
+                path: 'model-metrics',
+                lazy: async () => ({ Component: (await import('@/features/model-metrics/page')).default }),
             },
             {
                 path: 'usage',
@@ -233,12 +241,6 @@ export const router = createBrowserRouter([
                         path: 'turn',
                         lazy: async () => ({
                             Component: (await import('@/features/usage/turn-usage')).TurnUsagePage,
-                        }),
-                    },
-                    {
-                        path: 'model',
-                        lazy: async () => ({
-                            Component: (await import('@/features/usage/model-usage')).ModelUsagePage,
                         }),
                     },
                     {

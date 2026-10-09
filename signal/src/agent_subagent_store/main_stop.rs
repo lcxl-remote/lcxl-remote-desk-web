@@ -83,6 +83,11 @@ impl SubAgentStore {
         let mut cancel_request_ids: Vec<String> =
             parent.current_request_id.iter().cloned().collect();
         let mut stopped_subagents = Vec::new();
+        let mut permission_ends =
+            desk_diagnose_core::model_observability::permission::PendingEnds::waiting(
+                &parent,
+                desk_diagnose_core::model_observability::PermissionOutcome::Cancelled,
+            );
         for group_id in group_ids {
             let row = group_row::Entity::find()
                 .filter(group_row::Column::GroupId.eq(&group_id))
@@ -121,7 +126,9 @@ impl SubAgentStore {
                     run.settle_cancel(&now.to_rfc3339())
                         .map_err(|_| invalid())?;
                     replace_run_on(&txn, child_row, &run, now.timestamp_millis()).await?;
-                    synchronize_control_on(&txn, &run, now.timestamp_millis()).await?;
+                    permission_ends.extend(
+                        synchronize_control_on(&txn, &run, now.timestamp_millis(), false).await?,
+                    );
                     append_state_event_on(&txn, &group, &run, now.timestamp_millis()).await?;
                     stopped_subagents.push(run.summary());
                 }
@@ -199,6 +206,10 @@ impl SubAgentStore {
         .insert(&txn)
         .await?;
         txn.commit().await?;
+        permission_ends.submit(
+            now.timestamp_millis(),
+            crate::model_metrics::runtime::submit,
+        );
         Ok(outcome)
     }
 }

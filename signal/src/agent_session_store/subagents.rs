@@ -76,9 +76,10 @@ impl SubAgentSeam for SignalAgentSessionStore {
         call: &ToolCall,
         operation: Operation,
         result_message_id: &str,
+        observation: &desk_diagnose_core::model_observability::tool::ToolObservation,
     ) -> Result<ToolReceipt, AgentError> {
         crate::agent_subagent_store::SubAgentStore::new(self.db.clone())
-            .execute_main_tool(session, call, operation, result_message_id)
+            .execute_main_tool_observed(session, call, operation, result_message_id, observation)
             .await
             .map_err(delegation_storage)
     }

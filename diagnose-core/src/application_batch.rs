@@ -220,15 +220,44 @@ pub fn completion_receipt(
     completed: &desk_agent_protocol::computer_use::ComputerActionCompleted,
     expected_steps: Option<usize>,
 ) -> Result<Option<(bool, String)>, AgentError> {
+    completion_receipt_reported(completed, expected_steps).map(|result| result.receipt)
+}
+
+/// Counts originate in the same validated receipt parse as the business result.
+/// Missing optional counts remain unknown; no message text enters observations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BatchExecutionObservation {
+    pub completed_steps: Option<u32>,
+    pub failed_step: Option<u32>,
+}
+
+pub struct ReportedBatchReceipt {
+    pub receipt: Option<(bool, String)>,
+    pub observation: Option<BatchExecutionObservation>,
+}
+
+pub fn completion_receipt_reported(
+    completed: &desk_agent_protocol::computer_use::ComputerActionCompleted,
+    expected_steps: Option<usize>,
+) -> Result<ReportedBatchReceipt, AgentError> {
     use desk_agent_protocol::computer_use::ComputerActionResultClass as Class;
     let Some(message) = completed.message.as_deref() else {
-        return Ok(None);
+        return Ok(ReportedBatchReceipt {
+            receipt: None,
+            observation: None,
+        });
     };
     let Ok(value) = serde_json::from_str::<Value>(message) else {
-        return Ok(None);
+        return Ok(ReportedBatchReceipt {
+            receipt: None,
+            observation: None,
+        });
     };
     let Some(failed) = compact_failed(&value) else {
-        return Ok(None);
+        return Ok(ReportedBatchReceipt {
+            receipt: None,
+            observation: None,
+        });
     };
     let number = value[if failed {
         "failed_step_number"
@@ -256,7 +285,15 @@ pub fn completion_receipt(
     {
         return Err(invalid("receipt", "invalid native batch receipt"));
     }
-    Ok(Some((failed, message.into())))
+    Ok(ReportedBatchReceipt {
+        receipt: Some((failed, message.into())),
+        observation: Some(BatchExecutionObservation {
+            completed_steps: value["completed_steps"]
+                .as_u64()
+                .and_then(|value| u32::try_from(value).ok()),
+            failed_step: failed.then_some(number as u32),
+        }),
+    })
 }
 
 fn failure_class_matches(

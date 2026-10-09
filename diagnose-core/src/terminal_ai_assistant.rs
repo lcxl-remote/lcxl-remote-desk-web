@@ -267,6 +267,47 @@ pub fn parse_assistant_answer(
     )
 }
 
+pub fn parse_assistant_answer_observed(
+    turn: &crate::chat::ModelTurn,
+    default_shell: &str,
+    observation: Option<&crate::model_observability::ObservationContext>,
+    now_ms: i64,
+) -> (TerminalAiAssistantAnswer, ParseOutcome) {
+    let result = parse_assistant_answer(&turn.text, default_shell);
+    crate::model_observability::record_structured_output(
+        turn,
+        result.1 == ParseOutcome::Structured,
+        observation,
+        now_ms,
+    );
+    result
+}
+
+/// The shared loop has already validated a complete, tool-free answer before
+/// publishing this handle. Parse it once at the caller's existing render step.
+pub fn parse_committed_assistant_answer_observed(
+    content: &str,
+    default_shell: &str,
+    observation: Option<&crate::model_observability::ObservationContext>,
+    now_ms: i64,
+) -> (TerminalAiAssistantAnswer, ParseOutcome) {
+    let result = parse_assistant_answer(content, default_shell);
+    if let Some(context) = observation {
+        use crate::model_observability::OutputOutcome;
+        context.output(
+            if content.trim().is_empty() {
+                OutputOutcome::EmptyResponse
+            } else if result.1 == ParseOutcome::Structured {
+                OutputOutcome::Accepted
+            } else {
+                OutputOutcome::InvalidStructuredOutput
+            },
+            now_ms,
+        );
+    }
+    result
+}
+
 /// Locate the trailing ```json fenced block. Returns the prose before the fence
 /// and the parsed raw answer inside it, or `None` if no parseable fenced block is
 /// present. [`extract_json_object`] finds the balanced object that follows the
@@ -388,6 +429,7 @@ pub struct AssistantStreamSink<S> {
     /// crate has neither, so it carries the pre-built stamp rather than building
     /// it here.
     provenance: Option<AiProvenance>,
+    answer_observation: Option<crate::model_observability::ObservationContext>,
 }
 
 impl<S: AssistantFrameSink> AssistantStreamSink<S> {
@@ -405,6 +447,7 @@ impl<S: AssistantFrameSink> AssistantStreamSink<S> {
             text: String::new(),
             emitted: 0,
             provenance: None,
+            answer_observation: None,
         }
     }
 
@@ -421,6 +464,12 @@ impl<S: AssistantFrameSink> AssistantStreamSink<S> {
     /// emitted; this crate only carries it through.
     pub fn set_provenance(&mut self, provenance: AiProvenance) {
         self.provenance = Some(provenance);
+    }
+
+    pub fn take_answer_observation(
+        &mut self,
+    ) -> Option<crate::model_observability::ObservationContext> {
+        self.answer_observation.take()
     }
 
     fn next_seq(&mut self) -> u32 {
@@ -491,6 +540,12 @@ impl<S: AssistantFrameSink> AssistantStreamSink<S> {
 }
 
 impl<S: AssistantFrameSink> TurnSink for AssistantStreamSink<S> {
+    fn on_answer_observation(&mut self, context: crate::model_observability::ObservationContext) {
+        if !self.terminated && self.answer_observation.is_none() {
+            self.answer_observation = Some(context);
+        }
+    }
+
     fn on_text_delta(&mut self, delta: &str) {
         // Off by default (the agentic manager path); only the single-turn signal
         // path opts in. The trailing ```json suggestions block is withheld — the

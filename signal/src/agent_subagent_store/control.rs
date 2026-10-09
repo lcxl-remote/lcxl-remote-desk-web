@@ -9,7 +9,8 @@ pub(crate) async fn synchronize_control_on<C: ConnectionTrait>(
     db: &C,
     run: &SubAgentRun,
     now_ms: i64,
-) -> Result<(), DbErr> {
+    deadline_reached: bool,
+) -> Result<desk_diagnose_core::model_observability::permission::PendingEnds, DbErr> {
     let row = session_row::Entity::find()
         .filter(session_row::Column::ConversationId.eq(&run.child_conversation_id))
         .filter(session_row::Column::ActorId.eq(&run.actor_id))
@@ -34,6 +35,12 @@ pub(crate) async fn synchronize_control_on<C: ConnectionTrait>(
         );
         super::native_cancel::cancel_native_actions_on(db, &session, &operation, now_ms).await?;
     }
+    let permission_ends =
+        desk_diagnose_core::model_observability::permission::PendingEnds::task_control(
+            &session,
+            run,
+            deadline_reached,
+        );
     let input_changed = session.input_revision != run.binding.input_revision;
     synchronize_session(&mut session, run, &now.to_rfc3339()).map_err(|_| invalid())?;
     if input_changed {
@@ -73,7 +80,7 @@ pub(crate) async fn synchronize_control_on<C: ConnectionTrait>(
     if changed.rows_affected != 1 {
         return Err(invalid());
     }
-    Ok(())
+    Ok(permission_ends)
 }
 
 /// One immutable notification per task-state revision. UI reads and model

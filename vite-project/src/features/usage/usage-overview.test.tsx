@@ -24,9 +24,9 @@ describe("UsageOverview", () => {
         expect(c.querySelector('a[href="/usage/turn"]')).not.toBeNull()
     })
 
-    it("links the AI token usage card to /usage/model", () => {
+    it("links the AI token usage card to /model-metrics", () => {
         const c = renderOverview()
-        expect(c.querySelector('a[href="/usage/model"]')).not.toBeNull()
+        expect(c.querySelector('a[href="/model-metrics"]')).not.toBeNull()
     })
 
     it("links the retention config card to /usage/retention", () => {

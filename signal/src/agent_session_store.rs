@@ -613,6 +613,11 @@ impl SignalAgentSessionStore {
             txn.commit()
                 .await
                 .map_err(|error| internal(format!("commit permission decision: {error}")))?;
+            desk_diagnose_core::model_observability::permission::decided(
+                &event,
+                now_from(now).timestamp_millis(),
+                crate::model_metrics::runtime::submit,
+            );
             return Ok(PermissionDecisionOutcome {
                 state: resulting_state,
                 newly_recorded: true,
@@ -1603,9 +1608,10 @@ impl SessionSeam for SignalAgentSessionStore {
         &self,
         session: &mut PersistedAgentSession,
         call: &desk_diagnose_core::chat::ToolCall,
+        observation: desk_diagnose_core::model_observability::tool::ToolObservation,
     ) -> Result<String, AgentError> {
         crate::schedule_store::ScheduleStore::new(self.db.clone())
-            .manage_from_session(session, call)
+            .manage_from_session(session, call, &observation)
             .await
             .map_err(|error| match error {
                 crate::schedule_store::ScheduleStoreError::ExceedsSessionRetention {
@@ -1621,9 +1627,10 @@ impl SessionSeam for SignalAgentSessionStore {
         &self,
         session: &mut PersistedAgentSession,
         schedule_id: &str,
+        observation: desk_diagnose_core::model_observability::tool::ToolObservation,
     ) -> Result<bool, AgentError> {
         crate::schedule_store::ScheduleStore::new(self.db.clone())
-            .poll_review_decision(session, schedule_id)
+            .poll_review_decision(session, schedule_id, &observation)
             .await
             .map_err(|_| desk_diagnose_core::schedule::proposal::unavailable())
     }

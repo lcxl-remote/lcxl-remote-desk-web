@@ -191,6 +191,11 @@ pub struct ApiSurfaceOpts {
 ///
 /// `ServiceDaemon` opens it in its own bootstrap (`daemon.rs`) before the local
 /// API comes up; `SessionWorker` and `McpStdio` serve no HTTP API at all.
+/// Drain the independent observation writer during an embedded host shutdown.
+pub async fn shutdown_model_metrics() {
+    desk_signal::model_metrics::runtime::shutdown().await;
+}
+
 pub fn startup_mode_has_signal_db(mode: &StartupMode) -> bool {
     match mode {
         StartupMode::Default | StartupMode::Signaling | StartupMode::ServiceDaemon => true,
@@ -389,6 +394,21 @@ pub fn configure_api_surface(
                             }
                         }),
                 );
+            })
+            .configure(move |cfg| {
+                if opts.has_signal_db {
+                    cfg.service(desk_signal::controller::model_metrics::get_model_metrics_status);
+                    cfg.service(desk_signal::controller::model_metrics::get_model_metrics_overview);
+                    cfg.service(desk_signal::controller::model_metrics::get_model_metrics_series);
+                    cfg.service(desk_signal::controller::model_metrics::get_model_metrics_models);
+                    cfg.service(desk_signal::controller::model_metrics::get_model_metrics_tools)
+                            .service(desk_signal::controller::model_metrics::get_model_metrics_runtime);
+                    cfg.service(desk_signal::controller::model_metrics::get_model_metrics_calls);
+                    cfg.service(desk_signal::controller::model_metrics::get_model_metrics_unassociated);
+                    cfg.service(desk_signal::controller::model_metrics::get_model_metrics_call);
+                    cfg.service(desk_signal::controller::model_metrics::get_model_metrics_settings);
+                    cfg.service(desk_signal::controller::model_metrics::update_model_metrics_settings);
+                }
             })
             .configure(move |cfg| {
                 if opts.include_model_usage {
@@ -651,6 +671,7 @@ pub async fn run_with_hub(
             .to_string();
 
         let signal_db = desk_signal::db::init_db(&settings_dir).await?;
+        desk_signal::model_metrics::runtime::initialize(&settings_dir);
         // Age-based retention cleanup for the local usage rollups (collect-only
         // telemetry, no billing coupling). One task per process; the delete is
         // idempotent.

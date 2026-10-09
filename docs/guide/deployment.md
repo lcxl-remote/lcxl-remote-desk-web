@@ -27,6 +27,15 @@ Compose file bind-mounts the three directories that must outlive the container:
 Losing `./data` discards the admin account's signaling state, access codes, AI
 provider configuration, and audit history — back it up alongside `./conf`.
 
+[Model Call Metrics](/features/model-metrics) uses an independent
+`model-metrics.sqlite` inside the signal data directory. Collection starts with
+the current empty observation schema and never imports old token buckets or
+logs. Use a consistent SQLite backup, or stop the service before copying files;
+copying only a live database file can omit committed WAL data. Metrics storage
+failure leaves model calls and the business signal/exec ledgers running. Repair
+the component's access or restore a current-format backup; do not delete the
+business database or reset sessions to repair statistics.
+
 ### TURN Relay Ports
 
 The relay port range (`[turn] relay_min_port` / `relay_max_port`, `50000-50050`

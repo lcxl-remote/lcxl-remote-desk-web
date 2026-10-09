@@ -228,7 +228,7 @@ async fn recovery_observes_a_paused_source_without_claiming_or_resetting_it() {
     replace_run_on(&txn, &row, &paused, now.timestamp_millis())
         .await
         .unwrap();
-    synchronize_control_on(&txn, &paused, now.timestamp_millis())
+    synchronize_control_on(&txn, &paused, now.timestamp_millis(), false)
         .await
         .unwrap();
     txn.commit().await.unwrap();

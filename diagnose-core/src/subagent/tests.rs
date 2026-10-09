@@ -239,7 +239,8 @@ fn child_creation_parser_rejects_forged_user_origin() {
             &ToolCall {
                 name: crate::schedule::proposal::REQUEST_SCHEDULE.into(),
                 ..call
-            }
+            },
+            &crate::model_observability::tool::ToolObservation::default(),
         )
         .is_err()
     );
@@ -277,17 +278,35 @@ fn child_can_inspect_its_own_schedule_scope_without_obtaining_schedule_writes() 
         arguments_json: "{}".into(),
     };
     assert!(matches!(
-        crate::schedule::management_tools::parse(&child, &call),
+        crate::schedule::management_tools::parse(
+            &child,
+            &call,
+            &crate::model_observability::tool::ToolObservation::default()
+        ),
         Ok(crate::schedule::management_tools::Action::List { .. })
     ));
     let cancel = ToolCall {
         name: crate::schedule::management_tools::CANCEL.into(),
         ..call.clone()
     };
-    assert!(crate::schedule::management_tools::parse(&child, &cancel).is_err());
+    assert!(
+        crate::schedule::management_tools::parse(
+            &child,
+            &cancel,
+            &crate::model_observability::tool::ToolObservation::default()
+        )
+        .is_err()
+    );
     child.adopt_trigger(TriggerOrigin::ExecCompletion, "receipt-turn");
     assert!(crate::registry::lookup_for_session(&registry, list, &child).is_none());
-    assert!(crate::schedule::management_tools::parse(&child, &call).is_err());
+    assert!(
+        crate::schedule::management_tools::parse(
+            &child,
+            &call,
+            &crate::model_observability::tool::ToolObservation::default()
+        )
+        .is_err()
+    );
 }
 
 #[test]

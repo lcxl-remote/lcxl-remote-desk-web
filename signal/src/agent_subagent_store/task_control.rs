@@ -4,6 +4,9 @@ use crate::entity::agent_delegation_reservation as receipt_row;
 use desk_agent_protocol::ai_assistant::subagent::{
     AiAssistantSubAgentControl, SubAgentControlAction,
 };
+use desk_diagnose_core::model_observability::{
+    InputIssue, PermissionOutcome, Stage, StageOutcome, tool::ToolObservation,
+};
 use sea_orm::{ActiveModelTrait, DatabaseTransaction};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -13,6 +16,13 @@ use sha2::{Digest, Sha256};
 pub struct SubAgentControlOutcome {
     pub task: AiAssistantSubAgentSummary,
     pub cancel_request_id: Option<String>,
+}
+
+/// Only the business outcome is serialized into the immutable control receipt.
+/// Permission updates remain local until the enclosing transaction commits.
+pub(crate) struct PreparedControl {
+    pub outcome: SubAgentControlOutcome,
+    pub permission_ends: desk_diagnose_core::model_observability::permission::PendingEnds,
 }
 
 impl SubAgentStore {
@@ -28,9 +38,12 @@ impl SubAgentStore {
 
         let parent = parent_on(&txn, root, actor, device).await?;
         let now_ms = chrono::Utc::now().timestamp_millis();
-        let result = apply_task_control_on(&txn, &parent, request, now_ms).await?;
+        let prepared = prepare_owner_control_on(&txn, &parent, request, now_ms).await?;
         txn.commit().await?;
-        Ok(result)
+        prepared
+            .permission_ends
+            .submit(now_ms, crate::model_metrics::runtime::submit);
+        Ok(prepared.outcome)
     }
 }
 
@@ -56,14 +69,34 @@ fn validate_control(request: &AiAssistantSubAgentControl) -> Result<(), DbErr> {
 }
 
 /// The caller holds owner/root then child control. No model, device or network
-/// call occurs in this transaction; cancellation delivery follows the commit.
+/// call occurs in this transaction; observations and cancellation follow commit.
+pub(crate) async fn prepare_owner_control_on(
+    txn: &DatabaseTransaction,
+    parent: &PersistedAgentSession,
+    request: &AiAssistantSubAgentControl,
+    now_ms: i64,
+) -> Result<PreparedControl, DbErr> {
+    apply_task_control_with_source_on(
+        txn,
+        parent,
+        request,
+        None,
+        now_ms,
+        &ToolObservation::default(),
+    )
+    .await
+}
+
+#[cfg(test)]
 pub(crate) async fn apply_task_control_on(
     txn: &DatabaseTransaction,
     parent: &PersistedAgentSession,
     request: &AiAssistantSubAgentControl,
     now_ms: i64,
 ) -> Result<SubAgentControlOutcome, DbErr> {
-    apply_task_control_with_source_on(txn, parent, request, None, now_ms).await
+    Ok(prepare_owner_control_on(txn, parent, request, now_ms)
+        .await?
+        .outcome)
 }
 
 /// Main-model controls retain the actual committed tool caller's restrictions;
@@ -73,9 +106,11 @@ pub(crate) async fn apply_task_control_from_turn_on(
     parent: &PersistedAgentSession,
     call: &desk_diagnose_core::chat::ToolCall,
     now_ms: i64,
-) -> Result<SubAgentControlOutcome, DbErr> {
+    input_observation: &ToolObservation,
+) -> Result<PreparedControl, DbErr> {
     use desk_diagnose_core::subagent::tools::{self, Operation};
-    let operation = tools::parse(parent, call).map_err(|_| invalid())?;
+    let operation =
+        tools::parse_observed(parent, call, input_observation).map_err(|_| invalid())?;
     let (task_id, input, control, action) = match operation {
         Operation::Cancel {
             task_id,
@@ -125,7 +160,15 @@ pub(crate) async fn apply_task_control_from_turn_on(
         expected_control_revision: control,
         action,
     };
-    apply_task_control_with_source_on(txn, parent, &request, Some(caller), now_ms).await
+    apply_task_control_with_source_on(
+        txn,
+        parent,
+        &request,
+        Some(caller),
+        now_ms,
+        input_observation,
+    )
+    .await
 }
 
 async fn apply_task_control_with_source_on(
@@ -134,9 +177,13 @@ async fn apply_task_control_with_source_on(
     request: &AiAssistantSubAgentControl,
     adjustment_source: Option<desk_agent_protocol::data_lineage::DataEnvelope>,
     now_ms: i64,
-) -> Result<SubAgentControlOutcome, DbErr> {
-    validate_control(request)?;
+    input_observation: &ToolObservation,
+) -> Result<PreparedControl, DbErr> {
+    validate_control(request).inspect_err(|_| {
+        input_observation.reject(Stage::Preflight, InputIssue::Semantic);
+    })?;
     if !parent.agent_role.is_main() || parent.surface != AgentSessionSurface::AiAssistant {
+        input_observation.permission(PermissionOutcome::PolicyRejected);
         return Err(invalid());
     }
     let operation_key = format!(
@@ -169,7 +216,10 @@ async fn apply_task_control_with_source_on(
         {
             return Err(invalid());
         }
-        return serde_json::from_str(&receipt.reservation_json).map_err(|_| invalid());
+        return Ok(PreparedControl {
+            outcome: serde_json::from_str(&receipt.reservation_json).map_err(|_| invalid())?,
+            permission_ends: Default::default(),
+        });
     }
     let row = run_row::Entity::find()
         .filter(run_row::Column::TaskId.eq(&request.task_id))
@@ -178,13 +228,18 @@ async fn apply_task_control_with_source_on(
         .filter(run_row::Column::DeviceId.eq(&parent.device_id))
         .one(txn)
         .await?
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| {
+            input_observation.reject(Stage::Reference, InputIssue::UnknownReference);
+            invalid()
+        })?;
     let mut run = decode_run(&row)?;
     if run.binding.input_revision != request.expected_input_revision
         || run.binding.control_revision != request.expected_control_revision
     {
+        input_observation.reject(Stage::Reference, InputIssue::ReferenceExpired);
         return Err(invalid());
     }
+    input_observation.stage(Stage::Reference, StageOutcome::Passed);
     let group_row = group_row::Entity::find()
         .filter(group_row::Column::GroupId.eq(&run.binding.group_id))
         .filter(group_row::Column::RootConversationId.eq(&parent.conversation_id))
@@ -229,11 +284,15 @@ async fn apply_task_control_with_source_on(
                 || group.source_epoch != run.binding.source_epoch
                 || group.source != run.binding.source
             {
+                input_observation.permission(PermissionOutcome::PolicyRejected);
                 return Err(invalid());
             }
             let criteria = run.binding.acceptance_criteria.clone();
             run.adjust(run.fence(), message.clone(), criteria, &now)
-                .map_err(|_| invalid())?;
+                .map_err(|_| {
+                    input_observation.reject(Stage::Preflight, InputIssue::Precondition);
+                    invalid()
+                })?;
             let creation: desk_diagnose_core::subagent::creation::TaskCreationEnvelope =
                 serde_json::from_str(&row.creation_envelope_json).map_err(|_| invalid())?;
             let label = match &adjustment_source {
@@ -278,11 +337,14 @@ async fn apply_task_control_with_source_on(
             true
         }
     };
-    if changed {
+    let permission_ends = if changed {
         replace_run_on(txn, &row, &run, now_ms).await?;
-        synchronize_control_on(txn, &run, now_ms).await?;
+        let prepared = synchronize_control_on(txn, &run, now_ms, false).await?;
         append_state_event_on(txn, &group, &run, now_ms).await?;
-    }
+        prepared
+    } else {
+        Default::default()
+    };
     let result = SubAgentControlOutcome {
         task: run.summary(),
         cancel_request_id: cancellation,
@@ -309,5 +371,8 @@ async fn apply_task_control_with_source_on(
     }
     .insert(txn)
     .await?;
-    Ok(result)
+    Ok(PreparedControl {
+        outcome: result,
+        permission_ends,
+    })
 }

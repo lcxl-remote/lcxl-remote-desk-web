@@ -207,6 +207,24 @@ pub fn reviewer_model_decision(
     parse_review_decision(candidate, &turn.text)
 }
 
+/// Observe the actual parser result without treating a reasoned denial as an
+/// invalid answer or an owner permission decision.
+pub fn reviewer_model_decision_observed(
+    candidate: &ApprovalReviewCandidate,
+    turn: &ModelTurn,
+    observation: Option<&crate::model_observability::ObservationContext>,
+    now_ms: i64,
+) -> Result<ApprovalReviewDecision, ApprovalReviewError> {
+    let decision = reviewer_model_decision(candidate, turn);
+    crate::model_observability::record_structured_output(
+        turn,
+        decision.is_ok(),
+        observation,
+        now_ms,
+    );
+    decision
+}
+
 /// Four disjoint token classes. A provider that omits its base input/output
 /// usage remains unknown and must be charged at the reserved upper bound.
 pub fn reviewer_billed_tokens(usage: TokenUsage) -> Option<u64> {
@@ -1565,6 +1583,36 @@ pub struct ApprovalProbeCase {
     pub expected_verdict: ApprovalVerdict,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalProbeError {
+    Protocol,
+    Decision(ApprovalReviewError),
+    Verdict,
+}
+
+pub fn validate_approval_probe_observed(
+    probe: &ApprovalProbeCase,
+    turn: &ModelTurn,
+    observation: Option<&crate::model_observability::ObservationContext>,
+    now_ms: i64,
+) -> Result<(), ApprovalProbeError> {
+    let result = if turn.stop_reason != StopReason::EndTurn || !turn.tool_calls.is_empty() {
+        Err(ApprovalProbeError::Protocol)
+    } else {
+        parse_review_decision(&probe.candidate, &turn.text)
+            .map_err(ApprovalProbeError::Decision)
+            .and_then(|decision| {
+                if decision.verdict == probe.expected_verdict {
+                    Ok(())
+                } else {
+                    Err(ApprovalProbeError::Verdict)
+                }
+            })
+    };
+    crate::model_observability::record_structured_output(turn, result.is_ok(), observation, now_ms);
+    result
+}
+
 pub fn approval_probe_cases() -> Vec<ApprovalProbeCase> {
     fn case(
         id: &'static str,
@@ -2416,6 +2464,197 @@ mod tests {
         assert_eq!(
             parse_review_decision(&candidate, &third_verdict.to_string()),
             Err(ApprovalReviewError::InvalidDecision)
+        );
+    }
+
+    #[test]
+    fn reviewer_output_observation_keeps_denial_protocol_and_transport_separate() {
+        use crate::model_observability::*;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Default)]
+        struct Recorder(Mutex<Vec<ObservationEvent>>);
+        impl ObservabilitySeam for Recorder {
+            fn submit(&self, event: ObservationEvent) {
+                self.0.lock().unwrap().push(event);
+            }
+        }
+        let candidate = candidate();
+        for (index, (verdict, reason, malformed, expected)) in [
+            (
+                "approve",
+                StopReason::EndTurn,
+                false,
+                OutputOutcome::Accepted,
+            ),
+            ("deny", StopReason::EndTurn, false, OutputOutcome::Accepted),
+            (
+                "approve",
+                StopReason::MaxTokens,
+                false,
+                OutputOutcome::OutputTruncated,
+            ),
+            (
+                "approve",
+                StopReason::ContextWindowExceeded,
+                false,
+                OutputOutcome::ContextLimit,
+            ),
+            (
+                "approve",
+                StopReason::Other,
+                false,
+                OutputOutcome::InvalidProtocol,
+            ),
+            (
+                "approve",
+                StopReason::ToolUse,
+                false,
+                OutputOutcome::InvalidProtocol,
+            ),
+            ("", StopReason::EndTurn, true, OutputOutcome::EmptyResponse),
+            (
+                "invalid_private_review",
+                StopReason::EndTurn,
+                true,
+                OutputOutcome::InvalidStructuredOutput,
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let recorder = Arc::new(Recorder::default());
+            let context = ObservationContext::new(
+                format!("review_{index}"),
+                1_000,
+                Attribution {
+                    provider_id: "approval-provider".into(),
+                    model_id: "approval-model".into(),
+                    model_name: "reviewer".into(),
+                    configuration_revision: "3".into(),
+                    contract_revision: "1".into(),
+                    surface: Surface::Assistant,
+                    purpose: Purpose::Approval,
+                    origin: Origin::System,
+                    configuration_scope: ConfigurationScope::Local,
+                    protocol: Protocol::OpenAiChatCompletions,
+                },
+                recorder.clone(),
+            );
+            let turn = ModelTurn {
+                text: if malformed {
+                    verdict.into()
+                } else {
+                    serde_json::json!({
+                        "candidate_id": candidate.candidate_id,
+                        "verdict": verdict,
+                        "reason_code": "within_scope",
+                        "reason": "Private review reason.",
+                        "evidence_event_ids": ["user-message"]
+                    })
+                    .to_string()
+                },
+                stop_reason: reason,
+                usage: TokenUsage {
+                    input_tokens: Some(50),
+                    output_tokens: Some(10),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let canonical_turn = serde_json::to_vec(&turn).unwrap();
+            let mut request =
+                reviewer_model_request(&candidate, review_user_prompt(&candidate).unwrap())
+                    .unwrap();
+            let digest = reviewer_request_digest(&request).unwrap();
+            request.observation = Some(context.clone());
+            assert_eq!(reviewer_request_digest(&request).unwrap(), digest);
+            let mut dial = RequestObservation::new(context.clone(), 2, 0);
+            dial.outbound(1_001);
+            dial.finish(RequestOutcome::Returned, OutputOutcome::NotEvaluated, 1_002);
+            let business = reviewer_model_decision(&candidate, &turn);
+            let observed =
+                reviewer_model_decision_observed(&candidate, &turn, Some(&context), 1_003);
+            assert_eq!(observed, business);
+            assert_eq!(
+                reviewer_model_decision_observed(&candidate, &turn, None, 1_003),
+                business
+            );
+            assert_eq!(serde_json::to_vec(&turn).unwrap(), canonical_turn);
+            let events = recorder.0.lock().unwrap();
+            let outputs: Vec<_> = events
+                .iter()
+                .filter(|event| event.phase == ObservationPhase::Output)
+                .collect();
+            assert_eq!(outputs.len(), 1);
+            let ObservationPayload::Call(output) = &outputs[0].payload else {
+                panic!("call output");
+            };
+            assert_eq!(output.output, expected);
+            assert_eq!(outputs[0].attribution.purpose, Purpose::Approval);
+            assert!(events.iter().all(|event| matches!(
+                &event.payload,
+                ObservationPayload::Call(_) | ObservationPayload::Attempt(_)
+            )));
+            assert!(events.iter().any(|event| event.phase == ObservationPhase::Terminal
+                && matches!(&event.payload, ObservationPayload::Call(call) if call.outcome == RequestOutcome::Returned)));
+            let serialized = serde_json::to_string(&*events).unwrap();
+            for private in [
+                "Private review reason",
+                "invalid_private_review",
+                &candidate.candidate_id,
+            ] {
+                assert!(!serialized.contains(private));
+            }
+        }
+    }
+
+    #[test]
+    fn unavailable_reviewer_observation_cannot_change_the_decision() {
+        use crate::model_observability::*;
+        use std::sync::Arc;
+
+        struct Broken;
+        impl ObservabilitySeam for Broken {
+            fn submit(&self, _: ObservationEvent) {
+                panic!("metrics unavailable");
+            }
+        }
+        let context = ObservationContext::new(
+            "review".into(),
+            1_000,
+            Attribution {
+                provider_id: "reviewer".into(),
+                model_id: "reviewer".into(),
+                model_name: "reviewer".into(),
+                configuration_revision: "1".into(),
+                contract_revision: "1".into(),
+                surface: Surface::Assistant,
+                purpose: Purpose::Approval,
+                origin: Origin::System,
+                configuration_scope: ConfigurationScope::Local,
+                protocol: Protocol::OpenAiChatCompletions,
+            },
+            Arc::new(Broken),
+        );
+        let candidate = candidate();
+        let turn = ModelTurn {
+            text: serde_json::json!({
+                "candidate_id": candidate.candidate_id,
+                "verdict": "deny",
+                "reason_code": "missing_evidence",
+                "reason": "Ask the owner for the recipient.",
+                "evidence_event_ids": ["user-message"]
+            })
+            .to_string(),
+            stop_reason: StopReason::EndTurn,
+            ..Default::default()
+        };
+        assert_eq!(
+            reviewer_model_decision_observed(&candidate, &turn, Some(&context), 1_003)
+                .unwrap()
+                .verdict,
+            ApprovalVerdict::Deny
         );
     }
 

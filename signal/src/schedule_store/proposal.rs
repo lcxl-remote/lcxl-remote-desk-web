@@ -3,6 +3,9 @@ use super::{ScheduleStore, ScheduleStoreError};
 use crate::entity::agent_session;
 use desk_diagnose_core::{
     chat::{ChatMessage, ChatRole, ToolCall},
+    model_observability::{
+        InputIssue, PermissionOutcome, Stage, StageOutcome, tool::ToolObservation,
+    },
     session::PersistedAgentSession,
 };
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
@@ -11,13 +14,15 @@ impl ScheduleStore {
         &self,
         session: &mut PersistedAgentSession,
         call: &ToolCall,
+        observation: &ToolObservation,
     ) -> Result<String, ScheduleStoreError> {
         let owner: i32 = session
             .actor_id
             .parse()
             .map_err(|_| ScheduleStoreError::Invalid)?;
-        let action = desk_diagnose_core::schedule::management_tools::parse(session, call)
-            .map_err(|_| ScheduleStoreError::Invalid)?;
+        let action =
+            desk_diagnose_core::schedule::management_tools::parse(session, call, observation)
+                .map_err(|_| ScheduleStoreError::Invalid)?;
         let txn = crate::db::begin_write(&self.db, crate::entity::agent_schedule::Entity).await?;
         if owner != crate::control_authorizer::SINGLE_ACCOUNT_USER_ID {
             return Err(ScheduleStoreError::NotFound);
@@ -86,12 +91,22 @@ impl ScheduleStore {
                     draft.kind
                         == desk_agent_protocol::schedule::ScheduledTaskKind::ConversationResume,
                 )
-                .map_err(|_| ScheduleStoreError::Invalid)?;
+                .map_err(|_| {
+                    observation.reject(Stage::Preflight, InputIssue::Precondition);
+                    ScheduleStoreError::Invalid
+                })?;
                 if draft.kind
                     == desk_agent_protocol::schedule::ScheduledTaskKind::ConversationResume
                 {
-                    super::check_resume_retention(&txn, &draft.spec, now).await?;
+                    super::check_resume_retention(&txn, &draft.spec, now)
+                        .await
+                        .inspect_err(|error| {
+                            if matches!(error, ScheduleStoreError::ExceedsSessionRetention { .. }) {
+                                observation.reject(Stage::Preflight, InputIssue::Precondition);
+                            }
+                        })?;
                 }
+                observation.stage(Stage::Preflight, StageOutcome::Passed);
                 let task = Self::create_draft_on(&txn, owner, &draft, now).await?;
                 if task.kind == "conversation_resume" {
                     awaiting_review = Some(task.schedule_id.clone());
@@ -99,14 +114,18 @@ impl ScheduleStore {
                 (serde_json::json!({"schedule_id":task.schedule_id,"kind":task.kind,"state":task.status,"awaiting_confirmation":awaiting_review.is_some(),
                     "message":"The application displays an owner review dialog. For a conversation timer, this model turn waits until the owner approves or rejects. Do not report success before the final owner decision. No extra chat confirmation is needed. No tool permission is granted."}).to_string(), "schedule_proposal")
             }
-            Action::List { after, limit } => (
-                super::model_management::list(&txn, owner, session, after, limit, now).await?,
-                "schedule_query",
-            ),
+            Action::List { after, limit } => {
+                observation.stage(Stage::Preflight, StageOutcome::Passed);
+                (
+                    super::model_management::list(&txn, owner, session, after, limit, now).await?,
+                    "schedule_query",
+                )
+            }
             Action::Cancel {
                 expected_revision, ..
             } => (
-                super::model_management::cancel(&txn, target, expected_revision, now).await?,
+                super::model_management::cancel(&txn, target, expected_revision, now, observation)
+                    .await?,
                 "schedule_cancellation",
             ),
         };
@@ -150,6 +169,9 @@ impl ScheduleStore {
         }
         txn.commit().await?;
         *session = next;
+        if session.pending_schedule_review.is_some() {
+            observation.permission(PermissionOutcome::Waiting);
+        }
         Ok(format!("schedule-proposal:{}", call.id))
     }
 }

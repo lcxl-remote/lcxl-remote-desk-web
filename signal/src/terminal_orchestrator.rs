@@ -28,17 +28,17 @@ use desk_diagnose_core::redaction::{Redactor, RegexRedactor};
 use desk_diagnose_core::seam::{ModelRequest, ModelSeam, NullTurnSink, TurnSink};
 use desk_diagnose_core::terminal_ai_assistant::{
     AssistantFrameSink, AssistantStreamSink, build_assistant_history_messages,
-    build_assistant_system_message, build_assistant_user_message, parse_assistant_answer,
+    build_assistant_system_message, build_assistant_user_message, parse_assistant_answer_observed,
 };
 use desk_diagnose_core::terminal_complete::{
-    CompletionRedaction, build_completion_model_request, parse_completions, redact_completion_ask,
-    validate_completion_raw_input,
+    CompletionRedaction, build_completion_model_request, parse_completions_observed,
+    redact_completion_ask, validate_completion_raw_input,
 };
 use desk_signal_facade::model::connection::{ConnectionState, SharedConnectionMap};
 use desk_signal_facade::model::signal::{SignalingModel, SignalingType};
 use sea_orm::DatabaseConnection;
 
-use crate::agent_runtime::record_usage;
+use crate::agent_runtime::record_metered;
 use crate::model_dial::SignalModelSeam;
 use crate::model_provider;
 
@@ -101,31 +101,53 @@ async fn send_to_browser<T: serde::Serialize>(
 }
 
 /// Load the provider config, build the model seam, dial once over `messages`, and
-/// record the call into the usage rollup. The single place every terminal model
+/// submit content-free usage observations. The single place every terminal model
 /// dial flows through, so the seam construction and usage accounting stay shared
 /// with the diagnose path.
 async fn dial(
     db: &DatabaseConnection,
     messages: Vec<ChatMessage>,
     sink: &mut dyn TurnSink,
-) -> Result<(ModelTurn, Option<String>), AgentError> {
+) -> Result<
+    (
+        ModelTurn,
+        Option<String>,
+        Option<desk_diagnose_core::model_observability::ObservationContext>,
+    ),
+    AgentError,
+> {
     let request = ModelRequest::text_only(messages, ResponseFormatSpec::None);
     dial_request(db, request, sink).await
 }
 
 async fn dial_request(
     db: &DatabaseConnection,
-    request: ModelRequest,
+    mut request: ModelRequest,
     sink: &mut dyn TurnSink,
-) -> Result<(ModelTurn, Option<String>), AgentError> {
+) -> Result<
+    (
+        ModelTurn,
+        Option<String>,
+        Option<desk_diagnose_core::model_observability::ObservationContext>,
+    ),
+    AgentError,
+> {
     let config = model_provider::load(db)
         .await
         .map_err(|e| transport_error(format!("failed to load model provider config: {e}")))?;
     let seam = SignalModelSeam::from_config(&config)?;
+    request.observation = seam.observation_context(
+        request.use_case,
+        desk_diagnose_core::model_observability::Origin::User,
+    );
+    if let Some(context) = &mut request.observation {
+        context.attribution.surface = desk_diagnose_core::model_observability::Surface::Terminal;
+    }
+    let observation = request.observation.clone();
     let turn = seam.call(request, sink).await?;
-    record_usage(db, config.model.as_deref().unwrap_or_default(), &turn.usage).await;
+    record_metered(observation.as_ref());
     // Return the model name so the caller can stamp AI provenance on the answer.
-    Ok((turn, config.model))
+    Ok((turn, config.model, observation))
 }
 
 /// Redact every browser-supplied free-text field of a assistant ask fail-closed. Any
@@ -189,8 +211,14 @@ async fn run_completion_turn(
     // Completion has no progressive UI: the candidates render together, so the
     // model text is not streamed.
     match dial_request(db, request, &mut NullTurnSink).await {
-        Ok((turn, model)) => {
-            let completions = parse_completions(&turn.text, &prefix, &default_shell);
+        Ok((turn, model, observation)) => {
+            let completions = parse_completions_observed(
+                &turn,
+                &prefix,
+                &default_shell,
+                observation.as_ref(),
+                chrono::Utc::now().timestamp_millis(),
+            );
             mark_completions(TerminalCompleteResult::ok(request_id, completions), model)
         }
         Err(transport) => TerminalCompleteResult::failed(request_id, transport),
@@ -244,8 +272,13 @@ async fn run_assistant_turn(
     messages.extend(build_assistant_history_messages(&ask.history));
     messages.push(build_assistant_user_message(&ask));
     match dial(db, messages, sink).await {
-        Ok((turn, model)) => {
-            let (answer, _outcome) = parse_assistant_answer(&turn.text, &default_shell);
+        Ok((turn, model, observation)) => {
+            let (answer, _outcome) = parse_assistant_answer_observed(
+                &turn,
+                &default_shell,
+                observation.as_ref(),
+                chrono::Utc::now().timestamp_millis(),
+            );
             // Mark the AI-generated answer with machine-readable provenance (Art.50(2)).
             sink.set_provenance(AiProvenance::stamp(
                 model,

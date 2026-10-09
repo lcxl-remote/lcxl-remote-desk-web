@@ -519,7 +519,7 @@ async fn timeout_and_authenticated_completion_converge_on_the_original_terminal_
 
 #[tokio::test]
 async fn batch_completion_projects_only_compact_failure_or_success() {
-    use crate::remote_tool_edge::completion::project;
+    use crate::remote_tool_edge::completion::{project, project_reported};
     let dir = tempfile::tempdir().unwrap();
     let f = Fixture::new(file_db(&dir.path().join("batch.db")).await).await;
     let mut plan = f.plan.clone();
@@ -586,6 +586,24 @@ async fn batch_completion_projects_only_compact_failure_or_success() {
                 .unwrap();
             assert_eq!(result.outcome, CapabilityDispatchOutcome::Failed);
             assert_eq!(Some(result.content), native.message);
+            let reported =
+                project_reported(&plan, "execute_ui_actions", "run", "{}", &native).unwrap();
+            let projection = reported.projection.unwrap();
+            assert_eq!(Some(projection.content.clone()), native.message);
+            assert_eq!(
+                reported.batch,
+                Some(
+                    desk_diagnose_core::application_batch::BatchExecutionObservation {
+                        completed_steps: Some(count),
+                        failed_step: Some(count + 1),
+                    }
+                )
+            );
+            // Metadata cannot enter the serialized receipt used by provenance.
+            let serialized = serde_json::to_value(&projection).unwrap();
+            assert_eq!(serialized.as_object().unwrap().len(), 2);
+            assert!(serialized.get("batch").is_none());
+            assert!(serialized.get("observation").is_none());
         }
     }
 }

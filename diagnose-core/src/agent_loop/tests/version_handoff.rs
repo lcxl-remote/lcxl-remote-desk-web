@@ -169,6 +169,7 @@ async fn execute(
         &mut || "minted".into(),
         &mut None,
         &mut NullTurnSink,
+        &crate::model_observability::tool::ToolObservation::default(),
     )
     .await;
     let observed = runtime.observed_version.get();

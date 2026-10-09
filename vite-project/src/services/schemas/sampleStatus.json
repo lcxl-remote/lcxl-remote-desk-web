@@ -1,0 +1,1 @@
+{"type":"string","enum":["complete","partial","no_samples","not_collected","unknown","unavailable","not_applicable"],"x-readme-ref-name":"SampleStatus"}

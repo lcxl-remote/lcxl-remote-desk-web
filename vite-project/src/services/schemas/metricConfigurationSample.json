@@ -1,0 +1,1 @@
+{"type":"object","required":["provider_id","model_id","model_name","revisions"],"properties":{"model_id":{"type":"string"},"model_name":{"type":"string"},"provider_id":{"type":"string"},"revisions":{"type":"array","items":{"type":"string"},"description":"Observed revisions in this query cohort, never current catalog values."}},"x-readme-ref-name":"MetricConfigurationSample"}

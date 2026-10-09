@@ -60,7 +60,7 @@ pub(crate) async fn close_root_on(
     db: &DatabaseTransaction,
     parent: &PersistedAgentSession,
     now_ms: i64,
-) -> Result<(), DbErr> {
+) -> Result<desk_diagnose_core::model_observability::permission::PendingEnds, DbErr> {
     if !parent.agent_role.is_main() {
         return Err(invalid());
     }
@@ -75,8 +75,13 @@ pub(crate) async fn close_root_on(
     // Diagnostic and terminal sessions have no delegation authority or native
     // assistant execution identity; retain their existing lifecycle.
     if parent.surface != AgentSessionSurface::AiAssistant {
-        return Ok(());
+        return Ok(Default::default());
     }
+    let mut permission_ends =
+        desk_diagnose_core::model_observability::permission::PendingEnds::waiting(
+            parent,
+            desk_diagnose_core::model_observability::PermissionOutcome::Cancelled,
+        );
     let now = chrono::DateTime::from_timestamp_millis(now_ms)
         .ok_or_else(invalid)?
         .to_rfc3339();
@@ -130,12 +135,14 @@ pub(crate) async fn close_root_on(
                 run.binding.source_epoch = group.source_epoch;
                 run.settle_cancel(&now).map_err(|_| invalid())?;
                 replace_run_on(db, &child, &run, now_ms).await?;
-                synchronize_control_on(db, &run, now_ms).await?;
+                permission_ends.extend(synchronize_control_on(db, &run, now_ms, false).await?);
                 append_state_event_on(db, &group, &run, now_ms).await?;
             }
         }
     }
-    super::native_cancel::cancel_native_actions_on(db, parent, "conversation_removed", now_ms).await
+    super::native_cancel::cancel_native_actions_on(db, parent, "conversation_removed", now_ms)
+        .await?;
+    Ok(permission_ends)
 }
 
 /// Filter before LIMIT and recheck under control locks. A parent's idle state

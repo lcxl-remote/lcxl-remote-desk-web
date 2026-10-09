@@ -94,7 +94,9 @@ struct Input {
 pub fn draft(
     session: &PersistedAgentSession,
     call: &ToolCall,
+    observation: &crate::model_observability::tool::ToolObservation,
 ) -> Result<ScheduleDraft, &'static str> {
+    use crate::model_observability::{InputIssue, PermissionOutcome, Stage, StageOutcome};
     if call.name != REQUEST_SCHEDULE
         || call.id.is_empty()
         || call.id.len() > 256
@@ -107,10 +109,28 @@ pub fn draft(
         || session.device_id.is_empty()
         || call.arguments_json.len() > 96 * 1024
     {
+        if call.name != REQUEST_SCHEDULE {
+            observation.reject(Stage::Exposure, InputIssue::UnknownTool);
+        } else if call.id.is_empty() || call.id.len() > 256 {
+            observation.reject(Stage::Protocol, InputIssue::InvalidProtocol);
+        } else if !session.agent_role.is_main()
+            || session.surface != AgentSessionSurface::AiAssistant
+            || session.trigger_origin != TriggerOrigin::User
+            || !session.turn_state.is_active()
+            || session.input_revision == 0
+            || session.actor_id.is_empty()
+            || session.device_id.is_empty()
+        {
+            observation.permission(PermissionOutcome::PolicyRejected);
+        } else {
+            observation.reject(Stage::Preflight, InputIssue::Length);
+        }
         return Err("schedule proposal is unavailable");
     }
-    let input: Input =
-        serde_json::from_str(&call.arguments_json).map_err(|_| "invalid schedule proposal")?;
+    let input: Input = serde_json::from_str(&call.arguments_json).map_err(|_| {
+        observation.reject(Stage::Preflight, InputIssue::Semantic);
+        "invalid schedule proposal"
+    })?;
     if input.title.trim().is_empty()
         || input.title.chars().count() > 240
         || input.title.chars().any(char::is_control)
@@ -121,9 +141,13 @@ pub fn draft(
             .chars()
             .any(|c| c.is_control() && c != '\n' && c != '\t')
     {
+        observation.reject(Stage::Preflight, InputIssue::Semantic);
         return Err("invalid schedule proposal");
     }
-    let (spec, time_confirmation) = resolve_time(input.rule, input.time_input)?;
+    let (spec, time_confirmation) =
+        resolve_time(input.rule, input.time_input).inspect_err(|_| {
+            observation.reject(Stage::Preflight, InputIssue::Combination);
+        })?;
     let continuation = input.kind == ScheduledTaskKind::ConversationResume;
     if continuation
         && !matches!(
@@ -131,6 +155,7 @@ pub fn draft(
             ScheduleRule::Once { .. } | ScheduleRule::AfterConfirmation { .. }
         )
     {
+        observation.reject(Stage::Preflight, InputIssue::Combination);
         return Err("conversation continuation must be one-time");
     }
     let identity = serde_json::to_vec(&(
@@ -141,6 +166,7 @@ pub fn draft(
         &call.id,
     ))
     .map_err(|_| "invalid proposal identity")?;
+    observation.stage(Stage::Preflight, StageOutcome::Attempted);
     Ok(ScheduleDraft {
         time_confirmation,
         client_create_key: format!("ai-schedule-{:x}", Sha256::digest(identity)),

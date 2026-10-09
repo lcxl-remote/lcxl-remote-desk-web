@@ -1,5 +1,5 @@
 use super::*;
-use crate::entity::{agent_exec_task, agent_run_event, ai_usage, turn_usage, usage_retention};
+use crate::entity::{agent_exec_task, agent_run_event, turn_usage, usage_retention};
 use desk_diagnose_core::session::TurnState;
 
 async fn add_cleanup_tables(db: &DatabaseConnection) {
@@ -7,7 +7,6 @@ async fn add_cleanup_tables(db: &DatabaseConnection) {
     for mut table in [
         schema.create_table_from_entity(usage_retention::Entity),
         schema.create_table_from_entity(turn_usage::Entity),
-        schema.create_table_from_entity(ai_usage::Entity),
         schema.create_table_from_entity(agent_exec_task::Entity),
         schema.create_table_from_entity(agent_run_event::Entity),
         schema.create_table_from_entity(crate::entity::agent_permission_resume::Entity),
@@ -153,7 +152,7 @@ async fn expiry_deletes_original_results_with_run_or_rolls_back_every_related_re
 
     assert_eq!(
         crate::usage_retention::cleanup_once(db, now).await.unwrap(),
-        (0, 0, 0, 1)
+        (0, 0, 1)
     );
     assert_eq!(counts(db).await, vec![0; 8]);
     assert!(
@@ -166,6 +165,6 @@ async fn expiry_deletes_original_results_with_run_or_rolls_back_every_related_re
     assert_eq!(counts(db).await, vec![0; 8]);
     assert_eq!(
         crate::usage_retention::cleanup_once(db, now).await.unwrap(),
-        (0, 0, 0, 0)
+        (0, 0, 0)
     );
 }

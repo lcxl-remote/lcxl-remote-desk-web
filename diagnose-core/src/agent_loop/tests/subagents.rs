@@ -227,6 +227,7 @@ impl SubAgentSeam for ChildSessions {
         _: &ToolCall,
         _: Operation,
         _: &str,
+        _: &crate::model_observability::tool::ToolObservation,
     ) -> Result<ToolReceipt, AgentError> {
         panic!("a child cannot reach delegation tools");
     }

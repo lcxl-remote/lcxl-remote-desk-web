@@ -1,0 +1,1 @@
+{"type":"string","enum":["calls","request_errors","request_failure_rate","input_rejected","input_rejection_rate"],"x-readme-ref-name":"MetricGroupSort"}

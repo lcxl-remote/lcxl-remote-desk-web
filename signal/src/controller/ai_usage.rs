@@ -1,101 +1,117 @@
-use actix_web::{HttpResponse, get, web};
-use desk_utils::rest::RestResponse;
-use serde::{Deserialize, Serialize};
-use utoipa::{IntoParams, ToSchema};
+//! Owner-only public usage query over the current observation store.
 
-use crate::ai_usage::query_ai_usage;
 use crate::error::DeskSignalError;
-use crate::usage_query::{self, Granularity};
+use crate::usage_query::{self, Granularity as UsageGranularity};
+use actix_session::Session;
+use actix_web::{HttpResponse, get, web};
+use desk_signal_facade::model::{
+    model_metrics::{Granularity, MetricsQuery},
+    model_usage::{ModelUsageQuery, ModelUsageRange, ModelUsageResult},
+};
+use desk_signal_facade::service::model_metrics::ResolvedQuery;
+use desk_utils::{error::DeskErrorCode, rest::RestResponse};
 
 pub const TAG: &str = "ModelUsage";
 
-/// Time range for a usage query. Both bounds are RFC3339 timestamps; `to` is
-/// exclusive. When omitted, `from` defaults to a recent window and the range is
-/// clamped to the configured retention.
-#[derive(Debug, Deserialize, IntoParams)]
-pub struct ModelUsageQuery {
-    pub from: Option<String>,
-    pub to: Option<String>,
-    /// Time-bucket granularity (`hour` / `day`). Omitted defaults to `hour`; a
-    /// range wider than the day threshold forces `day` regardless.
-    pub granularity: Option<String>,
-}
-
-/// One per-model hourly usage row, projected for the frontend chart.
-#[derive(Debug, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct ModelUsageItem {
-    pub model_name: String,
-    pub hour_bucket: String,
-    pub input_tokens: i64,
-    pub output_tokens: i64,
-    pub cache_read_tokens: i64,
-    pub cache_write_tokens: i64,
-    pub request_count: i64,
-}
-
-#[derive(Debug, Serialize, ToSchema)]
-pub struct ModelUsageResult {
-    pub items: Vec<ModelUsageItem>,
-    /// The effective range actually queried (after clamping to retention / now)
-    /// and the granularity applied. Day buckets are UTC-0.
-    pub range: usage_query::UsageRangeDto,
-}
-
-#[utoipa::path(
-    tag = TAG,
-    summary = "Query local per-model AI gateway token usage",
-    params(ModelUsageQuery),
-    responses(
-        (status = 200, description = "Per-model hourly token usage", body = RestResponse<ModelUsageResult>),
-    ),
-)]
+#[utoipa::path(tag=TAG,summary="Query local model usage from current observations",params(ModelUsageQuery),responses((status=200,body=RestResponse<ModelUsageResult>)))]
 #[get("/usage")]
 pub async fn get_model_usage(
+    session: Session,
     query: web::Query<ModelUsageQuery>,
 ) -> Result<HttpResponse, DeskSignalError> {
-    let db = crate::db::get_db();
-    // Clamp the requested range to the configured AI retention window, and resolve
-    // the effective granularity (wide ranges force `day`).
-    let now = chrono::Utc::now();
-    let retention = crate::usage_retention::load(db).await?;
-    let range = usage_query::resolve_effective_range(
-        query.from.as_deref(),
-        query.to.as_deref(),
-        Granularity::parse(query.granularity.as_deref()),
-        now,
-        retention.ai_days,
-    )
-    .map_err(|e| {
-        DeskSignalError::new_custom_error(desk_utils::error::DeskErrorCode::INVALID_PARAMS, &e)
+    super::model_metrics::authorize(&session)?;
+    let store = crate::model_metrics::runtime::store().ok_or_else(|| {
+        DeskSignalError::new_custom_error(DeskErrorCode::SYSTEM_ERROR, "model metrics unavailable")
     })?;
-
-    let items = if range.is_empty {
-        Vec::new()
-    } else {
-        query_ai_usage(db, range.from, range.to, range.granularity)
-            .await?
-            .into_iter()
-            .map(|row| ModelUsageItem {
-                model_name: row.model_name,
-                hour_bucket: chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(
-                    row.hour_bucket,
-                    chrono::Utc,
+    let result = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        let config = store.load_settings().await.map_err(|_| {
+            DeskSignalError::new_custom_error(
+                DeskErrorCode::SYSTEM_ERROR,
+                "model metrics unavailable",
+            )
+        })?;
+        let now = chrono::Utc::now();
+        if query
+            .granularity
+            .as_deref()
+            .is_some_and(|v| v != "hour" && v != "day")
+        {
+            return Err(DeskSignalError::new_custom_error(
+                DeskErrorCode::INVALID_PARAMS,
+                "unsupported usage granularity",
+            ));
+        }
+        let range = usage_query::resolve_effective_range(
+            query.from.as_deref(),
+            query.to.as_deref(),
+            UsageGranularity::parse(query.granularity.as_deref()),
+            now,
+            config.hourly_days,
+        )
+        .map_err(|_| {
+            DeskSignalError::new_custom_error(DeskErrorCode::INVALID_PARAMS, "invalid usage range")
+        })?;
+        if range.is_empty {
+            let dto = range.to_dto();
+            return Ok(ModelUsageResult {
+                items: vec![],
+                range: ModelUsageRange {
+                    from: dto.from,
+                    to: dto.to,
+                    granularity: dto.granularity,
+                },
+                usage_source: "observations".into(),
+                partial: true,
+                available_from: None,
+            });
+        }
+        if query
+            .model_name
+            .as_ref()
+            .is_some_and(|value| value.len() > 128 || value.chars().any(char::is_control))
+        {
+            return Err(DeskSignalError::new_custom_error(
+                DeskErrorCode::INVALID_PARAMS,
+                "invalid model selector",
+            ));
+        }
+        let resolved = ResolvedQuery::resolve(
+            &MetricsQuery {
+                from: Some(range.from.to_rfc3339()),
+                to: Some(range.to.to_rfc3339()),
+                granularity: Some(Granularity::Hour),
+                provider_id: query.provider_id.clone(),
+                model_id: query.model_id.clone(),
+                purpose: query.purpose.clone(),
+                include_probe: Some(true),
+                ..Default::default()
+            },
+            now.timestamp_millis(),
+        )
+        .map_err(|reason| {
+            DeskSignalError::new_custom_error(DeskErrorCode::INVALID_PARAMS, reason)
+        })?;
+        store
+            .model_usage(
+                &resolved,
+                query.model_name.as_deref(),
+                range.granularity == UsageGranularity::Day,
+                now.timestamp_millis(),
+            )
+            .await
+            .map_err(|_| {
+                DeskSignalError::new_custom_error(
+                    DeskErrorCode::SYSTEM_ERROR,
+                    "model metrics unavailable",
                 )
-                .to_rfc3339(),
-                input_tokens: row.input_tokens,
-                output_tokens: row.output_tokens,
-                cache_read_tokens: row.cache_read_tokens,
-                cache_write_tokens: row.cache_write_tokens,
-                request_count: row.request_count,
             })
-            .collect()
-    };
-
-    Ok(
-        HttpResponse::Ok().json(RestResponse::succeed_with_data(ModelUsageResult {
-            items,
-            range: range.to_dto(),
-        })),
-    )
+    })
+    .await
+    .map_err(|_| {
+        DeskSignalError::new_custom_error(
+            DeskErrorCode::SYSTEM_ERROR,
+            "model metrics query timed out",
+        )
+    })??;
+    Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(result)))
 }

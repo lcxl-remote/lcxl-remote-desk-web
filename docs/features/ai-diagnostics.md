@@ -1,5 +1,7 @@
 # AI Diagnostics
 
+Device owners can open [Model call metrics](/features/model-metrics) from **Usage** to inspect call errors, tool parameter checks and Token usage. Statistics may be incomplete in exceptional situations and are for reference. The page does not store conversation content or recalculate earlier calls.
+
 ## Subagents
 
 Main and child tab titles pulse while approval remains pending. Reading a tab or marking it read does not clear approval attention; resolving approval does. Reduced-motion settings use a static highlight. Child attachments, context, working directories, permission history, background tasks and task details use the main conversation’s menu and panel presentation. Chat, images and pending consent actions stay in the transcript. Switching tabs closes the prior panels without retargeting consent. The context meter splits history occupancy into conversation/events, tool calls/results, protocol replay (including reasoning), and summaries/projections; these sum to total usage. System and tool definitions are already reserved outside the history budget, and display copies of reasoning are not counted twice. Cumulative tokens sum multiple calls rather than measuring current occupancy.

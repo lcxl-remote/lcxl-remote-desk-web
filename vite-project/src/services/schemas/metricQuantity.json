@@ -1,0 +1,1 @@
+{"type":"object","required":["key","sample_count","sum"],"properties":{"key":{"type":"string"},"sample_count":{"type":"string"},"sum":{"type":"string"}},"x-readme-ref-name":"MetricQuantity"}

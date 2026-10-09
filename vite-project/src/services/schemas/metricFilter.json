@@ -1,0 +1,1 @@
+{"type":"string","enum":["time","provider_id","model_id","surface","purpose","origin","tool","error","contract_revision","include_probe"],"x-readme-ref-name":"MetricFilter"}
