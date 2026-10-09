@@ -857,6 +857,16 @@ pub struct ContextUsageDto {
     pub limit_bytes: u64,
     pub strategy: String,
     pub breakdown: ContextUsageBreakdownDto,
+    pub request_budget: Option<ContextRequestBudgetDto>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextRequestBudgetDto {
+    pub total_bytes: u64,
+    pub system_prompt_bytes: u64,
+    pub tool_definitions_bytes: u64,
+    pub other_overhead_bytes: u64,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -880,6 +890,12 @@ impl From<desk_diagnose_core::context_usage::ContextUsage> for ContextUsageDto {
                 replay_bytes: value.breakdown.replay_bytes as u64,
                 projected_bytes: value.breakdown.projected_bytes as u64,
             },
+            request_budget: value.request_budget.map(|budget| ContextRequestBudgetDto {
+                total_bytes: budget.total_bytes as u64,
+                system_prompt_bytes: budget.system_prompt_bytes as u64,
+                tool_definitions_bytes: budget.tool_definitions_bytes as u64,
+                other_overhead_bytes: budget.other_overhead_bytes as u64,
+            }),
         }
     }
 }
@@ -2027,14 +2043,36 @@ mod tests {
                 replay_bytes: 20,
                 projected_bytes: 0,
             },
+            request_budget: Some(desk_diagnose_core::context_usage::ContextRequestBudget {
+                total_bytes: 256,
+                system_prompt_bytes: 64,
+                tool_definitions_bytes: 32,
+                other_overhead_bytes: 32,
+            }),
         });
         assert_eq!(
             serde_json::to_value(dto).unwrap(),
             serde_json::json!({
                 "usedBytes": 42, "limitBytes": 128, "strategy": "checkpoint_summary",
-                "breakdown": {"messagesBytes": 12, "toolsBytes": 10, "replayBytes": 20, "projectedBytes": 0}
+                "breakdown": {"messagesBytes": 12, "toolsBytes": 10, "replayBytes": 20, "projectedBytes": 0},
+                "requestBudget": {"totalBytes": 256, "systemPromptBytes": 64, "toolDefinitionsBytes": 32, "otherOverheadBytes": 32}
             })
         );
+    }
+
+    #[test]
+    fn unmeasured_request_budget_is_null_instead_of_zero() {
+        let dto = ContextUsageDto::from(desk_diagnose_core::context_usage::ContextUsage {
+            used_bytes: 0,
+            limit_bytes: 128,
+            strategy: "window".into(),
+            breakdown: Default::default(),
+            request_budget: None,
+        });
+        let value = serde_json::to_value(dto).unwrap();
+        assert!(value["requestBudget"].is_null());
+        assert_eq!(value["limitBytes"], 128);
+        assert_eq!(value["usedBytes"], 0);
     }
 
     fn slack_exact_send_json() -> String {

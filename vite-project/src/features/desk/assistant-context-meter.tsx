@@ -5,6 +5,20 @@ import type { ContextUsageDto } from '@/services/types';
 
 export type AssistantContextUsage = ContextUsageDto;
 
+export function contextRequestBudget(usage: AssistantContextUsage | null) {
+    const budget = usage?.requestBudget;
+    if (!budget || !usage || ![budget.totalBytes, budget.systemPromptBytes, budget.toolDefinitionsBytes, budget.otherOverheadBytes]
+        .every(value => Number.isSafeInteger(value) && value >= 0) || budget.totalBytes <= 0) return null;
+    const overhead = budget.systemPromptBytes + budget.toolDefinitionsBytes + budget.otherOverheadBytes;
+    return Number.isSafeInteger(overhead) && budget.totalBytes - overhead === usage.limitBytes && usage.limitBytes > 0 ? budget : null;
+}
+
+export function contextBudgetShare(bytes: number, total: number) {
+    if (!Number.isSafeInteger(bytes) || !Number.isSafeInteger(total) || bytes < 0 || total <= 0 || bytes > total) return null;
+    const percent = bytes / total * 100;
+    return percent > 0 && percent < 0.1 ? 'small' : Math.min(bytes < total ? 99.9 : 100, Math.round(percent * 10) / 10);
+}
+
 export function contextMeterValues(usage: AssistantContextUsage | null, draft: string) {
     if (!usage || !Number.isSafeInteger(usage.usedBytes) || !Number.isSafeInteger(usage.limitBytes)
         || usage.usedBytes < 0 || usage.limitBytes <= 0
@@ -21,7 +35,13 @@ export function contextMeterValues(usage: AssistantContextUsage | null, draft: s
 export function AssistantContextMeter({ usage, draft }: { usage: AssistantContextUsage | null; draft: string }) {
     const { t, i18n } = useTranslation();
     const values = contextMeterValues(usage, draft);
+    const budget = contextRequestBudget(usage);
     const bytes = (n: number) => t('pages.aiAssistant.contextMeter.bytes', { value: new Intl.NumberFormat(i18n.language).format(n) });
+    const share = (cost: number, total: number) => {
+        const value = contextBudgetShare(cost, total);
+        return value === 'small' ? t('pages.aiAssistant.contextMeter.shareSmall')
+            : value == null ? '—' : t('pages.aiAssistant.contextMeter.share', { value: new Intl.NumberFormat(i18n.language, { maximumFractionDigits: 1 }).format(value) });
+    };
     const label = t(values ? 'pages.aiAssistant.contextMeter.percent' : 'pages.aiAssistant.contextMeter.unknown', { percent: values?.percent });
     return <Popover><PopoverTrigger asChild>
         <Button variant="unstyled" type="button" aria-label={label} className="assistant-context-meter flex h-11 w-11 shrink-0 items-center justify-center rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
@@ -33,10 +53,22 @@ export function AssistantContextMeter({ usage, draft }: { usage: AssistantContex
                 <text x="20" y="20" dy=".35em" textAnchor="middle" fill="currentColor" fontSize="10">{values ? `${values.percent}%` : '—'}</text>
             </svg>
         </Button>
-    </PopoverTrigger><PopoverContent side="top" className="max-w-xs space-y-2 p-3">
+    </PopoverTrigger><PopoverContent side="top" collisionPadding={16} aria-label={t('pages.aiAssistant.contextMeter.title')} className="w-96 max-w-[calc(100vw-2rem)] max-h-[var(--radix-popover-content-available-height)] overflow-y-auto overscroll-contain space-y-3 p-3">
         <p className="font-medium">{t('pages.aiAssistant.contextMeter.title')}</p>
         {values && usage ? <>
-            <dl className="grid grid-cols-[1fr_auto] gap-x-4 gap-y-1">
+            <section aria-label={t('pages.aiAssistant.contextMeter.requestTitle')} className="space-y-2">
+                <p className="text-sm font-medium">{t('pages.aiAssistant.contextMeter.requestTitle')}</p>
+                <dl className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-2 text-sm">
+                    <dt>{t('pages.aiAssistant.contextMeter.total')}</dt><dd className="text-right tabular-nums">{budget ? bytes(budget.totalBytes) : '—'}</dd>
+                    {(['systemPromptBytes', 'toolDefinitionsBytes', 'otherOverheadBytes'] as const).map(key => <div key={key} className="contents">
+                        <dt>{t(`pages.aiAssistant.contextMeter.request.${key}`)}</dt>
+                        <dd className="text-right tabular-nums">{budget ? <>{bytes(budget[key])}<span className="block text-xs text-muted-foreground">{share(budget[key], budget.totalBytes)}</span></> : '—'}</dd>
+                    </div>)}
+                </dl>
+                {!budget && <p className="text-xs text-muted-foreground">{t('pages.aiAssistant.contextMeter.requestUnknown')}</p>}
+            </section>
+            <p className="border-t pt-2 text-sm font-medium">{t('pages.aiAssistant.contextMeter.historyTitle')}</p>
+            <dl className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-1 text-sm [&_dd]:text-right [&_dd]:tabular-nums">
                 <dt>{t(`pages.aiAssistant.contextMeter.limit.${usage.strategy}`)}</dt><dd>{bytes(usage.limitBytes)}</dd>
                 <dt>{t('pages.aiAssistant.contextMeter.used')}</dt><dd>{bytes(usage.usedBytes)}</dd>
                 {usage.breakdown && (['messagesBytes', 'toolsBytes', 'replayBytes', 'projectedBytes'] as const).map(key => <div key={key} className="contents">
@@ -46,7 +78,7 @@ export function AssistantContextMeter({ usage, draft }: { usage: AssistantContex
                 <dt>{t('pages.aiAssistant.contextMeter.draft')}</dt><dd>{bytes(values.draftBytes)}</dd>
             </dl>
             {values.draftBytes > values.remaining && <p>{t('pages.aiAssistant.contextMeter.exceeds')}</p>}
-            <p>{t('pages.aiAssistant.contextMeter.hint')}</p>
+            <p className="text-xs leading-relaxed text-muted-foreground">{t('pages.aiAssistant.contextMeter.hint')}</p>
         </> : <p>{t('pages.aiAssistant.contextMeter.unknownHint')}</p>}
     </PopoverContent></Popover>;
 }

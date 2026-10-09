@@ -122,12 +122,22 @@ async fn check_completion_usage(with_usage: bool, invalid_count: usize) {
             1,
             TEST_MODEL_CONTEXT_BYTES,
         )
+        .unwrap()
+        .with_request_overhead_bytes(1024)
         .unwrap();
-        session.context_usage_basis = Some(crate::context_usage::ContextUsageBasis::observe(
-            &session.conversation[..2],
-            &session.conversation[..2],
-            &policy,
-        ));
+        session.context_usage_basis = Some(
+            crate::context_usage::ContextUsageBasis::observe(
+                &session.conversation[..2],
+                &session.conversation[..2],
+                &policy,
+            )
+            .with_request_budget(Some(crate::context_usage::ContextRequestBudget {
+                total_bytes: TEST_MODEL_CONTEXT_BYTES,
+                system_prompt_bytes: 256,
+                tool_definitions_bytes: 512,
+                other_overhead_bytes: 256,
+            })),
+        );
     }
     let original_usage = session.context_usage_basis.clone();
     let used_before = original_usage

@@ -2614,6 +2614,56 @@ fn superseded_tool_result(
 #[cfg(test)]
 mod tests {
     #[tokio::test]
+    async fn context_request_budget_survives_session_store_recreation() {
+        use desk_diagnose_core::{
+            context_usage::{ContextRequestBudget, ContextUsageBasis},
+            model_context::PinnedContextPolicy,
+            model_profile::WireProtocol,
+            replay::SourceContextKey,
+        };
+        let owner = store().await;
+        let mut session = owner.claim_turn(claim("budget-turn")).await.unwrap();
+        let policy = PinnedContextPolicy::window(
+            SourceContextKey::derive(WireProtocol::OpenAiChatCompletions, "test", "test", "test"),
+            1,
+            16_384,
+        )
+        .unwrap()
+        .with_request_overhead_bytes(1024)
+        .unwrap();
+        let budget = ContextRequestBudget {
+            total_bytes: 16_384,
+            system_prompt_bytes: 256,
+            tool_definitions_bytes: 512,
+            other_overhead_bytes: 256,
+        };
+        session.context_usage_basis = Some(
+            ContextUsageBasis::observe(&session.conversation, &session.conversation, &policy)
+                .with_request_budget(Some(budget.clone())),
+        );
+        session.finish_turn(TurnState::Idle, Utc::now().to_rfc3339());
+        owner.save(&mut session).await.unwrap();
+        let first = owner
+            .read_snapshot(&session.conversation_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let db = owner.db.clone();
+        drop(owner);
+        let reader = SignalAgentSessionStore::new(db);
+        let second = reader
+            .read_snapshot(&session.conversation_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.context_usage, second.context_usage);
+        let usage = second.context_usage.unwrap();
+        assert_eq!(usage.request_budget, Some(budget));
+        assert_eq!(usage.limit_bytes, 15_360);
+        assert_eq!(usage.used_bytes, 0);
+    }
+
+    #[tokio::test]
     async fn conversation_list_prioritizes_running_before_recency_and_limit() {
         let store = store().await;
         for (id, active, age) in [

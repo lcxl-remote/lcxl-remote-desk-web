@@ -1118,6 +1118,29 @@ export type ContextUsageBreakdownDto = {
     toolsBytes: number;
 };
 
+export type ContextRequestBudgetDto = {
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    otherOverheadBytes: number;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    systemPromptBytes: number;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    toolDefinitionsBytes: number;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    totalBytes: number;
+};
+
 export type ContextUsageDto = {
     /**
      * @type object
@@ -1128,6 +1151,7 @@ export type ContextUsageDto = {
      * @type integer, int64
     */
     limitBytes: number;
+    requestBudget?: (null | ContextRequestBudgetDto);
     /**
      * @type string
     */

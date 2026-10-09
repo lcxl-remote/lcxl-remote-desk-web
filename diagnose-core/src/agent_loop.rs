@@ -3149,18 +3149,22 @@ async fn run_inner_impl(
                 model_context_error(crate::model_context::ModelContextError::ContextCostOverflow)
             })?
             .len();
-        let request_overhead_bytes = messages
+        let mut system_prompt_bytes = Some(0usize);
+        let message_overhead_bytes = messages
             .iter()
-            .map(crate::trim::model_context_cost)
-            .sum::<usize>()
-            .checked_add(if split_runtime {
-                crate::trim::model_context_cost(&stable_system)
-            } else {
-                0
+            .chain(split_runtime.then_some(&stable_system))
+            .try_fold(0usize, |total, message| {
+                let cost = crate::trim::model_context_cost(message);
+                if message.role == ChatRole::System {
+                    system_prompt_bytes =
+                        system_prompt_bytes.and_then(|bytes| bytes.checked_add(cost));
+                }
+                total.checked_add(cost)
             })
             .ok_or_else(|| {
                 model_context_error(crate::model_context::ModelContextError::ContextCostOverflow)
-            })?
+            })?;
+        let request_overhead_bytes = message_overhead_bytes
             .checked_add(tool_spec_bytes)
             .and_then(|value| value.checked_add(REQUEST_FRAMING_RESERVE_BYTES))
             .ok_or_else(|| {
@@ -3170,6 +3174,16 @@ async fn run_inner_impl(
             .clone()
             .with_request_overhead_bytes(request_overhead_bytes)
             .map_err(model_context_error)?;
+        let request_budget = system_prompt_bytes.and_then(|system_prompt_bytes| {
+            Some(crate::context_usage::ContextRequestBudget {
+                total_bytes: pinned_context.max_context_bytes,
+                system_prompt_bytes,
+                tool_definitions_bytes: tool_spec_bytes,
+                other_overhead_bytes: message_overhead_bytes
+                    .checked_sub(system_prompt_bytes)?
+                    .checked_add(REQUEST_FRAMING_RESERVE_BYTES)?,
+            })
+        });
         crate::conversation_attachment::model_read::validate_pending_reads(
             deps.session_seam,
             session,
@@ -3198,11 +3212,14 @@ async fn run_inner_impl(
         // Completion-only projections do not replace the regular conversation's
         // occupancy baseline. New results/replies still count via usage().
         if deps.model.command_completion_event_id().is_none() {
-            session.context_usage_basis = Some(crate::context_usage::ContextUsageBasis::observe(
-                &session.conversation,
-                &context_view.messages,
-                &history_policy,
-            ));
+            session.context_usage_basis = Some(
+                crate::context_usage::ContextUsageBasis::observe(
+                    &session.conversation,
+                    &context_view.messages,
+                    &history_policy,
+                )
+                .with_request_budget(request_budget),
+            );
         }
         let runtime_messages = messages;
         let mut messages =

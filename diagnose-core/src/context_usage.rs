@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 pub struct ContextUsageBasis {
     pub limit_bytes: usize,
     pub strategy: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    request_budget: Option<ContextRequestBudget>,
     retained_ids: Vec<String>,
     synthetic_bytes: usize,
     observed_len: usize,
@@ -19,6 +21,26 @@ pub struct ContextUsage {
     pub limit_bytes: usize,
     pub strategy: String,
     pub breakdown: ContextUsageBreakdown,
+    pub request_budget: Option<ContextRequestBudget>,
+}
+
+/// Metadata for the overhead reserved before selecting the history window.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextRequestBudget {
+    pub total_bytes: usize,
+    pub system_prompt_bytes: usize,
+    pub tool_definitions_bytes: usize,
+    pub other_overhead_bytes: usize,
+}
+
+impl ContextRequestBudget {
+    pub fn matches_history_limit(&self, limit_bytes: usize) -> bool {
+        self.system_prompt_bytes
+            .checked_add(self.tool_definitions_bytes)
+            .and_then(|overhead| overhead.checked_add(self.other_overhead_bytes))
+            .and_then(|overhead| self.total_bytes.checked_sub(overhead))
+            .is_some_and(|remaining| remaining > 0 && remaining == limit_bytes)
+    }
 }
 
 /// Costs of the prepared history only; contains no message or replay content.
@@ -40,6 +62,7 @@ impl ContextUsageBasis {
             history.iter().map(|m| m.message_id.as_str()).collect();
         Self {
             limit_bytes: policy.history_context_bytes(),
+            request_budget: None,
             strategy: match policy.strategy {
                 crate::model_context::ContextManagementStrategy::Window => "window",
                 crate::model_context::ContextManagementStrategy::CheckpointSummary => {
@@ -60,6 +83,13 @@ impl ContextUsageBasis {
             observed_len: history.len(),
             observed_tail_id: history.last().map(|m| m.message_id.clone()),
         }
+    }
+
+    /// Missing or inconsistent display metadata cannot invalidate history usage.
+    pub fn with_request_budget(mut self, budget: Option<ContextRequestBudget>) -> Self {
+        self.request_budget =
+            budget.filter(|budget| budget.matches_history_limit(self.limit_bytes));
+        self
     }
 
     /// Include replies, tool results and newly accepted input since observation.
@@ -108,6 +138,11 @@ impl ContextUsageBasis {
             limit_bytes: self.limit_bytes,
             strategy: self.strategy.clone(),
             breakdown,
+            request_budget: self
+                .request_budget
+                .as_ref()
+                .filter(|budget| budget.matches_history_limit(self.limit_bytes))
+                .cloned(),
         })
     }
 }
@@ -131,6 +166,76 @@ mod tests {
         .unwrap()
         .with_request_overhead_bytes(1024)
         .unwrap()
+    }
+
+    #[test]
+    fn request_budget_survives_persistence_without_recounting_history() {
+        let policy = policy();
+        let budget = ContextRequestBudget {
+            total_bytes: policy.max_context_bytes,
+            system_prompt_bytes: 256,
+            tool_definitions_bytes: 512,
+            other_overhead_bytes: 256,
+        };
+        let message = ChatMessage::text("u", ChatRole::User, "private conversation body");
+        let mut history = vec![message.clone()];
+        let basis = ContextUsageBasis::observe(&history, &history, &policy)
+            .with_request_budget(Some(budget.clone()));
+        let encoded = serde_json::to_string(&basis).unwrap();
+        assert!(!encoded.contains(&message.text));
+        let restored: ContextUsageBasis = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(restored, basis);
+        let reply = ChatMessage::text("a", ChatRole::Assistant, "new response");
+        history.push(reply.clone());
+        let usage = restored.usage(&history).unwrap();
+        assert_eq!(usage.request_budget, Some(budget));
+        assert_eq!(usage.limit_bytes, policy.history_context_bytes());
+        assert_eq!(
+            usage.used_bytes,
+            model_context_cost(&message) + model_context_cost(&reply)
+        );
+        assert_eq!(usage.breakdown.messages_bytes, usage.used_bytes);
+        assert!(restored.usage(&[]).is_none());
+    }
+
+    #[test]
+    fn unknown_or_invalid_request_metadata_does_not_invalidate_history_usage() {
+        let policy = policy();
+        let basis = ContextUsageBasis::observe(&[], &[], &policy);
+        assert!(basis.usage(&[]).unwrap().request_budget.is_none());
+        let valid = ContextRequestBudget {
+            total_bytes: policy.max_context_bytes,
+            system_prompt_bytes: 256,
+            tool_definitions_bytes: 512,
+            other_overhead_bytes: 256,
+        };
+        let invalid_budgets = [
+            ContextRequestBudget {
+                other_overhead_bytes: 255,
+                ..valid.clone()
+            },
+            ContextRequestBudget {
+                total_bytes: 512,
+                ..valid.clone()
+            },
+            ContextRequestBudget {
+                system_prompt_bytes: usize::MAX,
+                ..valid.clone()
+            },
+            ContextRequestBudget {
+                total_bytes: 1024,
+                ..valid
+            },
+        ];
+        for invalid in invalid_budgets {
+            let mut restored = basis.clone();
+            restored.request_budget = Some(invalid.clone());
+            assert!(restored.usage(&[]).unwrap().request_budget.is_none());
+            assert_eq!(
+                basis.clone().with_request_budget(Some(invalid)).usage(&[]),
+                basis.usage(&[])
+            );
+        }
     }
 
     #[test]

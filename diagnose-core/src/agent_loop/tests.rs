@@ -522,6 +522,7 @@ struct ScriptModel {
 
 struct ProjectionMetricsModel {
     metrics: Rc<RefCell<Vec<crate::seam::ModelRequestProjectionMetrics>>>,
+    requests: RefCell<Vec<ModelRequest>>,
 }
 
 // Agent-loop fixtures exercise complete provider requests, including the
@@ -551,9 +552,10 @@ impl ModelSeam for ProjectionMetricsModel {
 
     async fn call(
         &self,
-        _request: ModelRequest,
+        request: ModelRequest,
         _sink: &mut dyn TurnSink,
     ) -> Result<ModelTurn, AgentError> {
+        self.requests.borrow_mut().push(request);
         Ok(answer("done"))
     }
 }
@@ -4061,6 +4063,26 @@ async fn trims_history_to_budget() {
         msgs.iter().any(|m| m.text == "recent"),
         "the newest message is kept"
     );
+    let session = sess.inner.borrow();
+    let session = session.as_ref().unwrap();
+    let usage = session
+        .context_usage_basis
+        .as_ref()
+        .unwrap()
+        .usage(&session.conversation)
+        .unwrap();
+    let budget = usage.request_budget.as_ref().unwrap();
+    assert_eq!(
+        budget.system_prompt_bytes,
+        crate::trim::model_context_cost(&msgs[0])
+    );
+    assert_eq!(
+        budget.tool_definitions_bytes,
+        serde_json::to_vec(&reqs[0].tools).unwrap().len()
+    );
+    assert_eq!(budget.other_overhead_bytes, 1024);
+    assert_eq!(budget.total_bytes, TEST_MODEL_CONTEXT_BYTES);
+    assert!(budget.matches_history_limit(usage.limit_bytes));
 }
 
 #[tokio::test]
@@ -4213,6 +4235,7 @@ async fn projection_metrics_preserve_history_and_keep_capability_catalog_bounded
         let metrics = Rc::new(RefCell::new(Vec::new()));
         let model = ProjectionMetricsModel {
             metrics: Rc::clone(&metrics),
+            requests: RefCell::new(Vec::new()),
         };
         let tools = RecordingTools {
             calls: Rc::new(RefCell::new(vec![])),
@@ -4253,6 +4276,51 @@ async fn projection_metrics_preserve_history_and_keep_capability_catalog_bounded
         let stored = sess.inner.borrow();
         let json = stored.as_ref().unwrap().encode_json_for_storage().unwrap();
         let restored = PersistedAgentSession::decode_json(&json).unwrap();
+        let usage = restored
+            .context_usage_basis
+            .as_ref()
+            .unwrap()
+            .usage(&restored.conversation)
+            .unwrap();
+        let request_budget = usage.request_budget.as_ref().unwrap();
+        let requests = model.requests.borrow();
+        let request = &requests[0];
+        let history_ids = restored
+            .conversation
+            .iter()
+            .map(|message| &message.message_id)
+            .collect::<std::collections::HashSet<_>>();
+        let reserved_messages = request
+            .messages
+            .iter()
+            .filter(|message| !history_ids.contains(&message.message_id))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            request_budget.system_prompt_bytes,
+            reserved_messages
+                .iter()
+                .filter(|message| message.role == ChatRole::System)
+                .map(|message| crate::trim::model_context_cost(message))
+                .sum::<usize>()
+        );
+        assert_eq!(
+            request_budget.other_overhead_bytes,
+            reserved_messages
+                .iter()
+                .filter(|message| message.role != ChatRole::System)
+                .map(|message| crate::trim::model_context_cost(message))
+                .sum::<usize>()
+                + 1024
+        );
+        assert_eq!(
+            request_budget.tool_definitions_bytes,
+            serde_json::to_vec(&request.tools).unwrap().len()
+        );
+        assert_eq!(
+            request_budget.total_bytes,
+            PROJECTION_TEST_MODEL_CONTEXT_BYTES
+        );
+        assert!(request_budget.matches_history_limit(usage.limit_bytes));
         assert!(matches!(
             restored.execution_state,
             ExecutionState::OutcomeUnknown { .. }
