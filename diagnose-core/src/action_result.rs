@@ -66,10 +66,11 @@ impl ActionResultOrigin {
                     && message.tool_calls.iter().any(|candidate| {
                         candidate.id == call.id
                             && candidate.name == call.name
-                            && crate::ui_model_ids::same_call_input(
+                            && crate::ui_model_ids::same_call_input_with_references(
                                 &call.name,
                                 &candidate.arguments_json,
                                 &call.arguments_json,
+                                Some(&session.ui_references),
                             )
                     })
             })
@@ -116,10 +117,11 @@ impl ActionResultOrigin {
                     && message.tool_calls.iter().any(|candidate| {
                         candidate.id == call.id
                             && candidate.name == call.name
-                            && crate::ui_model_ids::same_call_input(
+                            && crate::ui_model_ids::same_call_input_with_references(
                                 &call.name,
                                 &candidate.arguments_json,
                                 &call.arguments_json,
+                                Some(&session.ui_references),
                             )
                     })
             })

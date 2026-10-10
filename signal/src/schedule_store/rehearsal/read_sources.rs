@@ -11,7 +11,7 @@ impl ScheduleStore {
     /// Historical source evidence only. The caller must verify all upstream
     /// model/transform nodes and current policy before publishing any contract.
     pub async fn read_rehearsal_read_sources_on(
-        txn: &sea_orm::DatabaseTransaction,
+        txn: &crate::config::connection::DatabaseTransaction,
         owner: i32,
         rehearsal_id: &str,
     ) -> Result<Vec<RehearsalToolSource>, ScheduleStoreError> {
@@ -67,7 +67,7 @@ impl ScheduleStore {
     /// Resolve historical model sources inside the caller's publication transaction.
     /// This does not approve a destination, issue grants, or replace current policy.
     pub async fn read_rehearsal_model_sources_on(
-        txn: &sea_orm::DatabaseTransaction,
+        txn: &crate::config::connection::DatabaseTransaction,
         owner: i32,
         rehearsal_id: &str,
         contract: &desk_diagnose_core::schedule::contract::ValidatedTaskContract,
@@ -86,7 +86,7 @@ impl ScheduleStore {
     }
 
     pub async fn read_rehearsal_model_sources_with_graph_on(
-        txn: &sea_orm::DatabaseTransaction,
+        txn: &crate::config::connection::DatabaseTransaction,
         owner: i32,
         rehearsal_id: &str,
         contract: &desk_diagnose_core::schedule::contract::ValidatedTaskContract,

@@ -1,13 +1,14 @@
 //! Conversation removal closes every source before retaining reconciliation evidence.
 use super::*;
+use crate::config::connection::DatabaseTransaction;
 use crate::entity::{
     agent_delegation_reservation as reservation, agent_file_recovery_cleanup as tombstone,
 };
-use sea_orm::{DatabaseTransaction, QueryTrait, sea_query::OnConflict};
+use sea_orm::{QueryTrait, sea_query::OnConflict};
 
 /// The cleanup queue is also the durable deletion tombstone. Completing file
 /// cleanup does not permit reuse of the original conversation identity.
-pub(crate) async fn deleted_on<C: ConnectionTrait>(
+pub(crate) async fn deleted_on<C: ConnectionTrait + crate::config::ConfigConnection>(
     db: &C,
     conversation: &str,
 ) -> Result<bool, DbErr> {
@@ -17,7 +18,7 @@ pub(crate) async fn deleted_on<C: ConnectionTrait>(
         .is_some())
 }
 
-pub(crate) async fn tombstone_on<C: ConnectionTrait>(
+pub(crate) async fn tombstone_on<C: ConnectionTrait + crate::config::ConfigConnection>(
     db: &C,
     conversation: &str,
     actor: &str,
@@ -560,6 +561,9 @@ pub(crate) async fn redact_deleted_content(
                     binding: Box::new(run.binding.clone()),
                 };
                 session.conversation.clear();
+                session.ui_references = Default::default();
+                session.thinking_prefix = Default::default();
+                session.latest_model_context = None;
                 session.delegated_owner_requirement = None;
                 session.model_context_state = Default::default();
                 session.context_usage_basis = None;

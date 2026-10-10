@@ -199,9 +199,12 @@ async fn terminal_receipt_survives_reopen_consumption_and_timeout_without_new_au
             .unwrap();
         assert_eq!(work(&f).await, first_work);
         let reopened = SignalCapabilityGrantStore::new(
-            Database::connect(format!("sqlite://{}?mode=rw", path.display()))
-                .await
-                .unwrap(),
+            crate::config::test_support::Database::connect(format!(
+                "sqlite://{}?mode=rw",
+                path.display()
+            ))
+            .await
+            .unwrap(),
         );
         let result = reopened
             .read_computer_result(&f.plan.execution_generation, "run-1", "actor-1", "device-1")

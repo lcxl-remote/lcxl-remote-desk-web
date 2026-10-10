@@ -4,13 +4,14 @@
 //! per-device hourly rollup stored in the local sqlite database. Connections
 //! that cannot be resolved to a device fall back to the raw `connection_id`.
 
+use crate::config::connection::DatabaseConnection;
 use std::collections::HashMap;
 
 use chrono::{NaiveDateTime, Timelike};
 use sea_orm::prelude::DateTimeUtc;
 use sea_orm::prelude::Expr;
 use sea_orm::sea_query::{ExprTrait, OnConflict};
-use sea_orm::{ActiveValue::Set, DatabaseConnection, DbErr, EntityTrait, FromQueryResult};
+use sea_orm::{ActiveValue::Set, DbErr, EntityTrait, FromQueryResult};
 use tokio::sync::RwLock;
 
 use crate::entity::turn_usage;
@@ -225,10 +226,12 @@ pub async fn query_turn_usage(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sea_orm::{ConnectionTrait, Database, Schema};
+    use sea_orm::{ConnectionTrait, Schema};
 
     async fn memory_db() -> DatabaseConnection {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
+        let db = crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap();
         let schema = Schema::new(db.get_database_backend());
         let stmt = schema.create_table_from_entity(turn_usage::Entity);
         db.execute(&stmt).await.unwrap();

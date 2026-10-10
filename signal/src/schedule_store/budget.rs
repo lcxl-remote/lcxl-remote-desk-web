@@ -2,10 +2,11 @@
 use super::authority::authority_now;
 use super::publication::{key, valid_digest};
 use super::{CurrentTaskAuthority, ScheduleStore, ScheduleStoreError, digest, entity, json};
+use crate::config::connection::DatabaseTransaction;
 use crate::entity::agent_task_budget_reservation as ledger;
 use sea_orm::{
-    ColumnTrait, DatabaseTransaction, EntityTrait, ExprTrait, PaginatorTrait, QueryFilter,
-    QuerySelect, Set, sea_query::Expr,
+    ColumnTrait, EntityTrait, ExprTrait, PaginatorTrait, QueryFilter, QuerySelect, Set,
+    sea_query::Expr,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

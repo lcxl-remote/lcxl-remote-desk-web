@@ -802,9 +802,9 @@ export type AiAssistantSessionListDto = {
 export type ApprovalDelegationDto = {
     /**
      * @minLength 0
-     * @type integer, int64
+     * @type integer,null, int64
     */
-    costUsedMicros: number;
+    costUsedMicros?: number | null;
     /**
      * @minLength 0
      * @type integer, int64
@@ -1118,6 +1118,42 @@ export type ContextUsageBreakdownDto = {
     toolsBytes: number;
 };
 
+export type ModelContextObservationDto = {
+    /**
+     * @minLength 0
+     * @type integer,null, int64
+    */
+    clearedInputTokens?: number | null;
+    /**
+     * @minLength 0
+     * @type integer,null, int64
+    */
+    clearedThinkingTurns?: number | null;
+    /**
+     * @minLength 0
+     * @type integer,null, int64
+    */
+    inputTokens?: number | null;
+    /**
+     * @type integer, int64
+    */
+    observedAtUnixMs: number;
+    /**
+     * @minLength 0
+     * @type integer,null, int64
+    */
+    reasoningTokens?: number | null;
+    /**
+     * @minLength 0
+     * @type integer,null, int64
+    */
+    requestBytes?: number | null;
+    /**
+     * @type boolean
+    */
+    stale: boolean;
+};
+
 export type ContextRequestBudgetDto = {
     /**
      * @minLength 0
@@ -1146,6 +1182,7 @@ export type ContextUsageDto = {
      * @type object
     */
     breakdown: ContextUsageBreakdownDto;
+    latestModelCall?: (null | ModelContextObservationDto);
     /**
      * @minLength 0
      * @type integer, int64
@@ -3086,6 +3123,10 @@ export type ApprovalModelProbeDto = {
 
 export type ApprovalModelProbeParams = {
     /**
+     * @type boolean
+    */
+    anthropic_prefix_binding: boolean;
+    /**
      * @type string,null
     */
     api_key?: string | null;
@@ -3106,9 +3147,9 @@ export type ApprovalModelProbeParams = {
     */
     output_limit_field: string;
     /**
-     * @type integer, int64
+     * @type string
     */
-    probe_max_output_tokens: number;
+    reasoning_contract: string;
     /**
      * @type object
     */
@@ -3163,6 +3204,10 @@ export type ApprovalModelPublic = {
     /**
      * @type boolean
     */
+    anthropic_prefix_binding: boolean;
+    /**
+     * @type boolean
+    */
     api_key_set: boolean;
     /**
      * @type boolean
@@ -3196,19 +3241,15 @@ export type ApprovalModelPublic = {
      * @type string
     */
     output_limit_field: string;
-    /**
-     * @type object,null
-    */
-    prices?: object | null;
-    /**
-     * @type integer, int64
-    */
-    probe_max_output_tokens: number;
     probe_observation?: (null | ModelProbeObservation);
     /**
      * @type integer, int64
     */
     profile_revision: number;
+    /**
+     * @type string
+    */
+    reasoning_contract: string;
     /**
      * @type object
     */
@@ -3227,7 +3268,26 @@ export type ApprovalModelPublic = {
     wire_protocol?: string | null;
 };
 
+export type ApprovalModelReuseParams = {
+    /**
+     * @type integer, int64
+    */
+    expected_configuration_revision: number;
+    /**
+     * @type integer, int64
+    */
+    expected_connection_revision: number;
+    /**
+     * @type integer, int64
+    */
+    expected_profile_revision: number;
+};
+
 export type ApprovalModelUpdate = {
+    /**
+     * @type boolean,null
+    */
+    anthropic_prefix_binding?: boolean | null;
     /**
      * @description Write-only: absent means keep, empty means clear.
      * @type string,null
@@ -3266,13 +3326,9 @@ export type ApprovalModelUpdate = {
     */
     output_limit_field?: string | null;
     /**
-     * @type object,null
+     * @type string,null
     */
-    prices?: object | null;
-    /**
-     * @type integer,null, int64
-    */
-    probe_max_output_tokens?: number | null;
+    reasoning_contract?: string | null;
     /**
      * @type object
     */
@@ -4276,6 +4332,11 @@ export type ContextManagementDto = {
      * @type string
     */
     strategy: ContextManagementStrategyDto;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    summaryMaxOutputTokens: number;
 };
 
 export type CorrectionGroupRecord = {
@@ -4544,6 +4605,8 @@ export const deskErrorCodeEnum = {
     CONNECTION_INSECURE_TRANSPORT: 68,
     REMOTE_ACCESS_LOCKED: 69,
     SHARED_STORE_UNAVAILABLE: 109,
+    AI_APPROVAL_PROBE_OUTPUT_TRUNCATED: 110,
+    AI_CONTEXT_SUMMARY_OUTPUT_TRUNCATED: 111,
     ACTION_NEED_RETRY: 1001,
     REMOTE_DESK_OFFLINE: 10003,
     TIMEOUT: 10004,
@@ -7423,6 +7486,10 @@ export type ResponseFormatMode = ResponseFormatModeEnumKey;
 */
 export type ModelProviderPublic = {
     /**
+     * @type boolean
+    */
+    anthropic_prefix_binding: boolean;
+    /**
      * @description Whether a non-empty API key is configured. The key itself is never\nreturned.
      * @type boolean
     */
@@ -7471,10 +7538,6 @@ export type ModelProviderPublic = {
      * @type string
     */
     output_limit_field: string;
-    /**
-     * @type integer, int64
-    */
-    probe_max_output_tokens: number;
     probe_observation?: (null | ModelProbeObservation);
     /**
      * @type integer, int64
@@ -7485,6 +7548,10 @@ export type ModelProviderPublic = {
      * @type integer, int32
     */
     profile_schema_version: number;
+    /**
+     * @type string
+    */
+    reasoning_contract: string;
     /**
      * @type object
     */
@@ -7512,6 +7579,10 @@ export type ModelProviderPublic = {
  * @description Update body for the provider-config update endpoint.\n\nConfiguration fields are optional: `None` leaves the stored value unchanged.\nThe update API separately requires both expected revisions. `api_key` is\nwrite-only with three-way semantics (see [`ModelProviderConfig::apply_update`]).
 */
 export type ModelProviderUpdate = {
+    /**
+     * @type boolean,null
+    */
+    anthropic_prefix_binding?: boolean | null;
     /**
      * @description Write-only. `None` = leave unchanged; `Some(\"\")` = clear; `Some(x)` = set.
      * @type string,null
@@ -7568,9 +7639,9 @@ export type ModelProviderUpdate = {
     */
     output_limit_field?: string | null;
     /**
-     * @type integer,null, int64
+     * @type string,null
     */
-    probe_max_output_tokens?: number | null;
+    reasoning_contract?: string | null;
     /**
      * @type object
     */
@@ -7884,6 +7955,10 @@ export type ProviderTestDto = {
 */
 export type ProviderTestParams = {
     /**
+     * @type boolean
+    */
+    anthropic_prefix_binding: boolean;
+    /**
      * @description Write-only. `None` reuses the stored key; an empty string clears it for\nthis probe; any other value is used only for this probe.
      * @type string,null
     */
@@ -7907,9 +7982,9 @@ export type ProviderTestParams = {
     */
     output_limit_field: string;
     /**
-     * @type integer, int64
+     * @type string
     */
-    probe_max_output_tokens: number;
+    reasoning_contract: string;
     /**
      * @type object
     */
@@ -9293,9 +9368,9 @@ export type RestResponseApprovalDelegationDto = {
     data?: {
         /**
          * @minLength 0
-         * @type integer, int64
+         * @type integer,null, int64
         */
-        costUsedMicros: number;
+        costUsedMicros?: number | null;
         /**
          * @minLength 0
          * @type integer, int64
@@ -9383,6 +9458,10 @@ export type RestResponseApprovalModelPublic = {
         /**
          * @type boolean
         */
+        anthropic_prefix_binding: boolean;
+        /**
+         * @type boolean
+        */
         api_key_set: boolean;
         /**
          * @type boolean
@@ -9416,19 +9495,15 @@ export type RestResponseApprovalModelPublic = {
          * @type string
         */
         output_limit_field: string;
-        /**
-         * @type object,null
-        */
-        prices?: object | null;
-        /**
-         * @type integer, int64
-        */
-        probe_max_output_tokens: number;
         probe_observation?: (null | ModelProbeObservation);
         /**
          * @type integer, int64
         */
         profile_revision: number;
+        /**
+         * @type string
+        */
+        reasoning_contract: string;
         /**
          * @type object
         */
@@ -9948,6 +10023,11 @@ export type RestResponseContextManagementDto = {
          * @type string
         */
         strategy: ContextManagementStrategyDto;
+        /**
+         * @minLength 0
+         * @type integer, int32
+        */
+        summaryMaxOutputTokens: number;
     };
     /**
      * @type string,null
@@ -10946,6 +11026,10 @@ export type RestResponseModelProviderPublic = {
     */
     data?: {
         /**
+         * @type boolean
+        */
+        anthropic_prefix_binding: boolean;
+        /**
          * @description Whether a non-empty API key is configured. The key itself is never\nreturned.
          * @type boolean
         */
@@ -10994,10 +11078,6 @@ export type RestResponseModelProviderPublic = {
          * @type string
         */
         output_limit_field: string;
-        /**
-         * @type integer, int64
-        */
-        probe_max_output_tokens: number;
         probe_observation?: (null | ModelProbeObservation);
         /**
          * @type integer, int64
@@ -11008,6 +11088,10 @@ export type RestResponseModelProviderPublic = {
          * @type integer, int32
         */
         profile_schema_version: number;
+        /**
+         * @type string
+        */
+        reasoning_contract: string;
         /**
          * @type object
         */
@@ -11927,6 +12011,36 @@ export type RestResponseTelemetryStatus = {
          * @type boolean
         */
         needed: boolean;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponseTerminalCompletionDto = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @minLength 0
+         * @type integer, int32
+        */
+        maxOutputTokens: number;
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        revision: number;
     };
     /**
      * @type string,null
@@ -14914,6 +15028,19 @@ export type TelemetryStatus = {
     needed: boolean;
 };
 
+export type TerminalCompletionDto = {
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    maxOutputTokens: number;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    revision: number;
+};
+
 /**
  * @description SignalingType::SendTerminalInput
 */
@@ -15100,6 +15227,11 @@ export type UpdateContextManagementRequest = {
      * @type string
     */
     strategy: ContextManagementStrategyDto;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    summaryMaxOutputTokens: number;
 };
 
 /**
@@ -15164,6 +15296,19 @@ export type UpdateSubAgentPolicy = {
      * @type object
     */
     limits: SubAgentLimits;
+};
+
+export type UpdateTerminalCompletionRequest = {
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    expectedRevision: number;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    maxOutputTokens: number;
 };
 
 /**
@@ -15337,6 +15482,27 @@ export type UpdateSubagentPolicyMutationResponse = UpdateSubagentPolicy200;
 export type UpdateSubagentPolicyMutation = {
     Response: UpdateSubagentPolicy200;
     Request: UpdateSubagentPolicyMutationRequest;
+    Errors: any;
+};
+
+export type GetTerminalCompletion200 = RestResponseTerminalCompletionDto;
+
+export type GetTerminalCompletionQueryResponse = GetTerminalCompletion200;
+
+export type GetTerminalCompletionQuery = {
+    Response: GetTerminalCompletion200;
+    Errors: any;
+};
+
+export type UpdateTerminalCompletion200 = RestResponseTerminalCompletionDto;
+
+export type UpdateTerminalCompletionMutationRequest = UpdateTerminalCompletionRequest;
+
+export type UpdateTerminalCompletionMutationResponse = UpdateTerminalCompletion200;
+
+export type UpdateTerminalCompletionMutation = {
+    Response: UpdateTerminalCompletion200;
+    Request: UpdateTerminalCompletionMutationRequest;
     Errors: any;
 };
 
@@ -16425,6 +16591,18 @@ export type UpdateApprovalModelProviderMutationResponse = UpdateApprovalModelPro
 export type UpdateApprovalModelProviderMutation = {
     Response: UpdateApprovalModelProvider200;
     Request: UpdateApprovalModelProviderMutationRequest;
+    Errors: any;
+};
+
+export type ReuseAiGatewayForApproval200 = RestResponseApprovalModelPublic;
+
+export type ReuseAiGatewayForApprovalMutationRequest = ApprovalModelReuseParams;
+
+export type ReuseAiGatewayForApprovalMutationResponse = ReuseAiGatewayForApproval200;
+
+export type ReuseAiGatewayForApprovalMutation = {
+    Response: ReuseAiGatewayForApproval200;
+    Request: ReuseAiGatewayForApprovalMutationRequest;
     Errors: any;
 };
 

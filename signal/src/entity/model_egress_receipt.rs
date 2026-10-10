@@ -25,6 +25,10 @@ pub struct Model {
     pub model_output_envelope_id: Option<String>,
     pub model_output_digest_sha256: Option<String>,
     pub authorized_at: DateTimeUtc,
+    #[sea_orm(column_type = "Text", nullable)]
+    pub provider_context_observation_json: Option<String>,
+    #[sea_orm(indexed)]
+    pub context_conversation_id: Option<String>,
     pub completed_at: Option<DateTimeUtc>,
     /// Immutable normalized usage from a returned provider turn; absent means
     /// no terminal usage was recorded and the task reservation must be retained.

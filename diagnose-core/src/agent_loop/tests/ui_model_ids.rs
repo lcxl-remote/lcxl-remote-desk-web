@@ -44,7 +44,7 @@ async fn model_ids_resolve_for_execution_without_rewriting_original_proposal() {
             "os":"macos","interactive_session_incarnation":"worker"
         }}}).to_string()));
         *sess.inner.borrow_mut() = Some(initial);
-        let input = r#"{"root_id":"session","queries":["Calendar"]}"#;
+        let input = r#"{"root_id":"s1","queries":["Calendar"]}"#;
         let requests = Rc::new(RefCell::new(vec![]));
         let model = ScriptModel {
             turns: RefCell::new(

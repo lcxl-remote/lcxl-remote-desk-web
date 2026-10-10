@@ -2,6 +2,7 @@
 //! background. The stable task/call/generation is created once; progress and
 //! completion only advance that same row and append ordered run events.
 
+use crate::config::connection::DatabaseConnection;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -19,10 +20,7 @@ use desk_diagnose_core::dynamic_run::{
 };
 use desk_diagnose_core::session::{PersistedAgentSession, WorkKind};
 use sea_orm::sea_query::Expr;
-use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, QueryOrder,
-    Set,
-};
+use sea_orm::{ActiveModelTrait, ColumnTrait, DbErr, EntityTrait, QueryFilter, QueryOrder, Set};
 use sha2::{Digest, Sha256};
 
 use crate::agent_session_store::EventAppend;
@@ -963,7 +961,7 @@ fn completion_status(completion: CapabilityCompletionClass) -> &'static str {
     }
 }
 
-async fn load_task_row<C: sea_orm::ConnectionTrait>(
+async fn load_task_row<C: sea_orm::ConnectionTrait + crate::config::ConfigConnection>(
     db: &C,
     task_id: &str,
 ) -> Result<Option<agent_action_item::Model>, DbErr> {
@@ -986,7 +984,7 @@ pub(crate) fn decode_record(row: &agent_action_item::Model) -> Result<Background
         .map_err(|error| DbErr::Custom(format!("decode background task: {error}")))
 }
 
-async fn load_session<C: sea_orm::ConnectionTrait>(
+async fn load_session<C: sea_orm::ConnectionTrait + crate::config::ConfigConnection>(
     db: &C,
     run_id: &str,
 ) -> Result<PersistedAgentSession, DbErr> {
@@ -1011,7 +1009,7 @@ fn next_event_seq(session: &mut PersistedAgentSession, updated_at: &str) -> Resu
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn persist_transition<C: sea_orm::ConnectionTrait>(
+async fn persist_transition<C: sea_orm::ConnectionTrait + crate::config::ConfigConnection>(
     db: &C,
     old_row: &agent_action_item::Model,
     record: &BackgroundTaskRecord,
@@ -1127,7 +1125,7 @@ mod tests {
         PermissionRequest, PermissionRequestState,
     };
     use desk_diagnose_core::simulated_grant::{SimulatedCapabilityCall, SimulatedGrantAuthorizer};
-    use sea_orm::{ConnectionTrait, Database, PaginatorTrait, QueryOrder, Schema};
+    use sea_orm::{ConnectionTrait, PaginatorTrait, QueryOrder, Schema};
     use std::sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -1152,9 +1150,12 @@ mod tests {
     }
 
     async fn create_file_db(path: &std::path::Path) -> DatabaseConnection {
-        let db = Database::connect(format!("sqlite://{}?mode=rwc", path.display()))
-            .await
-            .unwrap();
+        let db = crate::config::test_support::Database::connect(format!(
+            "sqlite://{}?mode=rwc",
+            path.display()
+        ))
+        .await
+        .unwrap();
         db.execute_unprepared("PRAGMA journal_mode = WAL")
             .await
             .unwrap();
@@ -1272,9 +1273,12 @@ mod tests {
         drop(store);
         db.close().await.unwrap();
 
-        let reopened = Database::connect(format!("sqlite://{}?mode=rw", path.display()))
-            .await
-            .unwrap();
+        let reopened = crate::config::test_support::Database::connect(format!(
+            "sqlite://{}?mode=rw",
+            path.display()
+        ))
+        .await
+        .unwrap();
         let store = SignalBackgroundTaskStore::new(reopened.clone());
         let after_reopen = store.load("task-1").await.unwrap().unwrap();
         assert_eq!(after_reopen.progress_sequence, 1);
@@ -1417,9 +1421,12 @@ mod tests {
         drop(store);
         reopened.close().await.unwrap();
 
-        let reopened = Database::connect(format!("sqlite://{}?mode=rw", path.display()))
-            .await
-            .unwrap();
+        let reopened = crate::config::test_support::Database::connect(format!(
+            "sqlite://{}?mode=rw",
+            path.display()
+        ))
+        .await
+        .unwrap();
         let store = SignalBackgroundTaskStore::new(reopened.clone());
         let sessions = crate::agent_session_store::SignalAgentSessionStore::new(reopened.clone());
         assert!(
@@ -1517,9 +1524,12 @@ mod tests {
         drop(store);
         db.close().await.unwrap();
 
-        let reopened = Database::connect(format!("sqlite://{}?mode=rw", path.display()))
-            .await
-            .unwrap();
+        let reopened = crate::config::test_support::Database::connect(format!(
+            "sqlite://{}?mode=rw",
+            path.display()
+        ))
+        .await
+        .unwrap();
         let store = SignalBackgroundTaskStore::new(reopened.clone());
         store
             .deliver_pending_cancellations_once(dispatcher.as_ref())
@@ -1620,9 +1630,12 @@ mod tests {
         drop(store);
         db.close().await.unwrap();
 
-        let reopened = Database::connect(format!("sqlite://{}?mode=rw", path.display()))
-            .await
-            .unwrap();
+        let reopened = crate::config::test_support::Database::connect(format!(
+            "sqlite://{}?mode=rw",
+            path.display()
+        ))
+        .await
+        .unwrap();
         let row = agent_action_item::Entity::find()
             .filter(agent_action_item::Column::ActionRequestId.eq("task-1"))
             .one(&reopened)
@@ -1782,9 +1795,12 @@ mod tests {
         // directory yet, but the exact task and canonical input are durable.
         drop(store);
         db.close().await.unwrap();
-        let reopened = Database::connect(format!("sqlite://{}?mode=rw", db_path.display()))
-            .await
-            .unwrap();
+        let reopened = crate::config::test_support::Database::connect(format!(
+            "sqlite://{}?mode=rw",
+            db_path.display()
+        ))
+        .await
+        .unwrap();
         let store = SignalBackgroundTaskStore::new(reopened.clone());
         let resumed = store.load(&task.task_id).await.unwrap().unwrap();
         assert_eq!(resumed.task, task);

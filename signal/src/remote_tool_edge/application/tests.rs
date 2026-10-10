@@ -2,7 +2,9 @@ use super::*;
 
 #[tokio::test]
 async fn application_catalog_passes_observation_gate_and_reaches_remote_dispatch() {
-    let db = sea_orm::Database::connect("sqlite::memory:").await.unwrap();
+    let db = crate::config::test_support::Database::connect("sqlite::memory:")
+        .await
+        .unwrap();
     let registry = desk_diagnose_core::ai_assistant::ai_assistant_provider_registry();
     let capability = registry.capability_for_tool("list_applications").unwrap();
     let provider = registry

@@ -42,6 +42,21 @@ async fn scheduled_second_permission_wait_settles_previous_decision_atomically()
     exercise(false, false, true, true, false).await;
 }
 
+#[test]
+fn scheduled_approval_and_recovery_fit_production_thread_stack() {
+    std::thread::Builder::new()
+        .name("scheduled-approval-stack".into())
+        .stack_size(2 * 1024 * 1024)
+        .spawn(|| {
+            scheduled_composition_after_owner_decision_preserves_run_and_uses_decision_bridge();
+            scheduled_failed_permission_turn_settles_original_decision();
+            scheduled_executor_reopens_durable_schedule_and_conversation_after_restart();
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
 async fn exercise(
     cancel_before_resume: bool,
     fail_model: bool,
@@ -99,7 +114,9 @@ async fn exercise_with_restart(
             )
         },
     );
-    let mut db = Database::connect(&database_url).await.unwrap();
+    let mut db = crate::config::test_support::Database::connect(&database_url)
+        .await
+        .unwrap();
     crate::db::initialize_schema(&db).await.unwrap();
     crate::ai_assistant_gate::enable_test_host();
     crate::model_provider::save(
@@ -122,7 +139,7 @@ async fn exercise_with_restart(
     let conversation = derive_conversation_key("1", "device", Some(client_id), "first");
     tokio::time::timeout(
         std::time::Duration::from_secs(15),
-        run_turn_inner(
+        actix_web::rt::spawn(run_turn_inner(
             connections.clone(),
             db.clone(),
             "first".into(),
@@ -137,9 +154,10 @@ async fn exercise_with_restart(
                 ..Default::default()
             },
             None,
-        ),
+        )),
     )
     .await
+    .unwrap()
     .unwrap();
     let row = crate::entity::agent_session::Entity::find()
         .filter(crate::entity::agent_session::Column::ConversationId.eq(&conversation))
@@ -172,11 +190,15 @@ async fn exercise_with_restart(
     use desk_agent_protocol::schedule::management::{
         ScheduleManagementRequest as Request, ScheduleManagementResponse as Response,
     };
-    let Response::Task { task: draft_task } =
-        crate::schedule_management::manage(&db, 1, Request::CreateDraft { draft })
-            .await
-            .unwrap()
-    else {
+    // Product entry points are independent runtime tasks. Do not retain this
+    // large end-to-end fixture's debug poll frame under their production stack.
+    let request_db = db.clone();
+    let Response::Task { task: draft_task } = actix_web::rt::spawn(async move {
+        crate::schedule_management::manage(&request_db, 1, Request::CreateDraft { draft }).await
+    })
+    .await
+    .unwrap()
+    .unwrap() else {
         panic!("expected draft")
     };
     assert_eq!(draft_task.status, ScheduledTaskStatus::Active);
@@ -185,7 +207,9 @@ async fn exercise_with_restart(
     drop(store);
     if restart {
         db.close().await.unwrap();
-        db = Database::connect(&database_url).await.unwrap();
+        db = crate::config::test_support::Database::connect(&database_url)
+            .await
+            .unwrap();
         crate::db::initialize_schema(&db).await.unwrap();
         crate::ai_assistant_gate::enable_test_host();
         let restored = crate::entity::agent_session::Entity::find()
@@ -219,7 +243,7 @@ async fn exercise_with_restart(
         .unwrap()
         .unwrap();
     if newer_input {
-        run_turn_inner(
+        actix_web::rt::spawn(run_turn_inner(
             connections.clone(),
             db.clone(),
             "newer-input".into(),
@@ -234,8 +258,9 @@ async fn exercise_with_restart(
                 ..Default::default()
             },
             None,
-        )
-        .await;
+        ))
+        .await
+        .unwrap();
     }
     if dispatch {
         let host = format!("schedule-dispatch-{}", uuid::Uuid::new_v4());
@@ -398,15 +423,20 @@ async fn exercise_with_restart(
         .unwrap();
     if cancel_before_resume {
         let current = store.read(1, &run.schedule_id).await.unwrap();
-        crate::schedule_management::manage(
-            &db,
-            1,
-            Request::Delete {
-                schedule_id: current.schedule_id,
-                expected_revision: current.revision,
-            },
-        )
+        let request_db = db.clone();
+        actix_web::rt::spawn(async move {
+            crate::schedule_management::manage(
+                &request_db,
+                1,
+                Request::Delete {
+                    schedule_id: current.schedule_id,
+                    expected_revision: current.revision,
+                },
+            )
+            .await
+        })
         .await
+        .unwrap()
         .unwrap();
         assert!(
             super::super::scheduled::prepare(&db, claimed, 90)
@@ -474,7 +504,7 @@ async fn exercise_with_restart(
     );
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(15),
-        compose_turn(
+        actix_web::rt::spawn(compose_turn(
             connections,
             db.clone(),
             run.run_id.clone(),
@@ -491,9 +521,10 @@ async fn exercise_with_restart(
             Some(prepared),
             None,
             None,
-        ),
+        )),
     )
     .await
+    .unwrap()
     .unwrap();
     if fail_model {
         assert!(matches!(result, Ok(Some(LoopOutcome::ProtocolError(_)))));

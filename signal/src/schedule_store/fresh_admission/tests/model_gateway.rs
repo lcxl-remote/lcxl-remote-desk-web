@@ -35,7 +35,9 @@ async fn fresh_task_gateway_accounts_usage_and_rejects_invalid_authority() {
         }).workers(1).listen(listener).unwrap().run();
         let handle = server.handle();
         actix_web::rt::spawn(server);
-        let db = Database::connect("sqlite::memory:").await.unwrap();
+        let db = crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap();
         crate::db::initialize_schema(&db).await.unwrap();
         let (store, task, _, publication) = fixture_on(db.clone()).await;
         let config = crate::model_provider::ModelProviderConfig {
@@ -46,6 +48,8 @@ async fn fresh_task_gateway_accounts_usage_and_rejects_invalid_authority() {
             base_url: Some(format!("http://{address}/v1")),
             api_key: Some("local-fixture-key".into()),
             max_context_bytes: Some(131_072),
+            // Keep the model explicit within this fixture's finite task quota.
+            runtime_max_output_tokens: 4096,
             ..Default::default()
         };
         crate::model_provider::save(&db, config).await.unwrap();

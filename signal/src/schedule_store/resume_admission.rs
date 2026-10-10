@@ -1,12 +1,13 @@
 //! Task-first locks for actions originating in a scheduled continuation.
 use super::entity;
+use crate::config::connection::DatabaseTransaction;
 use crate::entity::{agent_schedule_run as run, agent_session};
 use desk_agent_protocol::schedule::SchedulePauseReason;
 use desk_diagnose_core::{
     schedule::lifecycle::FailureState,
     session::{AgentSessionSurface, PersistedAgentSession, TriggerOrigin},
 };
-use sea_orm::{ColumnTrait, DatabaseTransaction, DbErr, EntityTrait, QueryFilter, sea_query::Expr};
+use sea_orm::{ColumnTrait, DbErr, EntityTrait, QueryFilter, sea_query::Expr};
 
 /// A scheduled continuation acquires the SQLite write lock by touching its task.
 /// Validation and the caller's action/outbox mutation share that transaction;

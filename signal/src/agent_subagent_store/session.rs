@@ -1,6 +1,6 @@
 //! Save history, task dependencies and repair allowance under the same child claim.
 use super::*;
-use sea_orm::DatabaseTransaction;
+use crate::config::connection::DatabaseTransaction;
 
 pub(crate) async fn save_child_session(
     db: &DatabaseConnection,

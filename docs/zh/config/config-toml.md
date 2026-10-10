@@ -141,9 +141,52 @@ external = "[2001:db8::1]:3478"
 
 若用户在设置正被修改的同时勾选了“记住我的选择”，该选择会被丢弃而不是被应用——你刚做的修改依然有效，而用户答复的那一次请求本身仍然按其答复处理。
 
-## AI 设置
+## OSS 全局配置
 
-AI 模型服务、基础 URL、模型名称和 API 密钥通过**管理控制台**配置，而不是写入 TOML 文件。API 密钥只保存在服务端。见 [AI 诊断](/zh/features/ai-diagnostics)。
+OSS 的 AI 网关、审批网关、搜索和策略配置与主机设置保存在同一份 `config.toml`，路径由当前 profile 或 `--config-file-path` 决定。设置页面保存后立即写入这份文件；停服后也可手工编辑，重新启动加载。以下九个段及 `[oss_config_metadata]` 不接受 `LRD_*` 环境变量覆盖；其他主机设置保持原有环境变量行为。
+
+| 配置段 | 字段与含义 |
+| --- | --- |
+| `[ai_gateway]` | `wire_protocol`、`base_url`、`model`、`api_key`、`supports_image_input`；`profile_schema_version`、`reasoning_contract`、`anthropic_prefix_binding`、`request_options_json`、`output_limit_field`、`runtime_max_output_tokens`、`max_context_bytes`；`response_format`、`execution_mode`、`max_steps_per_turn`、`max_same_tool_calls_per_turn`、`exec_approval_timeout_secs`（秒） |
+| `[approval_gateway]` | `enabled`；独立模型配置位于 `[approval_gateway.gateway]`，字段沿用主网关。OSS 不包含价格、货币或记账配置 |
+| `[web_search]` | `schema_version`、`provider`（`duck_duck_go` / `brave` / `tavily`）、可选 `api_key` |
+| `[context_management]` | `schema_version`、`strategy`（`window` / `checkpoint_summary`） |
+| `[subagent_policy.limits]` | `maxUnfinishedPerRoot`：每个主会话未结束子助手数上限 |
+| `[goal_budget_policy]` | `schemaVersion`、`deviceUnavailableMaxMs`（毫秒，不可禁用）；`[goal_budget_policy.limits]` 包含 `activeTimeMs`、`deadlineMs`（毫秒）、`modelTokens`、`modelCalls`、`toolCalls`、`slices`、`stalledSlices` |
+| `[schedule_budget_policy.maximum]` | `max_runs_per_utc_day`、`max_calls_per_run`、`max_model_tokens_per_run`、`max_runtime_seconds`（秒） |
+| `[usage_retention]` | `turn_days`、`agent_session_days`（天） |
+| `[model_metrics]` | `enabled`、`detail_days`、`five_minute_days`、`hourly_days`、`mutable_days`（天）、`detail_row_budget`、`event_row_budget`、`compact_row_budget`、`rollup_row_budget`、`series_per_bucket`、`storage_budget_bytes`（字节，十进制字符串） |
+
+AI 网关与审批网关的测试均使用各自的 `runtime_max_output_tokens`，与实际调用共用输出上限，不再配置独立的探针输出 token。
+
+缺段或省略字段使用现有业务默认值；上述段内未知字段和非法值会拒绝加载。配置版本字段 `revision`、`connection_revision`、`profile_revision`、`configuration_revision` 均使用十进制字符串，例如 `revision = "1"`。版本及 `[oss_config_metadata]` 的实例身份、指纹和版本记录由服务维护，无需手工修改。停服编辑业务字段时，启动过程按实际变化更新对应版本；空白和键顺序变化不会更新版本。两套网关的探测记录仍存 SQLite，手工修改网关后需按页面提示重新验证。
+
+`request_options_json` 是 JSON 对象字符串，可以保存嵌套 `null`。长期目标的每项可选限额可写正整数或字符串 `"disabled"`，省略表示默认限额；设备不可用等待上限始终为合法正整数。
+
+```toml
+[ai_gateway]
+wire_protocol = "anthropic_messages"
+base_url = "https://model.example/v1"
+model = "example-model"
+api_key = "replace-with-your-key"
+max_context_bytes = 131072
+request_options_json = '{"thinking":{"type":"adaptive","display":null}}'
+
+[approval_gateway]
+enabled = false
+
+[goal_budget_policy.limits]
+modelTokens = "disabled"
+
+[usage_retention]
+turn_days = 30
+agent_session_days = 30
+```
+
+API 密钥保存在这份文件中，公开设置响应继续只返回“是否已设置”。现有整文件保存及 worker 初始化保留全部配置段。上下文策略继续在模型 seam 首次使用时固定；长期目标在原有检查点应用最新预算，既有计数不重置；保留期限在下一清理周期生效。
+
+`desk_signal.db` 只保存会话、任务、授权、探测、用量等运行数据，`model-metrics.sqlite` 只保存指标记录和运行水位。开发阶段遇到不兼容数据库结构时，停服并手工重建运行数据库；新格式不提供旧配置表的读取、转换或迁移，已保存在 `config.toml` 的配置会保留。
+
 
 ## 推荐的开发配置
 
@@ -155,3 +198,23 @@ traceback = true
 [desk]
 video_fps = 30               # 开发期间降低 FPS 以节省资源
 ```
+
+## 用途输出额度
+
+网页“上下文管理”和“终端补全”保存到以下全局段；revision 由设置提交机制维护。正整数范围为 1～4294967295，实际输出取用途额度与模型运行时额度的较小值。
+
+```toml
+[context_management]
+schema_version = 2
+revision = "0"
+strategy = "checkpoint_summary"
+summary_max_output_tokens = 16384
+
+[terminal_completion]
+revision = "0"
+max_output_tokens = 512
+```
+
+### 思考请求配置
+
+当前 profile schema 为 `2`。`reasoning_contract` 显式选择 `conservative`、`openai_chat`、`deepseek_chat` 或 `anthropic_messages`，并与 `wire_protocol` 匹配。`anthropic_prefix_binding` 默认 `false`，只在端点将签名思考绑定到请求前缀时启用。思考强度和可选原生清理保存在 `request_options_json`；详见 [AI 诊断](../features/ai-diagnostics.md)。主模型与审批模型使用相同字段。

@@ -104,7 +104,7 @@ impl SubAgentStore {
 /// the original publication fence, and has independently established withdrawal.
 /// No model-visible control tool can invoke this historical settlement helper.
 pub(crate) async fn close_scheduled_group_on(
-    txn: &sea_orm::DatabaseTransaction,
+    txn: &crate::config::connection::DatabaseTransaction,
     row: &group_row::Model,
     now_ms: i64,
 ) -> Result<

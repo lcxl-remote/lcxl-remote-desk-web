@@ -7,7 +7,6 @@ use desk_diagnose_core::model_profile::{ModelUseCase, OutputLimitField, WireProt
 use desk_diagnose_core::prompt::ResponseFormatSpec;
 use desk_diagnose_core::provider_probe::{provider_probe_request, verify_probe_response};
 use desk_diagnose_core::seam::{ModelRequest, ModelSeam, NullTurnSink};
-use desk_diagnose_core::terminal_complete::COMPLETION_MAX_OUTPUT_TOKENS;
 use desk_utils::error::DeskErrorCode;
 use desk_utils::rest::RestResponse;
 use serde::{Deserialize, Serialize};
@@ -44,6 +43,9 @@ pub struct ProviderTestDto {
 #[derive(Deserialize, ToSchema)]
 pub struct ProviderTestParams {
     #[schema(value_type = String)]
+    pub reasoning_contract: desk_diagnose_core::model_profile::ReasoningContract,
+    pub anthropic_prefix_binding: bool,
+    #[schema(value_type = String)]
     pub wire_protocol: WireProtocol,
     pub model: String,
     pub supports_image_input: bool,
@@ -52,7 +54,6 @@ pub struct ProviderTestParams {
     pub request_options: serde_json::Value,
     #[schema(value_type = String)]
     pub output_limit_field: OutputLimitField,
-    pub probe_max_output_tokens: i64,
     pub runtime_max_output_tokens: i64,
     #[schema(minimum = 4096, maximum = 16777216)]
     pub max_context_bytes: i64,
@@ -67,13 +68,14 @@ fn config_for_probe(
 ) -> model_provider::ModelProviderConfig {
     let mut candidate = stored.clone();
     candidate.apply_update(ModelProviderUpdate {
+        reasoning_contract: Some(params.reasoning_contract),
+        anthropic_prefix_binding: Some(params.anthropic_prefix_binding),
         wire_protocol: Some(params.wire_protocol),
         model: Some(params.model),
         supports_image_input: Some(params.supports_image_input),
         base_url: Some(params.base_url),
         request_options: Some(params.request_options),
         output_limit_field: Some(params.output_limit_field),
-        probe_max_output_tokens: Some(params.probe_max_output_tokens),
         runtime_max_output_tokens: Some(params.runtime_max_output_tokens),
         max_context_bytes: Some(params.max_context_bytes),
         api_key: params.api_key,
@@ -84,10 +86,11 @@ fn config_for_probe(
 
 /// The OSS singleton serves both the conversational agent and terminal
 /// completion. Validate the stored/candidate profile against the completion
-/// caller's smaller hard cap so a successful save or probe cannot create a
+/// configured completion purpose cap so a successful save or probe cannot create a
 /// configuration that deterministically fails every completion request.
 fn validate_shared_profile(
     config: &model_provider::ModelProviderConfig,
+    max_output_tokens: u32,
 ) -> Result<(), DeskSignalError> {
     let profile = config.request_profile().map_err(|error| {
         DeskSignalError::new_custom_error(DeskErrorCode::INVALID_PARAMS, &error.to_string())
@@ -102,7 +105,7 @@ fn validate_shared_profile(
         .validate_for_use_case(
             protocol,
             ModelUseCase::Completion,
-            Some(i64::from(COMPLETION_MAX_OUTPUT_TOKENS)),
+            Some(i64::from(max_output_tokens)),
         )
         .map_err(|error| {
             DeskSignalError::new_custom_error(DeskErrorCode::INVALID_PARAMS, &error.to_string())
@@ -212,7 +215,12 @@ pub async fn update_model_provider(
         ));
     }
     config.apply_update(update);
-    validate_shared_profile(&config)?;
+    validate_shared_profile(
+        &config,
+        crate::terminal_completion_config::read(db)
+            .await?
+            .max_output_tokens,
+    )?;
     // Write-time SSRF check: reject a base_url whose scheme or IP-literal host is
     // not permitted by the active mode. Domain hosts pass here and are re-checked
     // authoritatively at dial time by the connect-time resolver. An unset base_url
@@ -238,8 +246,13 @@ pub async fn update_model_provider(
         expected_connection_revision,
         expected_profile_revision,
     )
-    .await?
-    {
+    .await
+    .map_err(|error| match error {
+        model_provider::ModelConfigWriteError::Invalid(message) => {
+            DeskSignalError::new_custom_error(DeskErrorCode::INVALID_PARAMS, &message)
+        }
+        model_provider::ModelConfigWriteError::Db(error) => error.into(),
+    })? {
         return Err(DeskSignalError::new_custom_error(
             DeskErrorCode::PRECONDITION_FAILED,
             "provider configuration revision conflict",
@@ -294,7 +307,7 @@ async fn run_probe(
         );
         return Err(DeskSignalError::new_custom_error(
             DeskErrorCode::PRECONDITION_FAILED,
-            "Test failed: the reasoning budget exhausted the probe output limit before any answer was produced; increase probe_max_output_tokens",
+            "Test failed: the reasoning budget exhausted the probe output limit before any answer was produced; increase runtime_max_output_tokens",
         ));
     }
     let validation = verify_probe_response(&expectation, &turn.text);
@@ -358,7 +371,12 @@ pub async fn test_model_provider(
     // Overlay the form values in memory. The candidate is deliberately never
     // passed to `save`, so testing cannot commit an unverified configuration.
     let config = config_for_probe(&stored, body.into_inner());
-    validate_shared_profile(&config)?;
+    validate_shared_profile(
+        &config,
+        crate::terminal_completion_config::read(db)
+            .await?
+            .max_output_tokens,
+    )?;
     // Fail closed with a precondition error when the provider is not fully
     // configured (missing model / base_url / api_key).
     let seam = SignalModelSeam::from_config(&config).map_err(|e| {
@@ -375,6 +393,7 @@ pub async fn test_model_provider(
     );
     let _stored = model_provider::save_probe_observation_if_current(
         db,
+        &config.config_instance,
         model_provider::ModelProbeObservation {
             connection_revision: config.connection_revision,
             profile_revision: config.profile_revision,
@@ -437,13 +456,14 @@ mod tests {
         let candidate = config_for_probe(
             &stored,
             ProviderTestParams {
+                reasoning_contract: Default::default(),
+                anthropic_prefix_binding: false,
                 wire_protocol: WireProtocol::AnthropicMessages,
                 model: "unsaved-model".into(),
                 supports_image_input: true,
                 base_url: "https://unsaved.example".into(),
                 request_options: serde_json::json!({}),
                 output_limit_field: OutputLimitField::MaxTokens,
-                probe_max_output_tokens: 512,
                 runtime_max_output_tokens: 4096,
                 max_context_bytes: 131_072,
                 api_key: Some("unsaved-key".into()),
@@ -474,13 +494,14 @@ mod tests {
         let candidate = config_for_probe(
             &stored,
             ProviderTestParams {
+                reasoning_contract: Default::default(),
+                anthropic_prefix_binding: false,
                 wire_protocol: WireProtocol::OpenAiChatCompletions,
                 model: "model".into(),
                 supports_image_input: false,
                 base_url: "https://example.com/v1".into(),
                 request_options: serde_json::json!({}),
                 output_limit_field: OutputLimitField::MaxTokens,
-                probe_max_output_tokens: 512,
                 runtime_max_output_tokens: 4096,
                 max_context_bytes: 131_072,
                 api_key: None,
@@ -501,13 +522,12 @@ mod tests {
                 "thinking": {"type": "enabled", "budget_tokens": 600}
             }),
             output_limit_field: OutputLimitField::MaxTokens,
-            probe_max_output_tokens: 1024,
             runtime_max_output_tokens: 4096,
             max_context_bytes: Some(131_072),
             ..Default::default()
         };
 
-        let error = validate_shared_profile(&config)
+        let error = validate_shared_profile(&config, 512)
             .expect_err("the singleton must remain valid for terminal completion");
         assert!(error.to_string().contains("effective output limit (512)"));
     }

@@ -1,10 +1,11 @@
 //! UI reads, successful model observation and final interpretation are separate.
 use super::*;
+use crate::config::connection::DatabaseTransaction;
 use crate::entity::{
     agent_delegation_reservation as reservation_row, agent_subagent_inbox as inbox,
 };
 use desk_diagnose_core::{chat::ChatRole, subagent::seam::AcceptedResultObservation};
-use sea_orm::DatabaseTransaction;
+
 use sha2::{Digest, Sha256};
 
 pub(super) async fn accepted_inputs_on(

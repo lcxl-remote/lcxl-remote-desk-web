@@ -114,6 +114,13 @@ struct CapturedModel {
 }
 #[async_trait(?Send)]
 impl ModelSeam for CapturedModel {
+    fn model_output_token_limit(&self, request: &ModelRequest) -> Result<i64, AgentError> {
+        Ok(request
+            .caller_output_hard_cap
+            .unwrap_or(128_000)
+            .min(128_000))
+    }
+
     async fn context_policy(
         &self,
         _requirements: crate::model_capability::ModelRequirements,
@@ -276,6 +283,8 @@ fn tool_use(id: &str, name: &str) -> ModelTurn {
             .into(),
         }],
         provider_meta: ProviderResponseMeta {
+            context_observation: None,
+            thinking_prefix: None,
             cache_projection: None,
             stop_reason: StopReason::ToolUse,
             replay: Some(ReplayDisposition::NotRequired { source_context_key }),

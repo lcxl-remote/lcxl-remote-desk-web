@@ -35,6 +35,7 @@ function renderFor(startupMode: string) {
 }
 
 const aiModelLink = (c: HTMLElement) => c.querySelector('a[href="/system/ai-model"]')
+const approvalModelLink = (c: HTMLElement) => c.querySelector('a[href="/system/approval-model"]')
 const aiPolicyLink = (c: HTMLElement) => c.querySelector('a[href="/system/ai-policy"]')
 
 describe("SettingsOverview AI settings placement", () => {
@@ -45,6 +46,7 @@ describe("SettingsOverview AI settings placement", () => {
         const c = renderFor("signaling")
         expect(c.querySelector('a[href="/system/model-metrics-settings"]')).not.toBeNull()
         expect(aiModelLink(c)).not.toBeNull()
+        expect(approvalModelLink(c)).not.toBeNull()
         expect(aiPolicyLink(c)).toBeNull()
     })
 
@@ -52,6 +54,7 @@ describe("SettingsOverview AI settings placement", () => {
         const c = renderFor("default")
         expect(c.querySelector('a[href="/system/model-metrics-settings"]')).not.toBeNull()
         expect(aiModelLink(c)).not.toBeNull()
+        expect(approvalModelLink(c)).not.toBeNull()
         expect(aiPolicyLink(c)).not.toBeNull()
     })
 
@@ -59,12 +62,18 @@ describe("SettingsOverview AI settings placement", () => {
         const c = renderFor("desk-server")
         expect(c.querySelector('a[href="/system/model-metrics-settings"]')).toBeNull()
         expect(aiModelLink(c)).toBeNull()
+        expect(approvalModelLink(c)).toBeNull()
         expect(aiPolicyLink(c)).not.toBeNull()
+    })
+
+    it("hides approval model configuration on a service-daemon without model provider routes", () => {
+        expect(approvalModelLink(renderFor("service-daemon"))).toBeNull()
     })
 
     it("uses icons and concise descriptions on the newer overview cards", () => {
         const c = renderFor("default")
         const cards = [
+            ["approval-model", "Configure and test the independent model for AI automatic approval."],
             ["web-search", "Choose the web search service for the AI Assistant."],
             ["schedule-budget", "Set runtime budget limits for independent automatic tasks."],
             ["goal-budget", "Set runtime budget limits for long-running goals."],

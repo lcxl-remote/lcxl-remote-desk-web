@@ -6,7 +6,9 @@ async fn expired_history_remains_available_without_compaction() {
     use sea_orm::{ActiveModelTrait, IntoActiveModel, Set};
     let listener = std::sync::Arc::new(TcpListener::bind("127.0.0.1:0").await.unwrap());
     let address = listener.local_addr().unwrap();
-    let db = Database::connect("sqlite::memory:").await.unwrap();
+    let db = crate::config::test_support::Database::connect("sqlite::memory:")
+        .await
+        .unwrap();
     crate::db::initialize_schema(&db).await.unwrap();
     crate::ai_assistant_gate::enable_test_host();
     crate::model_provider::save(
@@ -107,7 +109,9 @@ async fn production_compaction_answers_and_restores_checkpoint_from_sqlite() {
         "sqlite://{}?mode=rwc",
         directory.path().join("session.db").display()
     );
-    let db = Database::connect(&url).await.unwrap();
+    let db = crate::config::test_support::Database::connect(&url)
+        .await
+        .unwrap();
     crate::db::initialize_schema(&db).await.unwrap();
     crate::ai_assistant_gate::enable_test_host();
     let config = crate::model_provider::ModelProviderConfig {
@@ -200,7 +204,9 @@ async fn production_compaction_answers_and_restores_checkpoint_from_sqlite() {
     let saved_context = context(&db).await;
     drop(sessions);
     db.close().await.unwrap();
-    let reopened = Database::connect(&url).await.unwrap();
+    let reopened = crate::config::test_support::Database::connect(&url)
+        .await
+        .unwrap();
     crate::db::initialize_schema(&reopened).await.unwrap();
     let restored = crate::agent_session_store::SignalAgentSessionStore::new(reopened.clone())
         .read_snapshot(&run)
@@ -220,7 +226,7 @@ fn sse(answer: &str) -> String {
     format!("data: {frame}\n\ndata: [DONE]\n\n")
 }
 
-async fn context(db: &sea_orm::DatabaseConnection) -> serde_json::Value {
+async fn context(db: &crate::config::connection::DatabaseConnection) -> serde_json::Value {
     let row = crate::entity::agent_session::Entity::find()
         .one(db)
         .await
@@ -231,7 +237,12 @@ async fn context(db: &sea_orm::DatabaseConnection) -> serde_json::Value {
     serde_json::to_value(session.model_context_state).unwrap()
 }
 
-async fn ask(db: &sea_orm::DatabaseConnection, client: &str, message: &str, question: String) {
+async fn ask(
+    db: &crate::config::connection::DatabaseConnection,
+    client: &str,
+    message: &str,
+    question: String,
+) {
     let result = tokio::time::timeout(
         // Cold macOS trust-store initialization can itself exceed 15 seconds.
         // This watchdog bounds the harness, not the production model timeout.

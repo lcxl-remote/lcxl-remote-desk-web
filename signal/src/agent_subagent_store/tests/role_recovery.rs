@@ -164,7 +164,7 @@ async fn raw_child_writes_stay_forbidden_after_compaction_permission_resume_and_
 async fn role_reopen_worker() {
     let file = std::env::var("LRD_ROLE_REOPEN_DB").unwrap();
     let id = std::env::var("LRD_ROLE_REOPEN_CHILD").unwrap();
-    let db = Database::connect(format!("sqlite://{file}?mode=rw"))
+    let db = crate::config::test_support::Database::connect(format!("sqlite://{file}?mode=rw"))
         .await
         .unwrap();
     let session = super::paused_permission::session(&db, &id).await;

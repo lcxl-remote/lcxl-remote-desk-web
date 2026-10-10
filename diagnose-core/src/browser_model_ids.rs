@@ -128,11 +128,12 @@ fn observed_browser_results(history: &[ChatMessage], now_ms: u64) -> Vec<Browser
         .collect()
 }
 
-pub(crate) fn resolve(
+pub(crate) fn resolve_with_references(
     call: &ToolCall,
     value: &mut Value,
     history: &[ChatMessage],
     now_ms: u64,
+    expected: &[Value],
 ) -> Result<(), AgentError> {
     if !supports(&call.name) {
         return Ok(());
@@ -221,37 +222,55 @@ pub(crate) fn resolve(
         requested.push(("attachment.element".into(), id));
     }
     let results = observed_browser_results(history, now_ms);
-    let latest = results
-        .iter()
-        .find(|result| result.page.page_id == page_id)
-        .ok_or_else(|| invalid("page_id was not observed in a current verified browser result"))?;
-    if results
-        .iter()
-        .any(|result| result.page.page_id == page_id && result.page.adapter != latest.page.adapter)
+    let latest = results.iter().find(|result| result.page.page_id == page_id);
+    if let Some(latest) = latest
+        && results.iter().any(|result| {
+            result.page.page_id == page_id && result.page.adapter != latest.page.adapter
+        })
     {
         return Err(invalid(
             "page_id is ambiguous across browser profiles; refresh the page",
         ));
     }
-    let result = if requested.is_empty() {
-        latest
+    let page = latest.map(|result| result.page.clone()).or_else(|| expected.iter()
+        .filter_map(|value| serde_json::from_value::<desk_agent_protocol::browser_control::BrowserPageRef>(value.clone()).ok())
+        .find(|page| page.page_id == page_id))
+        .ok_or_else(|| invalid("page_id was not observed in a current verified browser result or authorized attachment"))?;
+    page.validate()
+        .map_err(|_| invalid("invalid observed browser page"))?;
+    let result = results.iter().find(|result| {
+        result.page == page
+            && result.snapshot.as_ref().is_some_and(|snapshot| {
+                requested.iter().all(|(_, id)| {
+                    snapshot
+                        .elements
+                        .iter()
+                        .any(|element| element.element_id == *id)
+                })
+            })
+    });
+    let elements = if let Some(result) = result {
+        result.snapshot.as_ref().unwrap().elements.clone()
     } else {
-        results.iter().find(|result| result.page == latest.page
-            && result.snapshot.as_ref().is_some_and(|snapshot| requested.iter().all(|(_, id)| {
-                snapshot.elements.iter().any(|element| element.element_id == *id)
-            })))
-            .ok_or_else(|| invalid("element_id was not observed with this current page; take a fresh browser snapshot"))?
-    };
-    object.insert("page".into(), serde_json::to_value(&result.page).unwrap());
-    for (field, id) in requested {
-        let element = result
-            .snapshot
-            .as_ref()
-            .unwrap()
-            .elements
+        expected
             .iter()
-            .find(|element| element.element_id == id)
-            .unwrap();
+            .filter_map(|value| {
+                serde_json::from_value::<desk_agent_protocol::browser_control::BrowserElementRef>(
+                    value.clone(),
+                )
+                .ok()
+            })
+            .collect()
+    };
+    object.insert("page".into(), serde_json::to_value(&page).unwrap());
+    for (field, id) in requested {
+        let element = elements.iter().find(|element| element.element_id == id)
+            .ok_or_else(|| invalid("element_id was not observed with this current page; take a fresh browser snapshot"))?;
+        element.validate_for_page(&page).map_err(|_| {
+            invalid(
+                "element reference belongs to another page/document; take a fresh browser snapshot",
+            )
+        })?;
         let encoded = serde_json::to_value(element).unwrap();
         if let Some(index) = field
             .strip_prefix("fields[")
@@ -443,6 +462,38 @@ pub(crate) fn project_result_message(message: &mut ChatMessage) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attachment_references_resolve_and_reject_a_changed_document() {
+        let page: BrowserPageRef = serde_json::from_value(json!({
+            "schema_version": desk_agent_protocol::browser_control::BROWSER_CONTROL_SCHEMA_VERSION,
+            "adapter": {"engine":"chrome_extension","device_id":"device","os_session_id":"session",
+                "browser_major_version":144,"browser_version":"144.0.0.0","adapter_id":"extension",
+                "adapter_version":"1.0","profile_incarnation":"profile","connection_revision":1},
+            "page_id":"native-page","page_incarnation":"original","origin":{"kind":"https","host_ascii":"example.com","port":443},
+            "document_revision":1,"url_sha256":"a".repeat(64),"observed_at_unix_ms":1,"account_id":null
+        })).unwrap();
+        let element: BrowserElementRef = serde_json::from_value(json!({
+            "page_id":page.page_id,"page_incarnation":page.page_incarnation,"document_revision":1,
+            "element_id":"native-element","role":"button","accessible_name":"Submit","value":null,"element_revision":1
+        })).unwrap();
+        let observed = vec![
+            serde_json::to_value(&page).unwrap(),
+            serde_json::to_value(&element).unwrap(),
+        ];
+        let call = call(
+            "browser_activate_element",
+            json!({"page_id":"native-page","element_id":"native-element"}),
+        );
+        let mut value: Value = serde_json::from_str(&call.arguments_json).unwrap();
+        resolve_with_references(&call, &mut value, &[], 2, &observed).unwrap();
+        assert_eq!(value["page"], observed[0]);
+        assert_eq!(value["element"], observed[1]);
+        let mut changed = observed;
+        changed[0]["document_revision"] = json!(2);
+        let mut value: Value = serde_json::from_str(&call.arguments_json).unwrap();
+        assert!(resolve_with_references(&call, &mut value, &[], 2, &changed).is_err());
+    }
 
     fn call(name: &str, value: Value) -> ToolCall {
         ToolCall {

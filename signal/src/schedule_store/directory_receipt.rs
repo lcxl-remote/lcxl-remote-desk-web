@@ -1,11 +1,12 @@
 //! Verify the original directory proposal without granting or resolving a path.
 use super::ScheduleStoreError;
+use crate::config::connection::DatabaseTransaction;
 use crate::entity::agent_run_event;
 use desk_diagnose_core::{
     file_scope::transaction::{self, FileScopeMutation, FileScopeReceipt},
     session::PersistedAgentSession,
 };
-use sea_orm::{ColumnTrait, DatabaseTransaction, EntityTrait, QueryFilter};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
 pub(super) async fn verify(
     txn: &DatabaseTransaction,

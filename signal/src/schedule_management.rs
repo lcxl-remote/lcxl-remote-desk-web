@@ -1,4 +1,5 @@
 //! Owner-authenticated task management and explicit publication; no direct tool dispatch.
+use crate::config::connection::DatabaseConnection;
 mod resume_sources;
 use crate::entity::agent_schedule as row;
 use crate::schedule_store::{ScheduleStore, ScheduleStoreError};
@@ -14,7 +15,7 @@ use desk_signal_facade::{
     },
 };
 use desk_utils::error::DeskErrorCode;
-use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
 pub async fn handle(
     db: &DatabaseConnection,
@@ -175,7 +176,10 @@ async fn manage_inner(
             offset,
             limit,
         } => {
-            return resume_sources::list(db, owner, &target_device_id, offset, limit).await;
+            return desk_diagnose_core::future::boxed(|| {
+                resume_sources::list(db, owner, &target_device_id, offset, limit)
+            })
+            .await;
         }
         Request::ConvertTime { input } => {
             let conversion = desk_diagnose_core::schedule::timezone::convert(&input)
@@ -201,7 +205,11 @@ async fn manage_inner(
             attention_only,
         } => {
             let after = match after {
-                Some(id) => store.read(owner, &id).await?.id,
+                Some(id) => {
+                    desk_diagnose_core::future::boxed(|| store.read(owner, &id))
+                        .await?
+                        .id
+                }
                 None => 0,
             };
             let kind = kind
@@ -212,8 +220,8 @@ async fn manage_inner(
                 .map(serde_json::to_value)
                 .transpose()
                 .map_err(|_| ScheduleStoreError::Invalid)?;
-            let (rows, total, attention_count) = store
-                .search(
+            let (rows, total, attention_count) = desk_diagnose_core::future::boxed(|| {
+                store.search(
                     owner,
                     after,
                     u64::from(limit),
@@ -224,12 +232,13 @@ async fn manage_inner(
                     source_conversation_id.as_deref(),
                     attention_only,
                 )
-                .await?;
+            })
+            .await?;
             let next_cursor =
                 (rows.len() == limit as usize).then(|| rows.last().unwrap().schedule_id.clone());
             let mut tasks = Vec::with_capacity(rows.len());
             for row in rows {
-                tasks.push(view(db, owner, row).await?);
+                tasks.push(desk_diagnose_core::future::boxed(|| view(db, owner, row)).await?);
             }
             return Ok(Response::SearchResults {
                 tasks,
@@ -240,15 +249,21 @@ async fn manage_inner(
         }
         Request::List { after, limit } => {
             let after = match after {
-                Some(id) => store.read(owner, &id).await?.id,
+                Some(id) => {
+                    desk_diagnose_core::future::boxed(|| store.read(owner, &id))
+                        .await?
+                        .id
+                }
                 None => 0,
             };
-            let rows = store.list(owner, after, u64::from(limit)).await?;
+            let rows =
+                desk_diagnose_core::future::boxed(|| store.list(owner, after, u64::from(limit)))
+                    .await?;
             let next_cursor =
                 (rows.len() == limit as usize).then(|| rows.last().unwrap().schedule_id.clone());
             let mut tasks = Vec::with_capacity(rows.len());
             for row in rows {
-                tasks.push(view(db, owner, row).await?);
+                tasks.push(desk_diagnose_core::future::boxed(|| view(db, owner, row)).await?);
             }
             return Ok(Response::List { tasks, next_cursor });
         }
@@ -257,9 +272,10 @@ async fn manage_inner(
             before,
             limit,
         } => {
-            let page = store
-                .run_history(owner, &schedule_id, before.as_deref(), limit)
-                .await?;
+            let page = desk_diagnose_core::future::boxed(|| {
+                store.run_history(owner, &schedule_id, before.as_deref(), limit)
+            })
+            .await?;
             let runs = page
                 .runs
                 .into_iter()
@@ -279,18 +295,20 @@ async fn manage_inner(
             approve,
             client_request_key,
         } => {
-            run_directory::decide(
-                db,
-                owner,
-                &schedule_id,
-                &run_id,
-                &directory_request_id,
-                expected_scope_revision,
-                Some(approve),
-                &client_request_key,
-            )
+            desk_diagnose_core::future::boxed(|| {
+                run_directory::decide(
+                    db,
+                    owner,
+                    &schedule_id,
+                    &run_id,
+                    &directory_request_id,
+                    expected_scope_revision,
+                    Some(approve),
+                    &client_request_key,
+                )
+            })
             .await?;
-            store.read(owner, &schedule_id).await?
+            desk_diagnose_core::future::boxed(|| store.read(owner, &schedule_id)).await?
         }
         Request::RevokeRunDirectory {
             schedule_id,
@@ -299,18 +317,20 @@ async fn manage_inner(
             expected_scope_revision,
             client_request_key,
         } => {
-            run_directory::decide(
-                db,
-                owner,
-                &schedule_id,
-                &run_id,
-                &directory_request_id,
-                expected_scope_revision,
-                None,
-                &client_request_key,
-            )
+            desk_diagnose_core::future::boxed(|| {
+                run_directory::decide(
+                    db,
+                    owner,
+                    &schedule_id,
+                    &run_id,
+                    &directory_request_id,
+                    expected_scope_revision,
+                    None,
+                    &client_request_key,
+                )
+            })
             .await?;
-            store.read(owner, &schedule_id).await?
+            desk_diagnose_core::future::boxed(|| store.read(owner, &schedule_id)).await?
         }
         Request::DisposeRunOutcome {
             schedule_id,
@@ -321,8 +341,8 @@ async fn manage_inner(
             execution_id,
             note,
         } => {
-            store
-                .dispose_run_outcome(
+            desk_diagnose_core::future::boxed(|| {
+                store.dispose_run_outcome(
                     owner,
                     &schedule_id,
                     &run_id,
@@ -332,8 +352,9 @@ async fn manage_inner(
                     work_id,
                     &execution_id,
                 )
-                .await?;
-            store.read(owner, &schedule_id).await?
+            })
+            .await?;
+            desk_diagnose_core::future::boxed(|| store.read(owner, &schedule_id)).await?
         }
         Request::AcknowledgeRunOutcome {
             schedule_id,
@@ -342,8 +363,8 @@ async fn manage_inner(
             client_request_key,
             note,
         } => {
-            store
-                .acknowledge_run_outcome(
+            desk_diagnose_core::future::boxed(|| {
+                store.acknowledge_run_outcome(
                     owner,
                     &schedule_id,
                     &run_id,
@@ -351,57 +372,73 @@ async fn manage_inner(
                     &client_request_key,
                     &note,
                 )
-                .await?;
-            store.read(owner, &schedule_id).await?
+            })
+            .await?;
+            desk_diagnose_core::future::boxed(|| store.read(owner, &schedule_id)).await?
         }
         Request::RunTaskNow {
             schedule_id,
             expected_revision,
             client_request_key,
         } => {
-            store
-                .enqueue_manual_at_revision(
+            desk_diagnose_core::future::boxed(|| {
+                store.enqueue_manual_at_revision(
                     owner,
                     &schedule_id,
                     &client_request_key,
                     expected_revision,
                 )
-                .await?;
-            store.read(owner, &schedule_id).await?
+            })
+            .await?;
+            desk_diagnose_core::future::boxed(|| store.read(owner, &schedule_id)).await?
         }
         Request::CancelTaskRun { run_id } => {
-            let work = store.cancel_run(owner, &run_id).await?;
-            store.read(owner, &work.schedule_id).await?
+            let work =
+                desk_diagnose_core::future::boxed(|| store.cancel_run(owner, &run_id)).await?;
+            desk_diagnose_core::future::boxed(|| store.read(owner, &work.schedule_id)).await?
         }
-        Request::Get { schedule_id } => store.read(owner, &schedule_id).await?,
+        Request::Get { schedule_id } => {
+            desk_diagnose_core::future::boxed(|| store.read(owner, &schedule_id)).await?
+        }
         Request::GenerateTaskContract {
             schedule_id,
             expected_revision,
         } => {
-            let task = store.read(owner, &schedule_id).await?;
+            let task =
+                desk_diagnose_core::future::boxed(|| store.read(owner, &schedule_id)).await?;
             if public_target(db, owner, &task.target_device_id)
                 .await?
                 .is_none()
             {
                 return Err(ScheduleStoreError::NotFound);
             }
-            let contract = store
-                .generate_task_contract(owner, &schedule_id, expected_revision)
-                .await?;
-            store
-                .save_contract(owner, expected_revision, &contract)
-                .await?;
-            return contract_response(db, owner, store.read(owner, &schedule_id).await?).await;
+            let contract = desk_diagnose_core::future::boxed(|| {
+                store.generate_task_contract(owner, &schedule_id, expected_revision)
+            })
+            .await?;
+            desk_diagnose_core::future::boxed(|| {
+                store.save_contract(owner, expected_revision, &contract)
+            })
+            .await?;
+            return contract_response(
+                db,
+                owner,
+                desk_diagnose_core::future::boxed(|| store.read(owner, &schedule_id)).await?,
+            )
+            .await;
         }
         Request::GetTaskContract { schedule_id } => {
-            let task = store.read(owner, &schedule_id).await?;
-            return contract_response(db, owner, task).await;
+            let task =
+                desk_diagnose_core::future::boxed(|| store.read(owner, &schedule_id)).await?;
+            return desk_diagnose_core::future::boxed(|| contract_response(db, owner, task)).await;
         }
         Request::SaveTaskContract {
             expected_revision,
             mut contract,
         } => {
-            let task = store.read(owner, &contract.schedule_id).await?;
+            let task =
+                desk_diagnose_core::future::boxed(|| store.read(owner, &contract.schedule_id))
+                    .await?;
             let target = public_target(db, owner, &task.target_device_id)
                 .await?
                 .ok_or(ScheduleStoreError::NotFound)?;
@@ -410,21 +447,30 @@ async fn manage_inner(
             }
             // Resolve the public handle on the server; clients never choose an internal ID.
             contract.target_device_id = task.target_device_id;
-            store
-                .save_contract(owner, expected_revision, &contract)
-                .await?;
-            let task = store.read(owner, &contract.schedule_id).await?;
-            return contract_response(db, owner, task).await;
+            desk_diagnose_core::future::boxed(|| {
+                store.save_contract(owner, expected_revision, &contract)
+            })
+            .await?;
+            let task =
+                desk_diagnose_core::future::boxed(|| store.read(owner, &contract.schedule_id))
+                    .await?;
+            return desk_diagnose_core::future::boxed(|| contract_response(db, owner, task)).await;
         }
         Request::CreateDraft { mut draft } => {
             // Only the model proposal transaction can stamp AI origin.
             draft.creation_source = desk_agent_protocol::schedule::ScheduleCreationSource::Manual;
-            let draft = resolve_draft(db, owner, draft).await?;
+            let draft =
+                desk_diagnose_core::future::boxed(|| resolve_draft(db, owner, draft)).await?;
             if draft.kind == desk_agent_protocol::schedule::ScheduledTaskKind::ConversationResume {
-                store.create_conversation_task(owner, &draft).await?
+                desk_diagnose_core::future::boxed(|| store.create_conversation_task(owner, &draft))
+                    .await?
             } else {
                 store
-                    .create_draft(owner, &draft, store.database_time().await?)
+                    .create_draft(
+                        owner,
+                        &draft,
+                        desk_diagnose_core::future::boxed(|| store.database_time()).await?,
+                    )
                     .await?
             }
         }
@@ -432,42 +478,60 @@ async fn manage_inner(
             schedule_id,
             expected_revision,
         } => {
-            let task = store.read(owner, &schedule_id).await?;
+            let task =
+                desk_diagnose_core::future::boxed(|| store.read(owner, &schedule_id)).await?;
             if public_target(db, owner, &task.target_device_id)
                 .await?
                 .is_none()
             {
                 return Err(ScheduleStoreError::NotFound);
             }
-            store
-                .activate_conversation_resume(owner, &schedule_id, expected_revision)
-                .await?
+            desk_diagnose_core::future::boxed(|| {
+                store.activate_conversation_resume(owner, &schedule_id, expected_revision)
+            })
+            .await?
         }
         Request::ReserveRehearsal {
             schedule_id,
             expected_revision,
             client_request_key,
         } => {
-            let task = store.read(owner, &schedule_id).await?;
+            let task =
+                desk_diagnose_core::future::boxed(|| store.read(owner, &schedule_id)).await?;
             if public_target(db, owner, &task.target_device_id)
                 .await?
                 .is_none()
             {
                 return Err(ScheduleStoreError::NotFound);
             }
-            let rehearsal = store
-                .reserve_rehearsal(owner, &schedule_id, expected_revision, &client_request_key)
-                .await?;
-            return rehearsal_response(db, owner, rehearsal).await;
+            let rehearsal = desk_diagnose_core::future::boxed(|| {
+                store.reserve_rehearsal(owner, &schedule_id, expected_revision, &client_request_key)
+            })
+            .await?;
+            return desk_diagnose_core::future::boxed(|| rehearsal_response(db, owner, rehearsal))
+                .await;
         }
         Request::GetTaskRehearsal { schedule_id } => {
-            let latest = store.read_latest_rehearsal(owner, &schedule_id).await?;
+            let latest = desk_diagnose_core::future::boxed(|| {
+                store.read_latest_rehearsal(owner, &schedule_id)
+            })
+            .await?;
             let rehearsal = match latest {
-                Some(row) => Some(rehearsal_view(db, owner, row).await?),
+                Some(row) => Some(
+                    desk_diagnose_core::future::boxed(|| rehearsal_view(db, owner, row)).await?,
+                ),
                 None => None,
             };
             return Ok(Response::TaskRehearsal {
-                task: Box::new(view(db, owner, store.read(owner, &schedule_id).await?).await?),
+                task: Box::new(
+                    view(
+                        db,
+                        owner,
+                        desk_diagnose_core::future::boxed(|| store.read(owner, &schedule_id))
+                            .await?,
+                    )
+                    .await?,
+                ),
                 rehearsal,
             });
         }
@@ -475,55 +539,70 @@ async fn manage_inner(
             return rehearsal_response(
                 db,
                 owner,
-                store.read_rehearsal(owner, &rehearsal_id).await?,
+                desk_diagnose_core::future::boxed(|| store.read_rehearsal(owner, &rehearsal_id))
+                    .await?,
             )
             .await;
         }
         Request::GetRehearsalPermissions { rehearsal_id } => {
-            return rehearsal_permissions::read(db, owner, &rehearsal_id).await;
+            return desk_diagnose_core::future::boxed(|| {
+                rehearsal_permissions::read(db, owner, &rehearsal_id)
+            })
+            .await;
         }
         Request::CancelPendingRehearsal {
             rehearsal_id,
             expected_revision,
         } => {
-            let rehearsal = store
-                .cancel_pending_rehearsal(owner, &rehearsal_id, expected_revision)
-                .await?;
-            return rehearsal_response(db, owner, rehearsal).await;
+            let rehearsal = desk_diagnose_core::future::boxed(|| {
+                store.cancel_pending_rehearsal(owner, &rehearsal_id, expected_revision)
+            })
+            .await?;
+            return desk_diagnose_core::future::boxed(|| rehearsal_response(db, owner, rehearsal))
+                .await;
         }
         Request::Rename {
             schedule_id,
             expected_revision,
             title,
         } => {
-            store
-                .rename(owner, &schedule_id, expected_revision, &title)
-                .await?
+            desk_diagnose_core::future::boxed(|| {
+                store.rename(owner, &schedule_id, expected_revision, &title)
+            })
+            .await?
         }
         Request::SetFailureThreshold {
             schedule_id,
             expected_revision,
             failure_threshold,
         } => {
-            store
-                .set_failure_threshold(owner, &schedule_id, expected_revision, failure_threshold)
-                .await?
+            desk_diagnose_core::future::boxed(|| {
+                store.set_failure_threshold(
+                    owner,
+                    &schedule_id,
+                    expected_revision,
+                    failure_threshold,
+                )
+            })
+            .await?
         }
         Request::ChangePrompt {
             schedule_id,
             expected_revision,
             prompt,
         } => {
-            let task = store.read(owner, &schedule_id).await?;
+            let task =
+                desk_diagnose_core::future::boxed(|| store.read(owner, &schedule_id)).await?;
             if public_target(db, owner, &task.target_device_id)
                 .await?
                 .is_none()
             {
                 return Err(ScheduleStoreError::NotFound);
             }
-            store
-                .change_prompt(owner, &schedule_id, expected_revision, &prompt)
-                .await?
+            desk_diagnose_core::future::boxed(|| {
+                store.change_prompt(owner, &schedule_id, expected_revision, &prompt)
+            })
+            .await?
         }
         Request::ChangeTime {
             schedule_id,
@@ -535,17 +614,19 @@ async fn manage_inner(
                 desk_diagnose_core::schedule::timezone::verify_confirmation(&spec, confirmation)
                     .map_err(|_| ScheduleStoreError::Invalid)?;
             }
-            store
-                .change_time(owner, &schedule_id, expected_revision, &spec)
-                .await?
+            desk_diagnose_core::future::boxed(|| {
+                store.change_time(owner, &schedule_id, expected_revision, &spec)
+            })
+            .await?
         }
         Request::RevokeTaskAuthorization {
             schedule_id,
             expected_revision,
         } => {
-            store
-                .revoke_current_task_authorization(owner, &schedule_id, expected_revision)
-                .await?
+            desk_diagnose_core::future::boxed(|| {
+                store.revoke_current_task_authorization(owner, &schedule_id, expected_revision)
+            })
+            .await?
         }
         Request::Pause {
             schedule_id,
@@ -556,17 +637,22 @@ async fn manage_inner(
                     owner,
                     &schedule_id,
                     expected_revision,
-                    store.database_time().await?,
+                    desk_diagnose_core::future::boxed(|| store.database_time()).await?,
                 )
                 .await?
         }
         Request::Delete {
             schedule_id,
             expected_revision,
-        } => store.delete(owner, &schedule_id, expected_revision).await?,
+        } => {
+            desk_diagnose_core::future::boxed(|| {
+                store.delete(owner, &schedule_id, expected_revision)
+            })
+            .await?
+        }
     };
     Ok(Response::Task {
-        task: view(db, owner, row).await?,
+        task: desk_diagnose_core::future::boxed(|| view(db, owner, row)).await?,
     })
 }
 
@@ -857,7 +943,9 @@ mod tests {
         use crate::schedule_store::{
             TestPublicationVerifier as Verifier, publication_test_fixture as fixture_on,
         };
-        let db = sea_orm::Database::connect("sqlite::memory:").await.unwrap();
+        let db = crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap();
         let (store, task, _, publication) = fixture_on(db.clone()).await;
         store
             .publish_task(1, &publication, &Verifier(true))
@@ -935,10 +1023,12 @@ mod tests {
         ScheduleCreationSource, ScheduleDraft, ScheduleRule, ScheduleSpec, ScheduledTaskKind,
         ScheduledTaskStatus,
     };
-    use sea_orm::{ConnectionTrait, Database, EntityTrait, PaginatorTrait, Schema};
+    use sea_orm::{ConnectionTrait, EntityTrait, PaginatorTrait, Schema};
 
     async fn fixture() -> DatabaseConnection {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
+        let db = crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap();
         let schema = Schema::new(db.get_database_backend());
         db.execute(&schema.create_table_from_entity(row::Entity))
             .await

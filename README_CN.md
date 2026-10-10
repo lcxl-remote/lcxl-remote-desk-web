@@ -122,7 +122,7 @@ LCXL Remote Desk Web 是一款 **AI 原生（AI-Native）**的开源高性能远
 | Linux（普通用户） | `$XDG_CONFIG_HOME/lcxl-remote-desk/config.toml`（未设置时为 `~/.config/lcxl-remote-desk/config.toml`） | `$XDG_STATE_HOME/lcxl-remote-desk/logs`（未设置时为 `~/.local/state/lcxl-remote-desk/logs`） |
 | macOS | `~/Library/Application Support/com.lcxl.remote-desk/config/config.toml` | `~/Library/Logs/lcxl-remote-desk` |
 
-用 `-c, --config-file-path <PATH>` 可显式切换到其他 profile，数据库、运行时套接字等同级文件会跟随该路径；部分设置也可用 `LRD_*` 环境变量覆盖。文件不存在时按默认值自动生成：监听 `0.0.0.0` / `::` 的 `8081` 端口、启用 IPv6、信令与 Manager 地址为空（即只用内置信令）、默认拒绝以明文连接公网信令；内置 TURN 开关默认打开，但要等配置了 `[[turn.interfaces]]` 才会真正提供中继。完整字段见 [config.toml 参考](docs/zh/config/config-toml.md)。
+用 `-c, --config-file-path <PATH>` 可显式切换到其他 profile，数据库、运行时套接字等同级文件会跟随该路径；主机设置仍可用 `LRD_*` 环境变量覆盖；OSS 全局 AI、搜索及策略段仅从文件加载。文件不存在时按默认值自动生成：监听 `0.0.0.0` / `::` 的 `8081` 端口、启用 IPv6、信令与 Manager 地址为空（即只用内置信令）、默认拒绝以明文连接公网信令；内置 TURN 开关默认打开，但要等配置了 `[[turn.interfaces]]` 才会真正提供中继。完整字段见 [config.toml 参考](docs/zh/config/config-toml.md)。
 
 以下主机侧设置可在本地控制台保存：
 

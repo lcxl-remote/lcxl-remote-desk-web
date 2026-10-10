@@ -56,12 +56,14 @@ pub(super) async fn consume(
 mod tests {
     use super::*;
     use sea_orm::{
-        ConnectionTrait, Database, DbBackend, EntityTrait, PaginatorTrait, Schema, TransactionTrait,
+        ConnectionTrait, DbBackend, EntityTrait, PaginatorTrait, Schema, TransactionTrait,
     };
 
     #[tokio::test]
     async fn missing_approval_is_distinct_from_failed_storage_and_consumes_nothing() {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
+        let db = crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap();
         let session = PersistedAgentSession::new(
             "run",
             "owner",

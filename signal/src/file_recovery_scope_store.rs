@@ -8,10 +8,10 @@ use sea_orm::{
 use sha2::{Digest, Sha256};
 
 pub struct FileRecoveryScopeStore {
-    db: sea_orm::DatabaseConnection,
+    db: crate::config::connection::DatabaseConnection,
 }
 impl FileRecoveryScopeStore {
-    pub fn new(db: sea_orm::DatabaseConnection) -> Self {
+    pub fn new(db: crate::config::connection::DatabaseConnection) -> Self {
         Self { db }
     }
     pub async fn prepare_dispatch(
@@ -186,7 +186,9 @@ mod tests {
     use sea_orm::{ActiveModelTrait, ConnectionTrait};
     #[tokio::test]
     async fn registrations_are_idempotent_scoped_and_fenced_by_deleted_conversations() {
-        let db = sea_orm::Database::connect("sqlite::memory:").await.unwrap();
+        let db = crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap();
         let schema = sea_orm::Schema::new(db.get_database_backend());
         db.execute(
             &schema

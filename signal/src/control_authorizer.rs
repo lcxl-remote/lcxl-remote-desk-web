@@ -22,6 +22,7 @@
 //! durable in the local SQLite database (it is not horizontally scaled like the
 //! manager).
 
+use crate::config::connection::DatabaseConnection;
 use actix_web::web;
 use desk_agent_protocol::ai_assistant::{
     AiAssistantAsk, AiAssistantContextUpdate, AiAssistantObjectContextUpdate,
@@ -37,7 +38,6 @@ use desk_signal_facade::model::connection::{ConnectionState, SharedConnectionMap
 use desk_signal_facade::model::signal::{RemoteDeskTypeEnum, SignalingModel, SignalingType};
 use desk_signal_facade::service::{ControlFrameAuthorizer, ControlFrameOutcome};
 use desk_utils::error::DeskErrorCode;
-use sea_orm::DatabaseConnection;
 
 use crate::model_provider;
 

@@ -1,5 +1,6 @@
 //! OSS Signal's owner-only AI Assistant orchestrator.
 
+use crate::config::connection::DatabaseConnection;
 pub(crate) mod cancellation;
 
 use actix_web::web;
@@ -51,7 +52,7 @@ use desk_diagnose_core::session::{AgentSessionSurface, TriggerOrigin};
 use desk_diagnose_core::stream::StreamingTurnSink;
 use desk_signal_facade::model::connection::{ConnectionState, SharedConnectionMap};
 use desk_signal_facade::model::signal::{SignalingModel, SignalingType};
-use sea_orm::DatabaseConnection;
+
 use sha2::{Digest, Sha256};
 
 use crate::model_dial::SignalModelSeam;
@@ -140,7 +141,9 @@ fn latest_committed_answer(
         .map(|message| message.text.clone())
 }
 
-pub(crate) async fn current_capability_projection<C: sea_orm::ConnectionTrait>(
+pub(crate) async fn current_capability_projection<
+    C: sea_orm::ConnectionTrait + crate::config::ConfigConnection,
+>(
     db: &C,
     connections: &SharedConnectionMap,
     target_connection_id: &str,
@@ -1593,20 +1596,21 @@ async fn compose_turn_inner(
     if let Some(resume) = scheduled.as_mut()
         && let Some(fresh) = resume.fresh.as_mut()
     {
-        let (session, creation) = Box::pin(
-            crate::agent_subagent_store::SubAgentStore::new(db.clone())
-                .initialize_scheduled_source(
-                    &resume.claimed.session,
-                    resume
-                        .claimed
-                        .run
-                        .lease_owner
-                        .as_deref()
-                        .ok_or_else(|| transport_error("task executor missing"))?,
-                    resume.claimed.run.lease_epoch,
-                    &destination,
-                ),
-        )
+        let store = crate::agent_subagent_store::SubAgentStore::new(db.clone());
+        let lease_owner = resume
+            .claimed
+            .run
+            .lease_owner
+            .as_deref()
+            .ok_or_else(|| transport_error("task executor missing"))?;
+        let (session, creation) = desk_diagnose_core::future::boxed(|| {
+            store.initialize_scheduled_source(
+                &resume.claimed.session,
+                lease_owner,
+                resume.claimed.run.lease_epoch,
+                &destination,
+            )
+        })
         .await
         .map_err(|_| transport_error("published task source changed"))?;
         resume.claimed.session = session;
@@ -2222,17 +2226,20 @@ async fn compose_turn_inner(
         sink.turn_started(&turn_id);
         let outcome = match runtime {
             desk_diagnose_core::subagent::runtime::RuntimeTurn::Child { run, .. } => {
-                match store
-                    .claim_child(&claim, &run.binding.task_id, run.fence(), &destination)
-                    .await
-                    .map_err(|error| transport_error(format!("claim delegated task: {error}")))?
+                match desk_diagnose_core::future::boxed(|| {
+                    store.claim_child(&claim, &run.binding.task_id, run.fence(), &destination)
+                })
+                .await
+                .map_err(|error| transport_error(format!("claim delegated task: {error}")))?
                 {
                     crate::agent_subagent_store::SubAgentClaimOutcome::Claimed(claimed) => {
-                        desk_diagnose_core::agent_loop::run_preclaimed_subagent_turn(
-                            &deps,
-                            claimed.session,
-                            &mut sink,
-                        )
+                        desk_diagnose_core::future::boxed(|| {
+                            desk_diagnose_core::agent_loop::run_preclaimed_subagent_turn(
+                                &deps,
+                                claimed.session,
+                                &mut sink,
+                            )
+                        })
                         .await?
                     }
                     crate::agent_subagent_store::SubAgentClaimOutcome::Blocked(_) => {
@@ -2241,18 +2248,21 @@ async fn compose_turn_inner(
                 }
             }
             desk_diagnose_core::subagent::runtime::RuntimeTurn::ParentCompletion { .. } => {
-                match store
-                    .claim_parent_completion(&claim, &destination)
-                    .await
-                    .map_err(|error| {
-                        transport_error(format!("claim delegated result interpretation: {error}"))
-                    })? {
+                match desk_diagnose_core::future::boxed(|| {
+                    store.claim_parent_completion(&claim, &destination)
+                })
+                .await
+                .map_err(|error| {
+                    transport_error(format!("claim delegated result interpretation: {error}"))
+                })? {
                     Some(claimed) => {
-                        desk_diagnose_core::agent_loop::run_preclaimed_subagent_completion(
-                            &deps,
-                            claimed.session,
-                            &mut sink,
-                        )
+                        desk_diagnose_core::future::boxed(|| {
+                            desk_diagnose_core::agent_loop::run_preclaimed_subagent_completion(
+                                &deps,
+                                claimed.session,
+                                &mut sink,
+                            )
+                        })
                         .await?
                     }
                     None => LoopOutcome::TurnBusy,
@@ -2304,8 +2314,10 @@ async fn compose_turn_inner(
         let mut sink = StreamingTurnSink::starting_at(|_event: AiAssistantEvent| {}, request_id, 0);
         sink.set_provenance(AiProvenance::stamp(config.model, Some(clock())));
         sink.turn_started(&turn_id);
-        let outcome =
-            Box::pin(run_preclaimed_goal_slice(&deps, claimed.session, &mut sink)).await?;
+        let outcome = desk_diagnose_core::future::boxed(|| {
+            run_preclaimed_goal_slice(&deps, claimed.session, &mut sink)
+        })
+        .await?;
         sink.finish_outcome(&outcome);
         return Ok(Some(outcome));
     }
@@ -2375,12 +2387,9 @@ async fn compose_turn_inner(
             Some(chrono::Utc::now().to_rfc3339()),
         ));
         sink.turn_started(&turn_id);
-        match Box::pin(resume_agent_turn_after_permission(
-            &deps,
-            claim,
-            decision_message,
-            &mut sink,
-        ))
+        match desk_diagnose_core::future::boxed(|| {
+            resume_agent_turn_after_permission(&deps, claim, decision_message, &mut sink)
+        })
         .await
         {
             Ok(LoopOutcome::TurnBusy) => {
@@ -2460,8 +2469,10 @@ async fn compose_turn_inner(
     };
     let event_store = crate::agent_run_event_store::SignalAgentRunEventStore::new(db.clone());
     let append_result = match goal_start {
-        Some(goal) => Box::pin(event_store.append_user_goal(input, goal)).await,
-        None => Box::pin(event_store.append_user_followup(input)).await,
+        Some(goal) => {
+            desk_diagnose_core::future::boxed(|| event_store.append_user_goal(input, goal)).await
+        }
+        None => desk_diagnose_core::future::boxed(|| event_store.append_user_followup(input)).await,
     };
     let ack = match append_result {
         Ok(ack) => ack,
@@ -2586,7 +2597,11 @@ async fn compose_turn_inner(
         .map_err(|error| transport_error(format!("claim AI Assistant goal: {error}")))?;
         match claimed {
             Some(claimed) => {
-                match Box::pin(run_preclaimed_goal_slice(&deps, claimed.session, &mut sink)).await {
+                match desk_diagnose_core::future::boxed(|| {
+                    run_preclaimed_goal_slice(&deps, claimed.session, &mut sink)
+                })
+                .await
+                {
                     Ok(outcome) => sink.finish_outcome(&outcome),
                     Err(error) => sink.error(error),
                 }
@@ -2600,12 +2615,9 @@ async fn compose_turn_inner(
         return Ok(None);
     }
     loop {
-        match Box::pin(run_agent_turn(
-            &deps,
-            claim.clone(),
-            user.clone(),
-            &mut sink,
-        ))
+        match desk_diagnose_core::future::boxed(|| {
+            run_agent_turn(&deps, claim.clone(), user.clone(), &mut sink)
+        })
         .await
         {
             Ok(LoopOutcome::TurnBusy) => {
@@ -2674,13 +2686,15 @@ mod tests {
     mod scheduled;
     use desk_agent_protocol::data_lineage::Sensitivity;
     use desk_diagnose_core::seam::NullTurnSink;
-    use sea_orm::{Database, EntityTrait};
+    use sea_orm::EntityTrait;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
     #[actix_web::test]
     async fn user_cancellation_stops_the_turn_at_tool_boundaries() {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
+        let db = crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap();
         let request_id = uuid::Uuid::new_v4().to_string();
         let registration = cancellation::register(17, &request_id);
         let heartbeat = SignalStoreHeartbeat {
@@ -2912,6 +2926,13 @@ mod tests {
         listener: impl std::borrow::Borrow<TcpListener>,
         sse: &str,
     ) -> Vec<u8> {
+        capture_one_openai_request_with_reply(listener, |_| sse.to_owned()).await
+    }
+
+    async fn capture_one_openai_request_with_reply(
+        listener: impl std::borrow::Borrow<TcpListener>,
+        reply: impl FnOnce(&[u8]) -> String,
+    ) -> Vec<u8> {
         let (mut socket, _) = listener.borrow().accept().await.unwrap();
         let mut request = Vec::new();
         let mut buffer = [0_u8; 4096];
@@ -2941,6 +2962,7 @@ mod tests {
             request.extend_from_slice(&buffer[..read]);
         }
 
+        let sse = reply(&request[header_end..header_end + content_length]);
         let response = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{sse}",
             sse.len()
@@ -3015,14 +3037,17 @@ mod tests {
             max_context_bytes: Some(131_072),
             ..Default::default()
         };
-        let db = Database::connect("sqlite::memory:").await.unwrap();
+        let db = crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap();
         crate::db::initialize_schema(&db).await.unwrap();
         crate::ai_assistant_gate::enable_test_host();
         crate::model_provider::save(&db, config.clone())
             .await
             .unwrap();
+        let config = crate::model_provider::load(&db).await.unwrap();
         crate::context_management_config::update(&db, &desk_signal_facade::context_management::UpdateContextManagementRequest {
-            expected_revision: 0, strategy: desk_signal_facade::context_management::ContextManagementStrategyDto::CheckpointSummary,
+            expected_revision: 0, summary_max_output_tokens: 4096, strategy: desk_signal_facade::context_management::ContextManagementStrategyDto::CheckpointSummary,
         }).await.unwrap();
         let model = MeteredModel {
             fresh_task: None,
@@ -3163,13 +3188,16 @@ mod tests {
             max_context_bytes: Some(131_072),
             ..Default::default()
         };
-        let destination = config.destination_identity().unwrap();
-        let db = Database::connect("sqlite::memory:").await.unwrap();
+        let db = crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap();
         crate::db::initialize_schema(&db).await.unwrap();
         crate::ai_assistant_gate::enable_test_host();
         crate::model_provider::save(&db, config.clone())
             .await
             .unwrap();
+        let config = crate::model_provider::load(&db).await.unwrap();
+        let destination = config.destination_identity().unwrap();
         let model = MeteredModel {
             fresh_task: None,
             inner: SignalModelSeam::from_config(&config)
@@ -3444,13 +3472,16 @@ mod tests {
             max_context_bytes: Some(131_072),
             ..Default::default()
         };
-        let destination = config.destination_identity().unwrap();
-        let db = Database::connect("sqlite::memory:").await.unwrap();
+        let db = crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap();
         crate::db::initialize_schema(&db).await.unwrap();
         crate::ai_assistant_gate::enable_test_host();
         crate::model_provider::save(&db, config.clone())
             .await
             .unwrap();
+        let config = crate::model_provider::load(&db).await.unwrap();
+        let destination = config.destination_identity().unwrap();
         let model = MeteredModel {
             fresh_task: None,
             inner: SignalModelSeam::from_config(&config)

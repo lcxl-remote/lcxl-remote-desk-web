@@ -1,5 +1,6 @@
 //! SQLite-backed agent sessions for the single-node OSS signal central brain.
 
+use crate::config::connection::DatabaseConnection;
 mod assistant_snapshot;
 mod deletion;
 mod file_scope;
@@ -34,8 +35,8 @@ use desk_diagnose_core::session::{
 use sea_orm::QueryTrait;
 use sea_orm::sea_query::Expr;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder,
-    QuerySelect, Set, TransactionTrait,
+    ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set,
+    TransactionTrait,
 };
 use sha2::{Digest, Sha256};
 
@@ -160,8 +161,22 @@ impl SignalAgentSessionStore {
         else {
             return Ok(None);
         };
-        let session = PersistedAgentSession::decode_json(&row.state_json)
+        let mut session = PersistedAgentSession::decode_json(&row.state_json)
             .map_err(|e| internal(format!("decode agent session snapshot: {e}")))?;
+        if let Some(latest) =
+            crate::model_egress_store::SignalModelEgressStore::new(self.db.clone())
+                .latest_context(&session.conversation_id)
+                .await
+                .map_err(|_| internal("model context observation could not be loaded"))?
+        {
+            let mut latest = latest;
+            if let (Some(previous), Some(current)) = (&session.latest_model_context, &mut latest)
+                && previous.call_id == current.call_id
+            {
+                current.stale |= previous.stale;
+            }
+            session.latest_model_context = latest;
+        }
         let active_execution_generation = session
             .execution_state
             .waitable_task()
@@ -179,7 +194,11 @@ impl SignalAgentSessionStore {
             context_usage: session
                 .context_usage_basis
                 .as_ref()
-                .and_then(|basis| basis.usage(&session.conversation)),
+                .and_then(|basis| basis.usage(&session.conversation))
+                .map(|mut usage| {
+                    usage.latest_model_call = session.latest_model_context.clone();
+                    usage
+                }),
             client_conversation_id: session.client_conversation_id,
             seq: row.version,
             active: session.turn_state.is_active()
@@ -1294,7 +1313,11 @@ fn snapshot_from_row(row: agent_session::Model) -> Result<SessionSnapshot, Agent
         context_usage: session
             .context_usage_basis
             .as_ref()
-            .and_then(|basis| basis.usage(&session.conversation)),
+            .and_then(|basis| basis.usage(&session.conversation))
+            .map(|mut usage| {
+                usage.latest_model_call = session.latest_model_context.clone();
+                usage
+            }),
         client_conversation_id: session.client_conversation_id,
         seq: row.version,
         active: session.turn_state.is_active()
@@ -2942,13 +2965,18 @@ mod tests {
         TaskStatusItem, TaskStatusProjection,
     };
     use desk_diagnose_core::session::{ExecutionState, TriggerOrigin, TurnState};
-    use sea_orm::{ConnectionTrait, Database, Schema};
+    use sea_orm::{ConnectionTrait, Schema};
 
     use crate::agent_run_event_store::{AppendUserFollowupParams, SignalAgentRunEventStore};
 
     async fn store() -> SignalAgentSessionStore {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
+        let db = crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap();
         let schema = Schema::new(db.get_database_backend());
+        db.execute(&schema.create_table_from_entity(crate::entity::model_egress_receipt::Entity))
+            .await
+            .unwrap();
         db.execute(&schema.create_table_from_entity(agent_session::Entity))
             .await
             .unwrap();
@@ -2980,7 +3008,9 @@ mod tests {
 
     #[tokio::test]
     async fn scheduled_continuation_cannot_use_an_unfenced_session_claim() {
-        let db = sea_orm::Database::connect("sqlite::memory:").await.unwrap();
+        let db = crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap();
         let store = SignalAgentSessionStore::new(db);
         let mut params = claim("scheduled");
         params.trigger_origin = desk_diagnose_core::session::TriggerOrigin::ScheduledContinuation;
@@ -3221,7 +3251,9 @@ mod tests {
             "sqlite://{}?mode=rwc",
             directory.path().join("disclosure.db").display()
         );
-        let db = Database::connect(&url).await.unwrap();
+        let db = crate::config::test_support::Database::connect(&url)
+            .await
+            .unwrap();
         let schema = Schema::new(db.get_database_backend());
         db.execute(&schema.create_table_from_entity(agent_session::Entity))
             .await
@@ -3258,7 +3290,9 @@ mod tests {
         let saved_version = session.version;
         first.db.close().await.unwrap();
 
-        let reopened_db = Database::connect(&url).await.unwrap();
+        let reopened_db = crate::config::test_support::Database::connect(&url)
+            .await
+            .unwrap();
         let row = agent_session::Entity::find()
             .filter(agent_session::Column::ConversationId.eq("conversation-1"))
             .one(&reopened_db)
@@ -3345,7 +3379,9 @@ mod tests {
             "sqlite://{}?mode=rwc",
             directory.path().join("lcc-matrix.db").display()
         );
-        let db = Database::connect(&url).await.unwrap();
+        let db = crate::config::test_support::Database::connect(&url)
+            .await
+            .unwrap();
         let schema = Schema::new(db.get_database_backend());
         db.execute(&schema.create_table_from_entity(agent_session::Entity))
             .await
@@ -3376,7 +3412,9 @@ mod tests {
         let expected_version = session.version;
         owner.db.close().await.unwrap();
 
-        let reopened_db = Database::connect(&url).await.unwrap();
+        let reopened_db = crate::config::test_support::Database::connect(&url)
+            .await
+            .unwrap();
         let row = agent_session::Entity::find()
             .filter(agent_session::Column::ConversationId.eq("conversation-1"))
             .one(&reopened_db)
@@ -4063,9 +4101,12 @@ mod tests {
     }
 
     async fn create_file_store(path: &std::path::Path) -> SignalAgentSessionStore {
-        let db = Database::connect(format!("sqlite://{}?mode=rwc", path.display()))
-            .await
-            .unwrap();
+        let db = crate::config::test_support::Database::connect(format!(
+            "sqlite://{}?mode=rwc",
+            path.display()
+        ))
+        .await
+        .unwrap();
         let schema = Schema::new(db.get_database_backend());
         db.execute(&schema.create_table_from_entity(agent_session::Entity))
             .await
@@ -4420,9 +4461,12 @@ mod tests {
         drop(first);
         db.close().await.unwrap();
 
-        let reopened_db = Database::connect(format!("sqlite://{}?mode=rw", path.display()))
-            .await
-            .unwrap();
+        let reopened_db = crate::config::test_support::Database::connect(format!(
+            "sqlite://{}?mode=rw",
+            path.display()
+        ))
+        .await
+        .unwrap();
         let reopened = SignalAgentSessionStore::new(reopened_db)
             .with_client_metadata(Some("client-1".into()), AgentSessionSurface::AiAssistant)
             .with_context_selection(context_selection(
@@ -4509,9 +4553,12 @@ mod tests {
         drop(first);
         db.close().await.unwrap();
 
-        let reopened_db = Database::connect(format!("sqlite://{}?mode=rw", path.display()))
-            .await
-            .unwrap();
+        let reopened_db = crate::config::test_support::Database::connect(format!(
+            "sqlite://{}?mode=rw",
+            path.display()
+        ))
+        .await
+        .unwrap();
         let reopened = SignalAgentSessionStore::new(reopened_db);
         let resumed = reopened
             .claim_turn(claim("communication-turn"))

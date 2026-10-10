@@ -66,7 +66,21 @@ async fn approved_child_with_source(
     ToolCall,
     CapabilityGrant,
 ) {
-    let db = database().await;
+    approved_child_with_source_on(database().await, proposed, destination, sensitivity).await
+}
+
+async fn approved_child_with_source_on(
+    db: DatabaseConnection,
+    proposed: Option<ToolCall>,
+    destination: desk_agent_protocol::data_lineage::DestinationIdentity,
+    sensitivity: desk_agent_protocol::data_lineage::Sensitivity,
+) -> (
+    DatabaseConnection,
+    SubAgentRun,
+    PersistedAgentSession,
+    ToolCall,
+    CapabilityGrant,
+) {
     super::input_sources::add_input_tables(&db).await;
     let schema = Schema::new(db.get_database_backend());
     for mut table in [

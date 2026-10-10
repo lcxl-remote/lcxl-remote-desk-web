@@ -1,29 +1,29 @@
 //! Usage-retention configuration for the OSS signal server.
 //!
 //! The portable signal server is single-node and single-account, so there is
-//! exactly one retention config (the singleton row in
-//! [`crate::entity::usage_retention`]). It controls how many days of
+//! exactly one file-owned retention configuration. It controls how many days of
 //! `turn_usage_hourly` rollups and idle AI diagnosis
 //! conversations are kept before the cleanup loop deletes them.
 //!
 //! Unlike the manager's cluster-shared config (optimistic-concurrency `revision`
 //! for multi-instance safety), the signal server never runs multi-instance, so
-//! writes are plain last-write-wins insert-or-replace on the fixed primary key —
+//! writes are plain last-write-wins updates to the configuration file —
 //! no revision, no conflict semantics.
 
+use crate::config::connection::DatabaseConnection;
 use std::time::Duration;
 
 use chrono::Utc;
+#[cfg(test)]
 use sea_orm::ActiveValue::Set;
 use sea_orm::prelude::DateTimeUtc;
 use sea_orm::{
-    ColumnTrait, ConnectionTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, QueryOrder,
-    QuerySelect, QueryTrait, Statement, Value,
+    ColumnTrait, ConnectionTrait, DbErr, EntityTrait, QueryFilter, QueryOrder, QuerySelect,
+    QueryTrait, Statement, Value,
 };
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use crate::entity::usage_retention::{self, SINGLETON_ID};
 use crate::entity::{
     agent_action_item, agent_approval_delegation, agent_capability_dispatch_outbox,
     agent_capability_grant, agent_exec_task, agent_goal_open_request, agent_goal_run,
@@ -58,7 +58,7 @@ pub(crate) const UNRESOLVED_EXEC_STATES: [&str; 3] = [
 /// Conversation timer states that still expect to run.
 const LIVE_TIMER_STATES: [&str; 4] = ["pending_review", "active", "triggered", "paused"];
 
-/// Default retention window (days) when no row has been written yet.
+/// Default retention window (days) when no file section has been written yet.
 pub const DEFAULT_RETENTION_DAYS: u32 = 30;
 /// Smallest accepted retention window (days).
 pub const MIN_RETENTION_DAYS: u32 = 1;
@@ -84,13 +84,6 @@ impl Default for UsageRetentionConfig {
 }
 
 impl UsageRetentionConfig {
-    fn from_entity(row: usage_retention::Model) -> Self {
-        Self {
-            turn_days: row.turn_days.max(0) as u32,
-            agent_session_days: row.agent_session_days.max(0) as u32,
-        }
-    }
-
     /// Reject out-of-range windows before persisting.
     pub fn validate(&self) -> Result<(), String> {
         for (label, days) in [
@@ -108,43 +101,22 @@ impl UsageRetentionConfig {
         }
         Ok(())
     }
-
-    fn into_active_model(self) -> usage_retention::ActiveModel {
-        usage_retention::ActiveModel {
-            id: Set(SINGLETON_ID),
-            turn_days: Set(self.turn_days.min(i32::MAX as u32) as i32),
-            agent_session_days: Set(self.agent_session_days.min(i32::MAX as u32) as i32),
-            updated_at: Set(chrono::Utc::now()),
-        }
-    }
 }
 
-/// Load the singleton retention config, returning the default when no row has
-/// been written yet.
-pub async fn load<C: sea_orm::ConnectionTrait>(db: &C) -> Result<UsageRetentionConfig, DbErr> {
-    let row = usage_retention::Entity::find_by_id(SINGLETON_ID)
-        .one(db)
-        .await?;
-    Ok(row
-        .map(UsageRetentionConfig::from_entity)
-        .unwrap_or_default())
+/// Read the file configuration pinned by a runtime transaction, when present.
+pub async fn load<C: crate::config::ConfigConnection>(
+    db: &C,
+) -> Result<UsageRetentionConfig, DbErr> {
+    Ok(db.config_read().await.usage_retention)
 }
 
-/// Persist the singleton retention config (insert-or-replace on the fixed PK).
 pub async fn save(db: &DatabaseConnection, config: UsageRetentionConfig) -> Result<(), DbErr> {
-    use sea_orm::sea_query::OnConflict;
-    let active = config.into_active_model();
-    usage_retention::Entity::insert(active)
-        .on_conflict(
-            OnConflict::column(usage_retention::Column::Id)
-                .update_columns([
-                    usage_retention::Column::TurnDays,
-                    usage_retention::Column::AgentSessionDays,
-                    usage_retention::Column::UpdatedAt,
-                ])
-                .to_owned(),
-        )
-        .exec(db)
+    use crate::config::ConfigConnection;
+    db.config_context()
+        .update::<_, DbErr, _>(|candidate| {
+            candidate.usage_retention = config;
+            Ok(Some(()))
+        })
         .await?;
     Ok(())
 }
@@ -646,14 +618,12 @@ pub async fn run_retention_cleanup_loop(db: DatabaseConnection) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sea_orm::{ConnectionTrait, Database, Schema};
+    use sea_orm::{ConnectionTrait, Schema};
 
     async fn memory_db() -> DatabaseConnection {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
-        let schema = Schema::new(db.get_database_backend());
-        let stmt = schema.create_table_from_entity(usage_retention::Entity);
-        db.execute(&stmt).await.unwrap();
-        db
+        crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap()
     }
 
     #[tokio::test]
@@ -702,11 +672,9 @@ mod tests {
         )
         .await
         .unwrap();
-        // Still a single row, holding the latest write.
-        let rows = usage_retention::Entity::find().all(&db).await.unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].turn_days, 7);
-        assert_eq!(rows[0].agent_session_days, 14);
+        let saved = load(&db).await.unwrap();
+        assert_eq!(saved.turn_days, 7);
+        assert_eq!(saved.agent_session_days, 14);
     }
 
     #[test]
@@ -743,10 +711,11 @@ mod tests {
     use sea_orm::ActiveModelTrait;
 
     async fn cleanup_db() -> DatabaseConnection {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
+        let db = crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap();
         let schema = Schema::new(db.get_database_backend());
         for stmt in [
-            schema.create_table_from_entity(usage_retention::Entity),
             schema.create_table_from_entity(turn_usage::Entity),
             schema.create_table_from_entity(agent_session::Entity),
             schema.create_table_from_entity(agent_exec_task::Entity),

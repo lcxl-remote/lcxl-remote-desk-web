@@ -1,12 +1,13 @@
 //! Durable OSS permission resumes; connection hints never grant device authority.
 use crate::agent_session_store::SignalAgentSessionStore;
+use crate::config::connection::DatabaseConnection;
 use actix_web::web;
 use desk_agent_protocol::{AgentError, ai_assistant::AiAssistantAsk};
 use desk_signal_facade::model::{
     auth_context::AuthKind, connection::SharedConnectionMap, signal::RemoteDeskTypeEnum,
 };
 use futures_util::{StreamExt, stream};
-use sea_orm::DatabaseConnection;
+
 use std::time::Duration;
 
 const BATCH_SIZE: u64 = 32;

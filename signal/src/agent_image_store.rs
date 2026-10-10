@@ -1,7 +1,8 @@
 //! Screenshot projection over the single conversation attachment store.
 use crate::agent_attachment_store as store;
+use crate::config::connection::DatabaseConnection;
 use desk_diagnose_core::{conversation_image::ImageAttachment, session::PersistedAgentSession};
-use sea_orm::{DatabaseConnection, DbErr};
+use sea_orm::DbErr;
 
 fn invalid() -> DbErr {
     DbErr::Custom("Screenshot attachment is unavailable".into())

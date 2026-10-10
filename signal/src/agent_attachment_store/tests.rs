@@ -4,7 +4,7 @@ use desk_diagnose_core::{
     conversation_attachment::batch::{DeliveryIdentity, OutputPart, PartContent, prepare_delivery},
     session::AgentSessionSurface,
 };
-use sea_orm::{Database, Schema};
+use sea_orm::Schema;
 
 #[tokio::test]
 async fn local_attachments_are_durable_scoped_atomic_and_do_not_resurrect() {
@@ -12,7 +12,9 @@ async fn local_attachments_are_durable_scoped_atomic_and_do_not_resurrect() {
         std::env::temp_dir().join(format!("attachment-store-test-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&directory).unwrap();
     let url = format!("sqlite://{}?mode=rwc", directory.join("test.db").display());
-    let db = Database::connect(&url).await.unwrap();
+    let db = crate::config::test_support::Database::connect(&url)
+        .await
+        .unwrap();
     let schema = Schema::new(db.get_database_backend());
     db.execute(&schema.create_table_from_entity(agent_session::Entity))
         .await
@@ -127,7 +129,9 @@ async fn local_attachments_are_durable_scoped_atomic_and_do_not_resurrect() {
     );
     assert!(read(&db, "conversation", "owner", id, false).await.is_ok());
     db.close().await.unwrap();
-    let db = Database::connect(&url).await.unwrap();
+    let db = crate::config::test_support::Database::connect(&url)
+        .await
+        .unwrap();
     assert_eq!(
         read(&db, "conversation", "owner", id, true)
             .await

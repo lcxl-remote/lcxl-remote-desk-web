@@ -1,12 +1,13 @@
 //! Audited, fail-closed model seam shared by foreground and completion turns.
 
+use crate::config::connection::DatabaseConnection;
 use crate::model_dial::SignalModelSeam;
 use desk_agent_protocol::{AgentError, AgentErrorKind, data_lineage::DestinationIdentity};
 use desk_diagnose_core::{
     model_egress::ModelEgressPolicy,
     seam::{ModelRequest, ModelSeam, TurnSink},
 };
-use sea_orm::DatabaseConnection;
+
 use sha2::{Digest, Sha256};
 
 mod scheduled;
@@ -42,6 +43,9 @@ impl ModelSeam for MeteredModel {
         origin: desk_diagnose_core::model_observability::Origin,
     ) -> Option<desk_diagnose_core::model_observability::ObservationContext> {
         self.inner.observation_context(use_case, origin)
+    }
+    fn model_output_token_limit(&self, request: &ModelRequest) -> Result<i64, AgentError> {
+        self.inner.model_output_token_limit(request)
     }
     fn model_input_token_upper_bound(
         &self,
@@ -181,6 +185,14 @@ impl ModelSeam for MeteredModel {
                     }
                 })
             })?;
+        if authorized.request.use_case == desk_diagnose_core::model_profile::ModelUseCase::Agent
+            && let Some(conversation_id) = &authorized.request.context_conversation_id
+        {
+            egress_store
+                .link_context_dispatch(&receipt_id, conversation_id)
+                .await
+                .map_err(|_| transport_error("Model context dispatch could not be recorded"))?;
+        }
         log::info!(
             "[ai-assistant] authorized model egress receipt_id={} destination={:?} envelopes={:?} digests={:?} total_bytes={}",
             receipt_id,
@@ -205,8 +217,15 @@ impl ModelSeam for MeteredModel {
                 return Err(error);
             }
         };
+        if let Some(context) = &mut turn.provider_meta.context_observation {
+            context.call_id = receipt_id.clone();
+        }
         egress_store
-            .record_terminal_usage(&receipt_id, &turn.usage)
+            .record_terminal_usage(
+                &receipt_id,
+                &turn.usage,
+                turn.provider_meta.context_observation.as_ref(),
+            )
             .await
             .map_err(|_| transport_error("The AI model usage could not be recorded safely."))?;
         self.settle_task_dispatch(model_call_ordinal, &turn.usage, delegated)

@@ -1,12 +1,13 @@
 //! Recover a persisted child pause or owner stop without another model request.
 use super::ScheduleStoreError;
 use crate::agent_subagent_store as children;
+use crate::config::connection::DatabaseTransaction;
 use crate::entity::{
     agent_delegation_group as group_row, agent_schedule_run as run, agent_session,
     agent_subagent_run as child_row,
 };
 use desk_diagnose_core::session::{ExecutionState, PersistedAgentSession, TurnState};
-use sea_orm::{ColumnTrait, DatabaseTransaction, EntityTrait, QueryFilter, Set};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
 
 /// A saved provider answer can retain an occurrence while optional children
 /// finish. This identifies historical evidence and grants no planning authority.

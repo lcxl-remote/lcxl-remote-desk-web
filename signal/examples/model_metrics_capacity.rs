@@ -1,8 +1,26 @@
 //! Disposable SQLite capacity runner using the OSS Store and current schema.
 
+use desk_signal::config::{
+    ConfigContext, ConfigPersistence, GlobalConfig, connection::DatabaseConnection,
+};
 use desk_signal::model_metrics::{runtime, store::Store};
 use sea_orm::{ConnectOptions, Database};
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
+
+struct SettingsFile(std::path::PathBuf);
+#[async_trait::async_trait]
+impl ConfigPersistence for SettingsFile {
+    async fn persist(&self, settings: &GlobalConfig) -> Result<(), sea_orm::DbErr> {
+        let contents =
+            toml::to_string(settings).map_err(|error| sea_orm::DbErr::Custom(error.to_string()))?;
+        desk_utils::durable_file::durable_atomic_write(
+            &self.0,
+            contents.as_bytes(),
+            desk_utils::durable_file::FileMode::Preserve,
+        )
+        .map_err(|error| sea_orm::DbErr::Custom(error.to_string()))
+    }
+}
 
 mod benchmark {
     include!(concat!(
@@ -36,7 +54,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .synchronous(sea_orm::sqlx::sqlite::SqliteSynchronous::Normal)
     });
     let result = async {
-        let db = Database::connect(options).await?;
+        let mut global = GlobalConfig::default();
+        global.initialize_metadata()?;
+        let persistence = Arc::new(SettingsFile(directory.join("config.toml")));
+        persistence.persist(&global).await?;
+        let configuration = ConfigContext::new(global, persistence)?;
+        let db = DatabaseConnection::new(Database::connect(options).await?, configuration);
         let result = async {
             runtime::create_schema(&db).await?;
             let store = Store::new(db.clone(), false, "capacity-runner".into());

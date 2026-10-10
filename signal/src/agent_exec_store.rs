@@ -1,5 +1,6 @@
 //! Durable background executions for the single-node OSS signal brain.
 
+use crate::config::connection::DatabaseConnection;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -7,8 +8,7 @@ use desk_agent_protocol::edge_exec::EdgeExecDisposition;
 use desk_agent_protocol::{AgentError, AgentErrorKind, AgentOutcome};
 use sea_orm::sea_query::Expr;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder,
-    QuerySelect, Set,
+    ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set,
 };
 
 use crate::agent_session_store::{EventAppend, SignalAgentSessionStore};
@@ -90,7 +90,9 @@ impl SignalAgentExecStore {
 
     /// Use the caller's connection so receipt persistence can commit or roll back
     /// with the original scheduled session and occurrence, without a nested transaction.
-    pub(crate) async fn command_result_on<C: sea_orm::ConnectionTrait>(
+    pub(crate) async fn command_result_on<
+        C: sea_orm::ConnectionTrait + crate::config::ConfigConnection,
+    >(
         db: &C,
         task: &agent_exec_task::Model,
     ) -> Result<
@@ -460,7 +462,18 @@ impl SignalAgentExecStore {
     /// durable delivery. Returning `false` leaves the task pending for the next
     /// publisher tick (a live user turn owns the conversation, or a transient
     /// model error still has retry budget).
-    async fn follow_up_completion(
+    fn follow_up_completion<'a>(
+        &'a self,
+        sessions: &'a SignalAgentSessionStore,
+        task: &'a agent_exec_task::Model,
+        now: &'a str,
+    ) -> std::pin::Pin<Box<impl std::future::Future<Output = Result<bool, AgentError>> + 'a>> {
+        desk_diagnose_core::future::boxed(move || {
+            self.follow_up_completion_inner(sessions, task, now)
+        })
+    }
+
+    async fn follow_up_completion_inner(
         &self,
         sessions: &SignalAgentSessionStore,
         task: &agent_exec_task::Model,
@@ -642,12 +655,13 @@ mod tests {
     use desk_agent_protocol::{AgentScope, ExecutionMode};
     use desk_diagnose_core::seam::{ClaimTurnParams, SessionSeam};
     use desk_diagnose_core::session::{ExecutionState, TriggerOrigin, TurnState};
-    use sea_orm::Database;
 
     use super::*;
 
     async fn store() -> SignalAgentExecStore {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
+        let db = crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap();
         crate::db::initialize_schema(&db).await.unwrap();
         SignalAgentExecStore::new(db)
     }

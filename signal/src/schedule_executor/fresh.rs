@@ -8,7 +8,7 @@ use desk_diagnose_core::{
 
 impl SignalScheduleExecutor {
     pub(super) async fn process_fresh(&self, candidate: run::Model) -> DispatchResult {
-        match self.start_fresh(&candidate).await {
+        match desk_diagnose_core::future::boxed(|| self.start_fresh(&candidate)).await {
             Ok(result) => result,
             Err(_) => DispatchResult::Deferred,
         }
@@ -102,8 +102,8 @@ impl SignalScheduleExecutor {
             expires_at: None,
             policy_name: Some("oss-ai-assistant-provider".into()),
         };
-        let claimed = store
-            .claim_fresh_task(
+        let claimed = desk_diagnose_core::future::boxed(|| {
+            store.claim_fresh_task(
                 self.connections.get_ref(),
                 &self.gate,
                 crate::schedule_store::FreshTaskClaim {
@@ -116,7 +116,8 @@ impl SignalScheduleExecutor {
                         desk_diagnose_core::assistant_policy::PERSONAL_ASSISTANT_POLICY_REVISION,
                 },
             )
-            .await?;
+        })
+        .await?;
         let active = run::Entity::find_by_id(candidate.id)
             .one(&self.db)
             .await?

@@ -1,5 +1,6 @@
 //! OSS SQLite CapabilityGrant issuance and atomic Prepare/DispatchIntent transactions.
 
+use crate::config::connection::DatabaseConnection;
 mod concrete_review;
 mod task_authority;
 pub(crate) mod task_grant;
@@ -12,8 +13,8 @@ use desk_agent_protocol::capability_grant::CapabilityGrant;
 use desk_diagnose_core::{capability_grant::CapabilityGrantCall, session::PersistedAgentSession};
 use sea_orm::sea_query::Expr;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, RuntimeErr,
-    Set, TransactionTrait,
+    ActiveModelTrait, ColumnTrait, DbErr, EntityTrait, QueryFilter, RuntimeErr, Set,
+    TransactionTrait,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -224,7 +225,7 @@ impl SignalCapabilityGrantStore {
 
     /// Participate in the caller's authority/budget/work transaction. This primitive
     /// persists a validated grant; current actor policy and dispatch remain caller checks.
-    pub async fn issue_on<C: sea_orm::ConnectionTrait>(
+    pub async fn issue_on<C: sea_orm::ConnectionTrait + crate::config::ConfigConnection>(
         db: &C,
         grant: &CapabilityGrant,
     ) -> Result<agent_capability_grant::Model, DbErr> {
@@ -276,7 +277,9 @@ impl SignalCapabilityGrantStore {
         Self::list_for_subject_on(&self.db, run_id, actor_id, target_device_id).await
     }
 
-    pub(crate) async fn list_for_subject_on<C: sea_orm::ConnectionTrait>(
+    pub(crate) async fn list_for_subject_on<
+        C: sea_orm::ConnectionTrait + crate::config::ConfigConnection,
+    >(
         db: &C,
         run_id: &str,
         actor_id: &str,
@@ -1354,7 +1357,7 @@ impl SignalCapabilityGrantStore {
 
     /// Join the caller's transaction; retrying or committing it belongs to the caller.
     pub(crate) async fn record_dispatch_completion_on(
-        txn: &sea_orm::DatabaseTransaction,
+        txn: &crate::config::connection::DatabaseTransaction,
         completion: &CapabilityDispatchCompletion,
         now_unix_ms: u64,
     ) -> Result<DispatchCompletionResult, DbErr> {
@@ -1532,7 +1535,7 @@ impl SignalCapabilityGrantStore {
     }
 }
 
-async fn release_before_intent<C: sea_orm::ConnectionTrait>(
+async fn release_before_intent<C: sea_orm::ConnectionTrait + crate::config::ConfigConnection>(
     db: &C,
     reservation: &agent_grant_reservation::Model,
     work: &agent_action_item::Model,
@@ -1639,7 +1642,7 @@ fn validate_outbox_replay(
     Ok(())
 }
 
-async fn load_prepared<C: sea_orm::ConnectionTrait>(
+async fn load_prepared<C: sea_orm::ConnectionTrait + crate::config::ConfigConnection>(
     db: &C,
     call_id: &str,
 ) -> Result<Option<(agent_grant_reservation::Model, agent_action_item::Model)>, DbErr> {
@@ -1807,7 +1810,7 @@ mod tests {
         },
         capability_provider::{CapabilityEffect, ProductSurface},
     };
-    use sea_orm::{ConnectionTrait, Database, PaginatorTrait, Schema, Statement};
+    use sea_orm::{ConnectionTrait, PaginatorTrait, Schema, Statement};
 
     const CRASH_DB_ENV: &str = "DESK_SIGNAL_CAPABILITY_CRASH_DB";
     const CRASH_MARKER_ENV: &str = "DESK_SIGNAL_CAPABILITY_CRASH_MARKER";
@@ -1853,9 +1856,12 @@ mod tests {
     }
 
     async fn file_db(path: &std::path::Path) -> DatabaseConnection {
-        let db = Database::connect(format!("sqlite://{}?mode=rwc", path.display()))
-            .await
-            .unwrap();
+        let db = crate::config::test_support::Database::connect(format!(
+            "sqlite://{}?mode=rwc",
+            path.display()
+        ))
+        .await
+        .unwrap();
         db.execute_unprepared(
             "PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; PRAGMA foreign_keys = ON;",
         )
@@ -1964,7 +1970,6 @@ mod tests {
             lease_owner: Set(None),
             lease_deadline: Set(None),
             reserved_tokens: Set(1),
-            reserved_cost_micros: Set(1),
             expires_at: Set(1_000),
             created_at: Set(400),
             updated_at: Set(450),
@@ -2614,9 +2619,12 @@ mod tests {
         drop(store);
         db.close().await.unwrap();
 
-        let reopened = Database::connect(format!("sqlite://{}?mode=rw", path.display()))
-            .await
-            .unwrap();
+        let reopened = crate::config::test_support::Database::connect(format!(
+            "sqlite://{}?mode=rw",
+            path.display()
+        ))
+        .await
+        .unwrap();
         let store = SignalCapabilityGrantStore::new(reopened.clone());
         let replay = store
             .prepare(request(
@@ -3041,9 +3049,12 @@ mod tests {
         drop(store);
         db.close().await.unwrap();
 
-        let reopened = Database::connect(format!("sqlite://{}?mode=rw", path.display()))
-            .await
-            .unwrap();
+        let reopened = crate::config::test_support::Database::connect(format!(
+            "sqlite://{}?mode=rw",
+            path.display()
+        ))
+        .await
+        .unwrap();
         let replay = SignalCapabilityGrantStore::new(reopened.clone())
             .record_dispatch_intent(request(
                 "call-intent",
@@ -3320,10 +3331,12 @@ mod tests {
                 .build()
                 .unwrap();
             runtime.block_on(async move {
-                let lock_db =
-                    Database::connect(format!("sqlite://{}?mode=rw", lock_path.display()))
-                        .await
-                        .unwrap();
+                let lock_db = crate::config::test_support::Database::connect(format!(
+                    "sqlite://{}?mode=rw",
+                    lock_path.display()
+                ))
+                .await
+                .unwrap();
                 lock_db
                     .execute_unprepared("PRAGMA busy_timeout = 1000")
                     .await
@@ -3402,9 +3415,12 @@ mod tests {
             let marker = directory.path().join("boundary.marker");
             kill_child_at_boundary(&path, &marker, phase).await;
 
-            let reopened = Database::connect(format!("sqlite://{}?mode=rw", path.display()))
-                .await
-                .unwrap();
+            let reopened = crate::config::test_support::Database::connect(format!(
+                "sqlite://{}?mode=rw",
+                path.display()
+            ))
+            .await
+            .unwrap();
             let quick_check: String = reopened
                 .query_one_raw(Statement::from_string(
                     reopened.get_database_backend(),
@@ -3676,9 +3692,12 @@ mod tests {
         drop(store);
         db.close().await.unwrap();
 
-        let reopened = Database::connect(format!("sqlite://{}?mode=rw", path.display()))
-            .await
-            .unwrap();
+        let reopened = crate::config::test_support::Database::connect(format!(
+            "sqlite://{}?mode=rw",
+            path.display()
+        ))
+        .await
+        .unwrap();
         let store = SignalCapabilityGrantStore::new(reopened.clone());
         assert_eq!(
             store

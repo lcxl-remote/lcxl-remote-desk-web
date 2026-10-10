@@ -1,6 +1,6 @@
 use super::*;
 use desk_agent_protocol::schedule::contract::{TaskBudget, TaskExceptionMode};
-use sea_orm::{Database, PaginatorTrait, Schema};
+use sea_orm::{PaginatorTrait, Schema};
 
 pub(crate) struct Verifier(pub(crate) bool);
 #[async_trait::async_trait]
@@ -62,11 +62,16 @@ async fn fixture() -> (
     contract_row::Model,
     PublishTask,
 ) {
-    fixture_on(Database::connect("sqlite::memory:").await.unwrap()).await
+    fixture_on(
+        crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap(),
+    )
+    .await
 }
 
 pub(crate) async fn fixture_on(
-    db: sea_orm::DatabaseConnection,
+    db: crate::config::connection::DatabaseConnection,
 ) -> (
     ScheduleStore,
     entity::Model,
@@ -77,7 +82,7 @@ pub(crate) async fn fixture_on(
 }
 
 pub(crate) async fn fixture_on_for_device(
-    db: sea_orm::DatabaseConnection,
+    db: crate::config::connection::DatabaseConnection,
     device: Option<&str>,
 ) -> (
     ScheduleStore,
@@ -87,7 +92,6 @@ pub(crate) async fn fixture_on_for_device(
 ) {
     let schema = Schema::new(db.get_database_backend());
     for mut table in [
-        schema.create_table_from_entity(crate::entity::schedule_budget_policy::Entity),
         schema.create_table_from_entity(entity::Entity),
         schema.create_table_from_entity(contract_row::Entity),
         schema.create_table_from_entity(authorization::Entity),

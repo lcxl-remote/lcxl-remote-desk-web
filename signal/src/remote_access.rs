@@ -1,3 +1,4 @@
+use crate::config::connection::DatabaseConnection;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -11,7 +12,7 @@ use desk_signal_facade::service::{
     HostRemoteAccessController, RemoteAccessAdmissionAuthorizer, RemoteAccessAdmissionOutcome,
 };
 use desk_utils::error::DeskErrorCode;
-use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set};
+use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
 use tokio::sync::RwLock;
 
 use crate::entity::{device_code, host_remote_access_state};
@@ -317,10 +318,12 @@ impl HostRemoteAccessController for SignalRemoteAccessControl {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sea_orm::{ConnectionTrait, Database, Schema};
+    use sea_orm::{ConnectionTrait, Schema};
 
     async fn setup() -> (DatabaseConnection, SignalRemoteAccessControl) {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
+        let db = crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap();
         let schema = Schema::new(db.get_database_backend());
         db.execute(&schema.create_table_from_entity(device_code::Entity))
             .await

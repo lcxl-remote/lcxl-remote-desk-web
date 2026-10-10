@@ -19,7 +19,12 @@ fn invalid(path: &str, detail: impl std::fmt::Display) -> AgentError {
     }
 }
 
-pub fn resolve(call: &ToolCall, history: &[ChatMessage], now: u64) -> Result<ToolCall, AgentError> {
+pub(crate) fn resolve_with_references(
+    call: &ToolCall,
+    history: &[ChatMessage],
+    now: u64,
+    expected: &[Value],
+) -> Result<ToolCall, AgentError> {
     if call.arguments_json.len() > 64 * 1024 {
         return Err(invalid("$", "batch exceeds 64 KiB"));
     }
@@ -66,13 +71,14 @@ pub fn resolve(call: &ToolCall, history: &[ChatMessage], now: u64) -> Result<Too
         if background {
             args["window_id"] = value["window_id"].clone();
         }
-        let child = crate::ui_model_ids::resolve_single_call(
+        let child = crate::ui_model_ids::resolve_single_call_with_references(
             &ToolCall {
                 arguments_json: args.to_string(),
                 ..call.clone()
             },
             history,
             now,
+            expected,
         )
         .map_err(|e| invalid(&path, e.message))?;
         // Validate the entire sequence before any approval reservation or dispatch.

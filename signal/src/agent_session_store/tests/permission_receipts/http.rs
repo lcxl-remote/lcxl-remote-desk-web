@@ -11,7 +11,12 @@ use std::sync::Arc;
 
 #[actix_web::test]
 async fn controller_replays_before_readiness_and_rejects_changed_target_without_new_work() {
-    let (store, decisions) = seed(Database::connect("sqlite::memory:").await.unwrap()).await;
+    let (store, decisions) = seed(
+        crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap(),
+    )
+    .await;
     decide(&store, &decisions, true).await.unwrap();
     let map = web::Data::new(SharedConnectionMap::new());
     let request = actix_web::test::TestRequest::get()

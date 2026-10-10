@@ -4,6 +4,7 @@ use crate::capability_grant_store::{
     SignalCapabilityGrantStore,
     computer_cancel::{CancelCandidate, wire_request_id},
 };
+use crate::config::connection::DatabaseConnection;
 use chrono::Utc;
 use desk_agent_protocol::{
     AgentScope, ExecutionMode, RiskLevel,
@@ -18,7 +19,7 @@ use desk_signal_facade::model::{
     connection::SharedConnectionMap,
     signal::{RemoteDeskTypeEnum, SignalingModel, SignalingType},
 };
-use sea_orm::{DatabaseConnection, DbErr};
+use sea_orm::DbErr;
 use std::{sync::Arc, time::Duration};
 
 pub struct SignalComputerCancelDispatcher {

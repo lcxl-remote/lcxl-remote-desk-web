@@ -47,11 +47,11 @@ pub trait DeviceGenerationLookup: Send + Sync {
 /// Production [`DeviceGenerationLookup`] backed by the signal's SQLite device-code
 /// table.
 pub struct DbDeviceGenerationLookup {
-    db: sea_orm::DatabaseConnection,
+    db: crate::config::connection::DatabaseConnection,
 }
 
 impl DbDeviceGenerationLookup {
-    pub fn new(db: sea_orm::DatabaseConnection) -> Self {
+    pub fn new(db: crate::config::connection::DatabaseConnection) -> Self {
         Self { db }
     }
 }

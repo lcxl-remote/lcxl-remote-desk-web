@@ -1,10 +1,11 @@
 //! Waiting-task permission inspection. This cannot claim a model or issue a task grant.
 use super::{ScheduleStore, ScheduleStoreError};
+use crate::config::connection::DatabaseTransaction;
 use crate::entity::{agent_schedule_run as run, agent_session};
 use desk_diagnose_core::session::{
     ExecutionState, PersistedAgentSession, TriggerOrigin, TurnState,
 };
-use sea_orm::{ColumnTrait, DatabaseTransaction, DbErr, EntityTrait, QueryFilter, QuerySelect};
+use sea_orm::{ColumnTrait, DbErr, EntityTrait, QueryFilter, QuerySelect};
 
 /// Review-only context; no task execution authority can be obtained from it.
 pub(crate) struct TaskApprovalReview {

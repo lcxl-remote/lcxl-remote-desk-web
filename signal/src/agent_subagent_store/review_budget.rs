@@ -1,5 +1,6 @@
 //! Independent reviewer leases share the original source allocation, not a planner lease.
 use super::*;
+use crate::config::connection::DatabaseTransaction;
 use crate::entity::agent_approval_review as review_row;
 use desk_diagnose_core::{
     approval_review::{APPROVAL_REVIEW_STATUS_REVIEWING, ApprovalReviewCandidate},
@@ -9,7 +10,6 @@ use desk_diagnose_core::{
         reservation::{DelegationCallKind, DelegationCallReservation, ReviewCallAuthority},
     },
 };
-use sea_orm::DatabaseTransaction;
 
 pub(crate) async fn validate_review_lease_on(
     txn: &DatabaseTransaction,
@@ -170,8 +170,8 @@ pub(crate) async fn reserve_review_call_on(
     candidate: &ApprovalReviewCandidate,
     destination: &desk_agent_protocol::data_lineage::DestinationIdentity,
     authorized: &desk_diagnose_core::approval_egress::AuthorizedApprovalReview,
-    prices: desk_diagnose_core::approval_cost::ApprovalTokenPrices,
     reserved_tokens: u64,
+    runtime_max_output_tokens: u64,
     now_ms: i64,
 ) -> Result<(ReviewCallAuthority, Option<DelegationCallReservation>), DbErr> {
     let review = review_row::Entity::find()
@@ -260,10 +260,6 @@ pub(crate) async fn reserve_review_call_on(
             call_authority_json: Set(Some(
                 serde_json::to_string(&authority).map_err(|_| invalid())?,
             )),
-            token_prices_json: Set(Some(
-                serde_json::to_string(&prices.validate().ok_or_else(invalid)?)
-                    .map_err(|_| invalid())?,
-            )),
             ..Default::default()
         })
         .filter(review_row::Column::Id.eq(review.id))
@@ -284,13 +280,12 @@ pub(crate) async fn reserve_review_call_on(
         tool_calls: 0,
         tokens: reserved_tokens,
     };
-    let goal_upper = GoalUsage {
-        input_tokens: reserved_tokens.checked_sub(2048).ok_or_else(invalid)?,
-        output_tokens: 2048,
-        model_calls: 1,
-        active_time_ms: authority.lease_deadline_ms.saturating_sub(now_ms as u64),
-        ..Default::default()
-    };
+    let goal_upper = desk_diagnose_core::approval_usage::reviewer_goal_usage(
+        reserved_tokens,
+        runtime_max_output_tokens,
+        authority.lease_deadline_ms.saturating_sub(now_ms as u64),
+    )
+    .ok_or_else(invalid)?;
     let admission = funding::reserve_call_with_authority_on(
         txn,
         &session,
@@ -360,21 +355,17 @@ pub(crate) async fn mark_review_dispatch_on(
 pub(crate) struct ReviewCallUsage {
     pub dispatched: bool,
     pub tokens: Option<u64>,
-    pub cost_micros: Option<u64>,
 }
 
 impl ReviewCallUsage {
     pub(crate) fn settlement(
         &self,
         reserved_tokens: i64,
-        reserved_cost: i64,
-    ) -> Result<desk_diagnose_core::approval_cost::ReviewUsageSettlement, DbErr> {
-        desk_diagnose_core::approval_cost::ReviewUsageSettlement::from_provider_fact(
+    ) -> Result<desk_diagnose_core::approval_usage::ReviewTokenUsageSettlement, DbErr> {
+        desk_diagnose_core::approval_usage::ReviewTokenUsageSettlement::from_provider_fact(
             self.dispatched,
             self.tokens,
-            self.cost_micros,
             u64::try_from(reserved_tokens).map_err(|_| invalid())?,
-            u64::try_from(reserved_cost).map_err(|_| invalid())?,
         )
         .ok_or_else(invalid)
     }
@@ -386,17 +377,12 @@ pub(crate) async fn settle_review_call_on(
     txn: &DatabaseTransaction,
     row: &review_row::Model,
     claimed_tokens: Option<u64>,
-    claimed_cost: Option<u64>,
     now_ms: i64,
 ) -> Result<ReviewCallUsage, DbErr> {
     let authority: ReviewCallAuthority =
         serde_json::from_str(row.call_authority_json.as_deref().ok_or_else(invalid)?)
             .map_err(|_| invalid())?;
     authority.validate().map_err(|_| invalid())?;
-    let prices: desk_diagnose_core::approval_cost::ApprovalTokenPrices =
-        serde_json::from_str(row.token_prices_json.as_deref().ok_or_else(invalid)?)
-            .map_err(|_| invalid())?;
-    prices.validate().ok_or_else(invalid)?;
     let dispatched = row.provider_receipt_id.is_some();
     if dispatched != row.provider_receipt_kind.is_some()
         || dispatched != row.provider_started_at_ms.is_some()
@@ -444,13 +430,9 @@ pub(crate) async fn settle_review_call_on(
         cache_write_tokens: i64::try_from(usage.cache_write_tokens).ok(),
     });
     let tokens = token_usage.and_then(desk_diagnose_core::approval_review::reviewer_billed_tokens);
-    let cost = token_usage.and_then(|usage| prices.actual(usage));
     if claimed_tokens
         .zip(tokens)
         .is_some_and(|(claimed, recorded)| claimed != recorded)
-        || claimed_cost
-            .zip(cost)
-            .is_some_and(|(claimed, recorded)| claimed != recorded)
     {
         return Err(invalid());
     }
@@ -486,11 +468,7 @@ pub(crate) async fn settle_review_call_on(
         )
         .await?;
     }
-    Ok(ReviewCallUsage {
-        dispatched,
-        tokens,
-        cost_micros: cost,
-    })
+    Ok(ReviewCallUsage { dispatched, tokens })
 }
 
 async fn validate_review_subject_on(

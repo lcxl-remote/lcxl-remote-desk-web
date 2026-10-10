@@ -536,7 +536,10 @@ mod tests {
     use crate::entity::agent_task_authorization as authorization;
     use desk_agent_protocol::ai_assistant::subagent::{AiAssistantStopControl, SubAgentStopChoice};
 
-    async fn original_run(db: &sea_orm::DatabaseConnection, root: &str) -> run::Model {
+    async fn original_run(
+        db: &crate::config::connection::DatabaseConnection,
+        root: &str,
+    ) -> run::Model {
         run::Entity::find()
             .filter(run::Column::RunId.eq(root))
             .one(db)

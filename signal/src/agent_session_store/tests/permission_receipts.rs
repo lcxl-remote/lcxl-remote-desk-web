@@ -95,7 +95,12 @@ async fn decide(
 
 #[tokio::test]
 async fn owner_scoped_decision_projection_keeps_the_recorded_source_and_items() {
-    let (store, decisions) = seed(Database::connect("sqlite::memory:").await.unwrap()).await;
+    let (store, decisions) = seed(
+        crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap(),
+    )
+    .await;
     decide(&store, &decisions, true).await.unwrap();
     let subject = PermissionDecisionSubject {
         conversation_id: "conversation-1",
@@ -204,7 +209,12 @@ async fn state(
 
 #[tokio::test]
 async fn decision_expected_request_rejects_stale_runs_without_writes() {
-    let (store, decisions) = seed(Database::connect("sqlite::memory:").await.unwrap()).await;
+    let (store, decisions) = seed(
+        crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap(),
+    )
+    .await;
     let before = state(&store).await;
     for expected in ["", "other-occurrence", &"x".repeat(257)] {
         assert!(
@@ -243,7 +253,12 @@ async fn decision_expected_request_rejects_stale_runs_without_writes() {
 
 #[tokio::test]
 async fn original_decision_replays_after_revoke_expiry_new_input_and_active_turn_without_writes() {
-    let (store, mut decisions) = seed(Database::connect("sqlite::memory:").await.unwrap()).await;
+    let (store, mut decisions) = seed(
+        crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap(),
+    )
+    .await;
     assert_eq!(replay(&store, &decisions).await.unwrap(), None);
     let first = decide(&store, &decisions, true).await.unwrap();
     assert!(first.newly_recorded);
@@ -278,7 +293,12 @@ async fn original_decision_replays_after_revoke_expiry_new_input_and_active_turn
 
 #[tokio::test]
 async fn changed_or_incomplete_decisions_and_foreign_subjects_cannot_replay() {
-    let (store, decisions) = seed(Database::connect("sqlite::memory:").await.unwrap()).await;
+    let (store, decisions) = seed(
+        crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap(),
+    )
+    .await;
     decide(&store, &decisions, true).await.unwrap();
     let saved = state(&store).await;
     for change in [
@@ -346,7 +366,12 @@ async fn damaged_or_missing_original_facts_never_manufacture_a_receipt() {
         "duplicate",
         "subject_column",
     ] {
-        let (store, decisions) = seed(Database::connect("sqlite::memory:").await.unwrap()).await;
+        let (store, decisions) = seed(
+            crate::config::test_support::Database::connect("sqlite::memory:")
+                .await
+                .unwrap(),
+        )
+        .await;
         decide(&store, &decisions, true).await.unwrap();
         let saved = state(&store).await;
         let row = saved
@@ -415,7 +440,12 @@ async fn decision_receipt_and_grants_rollback_together() {
         "agent_capability_grant",
         "agent_permission_resume",
     ] {
-        let (store, decisions) = seed(Database::connect("sqlite::memory:").await.unwrap()).await;
+        let (store, decisions) = seed(
+            crate::config::test_support::Database::connect("sqlite::memory:")
+                .await
+                .unwrap(),
+        )
+        .await;
         store.db.execute_unprepared(&format!("CREATE TRIGGER reject_decision BEFORE INSERT ON {table} BEGIN SELECT RAISE(ABORT, 'synthetic failure'); END")).await.unwrap();
         let saved = state(&store).await;
         assert!(decide(&store, &decisions, true).await.is_err());
@@ -442,8 +472,17 @@ async fn independent_sqlite_pools_and_reopen_keep_one_original_decision() {
         "sqlite://{}?mode=rwc",
         directory.path().join("permissions.db").display()
     );
-    let (first, decisions) = seed(Database::connect(&url).await.unwrap()).await;
-    let second = SignalAgentSessionStore::new(Database::connect(&url).await.unwrap());
+    let (first, decisions) = seed(
+        crate::config::test_support::Database::connect(&url)
+            .await
+            .unwrap(),
+    )
+    .await;
+    let second = SignalAgentSessionStore::new(
+        crate::config::test_support::Database::connect(&url)
+            .await
+            .unwrap(),
+    );
     let (left, right) = tokio::join!(
         decide(&first, &decisions, true),
         decide(&second, &decisions, true)
@@ -474,7 +513,11 @@ async fn independent_sqlite_pools_and_reopen_keep_one_original_decision() {
     );
     first.db.close().await.unwrap();
     second.db.close().await.unwrap();
-    let reopened = SignalAgentSessionStore::new(Database::connect(&url).await.unwrap());
+    let reopened = SignalAgentSessionStore::new(
+        crate::config::test_support::Database::connect(&url)
+            .await
+            .unwrap(),
+    );
     assert_eq!(
         replay(&reopened, &decisions).await.unwrap(),
         Some(PermissionRequestState::PartiallyApproved)
@@ -495,8 +538,17 @@ async fn conflicting_first_decisions_from_independent_pools_keep_only_the_winner
         "sqlite://{}?mode=rwc",
         directory.path().join("conflict.db").display()
     );
-    let (first, decisions) = seed(Database::connect(&url).await.unwrap()).await;
-    let second = SignalAgentSessionStore::new(Database::connect(&url).await.unwrap());
+    let (first, decisions) = seed(
+        crate::config::test_support::Database::connect(&url)
+            .await
+            .unwrap(),
+    )
+    .await;
+    let second = SignalAgentSessionStore::new(
+        crate::config::test_support::Database::connect(&url)
+            .await
+            .unwrap(),
+    );
     let mut different = decisions.clone();
     if let PermissionItemDecision::Approve { ttl_seconds, .. } = &mut different[0].decision {
         *ttl_seconds = 60;

@@ -2,7 +2,7 @@
 //!
 //! An owner delegation enables review, but it does not turn an arbitrary
 //! assembled string into an authorized source. This
-//! gate checks the original message envelopes and the persisted request before
+//! gate checks current message bytes and envelopes and the persisted request before
 //! returning the only prompt bytes a caller may send.
 
 use std::collections::BTreeSet;
@@ -32,9 +32,11 @@ use desk_agent_protocol::capability_grant::CapabilityRiskTier;
 
 #[derive(Debug, Clone)]
 pub struct AuthorizedApprovalReview {
+    /// Read-only copy of the originating session's aliases; never grants authority.
+    pub ui_references: crate::ui_references::UiReferenceState,
     pub prompt: String,
     pub prompt_envelope: DataEnvelope,
-    /// Identities and digests of original evidence authorized for this review.
+    /// Identities and digests of current evidence authorized for this review.
     pub source_audit: SinkProjectionAudit,
     /// The exact derived prompt authorized for the independent reviewer.
     pub prompt_audit: SinkProjectionAudit,
@@ -58,6 +60,7 @@ impl AuthorizedApprovalReview {
         {
             return Err(ApprovalReviewError::InvalidContext);
         }
+        request.ui_references = Some(self.ui_references.clone());
         request
             .messages
             .get_mut(1)
@@ -398,12 +401,12 @@ fn authorize_review_sources(
             .iter()
             .find(|message| message.message_id == message_id)
             .ok_or(ApprovalReviewError::InvalidContext)?;
-        if message.image_data_url.is_some()
-            || message.attachment_read.is_some()
-            || message.raw_result.is_some()
-        {
+        if message.image_data_url.is_some() {
             return Err(ApprovalReviewError::InvalidContext);
         }
+        // Attachment storage proofs are not model input. Authorize the current
+        // reference, page or released receipt against its current label below;
+        // never restore the original body or export the bookkeeping metadata.
         let source = message
             .data_envelope
             .as_ref()
@@ -489,6 +492,7 @@ fn authorize_review_sources(
         .map_err(|_| ApprovalReviewError::InvalidContext)?
         .audit;
     Ok(AuthorizedApprovalReview {
+        ui_references: session.ui_references.clone(),
         prompt,
         prompt_envelope,
         source_audit,
@@ -534,6 +538,292 @@ mod tests {
                 expires_at_unix_ms: None,
                 delete_with_run: true,
             },
+        }
+    }
+
+    fn review_projections() -> Vec<ChatMessage> {
+        use crate::conversation_attachment::{delivery, model_read};
+
+        let original = ChatMessage::tool_result("raw", "observe", "original-private-body");
+        let original_envelope = envelope_for(&original, Sensitivity::Sensitive);
+        let mut reference = ChatMessage::tool_result(
+            "reference",
+            "observe",
+            r#"{"attachment_id":"ui-result","notice":"read the attachment"}"#,
+        );
+        reference.data_envelope = delivery::projection_envelope(
+            Some(&original_envelope),
+            reference.text.as_bytes(),
+            "reference",
+        )
+        .unwrap();
+        reference.raw_result = Some(Box::new(delivery::RawResult {
+            original_sha256: original_envelope.digest_sha256.clone(),
+            original_envelope: Some(original_envelope.clone()),
+            restorable: true,
+            template: Some(serde_json::json!({"hidden": "original-private-body"})),
+            slots: vec![delivery::RawSlot {
+                path: "result".into(),
+                attachment_id: "ui-result".into(),
+                sha256: original_envelope.digest_sha256.clone(),
+            }],
+            sha256: original_envelope.digest_sha256.clone(),
+            envelope: Some(original_envelope.clone()),
+        }));
+
+        let mut page = ChatMessage::tool_result(
+            "page",
+            "read",
+            r#"{"attachment_id":"ui-result","body":"current-ui-evidence"}"#,
+        );
+        page.data_envelope =
+            delivery::projection_envelope(Some(&original_envelope), page.text.as_bytes(), "page")
+                .unwrap();
+        page.attachment_read = Some(Box::new(model_read::ReadReceipt {
+            input: model_read::Input {
+                attachment_id: "ui-result".into(),
+                cursor: None,
+                queries: None,
+                start_line: None,
+                end_line: None,
+                ignore_case: false,
+                before_context: 0,
+                after_context: 0,
+                max_bytes: None,
+            },
+            source_sha256: original_envelope.digest_sha256.clone(),
+            projection_version: 1,
+            page_sha256: format!("{:x}", Sha256::digest(page.text.as_bytes())),
+            body_bytes: "current-ui-evidence".len(),
+            original_envelope: Some(original_envelope),
+            consumed: true,
+            released: false,
+        }));
+        let mut released = page.clone();
+        released.message_id = "released-page".into();
+        crate::conversation_attachment::model_read::release_consumed(std::slice::from_mut(
+            &mut released,
+        ))
+        .unwrap();
+        vec![reference, page, released]
+    }
+
+    fn source_review_session() -> PersistedAgentSession {
+        let mut session = PersistedAgentSession::new(
+            "conversation",
+            "owner",
+            "device",
+            1,
+            desk_agent_protocol::AgentScope {
+                granted: vec![],
+                mode: desk_agent_protocol::ExecutionMode::ReadOnly,
+                expires_at: None,
+                policy_name: None,
+            },
+            "2026-09-23T00:00:00Z",
+        );
+        session.surface = AgentSessionSurface::AiAssistant;
+        session.input_revision = 1;
+        session.latest_input_seq = 1;
+        session
+            .begin_turn(
+                "turn",
+                None,
+                None,
+                1,
+                session.scope_snapshot.clone(),
+                "2026-09-23T00:00:00Z",
+            )
+            .unwrap();
+        let mut user = ChatMessage::text("user", ChatRole::User, "Run the approved check");
+        user.data_envelope = Some(envelope_for(&user, Sensitivity::UserContent));
+        let mut assistant = ChatMessage::assistant_tool_calls(
+            "assistant",
+            "",
+            vec![ToolCallRef {
+                id: "command-call".into(),
+                name: "exec_command".into(),
+                arguments_json: r#"{"shell":"powershell","command":"Get-Date"}"#.into(),
+            }],
+        );
+        assistant.turn_id = Some("turn".into());
+        assistant.data_envelope = Some(envelope_for(&assistant, Sensitivity::UserContent));
+        session.conversation.extend([user, assistant]);
+        session
+    }
+
+    fn authorize_projected_source(
+        session: &PersistedAgentSession,
+        source: ApprovalSource,
+    ) -> Result<AuthorizedApprovalReview, ApprovalReviewError> {
+        let delegation = ApprovalDelegation::new(
+            "delegation".into(),
+            "conversation".into(),
+            "owner".into(),
+            "device".into(),
+            "owner-open".into(),
+            1,
+        )
+        .unwrap();
+        let destination = DestinationIdentity::Model {
+            connection_id: "review-connection".into(),
+            connection_revision: 1,
+            model_id: "review-model".into(),
+            profile_revision: 1,
+        };
+        let action_json = r#"{"shell":"powershell","command":"Get-Date"}"#;
+        let descriptor_json = r#"{"tool_name":"exec_command","provider_id":"manager.exec"}"#;
+        let concrete = matches!(source, ApprovalSource::ConcreteCall { .. });
+        let input_kind = if concrete {
+            ApprovalInputKind::ConcreteCall
+        } else {
+            ApprovalInputKind::ExactCall
+        };
+        let candidate = source_review_candidate(SourceReviewInput {
+            session,
+            delegation: &delegation,
+            goal: None,
+            source: source.clone(),
+            tool_name: "exec_command",
+            descriptor_json,
+            risk: CapabilityRiskTier::R3,
+            input_kind,
+            action_json,
+            expires_at_unix_ms: 60_000,
+            current_authority: vec![ApprovalAuthorityFact {
+                source: source.clone(),
+                status: if concrete {
+                    ApprovalAuthorityStatus::ActiveGrant
+                } else {
+                    ApprovalAuthorityStatus::Pending
+                },
+                decision_event_id: concrete.then(|| "approval-event".into()),
+                active_grant_ids: if concrete {
+                    vec!["grant".into()]
+                } else {
+                    vec![]
+                },
+                dispatch_ids: vec![],
+            }],
+            now_unix_ms: 10,
+        })?;
+        let binding = SourceReviewBinding {
+            source: &source,
+            tool_call_id: "command-call",
+            turn_id: "turn",
+            lease_token: session.lease_token,
+            tool_name: "exec_command",
+            action_json,
+            descriptor_json,
+            risk: CapabilityRiskTier::R3,
+            input_kind,
+            input_revision: 1,
+            expires_at_unix_ms: 60_000,
+        };
+        authorize_source_review_egress(
+            &candidate,
+            &binding,
+            session,
+            None,
+            &delegation,
+            &destination,
+            10,
+        )
+    }
+
+    #[test]
+    fn source_reviews_export_current_attachment_projections_without_restoring_bodies() {
+        for source in [
+            ApprovalSource::ManagerCommand {
+                work_id: "12".into(),
+            },
+            ApprovalSource::ConcreteCall {
+                call_id: "command-call".into(),
+                grant_id: "grant".into(),
+            },
+        ] {
+            for projection in review_projections() {
+                let mut session = source_review_session();
+                session.conversation.push(projection.clone());
+                let authorized = authorize_projected_source(&session, source.clone())
+                    .unwrap_or_else(|error| {
+                        panic!("{source:?} {}: {error:?}", projection.message_id)
+                    });
+                let current = projection.data_envelope.as_ref().unwrap();
+                assert!(
+                    authorized
+                        .source_audit
+                        .digests_sha256
+                        .contains(&current.digest_sha256)
+                );
+                assert_eq!(
+                    authorized.source_audit.total_bytes,
+                    session
+                        .conversation
+                        .iter()
+                        .map(|message| message_content_bytes(message).unwrap().len())
+                        .sum::<usize>()
+                );
+                assert!(!authorized.prompt.contains("original-private-body"));
+                assert!(!authorized.prompt.contains("original_envelope"));
+                if projection
+                    .attachment_read
+                    .as_ref()
+                    .is_some_and(|receipt| receipt.released)
+                {
+                    assert!(!authorized.prompt.contains("current-ui-evidence"));
+                    assert!(authorized.prompt.contains("This page was consumed"));
+                } else if projection.attachment_read.is_some() {
+                    assert!(authorized.prompt.contains("current-ui-evidence"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn attachment_projections_still_require_exact_current_authorized_labels() {
+        for projection in review_projections() {
+            let mut session = source_review_session();
+            session.conversation.push(projection.clone());
+            let source = ApprovalSource::ConcreteCall {
+                call_id: "command-call".into(),
+                grant_id: "grant".into(),
+            };
+            for invalid in 0..6 {
+                let message = session.conversation.last_mut().unwrap();
+                *message = projection.clone();
+                match invalid {
+                    0 => message.text.push_str("tampered"),
+                    1 => message.data_envelope = None,
+                    2 => message.data_envelope.as_mut().unwrap().sensitivity = Sensitivity::Secret,
+                    3 => {
+                        message
+                            .data_envelope
+                            .as_mut()
+                            .unwrap()
+                            .retention
+                            .expires_at_unix_ms = Some(1)
+                    }
+                    4 => {
+                        let ContentRef::ImmutableBlob { size_bytes, .. } =
+                            &mut message.data_envelope.as_mut().unwrap().content
+                        else {
+                            panic!("expected projected blob")
+                        };
+                        *size_bytes += 1;
+                    }
+                    5 => message.image_data_url = Some("data:image/png;base64,aW1hZ2U=".into()),
+                    _ => unreachable!(),
+                }
+                assert!(
+                    matches!(
+                        authorize_projected_source(&session, source.clone()),
+                        Err(ApprovalReviewError::InvalidContext)
+                    ),
+                    "projection {} accepted invalid case {invalid}",
+                    projection.message_id
+                );
+            }
         }
     }
 
@@ -613,6 +903,7 @@ mod tests {
         assistant.data_envelope = Some(envelope_for(&assistant, Sensitivity::UserContent));
         session.conversation.push(user);
         session.conversation.push(assistant);
+        session.conversation.extend(review_projections());
         session.conversation.push(ChatMessage::tool_result(
             "result",
             "call",
@@ -653,7 +944,8 @@ mod tests {
         )
         .unwrap();
         assert!(authorized.prompt.contains(&candidate.candidate_id));
-        assert_eq!(authorized.source_audit.envelope_ids.len(), 2);
+        assert_eq!(authorized.source_audit.envelope_ids.len(), 5);
+        assert!(!authorized.prompt.contains("original-private-body"));
         assert_eq!(authorized.prompt_audit.envelope_ids.len(), 1);
 
         let old_pause = "not executed: waiting for user permission decision";

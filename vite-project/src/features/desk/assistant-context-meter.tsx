@@ -36,6 +36,8 @@ export function AssistantContextMeter({ usage, draft }: { usage: AssistantContex
     const { t, i18n } = useTranslation();
     const values = contextMeterValues(usage, draft);
     const budget = contextRequestBudget(usage);
+    const modelCall = usage?.latestModelCall;
+    const number = (value: number | null | undefined) => value == null ? "—" : new Intl.NumberFormat(i18n.language).format(value);
     const bytes = (n: number) => t('pages.aiAssistant.contextMeter.bytes', { value: new Intl.NumberFormat(i18n.language).format(n) });
     const share = (cost: number, total: number) => {
         const value = contextBudgetShare(cost, total);
@@ -55,6 +57,19 @@ export function AssistantContextMeter({ usage, draft }: { usage: AssistantContex
         </Button>
     </PopoverTrigger><PopoverContent side="top" collisionPadding={16} aria-label={t('pages.aiAssistant.contextMeter.title')} className="w-96 max-w-[calc(100vw-2rem)] max-h-[var(--radix-popover-content-available-height)] overflow-y-auto overscroll-contain space-y-3 p-3">
         <p className="font-medium">{t('pages.aiAssistant.contextMeter.title')}</p>
+        <section className="space-y-2 border-b pb-3">
+            <p className="text-sm font-medium">{t('pages.aiAssistant.contextMeter.modelTitle')}</p>
+            <dl className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-1 text-sm [&_dd]:text-right [&_dd]:tabular-nums">
+                {(['inputTokens', 'reasoningTokens', 'clearedThinkingTurns', 'clearedInputTokens'] as const).map((key, index) => <div key={key} className="contents">
+                    <dt>{t(`pages.aiAssistant.contextMeter.${['inputTokens', 'reasoningTokens', 'clearedTurns', 'clearedTokens'][index]}`)}</dt><dd>{number(modelCall?.[key])}</dd>
+                </div>)}
+                <dt>{t('pages.aiAssistant.contextMeter.wireBytes')}</dt><dd>{modelCall?.requestBytes == null ? '—' : bytes(modelCall.requestBytes)}</dd>
+                <dt>{t('pages.aiAssistant.contextMeter.observedAt')}</dt><dd>{modelCall ? new Date(modelCall.observedAtUnixMs).toLocaleTimeString(i18n.language) : '—'}</dd>
+            </dl>
+            {modelCall?.stale && <p className="text-xs text-amber-600">{t('pages.aiAssistant.contextMeter.stale')}</p>}
+            {!modelCall || modelCall.inputTokens == null ? <p className="text-xs text-muted-foreground">{t('pages.aiAssistant.contextMeter.observationUnknown')}</p> : null}
+            <p className="text-xs text-muted-foreground">{t('pages.aiAssistant.contextMeter.modelHint')}</p>
+        </section>
         {values && usage ? <>
             <section aria-label={t('pages.aiAssistant.contextMeter.requestTitle')} className="space-y-2">
                 <p className="text-sm font-medium">{t('pages.aiAssistant.contextMeter.requestTitle')}</p>

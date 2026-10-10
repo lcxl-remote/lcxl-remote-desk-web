@@ -1,4 +1,5 @@
 //! Exact call grants issued atomically with task budget and Provider preparation.
+use crate::config::connection::DatabaseTransaction;
 mod artifact;
 mod exception;
 mod message;
@@ -11,7 +12,7 @@ use desk_agent_protocol::capability_grant::{
     CapabilityGrantUsePolicy,
 };
 use desk_diagnose_core::schedule::contract::{TaskCall, TaskDecision};
-use sea_orm::DatabaseTransaction;
+
 use std::collections::BTreeMap;
 
 pub(crate) fn identity(run: &str, call: &str) -> String {

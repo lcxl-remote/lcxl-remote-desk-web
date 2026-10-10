@@ -1,4 +1,5 @@
 import type { TFunction } from 'i18next';
+import { deskErrorCodeEnum } from '@/services/types';
 
 /**
  * Shared plumbing for turning a backend `DeskErrorCode` into something the user
@@ -27,6 +28,10 @@ import type { TFunction } from 'i18next';
 
 /** A domain's table from `DeskErrorCode` value to i18n key. */
 export type ErrorCodeKeyMap = Readonly<Record<number, string>>;
+
+export const APPROVAL_MODEL_ERROR_KEYS: ErrorCodeKeyMap = {
+    [deskErrorCodeEnum.AI_APPROVAL_PROBE_OUTPUT_TRUNCATED]: 'pages.approvalModel.testOutputTruncated',
+};
 
 /**
  * The `DeskErrorCode` an error carries, or `undefined` when it carries none.

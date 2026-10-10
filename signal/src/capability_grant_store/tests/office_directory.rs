@@ -167,9 +167,12 @@ async fn office_directory_revocation_blocks_both_dispatch_boundaries_and_restart
             }
             drop(store);
             db.close().await.unwrap();
-            let reopened = Database::connect(format!("sqlite://{}?mode=rw", path.display()))
-                .await
-                .unwrap();
+            let reopened = crate::config::test_support::Database::connect(format!(
+                "sqlite://{}?mode=rw",
+                path.display()
+            ))
+            .await
+            .unwrap();
             let store = SignalCapabilityGrantStore::new(reopened.clone());
             let replay = store.record_dispatch_intent(make_request()).await.unwrap();
             assert_eq!(

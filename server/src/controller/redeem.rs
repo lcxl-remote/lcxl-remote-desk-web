@@ -218,8 +218,8 @@ async fn target_is_remote_access_locked(client_id: &str) -> Result<bool, sea_orm
     target_is_remote_access_locked_in(desk_signal::db::get_db(), client_id).await
 }
 
-async fn target_is_remote_access_locked_in(
-    db: &sea_orm::DatabaseConnection,
+async fn target_is_remote_access_locked_in<C: sea_orm::ConnectionTrait>(
+    db: &C,
     client_id: &str,
 ) -> Result<bool, sea_orm::DbErr> {
     use sea_orm::EntityTrait as _;

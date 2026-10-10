@@ -1,4 +1,5 @@
 //! Durable stop intent on the original accepted execution, never a new action.
+use crate::config::connection::DatabaseTransaction;
 mod foreground;
 
 use super::computer_background::{Promotion, bound, task_on};
@@ -6,7 +7,7 @@ use super::computer_binding::original_on;
 use super::*;
 use desk_agent_protocol::computer_use::{ComputerActionPhase, ComputerActionStateReport};
 use desk_diagnose_core::dynamic_run::BackgroundTaskRecord;
-use sea_orm::{DatabaseTransaction, QueryOrder, QuerySelect};
+use sea_orm::{QueryOrder, QuerySelect};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -79,7 +80,10 @@ pub(super) fn validate_intent(
 
 // Acquire SQLite's writer reservation before reading facts. Concurrent owners,
 // ACKs and completions serialize without upgrading a stale deferred snapshot.
-async fn lock_task<C: sea_orm::ConnectionTrait>(txn: &C, task: &str) -> Result<(), DbErr> {
+async fn lock_task<C: sea_orm::ConnectionTrait + crate::config::ConfigConnection>(
+    txn: &C,
+    task: &str,
+) -> Result<(), DbErr> {
     agent_action_item::Entity::update_many()
         .filter(agent_action_item::Column::ActionRequestId.eq(task))
         .col_expr(
@@ -91,7 +95,7 @@ async fn lock_task<C: sea_orm::ConnectionTrait>(txn: &C, task: &str) -> Result<(
     Ok(())
 }
 
-async fn save_promotion<C: sea_orm::ConnectionTrait>(
+async fn save_promotion<C: sea_orm::ConnectionTrait + crate::config::ConfigConnection>(
     txn: &C,
     outbox: agent_capability_dispatch_outbox::Model,
     promotion: &Promotion,
@@ -127,7 +131,9 @@ impl SignalCapabilityGrantStore {
     }
 
     /// Commit stop intent with the caller's root/task control, without device I/O.
-    pub(crate) async fn request_computer_background_cancel_on<C: sea_orm::ConnectionTrait>(
+    pub(crate) async fn request_computer_background_cancel_on<
+        C: sea_orm::ConnectionTrait + crate::config::ConfigConnection,
+    >(
         txn: &C,
         task: &str,
         run: &str,

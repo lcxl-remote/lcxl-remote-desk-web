@@ -107,8 +107,8 @@ use desk_signal::{
         },
         ai_usage::get_model_usage,
         approval_model_provider::{
-            get_approval_model_provider, test_approval_model_provider,
-            update_approval_model_provider,
+            get_approval_model_provider, reuse_ai_gateway_for_approval,
+            test_approval_model_provider, update_approval_model_provider,
         },
         connection::list_connections,
         device_code::{
@@ -420,11 +420,14 @@ pub fn configure_api_surface(
                             .service(test_model_provider)
                             .service(get_approval_model_provider)
                             .service(update_approval_model_provider)
+                            .service(reuse_ai_gateway_for_approval)
                             .service(test_approval_model_provider),
                     )
                     .service(desk_signal::controller::web_search::get_web_search)
                     .service(desk_signal::controller::context_management::get_context_management)
                     .service(desk_signal::controller::context_management::update_context_management)
+                    .service(desk_signal::controller::terminal_completion::get_terminal_completion)
+                    .service(desk_signal::controller::terminal_completion::update_terminal_completion)
                     .service(desk_signal::controller::schedule_budget_policy::get_schedule_budget_policy)
                     .service(desk_signal::controller::schedule_budget_policy::update_schedule_budget_policy)
                     .service(desk_signal::controller::goal_budget_policy::get_goal_budget_policy)
@@ -670,8 +673,16 @@ pub async fn run_with_hub(
             .to_string_lossy()
             .to_string();
 
-        let signal_db = desk_signal::db::init_db(&settings_dir).await?;
-        desk_signal::model_metrics::runtime::initialize(&settings_dir);
+        let configuration = crate::model::oss_config::context(shared_settings.clone())
+            .await
+            .map_err(|_| {
+                DeskError::new_custom_error(
+                    desk_utils::error::DeskErrorCode::INVALID_PARAMS,
+                    "invalid OSS file configuration",
+                )
+            })?;
+        let signal_db = desk_signal::db::init_db(&settings_dir, configuration.clone()).await?;
+        desk_signal::model_metrics::runtime::initialize(&settings_dir, configuration);
         // Age-based retention cleanup for the local usage rollups (collect-only
         // telemetry, no billing coupling). One task per process; the delete is
         // idempotent.

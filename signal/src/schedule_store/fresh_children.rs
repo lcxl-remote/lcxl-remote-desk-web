@@ -1,8 +1,9 @@
 //! Reclaim the original occurrence only after its durable child dependency resolves.
 use super::{FreshTaskClaim, ScheduleStore, ScheduleStoreError};
+use crate::config::connection::DatabaseTransaction;
 use crate::entity::{agent_schedule_run as run, agent_session};
 use desk_diagnose_core::session::{PersistedAgentSession, TriggerOrigin, TurnState};
-use sea_orm::{ColumnTrait, DatabaseTransaction, EntityTrait, QueryFilter, Set};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
 
 impl ScheduleStore {
     /// Caller holds current owner/device and root control. Neither the dependency
@@ -253,7 +254,7 @@ mod tests {
     use sea_orm::TransactionTrait;
 
     pub(super) async fn claim_on(
-        db: &sea_orm::DatabaseConnection,
+        db: &crate::config::connection::DatabaseConnection,
         parent: &PersistedAgentSession,
     ) -> Result<PersistedAgentSession, ScheduleStoreError> {
         let txn = crate::db::begin_write(db, agent_session::Entity).await?;

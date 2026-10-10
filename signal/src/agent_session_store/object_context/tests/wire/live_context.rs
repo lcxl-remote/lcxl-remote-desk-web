@@ -5,10 +5,7 @@ use desk_agent_protocol::ai_assistant::{AiAssistantContextUpdate, AiAssistantCon
 async fn live_wire_replays_first_receipts_and_returns_correlated_rejections() {
     let store = memory().await;
     let schema = Schema::new(store.db.get_database_backend());
-    for table in [
-        schema.create_table_from_entity(model_provider::Entity),
-        schema.create_table_from_entity(model_probe_observation::Entity),
-    ] {
+    for table in [schema.create_table_from_entity(model_probe_observation::Entity)] {
         store.db.execute(&table).await.unwrap();
     }
     crate::model_provider::save(
@@ -222,8 +219,14 @@ async fn live_wire_replays_first_receipts_and_returns_correlated_rejections() {
         .await
         .unwrap();
     socket = new_socket;
-    model_provider::Entity::delete_many()
-        .exec(&store.db)
+    use crate::config::ConfigConnection;
+    store
+        .db
+        .config_context()
+        .update::<_, sea_orm::DbErr, _>(|config| {
+            config.ai_gateway = crate::model_provider::ModelProviderConfig::default();
+            Ok(Some(()))
+        })
         .await
         .unwrap();
     cache.remove_connection("live-context-host");

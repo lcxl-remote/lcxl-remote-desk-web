@@ -9,7 +9,7 @@ use desk_diagnose_core::approval_review::{
     APPROVAL_REVIEW_SYSTEM_PROMPT, ApprovalProbeError, approval_probe_cases, review_user_prompt,
     validate_approval_probe_observed,
 };
-use desk_diagnose_core::chat::{ChatMessage, ChatRole};
+use desk_diagnose_core::chat::{ChatMessage, ChatRole, ModelTurn, StopReason};
 use desk_diagnose_core::model_profile::{ModelUseCase, OutputLimitField, WireProtocol};
 use desk_diagnose_core::prompt::ResponseFormatSpec;
 use desk_diagnose_core::seam::{ModelRequest, ModelSeam, NullTurnSink};
@@ -18,9 +18,11 @@ use desk_utils::rest::RestResponse;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use crate::approval_model_provider::{self, ApprovalModelPublic, ApprovalModelUpdate};
+use crate::approval_model_provider::{
+    self, ApprovalModelPublic, ApprovalModelReuseParams, ApprovalModelUpdate, validate_provider_url,
+};
 use crate::error::DeskSignalError;
-use crate::model_dial::{SignalModelSeam, configured_enforce_public_tls, configured_ssrf_mode};
+use crate::model_dial::SignalModelSeam;
 use crate::model_provider::ModelProbeObservation;
 
 pub const TAG: &str = "ApprovalModelProvider";
@@ -35,8 +37,10 @@ pub struct ApprovalModelProbeParams {
     #[schema(value_type = Object)]
     pub request_options: serde_json::Value,
     #[schema(value_type = String)]
+    pub reasoning_contract: desk_diagnose_core::model_profile::ReasoningContract,
+    pub anthropic_prefix_binding: bool,
+    #[schema(value_type = String)]
     pub output_limit_field: OutputLimitField,
-    pub probe_max_output_tokens: i64,
     pub runtime_max_output_tokens: i64,
     pub max_context_bytes: i64,
 }
@@ -54,20 +58,32 @@ fn reject_invalid(error: impl std::fmt::Display) -> DeskSignalError {
     DeskSignalError::new_custom_error(DeskErrorCode::INVALID_PARAMS, &error.to_string())
 }
 
-fn validate_provider_url(
-    config: &approval_model_provider::ApprovalModelConfig,
-) -> Result<(), DeskSignalError> {
-    if let Some(base_url) = config.gateway.base_url.as_deref()
-        && !base_url.trim().is_empty()
-    {
-        desk_utils::ssrf::check_provider_url(
-            base_url,
-            configured_ssrf_mode(),
-            configured_enforce_public_tls(),
-        )
-        .map_err(|_| reject_invalid("approval model base_url is not permitted"))?;
-    }
-    Ok(())
+fn probe_failure(error: ApprovalProbeError, turn: &ModelTurn, limit: i64) -> DeskSignalError {
+    let (code, message) = match error {
+        ApprovalProbeError::Protocol if turn.stop_reason == StopReason::MaxTokens => (
+            DeskErrorCode::AI_APPROVAL_PROBE_OUTPUT_TRUNCATED,
+            format!(
+                "approval model probe output was truncated at the configured limit of {limit} tokens; increase runtime_max_output_tokens, save and retry"
+            ),
+        ),
+        ApprovalProbeError::Protocol => (
+            DeskErrorCode::SYSTEM_ERROR,
+            format!(
+                "approval model probe did not finish with one text decision: stop_reason={:?}, tool_call_count={}",
+                turn.stop_reason,
+                turn.tool_calls.len()
+            ),
+        ),
+        ApprovalProbeError::Decision(error) => (
+            DeskErrorCode::SYSTEM_ERROR,
+            format!("approval model returned an invalid probe decision: {error:?}"),
+        ),
+        ApprovalProbeError::Verdict => (
+            DeskErrorCode::SYSTEM_ERROR,
+            "approval model returned the wrong probe verdict".into(),
+        ),
+    };
+    DeskSignalError::new_custom_error(code, &message)
 }
 
 #[utoipa::path(
@@ -94,14 +110,6 @@ pub async fn update_approval_model_provider(
     let db = crate::db::get_db();
     let mut config = approval_model_provider::load(db).await?;
     let update = body.into_inner();
-    if update
-        .prices
-        .is_some_and(|prices| prices.validate().is_none())
-    {
-        return Err(reject_invalid(
-            "approval model token prices must include positive input and output rates",
-        ));
-    }
     let expected = (
         update.expected_configuration_revision,
         update.expected_connection_revision,
@@ -141,6 +149,20 @@ pub async fn update_approval_model_provider(
 
 #[utoipa::path(
     tag = TAG,
+    summary = "Copy the saved AI gateway into the independent approval model",
+    request_body = ApprovalModelReuseParams,
+    responses((status = 200, body = RestResponse<ApprovalModelPublic>)),
+)]
+#[post("/approval-provider/reuse-ai-gateway")]
+pub async fn reuse_ai_gateway_for_approval(
+    body: web::Json<ApprovalModelReuseParams>,
+) -> Result<HttpResponse, DeskSignalError> {
+    let config = approval_model_provider::reuse_ai_gateway(crate::db::get_db(), &body).await?;
+    Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(config.public_view())))
+}
+
+#[utoipa::path(
+    tag = TAG,
     summary = "Probe independent approval decisions without device tools",
     request_body = ApprovalModelProbeParams,
     responses((status = 200, body = RestResponse<ApprovalModelProbeDto>)),
@@ -162,8 +184,9 @@ pub async fn test_approval_model_provider(
         base_url: Some(params.base_url),
         api_key: params.api_key,
         request_options: Some(params.request_options),
+        reasoning_contract: Some(params.reasoning_contract),
+        anthropic_prefix_binding: Some(params.anthropic_prefix_binding),
         output_limit_field: Some(params.output_limit_field),
-        probe_max_output_tokens: Some(params.probe_max_output_tokens),
         runtime_max_output_tokens: Some(params.runtime_max_output_tokens),
         max_context_bytes: Some(params.max_context_bytes),
         ..Default::default()
@@ -220,18 +243,7 @@ pub async fn test_approval_model_provider(
             chrono::Utc::now().timestamp_millis(),
         )
         .map_err(|error| {
-            let message = match error {
-                ApprovalProbeError::Protocol => {
-                    "approval model probe did not finish with one text decision".to_string()
-                }
-                ApprovalProbeError::Decision(error) => {
-                    format!("approval model returned an invalid probe decision: {error:?}")
-                }
-                ApprovalProbeError::Verdict => {
-                    "approval model returned the wrong probe verdict".to_string()
-                }
-            };
-            DeskSignalError::new_custom_error(DeskErrorCode::SYSTEM_ERROR, &message)
+            probe_failure(error, &turn, candidate.gateway.runtime_max_output_tokens)
         })?;
         capabilities.push(probe.key.to_owned());
         reasoning_observed |= turn.provider_meta.reasoning_observed;
@@ -269,3 +281,6 @@ pub async fn test_approval_model_provider(
         })),
     )
 }
+
+#[cfg(test)]
+mod tests;

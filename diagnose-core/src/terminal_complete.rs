@@ -54,9 +54,6 @@ pub const MAX_RECENT_OUTPUT_BYTES: usize = 2_048;
 /// dropped rather than truncated (a half command is worse than none).
 pub const MAX_COMPLETION_BYTES: usize = 512;
 
-/// Hard output cap for a latency-sensitive, non-agentic completion turn.
-pub const COMPLETION_MAX_OUTPUT_TOKENS: u32 = 512;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompletionRawField {
     Os,
@@ -146,7 +143,10 @@ pub fn build_completion_user_message(ask: &TerminalCompleteAsk) -> ChatMessage {
 
 /// Build the shared model request so manager and OSS signal apply the same output
 /// cap and tool-free response contract.
-pub fn build_completion_model_request(ask: &TerminalCompleteAsk) -> ModelRequest {
+pub fn build_completion_model_request(
+    ask: &TerminalCompleteAsk,
+    max_output_tokens: u32,
+) -> ModelRequest {
     let mut request = ModelRequest::text_only(
         vec![
             build_completion_system_message(),
@@ -155,7 +155,7 @@ pub fn build_completion_model_request(ask: &TerminalCompleteAsk) -> ModelRequest
         ResponseFormatSpec::None,
     );
     request.use_case = crate::model_profile::ModelUseCase::Completion;
-    request.caller_output_hard_cap = Some(i64::from(COMPLETION_MAX_OUTPUT_TOKENS));
+    request.caller_output_hard_cap = Some(i64::from(max_output_tokens));
     request
 }
 
@@ -586,8 +586,8 @@ mod tests {
         );
         assert_eq!(ask.context.recent_output.len(), MAX_RECENT_OUTPUT_BYTES);
         assert_eq!(
-            build_completion_model_request(&ask).caller_output_hard_cap,
-            Some(i64::from(COMPLETION_MAX_OUTPUT_TOKENS))
+            build_completion_model_request(&ask, 32768).caller_output_hard_cap,
+            Some(32768)
         );
     }
 

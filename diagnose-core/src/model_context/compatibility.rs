@@ -32,12 +32,12 @@ pub(crate) fn group_messages_for_policy(
             .and_then(ReplayDisposition::source_context_key)
             != Some(&policy.source_context_key)
         {
-            group.cost = group.cost.saturating_sub(
-                message
-                    .replay_disposition
-                    .as_ref()
-                    .map_or(0, ReplayDisposition::model_context_cost),
-            );
+            let mut portable = conversation[group.start..group.end].to_vec();
+            project_portable_replay(&mut portable, policy);
+            for message in &mut portable {
+                message.prepared_context_cost.0 = None;
+            }
+            group.cost = portable.iter().map(crate::trim::model_context_cost).sum();
         }
     }
     Ok(groups)

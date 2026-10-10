@@ -40,7 +40,9 @@ async fn exercise(model_budget: u64) {
     }).workers(1).listen(listener).unwrap().run();
     let handle = server.handle();
     actix_web::rt::spawn(server);
-    let db = Database::connect("sqlite::memory:").await.unwrap();
+    let db = crate::config::test_support::Database::connect("sqlite::memory:")
+        .await
+        .unwrap();
     crate::db::initialize_schema(&db).await.unwrap();
     let (store, task, contract, mut publication) = fixture_on(db.clone()).await;
     // The full orchestration prompt is larger than the storage fixture's request.
@@ -65,6 +67,8 @@ async fn exercise(model_budget: u64) {
             base_url: Some(format!("http://{address}/v1")),
             api_key: Some("synthetic-test-key".into()),
             max_context_bytes: Some(131_072),
+            // Exercise both finite-quota cases independently of product defaults.
+            runtime_max_output_tokens: 4096,
             ..Default::default()
         },
     )

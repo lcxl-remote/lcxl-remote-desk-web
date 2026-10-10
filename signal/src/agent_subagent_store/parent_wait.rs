@@ -30,7 +30,7 @@ async fn begin_parent_control(
     _root: &str,
     _actor: &str,
     _device: &str,
-) -> Result<sea_orm::DatabaseTransaction, DbErr> {
+) -> Result<crate::config::connection::DatabaseTransaction, DbErr> {
     let txn = crate::db::begin_write(&store.db, session_row::Entity).await?;
     Ok(txn)
 }
@@ -38,7 +38,7 @@ async fn begin_parent_control(
 /// A ready record still carries source authority. It never becomes a User turn,
 /// a goal/schedule opening or permission to revive a stopped main planner.
 pub(crate) async fn ready_wait_source_on(
-    txn: &sea_orm::DatabaseTransaction,
+    txn: &crate::config::connection::DatabaseTransaction,
     parent: &PersistedAgentSession,
 ) -> Result<Option<(ParentWait, DelegationGroup, CreationEnvelope)>, DbErr> {
     let Some(wait) = &parent.ready_subagent_wait else {
@@ -89,7 +89,7 @@ pub(crate) async fn ready_wait_source_on(
 }
 
 pub(crate) async fn ready_parent_source_on(
-    txn: &sea_orm::DatabaseTransaction,
+    txn: &crate::config::connection::DatabaseTransaction,
     parent: &PersistedAgentSession,
 ) -> Result<Option<(DelegationGroup, CreationEnvelope)>, DbErr> {
     if let Some((_, group, source)) = ready_wait_source_on(txn, parent).await? {
@@ -99,7 +99,7 @@ pub(crate) async fn ready_parent_source_on(
 }
 
 pub(crate) async fn goal_wait_ready_on(
-    txn: &sea_orm::DatabaseTransaction,
+    txn: &crate::config::connection::DatabaseTransaction,
     parent: &PersistedAgentSession,
     goal: &desk_diagnose_core::goal::GoalRun,
 ) -> Result<bool, DbErr> {
@@ -301,9 +301,7 @@ impl SubAgentStore {
             .charged
             .checked_add(group.budget.outstanding)
             .map_err(|_| invalid())?;
-        if charged.model_calls >= group.limits.total.model_calls
-            || charged.tokens >= group.limits.total.tokens
-        {
+        if !group.limits.total.has_model_capacity(charged) {
             return Ok(None);
         }
         let now = chrono::DateTime::parse_from_rfc3339(&params.now)

@@ -1,5 +1,6 @@
 //! Root-scoped child cancellation and adjustment with durable operation receipts.
 use super::*;
+use crate::config::connection::DatabaseTransaction;
 use crate::entity::agent_delegation_reservation as receipt_row;
 use desk_agent_protocol::ai_assistant::subagent::{
     AiAssistantSubAgentControl, SubAgentControlAction,
@@ -7,7 +8,7 @@ use desk_agent_protocol::ai_assistant::subagent::{
 use desk_diagnose_core::model_observability::{
     InputIssue, PermissionOutcome, Stage, StageOutcome, tool::ToolObservation,
 };
-use sea_orm::{ActiveModelTrait, DatabaseTransaction};
+use sea_orm::ActiveModelTrait;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 

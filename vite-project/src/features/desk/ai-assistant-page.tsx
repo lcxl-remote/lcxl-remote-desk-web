@@ -12,6 +12,8 @@ import { AssistantDocumentPreviews } from './assistant-document-preview';
 import { AssistantBackgroundTasks } from './assistant-background-tasks';
 import { AssistantSubagentApprovalNotice, AssistantSubagents, AssistantConversationTabs, AssistantSubagentMenu, type AssistantSubagentPanel } from './assistant-subagents';
 import { AssistantStopConfirmation } from './assistant-stop-confirmation';
+import { AssistantComposerActions } from './assistant-composer-actions';
+import { AssistantAutomaticApproval } from './assistant-automatic-approval';
 import { useAiAssistantSubagents } from './use-ai-assistant-subagents';
 import { ScheduleProposalCards } from '@/features/schedules/proposal-card';
 import { AssistantContextMeter } from './assistant-context-meter';
@@ -21,7 +23,7 @@ import { AssistantConnectionIcon } from './assistant-connection-icon';
 import { exportDeviceFileRecovery } from '@/services/clients';
 import { FileRecoverySettings } from '@/features/settings/file-recovery-settings';
 import { AssistantPermissionRequest } from './assistant-permission-request';
-import { AssistantPermissionRecords } from './assistant-permission-records';
+import { AssistantPermissionRecords, permissionIsAutomaticallyReviewed } from './assistant-permission-records';
 import { AssistantHistory } from './assistant-history';
 import { AssistantMoreMenu, type AssistantMoreSection } from './assistant-more-menu';
 import { useIsMobile } from '@/hooks/use-mobile';
@@ -31,7 +33,7 @@ import { capabilityDescriptionKey } from './assistant-capability-copy';
 import { type FormEvent, useEffect, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { Check, AlertTriangle, ArrowDown, ArrowLeft, CalendarClock, Eye, FolderKey, ListTodo, LoaderCircle, Monitor, Paperclip, Plus, RefreshCw, Send, Settings2, ShieldCheck, X } from 'lucide-react';
+import { Check, AlertTriangle, ArrowDown, ArrowLeft, CalendarClock, Eye, FolderKey, ListTodo, LoaderCircle, Monitor, Paperclip, Plus, RefreshCw, Settings2, ShieldCheck, X } from 'lucide-react';
 
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
@@ -341,7 +343,9 @@ export function AiAssistantWorkspace({
     const selectedChildDraft = selectedChildTask && childDrafts[selectedChildTask.task_id];
     const { scrollRef, contentRef, onScroll, showJumpToLatest, jumpToLatest } = useFollowLatest(!subagents.selected, permissionHistoryKey);
     const pendingDirectories = chat.fileScope.directories.filter(directory => directory.state === 'pending');
-    const pendingPermissionCount = chat.permissionRequests.filter(request => ['pending', 'needs_revalidation'].includes(request.state)).length;
+    const automaticApproval = chat.approvalDelegation?.status === 'active';
+    const pendingPermissionCount = chat.permissionRequests.filter(request => ['pending', 'needs_revalidation'].includes(request.state)
+        && !permissionIsAutomaticallyReviewed(request, automaticApproval)).length;
     const pendingCount = pendingDirectories.length + pendingPermissionCount + pendingScheduleCount + Number(Boolean(chat.pendingGoalOpenRequest));
     const runningTaskCount = [...chat.commandTasks, ...chat.backgroundTasks]
         .filter(task => ['running', 'cancel_requested'].includes(task.state)).length;
@@ -445,7 +449,7 @@ export function AiAssistantWorkspace({
 
     const submit = (event: FormEvent) => {
         event.preventDefault();
-        if (chat.turnRunning || chat.deliveryState) return;
+        if (chat.turnRunning || chat.stopping || chat.deliveryState) return;
         if (!assistantEnabled || !rehearsalCanStart || (startGoal && !goalBudgetPolicy)) return;
         const selectedContext = featureProfile.object_context ? selectedCapabilityIds : [];
         chat.start(question, i18n.language, selectedContext, startGoal, previousCompletedGoalId);
@@ -968,7 +972,7 @@ export function AiAssistantWorkspace({
                         disabled={!assistantEnabled || !isConnected || chat.hydrating || chat.contextUpdating} onUpdate={chat.updateDirectory}
                         showPendingActions={false} onPendingJump={id => jumpToPending(`assistant-directory-${id}`)} />
                     <div data-assistant-pending={pendingPermissionCount > 0 ? '' : undefined} tabIndex={-1}>
-                    <AssistantPermissionRecords key={permissionHistoryKey} requests={chat.permissionRequests}
+                    <AssistantPermissionRecords key={permissionHistoryKey} requests={chat.permissionRequests} automaticApproval={automaticApproval}
                         open={permissionHistorySession === permissionHistoryKey}
                         onOpenChange={(open) => setPermissionHistorySession(open ? permissionHistoryKey : null)}>
                             {(request) => (
@@ -1099,18 +1103,9 @@ export function AiAssistantWorkspace({
                             </Button>}
                             <div className="ml-auto flex shrink-0 items-center gap-1">
                                 <AssistantContextMeter usage={chat.contextUsage} draft={question} />
-                                {chat.canStop && (
-                                    <Button type="button" className="assistant-action assistant-primary-action" aria-label={t(chat.stopping ? 'pages.aiAssistant.stopping' : 'pages.aiAssistant.stop')} onClick={chat.stop} disabled={!chat.canStop || chat.stopping}>
-                                        {chat.turnRunning || chat.stopping ? <LoaderCircle aria-hidden="true" className="h-4 w-4 shrink-0 animate-spin motion-reduce:animate-none" /> : <X aria-hidden="true" className="h-4 w-4 shrink-0" />}
-                                        <span className="assistant-action-label">{t(chat.stopping ? 'pages.aiAssistant.stopping' : 'pages.aiAssistant.stop')}</span>
-                                    </Button>
-                                )}
-                                {!chat.turnRunning && (
-                                    <Button type="submit" className="assistant-action assistant-primary-action" aria-label={t(rehearsal ? 'schedules.rehearsal.begin' : 'pages.aiAssistant.send')} disabled={!!chat.deliveryState || !rehearsalCanStart || !assistantEnabled || !question.trim() || !isConnected || chat.hydrating || !chat.sessionTargetReady || chat.sessionTargetResolving || chat.contextUpdating || !providerConfig?.api_key_set || !providerConfig?.model || (startGoal && !goalBudgetPolicy)}>
-                                        <Send className="h-4 w-4 shrink-0" />
-                                        <span className="assistant-action-label">{t(rehearsal ? 'schedules.rehearsal.begin' : 'pages.aiAssistant.send')}</span>
-                                    </Button>
-                                )}
+                                <AssistantComposerActions turnRunning={chat.turnRunning} canStop={chat.canStop}
+                                    stopping={chat.stopping} onStop={chat.stop} rehearsal={!!rehearsal}
+                                    sendDisabled={!!chat.deliveryState || !rehearsalCanStart || !assistantEnabled || !question.trim() || !isConnected || chat.hydrating || !chat.sessionTargetReady || chat.sessionTargetResolving || chat.contextUpdating || !providerConfig?.api_key_set || !providerConfig?.model || (startGoal && !goalBudgetPolicy)} />
                             </div>
                         </div>
                     </form>
@@ -1216,32 +1211,9 @@ export function AiAssistantWorkspace({
                     <Sheet open={approvalSettingsOpen} onOpenChange={setApprovalSettingsOpen}>
                         <SheetContent className="w-full overflow-y-auto sm:max-w-xl">
                             <SheetHeader><SheetTitle>{t('pages.aiAssistant.autoApprovalTitle')}</SheetTitle></SheetHeader>
-                    {!rehearsal && featureProfile.approval_delegation && chat.conversationId && (
-                        <div data-testid="ai-assistant-automatic-approval" className="rounded-md border px-3 py-2 text-xs">
-                            <div className="flex items-center justify-between gap-3">
-                                <div className="min-w-0">
-                                    <p className="flex items-center gap-2 font-medium"><ShieldCheck className="h-4 w-4" />{t('pages.aiAssistant.autoApprovalTitle')}</p>
-                                    <p className="mt-1 text-muted-foreground">{t('pages.aiAssistant.autoApprovalDescription')}</p>
-                                </div>
-                                <Button size="sm" variant="outline"
-                                    disabled={!assistantEnabled || chat.hydrating || chat.approvalUpdating
-                                        || (!(chat.approvalDelegation?.status === 'active')
-                                            && (!chat.approvalModelReadiness?.available || chat.turnRunning))}
-                                    onClick={() => void chat.setAutomaticApproval(chat.approvalDelegation?.status !== 'active')}>
-                                    {chat.approvalDelegation?.status === 'active'
-                                        ? t('pages.aiAssistant.autoApprovalDisable') : t('pages.aiAssistant.autoApprovalEnable')}
-                                </Button>
-                            </div>
-                            {chat.approvalDelegation?.status === 'active'
-                                ? <p className="mt-1 text-muted-foreground">{t('pages.aiAssistant.autoApprovalUsage', {
-                                    reviews: chat.approvalDelegation.reviewsUsed,
-                                    tokens: chat.approvalDelegation.tokensUsed,
-                                })}</p>
-                                : chat.approvalModelReadiness && !chat.approvalModelReadiness.available
-                                    ? <p className="mt-1 text-amber-700 dark:text-amber-300">{t('pages.aiAssistant.autoApprovalUnavailable')}: {t(`pages.aiAssistant.approvalModelReason.${chat.approvalModelReadiness.reason ?? 'unknown'}`)}</p>
-                                    : null}
-                        </div>
-                    )}
+                            {approvalSettingsOpen && !rehearsal && featureProfile.approval_delegation && (
+                                <AssistantAutomaticApproval chat={chat} enabled={assistantEnabled} connected={isConnected} />
+                            )}
                         </SheetContent>
                     </Sheet>
                     <Sheet open={deviceSettingsOpen} onOpenChange={setDeviceSettingsOpen}>

@@ -1,5 +1,6 @@
 //! Owner-confirmed agentic execution for the single-node OSS signal brain.
 
+use crate::config::connection::DatabaseConnection;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -34,7 +35,7 @@ use desk_diagnose_core::seam::{ExecContext, ExecOutcome, ToolRunOutput, ToolSeam
 use desk_signal_facade::model::connection::{ConnectionState, SharedConnectionMap};
 use desk_signal_facade::model::signal::{SignalingModel, SignalingType};
 use desk_signal_facade::service::{EdgeExecObserver, ExecStateReplyObserver};
-use sea_orm::DatabaseConnection;
+
 use tokio::sync::oneshot;
 
 const RESULT_SLACK: Duration = Duration::from_secs(30);

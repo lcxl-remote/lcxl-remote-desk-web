@@ -201,6 +201,13 @@ async fn approval_exposes_without_load_and_last_use_refreshes_next_request() {
 struct ExactGrantModel(ScriptModel);
 #[async_trait(?Send)]
 impl ModelSeam for ExactGrantModel {
+    fn model_output_token_limit(&self, request: &ModelRequest) -> Result<i64, AgentError> {
+        Ok(request
+            .caller_output_hard_cap
+            .unwrap_or(128_000)
+            .min(128_000))
+    }
+
     fn model_egress_policy(
         &self,
     ) -> Result<Option<crate::model_egress::ModelEgressPolicy>, AgentError> {

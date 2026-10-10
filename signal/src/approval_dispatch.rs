@@ -3,6 +3,7 @@
 //! decision transaction. A failed reviewer produces a system-sourced denial
 //! after the bounded review attempt; no device action is dispatched.
 
+use crate::config::connection::DatabaseConnection;
 use actix_web::web;
 use desk_agent_protocol::ai_assistant::AiAssistantAsk;
 use desk_agent_protocol::capability_provider::ProductSurface;
@@ -18,7 +19,6 @@ use desk_diagnose_core::provider_registry::ProviderRegistry;
 use desk_signal_facade::model::{
     auth_context::AuthKind, connection::SharedConnectionMap, signal::RemoteDeskTypeEnum,
 };
-use sea_orm::DatabaseConnection;
 
 use crate::agent_approval_store::PendingPermissionReview;
 use crate::agent_session_store::{
@@ -155,13 +155,12 @@ pub async fn process_pending_permission_review(
             current_device_context(&db, connections.as_ref(), &subject, chrono::Utc::now())
                 .await
                 .map_or(0, |device| device.readiness_revision);
-        let (decision, tokens, cost) = match &response {
+        let (decision, tokens) = match &response {
             Ok(response) => (
                 response.decision.as_ref(),
                 reviewer_billed_tokens(response.usage),
-                claim.prices.actual(response.usage),
             ),
-            Err(_) => (None, None, None),
+            Err(_) => (None, None),
         };
         if crate::agent_approval_store::settle_permission_review(
             &db,
@@ -170,7 +169,6 @@ pub async fn process_pending_permission_review(
             claim.lease_epoch,
             decision,
             tokens,
-            cost,
             current_revision,
             u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0),
         )

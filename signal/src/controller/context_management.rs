@@ -9,7 +9,7 @@ use desk_signal_facade::context_management::{
 };
 use desk_utils::{error::DeskErrorCode, rest::RestResponse};
 
-fn db() -> Result<&'static sea_orm::DatabaseConnection, DeskSignalError> {
+fn db() -> Result<&'static crate::config::connection::DatabaseConnection, DeskSignalError> {
     crate::db::try_get_db().ok_or_else(|| {
         DeskSignalError::new_custom_error(
             DeskErrorCode::PRECONDITION_FAILED,
@@ -23,6 +23,7 @@ fn response(config: desk_diagnose_core::model_context::PlatformContextPolicy) ->
         .json(RestResponse::succeed_with_data(ContextManagementDto {
             revision: config.revision,
             strategy: config.strategy.into(),
+            summary_max_output_tokens: config.summary_max_output_tokens,
         }))
 }
 #[utoipa::path(tag = "ContextManagementAdmin", responses((status = 200, body = RestResponse<ContextManagementDto>)))]

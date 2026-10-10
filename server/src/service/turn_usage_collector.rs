@@ -32,12 +32,12 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use desk_signal::config::connection::DatabaseConnection;
 use desk_signal::turn_usage::{
     ConnectionDeviceMap, TurnUsageDelta, truncate_to_hour, upsert_turn_usage,
 };
 use desk_turn::model::{Statistics, TurnApiState, TurnDirectionalCounters, TurnSessionStatistics};
 use desk_turn::supervisor::RetiredRuntimes;
-use sea_orm::DatabaseConnection;
 use tokio::sync::watch;
 
 /// Hour-aligned UTC timestamp, matching the rollup's `hour_bucket` column type.
@@ -305,10 +305,11 @@ fn delta_since(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::oss_config::TestDatabase as Database;
     use desk_signal::entity::turn_usage;
     use desk_signal::turn_usage::query_turn_usage;
     use desk_turn::model::TurnTrafficClass;
-    use sea_orm::{ConnectionTrait, Database, Schema};
+    use sea_orm::{ConnectionTrait, Schema};
 
     async fn memory_db() -> DatabaseConnection {
         // One connection: each `sqlite::memory:` connection gets a database of

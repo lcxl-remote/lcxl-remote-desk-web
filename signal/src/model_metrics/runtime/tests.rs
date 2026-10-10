@@ -6,7 +6,7 @@ use sea_orm::{EntityTrait, Statement};
 async fn fresh_file_and_same_version_reopen_preserve_the_original_capture_boundary() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("model-metrics.sqlite");
-    let business = Database::connect(format!(
+    let business = crate::config::test_support::Database::connect(format!(
         "sqlite://{}?mode=rwc",
         directory.path().join("signal.sqlite").display()
     ))
@@ -27,24 +27,37 @@ async fn fresh_file_and_same_version_reopen_preserve_the_original_capture_bounda
         .await
         .unwrap();
     let creating = AtomicBool::new(false);
-    let store = open_current_store(&path, &creating).await.unwrap();
+    let store = open_current_store(
+        &path,
+        &creating,
+        crate::config::test_support::context().await,
+    )
+    .await
+    .unwrap();
     assert!(!creating.load(Ordering::Relaxed));
-    let first = model_metric_settings::Entity::find_by_id(1)
+    let first = model_metric_state::Entity::find_by_id(1)
         .one(&store.db)
         .await
         .unwrap()
         .unwrap();
-    let reopened = open_current_store(&path, &AtomicBool::new(false))
-        .await
-        .unwrap();
-    let second = model_metric_settings::Entity::find_by_id(1)
+    let reopened = open_current_store(
+        &path,
+        &AtomicBool::new(false),
+        crate::config::test_support::context().await,
+    )
+    .await
+    .unwrap();
+    let second = model_metric_state::Entity::find_by_id(1)
         .one(&reopened.db)
         .await
         .unwrap()
         .unwrap();
     assert_eq!(first.available_from_ms, second.available_from_ms);
     assert_eq!(first.schema_version, second.schema_version);
-    assert_eq!(first.settings_json, second.settings_json);
+    assert_eq!(
+        store.load_settings().await.unwrap(),
+        reopened.load_settings().await.unwrap()
+    );
     assert!(
         model_metric_event::Entity::find()
             .all(&reopened.db)
@@ -67,9 +80,12 @@ async fn fresh_file_and_same_version_reopen_preserve_the_original_capture_bounda
 async fn existing_missing_schema_corrupt_file_and_unusable_directory_are_not_rebuilt() {
     let directory = tempfile::tempdir().unwrap();
     let missing = directory.path().join("existing.sqlite");
-    let db = Database::connect(format!("sqlite://{}?mode=rwc", missing.display()))
-        .await
-        .unwrap();
+    let db = crate::config::test_support::Database::connect(format!(
+        "sqlite://{}?mode=rwc",
+        missing.display()
+    ))
+    .await
+    .unwrap();
     db.execute_raw(Statement::from_string(
         db.get_database_backend(),
         "CREATE TABLE retired_observation_fixture (total BIGINT NOT NULL)".to_string(),
@@ -83,9 +99,13 @@ async fn existing_missing_schema_corrupt_file_and_unusable_directory_are_not_reb
     .await
     .unwrap();
     assert!(
-        open_current_store(&missing, &AtomicBool::new(false))
-            .await
-            .is_err()
+        open_current_store(
+            &missing,
+            &AtomicBool::new(false),
+            crate::config::test_support::context().await
+        )
+        .await
+        .is_err()
     );
     let total = db
         .query_one_raw(Statement::from_string(
@@ -97,7 +117,7 @@ async fn existing_missing_schema_corrupt_file_and_unusable_directory_are_not_reb
         .unwrap();
     assert_eq!(total.try_get::<i64>("", "total").unwrap(), 123456789);
     assert!(
-        model_metric_settings::Entity::find_by_id(1)
+        model_metric_state::Entity::find_by_id(1)
             .one(&db)
             .await
             .is_err()
@@ -113,7 +133,11 @@ async fn existing_missing_schema_corrupt_file_and_unusable_directory_are_not_reb
         assert!(
             tokio::time::timeout(
                 Duration::from_secs(4),
-                open_current_store(path, &AtomicBool::new(false))
+                open_current_store(
+                    path,
+                    &AtomicBool::new(false),
+                    crate::config::test_support::context().await
+                )
             )
             .await
             .unwrap()
@@ -130,28 +154,36 @@ async fn existing_missing_schema_corrupt_file_and_unusable_directory_are_not_reb
 async fn wrong_component_format_remains_unavailable_without_altering_or_importing_data() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("model-metrics.sqlite");
-    let store = open_current_store(&path, &AtomicBool::new(false))
-        .await
-        .unwrap();
+    let store = open_current_store(
+        &path,
+        &AtomicBool::new(false),
+        crate::config::test_support::context().await,
+    )
+    .await
+    .unwrap();
     store
         .db
         .execute_raw(Statement::from_string(
             store.db.get_database_backend(),
-            "UPDATE model_metric_settings SET schema_version = -1".to_string(),
+            "UPDATE model_metric_state SET schema_version = -1".to_string(),
         ))
         .await
         .unwrap();
-    let prior = model_metric_settings::Entity::find_by_id(1)
+    let prior = model_metric_state::Entity::find_by_id(1)
         .one(&store.db)
         .await
         .unwrap()
         .unwrap();
     assert!(
-        open_current_store(&path, &AtomicBool::new(false))
-            .await
-            .is_err()
+        open_current_store(
+            &path,
+            &AtomicBool::new(false),
+            crate::config::test_support::context().await
+        )
+        .await
+        .is_err()
     );
-    let after = model_metric_settings::Entity::find_by_id(1)
+    let after = model_metric_state::Entity::find_by_id(1)
         .one(&store.db)
         .await
         .unwrap()
@@ -194,16 +226,23 @@ fn sample_event(now: i64) -> ObservationEvent {
 async fn a_real_sqlite_write_lock_or_page_limit_is_a_bounded_observation_failure() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("model-metrics.sqlite");
-    let store = open_current_store(&path, &AtomicBool::new(false))
-        .await
-        .unwrap();
-    let locking = Database::connect(format!("sqlite://{}?mode=rw", path.display()))
-        .await
-        .unwrap();
+    let store = open_current_store(
+        &path,
+        &AtomicBool::new(false),
+        crate::config::test_support::context().await,
+    )
+    .await
+    .unwrap();
+    let locking = crate::config::test_support::Database::connect(format!(
+        "sqlite://{}?mode=rw",
+        path.display()
+    ))
+    .await
+    .unwrap();
     let lock = locking.begin().await.unwrap();
     lock.execute_raw(Statement::from_string(
         lock.get_database_backend(),
-        "UPDATE model_metric_settings SET schema_version = schema_version WHERE id = 1".to_string(),
+        "UPDATE model_metric_state SET schema_version = schema_version WHERE id = 1".to_string(),
     ))
     .await
     .unwrap();
@@ -225,7 +264,9 @@ async fn a_real_sqlite_write_lock_or_page_limit_is_a_bounded_observation_failure
     let mut full_options =
         ConnectOptions::new(format!("sqlite://{}?mode=rwc", full_path.display()));
     full_options.max_connections(1).min_connections(1);
-    let full_db = Database::connect(full_options).await.unwrap();
+    let full_db = crate::config::test_support::Database::connect(full_options)
+        .await
+        .unwrap();
     create_schema(&full_db).await.unwrap();
     let full_store = Store::new(full_db.clone(), false, "limited".into());
     full_store.initialize_settings(now).await.unwrap();

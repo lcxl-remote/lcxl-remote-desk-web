@@ -29,6 +29,8 @@ const CODE_TO_KEY: ErrorCodeKeyMap = {
     [deskErrorCodeEnum.AI_CONTEXT_ITEM_TOO_LARGE]: 'pages.agentError.aiContextItemTooLarge',
     [deskErrorCodeEnum.AI_CONTEXT_COMPRESSION_FAILED]:
         'pages.agentError.aiContextCompressionFailed',
+    [deskErrorCodeEnum.AI_CONTEXT_SUMMARY_OUTPUT_TRUNCATED]:
+        'pages.agentError.aiContextSummaryOutputTruncated',
     [deskErrorCodeEnum.AI_PLATFORM_BUSY]: 'pages.agentError.aiPlatformBusy',
     [deskErrorCodeEnum.AI_MODEL_IMAGE_INPUT_UNSUPPORTED]:
         'pages.agentError.aiModelImageInputUnsupported',

@@ -1,10 +1,12 @@
 use super::*;
 use desk_agent_protocol::computer_use::{ObjectKind, ObjectRef};
 use desk_diagnose_core::file_scope::{DirectoryConsentSource, DirectoryProposal, FileScopeSubject};
-use sea_orm::{ConnectionTrait, Database, Schema};
+use sea_orm::{ConnectionTrait, Schema};
 
 async fn setup() -> SignalAgentSessionStore {
-    let db = Database::connect("sqlite::memory:").await.unwrap();
+    let db = crate::config::test_support::Database::connect("sqlite::memory:")
+        .await
+        .unwrap();
     let schema = Schema::new(db.get_database_backend());
     for table in [
         schema.create_table_from_entity(agent_session::Entity),

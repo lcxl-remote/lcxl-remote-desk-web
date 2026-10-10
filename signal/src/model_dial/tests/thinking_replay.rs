@@ -72,7 +72,6 @@ async fn live_project_model_thinking_replay() {
         &seam.profile,
         resolve_effective_output_limit(
             request.use_case,
-            seam.profile.probe_max_output_tokens,
             seam.profile.runtime_max_output_tokens,
             request.caller_output_hard_cap,
         )

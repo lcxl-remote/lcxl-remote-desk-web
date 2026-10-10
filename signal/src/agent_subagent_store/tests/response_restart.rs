@@ -72,7 +72,7 @@ async fn response_reopen_worker() {
     )
     .unwrap();
     assert!(std::fs::metadata(&file).unwrap().len() > 0);
-    let db = sea_orm::Database::connect(format!("sqlite://{file}?mode=rw"))
+    let db = crate::config::test_support::Database::connect(format!("sqlite://{file}?mode=rw"))
         .await
         .unwrap();
     assert_eq!(snapshot(&db).await, expected);

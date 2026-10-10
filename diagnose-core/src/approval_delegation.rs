@@ -26,14 +26,28 @@ impl ApprovalDelegationStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-#[derive(Default)]
 pub struct ApprovalDelegationUsage {
     pub reviews_used: u64,
     pub reviews_reserved: u32,
     pub tokens_used: u64,
     pub tokens_reserved: u64,
-    pub cost_used_micros: u64,
-    pub cost_reserved_micros: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_used_micros: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_reserved_micros: Option<u64>,
+}
+
+impl Default for ApprovalDelegationUsage {
+    fn default() -> Self {
+        Self {
+            reviews_used: 0,
+            reviews_reserved: 0,
+            tokens_used: 0,
+            tokens_reserved: 0,
+            cost_used_micros: Some(0),
+            cost_reserved_micros: Some(0),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -110,6 +124,135 @@ impl ApprovalDelegationAuditEvent {
 }
 
 impl ApprovalDelegation {
+    /// Create an owner switch whose review usage has no monetary accounting.
+    pub fn new_usage_only(
+        delegation_id: String,
+        conversation_id: String,
+        owner_id: String,
+        device_id: String,
+        owner_authorization_id: String,
+        created_at_unix_ms: u64,
+    ) -> Result<Self, ApprovalDelegationError> {
+        let mut value = Self::new(
+            delegation_id,
+            conversation_id,
+            owner_id,
+            device_id,
+            owner_authorization_id,
+            created_at_unix_ms,
+        )?;
+        value.usage.cost_used_micros = None;
+        value.usage.cost_reserved_micros = None;
+        Ok(value)
+    }
+
+    fn require_usage_only(&self) -> Result<(), ApprovalDelegationError> {
+        self.validate()?;
+        if self.usage.cost_used_micros.is_some() || self.usage.cost_reserved_micros.is_some() {
+            return Err(ApprovalDelegationError::InvalidState);
+        }
+        Ok(())
+    }
+
+    pub fn reserve_tokens(&mut self, tokens: u64) -> Result<(), ApprovalDelegationError> {
+        self.require_usage_only()?;
+        if self.status != ApprovalDelegationStatus::Active || tokens == 0 {
+            return Err(ApprovalDelegationError::InvalidState);
+        }
+        let mut staged = self.clone();
+        staged.usage.reviews_reserved = staged
+            .usage
+            .reviews_reserved
+            .checked_add(1)
+            .ok_or(ApprovalDelegationError::BudgetExceeded)?;
+        staged.usage.tokens_reserved = staged
+            .usage
+            .tokens_reserved
+            .checked_add(tokens)
+            .ok_or(ApprovalDelegationError::BudgetExceeded)?;
+        staged.ledger_version = staged
+            .ledger_version
+            .checked_add(1)
+            .ok_or(ApprovalDelegationError::InvalidState)?;
+        *self = staged;
+        Ok(())
+    }
+
+    pub fn release_unstarted_review_tokens(
+        &mut self,
+        reserved_tokens: u64,
+    ) -> Result<(), ApprovalDelegationError> {
+        self.require_usage_only()?;
+        if reserved_tokens == 0
+            || self.usage.reviews_reserved == 0
+            || self.usage.tokens_reserved < reserved_tokens
+        {
+            return Err(ApprovalDelegationError::InvalidState);
+        }
+        let version = self
+            .ledger_version
+            .checked_add(1)
+            .ok_or(ApprovalDelegationError::InvalidState)?;
+        self.usage.reviews_reserved -= 1;
+        self.usage.tokens_reserved -= reserved_tokens;
+        self.ledger_version = version;
+        Ok(())
+    }
+
+    pub fn settle_tokens(
+        &mut self,
+        reserved_tokens: u64,
+        actual_tokens: Option<u64>,
+    ) -> Result<(), ApprovalDelegationError> {
+        self.require_usage_only()?;
+        let mut staged = self.clone();
+        staged.release_unstarted_review_tokens(reserved_tokens)?;
+        staged.usage.reviews_used = staged
+            .usage
+            .reviews_used
+            .checked_add(1)
+            .ok_or(ApprovalDelegationError::InvalidState)?;
+        staged.usage.tokens_used = staged
+            .usage
+            .tokens_used
+            .checked_add(actual_tokens.unwrap_or(reserved_tokens))
+            .ok_or(ApprovalDelegationError::InvalidState)?;
+        *self = staged;
+        Ok(())
+    }
+
+    pub fn reconcile_review_token_usage(
+        &mut self,
+        previous: crate::approval_usage::ReviewTokenUsageSettlement,
+        actual: crate::approval_usage::ReviewTokenUsageSettlement,
+    ) -> Result<(), ApprovalDelegationError> {
+        self.require_usage_only()?;
+        if previous.schema_version != 1
+            || actual.schema_version != 1
+            || !previous.provider_started
+            || previous.usage_known
+            || !actual.provider_started
+            || !actual.usage_known
+            || previous.tokens == 0
+            || self.usage.reviews_used == 0
+        {
+            return Err(ApprovalDelegationError::InvalidState);
+        }
+        let tokens = self
+            .usage
+            .tokens_used
+            .checked_sub(previous.tokens)
+            .and_then(|remaining| remaining.checked_add(actual.tokens))
+            .ok_or(ApprovalDelegationError::InvalidState)?;
+        let version = self
+            .ledger_version
+            .checked_add(1)
+            .ok_or(ApprovalDelegationError::InvalidState)?;
+        self.usage.tokens_used = tokens;
+        self.ledger_version = version;
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         delegation_id: String,
@@ -139,6 +282,9 @@ impl ApprovalDelegation {
     pub fn validate(&self) -> Result<(), ApprovalDelegationError> {
         if self.schema_version != APPROVAL_DELEGATION_SCHEMA_VERSION {
             return Err(ApprovalDelegationError::UnsupportedVersion);
+        }
+        if self.usage.cost_used_micros.is_some() != self.usage.cost_reserved_micros.is_some() {
+            return Err(ApprovalDelegationError::InvalidState);
         }
         for identity in [
             &self.delegation_id,
@@ -200,11 +346,14 @@ impl ApprovalDelegation {
             .tokens_reserved
             .checked_add(max_tokens)
             .ok_or(ApprovalDelegationError::BudgetExceeded)?;
-        staged.usage.cost_reserved_micros = staged
-            .usage
-            .cost_reserved_micros
-            .checked_add(max_cost_micros)
-            .ok_or(ApprovalDelegationError::BudgetExceeded)?;
+        staged.usage.cost_reserved_micros = Some(
+            staged
+                .usage
+                .cost_reserved_micros
+                .ok_or(ApprovalDelegationError::InvalidState)?
+                .checked_add(max_cost_micros)
+                .ok_or(ApprovalDelegationError::BudgetExceeded)?,
+        );
         staged.ledger_version = staged
             .ledger_version
             .checked_add(1)
@@ -225,7 +374,10 @@ impl ApprovalDelegation {
             || reserved_cost_micros == 0
             || self.usage.reviews_reserved == 0
             || self.usage.tokens_reserved < reserved_tokens
-            || self.usage.cost_reserved_micros < reserved_cost_micros
+            || self
+                .usage
+                .cost_reserved_micros
+                .is_none_or(|cost| cost < reserved_cost_micros)
         {
             return Err(ApprovalDelegationError::BudgetExceeded);
         }
@@ -235,7 +387,10 @@ impl ApprovalDelegation {
             .ok_or(ApprovalDelegationError::BudgetExceeded)?;
         self.usage.reviews_reserved -= 1;
         self.usage.tokens_reserved -= reserved_tokens;
-        self.usage.cost_reserved_micros -= reserved_cost_micros;
+        self.usage.cost_reserved_micros = self
+            .usage
+            .cost_reserved_micros
+            .map(|cost| cost - reserved_cost_micros);
         self.ledger_version = version;
         Ok(())
     }
@@ -252,14 +407,20 @@ impl ApprovalDelegation {
         self.validate()?;
         if self.usage.reviews_reserved == 0
             || self.usage.tokens_reserved < reserved_tokens
-            || self.usage.cost_reserved_micros < reserved_cost_micros
+            || self
+                .usage
+                .cost_reserved_micros
+                .is_none_or(|cost| cost < reserved_cost_micros)
         {
             return Err(ApprovalDelegationError::InvalidState);
         }
         let mut staged = self.clone();
         staged.usage.reviews_reserved -= 1;
         staged.usage.tokens_reserved -= reserved_tokens;
-        staged.usage.cost_reserved_micros -= reserved_cost_micros;
+        staged.usage.cost_reserved_micros = staged
+            .usage
+            .cost_reserved_micros
+            .map(|cost| cost - reserved_cost_micros);
         staged.usage.reviews_used = staged
             .usage
             .reviews_used
@@ -270,11 +431,14 @@ impl ApprovalDelegation {
             .tokens_used
             .checked_add(actual_tokens.unwrap_or(reserved_tokens))
             .ok_or(ApprovalDelegationError::InvalidState)?;
-        staged.usage.cost_used_micros = staged
-            .usage
-            .cost_used_micros
-            .checked_add(actual_cost_micros.unwrap_or(reserved_cost_micros))
-            .ok_or(ApprovalDelegationError::InvalidState)?;
+        staged.usage.cost_used_micros = Some(
+            staged
+                .usage
+                .cost_used_micros
+                .ok_or(ApprovalDelegationError::InvalidState)?
+                .checked_add(actual_cost_micros.unwrap_or(reserved_cost_micros))
+                .ok_or(ApprovalDelegationError::InvalidState)?,
+        );
         staged.ledger_version = staged
             .ledger_version
             .checked_add(1)
@@ -311,12 +475,15 @@ impl ApprovalDelegation {
             .checked_sub(previous.tokens)
             .and_then(|remaining| remaining.checked_add(actual.tokens))
             .ok_or(ApprovalDelegationError::InvalidState)?;
-        staged.usage.cost_used_micros = staged
-            .usage
-            .cost_used_micros
-            .checked_sub(previous.cost_micros)
-            .and_then(|remaining| remaining.checked_add(actual.cost_micros))
-            .ok_or(ApprovalDelegationError::InvalidState)?;
+        staged.usage.cost_used_micros = Some(
+            staged
+                .usage
+                .cost_used_micros
+                .ok_or(ApprovalDelegationError::InvalidState)?
+                .checked_sub(previous.cost_micros)
+                .and_then(|remaining| remaining.checked_add(actual.cost_micros))
+                .ok_or(ApprovalDelegationError::InvalidState)?,
+        );
         staged.ledger_version = staged
             .ledger_version
             .checked_add(1)
@@ -379,6 +546,72 @@ mod tests {
         .unwrap()
     }
 
+    fn usage_only() -> ApprovalDelegation {
+        ApprovalDelegation::new_usage_only(
+            "delegation".into(),
+            "conversation".into(),
+            "owner".into(),
+            "device".into(),
+            "owner-open-event".into(),
+            1000,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn oss_usage_omits_money_and_reconciles_after_closing_without_renewing_authority() {
+        use crate::approval_usage::ReviewTokenUsageSettlement;
+        let mut value = usage_only();
+        let encoded = serde_json::to_value(&value).unwrap();
+        assert!(encoded["usage"].get("cost_used_micros").is_none());
+        assert!(encoded["usage"].get("cost_reserved_micros").is_none());
+        let decoded: ApprovalDelegation = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded, value);
+        value.reserve_tokens(100).unwrap();
+        value.settle_tokens(100, None).unwrap();
+        value.close(ApprovalDelegationStatus::Closed).unwrap();
+        let revision = value.revision;
+        let previous = ReviewTokenUsageSettlement::from_provider_fact(true, None, 100).unwrap();
+        let actual = ReviewTokenUsageSettlement::from_provider_fact(true, Some(7), 100).unwrap();
+        value
+            .reconcile_review_token_usage(previous, actual)
+            .unwrap();
+        assert_eq!(value.usage.tokens_used, 7);
+        assert_eq!(value.usage.reviews_used, 1);
+        assert_eq!(value.revision, revision);
+        assert_eq!(value.status, ApprovalDelegationStatus::Closed);
+        assert!(value.reserve_tokens(100).is_err());
+    }
+
+    #[test]
+    fn oss_unsent_calls_release_tokens_and_modes_cannot_mix() {
+        let mut value = usage_only();
+        assert!(value.reserve(100, 100).is_err());
+        value.reserve_tokens(100).unwrap();
+        value.release_unstarted_review_tokens(100).unwrap();
+        assert_eq!(value.usage.reviews_used, 0);
+        assert_eq!(value.usage.tokens_used, 0);
+        assert_eq!(value.usage.tokens_reserved, 0);
+        let mut billed = delegation();
+        assert!(billed.reserve_tokens(100).is_err());
+        billed.reserve(100, 100).unwrap();
+        assert!(billed.settle_tokens(100, Some(7)).is_err());
+        billed.settle(100, 100, Some(7), Some(9)).unwrap();
+        assert_eq!(billed.usage.cost_used_micros, Some(9));
+    }
+
+    #[test]
+    fn token_only_usage_overflow_does_not_consume_a_reservation() {
+        let mut value = usage_only();
+        value.reserve_tokens(100).unwrap();
+        value.usage.tokens_used = u64::MAX;
+        let before = value.clone();
+        assert!(value.settle_tokens(100, Some(1)).is_err());
+        assert_eq!(value, before);
+        value.usage.cost_used_micros = Some(0);
+        assert!(value.validate().is_err());
+    }
+
     #[test]
     fn switch_has_no_goal_model_or_expiry_binding() {
         let delegation = delegation();
@@ -419,7 +652,7 @@ mod tests {
         assert_eq!(delegation.ledger_version, 3);
         assert_eq!(delegation.usage.reviews_used, 1);
         assert_eq!(delegation.usage.tokens_used, 4_000);
-        assert_eq!(delegation.usage.cost_used_micros, 20_000);
+        assert_eq!(delegation.usage.cost_used_micros, Some(20_000));
         assert_eq!(delegation.usage.reviews_reserved, 0);
     }
 
@@ -467,7 +700,7 @@ mod tests {
         let mut delegation = delegation();
         delegation.usage.reviews_used = 1_000_000;
         delegation.usage.tokens_used = 10_000_000;
-        delegation.usage.cost_used_micros = 10_000_000;
+        delegation.usage.cost_used_micros = Some(10_000_000);
         delegation.reserve(128_001, 1).unwrap();
         delegation.settle(128_001, 1, Some(1), Some(1)).unwrap();
         assert_eq!(delegation.usage.reviews_used, 1_000_001);
@@ -506,11 +739,11 @@ mod tests {
             ReviewUsageSettlement::from_provider_fact(true, Some(7), Some(9), 100, 200).unwrap();
         delegation.reconcile_review_usage(previous, actual).unwrap();
         assert_eq!(delegation.usage.tokens_used, 19);
-        assert_eq!(delegation.usage.cost_used_micros, 22);
+        assert_eq!(delegation.usage.cost_used_micros, Some(22));
         assert_eq!(delegation.usage.reviews_used, 2);
         assert_eq!(delegation.usage.reviews_reserved, 1);
         assert_eq!(delegation.usage.tokens_reserved, 40);
-        assert_eq!(delegation.usage.cost_reserved_micros, 50);
+        assert_eq!(delegation.usage.cost_reserved_micros, Some(50));
         assert_eq!(delegation.status, before.status);
         assert_eq!(delegation.revision, before.revision);
         assert_eq!(delegation.ledger_version, before.ledger_version + 1);
@@ -536,7 +769,7 @@ mod tests {
                 .unwrap();
         delegation.reconcile_review_usage(previous, actual).unwrap();
         assert_eq!(delegation.usage.tokens_used, 320);
-        assert_eq!(delegation.usage.cost_used_micros, 540);
+        assert_eq!(delegation.usage.cost_used_micros, Some(540));
         assert_eq!(delegation.usage.reviews_used, 2);
     }
 

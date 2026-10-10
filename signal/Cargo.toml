@@ -57,3 +57,4 @@ actix-http = { workspace = true }
 # Build a realistic VersionInfo query string for the signaling probe test.
 serde_urlencoded = { workspace = true }
 tempfile = { workspace = true }
+toml = { workspace = true }

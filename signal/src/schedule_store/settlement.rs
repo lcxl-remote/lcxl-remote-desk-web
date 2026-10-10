@@ -126,7 +126,7 @@ impl ScheduleStore {
 }
 
 pub(super) struct Settlement {
-    pub(super) txn: sea_orm::DatabaseTransaction,
+    pub(super) txn: crate::config::connection::DatabaseTransaction,
     pub(super) work: run::Model,
     pub(super) now: i64,
     pub(super) outcome: ScheduledRunStatus,

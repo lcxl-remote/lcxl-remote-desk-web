@@ -13,7 +13,9 @@ use serde_json::{Map, Value};
 
 use crate::{MAX_MODEL_CONTEXT_BYTES, MIN_MODEL_CONTEXT_BYTES};
 
-pub const MODEL_PROFILE_SCHEMA_VERSION: u16 = 1;
+pub const DEFAULT_RUNTIME_MAX_OUTPUT_TOKENS: i64 = 64 * 1024;
+
+pub const MODEL_PROFILE_SCHEMA_VERSION: u16 = 2;
 
 const OUTPUT_LIMIT_KEYS: [&str; 3] = ["max_tokens", "max_completion_tokens", "max_output_tokens"];
 
@@ -152,7 +154,7 @@ impl FromStr for OutputLimitField {
     }
 }
 
-/// Purpose of a model request. It determines which configured budget applies.
+/// Purpose of a model request, including observation and caller-cap rules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ModelUseCase {
     Probe,
@@ -163,12 +165,6 @@ pub enum ModelUseCase {
     FleetNaturalLanguage,
     /// Inline portable checkpoint-summary compressor.
     ContextCompression,
-}
-
-impl ModelUseCase {
-    const fn uses_probe_limit(self) -> bool {
-        matches!(self, Self::Probe)
-    }
 }
 
 /// A validated positive provider output-token limit.
@@ -188,13 +184,82 @@ impl PositiveOutputLimit {
     }
 }
 
+/// Explicit replay behavior; unknown gateways retain their observed material.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningContract {
+    #[default]
+    Conservative,
+    OpenaiChat,
+    DeepseekChat,
+    AnthropicMessages,
+}
+
+impl ReasoningContract {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Conservative => "conservative",
+            Self::OpenaiChat => "openai_chat",
+            Self::DeepseekChat => "deepseek_chat",
+            Self::AnthropicMessages => "anthropic_messages",
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self, ProfileError> {
+        match value {
+            "conservative" => Ok(Self::Conservative),
+            "openai_chat" => Ok(Self::OpenaiChat),
+            "deepseek_chat" => Ok(Self::DeepseekChat),
+            "anthropic_messages" => Ok(Self::AnthropicMessages),
+            _ => Err(ProfileError::InvalidRequestOption(
+                "unknown reasoning_contract".into(),
+            )),
+        }
+    }
+
+    fn validate(
+        self,
+        protocol: WireProtocol,
+        prefix: bool,
+        options: &Value,
+    ) -> Result<(), ProfileError> {
+        let valid = match self {
+            Self::Conservative => true,
+            Self::OpenaiChat | Self::DeepseekChat => {
+                protocol == WireProtocol::OpenAiChatCompletions
+            }
+            Self::AnthropicMessages => protocol == WireProtocol::AnthropicMessages,
+        };
+        if !valid || (prefix && self != Self::AnthropicMessages) {
+            return Err(ProfileError::InvalidRequestOption(
+                "reasoning_contract/prefix binding does not match the wire protocol".into(),
+            ));
+        }
+        if self == Self::OpenaiChat && options.get("thinking").is_some() {
+            return Err(ProfileError::InvalidRequestOption("thinking is a vendor extension; standard OpenAI Chat uses reasoning_effort. Choose the actual DeepSeek or conservative gateway contract when using this extension.".into()));
+        }
+        if let Some(effort) = options.get("reasoning_effort").and_then(Value::as_str)
+            && ((self == Self::DeepseekChat && !matches!(effort, "low" | "high" | "max"))
+                || (self != Self::DeepseekChat && effort == "max"))
+        {
+            return Err(ProfileError::InvalidRequestOption(
+                "reasoning_effort is not supported by the selected contract".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+pub const CONTEXT_MANAGEMENT_BETA: &str = "context-management-2025-06-27";
+
 /// Stable model profile stored as relational scalar columns plus typed options.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelRequestProfile {
     pub profile_schema_version: u16,
+    pub reasoning_contract: ReasoningContract,
+    pub anthropic_prefix_binding: bool,
     pub request_options: Value,
     pub output_limit_field: OutputLimitField,
-    pub probe_max_output_tokens: i64,
     pub runtime_max_output_tokens: i64,
     pub max_context_bytes: i64,
     pub profile_revision: i64,
@@ -211,7 +276,6 @@ impl ModelRequestProfile {
         if self.profile_revision < 1 {
             return Err(ProfileError::InvalidProfileRevision(self.profile_revision));
         }
-        PositiveOutputLimit::new(self.probe_max_output_tokens)?;
         PositiveOutputLimit::new(self.runtime_max_output_tokens)?;
         let context = usize::try_from(self.max_context_bytes)
             .map_err(|_| ProfileError::InvalidMaxContextBytes(self.max_context_bytes))?;
@@ -222,8 +286,13 @@ impl ModelRequestProfile {
             return Err(ProfileError::RequestOptionsMustBeObject);
         }
         validate_output_field(protocol, self.output_limit_field)?;
+        self.reasoning_contract.validate(
+            protocol,
+            self.anthropic_prefix_binding,
+            &self.request_options,
+        )?;
         let options = parse_options(protocol, &self.request_options)?;
-        options.validate_limits(self.probe_max_output_tokens, self.runtime_max_output_tokens)
+        options.validate_limits(self.runtime_max_output_tokens)
     }
 
     pub fn max_context_bytes(&self) -> Result<usize, ProfileError> {
@@ -243,7 +312,6 @@ impl ModelRequestProfile {
         self.validate(protocol)?;
         let effective = resolve_effective_output_limit(
             use_case,
-            self.probe_max_output_tokens,
             self.runtime_max_output_tokens,
             caller_hard_cap,
         )?;
@@ -261,22 +329,17 @@ impl ModelRequestProfile {
     }
 }
 
-/// Resolve the profile output budget for one use case. A caller hard cap may
-/// only narrow runtime requests; probe requests use only the probe profile value.
+/// Tests and runtime calls share the configured output budget. A caller hard
+/// cap can only narrow runtime requests; probes cannot add a caller cap.
 pub fn resolve_effective_output_limit(
     use_case: ModelUseCase,
-    profile_probe_limit: i64,
     profile_runtime_limit: i64,
     caller_hard_cap: Option<i64>,
 ) -> Result<PositiveOutputLimit, ProfileError> {
-    let profile_limit = if use_case.uses_probe_limit() {
-        if caller_hard_cap.is_some() {
-            return Err(ProfileError::ProbeHardCapNotAllowed);
-        }
-        PositiveOutputLimit::new(profile_probe_limit)?
-    } else {
-        PositiveOutputLimit::new(profile_runtime_limit)?
-    };
+    if use_case == ModelUseCase::Probe && caller_hard_cap.is_some() {
+        return Err(ProfileError::ProbeHardCapNotAllowed);
+    }
+    let profile_limit = PositiveOutputLimit::new(profile_runtime_limit)?;
 
     match caller_hard_cap {
         Some(cap) => {
@@ -296,12 +359,8 @@ pub fn apply_model_request_profile(
     body: &mut Value,
 ) -> Result<(), ProfileError> {
     profile.validate(protocol)?;
-    let expected = resolve_effective_output_limit(
-        use_case,
-        profile.probe_max_output_tokens,
-        profile.runtime_max_output_tokens,
-        None,
-    )?;
+    let expected =
+        resolve_effective_output_limit(use_case, profile.runtime_max_output_tokens, None)?;
     if effective_output_limit.get() > expected.get() {
         return Err(ProfileError::EffectiveLimitExceedsProfile {
             effective: effective_output_limit.get(),
@@ -383,6 +442,7 @@ enum OpenAiReasoningEffort {
     Medium,
     High,
     Xhigh,
+    Max,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -394,6 +454,36 @@ struct AnthropicRequestOptions {
     thinking: Option<AnthropicThinking>,
     #[serde(default)]
     output_config: Option<AnthropicOutputConfig>,
+    #[serde(default)]
+    context_management: Option<ThinkingContextManagement>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ThinkingContextManagement {
+    edits: Vec<ThinkingEdit>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", deny_unknown_fields)]
+enum ThinkingEdit {
+    #[serde(rename = "clear_thinking_20251015")]
+    ClearThinking { keep: ThinkingKeep },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+enum ThinkingKeep {
+    All(String),
+    Turns(ThinkingTurns),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ThinkingTurns {
+    #[serde(rename = "type")]
+    kind: String,
+    value: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -439,7 +529,7 @@ enum TypedRequestOptions {
 }
 
 impl TypedRequestOptions {
-    fn validate_limits(&self, probe: i64, runtime: i64) -> Result<(), ProfileError> {
+    fn validate_limits(&self, runtime: i64) -> Result<(), ProfileError> {
         match self {
             Self::OpenAi(options) => {
                 if let Some(value) = options.thinking_budget
@@ -451,6 +541,28 @@ impl TypedRequestOptions {
                 }
             }
             Self::Anthropic(options) => {
+                if let Some(context) = &options.context_management {
+                    if context.edits.len() != 1 {
+                        return Err(ProfileError::InvalidRequestOption(
+                            "context_management requires exactly one clear_thinking_20251015 edit"
+                                .into(),
+                        ));
+                    }
+                    for ThinkingEdit::ClearThinking { keep } in &context.edits {
+                        let valid = match keep {
+                            ThinkingKeep::All(value) => value == "all",
+                            ThinkingKeep::Turns(turns) => {
+                                turns.kind == "thinking_turns" && turns.value > 0
+                            }
+                        };
+                        if !valid {
+                            return Err(ProfileError::InvalidRequestOption(
+                                "thinking keep must be all or a positive thinking_turns value"
+                                    .into(),
+                            ));
+                        }
+                    }
+                }
                 if options.prompt_cache.cache_history
                     && options.prompt_cache.mode
                         != crate::prompt_cache::CacheMode::AnthropicExplicit
@@ -468,10 +580,10 @@ impl TypedRequestOptions {
                     ));
                 }
                 if let Some(AnthropicThinking::Enabled { budget_tokens, .. }) = options.thinking
-                    && (budget_tokens <= 0 || budget_tokens >= probe || budget_tokens >= runtime)
+                    && (budget_tokens <= 0 || budget_tokens >= runtime)
                 {
                     return Err(ProfileError::InvalidRequestOption(format!(
-                        "manual thinking budget_tokens ({budget_tokens}) must be positive and lower than both probe ({probe}) and runtime ({runtime}) output limits"
+                        "manual thinking budget_tokens ({budget_tokens}) must be positive and lower than the runtime ({runtime}) output limit"
                     )));
                 }
             }
@@ -518,6 +630,9 @@ impl TypedRequestOptions {
                 }
                 if let Some(output_config) = &options.output_config {
                     object.insert("output_config".to_string(), to_value(output_config)?);
+                }
+                if let Some(context) = &options.context_management {
+                    object.insert("context_management".into(), to_value(context)?);
                 }
             }
         }
@@ -638,10 +753,11 @@ mod tests {
 
     fn profile(options: Value) -> ModelRequestProfile {
         ModelRequestProfile {
+            reasoning_contract: Default::default(),
+            anthropic_prefix_binding: false,
             profile_schema_version: MODEL_PROFILE_SCHEMA_VERSION,
             request_options: options,
             output_limit_field: OutputLimitField::MaxTokens,
-            probe_max_output_tokens: 512,
             runtime_max_output_tokens: 4096,
             max_context_bytes: 131_072,
             profile_revision: 1,
@@ -674,26 +790,25 @@ mod tests {
     #[test]
     fn runtime_limit_can_only_be_narrowed() {
         assert_eq!(
-            resolve_effective_output_limit(ModelUseCase::Completion, 512, 4096, Some(512))
+            resolve_effective_output_limit(ModelUseCase::Completion, 4096, Some(512))
                 .unwrap()
                 .get(),
             512
         );
         assert_eq!(
-            resolve_effective_output_limit(ModelUseCase::Agent, 512, 4096, Some(8192))
+            resolve_effective_output_limit(ModelUseCase::Agent, 4096, Some(8192))
                 .unwrap()
                 .get(),
             4096
         );
-        assert!(resolve_effective_output_limit(ModelUseCase::Probe, 512, 4096, Some(16)).is_err());
+        assert!(resolve_effective_output_limit(ModelUseCase::Probe, 4096, Some(16)).is_err());
     }
 
     #[test]
     fn completion_validation_rejects_manual_budget_at_the_caller_cap() {
-        let mut profile = profile(json!({
+        let profile = profile(json!({
             "thinking": {"type": "enabled", "budget_tokens": 600}
         }));
-        profile.probe_max_output_tokens = 1024;
         let error = profile
             .validate_for_use_case(
                 WireProtocol::AnthropicMessages,
@@ -707,20 +822,14 @@ mod tests {
     #[test]
     fn compression_cap_reuses_profile_options_and_rejects_an_incompatible_manual_budget() {
         assert_eq!(
-            resolve_effective_output_limit(
-                ModelUseCase::ContextCompression,
-                8192,
-                8192,
-                Some(4096),
-            )
-            .unwrap()
-            .get(),
+            resolve_effective_output_limit(ModelUseCase::ContextCompression, 8192, Some(4096),)
+                .unwrap()
+                .get(),
             4096
         );
         let mut profile = profile(json!({
             "thinking": {"type": "enabled", "budget_tokens": 5000}
         }));
-        profile.probe_max_output_tokens = 8192;
         profile.runtime_max_output_tokens = 8192;
         let error = profile
             .validate_for_use_case(
@@ -775,11 +884,59 @@ mod tests {
     }
 
     #[test]
-    fn rejects_manual_thinking_at_or_above_any_budget() {
+    fn rejects_manual_thinking_at_or_above_the_runtime_budget() {
         let profile = profile(json!({
-            "thinking": {"type": "enabled", "budget_tokens": 512}
+            "thinking": {"type": "enabled", "budget_tokens": 4096}
         }));
         assert!(profile.validate(WireProtocol::AnthropicMessages).is_err());
+    }
+
+    #[test]
+    fn probes_and_runtime_requests_use_the_same_output_budget_and_options() {
+        for (protocol, field, options) in [
+            (
+                WireProtocol::OpenAiChatCompletions,
+                OutputLimitField::MaxTokens,
+                json!({"reasoning_effort": "high"}),
+            ),
+            (
+                WireProtocol::OpenAiChatCompletions,
+                OutputLimitField::MaxCompletionTokens,
+                json!({}),
+            ),
+            (
+                WireProtocol::AnthropicMessages,
+                OutputLimitField::MaxTokens,
+                json!({"thinking": {"type": "enabled", "budget_tokens": 2048}}),
+            ),
+        ] {
+            let mut profile = profile(options);
+            profile.output_limit_field = field;
+            let mut bodies = Vec::new();
+            for use_case in [
+                ModelUseCase::Probe,
+                ModelUseCase::Agent,
+                ModelUseCase::Approval,
+                ModelUseCase::Safety,
+            ] {
+                let effective = profile
+                    .validate_for_use_case(protocol, use_case, None)
+                    .unwrap();
+                assert_eq!(effective.get(), profile.runtime_max_output_tokens);
+                let mut body = json!({"model": "synthetic", "messages": []});
+                apply_model_request_profile(protocol, use_case, &profile, effective, &mut body)
+                    .unwrap();
+                assert_eq!(body[field.as_str()], profile.runtime_max_output_tokens);
+                bodies.push(body);
+            }
+            assert!(bodies.windows(2).all(|pair| pair[0] == pair[1]));
+            assert!(
+                serde_json::to_value(&profile)
+                    .unwrap()
+                    .get("probe_max_output_tokens")
+                    .is_none()
+            );
+        }
     }
 
     #[test]
@@ -815,5 +972,58 @@ mod tests {
                 .validate(WireProtocol::OpenAiChatCompletions)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn native_clear_requires_one_explicit_valid_keep_policy() {
+        for keep in [json!("all"), json!({"type":"thinking_turns","value":2})] {
+            let candidate = profile(
+                json!({"context_management":{"edits":[{"type":"clear_thinking_20251015","keep":keep}]}}),
+            );
+            assert!(candidate.validate(WireProtocol::AnthropicMessages).is_ok());
+        }
+        for options in [
+            json!({"context_management":{"edits":[]}}),
+            json!({"context_management":{"edits":[{"type":"clear_thinking_20251015"}]}}),
+            json!({"context_management":{"edits":[{"type":"clear_thinking_20251015","keep":{"type":"thinking_turns","value":0}}]}}),
+            json!({"context_management":{"edits":[{"type":"clear_tool_uses_20250919","keep":"all"}]}}),
+            json!({"context_management":{"edits":[{"type":"clear_thinking_20251015","keep":"all","extra":true}]}}),
+        ] {
+            assert!(
+                profile(options)
+                    .validate(WireProtocol::AnthropicMessages)
+                    .is_err()
+            );
+        }
+    }
+    #[test]
+    fn reasoning_effort_and_prefix_are_explicit_contract_capabilities() {
+        let mut candidate = profile(json!({"reasoning_effort":"max"}));
+        assert!(
+            candidate
+                .validate(WireProtocol::OpenAiChatCompletions)
+                .is_err()
+        );
+        candidate.reasoning_contract = ReasoningContract::DeepseekChat;
+        assert!(
+            candidate
+                .validate(WireProtocol::OpenAiChatCompletions)
+                .is_ok()
+        );
+        candidate.request_options = json!({"reasoning_effort":"medium"});
+        assert!(
+            candidate
+                .validate(WireProtocol::OpenAiChatCompletions)
+                .is_err()
+        );
+        candidate.request_options = json!({});
+        candidate.anthropic_prefix_binding = true;
+        assert!(
+            candidate
+                .validate(WireProtocol::OpenAiChatCompletions)
+                .is_err()
+        );
+        candidate.reasoning_contract = ReasoningContract::AnthropicMessages;
+        assert!(candidate.validate(WireProtocol::AnthropicMessages).is_ok());
     }
 }

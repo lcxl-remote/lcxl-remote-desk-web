@@ -7,8 +7,6 @@ use serde::{Deserialize, Serialize};
 use crate::chat::TokenUsage;
 
 const TOKENS_PER_PRICE_UNIT: u128 = 1_000_000;
-pub const APPROVAL_REVIEW_OUTPUT_TOKEN_RESERVE: u64 = 2_048;
-const APPROVAL_REVIEW_FRAME_BYTE_RESERVE: u64 = 8 * 1_024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -24,7 +22,7 @@ impl ApprovalTokenPrices {
         (self.input_micros_per_million > 0 && self.output_micros_per_million > 0).then_some(self)
     }
 
-    /// Reserve the full request context and the strict reviewer output cap.
+    /// Reserve the full request context and the configured runtime output budget.
     /// Cache classes use the maximum of their own configured price and the
     /// ordinary input price because the provider may change cache behavior.
     pub fn reserve(self, max_input_tokens: u64, max_output_tokens: u64) -> Option<u64> {
@@ -58,24 +56,21 @@ impl ApprovalTokenPrices {
 
 /// The independent reviewer has no tools and sends only a fixed system prompt
 /// plus the already authorized candidate prompt. Reserve a conservative UTF-8
-/// byte bound for input tokens, wire framing, and the hard output cap. Oversized
-/// requests hand off to a person before any provider dial.
+/// byte bound for input tokens, wire framing, and the configured runtime output
+/// budget. Oversized requests fail before any provider dial.
 pub fn reviewer_reservation(
     authorized_prompt: &str,
     prices: ApprovalTokenPrices,
     model_context_bytes: u64,
+    runtime_max_output_tokens: u64,
 ) -> Option<(u64, u64)> {
-    let input_upper = u64::try_from(authorized_prompt.len())
-        .ok()?
-        .checked_add(
-            u64::try_from(crate::approval_review::APPROVAL_REVIEW_SYSTEM_PROMPT.len()).ok()?,
-        )?
-        .checked_add(APPROVAL_REVIEW_FRAME_BYTE_RESERVE)?;
-    if input_upper > model_context_bytes {
-        return None;
-    }
-    let tokens = input_upper.checked_add(APPROVAL_REVIEW_OUTPUT_TOKEN_RESERVE)?;
-    let cost = prices.reserve(input_upper, APPROVAL_REVIEW_OUTPUT_TOKEN_RESERVE)?;
+    let tokens = crate::approval_usage::reviewer_token_reservation(
+        authorized_prompt,
+        model_context_bytes,
+        runtime_max_output_tokens,
+    )?;
+    let input_upper = tokens.checked_sub(runtime_max_output_tokens)?;
+    let cost = prices.reserve(input_upper, runtime_max_output_tokens)?;
     (cost > 0).then_some((tokens, cost))
 }
 
@@ -189,8 +184,8 @@ mod tests {
             None
         );
         let (reserved_tokens, reserved_cost) =
-            reviewer_reservation("review", prices, 32_768).unwrap();
-        assert!(reserved_tokens > APPROVAL_REVIEW_OUTPUT_TOKEN_RESERVE);
+            reviewer_reservation("review", prices, 32_768, 128_000).unwrap();
+        assert!(reserved_tokens > 128_000);
         assert!(
             reserved_cost
                 >= prices
@@ -201,8 +196,26 @@ mod tests {
                     })
                     .unwrap()
         );
-        assert!(reviewer_reservation("review", prices, 100).is_none());
+        assert!(reviewer_reservation("review", prices, 100, 128_000).is_none());
     }
+    #[test]
+    fn runtime_output_budget_is_reserved_at_the_output_price() {
+        let prices = ApprovalTokenPrices {
+            input_micros_per_million: 1_000_000,
+            output_micros_per_million: 2_000_000,
+            cache_read_micros_per_million: 1_000_000,
+            cache_write_micros_per_million: 1_000_000,
+        };
+        let (small_tokens, small_cost) =
+            reviewer_reservation("review", prices, 32_768, 2048).unwrap();
+        let (large_tokens, large_cost) =
+            reviewer_reservation("review", prices, 32_768, 128_000).unwrap();
+        assert_eq!(large_tokens - small_tokens, 128_000 - 2048);
+        assert_eq!(large_cost - small_cost, 2 * (128_000 - 2048));
+        assert!(reviewer_reservation("review", prices, 32_768, 0).is_none());
+        assert!(reviewer_reservation("review", prices, 32_768, u64::MAX).is_none());
+    }
+
     #[test]
     fn partial_provider_usage_holds_both_original_bounds() {
         for (tokens, cost) in [(None, None), (Some(17), None), (None, Some(9))] {

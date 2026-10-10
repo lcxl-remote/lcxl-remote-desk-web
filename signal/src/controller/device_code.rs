@@ -1,3 +1,5 @@
+#[cfg(test)]
+use crate::config::connection::DatabaseConnection;
 use std::collections::HashSet;
 
 use actix_web::{HttpResponse, delete, get, post, put, web};
@@ -225,7 +227,7 @@ pub async fn update_device_code(
 /// teardown, since the generation bump alone supersedes the old code. A same-code
 /// edit only refreshes `updated_at` and the capabilities, leaving the generation
 /// untouched. Returns the updated model, or `None` if no code with that id exists.
-pub async fn apply_device_code_update<C: ConnectionTrait>(
+pub async fn apply_device_code_update<C: ConnectionTrait + crate::config::ConfigConnection>(
     db: &C,
     id: i32,
     new_code: &str,
@@ -338,10 +340,12 @@ pub async fn batch_delete_device_codes(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sea_orm::{Database, DatabaseConnection, Schema};
+    use sea_orm::Schema;
 
     async fn setup() -> DatabaseConnection {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
+        let db = crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap();
         let schema = Schema::new(db.get_database_backend());
         db.execute(&schema.create_table_from_entity(device_code::Entity))
             .await

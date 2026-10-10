@@ -3,8 +3,8 @@ use desk_diagnose_core::model_observability::{
     ObservationRelation,PermissionOutcome,Stage,aggregate::{contribution,Count},
 };
 
-async fn seed_observed_schedule_waits(
-    db: &sea_orm::DatabaseConnection,
+async fn seed_observed_schedule_waits<C: sea_orm::ConnectionTrait>(
+    db: &C,
     parent: &PersistedAgentSession,
     child_conversation: &str,
 ) -> Vec<ObservationAlias> {

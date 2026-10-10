@@ -50,6 +50,7 @@ export type { UpdateCollectionPolicySettingsMutationKey } from "./aiModelControl
 export type { CreateTokenMutationKey } from "./apiTokenController/useCreateToken.ts";
 export type { GetApprovalModelProviderQueryKey } from "./approvalModelProviderController/useGetApprovalModelProvider.ts";
 export type { GetApprovalModelProviderSuspenseQueryKey } from "./approvalModelProviderController/useGetApprovalModelProviderSuspense.ts";
+export type { ReuseAiGatewayForApprovalMutationKey } from "./approvalModelProviderController/useReuseAiGatewayForApproval.ts";
 export type { TestApprovalModelProviderMutationKey } from "./approvalModelProviderController/useTestApprovalModelProvider.ts";
 export type { UpdateApprovalModelProviderMutationKey } from "./approvalModelProviderController/useUpdateApprovalModelProvider.ts";
 export type { ChangePasswordMutationKey } from "./authController/useChangePassword.ts";
@@ -164,6 +165,9 @@ export type { QuerySysinfoSuspenseQueryKey } from "./systemController/useQuerySy
 export type { QueryTelemetryStatusQueryKey } from "./telemetryController/useQueryTelemetryStatus.ts";
 export type { QueryTelemetryStatusSuspenseQueryKey } from "./telemetryController/useQueryTelemetryStatusSuspense.ts";
 export type { UpdateTelemetryConsentMutationKey } from "./telemetryController/useUpdateTelemetryConsent.ts";
+export type { GetTerminalCompletionQueryKey } from "./terminalCompletionAdminController/useGetTerminalCompletion.ts";
+export type { GetTerminalCompletionSuspenseQueryKey } from "./terminalCompletionAdminController/useGetTerminalCompletionSuspense.ts";
+export type { UpdateTerminalCompletionMutationKey } from "./terminalCompletionAdminController/useUpdateTerminalCompletion.ts";
 export type { ListTerminalQueryKey } from "./terminalController/useListTerminal.ts";
 export type { ListTerminalSuspenseQueryKey } from "./terminalController/useListTerminalSuspense.ts";
 export type { OpenTerminalSessionQueryKey } from "./terminalController/useOpenTerminalSession.ts";
@@ -355,6 +359,9 @@ export { useGetApprovalModelProvider } from "./approvalModelProviderController/u
 export { getApprovalModelProviderSuspenseQueryKey } from "./approvalModelProviderController/useGetApprovalModelProviderSuspense.ts";
 export { getApprovalModelProviderSuspenseQueryOptions } from "./approvalModelProviderController/useGetApprovalModelProviderSuspense.ts";
 export { useGetApprovalModelProviderSuspense } from "./approvalModelProviderController/useGetApprovalModelProviderSuspense.ts";
+export { reuseAiGatewayForApprovalMutationKey } from "./approvalModelProviderController/useReuseAiGatewayForApproval.ts";
+export { reuseAiGatewayForApprovalMutationOptions } from "./approvalModelProviderController/useReuseAiGatewayForApproval.ts";
+export { useReuseAiGatewayForApproval } from "./approvalModelProviderController/useReuseAiGatewayForApproval.ts";
 export { testApprovalModelProviderMutationKey } from "./approvalModelProviderController/useTestApprovalModelProvider.ts";
 export { testApprovalModelProviderMutationOptions } from "./approvalModelProviderController/useTestApprovalModelProvider.ts";
 export { useTestApprovalModelProvider } from "./approvalModelProviderController/useTestApprovalModelProvider.ts";
@@ -697,6 +704,15 @@ export { useQueryTelemetryStatusSuspense } from "./telemetryController/useQueryT
 export { updateTelemetryConsentMutationKey } from "./telemetryController/useUpdateTelemetryConsent.ts";
 export { updateTelemetryConsentMutationOptions } from "./telemetryController/useUpdateTelemetryConsent.ts";
 export { useUpdateTelemetryConsent } from "./telemetryController/useUpdateTelemetryConsent.ts";
+export { getTerminalCompletionQueryKey } from "./terminalCompletionAdminController/useGetTerminalCompletion.ts";
+export { getTerminalCompletionQueryOptions } from "./terminalCompletionAdminController/useGetTerminalCompletion.ts";
+export { useGetTerminalCompletion } from "./terminalCompletionAdminController/useGetTerminalCompletion.ts";
+export { getTerminalCompletionSuspenseQueryKey } from "./terminalCompletionAdminController/useGetTerminalCompletionSuspense.ts";
+export { getTerminalCompletionSuspenseQueryOptions } from "./terminalCompletionAdminController/useGetTerminalCompletionSuspense.ts";
+export { useGetTerminalCompletionSuspense } from "./terminalCompletionAdminController/useGetTerminalCompletionSuspense.ts";
+export { updateTerminalCompletionMutationKey } from "./terminalCompletionAdminController/useUpdateTerminalCompletion.ts";
+export { updateTerminalCompletionMutationOptions } from "./terminalCompletionAdminController/useUpdateTerminalCompletion.ts";
+export { useUpdateTerminalCompletion } from "./terminalCompletionAdminController/useUpdateTerminalCompletion.ts";
 export { listTerminalQueryKey } from "./terminalController/useListTerminal.ts";
 export { listTerminalQueryOptions } from "./terminalController/useListTerminal.ts";
 export { useListTerminal } from "./terminalController/useListTerminal.ts";

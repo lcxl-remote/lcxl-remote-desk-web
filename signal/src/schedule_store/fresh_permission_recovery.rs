@@ -1,8 +1,9 @@
 //! Recover a committed task permission pause without restarting the model.
 use super::{ScheduleStoreError, entity};
+use crate::config::connection::DatabaseTransaction;
 use crate::entity::{agent_action_item as work_item, agent_schedule_run as run, agent_session};
 use desk_diagnose_core::session::{ExecutionState, PersistedAgentSession, TurnState};
-use sea_orm::{ColumnTrait, DatabaseTransaction, EntityTrait, QueryFilter, QuerySelect, Set};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect, Set};
 
 /// Caller has locked the original task and session and checked subject, run and
 /// expired execution lease. Ownership of the transaction prevents a partial wait.

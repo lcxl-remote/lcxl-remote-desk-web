@@ -1,9 +1,9 @@
 //! Source-qualified resource waits and deadline settlement never replay actions.
 use super::*;
+use crate::config::connection::DatabaseTransaction;
 use desk_diagnose_core::subagent::{
     SubAgentWaitReason, runtime::RuntimeTurn, state::TaskDependency,
 };
-use sea_orm::DatabaseTransaction;
 
 async fn begin_candidate_control(
     store: &SubAgentStore,

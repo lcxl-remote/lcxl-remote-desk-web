@@ -21,7 +21,44 @@ use crate::chat::{ChatMessage, ChatRole, ToolCallRef, frame_context_summary};
 /// The serialized byte cost charged against the budget for one message. Uses the
 /// JSON encoding (what actually crosses to the gateway) and falls back to the text
 /// length if encoding somehow fails.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PreparedMessageCost {
+    pub bytes: usize,
+    pub replay_bytes: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PreparedContextCost(pub Option<PreparedMessageCost>);
+// Request-only estimates do not change durable message/provenance identity.
+impl PartialEq for PreparedContextCost {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+impl Eq for PreparedContextCost {}
+
+pub fn model_replay_cost(msg: &ChatMessage) -> usize {
+    msg.prepared_context_cost.0.map_or_else(
+        || {
+            msg.replay_disposition
+                .as_ref()
+                .map_or(0, crate::replay::ReplayDisposition::model_context_cost)
+        },
+        |cost| cost.replay_bytes,
+    )
+}
+
 pub fn model_context_cost(msg: &ChatMessage) -> usize {
+    if let Some(cost) = msg.prepared_context_cost.0 {
+        return cost.bytes;
+    }
+    if let Some(crate::replay::ReplayDisposition::Present { envelope }) = &msg.replay_disposition
+        && envelope.codec == crate::replay::ReplayCodec::AnthropicContentBlocks
+    {
+        return serde_json::json!({"role":msg.role,"content":envelope.payload})
+            .to_string()
+            .len();
+    }
     #[derive(Serialize)]
     struct ModelContextCostView<'a> {
         role: ChatRole,

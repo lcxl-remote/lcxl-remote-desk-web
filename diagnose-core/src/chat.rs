@@ -207,6 +207,9 @@ pub struct ToolCallRef {
 /// background dispatch receipt or delayed completion.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatMessage {
+    /// Request-only projected cost; durable source content is unchanged.
+    #[serde(skip)]
+    pub prepared_context_cost: crate::trim::PreparedContextCost,
     pub message_id: String,
     /// Optional owning turn for UI transcript projection. Provider adapters and
     /// context costing deliberately ignore this server-only identifier.
@@ -261,6 +264,7 @@ impl ChatMessage {
     /// A plain text message (no image, no tool linkage).
     pub fn text(message_id: impl Into<String>, role: ChatRole, text: impl Into<String>) -> Self {
         Self {
+            prepared_context_cost: Default::default(),
             message_id: message_id.into(),
             turn_id: None,
             role,
@@ -314,6 +318,7 @@ impl ChatMessage {
         replay_disposition: ReplayDisposition,
     ) -> Self {
         Self {
+            prepared_context_cost: Default::default(),
             message_id: message_id.into(),
             turn_id: None,
             role: ChatRole::Assistant,
@@ -358,6 +363,7 @@ impl ChatMessage {
         text: impl Into<String>,
     ) -> Self {
         Self {
+            prepared_context_cost: Default::default(),
             message_id: message_id.into(),
             turn_id: None,
             role: ChatRole::UntrustedOutput,
@@ -385,6 +391,7 @@ impl ChatMessage {
         text: impl Into<String>,
     ) -> Self {
         Self {
+            prepared_context_cost: Default::default(),
             message_id: message_id.into(),
             turn_id: None,
             role: ChatRole::Tool,
@@ -416,6 +423,7 @@ impl ChatMessage {
     ) -> Self {
         let background_task_id = background_task_id.into();
         Self {
+            prepared_context_cost: Default::default(),
             message_id: message_id.into(),
             turn_id: None,
             role: ChatRole::Tool,
@@ -767,6 +775,8 @@ mod tests {
 
     fn meta(stop_reason: StopReason, has_tool_calls: bool) -> ProviderResponseMeta {
         ProviderResponseMeta {
+            context_observation: None,
+            thinking_prefix: None,
             cache_projection: None,
             stop_reason,
             replay: has_tool_calls.then_some(ReplayDisposition::Unavailable {

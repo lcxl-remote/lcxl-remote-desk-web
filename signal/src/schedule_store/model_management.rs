@@ -1,5 +1,6 @@
 //! Model management is confined to the current conversation and server origin.
 use super::{ScheduleStoreError, entity};
+use crate::config::connection::DatabaseTransaction;
 use crate::entity::agent_schedule_run as run;
 use desk_diagnose_core::{
     model_observability::{
@@ -8,10 +9,7 @@ use desk_diagnose_core::{
     schedule::management_tools::{Action, proposed_ids},
     session::PersistedAgentSession,
 };
-use sea_orm::{
-    ColumnTrait, Condition, DatabaseTransaction, EntityTrait, QueryFilter, QueryOrder, QuerySelect,
-    Set,
-};
+use sea_orm::{ColumnTrait, Condition, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set};
 use serde_json::{Value, json};
 
 fn scope(owner: i32, session: &PersistedAgentSession) -> Condition {

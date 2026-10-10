@@ -163,10 +163,10 @@ fn group() -> DelegationGroup {
         parent_control_revision: 1,
         parent_active: true,
         limits: budget::DelegationLimits {
-            total: budget::Usage {
+            total: budget::Allowance {
                 model_calls: 10,
                 tool_calls: 20,
-                tokens: 1000,
+                tokens: Some(1000),
             },
             max_context_bytes: 4096,
             max_result_bytes: 8192,
@@ -913,7 +913,7 @@ fn goal_delegation_uses_the_goal_token_ceiling_and_honors_a_lower_configured_lim
         GoalLimits::default(),
     )
     .unwrap();
-    assert!(goal.limits.model_tokens > creation::DEFAULT_GROUP_TOKENS);
+    assert!(goal.limits.model_tokens > 1_000_000);
     assert_eq!(
         source
             .new_group(1_000, Some(&goal))
@@ -921,7 +921,7 @@ fn goal_delegation_uses_the_goal_token_ceiling_and_honors_a_lower_configured_lim
             .limits
             .total
             .tokens,
-        goal.limits.model_tokens
+        Some(goal.limits.model_tokens)
     );
     goal.limits.model_tokens = 50_000;
     assert_eq!(
@@ -931,7 +931,35 @@ fn goal_delegation_uses_the_goal_token_ceiling_and_honors_a_lower_configured_lim
             .limits
             .total
             .tokens,
-        50_000
+        Some(50_000)
+    );
+    goal.limits.model_tokens = 20_000_000;
+    assert_eq!(
+        source
+            .new_group(1_000, Some(&goal))
+            .unwrap()
+            .limits
+            .total
+            .tokens,
+        Some(20_000_000)
+    );
+    let mut policy = crate::goal_budget::initial();
+    policy.limits.model_tokens = None;
+    goal.apply_budget_policy(&policy).unwrap();
+    assert_eq!(
+        source
+            .new_group(1_000, Some(&goal))
+            .unwrap()
+            .limits
+            .total
+            .tokens,
+        None
+    );
+    let mut ordinary = source;
+    ordinary.source = DelegationSource::UserInput { input_revision: 1 };
+    assert_eq!(
+        ordinary.new_group(1_000, None).unwrap().limits.total.tokens,
+        None
     );
 }
 

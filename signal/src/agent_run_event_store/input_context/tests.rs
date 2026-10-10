@@ -11,7 +11,7 @@ use desk_diagnose_core::{
     model_message_labels::model_bound_user_message,
     seam::{ClaimError, ClaimTurnParams, SessionSeam},
 };
-use sea_orm::{ConnectionTrait, Database, sea_query::Expr};
+use sea_orm::{ConnectionTrait, sea_query::Expr};
 
 mod grants;
 mod live_targets;
@@ -36,7 +36,9 @@ fn subject() -> InputSubject<'static> {
 }
 
 async fn setup(url: &str) -> SignalAgentRunEventStore {
-    let db = Database::connect(url).await.unwrap();
+    let db = crate::config::test_support::Database::connect(url)
+        .await
+        .unwrap();
     crate::db::initialize_schema(&db).await.unwrap();
     SignalAgentRunEventStore::new(db)
 }
@@ -613,7 +615,11 @@ async fn independent_sqlite_pools_preserve_one_original_input_under_competing_re
     );
     let first = setup(&url).await;
     let object = attach(&first, "object", ObjectKind::File).await;
-    let second = SignalAgentRunEventStore::new(Database::connect(&url).await.unwrap());
+    let second = SignalAgentRunEventStore::new(
+        crate::config::test_support::Database::connect(&url)
+            .await
+            .unwrap(),
+    );
     let original = input("message", vec![object]);
     let (left, right) = tokio::join!(
         first.append_user_followup(original.clone()),

@@ -3,7 +3,7 @@ use super::*;
 use crate::entity::agent_delegation_reservation as reservation_row;
 use desk_diagnose_core::subagent::reservation::{DelegationCallKind, DelegationCallReservation};
 
-pub(super) async fn provider_usage_on<C: ConnectionTrait>(
+pub(super) async fn provider_usage_on<C: ConnectionTrait + crate::config::ConfigConnection>(
     db: &C,
     row: &reservation_row::Model,
 ) -> Result<Option<desk_diagnose_core::goal::GoalUsage>, DbErr> {
@@ -47,7 +47,7 @@ pub(super) async fn provider_usage_on<C: ConnectionTrait>(
 /// The caller holds owner/root/child controls. A reserved allocation never
 /// substitutes for the planner lease or current source admission.
 async fn validate_dispatch_on(
-    txn: &sea_orm::DatabaseTransaction,
+    txn: &crate::config::connection::DatabaseTransaction,
     reservation: &DelegationCallReservation,
     now_ms: i64,
 ) -> Result<(), DbErr> {
@@ -157,7 +157,7 @@ impl SubAgentStore {
     /// Join source/lease validation, linkage and the durable provider-start fence.
     /// The caller rolls back on error and sends no request before commit.
     pub(crate) async fn link_model_receipt_on(
-        txn: &sea_orm::DatabaseTransaction,
+        txn: &crate::config::connection::DatabaseTransaction,
         reservation: &DelegationCallReservation,
         provider_receipt_id: &str,
         now_ms: i64,

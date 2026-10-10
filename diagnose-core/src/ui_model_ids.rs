@@ -63,6 +63,7 @@ fn observation_value(text: &str) -> Option<Value> {
         && value
             .pointer("/ReadContext/DesktopSessionInspect")
             .is_none()
+        && value.pointer("/ReadContext/ScreenCaptureCurrent").is_none()
     {
         return None;
     }
@@ -90,7 +91,7 @@ fn resolve(history: &[ChatMessage], id: &str, _now_ms: u64) -> Result<ObjectRef,
             .map(|call| call.name.as_str());
         if !matches!(
             observed_by,
-            Some("inspect_desktop_ui" | "inspect_desktop_session")
+            Some("inspect_desktop_ui" | "inspect_desktop_session" | "read_current_screen")
         ) {
             continue;
         }
@@ -108,6 +109,21 @@ fn resolve(history: &[ChatMessage], id: &str, _now_ms: u64) -> Result<ObjectRef,
     ))
 }
 
+fn resolve_with_references(
+    history: &[ChatMessage],
+    id: &str,
+    now_ms: u64,
+    expected: &[Value],
+) -> Result<ObjectRef, AgentError> {
+    resolve(history, id, now_ms).or_else(|error| {
+        expected
+            .iter()
+            .filter_map(|value| serde_json::from_value::<ObjectRef>(value.clone()).ok())
+            .find(|reference| reference.token == id)
+            .ok_or(error)
+    })
+}
+
 /// Resolve model arguments before existing typed preflight and authorization.
 /// Original model calls and their signed envelopes are never rewritten.
 pub fn resolve_call(
@@ -115,10 +131,19 @@ pub fn resolve_call(
     history: &[ChatMessage],
     now_ms: u64,
 ) -> Result<ToolCall, AgentError> {
+    resolve_call_with_references(call, history, now_ms, &[])
+}
+
+fn resolve_call_with_references(
+    call: &ToolCall,
+    history: &[ChatMessage],
+    now_ms: u64,
+    expected: &[Value],
+) -> Result<ToolCall, AgentError> {
     if crate::application_batch::supports(&call.name) {
-        return crate::application_batch::resolve(call, history, now_ms);
+        return crate::application_batch::resolve_with_references(call, history, now_ms, expected);
     }
-    resolve_single_call(call, history, now_ms)
+    resolve_single_call_with_references(call, history, now_ms, expected)
 }
 
 /// Resolve IDs and directory consent from the same authoritative session.
@@ -127,7 +152,10 @@ pub fn resolve_session_call(
     session: &crate::session::PersistedAgentSession,
     now_ms: u64,
 ) -> Result<ToolCall, AgentError> {
-    let mut resolved = resolve_call(call, &session.conversation, now_ms)?;
+    let (expanded, expected) = session.ui_references.expand_call(call)?;
+    let mut resolved =
+        resolve_call_with_references(&expanded, &session.conversation, now_ms, &expected)?;
+    crate::ui_references::UiReferenceState::validate_resolved(&expected, &resolved)?;
     let mut value = serde_json::from_str(&resolved.arguments_json)
         .map_err(|_| invalid("Tool arguments must be a JSON object."))?;
     crate::document_model_ids::resolve_directories(&call.name, &mut value, session, now_ms)?;
@@ -135,10 +163,11 @@ pub fn resolve_session_call(
     Ok(resolved)
 }
 
-pub(crate) fn resolve_single_call(
+pub(crate) fn resolve_single_call_with_references(
     call: &ToolCall,
     history: &[ChatMessage],
     now_ms: u64,
+    expected: &[Value],
 ) -> Result<ToolCall, AgentError> {
     if !needs_resolution(&call.name) {
         let mut value: Value = serde_json::from_str(&call.arguments_json).map_err(|e| {
@@ -162,7 +191,9 @@ pub(crate) fn resolve_single_call(
     crate::result_model_ids::resolve(&call.name, &mut value, history, now_ms)?;
     crate::document_model_ids::resolve(&call.name, &mut value, history, now_ms)?;
     if crate::browser_model_ids::supports(&call.name) {
-        crate::browser_model_ids::resolve(call, &mut value, history, now_ms)?;
+        crate::browser_model_ids::resolve_with_references(
+            call, &mut value, history, now_ms, expected,
+        )?;
         crate::model_input::fill_versions(&call.name, &mut value);
         return Ok(ToolCall {
             arguments_json: value.to_string(),
@@ -201,7 +232,7 @@ pub(crate) fn resolve_single_call(
         let reference = if *model == "output_id" {
             crate::provider_preflight::wayland_output::bind_observation(history, id, now_ms)?.0
         } else {
-            resolve(history, id, now_ms)?
+            resolve_with_references(history, id, now_ms, expected)?
         };
         let expected = match *model {
             "application_id" => Some(ObjectKind::Application),
@@ -300,11 +331,12 @@ pub(crate) fn resolve_single_call(
                 ));
             }
             if let Some(id) = action.remove("element_id") {
-                let reference = resolve(
+                let reference = resolve_with_references(
                     history,
                     id.as_str()
                         .ok_or_else(|| invalid("element_id must be a string"))?,
                     now_ms,
+                    expected,
                 )?;
                 if reference.object_kind != ObjectKind::UiElement {
                     return Err(invalid("element_id must identify a UI element"));
@@ -329,9 +361,11 @@ pub(crate) fn resolve_single_call(
                     name: tool,
                     arguments_json: exact.to_string(),
                 };
-                *exact =
-                    serde_json::from_str(&resolve_call(&nested, history, now_ms)?.arguments_json)
-                        .unwrap();
+                *exact = serde_json::from_str(
+                    &resolve_call_with_references(&nested, history, now_ms, expected)?
+                        .arguments_json,
+                )
+                .unwrap();
                 continue;
             }
             if matches!(
@@ -346,7 +380,8 @@ pub(crate) fn resolve_single_call(
                         arguments_json: exact.to_string(),
                     };
                     *exact = serde_json::from_str(
-                        &resolve_call(&nested, history, now_ms)?.arguments_json,
+                        &resolve_call_with_references(&nested, history, now_ms, expected)?
+                            .arguments_json,
                     )
                     .unwrap();
                 }
@@ -370,11 +405,12 @@ pub(crate) fn resolve_single_call(
                     "application_scope.application_id is required. No approval card was created.",
                 )
             })?;
-            let reference = resolve(
+            let reference = resolve_with_references(
                 history,
                 id.as_str()
                     .ok_or_else(|| invalid("application_id must be a string."))?,
                 now_ms,
+                expected,
             )?;
             if reference.object_kind != ObjectKind::Application {
                 return Err(invalid(
@@ -512,6 +548,15 @@ fn project_scope(value: &mut Value) {
 /// Compare a server-resolved call with the original ID-only model proposal.
 /// All non-reference inputs, including the action, must still match exactly.
 pub fn same_call_input(tool: &str, original: &str, resolved: &str) -> bool {
+    same_call_input_with_references(tool, original, resolved, None)
+}
+
+pub fn same_call_input_with_references(
+    tool: &str,
+    original: &str,
+    resolved: &str,
+    references: Option<&crate::ui_references::UiReferenceState>,
+) -> bool {
     let (Ok(mut left), Ok(mut right)) = (
         serde_json::from_str::<Value>(original),
         serde_json::from_str::<Value>(resolved),
@@ -527,6 +572,9 @@ pub fn same_call_input(tool: &str, original: &str, resolved: &str) -> bool {
         return false;
     }
     project_arguments(tool, &mut left);
+    if let Some(references) = references {
+        references.alias_native_arguments(&mut right);
+    }
     project_arguments(tool, &mut right);
     left == right
 }
@@ -608,6 +656,12 @@ pub(crate) fn project_tool_message(message: &mut ChatMessage) {
         }
         crate::ui_model_output::add_window_discovery_hint(&mut value);
         hide_references(&mut value);
+        if let Some(body) = value
+            .pointer_mut("/ReadContext/DesktopSessionInspect")
+            .and_then(Value::as_object_mut)
+        {
+            body.remove("interactive_session_incarnation");
+        }
         // Omit default node fields without removing useful semantic IDs.
         if let Some(nodes) = value
             .pointer_mut("/ReadContext/DesktopUiInspect/nodes")
@@ -646,9 +700,20 @@ pub(crate) fn project_tool_message(message: &mut ChatMessage) {
 pub fn project_request(request: &crate::seam::ModelRequest) -> crate::seam::ModelRequest {
     let mut request = request.clone();
     for message in &mut request.messages {
+        if request.use_case == crate::model_profile::ModelUseCase::Approval
+            && let Some(references) = &request.ui_references
+        {
+            project_review_message(message, references);
+        }
         project_tool_message(message);
+        if let Some(references) = &request.ui_references {
+            references.project_message(message);
+        }
         for call in &mut message.tool_calls {
             if let Ok(mut value) = serde_json::from_str::<Value>(&call.arguments_json) {
+                if let Some(references) = &request.ui_references {
+                    references.alias_native_arguments(&mut value);
+                }
                 project_arguments(&call.name, &mut value);
                 call.arguments_json = value.to_string();
             }
@@ -661,6 +726,9 @@ pub fn project_request(request: &crate::seam::ModelRequest) -> crate::seam::Mode
                 if let Some(Ok(mut entries)) = stream.next() {
                     let end = start + stream.byte_offset();
                     for entry in &mut entries {
+                        if let Some(references) = &request.ui_references {
+                            references.alias_native_arguments(entry);
+                        }
                         project_scope(entry);
                         if let Some(object) = entry.as_object_mut() {
                             object.remove("canonical_input_digest_sha256");
@@ -690,6 +758,81 @@ pub fn project_request(request: &crate::seam::ModelRequest) -> crate::seam::Mode
     request
 }
 
+fn project_review_message(
+    message: &mut ChatMessage,
+    references: &crate::ui_references::UiReferenceState,
+) {
+    let Some(start) = message
+        .text
+        .find("<candidate_json>")
+        .map(|index| index + "<candidate_json>".len())
+    else {
+        return;
+    };
+    let Some(end) = message.text[start..]
+        .find("</candidate_json>")
+        .map(|index| index + start)
+    else {
+        return;
+    };
+    let Ok(mut candidate) = serde_json::from_str::<Value>(&message.text[start..end]) else {
+        return;
+    };
+    let Some(tool) = candidate["tool_name"].as_str().map(str::to_owned) else {
+        return;
+    };
+    if let Some(action) = candidate["action_json"].as_str()
+        && let Ok(mut action) = serde_json::from_str::<Value>(action)
+    {
+        references.alias_native_arguments(&mut action);
+        project_scope(&mut action);
+        if let Some(input) = action.get_mut("exact_input") {
+            project_arguments(&tool, input);
+        }
+        if candidate["input_kind"] == "concrete_call" {
+            project_arguments(&tool, &mut action);
+        }
+        if let Some(input) = action["canonical_scope_input"].as_str()
+            && let Ok(mut input) = serde_json::from_str::<Value>(input)
+        {
+            references.alias_native_arguments(&mut input);
+            project_scope(&mut input);
+            project_arguments(&tool, &mut input);
+            action["canonical_scope_input"] = Value::String(input.to_string());
+        }
+        candidate["action_json"] = Value::String(action.to_string());
+    }
+    if let Some(descriptor) = candidate["descriptor_json"].as_str()
+        && let Ok(mut descriptor) = serde_json::from_str::<Value>(descriptor)
+        && let Ok(mut spec) =
+            serde_json::from_value::<crate::chat::ToolSpec>(descriptor["tool_spec"].clone())
+    {
+        project_tool(&mut spec);
+        descriptor["tool_spec"] = serde_json::to_value(spec).unwrap();
+        candidate["descriptor_json"] = Value::String(descriptor.to_string());
+    }
+    references.alias_native_arguments(&mut candidate["context"]);
+    hide_references(&mut candidate["context"]);
+    if let Some(evidence) = candidate["context"]["evidence"].as_array_mut() {
+        for evidence in evidence {
+            if evidence["trust"] != "untrusted_content" {
+                continue;
+            }
+            if let (Some(id), Some(text)) =
+                (evidence["event_id"].as_str(), evidence["text"].as_str())
+            {
+                let mut projected = ChatMessage::tool_result(id, "review-evidence", text);
+                project_tool_message(&mut projected);
+                references.project_message(&mut projected);
+                evidence["text"] = Value::String(projected.text);
+            }
+        }
+    }
+    message
+        .text
+        .replace_range(start..end, &format!("\n{candidate}\n"));
+}
+
 pub fn project_tool(tool: &mut crate::chat::ToolSpec) {
     crate::model_input::hide_versions(&mut tool.parameters_schema);
     crate::model_input::project_defaults(tool);
@@ -708,7 +851,7 @@ pub fn project_tool(tool: &mut crate::chat::ToolSpec) {
     for (internal, model) in fields(&tool.name) {
         if let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut) {
             properties.remove(*internal);
-            properties.insert((*model).into(), json!({"type":"string","minLength":1,"maxLength":512,"description":"Copy the observed object ID. The server resolves the reference and checks native object lifetime."}));
+            properties.insert((*model).into(), json!({"type":"string","minLength":1,"maxLength":512,"description":"Copy the observed short object ID (s1/a1/w1/e1/o1) from this session. Never invent or reuse an ID from another session. The server checks the full native identity and lifetime."}));
         }
         if let Some(required) = schema.get_mut("required").and_then(Value::as_array_mut) {
             for field in required {

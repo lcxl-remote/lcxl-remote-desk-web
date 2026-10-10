@@ -24,6 +24,44 @@ const snapshotFields = { controlRevision: 1, inputRevision: 1, mainStopped: fals
     subagents: { active_tasks: [], task: null, tasks: null, parent_session_id: null, attention_tasks: [], attention_count: 0 } };
 
 describe('useAiAssistantChat', () => {
+    it('enables approval when configuration becomes ready without a new conversation event', async () => {
+        vi.useFakeTimers();
+        localStorage.setItem('ai-assistant-conversation:desk-1', 'conversation-1');
+        let available = false;
+        let opened = false;
+        const delegation = { delegationId: 'delegation', status: 'active', reviewsUsed: 0, tokensUsed: 0 };
+        const fetchMock = vi.fn(async (url: string, _options?: RequestInit) => {
+            if (url.endsWith('/approval-delegation/open')) {
+                opened = true;
+                return { ok: true, json: async () => ({ success: true, data: delegation }) };
+            }
+            return { ok: true, json: async () => ({ success: true, data: {
+                ...snapshotFields, sessionId: 'session', seq: 1, active: false, messages: [],
+                approvalModelReadiness: { available, reason: available ? null : 'approval_model_disabled' },
+                approvalDelegation: opened ? delegation : null,
+            } }) };
+        });
+        vi.stubGlobal('fetch', fetchMock);
+        const { result, unmount } = renderHook(() => useAiAssistantChat({ deskId: 'desk-1',
+            subscribe: () => () => undefined, sendMessage: () => 'request' }));
+        try {
+            await act(async () => { await Promise.resolve(); });
+            expect(result.current.approvalModelReadiness?.available).toBe(false);
+            await act(async () => { expect(await result.current.setAutomaticApproval(true)).toBe(false); });
+            expect(opened).toBe(false);
+            available = true;
+            await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+            expect(result.current.approvalModelReadiness?.available).toBe(true);
+            await act(async () => { expect(await result.current.setAutomaticApproval(true)).toBe(true); });
+            expect(result.current.approvalDelegation?.status).toBe('active');
+            expect(fetchMock).toHaveBeenCalledWith('/api/my/ai-assistant-session/approval-delegation/open',
+                expect.objectContaining({ method: 'POST', body: expect.any(String) }));
+            const call = fetchMock.mock.calls.find(([url]) => url.endsWith('/approval-delegation/open'));
+            expect(JSON.parse(call?.[1]?.body as string)).toMatchObject({
+                conversation: 'conversation-1', session: 'session', expectedInputRevision: 1,
+            });
+        } finally { unmount(); }
+    });
     it('does not let a read started before goal control overwrite its committed state', async () => {
         vi.useFakeTimers();
         localStorage.setItem('ai-assistant-conversation:desk-1', 'conversation-1');

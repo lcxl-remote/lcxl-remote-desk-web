@@ -1,7 +1,8 @@
 //! Fence the first interactive input to its explicit rehearsal reservation.
 use super::*;
+use crate::config::connection::DatabaseTransaction;
 use desk_diagnose_core::chat::ChatMessage;
-use sea_orm::{DatabaseTransaction, sea_query::Expr};
+use sea_orm::sea_query::Expr;
 
 pub(crate) async fn validate_rehearsal_input_on(
     txn: &DatabaseTransaction,

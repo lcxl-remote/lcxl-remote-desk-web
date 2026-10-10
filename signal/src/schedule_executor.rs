@@ -1,4 +1,5 @@
 //! Single-node scheduled dispatch using durable paired claims.
+use crate::config::connection::DatabaseConnection;
 mod fresh;
 mod subagents;
 use crate::owned_task;
@@ -19,7 +20,7 @@ use desk_signal_facade::model::{
     auth_context::AuthKind, connection::SharedConnectionMap, signal::RemoteDeskTypeEnum,
 };
 use futures_util::{StreamExt, stream};
-use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use std::{
     sync::{
         Arc,
@@ -377,7 +378,7 @@ impl SignalScheduleExecutor {
         )
         .is_ok_and(|task| task.kind == "fresh_task")
         {
-            return Box::pin(self.process_fresh(candidate)).await;
+            return desk_diagnose_core::future::boxed(|| self.process_fresh(candidate)).await;
         }
         if !self.gate.is_enabled()
             || candidate.owner_user_id != crate::control_authorizer::SINGLE_ACCOUNT_USER_ID

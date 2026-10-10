@@ -208,7 +208,7 @@ enum ModelConfigurationSource {
 
 pub struct SignalModelSeam {
     cancel: tokio_util::sync::CancellationToken,
-    context_db: Option<sea_orm::DatabaseConnection>,
+    context_db: Option<crate::config::connection::DatabaseConnection>,
     context_policy: tokio::sync::OnceCell<desk_diagnose_core::model_context::PinnedContextPolicy>,
     compression_call_key: std::cell::RefCell<Option<String>>,
     retry_after_unix_ms: std::cell::Cell<Option<u64>>,
@@ -267,9 +267,10 @@ impl SignalModelSeam {
                 ("oss-approval-gateway:1", "oss-approval-model:1")
             }
         };
+        let connection_id = format!("{connection_id}:{}", config.config_instance);
         let source_context_key = SourceContextKey::derive_for_endpoint(
             protocol,
-            connection_id,
+            &connection_id,
             &base_url,
             model_id,
             &model,
@@ -298,7 +299,9 @@ impl SignalModelSeam {
 
     /// Recheck pinned wire configuration using the caller's admission transaction.
     /// Credentials are compared only in memory and never included in diagnostics.
-    pub(crate) async fn validate_current_on<C: sea_orm::ConnectionTrait>(
+    pub(crate) async fn validate_current_on<
+        C: sea_orm::ConnectionTrait + crate::config::ConfigConnection,
+    >(
         &self,
         db: &C,
     ) -> Result<(), AgentError> {
@@ -548,6 +551,30 @@ impl SignalModelSeam {
                 .insert_header(("anthropic-version", ANTHROPIC_VERSION)),
         };
 
+        if self.dialect == Dialect::Anthropic
+            && self
+                .profile
+                .request_options
+                .get("context_management")
+                .is_some()
+        {
+            http = http.insert_header((
+                "anthropic-beta",
+                desk_diagnose_core::model_profile::CONTEXT_MANAGEMENT_BETA,
+            ));
+        }
+        let thinking_prefix = if self.profile.anthropic_prefix_binding {
+            Some(
+                desk_diagnose_core::thinking_context::project_anthropic_prefix(
+                    &mut body,
+                    &request,
+                    &self.source_context_key,
+                )
+                .map_err(|error| config_error(error.to_string()))?,
+            )
+        } else {
+            None
+        };
         if let Some(db) = &self.context_db {
             self.validate_current_on(db).await.inspect_err(|_| {
                 if let Some(observation) = observation {
@@ -687,6 +714,26 @@ impl SignalModelSeam {
                 observation.change_reason
             );
         }
+        let mut context = turn
+            .provider_meta
+            .context_observation
+            .take()
+            .unwrap_or_default()
+            .with_usage(turn.usage, self.dialect == Dialect::Anthropic);
+        context.conversation_id = request.context_conversation_id.clone();
+        context.observed_at_unix_ms = chrono::Utc::now().timestamp_millis();
+        context.source_context_key = Some(self.source_context_key.clone());
+        context.profile_revision = self.profile.profile_revision;
+        context.reasoning_tokens = turn.provider_meta.reasoning_tokens;
+        if turn.stop_reason == StopReason::Other {
+            context.input_tokens = None;
+            context.cleared_thinking_turns = None;
+            context.cleared_input_tokens = None;
+        }
+        context.request_bytes =
+            Some(serde_json::to_vec(&body).map_or(0, |bytes| bytes.len()) as u64);
+        turn.provider_meta.context_observation = Some(context);
+        turn.provider_meta.thinking_prefix = thinking_prefix;
         turn.provider_meta.cache_projection = cache_projection;
         if request.use_case == desk_diagnose_core::model_profile::ModelUseCase::ContextCompression {
             *self.compression_call_key.borrow_mut() = Some(uuid::Uuid::new_v4().to_string());
@@ -712,7 +759,7 @@ impl SignalModelSeam {
     }
 
     /// Inject the same central store that owns the conversation and provider.
-    pub fn with_context_db(mut self, db: sea_orm::DatabaseConnection) -> Self {
+    pub fn with_context_db(mut self, db: crate::config::connection::DatabaseConnection) -> Self {
         self.context_db = Some(db);
         self
     }
@@ -720,7 +767,6 @@ impl SignalModelSeam {
     fn build_body(&self, request: &ModelRequest) -> Result<Value, AgentError> {
         let effective = resolve_effective_output_limit(
             request.use_case,
-            self.profile.probe_max_output_tokens,
             self.profile.runtime_max_output_tokens,
             request.caller_output_hard_cap,
         )
@@ -842,6 +888,14 @@ impl ModelSeam for SignalModelSeam {
             },
         })
     }
+    fn model_output_token_limit(&self, request: &ModelRequest) -> Result<i64, AgentError> {
+        let body = self.build_body(request)?;
+        self.profile
+            .output_limit_field
+            .read_positive(&body)
+            .map(|limit| limit.get())
+            .map_err(|_| config_error("invalid model output limit"))
+    }
     fn model_input_token_upper_bound(
         &self,
         request: &ModelRequest,
@@ -891,6 +945,7 @@ impl ModelSeam for SignalModelSeam {
                             .max_context_bytes()
                             .map_err(|e| config_error(e.to_string()))?,
                     )
+                    .map(|policy| policy.with_reasoning_profile(&self.profile))
                     .map_err(|e| config_error(e.to_string()))
             })
             .await
@@ -1032,7 +1087,7 @@ fn error_message(err: &Value) -> String {
 /// assembles the normalized [`ModelTurn`] at the end.
 enum StreamState {
     OpenAi(OpenAiStreamState),
-    Anthropic(AnthropicStreamState),
+    Anthropic(Box<AnthropicStreamState>),
 }
 
 impl StreamState {
@@ -1048,10 +1103,10 @@ impl StreamState {
                 source_context_key: Some(source_context_key),
                 ..Default::default()
             }),
-            Dialect::Anthropic => StreamState::Anthropic(AnthropicStreamState {
+            Dialect::Anthropic => StreamState::Anthropic(Box::new(AnthropicStreamState {
                 source_context_key: Some(source_context_key),
                 ..Default::default()
-            }),
+            })),
         }
     }
 
@@ -1081,7 +1136,7 @@ impl StreamState {
     fn into_turn(self) -> ModelTurn {
         match self {
             StreamState::OpenAi(s) => s.into_turn(),
-            StreamState::Anthropic(s) => s.into_turn(),
+            StreamState::Anthropic(s) => (*s).into_turn(),
         }
     }
 }
@@ -1204,7 +1259,10 @@ fn build_openai_body_profiled(
     profile: &ModelRequestProfile,
     effective_output_limit: PositiveOutputLimit,
 ) -> Result<Value, desk_diagnose_core::model_profile::ProfileError> {
-    let projected = desk_diagnose_core::ui_model_ids::project_request(request);
+    let mut projected = desk_diagnose_core::ui_model_ids::project_request(request);
+    for message in &mut projected.messages {
+        desk_diagnose_core::thinking_context::project_replay(message, profile.reasoning_contract);
+    }
     let request = &projected;
     let messages = openai_messages_to_json(&request.messages);
     let mut body = json!({
@@ -1398,6 +1456,8 @@ impl OpenAiStreamState {
             text: self.text,
             tool_calls,
             provider_meta: ProviderResponseMeta {
+                context_observation: None,
+                thinking_prefix: None,
                 cache_projection: None,
                 display_reasoning,
                 reasoning_observed: self.reasoning_observed,
@@ -1471,13 +1531,14 @@ fn anthropic_message_to_json(m: &ChatMessage) -> Value {
         };
         return json!({"role": "user", "content": content});
     }
+    if m.role == ChatRole::Assistant
+        && let Some(ReplayDisposition::Present { envelope }) = &m.replay_disposition
+        && envelope.codec == ReplayCodec::AnthropicContentBlocks
+        && envelope.payload.is_array()
+    {
+        return json!({"role": "assistant", "content": envelope.payload});
+    }
     if m.role == ChatRole::Assistant && !m.tool_calls.is_empty() {
-        if let Some(ReplayDisposition::Present { envelope }) = &m.replay_disposition
-            && envelope.codec == ReplayCodec::AnthropicContentBlocks
-            && envelope.payload.is_array()
-        {
-            return json!({"role": "assistant", "content": envelope.payload});
-        }
         let mut blocks = Vec::new();
         if !m.text.is_empty() {
             blocks.push(json!({"type": "text", "text": m.text}));
@@ -1531,7 +1592,10 @@ fn build_anthropic_body_profiled(
     profile: &ModelRequestProfile,
     effective_output_limit: PositiveOutputLimit,
 ) -> Result<Value, desk_diagnose_core::model_profile::ProfileError> {
-    let projected = desk_diagnose_core::ui_model_ids::project_request(request);
+    let mut projected = desk_diagnose_core::ui_model_ids::project_request(request);
+    for message in &mut projected.messages {
+        desk_diagnose_core::thinking_context::project_replay(message, profile.reasoning_contract);
+    }
     let request = &projected;
     let mut system = String::new();
     let mut messages: Vec<Value> = Vec::new();
@@ -1579,6 +1643,14 @@ fn build_anthropic_body_profiled(
         effective_output_limit,
         &mut body,
     )?;
+    if profile.anthropic_prefix_binding {
+        // Source is bound by the pinned seam; use the same key as durable replay.
+        if let Some(source) = request.pinned_source_context_key.as_ref() {
+            desk_diagnose_core::thinking_context::project_anthropic_prefix(
+                &mut body, request, source,
+            )?;
+        }
+    }
     desk_diagnose_core::prompt_cache::apply_anthropic(&mut body, request, &profile.request_options);
     desk_diagnose_core::prompt_cache::validate_wire_budget(&body, profile.max_context_bytes()?)?;
     Ok(body)
@@ -1613,6 +1685,7 @@ struct AnthropicStreamState {
     source_context_key: Option<SourceContextKey>,
     content_blocks: BTreeMap<usize, Value>,
     reasoning_observed: bool,
+    context_observation: desk_diagnose_core::thinking_context::ProviderContextObservation,
 }
 
 impl AnthropicStreamState {
@@ -1623,6 +1696,8 @@ impl AnthropicStreamState {
             return None;
         }
         let v: Value = serde_json::from_str(data).ok()?;
+        self.context_observation.record_edits(&v);
+        self.context_observation.record_edits(&v["message"]);
         match v.get("type").and_then(|t| t.as_str())? {
             "error" => {
                 self.error = Some(
@@ -1708,6 +1783,15 @@ impl AnthropicStreamState {
                 }
             }
             "message_delta" => {
+                if let Some(count) = v["usage"]["input_tokens"].as_i64() {
+                    self.input_tokens = Some(count);
+                }
+                if let Some(count) = v["usage"]["cache_read_input_tokens"].as_i64() {
+                    self.cache_read = Some(count);
+                }
+                if let Some(count) = v["usage"]["cache_creation_input_tokens"].as_i64() {
+                    self.cache_write = Some(count);
+                }
                 if let Some(sr) = v
                     .get("delta")
                     .and_then(|d| d.get("stop_reason"))
@@ -1748,16 +1832,18 @@ impl AnthropicStreamState {
                 arguments_json: call.arguments,
             })
             .collect();
-        let replay = (!tool_calls.is_empty()).then(|| match self.source_context_key {
-            Some(source_context_key) if self.reasoning_observed => ReplayDisposition::Present {
-                envelope: ProviderReplayEnvelope::new(
-                    ReplayCodec::AnthropicContentBlocks,
-                    source_context_key,
-                    replay_payload,
-                ),
-            },
-            Some(source_context_key) => ReplayDisposition::NotRequired { source_context_key },
-            None => ReplayDisposition::legacy_unknown(),
+        let replay = (!tool_calls.is_empty() || self.reasoning_observed).then(|| {
+            match self.source_context_key {
+                Some(source_context_key) if self.reasoning_observed => ReplayDisposition::Present {
+                    envelope: ProviderReplayEnvelope::new(
+                        ReplayCodec::AnthropicContentBlocks,
+                        source_context_key,
+                        replay_payload,
+                    ),
+                },
+                Some(source_context_key) => ReplayDisposition::NotRequired { source_context_key },
+                None => ReplayDisposition::legacy_unknown(),
+            }
         });
         ModelTurn {
             stop_reason,
@@ -1771,6 +1857,8 @@ impl AnthropicStreamState {
             text: self.text,
             tool_calls,
             provider_meta: ProviderResponseMeta {
+                context_observation: Some(self.context_observation),
+                thinking_prefix: None,
                 cache_projection: None,
                 display_reasoning,
                 reasoning_observed: self.reasoning_observed,
@@ -1800,6 +1888,45 @@ fn append_block_string(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn final_thinking_and_native_clear_receipt_are_preserved() {
+        let source = SourceContextKey::derive(
+            WireProtocol::AnthropicMessages,
+            "connection",
+            "model",
+            "claude",
+        );
+        let mut scan = AnthropicStreamState {
+            source_context_key: Some(source),
+            ..Default::default()
+        };
+        for payload in [
+            r#"{"type":"message_start","message":{"usage":{"input_tokens":11,"cache_read_input_tokens":13,"cache_creation_input_tokens":17}}}"#,
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"private","signature":"signature"}}"#,
+            r#"{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}"#,
+            r#"{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Done"}}"#,
+            r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":7},"context_management":{"applied_edits":[{"type":"clear_thinking_20251015","cleared_thinking_turns":2,"cleared_input_tokens":19}]}}"#,
+        ] {
+            let _ = scan.apply(payload);
+        }
+        let turn = scan.into_turn();
+        assert!(turn.tool_calls.is_empty());
+        assert_eq!(turn.text, "Done");
+        let Some(ReplayDisposition::Present { envelope }) = turn.provider_meta.replay else {
+            panic!("final signed thinking must be retained")
+        };
+        assert_eq!(envelope.payload[0]["signature"], "signature");
+        assert_eq!(envelope.payload[1]["text"], "Done");
+        let observation = turn
+            .provider_meta
+            .context_observation
+            .unwrap()
+            .with_usage(turn.usage, true);
+        assert_eq!(observation.input_tokens, Some(41));
+        assert_eq!(observation.cleared_thinking_turns, Some(2));
+        assert_eq!(observation.cleared_input_tokens, Some(19));
+    }
     mod thinking_replay;
 
     #[test]
@@ -2024,8 +2151,7 @@ mod tests {
         );
         request.use_case = desk_diagnose_core::model_profile::ModelUseCase::ContextCompression;
         request.tool_choice = ToolChoice::None;
-        request.caller_output_hard_cap =
-            Some(desk_diagnose_core::model_context::CONTEXT_SUMMARY_OUTPUT_HARD_CAP_TOKENS);
+        request.caller_output_hard_cap = Some(4096);
         let metrics = std::sync::Arc::new(TransportMetrics::default());
         request.observation = Some(observed_transport(
             metrics.clone(),
@@ -2114,14 +2240,9 @@ mod tests {
     }
     #[actix_web::test]
     async fn oss_policy_is_durable_pinned_and_provenance_requires_a_completed_call() {
-        use sea_orm::ConnectionTrait;
-        let db = sea_orm::Database::connect("sqlite::memory:").await.unwrap();
-        db.execute(
-            &sea_orm::Schema::new(db.get_database_backend())
-                .create_table_from_entity(crate::entity::context_management_config::Entity),
-        )
-        .await
-        .unwrap();
+        let db = crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap();
         let config = ModelProviderConfig {
             base_url: Some("https://example.test/v1".into()),
             model: Some("test".into()),
@@ -2142,6 +2263,7 @@ mod tests {
             &db,
             &desk_signal_facade::context_management::UpdateContextManagementRequest {
                 expected_revision: 0,
+                summary_max_output_tokens: 4096,
                 strategy:
                     desk_signal_facade::context_management::ContextManagementStrategyDto::Window,
             },
@@ -2170,10 +2292,11 @@ mod tests {
 
     fn test_profile() -> ModelRequestProfile {
         ModelRequestProfile {
+            reasoning_contract: Default::default(),
+            anthropic_prefix_binding: false,
             profile_schema_version: desk_diagnose_core::model_profile::MODEL_PROFILE_SCHEMA_VERSION,
             request_options: json!({}),
             output_limit_field: desk_diagnose_core::model_profile::OutputLimitField::MaxTokens,
-            probe_max_output_tokens: 512,
             runtime_max_output_tokens: 4096,
             max_context_bytes: 131_072,
             profile_revision: 1,
@@ -2184,7 +2307,6 @@ mod tests {
         let profile = test_profile();
         let effective = resolve_effective_output_limit(
             request.use_case,
-            profile.probe_max_output_tokens,
             profile.runtime_max_output_tokens,
             request.caller_output_hard_cap,
         )
@@ -2203,7 +2325,6 @@ mod tests {
         let profile = test_profile();
         let effective = resolve_effective_output_limit(
             request.use_case,
-            profile.probe_max_output_tokens,
             profile.runtime_max_output_tokens,
             request.caller_output_hard_cap,
         )
@@ -2309,6 +2430,11 @@ mod tests {
             tool_choice: choice,
             response_format: ResponseFormatSpec::None,
             use_case: desk_diagnose_core::model_profile::ModelUseCase::Agent,
+            thinking_prefix: None,
+            protected_replay_message_ids: Default::default(),
+            context_conversation_id: None,
+            pinned_source_context_key: None,
+            ui_references: None,
             previous_cache_projection: None,
             delegation_call: None,
             caller_output_hard_cap: None,
@@ -2462,20 +2588,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn current_provider_validation_reads_uncommitted_changes_and_preserves_rollback() {
-        use crate::entity::model_provider as provider;
-        use sea_orm::{Database, EntityTrait, Set, TransactionTrait};
-        let db = Database::connect("sqlite::memory:").await.unwrap();
+    async fn current_provider_validation_uses_file_settings_inside_runtime_transactions() {
+        use crate::config::ConfigConnection;
+        use sea_orm::TransactionTrait;
+        let db = crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap();
         crate::db::initialize_schema(&db).await.unwrap();
-        let config = ModelProviderConfig {
-            base_url: Some("https://model.example/v1".into()),
-            model: Some("test".into()),
-            api_key: Some("test-only".into()),
-            wire_protocol: Some(WireProtocol::OpenAiChatCompletions),
-            max_context_bytes: Some(131_072),
-            ..Default::default()
-        };
-        crate::model_provider::save(&db, config).await.unwrap();
+        crate::model_provider::save(
+            &db,
+            ModelProviderConfig {
+                base_url: Some("https://model.example/v1".into()),
+                model: Some("test".into()),
+                api_key: Some("test-only".into()),
+                wire_protocol: Some(WireProtocol::OpenAiChatCompletions),
+                max_context_bytes: Some(131_072),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
         let config = crate::model_provider::load(&db).await.unwrap();
         let seam = SignalModelSeam::from_config(&config).unwrap();
         seam.validate_current_on(&db).await.unwrap();
@@ -2487,37 +2619,103 @@ mod tests {
             "output_limit",
             "capability",
         ] {
-            let txn = db.begin().await.unwrap();
-            let mut update = provider::ActiveModel::default();
-            match field {
-                "model" => update.model = Set(Some("changed".into())),
-                "secret" => update.api_key = Set(Some("changed-secret".into())),
-                "connection_revision" => {
-                    update.connection_revision = Set(config.connection_revision + 1)
-                }
-                "profile_revision" => update.profile_revision = Set(config.profile_revision + 1),
-                "output_limit" => {
-                    update.runtime_max_output_tokens = Set(config.runtime_max_output_tokens + 1)
-                }
-                "capability" => update.supports_image_input = Set(!config.supports_image_input),
-                _ => unreachable!(),
-            }
-            provider::Entity::update_many()
-                .set(update)
-                .exec(&txn)
+            db.config_context()
+                .update::<_, sea_orm::DbErr, _>(|file| {
+                    let gateway = &mut file.ai_gateway;
+                    match field {
+                        "model" => gateway.model = Some("changed".into()),
+                        "secret" => gateway.api_key = Some("changed-secret".into()),
+                        "connection_revision" => gateway.connection_revision += 1,
+                        "profile_revision" => gateway.profile_revision += 1,
+                        "output_limit" => gateway.runtime_max_output_tokens += 1,
+                        "capability" => {
+                            gateway.supports_image_input = !gateway.supports_image_input
+                        }
+                        _ => unreachable!(),
+                    }
+                    Ok(Some(()))
+                })
                 .await
                 .unwrap();
+            let txn = db.begin().await.unwrap();
             let error = seam.validate_current_on(&txn).await.unwrap_err();
             assert!(!error.message.contains("changed-secret"));
             assert!(!error.message.contains("test-only"));
             txn.rollback().await.unwrap();
+            // Rolling back runtime rows does not roll back a committed file update.
+            assert!(seam.validate_current_on(&db).await.is_err());
+            crate::model_provider::save(&db, config.clone())
+                .await
+                .unwrap();
             seam.validate_current_on(&db).await.unwrap();
         }
+        db.config_context()
+            .update::<_, sea_orm::DbErr, _>(|file| {
+                file.ai_gateway = ModelProviderConfig::default();
+                Ok(Some(()))
+            })
+            .await
+            .unwrap();
         let txn = db.begin().await.unwrap();
-        provider::Entity::delete_many().exec(&txn).await.unwrap();
         assert!(seam.validate_current_on(&txn).await.is_err());
         txn.rollback().await.unwrap();
-        seam.validate_current_on(&db).await.unwrap();
+    }
+
+    #[test]
+    fn probes_use_runtime_budget_for_both_agent_and_approval_gateways() {
+        use desk_diagnose_core::model_profile::OutputLimitField;
+
+        for (protocol, field, options) in [
+            (
+                WireProtocol::OpenAiChatCompletions,
+                OutputLimitField::MaxTokens,
+                json!({"reasoning_effort": "high"}),
+            ),
+            (
+                WireProtocol::OpenAiChatCompletions,
+                OutputLimitField::MaxCompletionTokens,
+                json!({}),
+            ),
+            (
+                WireProtocol::AnthropicMessages,
+                OutputLimitField::MaxTokens,
+                json!({"thinking": {"type": "enabled", "budget_tokens": 2048}}),
+            ),
+        ] {
+            let gateway = ModelProviderConfig {
+                base_url: Some("https://model.example/v1".into()),
+                model: Some("synthetic".into()),
+                api_key: Some("synthetic-key".into()),
+                wire_protocol: Some(protocol),
+                request_options: options,
+                output_limit_field: field,
+                runtime_max_output_tokens: 8192,
+                max_context_bytes: Some(131_072),
+                ..Default::default()
+            };
+            let agent = SignalModelSeam::from_config(&gateway).unwrap();
+            let approval = SignalModelSeam::from_approval_config(
+                &crate::approval_model_provider::ApprovalModelConfig {
+                    gateway,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            for seam in [agent, approval] {
+                for use_case in [
+                    desk_diagnose_core::model_profile::ModelUseCase::Probe,
+                    desk_diagnose_core::model_profile::ModelUseCase::Approval,
+                ] {
+                    let mut request = text_request(ResponseFormatSpec::None);
+                    request.use_case = use_case;
+                    let body = seam.build_body(&request).unwrap();
+                    assert_eq!(body[field.as_str()], 8192);
+                    if protocol == WireProtocol::AnthropicMessages {
+                        assert_eq!(body["thinking"]["budget_tokens"], 2048);
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -2536,7 +2734,6 @@ mod tests {
                 enabled: true,
                 configuration_revision: 7,
                 gateway,
-                prices: None,
                 probe_observation: None,
             },
         )
@@ -3220,6 +3417,11 @@ mod tests {
                 tool_choice: ToolChoice::Auto,
                 response_format: ResponseFormatSpec::None,
                 use_case: desk_diagnose_core::model_profile::ModelUseCase::Agent,
+                thinking_prefix: None,
+                protected_replay_message_ids: Default::default(),
+                context_conversation_id: None,
+                pinned_source_context_key: None,
+                ui_references: None,
                 previous_cache_projection: None,
                 delegation_call: None,
                 caller_output_hard_cap: Some(1024),
@@ -3630,6 +3832,11 @@ mod tests {
                 tool_choice: ToolChoice::Auto,
                 response_format: ResponseFormatSpec::None,
                 use_case: desk_diagnose_core::model_profile::ModelUseCase::Agent,
+                thinking_prefix: None,
+                protected_replay_message_ids: Default::default(),
+                context_conversation_id: None,
+                pinned_source_context_key: None,
+                ui_references: None,
                 previous_cache_projection: None,
                 delegation_call: None,
                 caller_output_hard_cap: Some(1024),

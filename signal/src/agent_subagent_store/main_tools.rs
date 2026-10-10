@@ -1,5 +1,6 @@
 //! Main tool effects and labelled transcript receipts share one root transaction.
 use super::*;
+use crate::config::connection::DatabaseTransaction;
 use desk_agent_protocol::data_lineage::DataEnvelope;
 use desk_diagnose_core::{
     chat::{ChatMessage, ChatRole, ToolCall},
@@ -13,7 +14,7 @@ use desk_diagnose_core::{
         wait::{ParentWait, TaskFence, WaitEvaluation},
     },
 };
-use sea_orm::DatabaseTransaction;
+
 use sha2::{Digest, Sha256};
 
 fn task_query(parent: &PersistedAgentSession) -> sea_orm::Select<run_row::Entity> {

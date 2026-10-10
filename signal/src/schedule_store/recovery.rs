@@ -1,11 +1,12 @@
 //! Explicit recovery revalidates current authority before starting a new epoch.
 use super::queue::database_now;
 use super::{ScheduleStore, ScheduleStoreError, entity, json};
+use crate::config::connection::DatabaseTransaction;
 use desk_agent_protocol::schedule::SchedulePauseReason;
 use desk_diagnose_core::schedule::{
     SCHEDULE_CALC_VERSION, lifecycle::FailureState, next_after, parse_json, validate_publication,
 };
-use sea_orm::{ColumnTrait, DatabaseTransaction, EntityTrait, QueryFilter, Set};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
 
 /// Runtime policy adapter checks account, device, contract and session fences.
 /// No wire payload or model response can implement this server-owned interface.

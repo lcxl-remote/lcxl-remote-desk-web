@@ -18,7 +18,10 @@ fn wakeup() -> &'static tokio::sync::Notify {
 pub fn notify() {
     wakeup().notify_one();
 }
-pub async fn run(db: sea_orm::DatabaseConnection, connections: web::Data<SharedConnectionMap>) {
+pub async fn run(
+    db: crate::config::connection::DatabaseConnection,
+    connections: web::Data<SharedConnectionMap>,
+) {
     let store = FileRecoveryCleanupStore::new(db.clone());
     let scopes = FileRecoveryScopeStore::new(db.clone());
     let mut tick = tokio::time::interval(Duration::from_secs(5));

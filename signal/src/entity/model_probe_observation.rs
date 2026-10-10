@@ -6,9 +6,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
 #[sea_orm(table_name = "model_probe_observation")]
 pub struct Model {
-    /// Fixed singleton id and FK to `model_provider.id`.
+    /// Logical singleton gateway id; configuration is file-owned.
     #[sea_orm(primary_key, auto_increment = false)]
     pub model_provider_id: i32,
+    pub config_instance: String,
     pub connection_revision: i64,
     pub profile_revision: i64,
     pub tested_at: DateTimeUtc,

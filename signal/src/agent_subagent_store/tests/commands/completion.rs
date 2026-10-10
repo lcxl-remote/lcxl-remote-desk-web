@@ -7,6 +7,21 @@ use desk_diagnose_core::{
     prompt::ResponseFormatSpec, seam::ModelRequest, session::WorkKind,
 };
 
+#[test]
+fn original_command_recovery_and_publication_fit_production_thread_stack() {
+    std::thread::Builder::new()
+        .name("child-command-completion-stack".into())
+        .stack_size(2 * 1024 * 1024)
+        .spawn(|| {
+            child_recovery_rearms_only_the_original_uninterpreted_command_delivery();
+            approved_child_original_completion_reaches_authorized_model_projection();
+            recovered_child_command_completion_is_still_published_and_interpreted();
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
 #[actix_web::test]
 async fn approved_child_original_completion_reaches_authorized_model_projection() {
     assert_completion_publisher_interprets_original(false).await;
@@ -42,7 +57,12 @@ async fn assert_completion_publisher_interprets_original(recover_first: bool) {
         max_context_bytes: Some(131072),
         ..Default::default()
     };
-    let (db, child, _) = completed_fixture_with_delivery(&config, None, recover_first).await;
+    let (db, child, _) = Box::pin(completed_fixture_with_delivery(
+        &config,
+        None,
+        recover_first,
+    ))
+    .await;
     let exec = SignalAgentExecStore::new(db.clone());
     let before = deliverable_commands(&db).await;
     assert_eq!(
@@ -135,7 +155,7 @@ async fn child_recovery_rearms_only_the_original_uninterpreted_command_delivery(
         max_context_bytes: Some(131072),
         ..Default::default()
     };
-    let (db, child, _) = completed_fixture(&config, None).await;
+    let (db, child, _) = Box::pin(completed_fixture(&config, None)).await;
     let pending = child.pending_auto_triggers[0].clone();
     let tasks = SubAgentStore::new(db.clone());
     let task_id = child.agent_role.binding().unwrap().task_id.clone();
@@ -200,7 +220,7 @@ async fn completed_fixture(
     config: &crate::model_provider::ModelProviderConfig,
     first: Option<&desk_diagnose_core::chat::ModelTurn>,
 ) -> (DatabaseConnection, PersistedAgentSession, ModelEgressPolicy) {
-    completed_fixture_with_delivery(config, first, false).await
+    Box::pin(completed_fixture_with_delivery(config, first, false)).await
 }
 
 async fn completed_fixture_with_delivery(
@@ -208,24 +228,29 @@ async fn completed_fixture_with_delivery(
     first: Option<&desk_diagnose_core::chat::ModelTurn>,
     recover_first: bool,
 ) -> (DatabaseConnection, PersistedAgentSession, ModelEgressPolicy) {
-    let destination = config.destination_identity().unwrap();
-    let (db, _, mut child, call, grant) = approved_child_with_source(
-        first.and_then(|turn| turn.tool_calls.first()).cloned(),
-        destination.clone(),
-        desk_agent_protocol::data_lineage::Sensitivity::Sensitive,
-    )
-    .await;
+    let db = database().await;
     let schema = Schema::new(db.get_database_backend());
-    for mut statement in [
-        schema.create_table_from_entity(crate::entity::model_provider::Entity),
-        schema.create_table_from_entity(crate::entity::model_probe_observation::Entity),
-        schema.create_table_from_entity(crate::entity::context_management_config::Entity),
-    ] {
-        db.execute(statement.if_not_exists()).await.unwrap();
-    }
+    db.execute(
+        schema
+            .create_table_from_entity(crate::entity::model_probe_observation::Entity)
+            .if_not_exists(),
+    )
+    .await
+    .unwrap();
     crate::model_provider::save(&db, config.clone())
         .await
         .unwrap();
+    let config = crate::model_provider::load(&db).await.unwrap();
+    let destination = config.destination_identity().unwrap();
+    // Keep the nested fixture futures on the heap. Debug poll frames retain
+    // large temporary session values even when no await is suspended there.
+    let (db, _, mut child, call, grant) = Box::pin(approved_child_with_source_on(
+        db,
+        first.and_then(|turn| turn.tool_calls.first().cloned()),
+        destination.clone(),
+        desk_agent_protocol::data_lineage::Sensitivity::Sensitive,
+    ))
+    .await;
     crate::ai_assistant_gate::enable_test_host();
     let now = chrono::Utc::now().timestamp_millis() as u64;
     let policy = ModelEgressPolicy {

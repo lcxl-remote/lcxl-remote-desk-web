@@ -35,6 +35,24 @@ describe('shared permission review', () => {
         expect(screen.getByText('pages.aiAssistant.permissionItemDecision.denied')).toBeInTheDocument();
         expect(screen.getByText(/The request includes unrelated files/)).toBeInTheDocument();
     });
+    it('shows a runtime approval-model fault and leaves the action unapproved', () => {
+        const onDecide = vi.fn();
+        const value = {
+            ...request(), state: 'denied',
+            decision: {
+                source: 'review_unavailable', decidedAt: '2026-10-09T00:00:00Z',
+                items: [{ itemId: 'read', approved: false, reasonCode: 'approval_ai_fault',
+                    reason: 'Approval AI is unavailable; the requested actions were not executed' }],
+            },
+        } as PermissionRequestDto;
+        render(<AssistantPermissionRequest request={value} canDecide={false} onDecide={onDecide} />);
+        fireEvent.click(screen.getByRole('button', { name: /inspect_desktop_session/ }));
+        expect(screen.getByText('pages.aiAssistant.permissionDecisionSource.review_unavailable')).toBeInTheDocument();
+        expect(screen.getByText(/Approval AI is unavailable; the requested actions were not executed/)).toBeInTheDocument();
+        expect(screen.getByText('pages.aiAssistant.permissionItemDecision.denied')).toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: 'pages.aiAssistant.permissionSubmitSelection' })).not.toBeInTheDocument();
+        expect(onDecide).not.toHaveBeenCalled();
+    });
     it.each([
         ['execute_ui_actions', 'ui:scroll'],
         ['send_background_input', 'background_input:scroll'],

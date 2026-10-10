@@ -1,5 +1,6 @@
 //! SQLite append-only event ledger for the OSS dynamic AI Assistant run.
 
+use crate::config::connection::DatabaseConnection;
 pub(crate) mod input_context;
 pub use desk_diagnose_core::input_read_context::ReadContextSelection;
 pub use input_context::InputSubject;
@@ -16,8 +17,8 @@ use desk_diagnose_core::goal::{
 };
 use desk_diagnose_core::session::{AgentSessionSurface, PersistedAgentSession};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder,
-    QuerySelect, Set, TransactionTrait,
+    ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set,
+    TransactionTrait,
 };
 
 use crate::entity::{agent_goal_open_request, agent_goal_run, agent_run_event, agent_session};
@@ -787,7 +788,7 @@ mod tests {
         Sensitivity,
     };
     use desk_agent_protocol::{ExecutionMode, data_lineage::DestinationIdentity};
-    use sea_orm::{Database, EntityTrait};
+    use sea_orm::EntityTrait;
     use sha2::{Digest, Sha256};
 
     fn scope() -> AgentScope {
@@ -848,7 +849,9 @@ mod tests {
 
     async fn file_db(path: &std::path::Path) -> DatabaseConnection {
         let url = format!("sqlite://{}?mode=rwc", path.display());
-        let db = Database::connect(&url).await.unwrap();
+        let db = crate::config::test_support::Database::connect(&url)
+            .await
+            .unwrap();
         crate::db::initialize_schema(&db).await.unwrap();
         db
     }
@@ -901,7 +904,9 @@ mod tests {
 
     #[tokio::test]
     async fn direct_goal_input_and_opening_are_one_idempotent_transaction() {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
+        let db = crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap();
         crate::db::initialize_schema(&db).await.unwrap();
         let mut configured = crate::goal_budget_policy::read(&db).await.unwrap().limits;
         configured.model_calls = Some(4);
@@ -1017,7 +1022,9 @@ mod tests {
         use desk_diagnose_core::goal::GoalControl;
         use sea_orm::TransactionTrait;
 
-        let db = Database::connect("sqlite::memory:").await.unwrap();
+        let db = crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap();
         crate::db::initialize_schema(&db).await.unwrap();
         let store = SignalAgentRunEventStore::new(db.clone());
         store
@@ -1119,7 +1126,9 @@ mod tests {
     #[tokio::test]
     async fn owner_goal_controls_are_fenced_and_durable() {
         use desk_diagnose_core::goal::{GoalOwnerAction, GoalState};
-        let db = Database::connect("sqlite::memory:").await.unwrap();
+        let db = crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap();
         crate::db::initialize_schema(&db).await.unwrap();
         let store = SignalAgentRunEventStore::new(db.clone());
         store
@@ -1205,7 +1214,9 @@ mod tests {
 
     #[tokio::test]
     async fn later_input_revises_goal_and_original_goal_input_stays_idempotent() {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
+        let db = crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap();
         crate::db::initialize_schema(&db).await.unwrap();
         let store = SignalAgentRunEventStore::new(db.clone());
         let start = StartUserGoal {
@@ -1264,7 +1275,9 @@ mod tests {
 
     #[tokio::test]
     async fn newer_user_input_withdraws_an_ai_goal_proposal_atomically() {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
+        let db = crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap();
         crate::db::initialize_schema(&db).await.unwrap();
         let store = SignalAgentRunEventStore::new(db.clone());
         store

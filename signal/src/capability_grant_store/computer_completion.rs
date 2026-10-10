@@ -2,6 +2,7 @@
 
 use super::computer_binding::{ComputerBinding, original_on, validate_binding};
 use super::*;
+use crate::config::connection::DatabaseTransaction;
 use crate::remote_tool_edge::completion::{Projection, project, project_reported};
 use desk_agent_protocol::computer_use::ComputerActionCompleted;
 use desk_diagnose_core::{
@@ -9,7 +10,6 @@ use desk_diagnose_core::{
     seam::{ExecOutcome, ToolRunOutput, WaitOutcome},
     session::{ActionIdentity, WorkKind},
 };
-use sea_orm::DatabaseTransaction;
 
 pub(crate) mod observation;
 

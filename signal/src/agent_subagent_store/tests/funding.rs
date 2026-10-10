@@ -50,7 +50,7 @@ pub(super) async fn funded_parent(db: &DatabaseConnection) -> (PersistedAgentSes
     (parent, goal)
 }
 
-async fn recorded_goal<C: ConnectionTrait>(db: &C) -> GoalRun {
+async fn recorded_goal<C: ConnectionTrait + crate::config::ConfigConnection>(db: &C) -> GoalRun {
     let row = goal_row::Entity::find()
         .filter(goal_row::Column::GoalId.eq("funding-goal"))
         .one(db)
@@ -673,12 +673,6 @@ async fn review_without_planner(
         source_epoch: Some(1),
     };
     authority.validate().unwrap();
-    let prices = desk_diagnose_core::approval_cost::ApprovalTokenPrices {
-        input_micros_per_million: 1000000,
-        output_micros_per_million: 1000000,
-        cache_read_micros_per_million: 1000000,
-        cache_write_micros_per_million: 1000000,
-    };
     crate::entity::agent_approval_review::ActiveModel {
         candidate_id: Set(authority.candidate_id.clone()),
         conversation_id: Set("root".into()),
@@ -691,13 +685,11 @@ async fn review_without_planner(
         action_sha256: Set("c".repeat(64)),
         context_hmac_sha256: Set(authority.context_hmac_sha256.clone()),
         call_authority_json: Set(Some(serde_json::to_string(&authority).unwrap())),
-        token_prices_json: Set(Some(serde_json::to_string(&prices).unwrap())),
         status: Set("reviewing".into()),
         lease_epoch: Set(1),
         lease_owner: Set(Some(authority.lease_owner.clone())),
         lease_deadline: Set(Some(authority.lease_deadline_ms as i64)),
         reserved_tokens: Set(230),
-        reserved_cost_micros: Set(230),
         expires_at: Set(now + 300000),
         created_at: Set(now),
         updated_at: Set(now),
@@ -850,13 +842,11 @@ async fn independent_review_reserves_without_planning_and_unstarted_pause_refund
         .await
         .unwrap()
         .unwrap();
-    let usage =
-        super::super::review_budget::settle_review_call_on(&txn, &review, None, None, now + 2)
-            .await
-            .unwrap();
+    let usage = super::super::review_budget::settle_review_call_on(&txn, &review, None, now + 2)
+        .await
+        .unwrap();
     assert!(!usage.dispatched);
     assert_eq!(usage.tokens, Some(0));
-    assert_eq!(usage.cost_micros, Some(0));
     txn.commit().await.unwrap();
     let goal = recorded_goal(&db).await;
     assert_eq!(goal.state, GoalState::Paused(GoalPauseReason::Owner));
@@ -913,29 +903,17 @@ async fn dispatched_review_usage_is_canonical_and_does_not_reactivate_the_parent
         .unwrap()
         .unwrap();
     assert!(
-        super::super::review_budget::settle_review_call_on(
-            &txn,
-            &review,
-            Some(20),
-            Some(18),
-            now + 5
-        )
-        .await
-        .is_err()
+        super::super::review_budget::settle_review_call_on(&txn, &review, Some(20), now + 5)
+            .await
+            .is_err()
     );
-    let usage = super::super::review_budget::settle_review_call_on(
-        &txn,
-        &review,
-        Some(18),
-        Some(18),
-        now + 5,
-    )
-    .await
-    .unwrap();
+    let usage =
+        super::super::review_budget::settle_review_call_on(&txn, &review, Some(18), now + 5)
+            .await
+            .unwrap();
     assert!(usage.dispatched);
     assert_eq!(usage.tokens, Some(18));
-    assert_eq!(usage.cost_micros, Some(18));
-    super::super::review_budget::settle_review_call_on(&txn, &review, None, None, now + 6)
+    super::super::review_budget::settle_review_call_on(&txn, &review, None, now + 6)
         .await
         .unwrap();
     txn.commit().await.unwrap();
@@ -967,14 +945,14 @@ async fn unknown_review_ledger(
     i64,
 ) {
     use desk_diagnose_core::{
-        approval_cost::ReviewUsageSettlement,
         approval_delegation::{ApprovalDelegation, ApprovalDelegationStatus},
+        approval_usage::ReviewTokenUsageSettlement,
     };
     let (parent, authority) = review_without_planner(db).await;
     let receipt = reserve_review(db, &parent, &authority).await;
     let now = chrono::Utc::now().timestamp_millis();
     let provider_id = "9".repeat(64);
-    let mut delegation = ApprovalDelegation::new(
+    let mut delegation = ApprovalDelegation::new_usage_only(
         authority.delegation_id.clone(),
         "root".into(),
         "1".into(),
@@ -983,8 +961,8 @@ async fn unknown_review_ledger(
         now as u64,
     )
     .unwrap();
-    delegation.reserve(230, 230).unwrap();
-    delegation.settle(230, 230, None, None).unwrap();
+    delegation.reserve_tokens(230).unwrap();
+    delegation.settle_tokens(230, None).unwrap();
     delegation.close(ApprovalDelegationStatus::Closed).unwrap();
     crate::entity::agent_approval_delegation::ActiveModel {
         delegation_id: Set(delegation.delegation_id.clone()),
@@ -1037,15 +1015,13 @@ async fn unknown_review_ledger(
         .await
         .unwrap()
         .unwrap();
-    let physical = super::super::review_budget::settle_review_call_on(&txn, &row, None, None, now)
+    let physical = super::super::review_budget::settle_review_call_on(&txn, &row, None, now)
         .await
         .unwrap();
-    let unknown = physical
-        .settlement(row.reserved_tokens, row.reserved_cost_micros)
-        .unwrap();
+    let unknown = physical.settlement(row.reserved_tokens).unwrap();
     assert_eq!(
         unknown,
-        ReviewUsageSettlement::from_provider_fact(true, None, None, 230, 230).unwrap()
+        ReviewTokenUsageSettlement::from_provider_fact(true, None, 230).unwrap()
     );
     crate::agent_approval_usage::record_usage_on(&txn, &row, unknown, now)
         .await
@@ -1121,7 +1097,7 @@ async fn late_review_usage_corrects_once_after_pause_and_closed_delegation() {
     );
     let after = cumulative_review(&db).await;
     assert_eq!(after.usage.tokens_used, 18);
-    assert_eq!(after.usage.cost_used_micros, 18);
+    assert_eq!(after.usage.cost_used_micros, None);
     assert_eq!(after.usage.reviews_used, 1);
     assert_eq!(after.usage.reviews_reserved, 0);
     assert_eq!(after.revision, before.revision);
@@ -1172,7 +1148,7 @@ async fn cumulative_unknown_review_pins_an_already_settled_source_until_correcti
         .await
         .unwrap()
         .unwrap();
-    super::super::review_budget::settle_review_call_on(&txn, &row, None, None, now + 5)
+    super::super::review_budget::settle_review_call_on(&txn, &row, None, now + 5)
         .await
         .unwrap();
     apply_goal_source_on(
@@ -1283,4 +1259,37 @@ async fn malformed_review_accounting_rotates_without_hiding_a_later_known_receip
         0
     );
     assert_eq!(cumulative_review(&db).await.usage.reviews_used, 1);
+}
+
+#[tokio::test]
+async fn ordinary_input_reserves_more_than_the_old_total_without_skipping_accounting() {
+    let db = database().await;
+    let (parent, _) = super::creation::runnable_parent(&db).await;
+    let store = SubAgentStore::new(db.clone());
+    let upper = GoalUsage {
+        input_tokens: 1_100_000,
+        output_tokens: 128_000,
+        model_calls: 1,
+        ..Default::default()
+    };
+    let now = chrono::Utc::now().timestamp_millis();
+    for id in ["large-first", "large-second"] {
+        let receipt = match store
+            .reserve_runtime_call(
+                &parent,
+                id,
+                DelegationCallKind::Model,
+                &"a".repeat(64),
+                upper,
+                now,
+            )
+            .await
+            .unwrap()
+        {
+            CallAdmission::Reserved(receipt) => receipt,
+            _ => panic!("ordinary source must admit its configured model allowance"),
+        };
+        assert_eq!(receipt.upper.tokens, 1_228_000);
+        assert_eq!(receipt.source_goal_upper, None);
+    }
 }

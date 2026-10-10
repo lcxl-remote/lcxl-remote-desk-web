@@ -135,12 +135,21 @@ pub fn trusted_permission_descriptor(
             unpredictable_input: false,
         },
     );
+    let mut tool_spec = capability.tool_spec.clone();
+    if matches!(
+        item.tool_name.as_str(),
+        "read_current_screen" | "inspect_desktop_ui"
+    ) {
+        // These exact grants canonicalize native references to observed IDs.
+        // Review the same contract without asking the model for native metadata.
+        crate::ui_model_ids::project_tool(&mut tool_spec);
+    }
     let descriptor = serde_json::json!({
         "provider_id": item.provider_id,
         "tool_name": item.tool_name,
         "provider": provider.wire,
         "capability": capability.wire,
-        "tool_spec": capability.tool_spec,
+        "tool_spec": tool_spec,
         "risk_tier": risk,
     })
     .to_string();
@@ -177,7 +186,6 @@ pub fn reviewer_model_request(
         ResponseFormatSpec::JsonObject,
     );
     request.use_case = ModelUseCase::Approval;
-    request.caller_output_hard_cap = Some(2_048);
     Ok(request)
 }
 
@@ -188,7 +196,7 @@ pub fn reviewer_request_digest(request: &ModelRequest) -> Result<String, Approva
         || !matches!(request.response_format, ResponseFormatSpec::JsonObject)
         || request.tool_choice != crate::chat::ToolChoice::Auto
         || request.previous_cache_projection.is_some()
-        || request.caller_output_hard_cap != Some(2048)
+        || request.caller_output_hard_cap.is_some()
     {
         return Err(ApprovalReviewError::InvalidContext);
     }
@@ -2401,6 +2409,17 @@ mod tests {
         let request = reviewer_model_request(&candidate, prompt.clone()).unwrap();
         assert!(request.tools.is_empty());
         assert_eq!(request.use_case, ModelUseCase::Approval);
+        assert_eq!(request.caller_output_hard_cap, None);
+        assert_eq!(
+            crate::model_profile::resolve_effective_output_limit(
+                request.use_case,
+                128_000,
+                request.caller_output_hard_cap,
+            )
+            .unwrap()
+            .get(),
+            128_000,
+        );
         assert!(matches!(
             request.response_format,
             ResponseFormatSpec::JsonObject
@@ -2513,6 +2532,12 @@ mod tests {
                 OutputOutcome::InvalidProtocol,
             ),
             ("", StopReason::EndTurn, true, OutputOutcome::EmptyResponse),
+            (
+                "",
+                StopReason::MaxTokens,
+                true,
+                OutputOutcome::OutputTruncated,
+            ),
             (
                 "invalid_private_review",
                 StopReason::EndTurn,
@@ -2728,6 +2753,86 @@ mod tests {
         assert!(
             trusted_permission_descriptor(&registry, &item, ProductSurface::OssPersonalOwner,)
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn permission_descriptor_matches_canonical_observed_ids_on_both_surfaces() {
+        let registry = crate::ai_assistant::ai_assistant_provider_registry();
+        for surface in [
+            ProductSurface::OssPersonalOwner,
+            ProductSurface::ManagerPersonalOwner,
+        ] {
+            for (name, native_field, model_field, kind) in [
+                ("read_current_screen", "window", "window_id", "window"),
+                ("inspect_desktop_ui", "root", "root_id", "application"),
+            ] {
+                let capability = registry.capability_for_tool(name).unwrap();
+                let provider = registry
+                    .provider_for_capability(&capability.wire.capability_id)
+                    .unwrap();
+                let reference = serde_json::json!({"token":"observed-target", "snapshot_id":"observation",
+                    "object_kind":kind, "expires_at":"2026-10-10T15:00:00Z"});
+                let mut native = serde_json::json!({native_field:reference.clone()});
+                if name == "inspect_desktop_ui" {
+                    native["queries"] = serde_json::json!(["窗口", "window"]);
+                }
+                let canonical =
+                    crate::permission_tools::canonical_tool_permission_input_json(name, native)
+                        .unwrap();
+                let input: serde_json::Value = serde_json::from_str(&canonical).unwrap();
+                assert_eq!(input[model_field], "observed-target");
+                assert!(input.get(native_field).is_none());
+                let mut item = permission_request().items.remove(0);
+                item.tool_name = name.into();
+                item.provider_id = provider.wire.provider_id.clone();
+                item.expected_effect = capability.wire.effect;
+                item.canonical_input_json = Some(canonical);
+                let (descriptor, _) =
+                    trusted_permission_descriptor(&registry, &item, surface).unwrap();
+                let descriptor: serde_json::Value = serde_json::from_str(&descriptor).unwrap();
+                let schema = &descriptor["tool_spec"]["parameters_schema"];
+                crate::model_input::validate_format_with_schema(name, schema, &input).unwrap();
+                assert!(schema["properties"].get(native_field).is_none());
+                assert_eq!(schema["properties"][model_field]["type"], "string");
+                let mut forged = input.clone();
+                forged[model_field] = reference;
+                assert!(
+                    crate::model_input::validate_format_with_schema(name, schema, &forged).is_err()
+                );
+                assert_eq!(
+                    descriptor["capability"]["capability_id"],
+                    capability.wire.capability_id
+                );
+                assert_eq!(descriptor["provider_id"], item.provider_id);
+                // The registered native schema remains available for dispatch.
+                assert!(
+                    capability.tool_spec.parameters_schema["properties"]
+                        .get(native_field)
+                        .is_some()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn other_permission_descriptors_keep_the_registered_native_contract() {
+        let registry = crate::ai_assistant::ai_assistant_provider_registry();
+        let capability = registry.capability_for_tool("launch_application").unwrap();
+        let provider = registry
+            .provider_for_capability(&capability.wire.capability_id)
+            .unwrap();
+        let mut item = permission_request().items.remove(0);
+        item.tool_name = capability.wire.tool_name.clone();
+        item.provider_id = provider.wire.provider_id.clone();
+        item.expected_effect = capability.wire.effect;
+        let (descriptor, _) =
+            trusted_permission_descriptor(&registry, &item, ProductSurface::OssPersonalOwner)
+                .unwrap();
+        let descriptor: serde_json::Value = serde_json::from_str(&descriptor).unwrap();
+        assert_eq!(
+            descriptor["tool_spec"],
+            serde_json::to_value(&capability.tool_spec).unwrap()
         );
     }
 

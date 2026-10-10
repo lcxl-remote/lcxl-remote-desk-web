@@ -1,8 +1,9 @@
 //! Bind each model budget reservation to the currently held fresh-task session.
 use super::{ScheduleStore, ScheduleStoreError, TaskBudgetKind, TaskBudgetRequest};
+use crate::config::connection::DatabaseTransaction;
 use crate::entity::{agent_session, agent_task_budget_reservation};
 use desk_diagnose_core::session::{AgentSessionSurface, PersistedAgentSession, TriggerOrigin};
-use sea_orm::{ColumnTrait, DatabaseTransaction, EntityTrait, QueryFilter, Set};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
 
 impl ScheduleStore {
     /// The caller holds current owner/device policy locks and derives the budget

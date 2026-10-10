@@ -4,7 +4,7 @@ use crate::entity::agent_subagent_inbox as inbox;
 use desk_agent_protocol::ai_assistant::subagent::AiAssistantDelegationSnapshot;
 use sea_orm::QueryTrait;
 
-pub(crate) async fn presentation_on<C: ConnectionTrait>(
+pub(crate) async fn presentation_on<C: ConnectionTrait + crate::config::ConfigConnection>(
     db: &C,
     session: &PersistedAgentSession,
 ) -> Result<AiAssistantDelegationSnapshot, DbErr> {

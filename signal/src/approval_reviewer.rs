@@ -1,13 +1,13 @@
 //! The separate OSS reviewer dial. Only a claimed, exactly authorized prompt
 //! reaches this model; configuration is pinned and checked again at send time.
 
+use crate::config::connection::DatabaseConnection;
 use desk_agent_protocol::{AgentError, AgentErrorKind};
 use desk_diagnose_core::approval_review::{
     ApprovalReviewCandidate, ApprovalReviewDecision, reviewer_model_decision_observed,
 };
 use desk_diagnose_core::chat::TokenUsage;
 use desk_diagnose_core::seam::{ModelSeam, NullTurnSink};
-use sea_orm::DatabaseConnection;
 
 use crate::agent_approval_store::ClaimedPermissionReview;
 use crate::model_dial::SignalModelSeam;
@@ -60,7 +60,13 @@ pub async fn call_claimed_permission_review(
         .model_request(candidate)
         .map_err(|_| reviewer_unavailable())?;
     request.delegation_call = claim.delegation_call.clone();
-    request.validate_delegation_call()?;
+    request.validate_delegation_call().inspect_err(|error| {
+        log::warn!(
+            "[approval] reviewer admission rejected: candidate={}, stage=delegation_request, error_kind={:?}",
+            candidate.candidate_id,
+            error.kind,
+        );
+    })?;
     if desk_diagnose_core::approval_review::reviewer_request_digest(&request)
         .ok()
         .as_ref()
@@ -146,12 +152,32 @@ pub async fn call_claimed_permission_review(
         }
     };
     store
-        .record_terminal_usage(&receipt_id, &turn.usage)
+        .record_terminal_usage(
+            &receipt_id,
+            &turn.usage,
+            turn.provider_meta.context_observation.as_ref(),
+        )
         .await
         .map_err(|_| reviewer_unavailable())?;
     if let Some(observation) = &observation {
         observation.metered(chrono::Utc::now().timestamp_millis());
     }
+    let decision = reviewer_model_decision_observed(
+        candidate,
+        &turn,
+        observation.as_ref(),
+        chrono::Utc::now().timestamp_millis(),
+    )
+    .map_err(|error| {
+        log::warn!(
+            "[approval] reviewer answer rejected: candidate={}, error={error:?}, stop_reason={:?}, text_bytes={}, tool_calls={}",
+            candidate.candidate_id,
+            turn.stop_reason,
+            turn.text.len(),
+            turn.tool_calls.len(),
+        );
+    })
+    .ok();
     let output_policy = desk_diagnose_core::model_egress::ModelEgressPolicy {
         destination: claim.model_destination.clone(),
         selected_source_tools: Default::default(),
@@ -170,16 +196,20 @@ pub async fn call_claimed_permission_review(
                 .mark_succeeded(&receipt_id, &output)
                 .await
                 .map_err(|_| reviewer_unavailable())?;
-            reviewer_model_decision_observed(
-                candidate,
-                &turn,
-                observation.as_ref(),
-                chrono::Utc::now().timestamp_millis(),
-            )
-            .ok()
+            decision
         }
         Err(_) => {
-            if let Some(observation) = &observation {
+            log::warn!(
+                "[approval] reviewer output audit rejected: candidate={}, stop_reason={:?}, text_bytes={}, tool_calls={}",
+                candidate.candidate_id,
+                turn.stop_reason,
+                turn.text.len(),
+                turn.tool_calls.len(),
+            );
+            // Preserve an incomplete, empty or malformed answer's classification.
+            if let Some(observation) = &observation
+                && decision.is_some()
+            {
                 observation.output(
                     desk_diagnose_core::model_observability::OutputOutcome::PolicyRejected,
                     chrono::Utc::now().timestamp_millis(),

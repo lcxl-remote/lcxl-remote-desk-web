@@ -1,12 +1,13 @@
 //! Owner attention projected from durable goal and opening-request rows.
 //! The projection carries no goal text or tool arguments into global UI.
 
+use crate::config::connection::DatabaseConnection;
 use desk_signal_facade::controller::ai_assistant_session::AiAssistantAttentionItemDto;
 use std::collections::{HashMap, HashSet};
 
 use desk_diagnose_core::dynamic_run::PermissionRequestState;
 use desk_diagnose_core::session::{AgentSessionSurface, PersistedAgentSession};
-use sea_orm::{ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter};
+use sea_orm::{ColumnTrait, DbErr, EntityTrait, QueryFilter};
 
 use crate::entity::{
     agent_approval_delegation, agent_goal_open_request, agent_goal_run, agent_session,

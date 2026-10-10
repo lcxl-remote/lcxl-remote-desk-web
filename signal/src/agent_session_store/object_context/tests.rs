@@ -1,6 +1,6 @@
 use super::*;
 use desk_agent_protocol::computer_use::{ObjectKind, ObjectRef};
-use sea_orm::{ConnectionTrait, Database, Schema};
+use sea_orm::{ConnectionTrait, Schema};
 
 mod wire;
 
@@ -62,7 +62,12 @@ async fn setup(db: DatabaseConnection) -> SignalAgentSessionStore {
 }
 
 async fn memory() -> SignalAgentSessionStore {
-    setup(Database::connect("sqlite::memory:").await.unwrap()).await
+    setup(
+        crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap(),
+    )
+    .await
 }
 
 async fn row(store: &SignalAgentSessionStore) -> agent_session::Model {
@@ -369,13 +374,26 @@ async fn object_receipts_survive_sqlite_reopen_and_second_connection_pool() {
         "sqlite://{}?mode=rwc",
         dir.path().join("objects.db").display()
     );
-    let a = setup(Database::connect(&url).await.unwrap()).await;
+    let a = setup(
+        crate::config::test_support::Database::connect(&url)
+            .await
+            .unwrap(),
+    )
+    .await;
     let original = params();
     assert!(a.update_object_context(&original).await.unwrap());
     let first = row(&a).await;
     a.db.close().await.unwrap();
-    let b = scoped(Database::connect(&url).await.unwrap());
-    let c = scoped(Database::connect(&url).await.unwrap());
+    let b = scoped(
+        crate::config::test_support::Database::connect(&url)
+            .await
+            .unwrap(),
+    );
+    let c = scoped(
+        crate::config::test_support::Database::connect(&url)
+            .await
+            .unwrap(),
+    );
     let (left, right) = tokio::join!(
         b.update_object_context(&original),
         c.update_object_context(&original)
@@ -393,8 +411,17 @@ async fn simultaneous_first_operations_converge_without_losing_or_duplicating_re
     for same_request in [true, false] {
         let dir = tempfile::tempdir().unwrap();
         let url = format!("sqlite://{}?mode=rwc", dir.path().join("race.db").display());
-        let a = setup(Database::connect(&url).await.unwrap()).await;
-        let b = scoped(Database::connect(&url).await.unwrap());
+        let a = setup(
+            crate::config::test_support::Database::connect(&url)
+                .await
+                .unwrap(),
+        )
+        .await;
+        let b = scoped(
+            crate::config::test_support::Database::connect(&url)
+                .await
+                .unwrap(),
+        );
         let first = params();
         let mut second = params();
         second.update = first.update.clone();

@@ -1,12 +1,11 @@
 //! Durable, metadata-only model-egress receipts for the OSS runtime.
 
+use crate::config::connection::DatabaseConnection;
 use desk_diagnose_core::sink_authorizer::SinkProjectionAudit;
 #[cfg(test)]
 use sea_orm::TransactionTrait;
 use sea_orm::sea_query::Expr;
-use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, Set,
-};
+use sea_orm::{ActiveModelTrait, ColumnTrait, DbErr, EntityTrait, QueryFilter, Set};
 use sha2::{Digest, Sha256};
 
 use crate::entity::model_egress_receipt;
@@ -23,6 +22,53 @@ pub struct SignalModelEgressStore {
 impl SignalModelEgressStore {
     pub fn new(db: DatabaseConnection) -> Self {
         Self { db }
+    }
+
+    pub async fn link_context_dispatch(
+        &self,
+        receipt_id: &str,
+        conversation_id: &str,
+    ) -> Result<(), DbErr> {
+        let changed = model_egress_receipt::Entity::update_many()
+            .set(model_egress_receipt::ActiveModel {
+                context_conversation_id: Set(Some(conversation_id.into())),
+                ..Default::default()
+            })
+            .filter(model_egress_receipt::Column::ReceiptId.eq(receipt_id))
+            .filter(model_egress_receipt::Column::ContextConversationId.is_null())
+            .exec(&self.db)
+            .await?;
+        if changed.rows_affected != 1 {
+            return Err(DbErr::Custom(
+                "model context dispatch identity changed".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Some(None) means the latest dispatch has no trustworthy terminal observation.
+    pub async fn latest_context(
+        &self,
+        conversation_id: &str,
+    ) -> Result<
+        Option<Option<desk_diagnose_core::thinking_context::ProviderContextObservation>>,
+        DbErr,
+    > {
+        use sea_orm::QueryOrder;
+        let row = model_egress_receipt::Entity::find()
+            .filter(model_egress_receipt::Column::ContextConversationId.eq(conversation_id))
+            .order_by_desc(model_egress_receipt::Column::AuthorizedAt)
+            .order_by_desc(model_egress_receipt::Column::ModelCallOrdinal)
+            .one(&self.db)
+            .await?;
+        row.map(|row| {
+            row.provider_context_observation_json
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()
+                .map_err(|_| DbErr::Custom("invalid stored model context observation".into()))
+        })
+        .transpose()
     }
 
     /// Persist the exact authorizer projection before any provider I/O. Failure
@@ -54,7 +100,7 @@ impl SignalModelEgressStore {
     /// A receipt permits no I/O until the caller commits all admission checks.
     /// Roll back on error; duplicate receipt identities must never dispatch again.
     pub async fn record_dispatch_intent_on(
-        txn: &sea_orm::DatabaseTransaction,
+        txn: &crate::config::connection::DatabaseTransaction,
         receipt_id: String,
         export_authorization_id: String,
         model_call_ordinal: u64,
@@ -99,6 +145,8 @@ impl SignalModelEgressStore {
             model_output_digest_sha256: Set(None),
             authorized_at: Set(now),
             completed_at: Set(None),
+            provider_context_observation_json: Set(None),
+            context_conversation_id: Set(None),
             usage_json: Set(None),
             usage_recorded_at: Set(None),
         }
@@ -112,11 +160,17 @@ impl SignalModelEgressStore {
         &self,
         receipt_id: &str,
         usage: &desk_diagnose_core::chat::TokenUsage,
+        context: Option<&desk_diagnose_core::thinking_context::ProviderContextObservation>,
     ) -> Result<(), DbErr> {
         let encoded = serde_json::to_string(usage)
             .map_err(|_| DbErr::Custom("model usage could not be encoded".into()))?;
+        let context_json = context
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|_| DbErr::Custom("model context observation could not be encoded".into()))?;
         let changed = model_egress_receipt::Entity::update_many()
             .set(model_egress_receipt::ActiveModel {
+                provider_context_observation_json: Set(context_json.clone()),
                 usage_json: Set(Some(encoded.clone())),
                 usage_recorded_at: Set(Some(chrono::Utc::now())),
                 ..Default::default()
@@ -132,7 +186,9 @@ impl SignalModelEgressStore {
             .one(&self.db)
             .await?
             .ok_or_else(|| DbErr::Custom("model usage receipt is missing".into()))?;
-        if row.usage_json.as_deref() != Some(encoded.as_str()) {
+        if row.usage_json.as_deref() != Some(encoded.as_str())
+            || row.provider_context_observation_json != context_json
+        {
             return Err(DbErr::Custom(
                 "model usage receipt cannot be replaced".into(),
             ));
@@ -197,7 +253,9 @@ impl SignalModelEgressStore {
     /// The export identity and ordinal must come from the owner-bound frozen
     /// session's model call, never from a client-provided output identifier.
     /// This returns historical source links, not permission to use or export data.
-    pub async fn read_output_evidence_on<C: sea_orm::ConnectionTrait>(
+    pub async fn read_output_evidence_on<
+        C: sea_orm::ConnectionTrait + crate::config::ConfigConnection,
+    >(
         db: &C,
         receipt_id: &str,
         export_authorization_id: &str,
@@ -232,7 +290,9 @@ impl SignalModelEgressStore {
 
     /// The export scope must be derived from the owner-bound original session.
     /// Compression stores the hash of its actual successful durable receipt ID.
-    pub async fn read_compression_inputs_on<C: sea_orm::ConnectionTrait>(
+    pub async fn read_compression_inputs_on<
+        C: sea_orm::ConnectionTrait + crate::config::ConfigConnection,
+    >(
         db: &C,
         export_authorization_id: &str,
         trace: &desk_diagnose_core::model_context::ContextSummaryDerivationV1,
@@ -267,7 +327,9 @@ impl SignalModelEgressStore {
     /// The caller must first authenticate and freeze the rehearsal session.
     /// Derive historical scope from its unique original input and the stored
     /// output turn, never from a transport request or a client-supplied receipt.
-    pub async fn find_rehearsal_output_evidence_on<C: sea_orm::ConnectionTrait>(
+    pub async fn find_rehearsal_output_evidence_on<
+        C: sea_orm::ConnectionTrait + crate::config::ConfigConnection,
+    >(
         db: &C,
         session: &desk_diagnose_core::session::PersistedAgentSession,
         original_input_id: &str,
@@ -295,7 +357,9 @@ impl SignalModelEgressStore {
 
     /// Resolve only within the original owner/run export identity. An output ID
     /// alone is never a lookup scope, and multiple matching receipts are rejected.
-    pub async fn find_output_evidence_on<C: sea_orm::ConnectionTrait>(
+    pub async fn find_output_evidence_on<
+        C: sea_orm::ConnectionTrait + crate::config::ConfigConnection,
+    >(
         db: &C,
         export_authorization_id: &str,
         message: &desk_diagnose_core::chat::ChatMessage,
@@ -477,7 +541,7 @@ pub(crate) fn test_inputs(
 mod tests {
     use super::*;
     use desk_agent_protocol::data_lineage::DestinationIdentity;
-    use sea_orm::{Database, EntityTrait};
+    use sea_orm::EntityTrait;
 
     fn audit() -> SinkProjectionAudit {
         SinkProjectionAudit {
@@ -505,7 +569,9 @@ mod tests {
 
     #[tokio::test]
     async fn output_lineage_must_match_original_receipt_before_success() {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
+        let db = crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap();
         crate::db::initialize_schema(&db).await.unwrap();
         let store = SignalModelEgressStore::new(db.clone());
         let row = store
@@ -627,7 +693,9 @@ mod tests {
 
     #[tokio::test]
     async fn lineage_is_persisted_and_mismatched_inputs_create_no_receipt() {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
+        let db = crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap();
         crate::db::initialize_schema(&db).await.unwrap();
         let store = SignalModelEgressStore::new(db.clone());
         let audit = audit();
@@ -672,7 +740,9 @@ mod tests {
 
     #[tokio::test]
     async fn terminal_usage_is_immutable_and_missing_counters_stay_unknown() {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
+        let db = crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap();
         crate::db::initialize_schema(&db).await.unwrap();
         let store = SignalModelEgressStore::new(db.clone());
         let usage = desk_diagnose_core::chat::TokenUsage {
@@ -682,7 +752,7 @@ mod tests {
         };
         assert!(
             store
-                .record_terminal_usage("missing", &usage)
+                .record_terminal_usage("missing", &usage, None)
                 .await
                 .is_err()
         );
@@ -697,14 +767,25 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            store.record_terminal_usage(id, &original).await.unwrap();
-            store.record_terminal_usage(id, &original).await.unwrap();
+            store
+                .record_terminal_usage(id, &original, None)
+                .await
+                .unwrap();
+            store
+                .record_terminal_usage(id, &original, None)
+                .await
+                .unwrap();
             store.mark_failed(id).await.unwrap();
             let changed = desk_diagnose_core::chat::TokenUsage {
                 output_tokens: Some(99),
                 ..original
             };
-            assert!(store.record_terminal_usage(id, &changed).await.is_err());
+            assert!(
+                store
+                    .record_terminal_usage(id, &changed, None)
+                    .await
+                    .is_err()
+            );
             let row = model_egress_receipt::Entity::find_by_id(id)
                 .one(&db)
                 .await
@@ -722,7 +803,9 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_receipt_follows_caller_commit_and_rollback() {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
+        let db = crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap();
         crate::db::initialize_schema(&db).await.unwrap();
         let txn = db.begin().await.unwrap();
         SignalModelEgressStore::record_dispatch_intent_on(
@@ -796,7 +879,9 @@ mod tests {
                 .journal_mode(sea_orm::sqlx::sqlite::SqliteJournalMode::Wal)
                 .busy_timeout(std::time::Duration::from_secs(2))
         });
-        let db = Database::connect(options).await.unwrap();
+        let db = crate::config::test_support::Database::connect(options)
+            .await
+            .unwrap();
         crate::db::initialize_schema(&db).await.unwrap();
         let store = SignalModelEgressStore::new(db.clone());
         store
@@ -840,7 +925,9 @@ mod tests {
 
     #[tokio::test]
     async fn receipt_is_durable_and_contains_metadata_only() {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
+        let db = crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap();
         crate::db::initialize_schema(&db).await.unwrap();
         let store = SignalModelEgressStore::new(db.clone());
         let row = store
@@ -876,7 +963,9 @@ mod tests {
 
     #[tokio::test]
     async fn failed_dispatch_cannot_be_reclassified() {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
+        let db = crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap();
         crate::db::initialize_schema(&db).await.unwrap();
         let store = SignalModelEgressStore::new(db.clone());
         store
@@ -893,6 +982,68 @@ mod tests {
         assert!(
             store
                 .mark_succeeded("receipt-2", &output("model-output-2"))
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_context_is_atomic_idempotent_and_recovered_without_session_save() {
+        let db = crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap();
+        crate::db::initialize_schema(&db).await.unwrap();
+        let store = SignalModelEgressStore::new(db);
+        store
+            .record_dispatch_intent(
+                "context-call".into(),
+                "export".into(),
+                1,
+                &audit(),
+                &test_inputs(&audit()),
+            )
+            .await
+            .unwrap();
+        store
+            .link_context_dispatch("context-call", "conversation")
+            .await
+            .unwrap();
+        assert_eq!(
+            store.latest_context("conversation").await.unwrap(),
+            Some(None)
+        );
+        let usage = desk_diagnose_core::chat::TokenUsage {
+            input_tokens: Some(10),
+            output_tokens: Some(5),
+            cache_read_tokens: Some(90),
+            ..Default::default()
+        };
+        let observation = desk_diagnose_core::thinking_context::ProviderContextObservation {
+            call_id: "context-call".into(),
+            conversation_id: Some("conversation".into()),
+            input_tokens: Some(100),
+            cleared_input_tokens: Some(50),
+            ..Default::default()
+        };
+        store
+            .record_terminal_usage("context-call", &usage, Some(&observation))
+            .await
+            .unwrap();
+        store
+            .record_terminal_usage("context-call", &usage, Some(&observation))
+            .await
+            .unwrap();
+        assert_eq!(
+            store.latest_context("conversation").await.unwrap(),
+            Some(Some(observation.clone()))
+        );
+        let changed = desk_diagnose_core::thinking_context::ProviderContextObservation {
+            input_tokens: Some(999),
+            ..observation
+        };
+        assert!(
+            store
+                .record_terminal_usage("context-call", &usage, Some(&changed))
                 .await
                 .is_err()
         );

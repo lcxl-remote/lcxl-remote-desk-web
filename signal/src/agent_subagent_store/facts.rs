@@ -1,5 +1,6 @@
 //! Read original OSS action bindings and results within the caller's writer.
 use super::*;
+use crate::config::connection::DatabaseTransaction;
 use crate::entity::{
     agent_action_item as work, agent_capability_dispatch_outbox as outbox, agent_exec_task,
 };
@@ -11,7 +12,6 @@ use desk_diagnose_core::{
         state::TaskDependency,
     },
 };
-use sea_orm::DatabaseTransaction;
 
 pub(crate) async fn runtime_facts_on(
     txn: &DatabaseTransaction,

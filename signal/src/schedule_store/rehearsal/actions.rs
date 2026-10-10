@@ -22,7 +22,7 @@ pub(crate) struct RehearsalActionReport {
 impl ScheduleStore {
     /// Join the publication transaction; never acquire a second connection or commit it.
     pub(crate) async fn read_rehearsal_actions_on(
-        txn: &sea_orm::DatabaseTransaction,
+        txn: &crate::config::connection::DatabaseTransaction,
         owner: i32,
         rehearsal_id: &str,
     ) -> Result<RehearsalActionReport, ScheduleStoreError> {

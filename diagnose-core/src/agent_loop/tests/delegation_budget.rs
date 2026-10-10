@@ -170,7 +170,7 @@ async fn physical_retry_has_a_new_reservation_and_unknown_usage_remains_unknown(
             .requests
             .borrow()
             .iter()
-            .all(|request| request.caller_output_hard_cap == Some(call_budget::OUTPUT_HARD_CAP))
+            .all(|request| request.caller_output_hard_cap == Some(128_000))
     );
     let requests = model.requests.borrow();
     assert_eq!(requests[0].delegation_call.as_ref(), Some(&receipts[0]));

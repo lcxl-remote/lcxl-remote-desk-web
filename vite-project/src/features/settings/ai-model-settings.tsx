@@ -1,6 +1,7 @@
+import { ModelThinkingSettings } from '@/components/model-thinking-settings';
 import { PromptCacheSettings } from '@/components/prompt-cache-settings';
 import { Textarea } from '@/components/ui/textarea';
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useState } from "react"
 import { useForm } from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
 import * as z from "zod"
@@ -21,6 +22,7 @@ import { Switch } from "@/components/ui/switch"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { useToast } from "@/hooks/use-toast"
 import { RestResponseError } from "@/lib/kubb-client"
+import { DEFAULT_MODEL_RUNTIME_OUTPUT_TOKENS } from '@/lib/output-token-settings';
 
 const RESPONSE_FORMATS = ["none", "json_object", "json_schema"] as const
 
@@ -50,6 +52,8 @@ const providerSchema = z.object({
     api_key: z.string(),
     clear_api_key: z.boolean(),
     supports_image_input: z.boolean(),
+    reasoning_contract: z.string(),
+    anthropic_prefix_binding: z.boolean(),
     max_context_bytes: z.number().int().min(4096).max(16777216),
     // The preset is an editor convenience, not part of the persisted profile.
     // Radix Select can briefly unregister it during hydration, so preserve the
@@ -60,7 +64,6 @@ const providerSchema = z.object({
         catch { return false }
     }),
     output_limit_field: z.string(),
-    probe_max_output_tokens: z.number().int().positive(),
     runtime_max_output_tokens: z.number().int().positive(),
     response_format: z.enum(RESPONSE_FORMATS),
     execution_mode: z.enum(EXECUTION_MODES),
@@ -92,22 +95,20 @@ export function presetProfile(preset: (typeof PROFILE_PRESETS)[number]) {
     if (preset === "deepseek") {
         return {
             requestOptions: { thinking: { type: "disabled" } },
-            probeBudget: 512,
-            runtimeBudget: 4096,
+            runtimeBudget: DEFAULT_MODEL_RUNTIME_OUTPUT_TOKENS,
         }
     }
     if (preset === "anthropic_adaptive") {
         return {
             requestOptions: { thinking: { type: "adaptive", display: "omitted" } },
-            probeBudget: 4096,
-            runtimeBudget: 8192,
+            runtimeBudget: DEFAULT_MODEL_RUNTIME_OUTPUT_TOKENS,
         }
     }
-    return { requestOptions: {}, probeBudget: 512, runtimeBudget: 4096 }
+    return { requestOptions: {}, runtimeBudget: DEFAULT_MODEL_RUNTIME_OUTPUT_TOKENS }
 }
 
 export function isProfilePresetSelectable(preset: (typeof PROFILE_PRESETS)[number]): boolean {
-    return preset !== "anthropic_manual"
+    return PROFILE_PRESETS.includes(preset)
 }
 
 // Render the central execution-grant choices.
@@ -176,11 +177,12 @@ export function AiModelSettings() {
             clear_api_key: false,
             supports_image_input: false,
             max_context_bytes: 0,
-            profile_preset: "standard",
+            reasoning_contract: "conservative",
+            anthropic_prefix_binding: false,
+            profile_preset: "custom",
             request_options_text: "{}",
             output_limit_field: "max_tokens",
-            probe_max_output_tokens: 512,
-            runtime_max_output_tokens: 4096,
+            runtime_max_output_tokens: DEFAULT_MODEL_RUNTIME_OUTPUT_TOKENS,
             response_format: "json_object",
             execution_mode: "confirm_each_action",
             max_steps_per_turn: MAX_STEPS_DEFAULT,
@@ -189,10 +191,9 @@ export function AiModelSettings() {
         },
     })
 
-    const didHydrateRef = useRef(false)
+    const [hydrated, setHydrated] = useState(false)
     useEffect(() => {
-        if (providerResponse?.data && !isLoading && !didHydrateRef.current) {
-            didHydrateRef.current = true
+        if (providerResponse?.data && !isLoading && !hydrated) {
             const data = providerResponse.data
             setApiKeySet(data.api_key_set)
             const rf = RESPONSE_FORMATS.includes(data.response_format as (typeof RESPONSE_FORMATS)[number])
@@ -206,10 +207,11 @@ export function AiModelSettings() {
                 clear_api_key: false,
                 supports_image_input: data.supports_image_input,
                 max_context_bytes: data.max_context_bytes ?? 0,
+                reasoning_contract: data.reasoning_contract ?? "conservative",
+                anthropic_prefix_binding: data.anthropic_prefix_binding ?? false,
                 profile_preset: "custom",
                 request_options_text: JSON.stringify(data.request_options ?? {}, null, 2),
                 output_limit_field: data.output_limit_field,
-                probe_max_output_tokens: data.probe_max_output_tokens,
                 runtime_max_output_tokens: data.runtime_max_output_tokens,
                 response_format: rf,
                 execution_mode: normalizeExecutionMode(data.execution_mode),
@@ -219,8 +221,9 @@ export function AiModelSettings() {
                 exec_approval_timeout_secs:
                     data.exec_approval_timeout_secs ?? EXEC_APPROVAL_TIMEOUT_DEFAULT_SECS,
             })
+            setHydrated(true)
         }
-    }, [providerResponse?.data, isLoading, form])
+    }, [providerResponse?.data, isLoading, hydrated, form])
 
     const onSubmit = async (values: ProviderFormValues) => {
         if (values.max_steps_per_turn < values.max_same_tool_calls_per_turn) {
@@ -242,8 +245,9 @@ export function AiModelSettings() {
             base_url: values.base_url,
             max_context_bytes: values.max_context_bytes,
             request_options: JSON.parse(values.request_options_text),
+            reasoning_contract: values.reasoning_contract,
+            anthropic_prefix_binding: values.anthropic_prefix_binding,
             output_limit_field: values.output_limit_field,
-            probe_max_output_tokens: values.probe_max_output_tokens,
             runtime_max_output_tokens: values.runtime_max_output_tokens,
             response_format: values.response_format,
             execution_mode: values.execution_mode,
@@ -288,8 +292,9 @@ export function AiModelSettings() {
                 supports_image_input: values.supports_image_input,
                 base_url: values.base_url,
                 request_options: JSON.parse(values.request_options_text),
+            reasoning_contract: values.reasoning_contract,
+            anthropic_prefix_binding: values.anthropic_prefix_binding,
                 output_limit_field: values.output_limit_field,
-                probe_max_output_tokens: values.probe_max_output_tokens,
                 runtime_max_output_tokens: values.runtime_max_output_tokens,
                 max_context_bytes: values.max_context_bytes,
                 api_key: pendingApiKey(values),
@@ -327,7 +332,7 @@ export function AiModelSettings() {
         }
     }
 
-    if (isLoading) {
+    if (isLoading || (providerResponse?.data && !hydrated)) {
         return (
             <div className="flex h-full items-center justify-center">
                 <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
@@ -380,7 +385,12 @@ export function AiModelSettings() {
                                             <FormLabel>{t("pages.aiModel.settings.provider")}</FormLabel>
                                             <Select
                                                 key={field.value || "provider-empty"}
-                                                onValueChange={field.onChange}
+                                                onValueChange={value => {
+                                                    field.onChange(value)
+                                                    form.setValue('reasoning_contract', 'conservative')
+                                                    form.setValue('anthropic_prefix_binding', false)
+                                                    if (value === 'anthropic_messages') form.setValue('output_limit_field', 'max_tokens')
+                                                }}
                                                 defaultValue={field.value}
                                             >
                                                 <FormControl>
@@ -529,12 +539,10 @@ export function AiModelSettings() {
                                                     if (value !== "custom") {
                                                         const profile = presetProfile(value)
                                                         form.setValue("request_options_text", JSON.stringify(profile.requestOptions, null, 2))
-                                                        form.setValue("probe_max_output_tokens", profile.probeBudget)
-                                                        form.setValue("runtime_max_output_tokens", profile.runtimeBudget)
+                                                        form.setValue("reasoning_contract", value === "deepseek" ? "deepseek_chat" : value.startsWith("anthropic") ? "anthropic_messages" : "openai_chat")
+                                                        form.setValue("anthropic_prefix_binding", false)
                                                         form.setValue("output_limit_field", "max_tokens")
-                                                        if (value.startsWith("anthropic")) {
-                                                            form.setValue("wire_protocol", "anthropic_messages")
-                                                        }
+                                                        form.setValue("wire_protocol", value.startsWith("anthropic") ? "anthropic_messages" : "open_ai_chat_completions")
                                                     }
                                                 }}
                                             >
@@ -552,7 +560,7 @@ export function AiModelSettings() {
                                                 </SelectContent>
                                             </Select>
                                             <FormDescription>
-                                                {t("pages.aiModel.settings.preset.manualUnavailable")}
+                                                {t("pages.aiModel.settings.preset.manualOutputHint")}
                                             </FormDescription>
                                         </FormItem>
                                     )}
@@ -575,6 +583,9 @@ export function AiModelSettings() {
                                 />
                             </div>
 
+                            <ModelThinkingSettings protocol={form.watch('wire_protocol')} contract={form.watch('reasoning_contract')} prefixBinding={form.watch('anthropic_prefix_binding')}
+                                value={form.watch('request_options_text')} onContractChange={value => form.setValue('reasoning_contract', value)}
+                                onPrefixBindingChange={value => form.setValue('anthropic_prefix_binding', value)} onChange={value => { form.setValue('request_options_text', value); form.setValue('profile_preset', 'custom'); }} />
                             {form.watch('wire_protocol') === 'anthropic_messages' && <PromptCacheSettings
                                 value={form.watch('request_options_text')}
                                 onChange={value => { form.setValue('request_options_text', value); form.setValue('profile_preset', 'custom'); }}
@@ -601,17 +612,11 @@ export function AiModelSettings() {
                             />
 
                             <div className="grid gap-6 md:grid-cols-2">
-                                <FormField control={form.control} name="probe_max_output_tokens" render={({ field }) => (
-                                    <FormItem>
-                                        <FormLabel>{t("pages.aiModel.settings.probeBudget")}</FormLabel>
-                                        <FormControl><Input type="number" min={1} {...field} onChange={event => field.onChange(Number(event.target.value))} /></FormControl>
-                                        <FormMessage />
-                                    </FormItem>
-                                )} />
                                 <FormField control={form.control} name="runtime_max_output_tokens" render={({ field }) => (
                                     <FormItem>
                                         <FormLabel>{t("pages.aiModel.settings.runtimeBudget")}</FormLabel>
                                         <FormControl><Input type="number" min={1} {...field} onChange={event => field.onChange(Number(event.target.value))} /></FormControl>
+                                        <FormDescription>{t("pages.aiModel.settings.runtimeBudgetHint")}</FormDescription>
                                         <FormMessage />
                                     </FormItem>
                                 )} />

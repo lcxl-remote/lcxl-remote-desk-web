@@ -1,5 +1,6 @@
 //! Durable pending AI-proposed goal requests for the OSS AI Assistant.
 
+use crate::config::connection::{DatabaseConnection, DatabaseTransaction};
 use crate::entity::{
     agent_goal_open_request as request_row, agent_goal_run as goal_row, agent_run_event,
     agent_session,
@@ -16,8 +17,8 @@ use desk_diagnose_core::session::{
 };
 use sea_orm::sea_query::Expr;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbErr,
-    EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DbErr, EntityTrait, QueryFilter, QueryOrder,
+    QuerySelect, Set,
 };
 use sha2::{Digest, Sha256};
 
@@ -289,7 +290,7 @@ pub(crate) async fn replace_pending_on(
     Ok(result.rows_affected == 1)
 }
 
-pub(crate) async fn pending_for_subject<C: ConnectionTrait>(
+pub(crate) async fn pending_for_subject<C: ConnectionTrait + crate::config::ConfigConnection>(
     db: &C,
     conversation_id: &str,
     actor_id: &str,

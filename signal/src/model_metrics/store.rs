@@ -1,5 +1,6 @@
 //! Bounded observation persistence, atomic projection and retention.
 
+use crate::config::connection::{DatabaseConnection, DatabaseTransaction};
 mod cleanup;
 mod correction;
 mod correction_group;
@@ -8,6 +9,7 @@ mod relation;
 mod resources;
 mod unassociated;
 
+use crate::config::ConfigConnection;
 use desk_diagnose_core::model_observability::capacity::{
     CLEANUP_BATCH_ROWS, StorageKind, charged_bytes, data_budget, low_water, retention_priority,
 };
@@ -21,8 +23,8 @@ use desk_signal_facade::{
 };
 use sea_orm::sea_query::{Expr, OnConflict};
 use sea_orm::{
-    ActiveValue::Set, ColumnTrait, Condition, DatabaseConnection, DatabaseTransaction, DbErr,
-    EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
+    ActiveValue::Set, ColumnTrait, Condition, DbErr, EntityTrait, PaginatorTrait, QueryFilter,
+    QueryOrder, QuerySelect, TransactionTrait,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
@@ -30,7 +32,7 @@ use sha2::{Digest, Sha256};
 use super::entity::{
     model_metric_compact as compact, model_metric_event as event, model_metric_health as health,
     model_metric_lease as lease, model_metric_record as detail, model_metric_rollup as rollup,
-    model_metric_settings as settings,
+    model_metric_state as settings,
 };
 
 const HOUR: i64 = 3_600_000;
@@ -108,12 +110,9 @@ impl Store {
     }
 
     pub async fn initialize_settings(&self, now: i64) -> Result<MetricsSettings, DbErr> {
-        let defaults = MetricsSettings::defaults(self.manager);
         settings::Entity::insert(settings::ActiveModel {
             id: Set(1),
             schema_version: Set(EVENT_SCHEMA_VERSION as i32),
-            revision: Set(1),
-            settings_json: Set(encode(&defaults)?),
             available_from_ms: Set(now),
             updated_at_ms: Set(now),
             frozen_before_ms: Set(0),
@@ -154,55 +153,26 @@ impl Store {
         )
         .exec_without_returning(&self.db)
         .await?;
+        let runtime = settings::Entity::find_by_id(1)
+            .one(&self.db)
+            .await?
+            .ok_or_else(|| DbErr::Custom("metrics runtime state unavailable".into()))?;
+        if runtime.schema_version != EVENT_SCHEMA_VERSION as i32 {
+            return Err(DbErr::Custom("metrics runtime format unavailable".into()));
+        }
         self.load_settings().await
     }
 
     pub async fn load_settings(&self) -> Result<MetricsSettings, DbErr> {
-        let row = settings::Entity::find_by_id(1)
-            .one(&self.db)
-            .await?
-            .ok_or_else(|| DbErr::Custom("metrics settings unavailable".into()))?;
-        if row.schema_version != EVENT_SCHEMA_VERSION as i32 || !resources::valid(&row) {
-            return Err(DbErr::Custom("metrics schema unavailable".into()));
-        }
-        let value: MetricsSettings = decode(&row.settings_json)?;
-        value
-            .validate()
-            .map_err(|_| DbErr::Custom("metrics settings unavailable".into()))?;
-        if value.revision != row.revision.to_string() {
-            return Err(DbErr::Custom("metrics settings revision conflict".into()));
-        }
-        Ok(value)
+        Ok(self.db.config_read().await.model_metrics.clone())
     }
 
     pub async fn save_settings(
         &self,
-        mut value: MetricsSettings,
-        now: i64,
+        value: MetricsSettings,
+        _now: i64,
     ) -> Result<Option<MetricsSettings>, DbErr> {
-        value
-            .validate()
-            .map_err(|reason| DbErr::Custom(reason.into()))?;
-        let revision = value
-            .revision
-            .parse::<i64>()
-            .map_err(|_| DbErr::Custom("metrics revision out of range".into()))?;
-        let next = revision
-            .checked_add(1)
-            .ok_or_else(|| DbErr::Custom("metrics revision exhausted".into()))?;
-        value.revision = next.to_string();
-        let changed = settings::Entity::update_many()
-            .set(settings::ActiveModel {
-                revision: Set(next),
-                settings_json: Set(encode(&value)?),
-                updated_at_ms: Set(now),
-                ..Default::default()
-            })
-            .filter(settings::Column::Id.eq(1))
-            .filter(settings::Column::Revision.eq(revision))
-            .exec(&self.db)
-            .await?;
-        Ok((changed.rows_affected == 1).then_some(value))
+        crate::config::save_metrics(self.db.config_context(), value).await
     }
 
     pub async fn persist(&self, events: &[ObservationEvent], now: i64) -> Result<u32, DbErr> {
@@ -1291,7 +1261,9 @@ fn contribution_axis(value: &Contribution, series_kind: &str, other: bool) -> Co
 mod tests {
     mod end_to_end;
     async fn fixture_store(now: i64) -> super::Store {
-        let db = sea_orm::Database::connect("sqlite::memory:").await.unwrap();
+        let db = crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap();
         crate::model_metrics::runtime::create_schema(&db)
             .await
             .unwrap();

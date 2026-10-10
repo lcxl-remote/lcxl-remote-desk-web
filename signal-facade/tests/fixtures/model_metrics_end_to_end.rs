@@ -39,6 +39,14 @@ struct ObservedAdapter {
 
 #[async_trait::async_trait(?Send)]
 impl ModelSeam for ObservedAdapter {
+    fn model_output_token_limit(&self, request: &ModelRequest) -> Result<i64, AgentError> {
+        self.parts.model.model_output_token_limit(request)
+    }
+
+    fn model_input_token_upper_bound(&self, request: &ModelRequest) -> Result<Option<u64>, AgentError> {
+        self.parts.model.model_input_token_upper_bound(request)
+    }
+
     fn observation_context(&self, use_case: ModelUseCase, origin: Origin) -> Option<ObservationContext> {
         let next = self.calls.get() + 1;
         self.calls.set(next);

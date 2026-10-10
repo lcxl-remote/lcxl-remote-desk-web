@@ -10,6 +10,7 @@ pub struct ContextUsageBasis {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     request_budget: Option<ContextRequestBudget>,
     retained_ids: Vec<String>,
+    retained_costs: Vec<(String, String, usize, usize)>,
     synthetic_bytes: usize,
     observed_len: usize,
     observed_tail_id: Option<String>,
@@ -17,6 +18,7 @@ pub struct ContextUsageBasis {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContextUsage {
+    pub latest_model_call: Option<crate::thinking_context::ProviderContextObservation>,
     pub used_bytes: usize,
     pub limit_bytes: usize,
     pub strategy: String,
@@ -52,6 +54,14 @@ pub struct ContextUsageBreakdown {
     pub projected_bytes: usize,
 }
 
+fn source_digest(message: &ChatMessage) -> String {
+    use sha2::{Digest, Sha256};
+    format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(message).expect("message is serializable"))
+    )
+}
+
 impl ContextUsageBasis {
     pub fn observe(
         history: &[ChatMessage],
@@ -74,6 +84,23 @@ impl ContextUsageBasis {
                 .iter()
                 .filter(|m| ids.contains(m.message_id.as_str()))
                 .map(|m| m.message_id.clone())
+                .collect(),
+            retained_costs: projected
+                .iter()
+                .filter(|m| ids.contains(m.message_id.as_str()))
+                .filter_map(|m| {
+                    history
+                        .iter()
+                        .find(|source| source.message_id == m.message_id)
+                        .map(|source| {
+                            (
+                                m.message_id.clone(),
+                                source_digest(source),
+                                model_context_cost(m),
+                                crate::trim::model_replay_cost(m),
+                            )
+                        })
+                })
                 .collect(),
             synthetic_bytes: projected
                 .iter()
@@ -118,11 +145,15 @@ impl ContextUsageBasis {
             .enumerate()
             .filter(|(i, m)| *i >= self.observed_len || ids.contains(&m.message_id))
         {
-            let cost = model_context_cost(message);
-            let replay = message
-                .replay_disposition
-                .as_ref()
-                .map_or(0, crate::replay::ReplayDisposition::model_context_cost);
+            let prepared = self.retained_costs.iter().find(|(id, digest, _, _)| {
+                id == &message.message_id && digest == &source_digest(message)
+            });
+            let cost =
+                prepared.map_or_else(|| model_context_cost(message), |(_, _, cost, _)| *cost);
+            let replay = prepared.map_or_else(
+                || crate::trim::model_replay_cost(message),
+                |(_, _, _, replay)| *replay,
+            );
             breakdown.replay_bytes = breakdown.replay_bytes.checked_add(replay)?;
             let category =
                 if message.role == crate::chat::ChatRole::Tool || !message.tool_calls.is_empty() {
@@ -134,6 +165,7 @@ impl ContextUsageBasis {
             used_bytes = used_bytes.checked_add(cost)?;
         }
         Some(ContextUsage {
+            latest_model_call: None,
             used_bytes,
             limit_bytes: self.limit_bytes,
             strategy: self.strategy.clone(),
@@ -341,5 +373,36 @@ mod tests {
         );
         call.reasoning = None;
         assert_eq!(model_context_cost(&call), model_context_cost(&history[2]));
+    }
+
+    #[test]
+    fn persisted_projected_cost_survives_restart_and_invalidates_on_content_change() {
+        let source = crate::replay::SourceContextKey::derive(
+            crate::model_profile::WireProtocol::OpenAiChatCompletions,
+            "connection",
+            "model",
+            "test",
+        );
+        let policy = PinnedContextPolicy::window(source, 1, 8192).unwrap();
+        let history = vec![ChatMessage::text(
+            "id",
+            crate::chat::ChatRole::Tool,
+            "long native reference",
+        )];
+        let mut prepared = history.clone();
+        prepared[0].text = "a1".into();
+        let basis = ContextUsageBasis::observe(&history, &prepared, &policy);
+        let restored: ContextUsageBasis =
+            serde_json::from_str(&serde_json::to_string(&basis).unwrap()).unwrap();
+        assert_eq!(
+            restored.usage(&history).unwrap().used_bytes,
+            model_context_cost(&prepared[0])
+        );
+        let mut changed = history.clone();
+        changed[0].text = "different native reference".into();
+        assert_eq!(
+            restored.usage(&changed).unwrap().used_bytes,
+            model_context_cost(&changed[0])
+        );
     }
 }

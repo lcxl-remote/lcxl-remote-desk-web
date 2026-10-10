@@ -195,9 +195,52 @@ A "remember my choice" answer given while the setting was being changed is
 discarded rather than applied — the change you just made stands, and the request
 the user answered is still honored on its own.
 
-## AI Settings
+## OSS global configuration
 
-AI provider, base URL, model, and API key are configured via the **management console**, not the TOML file. API keys are strictly server-side secrets. See [AI Diagnostics](/features/ai-diagnostics).
+OSS saves AI gateways, search and global policies in the same `config.toml` as host settings, selected by the active profile or `--config-file-path`. Settings pages persist changes immediately. To edit the file manually, stop the service, edit, and restart. These nine sections and `[oss_config_metadata]` do not accept `LRD_*` overrides; other host settings keep their existing environment behavior.
+
+| Section | Fields and meaning |
+| --- | --- |
+| `[ai_gateway]` | `wire_protocol`, `base_url`, `model`, `api_key`, `supports_image_input`; `profile_schema_version`, `reasoning_contract`, `anthropic_prefix_binding`, `request_options_json`, `output_limit_field`, `runtime_max_output_tokens`, `max_context_bytes`; `response_format`, `execution_mode`, `max_steps_per_turn`, `max_same_tool_calls_per_turn`, `exec_approval_timeout_secs` (seconds) |
+| `[approval_gateway]` | `enabled`; its independent model settings are in `[approval_gateway.gateway]`, with the same fields as the main gateway. OSS has no price, currency or accounting settings |
+| `[web_search]` | `schema_version`, `provider` (`duck_duck_go`, `brave`, `tavily`), optional `api_key` |
+| `[context_management]` | `schema_version`, `strategy` (`window`, `checkpoint_summary`) |
+| `[subagent_policy.limits]` | `maxUnfinishedPerRoot`: maximum unfinished subagents for each root conversation |
+| `[goal_budget_policy]` | `schemaVersion`, `deviceUnavailableMaxMs` (milliseconds, cannot be disabled); `[goal_budget_policy.limits]` contains `activeTimeMs`, `deadlineMs` (milliseconds), `modelTokens`, `modelCalls`, `toolCalls`, `slices`, `stalledSlices` |
+| `[schedule_budget_policy.maximum]` | `max_runs_per_utc_day`, `max_calls_per_run`, `max_model_tokens_per_run`, `max_runtime_seconds` (seconds) |
+| `[usage_retention]` | `turn_days`, `agent_session_days` (days) |
+| `[model_metrics]` | `enabled`, `detail_days`, `five_minute_days`, `hourly_days`, `mutable_days` (days), `detail_row_budget`, `event_row_budget`, `compact_row_budget`, `rollup_row_budget`, `series_per_bucket`, `storage_budget_bytes` (bytes, decimal string) |
+
+AI gateway and approval gateway tests use their respective `runtime_max_output_tokens`, sharing the output limit with runtime calls. There is no separate probe output token setting.
+
+Missing sections or fields use the existing business defaults. Unknown fields within these sections and invalid values reject loading. Revision fields (`revision`, `connection_revision`, `profile_revision`, `configuration_revision`) use decimal strings, for example `revision = "1"`. The service maintains revisions and the instance identity, fingerprints and revision records in `[oss_config_metadata]`; leave these fields managed by the service. Startup reconciles actual business changes after a stopped-service edit; whitespace and key ordering do not advance revisions. Gateway probes remain in SQLite; revalidate an edited gateway when prompted by the settings page.
+
+`request_options_json` is a JSON object string and preserves nested `null`. Each optional goal limit accepts a positive integer or the string `"disabled"`; omission uses its default. The device-unavailable wait bound always requires a valid positive integer.
+
+```toml
+[ai_gateway]
+wire_protocol = "anthropic_messages"
+base_url = "https://model.example/v1"
+model = "example-model"
+api_key = "replace-with-your-key"
+max_context_bytes = 131072
+request_options_json = '{"thinking":{"type":"adaptive","display":null}}'
+
+[approval_gateway]
+enabled = false
+
+[goal_budget_policy.limits]
+modelTokens = "disabled"
+
+[usage_retention]
+turn_days = 30
+agent_session_days = 30
+```
+
+The file contains API keys. Public settings responses still return only whether a key is set. Complete-document saves and the existing worker initialization retain all sections. Context policy stays pinned when each model seam first uses it; goals apply current budgets at their existing checkpoints without resetting counters; retention changes apply on the next cleanup cycle.
+
+`desk_signal.db` retains sessions, tasks, permissions, probes and usage; `model-metrics.sqlite` retains metric records and runtime watermarks. During development, stop the service and manually rebuild incompatible runtime databases. The new format does not read, convert or migrate old configuration tables. Settings already saved in `config.toml` survive a database rebuild.
+
 
 ## Recommended Development Config
 
@@ -209,3 +252,23 @@ traceback = true
 [desk]
 video_fps = 30               # Reduce FPS during development to save resources
 ```
+
+## Purpose output limits
+
+The Context management and Terminal completion pages save the following global sections. Settings submission manages revision. Values must be integers from 1 to 4294967295; effective output is the smaller of the purpose value and the model runtime limit.
+
+```toml
+[context_management]
+schema_version = 2
+revision = "0"
+strategy = "checkpoint_summary"
+summary_max_output_tokens = 16384
+
+[terminal_completion]
+revision = "0"
+max_output_tokens = 512
+```
+
+### Thinking request profile
+
+The current profile schema is `2`. Set `reasoning_contract` explicitly to `conservative`, `openai_chat`, `deepseek_chat` or `anthropic_messages`, matching `wire_protocol`. `anthropic_prefix_binding` defaults to `false`; enable it only for an Anthropic endpoint that binds signed thinking to the request prefix. Thinking effort and optional native clearing remain inside `request_options_json`; see [AI diagnostics](../features/ai-diagnostics.md#thinking-replay-clearing-and-short-references). Both the main and approval gateways use these fields.

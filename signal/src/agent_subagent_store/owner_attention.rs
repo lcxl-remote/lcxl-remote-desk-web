@@ -6,7 +6,9 @@ use desk_signal_facade::controller::ai_assistant_session::{
 };
 use std::collections::{HashMap, HashSet};
 
-pub(crate) async fn augment_owner_attention_on<C: ConnectionTrait>(
+pub(crate) async fn augment_owner_attention_on<
+    C: ConnectionTrait + crate::config::ConfigConnection,
+>(
     db: &C,
     actor: &str,
     devices: Option<&HashSet<String>>,

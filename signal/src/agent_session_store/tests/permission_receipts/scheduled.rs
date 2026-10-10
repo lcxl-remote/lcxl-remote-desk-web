@@ -11,7 +11,12 @@ use desk_agent_protocol::schedule::*;
 
 #[tokio::test]
 async fn scheduled_approval_claim_consumes_original_receipt_and_preserves_occurrence() {
-    let (store, decisions) = seed(Database::connect("sqlite::memory:").await.unwrap()).await;
+    let (store, decisions) = seed(
+        crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap(),
+    )
+    .await;
     let row = agent_session::Entity::find()
         .one(&store.db)
         .await

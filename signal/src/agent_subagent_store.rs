@@ -1,5 +1,6 @@
 //! Durable delegation records and source controls, scoped to one owner and root.
 
+use crate::config::connection::DatabaseConnection;
 mod history;
 pub(crate) use history::group_children_on;
 mod control;
@@ -101,8 +102,8 @@ use desk_diagnose_core::{
     },
 };
 use sea_orm::{
-    ColumnTrait, ConnectionTrait, DatabaseConnection, DbErr, EntityTrait, PaginatorTrait,
-    QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait,
+    ColumnTrait, ConnectionTrait, DbErr, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder,
+    QuerySelect, Set, TransactionTrait,
 };
 
 #[derive(Clone)]
@@ -174,7 +175,7 @@ fn admission_label(admission: SourceAdmission) -> &'static str {
     }
 }
 
-async fn parent_on<C: ConnectionTrait>(
+async fn parent_on<C: ConnectionTrait + crate::config::ConfigConnection>(
     db: &C,
     root: &str,
     actor: &str,
@@ -300,7 +301,7 @@ impl SubAgentStore {
 
 /// The caller holds owner/device and root conversation control. Acquire child
 /// conversations before group/task/session/goal rows, matching every coordinator.
-pub(crate) async fn lock_goal_source_on<C: ConnectionTrait>(
+pub(crate) async fn lock_goal_source_on<C: ConnectionTrait + crate::config::ConfigConnection>(
     db: &C,
     root: &str,
     actor: &str,
@@ -340,7 +341,7 @@ pub(crate) async fn lock_goal_source_on<C: ConnectionTrait>(
 
 /// Commit source epoch, child admission and task states with the main goal. A new
 /// parent message never enters this path and cannot invalidate independent children.
-pub(crate) async fn apply_goal_source_on<C: ConnectionTrait>(
+pub(crate) async fn apply_goal_source_on<C: ConnectionTrait + crate::config::ConfigConnection>(
     db: &C,
     root: &str,
     actor: &str,
@@ -442,7 +443,7 @@ pub(crate) async fn apply_goal_source_on<C: ConnectionTrait>(
     Ok(permission_ends)
 }
 
-pub(crate) async fn replace_run_on<C: ConnectionTrait>(
+pub(crate) async fn replace_run_on<C: ConnectionTrait + crate::config::ConfigConnection>(
     db: &C,
     old: &run_row::Model,
     run: &SubAgentRun,
@@ -480,7 +481,7 @@ pub(crate) async fn replace_run_on<C: ConnectionTrait>(
 
 /// Final child action admission under the caller's owner/root control locks.
 /// Main input/control changes are independent of this child's frozen input.
-pub(crate) async fn check_child_action_on<C: ConnectionTrait>(
+pub(crate) async fn check_child_action_on<C: ConnectionTrait + crate::config::ConfigConnection>(
     db: &C,
     session: &PersistedAgentSession,
     fence: &desk_diagnose_core::action_turn_fence::AssistantTurnFence,
@@ -531,13 +532,13 @@ pub(crate) async fn check_child_action_on<C: ConnectionTrait>(
             .child_charged
             .checked_add(group.budget.child_outstanding)
             .map_err(|_| invalid())?
-            .fits(group.limits.child_ceiling())
+            .fits_allowance(group.limits.child_ceiling())
         || !group
             .budget
             .charged
             .checked_add(group.budget.outstanding)
             .map_err(|_| invalid())?
-            .fits(group.limits.total)
+            .fits_allowance(group.limits.total)
     {
         return Ok(false);
     }

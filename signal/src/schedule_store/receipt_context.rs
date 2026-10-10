@@ -1,10 +1,11 @@
 //! Historical identity for receipt verification. Never usable for execution admission.
 use super::publication::{TaskRehearsalEvidence, key, load_contract, valid_digest};
 use super::{ScheduleStoreError, digest, entity, json};
+use crate::config::connection::DatabaseTransaction;
 use crate::entity::{agent_schedule_run as run, agent_task_authorization as authorization};
 use desk_agent_protocol::capability_grant::TaskGrantProvenance;
 use desk_diagnose_core::schedule::contract::ValidatedTaskContract;
-use sea_orm::{ColumnTrait, DatabaseTransaction, EntityTrait, QueryFilter};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
 /// Immutable historical facts, deliberately distinct from CurrentTaskAuthority.
 /// Expiry/revocation stop new execution, not inspection of an original receipt.

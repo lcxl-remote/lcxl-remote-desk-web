@@ -3,6 +3,7 @@
 use desk_diagnose_core::model_observability::capacity::{StorageKind, data_budget};
 
 use super::*;
+use crate::config::ConfigConnection;
 
 pub(super) fn valid(row: &settings::Model) -> bool {
     [
@@ -130,13 +131,10 @@ pub(super) async fn configuration(
     if row.schema_version != EVENT_SCHEMA_VERSION as i32 || !valid(&row) {
         return Err(DbErr::Custom("metrics schema unavailable".into()));
     }
-    let config: MetricsSettings = decode(&row.settings_json)?;
+    let config = txn.config_read().await.model_metrics.clone();
     config
         .validate()
         .map_err(|_| DbErr::Custom("metrics settings unavailable".into()))?;
-    if config.revision != row.revision.to_string() {
-        return Err(DbErr::Custom("metrics revision conflict".into()));
-    }
     Ok((row, config))
 }
 

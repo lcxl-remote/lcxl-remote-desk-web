@@ -33,7 +33,7 @@ use crate::context_attachment::{
 use crate::model_context::{ContextNotice, MAX_CONTEXT_NOTICES, ModelContextState};
 use crate::replay::{ReplayDisposition, ReplayUnavailableReason};
 
-pub const CONVERSATION_SCHEMA_VERSION: u16 = 6;
+pub const CONVERSATION_SCHEMA_VERSION: u16 = 7;
 /// Opaque replay is bounded independently from visible transcript text.
 pub const MAX_REPLAY_ENVELOPE_BYTES: usize = 256 * 1024;
 pub const MAX_SESSION_REPLAY_BYTES: usize = 2 * 1024 * 1024;
@@ -530,6 +530,10 @@ pub struct PersistedAgentSession {
     #[serde(default)]
     pub conversation_schema_version: u16,
     pub conversation: Vec<crate::chat::ChatMessage>,
+    /// Session-local model aliases; deleted with this session.
+    pub ui_references: crate::ui_references::UiReferenceState,
+    pub thinking_prefix: crate::thinking_context::ThinkingPrefixState,
+    pub latest_model_context: Option<crate::thinking_context::ProviderContextObservation>,
     /// Bounded state owned by the current AI Assistant user-input epoch.
     /// Permission, dispatch, work and receipt facts remain independent durable
     /// state and are not deleted when this state resets.
@@ -747,6 +751,25 @@ impl PersistedAgentSession {
     /// database/SQLite JSON at an intermediate save or crash boundary.
     pub fn encode_json_for_storage(&self) -> Result<String, serde_json::Error> {
         let mut projection = self.clone();
+        let sources = projection
+            .conversation
+            .iter()
+            .map(|message| message.message_id.clone())
+            .collect();
+        let protected = projection
+            .ui_references
+            .retained_call_aliases(&projection.conversation);
+        projection
+            .ui_references
+            .retain_sources(&sources, &protected);
+        projection
+            .thinking_prefix
+            .bindings
+            .retain(|id, _| sources.contains(id));
+        projection
+            .thinking_prefix
+            .invalidated
+            .retain(|id| sources.contains(id));
         projection.enforce_replay_storage_limits();
         crate::image_input::strip_session_images(&mut projection.conversation);
         crate::visual_evidence::strip_previews(&mut projection.visual_evidence);
@@ -1161,6 +1184,9 @@ impl PersistedAgentSession {
             focus_epoch: crate::focus_epoch::FocusEpochState::default(),
             capability_disclosure: crate::capability_disclosure::CapabilityDisclosureState::default(
             ),
+            ui_references: Default::default(),
+            thinking_prefix: Default::default(),
+            latest_model_context: None,
             model_context_state: ModelContextState::default(),
             context_usage_basis: None,
             cache_projection: None,

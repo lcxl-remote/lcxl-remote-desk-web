@@ -521,6 +521,12 @@ desk_error_codes! {
     /// rather than an opaque internal failure, and so the UI can say which
     /// dependency. Carried in `RestResponse.code`, never an HTTP status.
     SHARED_STORE_UNAVAILABLE = 109,
+    /// An approval-model probe exhausted its configured output token limit.
+    /// The incomplete response cannot validate the reviewer configuration.
+    AI_APPROVAL_PROBE_OUTPUT_TRUNCATED = 110,
+    /// A checkpoint summary ended at its configured model output limit. No
+    /// incomplete checkpoint is committed; the original history is retained.
+    AI_CONTEXT_SUMMARY_OUTPUT_TRUNCATED = 111,
 
     ACTION_NEED_RETRY = 1001,
 

@@ -3,6 +3,7 @@
 //! Mutating helpers take an existing transaction so the caller can lock the
 //! session first and commit both rows and the run event together.
 
+use crate::config::connection::{DatabaseConnection, DatabaseTransaction};
 use crate::entity::{
     agent_attachment as attachment_row, agent_goal_run as goal_row,
     agent_permission_resume as resume_row, agent_run_event, agent_session,
@@ -19,8 +20,8 @@ use desk_diagnose_core::session::{
 };
 use sea_orm::sea_query::Expr;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, Condition, ConnectionTrait, DatabaseConnection,
-    DatabaseTransaction, DbErr, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set,
+    ActiveModelTrait, ColumnTrait, Condition, ConnectionTrait, DbErr, EntityTrait, QueryFilter,
+    QueryOrder, QuerySelect, Set,
 };
 
 fn invalid() -> DbErr {
@@ -206,7 +207,7 @@ pub async fn load_for_subject(
 
 /// Owner-visible latest goal, including a terminal goal that the user may
 /// inspect after the assistant has stopped running.
-pub async fn load_latest_for_subject<C: ConnectionTrait>(
+pub async fn load_latest_for_subject<C: ConnectionTrait + crate::config::ConfigConnection>(
     db: &C,
     conversation_id: &str,
     actor_id: &str,
@@ -1795,10 +1796,11 @@ pub async fn settle_slice(
 #[cfg(test)]
 mod lifecycle_tests {
     use super::*;
-    use sea_orm::Database;
 
     async fn db() -> DatabaseConnection {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
+        let db = crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap();
         crate::db::initialize_schema(&db).await.unwrap();
         db
     }

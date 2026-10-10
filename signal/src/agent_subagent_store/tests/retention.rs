@@ -1,7 +1,9 @@
 use super::*;
 use crate::entity::{agent_file_recovery_cleanup as tombstone, agent_subagent_inbox as inbox};
 
-async fn parent<C: ConnectionTrait>(db: &C) -> PersistedAgentSession {
+async fn parent<C: ConnectionTrait + crate::config::ConfigConnection>(
+    db: &C,
+) -> PersistedAgentSession {
     let row = session_row::Entity::find()
         .filter(session_row::Column::ConversationId.eq("root"))
         .one(db)

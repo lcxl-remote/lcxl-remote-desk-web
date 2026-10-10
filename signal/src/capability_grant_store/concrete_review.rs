@@ -1,12 +1,13 @@
 //! Intent-time gate for a concrete UI call under an AI-approved scope grant.
 
+use crate::config::connection::DatabaseTransaction;
 use crate::entity::agent_approval_review;
 use desk_agent_protocol::capability_grant::{CapabilityGrant, CapabilityGrantIssuer};
 use desk_diagnose_core::approval_review::{
     APPROVAL_REVIEW_SOURCE_CONCRETE_CALL, APPROVAL_REVIEW_STATUS_APPROVED, ApprovalReviewDecision,
     ApprovalVerdict, concrete_call_review_identity,
 };
-use sea_orm::{ColumnTrait, DatabaseTransaction, DbErr, EntityTrait, QueryFilter};
+use sea_orm::{ColumnTrait, DbErr, EntityTrait, QueryFilter};
 
 pub(super) async fn require_approved_on(
     txn: &DatabaseTransaction,

@@ -1,5 +1,5 @@
 use super::*;
-use sea_orm::{ConnectionTrait, Database};
+use sea_orm::ConnectionTrait;
 
 fn params() -> UpdateLiveContext {
     let now = Utc::now();
@@ -26,7 +26,9 @@ fn params() -> UpdateLiveContext {
 }
 
 async fn store(url: &str) -> SignalAgentSessionStore {
-    let db = Database::connect(url).await.unwrap();
+    let db = crate::config::test_support::Database::connect(url)
+        .await
+        .unwrap();
     crate::db::initialize_schema(&db).await.unwrap();
     SignalAgentSessionStore::new(db).with_client_metadata(
         Some("client-conversation".into()),

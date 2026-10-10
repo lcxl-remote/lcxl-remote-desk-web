@@ -194,23 +194,17 @@ async fn terminal_tasks_release_slots_without_a_cumulative_limit() {
 #[tokio::test]
 async fn invalid_configuration_fails_closed_without_creating_a_task() {
     let db = database().await;
-    let (parent, calls) = parent_with_calls(&db, 3).await;
-    let store = SubAgentStore::new(db.clone());
-    crate::subagent_policy::read(&db).await.unwrap();
-    crate::entity::subagent_policy::Entity::update_many()
-        .col_expr(
-            crate::entity::subagent_policy::Column::ConfigJson,
-            sea_orm::sea_query::Expr::value("{}"),
-        )
-        .exec(&db)
-        .await
-        .unwrap();
-    assert!(
-        store
-            .spawn_for_turn(&parent, &calls[0], &super::creation::spawn_request())
-            .await
-            .is_err()
-    );
+    let before = crate::subagent_policy::read(&db).await.unwrap();
+    use crate::config::ConfigConnection;
+    let result = db
+        .config_context()
+        .update::<_, sea_orm::DbErr, _>(|config| {
+            config.subagent_policy.limits.max_unfinished_per_root = 0;
+            Ok(Some(()))
+        })
+        .await;
+    assert!(result.is_err());
+    assert_eq!(crate::subagent_policy::read(&db).await.unwrap(), before);
     assert_eq!(run_row::Entity::find().count(&db).await.unwrap(), 0);
 }
 

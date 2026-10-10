@@ -7,7 +7,7 @@ use desk_diagnose_core::dynamic_run::{BackgroundTaskRecord, BackgroundTaskState}
 mod wire;
 
 async fn reopen(path: &std::path::Path) -> DatabaseConnection {
-    Database::connect(format!("sqlite://{}?mode=rw", path.display()))
+    crate::config::test_support::Database::connect(format!("sqlite://{}?mode=rw", path.display()))
         .await
         .unwrap()
 }

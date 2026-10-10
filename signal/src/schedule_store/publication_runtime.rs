@@ -2,6 +2,7 @@
 use super::{
     ScheduleStore, ScheduleStoreError, TaskPublicationVerifier, TaskRehearsalEvidence, entity,
 };
+use crate::config::connection::DatabaseTransaction;
 use crate::{ai_assistant_gate::AiAssistantGate, control_authorizer::SINGLE_ACCOUNT_USER_ID};
 use desk_agent_protocol::{capability_provider::ProductSurface, schedule::contract::TaskBudget};
 use desk_diagnose_core::{
@@ -11,7 +12,6 @@ use desk_diagnose_core::{
 use desk_signal_facade::model::{
     auth_context::AuthKind, connection::SharedConnectionMap, signal::RemoteDeskTypeEnum,
 };
-use sea_orm::DatabaseTransaction;
 
 pub struct SignalTaskPublicationVerifier<'a> {
     pub connections: &'a SharedConnectionMap,
@@ -144,11 +144,12 @@ mod tests {
     use super::*;
     use crate::schedule_store::publication_test_fixture;
     use desk_agent_protocol::ai_assistant::AiAssistantSettings;
-    use sea_orm::Database;
 
     #[tokio::test]
     async fn publication_without_enabled_assistant_and_live_target_creates_no_authority() {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
+        let db = crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap();
         let (store, task, _, input) = publication_test_fixture(db).await;
         let connections = SharedConnectionMap::new();
         let gate = AiAssistantGate::default();

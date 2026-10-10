@@ -6,7 +6,9 @@ use crate::entity::{
 };
 use sea_orm::ActiveModelTrait;
 
-pub(crate) async fn cancel_native_actions_on<C: ConnectionTrait>(
+pub(crate) async fn cancel_native_actions_on<
+    C: ConnectionTrait + crate::config::ConfigConnection,
+>(
     txn: &C,
     session: &PersistedAgentSession,
     operation: &str,

@@ -1,12 +1,13 @@
 use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
 
-/// Last successful three-case review probe for the exact saved configuration.
+/// Last successful three-case review probe for a saved model connection and profile.
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
 #[sea_orm(table_name = "approval_model_probe_observation")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub approval_model_provider_id: i32,
+    pub config_instance: String,
     pub connection_revision: i64,
     pub profile_revision: i64,
     pub configuration_revision: i64,

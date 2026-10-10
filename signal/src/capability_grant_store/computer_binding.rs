@@ -52,7 +52,7 @@ fn invalid() -> DbErr {
     DbErr::Custom("invalid original Computer Action binding".into())
 }
 
-pub(crate) async fn original_on<C: sea_orm::ConnectionTrait>(
+pub(crate) async fn original_on<C: sea_orm::ConnectionTrait + crate::config::ConfigConnection>(
     txn: &C,
     generation: &str,
 ) -> Result<

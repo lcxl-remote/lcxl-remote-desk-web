@@ -1,7 +1,8 @@
 //! Bind completed runtime observations to the task being considered for publication.
 use super::super::publication::TaskRehearsalEvidence;
 use super::*;
-use sea_orm::DatabaseTransaction;
+use crate::config::connection::DatabaseTransaction;
+
 use std::collections::BTreeSet;
 
 impl ScheduleStore {

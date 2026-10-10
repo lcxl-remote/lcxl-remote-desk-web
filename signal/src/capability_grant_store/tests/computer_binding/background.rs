@@ -229,9 +229,12 @@ async fn original_publisher_recovers_crash_preserves_receipt_and_consumes_only_a
         .await
         .unwrap()
         .unwrap();
-    let reopened = Database::connect(format!("sqlite://{}?mode=rw", path.display()))
-        .await
-        .unwrap();
+    let reopened = crate::config::test_support::Database::connect(format!(
+        "sqlite://{}?mode=rw",
+        path.display()
+    ))
+    .await
+    .unwrap();
     let store = SignalCapabilityGrantStore::new(reopened.clone());
     reopened.execute_unprepared("CREATE TRIGGER refuse_completion BEFORE UPDATE ON agent_session BEGIN SELECT RAISE(ABORT, 'synthetic save failure'); END").await.unwrap();
     store.publish_computer_results_once().await.unwrap();
@@ -362,9 +365,12 @@ async fn independent_snapshot_connections_converge_without_changing_the_runtime_
         .unwrap();
     let mut jobs = Vec::new();
     for _ in 0..8 {
-        let db = Database::connect(format!("sqlite://{}?mode=rw", path.display()))
-            .await
-            .unwrap();
+        let db = crate::config::test_support::Database::connect(format!(
+            "sqlite://{}?mode=rw",
+            path.display()
+        ))
+        .await
+        .unwrap();
         jobs.push(tokio::spawn(async move {
             let snapshot = SignalAgentSessionStore::new(db.clone())
                 .read_assistant_snapshot_for_subject("run-1", "actor-1", "device-1")

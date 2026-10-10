@@ -73,8 +73,14 @@ Exports include filters, time ranges and data completeness. Details and CSV file
 
 ## Backup and troubleshooting
 
-Local statistics are stored in the separate `model-metrics.sqlite` file. Use a consistent SQLite backup, or stop the service before copying files. Copying only the main file while the service is running can miss recent data.
+Collection and retention settings are stored in `[model_metrics]` in the active `config.toml`; records and runtime watermarks are stored in the separate `model-metrics.sqlite` file. Use a consistent SQLite backup, or stop the service before copying files. Copying only the main file while the service is running can miss recent data.
 
 Portable, signaling and system-service modes that provide local signaling support these statistics. Desk-server-only mode does not. If you connect to an external Manager, view platform statistics in Manager.
 
 If data is temporarily unavailable, turn off automatic refresh and check database space, permissions and service logs. After a repair, check the collection state and latest update time. Do not clear business data to fix a separate statistics failure. A backup cannot recover records that were never saved, repeat tool actions or recalculate bills.
+
+## Latest main-model context observation
+
+The session panel separates the retained model-view byte budget from the latest main-model input tokens. Reported cache input is included once. Native-clearing counts are shown separately and are never subtracted again. Missing or incomplete usage stays unknown; configuration or summary changes mark an earlier observation stale. Summary calls and cumulative session usage do not replace main-model input, and no provider-window percentage is shown.
+
+Thinking replay follows the configured explicit protocol contract. DeepSeek retains full thinking history; Anthropic retains complete signed blocks and can use native clearing where the endpoint supports it. Clearing does not reduce HTTP request bytes, so the local byte budget still applies. UI references use session-owned `s1/a1/w1/e1/o1` and browser `p1/b1` aliases. Observe again when a reference expires or an object changes.

@@ -5,6 +5,7 @@ use crate::capability_grant_store::{
     CAPABILITY_WORK_KIND, CAPABILITY_WORK_PREPARED, GRANT_STATUS_ACTIVE, decode_grant,
     decode_prepared_payload,
 };
+use crate::config::connection::{DatabaseConnection, DatabaseTransaction};
 use crate::entity::{
     agent_action_item, agent_approval_delegation as delegation_row,
     agent_approval_review as review_row, agent_capability_grant, agent_goal_run, agent_session,
@@ -26,11 +27,9 @@ use desk_diagnose_core::chat::ToolCall;
 use desk_diagnose_core::provider_registry::ProviderRegistry;
 use desk_diagnose_core::session::{AgentSessionSurface, PersistedAgentSession};
 use sea_orm::sea_query::Expr;
-use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, DatabaseTransaction, DbErr, EntityTrait,
-    QueryFilter, Set,
-};
+use sea_orm::{ActiveModelTrait, ColumnTrait, DbErr, EntityTrait, QueryFilter, Set};
 use sha2::{Digest, Sha256};
+use std::{future::Future, pin::Pin};
 
 use crate::agent_approval_store::ClaimedPermissionReview;
 
@@ -47,8 +46,8 @@ struct PreparedReview {
     authorized: AuthorizedApprovalReview,
     destination: desk_agent_protocol::data_lineage::DestinationIdentity,
     model_config_revision: u64,
-    prices: desk_diagnose_core::approval_cost::ApprovalTokenPrices,
     max_context_bytes: u64,
+    runtime_max_output_tokens: u64,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -77,7 +76,26 @@ fn as_i64(value: u64) -> Result<i64, DbErr> {
     value.try_into().map_err(|_| invalid())
 }
 
-async fn prepare_on(
+// Keep reviewer child states out of the UI dispatcher's poll frame. Boxing in
+// a separate constructor also avoids its temporary state copies in that caller.
+#[inline(never)]
+fn prepare_on<'a>(
+    txn: &'a DatabaseTransaction,
+    subject: &'a ConcreteSubject<'a>,
+    registry: &'a ProviderRegistry,
+    expires_at: Option<u64>,
+    now_unix_ms: u64,
+) -> Pin<Box<impl Future<Output = Result<Option<PreparedReview>, DbErr>> + 'a>> {
+    Box::pin(prepare_on_inner(
+        txn,
+        subject,
+        registry,
+        expires_at,
+        now_unix_ms,
+    ))
+}
+
+async fn prepare_on_inner(
     txn: &DatabaseTransaction,
     subject: &ConcreteSubject<'_>,
     registry: &ProviderRegistry,
@@ -177,7 +195,6 @@ async fn prepare_on(
     let model_config_revision =
         u64::try_from(config.configuration_revision).map_err(|_| invalid())?;
     let destination = config.destination_identity().map_err(|_| invalid())?;
-    let prices = config.prices.ok_or_else(invalid)?;
     let goal_row = agent_goal_run::Entity::find()
         .filter(agent_goal_run::Column::ConversationId.eq(subject.conversation_id))
         .filter(agent_goal_run::Column::ActorId.eq(subject.actor_id))
@@ -283,13 +300,24 @@ async fn prepare_on(
         authorized,
         destination,
         model_config_revision,
-        prices,
         max_context_bytes: u64::try_from(config.gateway.max_context_bytes.ok_or_else(invalid)?)
+            .map_err(|_| invalid())?,
+        runtime_max_output_tokens: u64::try_from(config.gateway.runtime_max_output_tokens)
             .map_err(|_| invalid())?,
     }))
 }
 
-async fn claim(
+#[inline(never)]
+fn claim<'a>(
+    db: &'a DatabaseConnection,
+    subject: &'a ConcreteSubject<'a>,
+    registry: &'a ProviderRegistry,
+    now_unix_ms: u64,
+) -> Pin<Box<impl Future<Output = Result<ClaimState, DbErr>> + 'a>> {
+    Box::pin(claim_inner(db, subject, registry, now_unix_ms))
+}
+
+async fn claim_inner(
     db: &DatabaseConnection,
     subject: &ConcreteSubject<'_>,
     registry: &ProviderRegistry,
@@ -367,15 +395,14 @@ async fn claim(
         .await?
         .ok_or_else(invalid)?;
     let mut delegation = crate::agent_approval_store::decode(&stored)?;
-    let (reserved_tokens, reserved_cost_micros) =
-        desk_diagnose_core::approval_cost::reviewer_reservation(
-            &prepared.authorized.prompt,
-            prepared.prices,
-            prepared.max_context_bytes,
-        )
-        .ok_or_else(invalid)?;
+    let reserved_tokens = desk_diagnose_core::approval_usage::reviewer_token_reservation(
+        &prepared.authorized.prompt,
+        prepared.max_context_bytes,
+        prepared.runtime_max_output_tokens,
+    )
+    .ok_or_else(invalid)?;
     delegation
-        .reserve(reserved_tokens, reserved_cost_micros)
+        .reserve_tokens(reserved_tokens)
         .map_err(|_| invalid())?;
     let changed = delegation_row::Entity::update_many()
         .col_expr(
@@ -419,7 +446,6 @@ async fn claim(
         lease_owner: Set(Some(lease_owner.clone())),
         lease_deadline: Set(Some(as_i64(lease_deadline_unix_ms)?)),
         reserved_tokens: Set(as_i64(reserved_tokens)?),
-        reserved_cost_micros: Set(as_i64(reserved_cost_micros)?),
         expires_at: Set(as_i64(candidate.expires_at_unix_ms)?),
         created_at: Set(as_i64(now_unix_ms)?),
         updated_at: Set(as_i64(now_unix_ms)?),
@@ -432,8 +458,8 @@ async fn claim(
         candidate,
         &prepared.destination,
         &prepared.authorized,
-        prepared.prices,
         reserved_tokens,
+        prepared.runtime_max_output_tokens,
         i64::try_from(now_unix_ms).map_err(|_| invalid())?,
     )
     .await?;
@@ -449,14 +475,37 @@ async fn claim(
             lease_deadline_unix_ms,
             model_destination: prepared.destination,
             model_config_revision: prepared.model_config_revision,
-            prices: prepared.prices,
             authorized: prepared.authorized,
         },
     ))
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn settle(
+#[inline(never)]
+fn settle<'a>(
+    db: &'a DatabaseConnection,
+    subject: &'a ConcreteSubject<'a>,
+    registry: &'a ProviderRegistry,
+    candidate: &'a ApprovalReviewCandidate,
+    claim: &'a ClaimedPermissionReview,
+    decision: Option<&'a ApprovalReviewDecision>,
+    actual_tokens: Option<u64>,
+    now_unix_ms: u64,
+) -> Pin<Box<impl Future<Output = Result<ConcreteReviewResult, DbErr>> + 'a>> {
+    Box::pin(settle_inner(
+        db,
+        subject,
+        registry,
+        candidate,
+        claim,
+        decision,
+        actual_tokens,
+        now_unix_ms,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn settle_inner(
     db: &DatabaseConnection,
     subject: &ConcreteSubject<'_>,
     registry: &ProviderRegistry,
@@ -464,7 +513,6 @@ async fn settle(
     claim: &ClaimedPermissionReview,
     decision: Option<&ApprovalReviewDecision>,
     actual_tokens: Option<u64>,
-    actual_cost_micros: Option<u64>,
     now_unix_ms: u64,
 ) -> Result<ConcreteReviewResult, DbErr> {
     let key = crate::approval_review_secret::load_or_create(db).await?;
@@ -487,7 +535,6 @@ async fn settle(
         || row.lease_owner.as_deref() != Some(claim.lease_owner.as_str())
         || row.lease_epoch != as_i64(claim.lease_epoch)?
         || row.reserved_tokens <= 0
-        || row.reserved_cost_micros <= 0
     {
         return Err(invalid());
     }
@@ -523,15 +570,12 @@ async fn settle(
         &txn,
         &row,
         actual_tokens,
-        actual_cost_micros,
         i64::try_from(now_unix_ms).map_err(|_| invalid())?,
     )
     .await?;
     let actual_tokens = physical.tokens;
-    let actual_cost_micros = physical.cost_micros;
-    let accounted = physical.settlement(row.reserved_tokens, row.reserved_cost_micros)?;
-    let usage_in_bounds = actual_tokens.is_none_or(|used| used <= row.reserved_tokens as u64)
-        && actual_cost_micros.is_none_or(|used| used <= row.reserved_cost_micros as u64);
+    let accounted = physical.settlement(row.reserved_tokens)?;
+    let usage_in_bounds = actual_tokens.is_none_or(|used| used <= row.reserved_tokens as u64);
     let valid_decision = physical.dispatched
         && decision.is_some_and(|review| review.validate_for(candidate).is_ok());
     let status = if expired {
@@ -547,16 +591,11 @@ async fn settle(
     };
     if physical.dispatched {
         delegation
-            .settle(
-                row.reserved_tokens as u64,
-                row.reserved_cost_micros as u64,
-                Some(accounted.tokens),
-                Some(accounted.cost_micros),
-            )
+            .settle_tokens(row.reserved_tokens as u64, Some(accounted.tokens))
             .map_err(|_| invalid())?;
     } else {
         delegation
-            .release_unstarted_review(row.reserved_tokens as u64, row.reserved_cost_micros as u64)
+            .release_unstarted_review_tokens(row.reserved_tokens as u64)
             .map_err(|_| invalid())?;
     }
     crate::agent_approval_usage::record_usage_on(
@@ -633,7 +672,16 @@ async fn settle(
 /// A claimed review is dialed once and settled before the source work can
 /// record any dispatch intent. Crashes leave the claim for lease expiry, not
 /// another model call with the same action identity.
-pub async fn review_prepared_call(
+#[inline(never)]
+pub fn review_prepared_call<'a>(
+    db: &'a DatabaseConnection,
+    registry: &'a ProviderRegistry,
+    subject: &'a ConcreteSubject<'a>,
+) -> Pin<Box<impl Future<Output = Result<ConcreteReviewResult, DbErr>> + 'a>> {
+    Box::pin(review_prepared_call_inner(db, registry, subject))
+}
+
+async fn review_prepared_call_inner(
     db: &DatabaseConnection,
     registry: &ProviderRegistry,
     subject: &ConcreteSubject<'_>,
@@ -653,13 +701,12 @@ pub async fn review_prepared_call(
         crate::approval_reviewer::call_claimed_permission_review(db, &candidate, &claim),
     )
     .await;
-    let (decision, tokens, cost) = match &response {
+    let (decision, tokens) = match &response {
         Ok(Ok(response)) => (
             response.decision.as_ref(),
             desk_diagnose_core::approval_review::reviewer_billed_tokens(response.usage),
-            claim.prices.actual(response.usage),
         ),
-        _ => (None, None, None),
+        _ => (None, None),
     };
     settle(
         db,
@@ -669,7 +716,6 @@ pub async fn review_prepared_call(
         &claim,
         decision,
         tokens,
-        cost,
         u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0),
     )
     .await

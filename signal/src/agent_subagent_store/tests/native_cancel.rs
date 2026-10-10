@@ -28,7 +28,10 @@ pub(super) async fn seed_native(
         .unwrap()
 }
 
-async fn native<C: ConnectionTrait>(db: &C, id: i64) -> command::Model {
+async fn native<C: ConnectionTrait + crate::config::ConfigConnection>(
+    db: &C,
+    id: i64,
+) -> command::Model {
     command::Entity::find_by_id(id)
         .one(db)
         .await

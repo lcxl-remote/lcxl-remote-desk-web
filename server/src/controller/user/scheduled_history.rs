@@ -37,7 +37,15 @@ async fn seed_code(session: Session) -> HttpResponse {
 #[ignore = "run alone: initializes the process-wide OSS database in a temporary directory"]
 async fn scheduled_result_rest_owner_guard_and_original_subject() {
     let dir = tempfile::tempdir().unwrap();
-    let db = desk_signal::db::init_db(dir.path().to_str().unwrap())
+    let args = crate::model::settings::Args {
+        config_file_path: Some(dir.path().join("config.toml")),
+        ..Default::default()
+    };
+    let settings = std::sync::Arc::new(crate::model::settings::SharedSettings::from(
+        crate::model::settings::Settings::new(&args).unwrap(),
+    ));
+    let configuration = crate::model::oss_config::context(settings).await.unwrap();
+    let db = desk_signal::db::init_db(dir.path().to_str().unwrap(), configuration)
         .await
         .unwrap();
     let now = chrono::Utc::now();

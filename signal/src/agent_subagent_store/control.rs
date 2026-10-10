@@ -5,7 +5,7 @@ use desk_diagnose_core::subagent::control::synchronize_session;
 use sea_orm::sea_query::OnConflict;
 use sha2::{Digest, Sha256};
 
-pub(crate) async fn synchronize_control_on<C: ConnectionTrait>(
+pub(crate) async fn synchronize_control_on<C: ConnectionTrait + crate::config::ConfigConnection>(
     db: &C,
     run: &SubAgentRun,
     now_ms: i64,
@@ -85,7 +85,7 @@ pub(crate) async fn synchronize_control_on<C: ConnectionTrait>(
 
 /// One immutable notification per task-state revision. UI reads and model
 /// result consumption have separate fields and are never inferred from progress.
-pub(crate) async fn append_state_event_on<C: ConnectionTrait>(
+pub(crate) async fn append_state_event_on<C: ConnectionTrait + crate::config::ConfigConnection>(
     db: &C,
     group: &DelegationGroup,
     run: &SubAgentRun,
@@ -175,7 +175,9 @@ pub(crate) async fn append_state_event_on<C: ConnectionTrait>(
 
 /// Permission recording may proceed while its source is paused. It cannot
 /// revive a cancelled task, adopt a newer child input or spend an expired source.
-pub(crate) async fn check_child_permission_on<C: ConnectionTrait>(
+pub(crate) async fn check_child_permission_on<
+    C: ConnectionTrait + crate::config::ConfigConnection,
+>(
     db: &C,
     session: &PersistedAgentSession,
     now_ms: i64,

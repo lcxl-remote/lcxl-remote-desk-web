@@ -1,8 +1,9 @@
 //! Renew both leases for one approved occurrence without resetting its context or budget.
 use super::{FreshTaskClaim, ScheduleStore, ScheduleStoreError};
+use crate::config::connection::DatabaseTransaction;
 use crate::entity::{agent_schedule_run as run, agent_session};
 use desk_diagnose_core::session::{PersistedAgentSession, TurnState};
-use sea_orm::{ColumnTrait, DatabaseTransaction, EntityTrait, QueryFilter, Set};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
 
 impl ScheduleStore {
     pub(super) async fn claim_fresh_approval_on(

@@ -16,7 +16,8 @@ pub use checkpoint::*;
 
 pub const MODEL_CONTEXT_STATE_SCHEMA_VERSION: u16 = 2;
 pub const CONTEXT_STRATEGY_SCHEMA_VERSION: u16 = 1;
-pub const PLATFORM_CONTEXT_POLICY_SCHEMA_VERSION: u32 = 1;
+pub const PLATFORM_CONTEXT_POLICY_SCHEMA_VERSION: u32 = 2;
+pub const DEFAULT_SUMMARY_MAX_OUTPUT_TOKENS: u32 = 16 * 1024;
 pub const MAX_CONTEXT_POLICY_ENTRIES: usize = 8;
 pub const MAX_CONTEXT_NOTICES: usize = 256;
 
@@ -43,6 +44,7 @@ pub struct PlatformContextPolicy {
     pub schema_version: u32,
     pub revision: u64,
     pub strategy: ContextManagementStrategy,
+    pub summary_max_output_tokens: u32,
 }
 
 impl Default for PlatformContextPolicy {
@@ -51,6 +53,7 @@ impl Default for PlatformContextPolicy {
             schema_version: PLATFORM_CONTEXT_POLICY_SCHEMA_VERSION,
             revision: 0,
             strategy: ContextManagementStrategy::CheckpointSummary,
+            summary_max_output_tokens: DEFAULT_SUMMARY_MAX_OUTPUT_TOKENS,
         }
     }
 }
@@ -60,15 +63,26 @@ impl PlatformContextPolicy {
         if self.schema_version != PLATFORM_CONTEXT_POLICY_SCHEMA_VERSION {
             return Err("unsupported context-management schema version");
         }
+        if self.summary_max_output_tokens == 0 {
+            return Err("summary output tokens must be positive");
+        }
         Ok(())
     }
 
-    pub fn candidate(&self, strategy: ContextManagementStrategy) -> Result<Self, &'static str> {
+    pub fn candidate(
+        &self,
+        strategy: ContextManagementStrategy,
+        summary_max_output_tokens: u32,
+    ) -> Result<Self, &'static str> {
         self.validate()?;
+        if summary_max_output_tokens == 0 {
+            return Err("summary output tokens must be positive");
+        }
         Ok(Self {
             schema_version: PLATFORM_CONTEXT_POLICY_SCHEMA_VERSION,
             revision: self.revision.checked_add(1).ok_or("revision overflow")?,
             strategy,
+            summary_max_output_tokens,
         })
     }
 
@@ -82,6 +96,7 @@ impl PlatformContextPolicy {
             .map_err(|_| ModelContextError::UnsupportedStrategy)?;
         let mut policy = PinnedContextPolicy::window(source, profile_revision, budget)?;
         policy.strategy = self.strategy;
+        policy.summary_max_output_tokens = self.summary_max_output_tokens;
         policy.platform_context_policy_revision = self.revision;
         Ok(policy)
     }
@@ -101,8 +116,11 @@ impl ContextPolicyKey {
         for component in [
             policy.source_context_key.as_str().to_string(),
             policy.profile_revision.to_string(),
+            policy.reasoning_contract.as_str().to_string(),
+            policy.anthropic_prefix_binding.to_string(),
             policy.max_context_bytes.to_string(),
             policy.strategy.as_str().to_string(),
+            policy.summary_max_output_tokens.to_string(),
             policy.platform_context_policy_revision.to_string(),
             policy.context_strategy_schema_version.to_string(),
         ] {
@@ -129,6 +147,8 @@ impl ContextPolicyKey {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PinnedContextPolicy {
     pub preserve_history: bool,
+    pub reasoning_contract: crate::model_profile::ReasoningContract,
+    pub anthropic_prefix_binding: bool,
     pub source_context_key: SourceContextKey,
     pub profile_revision: i64,
     pub max_context_bytes: usize,
@@ -137,6 +157,7 @@ pub struct PinnedContextPolicy {
     /// the persisted policy key.
     pub request_overhead_bytes: usize,
     pub strategy: ContextManagementStrategy,
+    pub summary_max_output_tokens: u32,
     pub platform_context_policy_revision: u64,
     pub context_strategy_schema_version: u16,
 }
@@ -155,11 +176,14 @@ impl PinnedContextPolicy {
         }
         Ok(Self {
             preserve_history: false,
+            reasoning_contract: Default::default(),
+            anthropic_prefix_binding: false,
             source_context_key,
             profile_revision,
             max_context_bytes,
             request_overhead_bytes: 0,
             strategy: ContextManagementStrategy::Window,
+            summary_max_output_tokens: DEFAULT_SUMMARY_MAX_OUTPUT_TOKENS,
             platform_context_policy_revision: 1,
             context_strategy_schema_version: CONTEXT_STRATEGY_SCHEMA_VERSION,
         })
@@ -175,6 +199,15 @@ impl PinnedContextPolicy {
         policy.strategy = ContextManagementStrategy::CheckpointSummary;
         policy.platform_context_policy_revision = platform_context_policy_revision;
         Ok(policy)
+    }
+
+    pub fn with_reasoning_profile(
+        mut self,
+        profile: &crate::model_profile::ModelRequestProfile,
+    ) -> Self {
+        self.reasoning_contract = profile.reasoning_contract;
+        self.anthropic_prefix_binding = profile.anthropic_prefix_binding;
+        self
     }
 
     pub fn key(&self) -> ContextPolicyKey {
@@ -1035,6 +1068,7 @@ mod tests {
     #[test]
     fn platform_policy_defaults_to_summary_revision_zero_and_revision_is_keyed() {
         let platform = PlatformContextPolicy::default();
+        assert_eq!(platform.summary_max_output_tokens, 16_384);
         assert_eq!(
             platform.schema_version,
             PLATFORM_CONTEXT_POLICY_SCHEMA_VERSION
@@ -1052,8 +1086,21 @@ mod tests {
             PinnedContextPolicy::checkpoint_summary(source("same"), 1, MIN_MODEL_CONTEXT_BYTES, 1)
                 .unwrap();
         assert_ne!(zero.key(), one.key());
+        let larger = PlatformContextPolicy::default()
+            .candidate(ContextManagementStrategy::CheckpointSummary, 32768)
+            .unwrap();
+        let frozen = larger
+            .pin(source("same"), 1, MIN_MODEL_CONTEXT_BYTES)
+            .unwrap();
+        assert_eq!(frozen.summary_max_output_tokens, 32768);
+        assert_ne!(frozen.key(), one.key());
+        assert!(
+            larger
+                .candidate(ContextManagementStrategy::Window, 0)
+                .is_err()
+        );
         let window = platform
-            .candidate(ContextManagementStrategy::Window)
+            .candidate(ContextManagementStrategy::Window, 4096)
             .unwrap();
         assert_eq!(window.revision, 1);
         let pinned = window
@@ -1072,7 +1119,7 @@ mod tests {
         invalid.revision = u64::MAX;
         assert!(
             invalid
-                .candidate(ContextManagementStrategy::Window)
+                .candidate(ContextManagementStrategy::Window, 4096)
                 .is_err()
         );
     }

@@ -31,13 +31,17 @@ async fn write_admission_waits_before_snapshot_and_does_not_block_readers() {
         "sqlite://{}?mode=rwc",
         dir.path().join("writers.db").display()
     );
-    let first = Database::connect(&url).await.unwrap();
+    let first = crate::config::test_support::Database::connect(&url)
+        .await
+        .unwrap();
     first
         .execute_unprepared("PRAGMA journal_mode=WAL")
         .await
         .unwrap();
     first.execute_unprepared("CREATE TABLE write_counter(id INTEGER PRIMARY KEY, value INTEGER NOT NULL); INSERT INTO write_counter VALUES(1,0)").await.unwrap();
-    let second = Database::connect(&url).await.unwrap();
+    let second = crate::config::test_support::Database::connect(&url)
+        .await
+        .unwrap();
     let writer = begin_write(&first, counter::Entity).await.unwrap();
     writer
         .execute_unprepared("UPDATE write_counter SET value=1 WHERE id=1")
@@ -73,7 +77,9 @@ async fn write_admission_waits_before_snapshot_and_does_not_block_readers() {
 
 #[tokio::test]
 async fn writer_reservation_never_changes_rows_or_fires_row_triggers() {
-    let db = Database::connect("sqlite::memory:").await.unwrap();
+    let db = crate::config::test_support::Database::connect("sqlite::memory:")
+        .await
+        .unwrap();
     db.execute_unprepared("CREATE TABLE write_counter(id INTEGER PRIMARY KEY, value INTEGER NOT NULL); INSERT INTO write_counter VALUES(1,7); CREATE TABLE changes(id INTEGER); CREATE TRIGGER counter_changed AFTER UPDATE ON write_counter BEGIN INSERT INTO changes VALUES(NEW.id); END;").await.unwrap();
     begin_write(&db, counter::Entity)
         .await

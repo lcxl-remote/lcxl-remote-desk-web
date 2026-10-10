@@ -37,7 +37,12 @@ async fn abrupt_process_exit_preserves_pending_and_started_fences() {
     const CHILD_DATABASE: &str = "LRD_TEST_PERMISSION_RESUME_DATABASE";
     const CHILD_PHASE: &str = "LRD_TEST_PERMISSION_RESUME_PHASE";
     if let Ok(url) = std::env::var(CHILD_DATABASE) {
-        let (store, decisions) = seed(Database::connect(&url).await.unwrap()).await;
+        let (store, decisions) = seed(
+            crate::config::test_support::Database::connect(&url)
+                .await
+                .unwrap(),
+        )
+        .await;
         decide(&store, &decisions, true).await.unwrap();
         if std::env::var(CHILD_PHASE).unwrap() == "started" {
             let (claimant, params) = prepare(&store).await;
@@ -83,7 +88,11 @@ async fn abrupt_process_exit_preserves_pending_and_started_fences() {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-        let store = SignalAgentSessionStore::new(Database::connect(&url).await.unwrap());
+        let store = SignalAgentSessionStore::new(
+            crate::config::test_support::Database::connect(&url)
+                .await
+                .unwrap(),
+        );
         crate::db::initialize_schema(&store.db).await.unwrap();
         let original = candidate(&store).await;
         let original_grants = state(&store).await.2;
@@ -127,14 +136,27 @@ async fn decide_reopen_concurrent_claim_and_settlement_never_reclaim_a_started_r
         "sqlite://{}?mode=rwc",
         directory.path().join("resume.db").display()
     );
-    let (store, decisions) = seed(Database::connect(&url).await.unwrap()).await;
+    let (store, decisions) = seed(
+        crate::config::test_support::Database::connect(&url)
+            .await
+            .unwrap(),
+    )
+    .await;
     decide(&store, &decisions, true).await.unwrap();
     let pending = candidate(&store).await;
     assert_eq!(pending.state, "pending");
     assert_eq!(pending.turn_id, None);
     store.db.close().await.unwrap();
-    let first = SignalAgentSessionStore::new(Database::connect(&url).await.unwrap());
-    let second = SignalAgentSessionStore::new(Database::connect(&url).await.unwrap());
+    let first = SignalAgentSessionStore::new(
+        crate::config::test_support::Database::connect(&url)
+            .await
+            .unwrap(),
+    );
+    let second = SignalAgentSessionStore::new(
+        crate::config::test_support::Database::connect(&url)
+            .await
+            .unwrap(),
+    );
     let (a, ca) = prepare(&first).await;
     let (b, cb) = prepare(&second).await;
     let (left, right) = tokio::join!(a.claim_turn(ca.clone()), b.claim_turn(cb));
@@ -180,7 +202,12 @@ async fn decide_reopen_concurrent_claim_and_settlement_never_reclaim_a_started_r
 
 #[tokio::test]
 async fn claim_and_resume_marker_rollback_together() {
-    let (store, decisions) = seed(Database::connect("sqlite::memory:").await.unwrap()).await;
+    let (store, decisions) = seed(
+        crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap(),
+    )
+    .await;
     decide(&store, &decisions, true).await.unwrap();
     let (claimant, params) = prepare(&store).await;
     let pending = candidate(&store).await;
@@ -199,7 +226,12 @@ async fn claim_and_resume_marker_rollback_together() {
 
 #[tokio::test]
 async fn new_input_supersedes_pending_but_preserves_original_receipt() {
-    let (store, decisions) = seed(Database::connect("sqlite::memory:").await.unwrap()).await;
+    let (store, decisions) = seed(
+        crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap(),
+    )
+    .await;
     decide(&store, &decisions, true).await.unwrap();
     let (claimant, params) = prepare(&store).await;
     let pending = candidate(&store).await;
@@ -226,7 +258,12 @@ async fn new_input_supersedes_pending_but_preserves_original_receipt() {
 
 #[tokio::test]
 async fn old_candidate_cannot_recover_a_new_input_turn_even_if_its_lease_lapsed() {
-    let (store, decisions) = seed(Database::connect("sqlite::memory:").await.unwrap()).await;
+    let (store, decisions) = seed(
+        crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap(),
+    )
+    .await;
     decide(&store, &decisions, true).await.unwrap();
     let pending = candidate(&store).await;
     SignalAgentRunEventStore::new(store.db.clone())
@@ -256,7 +293,12 @@ async fn old_candidate_cannot_recover_a_new_input_turn_even_if_its_lease_lapsed(
 
 #[tokio::test]
 async fn revoke_during_preflight_and_wrong_claim_identity_cannot_take_the_resume() {
-    let (store, decisions) = seed(Database::connect("sqlite::memory:").await.unwrap()).await;
+    let (store, decisions) = seed(
+        crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap(),
+    )
+    .await;
     decide(&store, &decisions, true).await.unwrap();
     let (claimant, params) = prepare(&store).await;
     for change in ["turn", "actor", "device", "trigger", "unbound"] {
@@ -289,7 +331,12 @@ async fn revoke_during_preflight_and_wrong_claim_identity_cannot_take_the_resume
 
 #[tokio::test]
 async fn process_loss_after_claim_recovers_the_original_lease_without_repeating_model_work() {
-    let (store, decisions) = seed(Database::connect("sqlite::memory:").await.unwrap()).await;
+    let (store, decisions) = seed(
+        crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap(),
+    )
+    .await;
     decide(&store, &decisions, true).await.unwrap();
     let (claimant, params) = prepare(&store).await;
     let started = claimant.claim_turn(params.clone()).await.unwrap();
@@ -320,12 +367,17 @@ async fn process_loss_after_claim_recovers_the_original_lease_without_repeating_
 
 #[tokio::test]
 async fn obsolete_schema_is_rejected_without_rewriting_decisions_or_creating_resume_work() {
-    let (store, decisions) = seed(Database::connect("sqlite::memory:").await.unwrap()).await;
+    let (store, decisions) = seed(
+        crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap(),
+    )
+    .await;
     decide(&store, &decisions, true).await.unwrap();
     let saved = state(&store).await;
     store
         .db
-        .execute_unprepared("DROP TABLE agent_permission_resume; DROP TABLE web_search_config; DROP TABLE context_management_config; PRAGMA user_version = 9")
+        .execute_unprepared("DROP TABLE agent_permission_resume; PRAGMA user_version = 9")
         .await
         .unwrap();
     for _ in 0..2 {
@@ -344,7 +396,12 @@ async fn obsolete_schema_is_rejected_without_rewriting_decisions_or_creating_res
 #[tokio::test]
 async fn corrupted_resume_metadata_is_not_a_claim_or_recovery_authority() {
     for change in ["event", "revision", "actor", "run", "state", "turn"] {
-        let (store, decisions) = seed(Database::connect("sqlite::memory:").await.unwrap()).await;
+        let (store, decisions) = seed(
+            crate::config::test_support::Database::connect("sqlite::memory:")
+                .await
+                .unwrap(),
+        )
+        .await;
         decide(&store, &decisions, true).await.unwrap();
         let (claimant, params) = prepare(&store).await;
         let mut row: resume::ActiveModel = candidate(&store).await.into();
@@ -373,7 +430,12 @@ async fn corrupted_resume_metadata_is_not_a_claim_or_recovery_authority() {
 
 #[tokio::test]
 async fn ordinary_permission_resume_cannot_replace_scheduled_occurrence_identity() {
-    let (store, decisions) = seed(Database::connect("sqlite::memory:").await.unwrap()).await;
+    let (store, decisions) = seed(
+        crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap(),
+    )
+    .await;
     decide(&store, &decisions, true).await.unwrap();
     let pending = candidate(&store).await;
     let (claimant, params) = prepare(&store).await;

@@ -34,6 +34,16 @@ fn fixture() -> (
     crate::session::PersistedAgentSession,
     i64,
 ) {
+    fixture_with_tokens(500)
+}
+
+fn fixture_with_tokens(
+    tokens: u64,
+) -> (
+    ScheduledCreationSource,
+    crate::session::PersistedAgentSession,
+    i64,
+) {
     let contract = validate_contract(&TaskContract {
         schema_version: 1,
         schedule_id: "schedule-test".into(),
@@ -47,7 +57,7 @@ fn fixture() -> (
         budget: TaskBudget {
             max_runs_per_utc_day: 2,
             max_calls_per_run: 9,
-            max_model_tokens_per_run: 500,
+            max_model_tokens_per_run: tokens,
             max_runtime_seconds: 60,
         },
     })
@@ -114,8 +124,8 @@ fn published_source_freezes_contract_caps_and_original_deadline() {
     );
     let original = creation.new_group(now, None).unwrap();
     assert_eq!(original.limits.total.tool_calls, 9);
-    assert_eq!(original.limits.total.tokens, 500);
-    assert_eq!(original.limits.child_ceiling().tokens, 400);
+    assert_eq!(original.limits.total.tokens, Some(500));
+    assert_eq!(original.limits.child_ceiling().tokens, Some(400));
     assert_eq!(original.limits.deadline_ms, now + 30_000);
     let later = creation.new_group(now + 20_000, None).unwrap();
     assert_eq!(later.group_id, original.group_id);
@@ -329,4 +339,13 @@ fn invalid_canonical_contract_and_deadline_are_rejected_before_allocation() {
     let mut runtime_only = source;
     runtime_only.authorization_expires_at_ms = None;
     assert_eq!(runtime_only.deadline_ms().unwrap(), now + 60_000);
+}
+
+#[test]
+fn scheduled_source_keeps_large_frozen_contract_tokens() {
+    let (source, session, now) = fixture_with_tokens(2_000_000);
+    let creation = CreationEnvelope::capture_scheduled(&session, source, destination()).unwrap();
+    let group = creation.new_group(now, None).unwrap();
+    assert_eq!(group.limits.total.tokens, Some(2_000_000));
+    assert_eq!(group.limits.child_ceiling().tokens, Some(1_600_000));
 }

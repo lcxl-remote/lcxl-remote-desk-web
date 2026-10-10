@@ -5,31 +5,34 @@
 //! split: it owns the model credentials and dials the provider, while edges only
 //! offer device-capability interfaces. Because the portable signal server is
 //! single-node and single-account, there is exactly one provider config
-//! (persisted as the singleton row in [`crate::entity::model_provider`]).
+//! (persisted in the global configuration file).
 //!
 //! The secret boundary has three faces (matching the edge `ai_model` design):
 //! - [`ModelProviderConfig`] — the loaded form. `api_key` is plaintext in the
-//!   local sqlite row but its [`std::fmt::Debug`] is redacted.
+//!   local configuration file but its [`std::fmt::Debug`] is redacted.
 //! - [`ModelProviderPublic`] — what `GET` returns. It reports only whether a key
 //!   is configured (`api_key_set`), never the key itself.
 //! - [`ModelProviderUpdate`] — what `POST` accepts. `api_key` is write-only with
 //!   explicit leave / clear / set semantics.
 
+use crate::config::connection::DatabaseConnection;
 use std::fmt;
 
 use desk_agent_protocol::ExecutionMode;
 use desk_agent_protocol::data_lineage::DestinationIdentity;
 use desk_diagnose_core::model_profile::{
-    MODEL_PROFILE_SCHEMA_VERSION, ModelRequestProfile, OutputLimitField, ProfileError, WireProtocol,
+    DEFAULT_RUNTIME_MAX_OUTPUT_TOKENS, MODEL_PROFILE_SCHEMA_VERSION, ModelRequestProfile,
+    OutputLimitField, ProfileError, ReasoningContract, WireProtocol,
 };
 use sea_orm::ActiveValue::Set;
-use sea_orm::sea_query::{Expr, OnConflict};
-use sea_orm::{ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, TryInsertResult};
+use sea_orm::sea_query::OnConflict;
+use sea_orm::{DbErr, EntityTrait};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use crate::entity::model_provider::SINGLETON_ID;
-use crate::entity::{model_probe_observation, model_provider};
+const SINGLETON_ID: i32 = 1;
+use crate::config::ConfigConnection;
+use crate::entity::model_probe_observation;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct ModelProbeObservation {
@@ -89,27 +92,12 @@ pub enum ResponseFormatMode {
     JsonSchema,
 }
 
-/// Encode a `serde(rename_all = "snake_case")` enum to its bare wire string
-/// (e.g. `ExecutionMode::SuggestOnly` -> `"suggest_only"`), without the quotes
-/// `serde_json::to_string` would add.
-fn enum_to_wire<T: Serialize>(value: &T) -> String {
-    serde_json::to_value(value)
-        .ok()
-        .and_then(|v| v.as_str().map(str::to_owned))
-        .unwrap_or_default()
-}
-
-/// Decode a bare wire string back to its enum, falling back to the default when
-/// the stored string is unrecognized (forward/backward tolerant).
-fn enum_from_wire<T: serde::de::DeserializeOwned + Default>(raw: &str) -> T {
-    serde_json::from_value(serde_json::Value::String(raw.to_owned())).unwrap_or_default()
-}
-
 /// Loaded model-provider configuration (the central brain's credentials + policy
 /// defaults).
 ///
 /// `Debug` is implemented by hand so `api_key` is never rendered.
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct ModelProviderConfig {
     /// Provider wire contract. `None` is allowed only for an unconfigured row.
     pub wire_protocol: Option<WireProtocol>,
@@ -122,15 +110,19 @@ pub struct ModelProviderConfig {
     /// Server-side secret. Never serialized into a public view; its `Debug` is
     /// redacted.
     pub api_key: Option<String>,
+    pub reasoning_contract: ReasoningContract,
+    pub anthropic_prefix_binding: bool,
     pub profile_schema_version: u16,
     pub request_options: serde_json::Value,
     pub output_limit_field: OutputLimitField,
-    pub probe_max_output_tokens: i64,
     pub runtime_max_output_tokens: i64,
     /// Explicit local model-history budget. It is not inferred from the model.
     pub max_context_bytes: Option<i64>,
     pub connection_revision: i64,
     pub profile_revision: i64,
+    #[serde(skip)]
+    pub config_instance: String,
+    #[serde(skip)]
     pub probe_observation: Option<ModelProbeObservation>,
     /// How the gateway is asked to constrain output format.
     pub response_format: ResponseFormatMode,
@@ -156,14 +148,16 @@ impl Default for ModelProviderConfig {
             supports_image_input: false,
             base_url: None,
             api_key: None,
+            reasoning_contract: Default::default(),
+            anthropic_prefix_binding: false,
             profile_schema_version: MODEL_PROFILE_SCHEMA_VERSION,
             request_options: serde_json::json!({}),
             output_limit_field: OutputLimitField::MaxTokens,
-            probe_max_output_tokens: 512,
-            runtime_max_output_tokens: 4096,
+            runtime_max_output_tokens: DEFAULT_RUNTIME_MAX_OUTPUT_TOKENS,
             max_context_bytes: None,
             connection_revision: 1,
             profile_revision: 1,
+            config_instance: String::new(),
             probe_observation: None,
             response_format: ResponseFormatMode::default(),
             // Grant confirmed execution centrally by default. The target edge's
@@ -197,7 +191,7 @@ impl ModelProviderConfig {
             return Err(ModelDestinationError::InvalidRevision);
         }
         Ok(DestinationIdentity::Model {
-            connection_id: format!("oss-ai-gateway:{SINGLETON_ID}"),
+            connection_id: format!("oss-ai-gateway:{SINGLETON_ID}:{}", self.config_instance),
             connection_revision,
             model_id: model_id.to_string(),
             profile_revision,
@@ -209,10 +203,11 @@ impl ModelProviderConfig {
             .max_context_bytes
             .ok_or(ProfileError::InvalidMaxContextBytes(0))?;
         let profile = ModelRequestProfile {
+            reasoning_contract: self.reasoning_contract,
+            anthropic_prefix_binding: self.anthropic_prefix_binding,
             profile_schema_version: self.profile_schema_version,
             request_options: self.request_options.clone(),
             output_limit_field: self.output_limit_field,
-            probe_max_output_tokens: self.probe_max_output_tokens,
             runtime_max_output_tokens: self.runtime_max_output_tokens,
             max_context_bytes,
             profile_revision: self.profile_revision,
@@ -248,10 +243,11 @@ impl ModelProviderConfig {
             supports_image_input: self.supports_image_input,
             base_url: self.base_url.clone(),
             max_context_bytes: self.max_context_bytes,
+            reasoning_contract: self.reasoning_contract,
+            anthropic_prefix_binding: self.anthropic_prefix_binding,
             profile_schema_version: self.profile_schema_version,
             request_options: self.request_options.clone(),
             output_limit_field: self.output_limit_field,
-            probe_max_output_tokens: self.probe_max_output_tokens,
             runtime_max_output_tokens: self.runtime_max_output_tokens,
             connection_revision: self.connection_revision,
             profile_revision: self.profile_revision,
@@ -283,9 +279,15 @@ impl ModelProviderConfig {
                 next != self.api_key.as_ref()
             });
         let mut profile_changed = update
-            .model
-            .as_ref()
-            .is_some_and(|value| Some(value) != self.model.as_ref())
+            .reasoning_contract
+            .is_some_and(|value| value != self.reasoning_contract)
+            || update
+                .anthropic_prefix_binding
+                .is_some_and(|value| value != self.anthropic_prefix_binding)
+            || update
+                .model
+                .as_ref()
+                .is_some_and(|value| Some(value) != self.model.as_ref())
             || update
                 .supports_image_input
                 .is_some_and(|value| value != self.supports_image_input)
@@ -296,9 +298,6 @@ impl ModelProviderConfig {
             || update
                 .output_limit_field
                 .is_some_and(|value| value != self.output_limit_field)
-            || update
-                .probe_max_output_tokens
-                .is_some_and(|value| value != self.probe_max_output_tokens)
             || update
                 .runtime_max_output_tokens
                 .is_some_and(|value| value != self.runtime_max_output_tokens)
@@ -320,14 +319,17 @@ impl ModelProviderConfig {
         if let Some(max_context_bytes) = update.max_context_bytes {
             self.max_context_bytes = Some(max_context_bytes);
         }
+        if let Some(value) = update.reasoning_contract {
+            self.reasoning_contract = value;
+        }
+        if let Some(value) = update.anthropic_prefix_binding {
+            self.anthropic_prefix_binding = value;
+        }
         if let Some(request_options) = update.request_options {
             self.request_options = request_options;
         }
         if let Some(output_limit_field) = update.output_limit_field {
             self.output_limit_field = output_limit_field;
-        }
-        if let Some(limit) = update.probe_max_output_tokens {
-            self.probe_max_output_tokens = limit;
         }
         if let Some(limit) = update.runtime_max_output_tokens {
             self.runtime_max_output_tokens = limit;
@@ -381,100 +383,6 @@ impl ModelProviderConfig {
             self.probe_observation = None;
         }
     }
-
-    fn from_entity(row: model_provider::Model) -> Self {
-        let exec_approval_timeout_secs = u32::try_from(row.exec_approval_timeout_secs)
-            .ok()
-            .filter(|value| {
-                (EXEC_APPROVAL_TIMEOUT_MIN_SECS..=EXEC_APPROVAL_TIMEOUT_MAX_SECS).contains(value)
-            })
-            .unwrap_or_else(|| {
-                log::warn!(
-                    "stored exec approval timeout is invalid; defaulting to \
-                     {EXEC_APPROVAL_TIMEOUT_DEFAULT_SECS} seconds"
-                );
-                EXEC_APPROVAL_TIMEOUT_DEFAULT_SECS
-            });
-        Self {
-            wire_protocol: row
-                .wire_protocol
-                .as_deref()
-                .map(WireProtocol::parse)
-                .transpose()
-                .unwrap_or(None),
-            model: row.model,
-            supports_image_input: row.supports_image_input,
-            base_url: row.base_url,
-            api_key: row.api_key,
-            profile_schema_version: u16::try_from(row.profile_schema_version).unwrap_or(0),
-            request_options: serde_json::from_str(&row.request_options)
-                .unwrap_or(serde_json::Value::Null),
-            output_limit_field: OutputLimitField::parse(&row.output_limit_field)
-                .unwrap_or(OutputLimitField::MaxOutputTokens),
-            probe_max_output_tokens: row.probe_max_output_tokens,
-            runtime_max_output_tokens: row.runtime_max_output_tokens,
-            max_context_bytes: Some(row.max_context_bytes),
-            connection_revision: row.connection_revision,
-            profile_revision: row.profile_revision,
-            probe_observation: None,
-            response_format: enum_from_wire(&row.response_format),
-            execution_mode: enum_from_wire(&row.execution_mode),
-            max_same_tool_calls_per_turn: (row.max_same_tool_calls_per_turn.max(0) as u32)
-                .clamp(MAX_SAME_TOOL_CALLS_MIN, MAX_SAME_TOOL_CALLS_MAX),
-            max_steps_per_turn: (row.max_steps_per_turn.max(0) as u32)
-                .clamp(MAX_STEPS_MIN, MAX_STEPS_MAX)
-                .max(
-                    (row.max_same_tool_calls_per_turn.max(0) as u32)
-                        .clamp(MAX_SAME_TOOL_CALLS_MIN, MAX_SAME_TOOL_CALLS_MAX),
-                ),
-            exec_approval_timeout_secs,
-        }
-    }
-
-    fn into_active_model(self) -> Result<model_provider::ActiveModel, DbErr> {
-        let profile = self
-            .request_profile()
-            .map_err(|error| DbErr::Custom(error.to_string()))?;
-        let protocol = self.wire_protocol.ok_or_else(|| {
-            DbErr::Custom("wire_protocol is required before saving model configuration".into())
-        })?;
-        let request_options = serde_json::to_string(&profile.request_options)
-            .map_err(|error| DbErr::Custom(error.to_string()))?;
-        Ok(model_provider::ActiveModel {
-            id: Set(SINGLETON_ID),
-            wire_protocol: Set(Some(protocol.to_string())),
-            model: Set(self.model),
-            supports_image_input: Set(self.supports_image_input),
-            base_url: Set(self.base_url),
-            api_key: Set(self.api_key),
-            profile_schema_version: Set(i32::from(profile.profile_schema_version)),
-            request_options: Set(request_options),
-            output_limit_field: Set(profile.output_limit_field.to_string()),
-            probe_max_output_tokens: Set(profile.probe_max_output_tokens),
-            runtime_max_output_tokens: Set(profile.runtime_max_output_tokens),
-            max_context_bytes: Set(profile.max_context_bytes),
-            connection_revision: Set(self.connection_revision),
-            profile_revision: Set(self.profile_revision),
-            response_format: Set(enum_to_wire(&self.response_format)),
-            execution_mode: Set(enum_to_wire(&self.execution_mode)),
-            max_same_tool_calls_per_turn: Set(self
-                .max_same_tool_calls_per_turn
-                .clamp(MAX_SAME_TOOL_CALLS_MIN, MAX_SAME_TOOL_CALLS_MAX)
-                as i32),
-            max_steps_per_turn: Set(self
-                .max_steps_per_turn
-                .clamp(MAX_STEPS_MIN, MAX_STEPS_MAX)
-                .max(
-                    self.max_same_tool_calls_per_turn
-                        .clamp(MAX_SAME_TOOL_CALLS_MIN, MAX_SAME_TOOL_CALLS_MAX),
-                ) as i32),
-            exec_approval_timeout_secs: Set(self.exec_approval_timeout_secs.clamp(
-                EXEC_APPROVAL_TIMEOUT_MIN_SECS,
-                EXEC_APPROVAL_TIMEOUT_MAX_SECS,
-            ) as i32),
-            updated_at: Set(chrono::Utc::now()),
-        })
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -507,7 +415,6 @@ impl fmt::Debug for ModelProviderConfig {
             .field("profile_schema_version", &self.profile_schema_version)
             .field("request_options", &self.request_options)
             .field("output_limit_field", &self.output_limit_field)
-            .field("probe_max_output_tokens", &self.probe_max_output_tokens)
             .field("runtime_max_output_tokens", &self.runtime_max_output_tokens)
             .field("connection_revision", &self.connection_revision)
             .field("profile_revision", &self.profile_revision)
@@ -537,12 +444,14 @@ pub struct ModelProviderPublic {
     pub base_url: Option<String>,
     #[schema(minimum = 4096, maximum = 16777216)]
     pub max_context_bytes: Option<i64>,
+    #[schema(value_type = String)]
+    pub reasoning_contract: ReasoningContract,
+    pub anthropic_prefix_binding: bool,
     pub profile_schema_version: u16,
     #[schema(value_type = Object)]
     pub request_options: serde_json::Value,
     #[schema(value_type = String)]
     pub output_limit_field: OutputLimitField,
-    pub probe_max_output_tokens: i64,
     pub runtime_max_output_tokens: i64,
     pub connection_revision: i64,
     pub profile_revision: i64,
@@ -590,8 +499,10 @@ pub struct ModelProviderUpdate {
     #[schema(value_type = Object)]
     pub request_options: Option<serde_json::Value>,
     #[schema(value_type = Option<String>)]
+    pub reasoning_contract: Option<ReasoningContract>,
+    pub anthropic_prefix_binding: Option<bool>,
+    #[schema(value_type = Option<String>)]
     pub output_limit_field: Option<OutputLimitField>,
-    pub probe_max_output_tokens: Option<i64>,
     pub runtime_max_output_tokens: Option<i64>,
     /// `None` leaves the stored format unchanged.
     pub response_format: Option<ResponseFormatMode>,
@@ -622,7 +533,6 @@ impl fmt::Debug for ModelProviderUpdate {
             .field("max_context_bytes", &self.max_context_bytes)
             .field("request_options", &self.request_options)
             .field("output_limit_field", &self.output_limit_field)
-            .field("probe_max_output_tokens", &self.probe_max_output_tokens)
             .field("runtime_max_output_tokens", &self.runtime_max_output_tokens)
             .field("response_format", &self.response_format)
             .field("execution_mode", &self.execution_mode)
@@ -640,16 +550,13 @@ impl fmt::Debug for ModelProviderUpdate {
     }
 }
 
-/// Load the singleton provider config, returning the default (all-unset) config
-/// when no row has been written yet.
-pub async fn load<C: sea_orm::ConnectionTrait>(db: &C) -> Result<ModelProviderConfig, DbErr> {
-    let row = model_provider::Entity::find_by_id(SINGLETON_ID)
-        .one(db)
-        .await?;
-    let Some(row) = row else {
-        return Ok(ModelProviderConfig::default());
-    };
-    let mut config = ModelProviderConfig::from_entity(row);
+/// Load file settings and attach the independently stored probe observation.
+pub async fn load<C: crate::config::ConfigConnection>(
+    db: &C,
+) -> Result<ModelProviderConfig, DbErr> {
+    let snapshot = db.config_read().await;
+    let mut config = snapshot.ai_gateway.clone();
+    config.config_instance = snapshot.metadata.instance.clone();
     let observation = model_probe_observation::Entity::find_by_id(SINGLETON_ID)
         .one(db)
         .await?;
@@ -663,118 +570,115 @@ pub async fn load<C: sea_orm::ConnectionTrait>(db: &C) -> Result<ModelProviderCo
             reasoning_tokens: row.reasoning_tokens,
             stop_reason: row.stop_reason,
             validated_capabilities,
-            current: row.connection_revision == config.connection_revision
+            current: row.config_instance == snapshot.metadata.instance
+                && row.connection_revision == config.connection_revision
                 && row.profile_revision == config.profile_revision,
         })
     });
     Ok(config)
 }
 
-/// Persist the singleton provider config (insert-or-replace on the fixed PK).
 pub async fn save(db: &DatabaseConnection, config: ModelProviderConfig) -> Result<(), DbErr> {
-    let active = config.into_active_model()?;
-    model_provider::Entity::insert(active)
-        .on_conflict(
-            OnConflict::column(model_provider::Column::Id)
-                .update_columns([
-                    model_provider::Column::WireProtocol,
-                    model_provider::Column::Model,
-                    model_provider::Column::SupportsImageInput,
-                    model_provider::Column::BaseUrl,
-                    model_provider::Column::ApiKey,
-                    model_provider::Column::MaxContextBytes,
-                    model_provider::Column::ProfileSchemaVersion,
-                    model_provider::Column::RequestOptions,
-                    model_provider::Column::OutputLimitField,
-                    model_provider::Column::ProbeMaxOutputTokens,
-                    model_provider::Column::RuntimeMaxOutputTokens,
-                    model_provider::Column::ConnectionRevision,
-                    model_provider::Column::ProfileRevision,
-                    model_provider::Column::ResponseFormat,
-                    model_provider::Column::ExecutionMode,
-                    model_provider::Column::MaxSameToolCallsPerTurn,
-                    model_provider::Column::MaxStepsPerTurn,
-                    model_provider::Column::ExecApprovalTimeoutSecs,
-                    model_provider::Column::UpdatedAt,
-                ])
-                .to_owned(),
-        )
-        .exec(db)
+    config
+        .request_profile()
+        .map_err(|error| DbErr::Custom(error.to_string()))?;
+    db.config_context()
+        .update::<_, DbErr, _>(|candidate| {
+            config
+                .request_profile()
+                .map_err(|error| DbErr::Custom(error.to_string()))?
+                .validate_for_use_case(
+                    config
+                        .wire_protocol
+                        .ok_or_else(|| DbErr::Custom("wire protocol is required".into()))?,
+                    desk_diagnose_core::model_profile::ModelUseCase::Completion,
+                    Some(i64::from(candidate.terminal_completion.max_output_tokens)),
+                )
+                .map_err(|error| DbErr::Custom(error.to_string()))?;
+            candidate.ai_gateway = config;
+            Ok(Some(()))
+        })
         .await?;
     Ok(())
 }
 
-/// Persist a configuration only when the singleton still has the revisions the
-/// caller read. The conditional UPDATE is the CAS for an existing row. A fresh
-/// database has no singleton row, so the insert uses DO NOTHING to make two
-/// first writers race safely; only the winner reports success.
+#[derive(Debug)]
+pub enum ModelConfigWriteError {
+    Invalid(String),
+    Db(DbErr),
+}
+impl From<DbErr> for ModelConfigWriteError {
+    fn from(error: DbErr) -> Self {
+        Self::Db(error)
+    }
+}
+
 pub async fn save_if_revisions_match(
     db: &DatabaseConnection,
     config: ModelProviderConfig,
     expected_connection_revision: i64,
     expected_profile_revision: i64,
-) -> Result<bool, DbErr> {
-    let active = config.into_active_model()?;
-    let updated = model_provider::Entity::update_many()
-        .set(active.clone())
-        .filter(model_provider::Column::Id.eq(SINGLETON_ID))
-        .filter(model_provider::Column::ConnectionRevision.eq(expected_connection_revision))
-        .filter(model_provider::Column::ProfileRevision.eq(expected_profile_revision))
-        .exec(db)
-        .await?;
-    if updated.rows_affected == 1 {
-        return Ok(true);
-    }
-
-    if expected_connection_revision != 1 || expected_profile_revision != 1 {
-        return Ok(false);
-    }
-    let inserted = model_provider::Entity::insert(active)
-        .on_conflict_do_nothing()
-        .exec_without_returning(db)
-        .await?;
-    Ok(matches!(inserted, TryInsertResult::Inserted(1)))
+) -> Result<bool, ModelConfigWriteError> {
+    config
+        .request_profile()
+        .map_err(|error| DbErr::Custom(error.to_string()))?;
+    Ok(db
+        .config_context()
+        .update::<_, ModelConfigWriteError, _>(|candidate| {
+            if candidate.ai_gateway.connection_revision != expected_connection_revision
+                || candidate.ai_gateway.profile_revision != expected_profile_revision
+            {
+                return Ok(None);
+            }
+            config
+                .request_profile()
+                .map_err(|error| ModelConfigWriteError::Invalid(error.to_string()))?
+                .validate_for_use_case(
+                    config.wire_protocol.ok_or_else(|| {
+                        ModelConfigWriteError::Invalid("wire protocol is required".into())
+                    })?,
+                    desk_diagnose_core::model_profile::ModelUseCase::Completion,
+                    Some(i64::from(candidate.terminal_completion.max_output_tokens)),
+                )
+                .map_err(|error| ModelConfigWriteError::Invalid(error.to_string()))?;
+            candidate.ai_gateway = config;
+            Ok(Some(()))
+        })
+        .await?
+        .is_some())
 }
 
-/// Persist an observation only if both saved revisions still match the probe
-/// snapshot. The no-op provider update is the first write in the transaction,
-/// so SQLite serializes this CAS with concurrent configuration saves.
+/// The transaction pins the file identity before taking the SQLite writer.
 pub async fn save_probe_observation_if_current(
     db: &DatabaseConnection,
+    expected_instance: &str,
     observation: ModelProbeObservation,
 ) -> Result<bool, DbErr> {
-    let validated_capabilities = serde_json::to_string(&observation.validated_capabilities)
-        .map_err(|error| DbErr::Custom(error.to_string()))?;
-    let txn = crate::db::begin_write(&db, crate::entity::model_provider::Entity).await?;
-    let matched = model_provider::Entity::update_many()
-        .col_expr(
-            model_provider::Column::Id,
-            Expr::col(model_provider::Column::Id),
-        )
-        .filter(model_provider::Column::Id.eq(SINGLETON_ID))
-        .filter(model_provider::Column::ConnectionRevision.eq(observation.connection_revision))
-        .filter(model_provider::Column::ProfileRevision.eq(observation.profile_revision))
-        .exec(&txn)
-        .await?
-        .rows_affected
-        == 1;
-    if !matched {
+    let txn = crate::db::begin_write(db, model_probe_observation::Entity).await?;
+    let snapshot = txn.config_read().await;
+    if snapshot.metadata.instance != expected_instance
+        || snapshot.ai_gateway.connection_revision != observation.connection_revision
+        || snapshot.ai_gateway.profile_revision != observation.profile_revision
+    {
+        drop(snapshot);
         txn.rollback().await?;
         return Ok(false);
     }
     model_probe_observation::Entity::insert(model_probe_observation::ActiveModel {
         model_provider_id: Set(SINGLETON_ID),
+        config_instance: Set(snapshot.metadata.instance.clone()),
         connection_revision: Set(observation.connection_revision),
         profile_revision: Set(observation.profile_revision),
         tested_at: Set(observation.tested_at),
         reasoning_observed: Set(Some(observation.reasoning_observed)),
         reasoning_tokens: Set(observation.reasoning_tokens),
         stop_reason: Set(observation.stop_reason),
-        validated_capabilities: Set(validated_capabilities),
+        validated_capabilities: Set(observation.validated_capabilities.to_string()),
     })
     .on_conflict(
         OnConflict::column(model_probe_observation::Column::ModelProviderId)
             .update_columns([
+                model_probe_observation::Column::ConfigInstance,
                 model_probe_observation::Column::ConnectionRevision,
                 model_probe_observation::Column::ProfileRevision,
                 model_probe_observation::Column::TestedAt,
@@ -787,6 +691,7 @@ pub async fn save_probe_observation_if_current(
     )
     .exec(&txn)
     .await?;
+    drop(snapshot);
     txn.commit().await?;
     Ok(true)
 }
@@ -794,13 +699,13 @@ pub async fn save_probe_observation_if_current(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sea_orm::{ConnectionTrait, Database, Schema};
+    use sea_orm::{ConnectionTrait, Schema};
 
     async fn memory_db() -> DatabaseConnection {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
+        let db = crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap();
         let schema = Schema::new(db.get_database_backend());
-        let stmt = schema.create_table_from_entity(model_provider::Entity);
-        db.execute(&stmt).await.unwrap();
         let stmt = schema.create_table_from_entity(model_probe_observation::Entity);
         db.execute(&stmt).await.unwrap();
         db
@@ -808,16 +713,18 @@ mod tests {
 
     fn configured() -> ModelProviderConfig {
         ModelProviderConfig {
+            config_instance: String::new(),
             wire_protocol: Some(WireProtocol::OpenAiChatCompletions),
             model: Some("example-model".into()),
             supports_image_input: true,
             base_url: Some("https://api.example/v1".into()),
             api_key: Some("sk-secret-value".into()),
             max_context_bytes: Some(131_072),
+            reasoning_contract: Default::default(),
+            anthropic_prefix_binding: false,
             profile_schema_version: MODEL_PROFILE_SCHEMA_VERSION,
             request_options: serde_json::json!({}),
             output_limit_field: OutputLimitField::MaxTokens,
-            probe_max_output_tokens: 512,
             runtime_max_output_tokens: 4096,
             connection_revision: 1,
             profile_revision: 1,
@@ -845,7 +752,10 @@ mod tests {
         assert_eq!(
             destination,
             DestinationIdentity::Model {
-                connection_id: format!("oss-ai-gateway:{SINGLETON_ID}"),
+                connection_id: format!(
+                    "oss-ai-gateway:{SINGLETON_ID}:{}",
+                    configured().config_instance
+                ),
                 connection_revision: 1,
                 model_id: "example-model".into(),
                 profile_revision: 1,
@@ -1048,9 +958,10 @@ mod tests {
         save(&db, second).await.unwrap();
 
         // Still a single row, holding the latest write.
-        let rows = model_provider::Entity::find().all(&db).await.unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].model.as_deref(), Some("other-model"));
+        assert_eq!(
+            load(&db).await.unwrap().model.as_deref(),
+            Some("other-model")
+        );
     }
 
     #[tokio::test]
@@ -1092,6 +1003,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn model_save_validates_completion_against_the_policy_inside_the_file_write() {
+        let db = memory_db().await;
+        let mut config = configured();
+        config.wire_protocol = Some(WireProtocol::AnthropicMessages);
+        config.runtime_max_output_tokens = 32768;
+        config.request_options =
+            serde_json::json!({"thinking":{"type":"enabled","budget_tokens":1024}});
+        assert!(matches!(
+            save_if_revisions_match(&db, config.clone(), 1, 1).await,
+            Err(ModelConfigWriteError::Invalid(_))
+        ));
+        crate::terminal_completion_config::update(
+            &db,
+            &desk_signal_facade::terminal_completion::UpdateTerminalCompletionRequest {
+                expected_revision: 0,
+                max_output_tokens: 32768,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            save_if_revisions_match(&db, config.clone(), 1, 1)
+                .await
+                .unwrap()
+        );
+        let current = load(&db).await.unwrap();
+        crate::terminal_completion_config::update(
+            &db,
+            &desk_signal_facade::terminal_completion::UpdateTerminalCompletionRequest {
+                expected_revision: 1,
+                max_output_tokens: 512,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            save_if_revisions_match(
+                &db,
+                config,
+                current.connection_revision,
+                current.profile_revision
+            )
+            .await,
+            Err(ModelConfigWriteError::Invalid(_))
+        ));
+        assert_eq!(
+            load(&db).await.unwrap().profile_revision,
+            current.profile_revision
+        );
+    }
+
+    #[tokio::test]
     async fn probe_observation_is_revision_bound_and_remains_visible_when_stale() {
         let db = memory_db().await;
         save(&db, configured()).await.unwrap();
@@ -1106,9 +1069,13 @@ mod tests {
             current: true,
         };
         assert!(
-            save_probe_observation_if_current(&db, observation.clone())
-                .await
-                .unwrap()
+            save_probe_observation_if_current(
+                &db,
+                &db.config_context().instance().await,
+                observation.clone()
+            )
+            .await
+            .unwrap()
         );
         assert!(load(&db).await.unwrap().probe_observation.unwrap().current);
 
@@ -1124,9 +1091,13 @@ mod tests {
             .expect("stale history remains visible");
         assert!(!stale.current);
         assert!(
-            !save_probe_observation_if_current(&db, observation)
-                .await
-                .unwrap()
+            !save_probe_observation_if_current(
+                &db,
+                &db.config_context().instance().await,
+                observation
+            )
+            .await
+            .unwrap()
         );
     }
 }

@@ -1,6 +1,7 @@
 //! OSS owner delegation projection. All writes are subject-scoped SQLite
 //! transactions; a saved switch is not a grant and cannot dispatch a tool.
 
+use crate::config::connection::{DatabaseConnection, DatabaseTransaction};
 use crate::entity::{
     agent_approval_delegation as delegation_row, agent_approval_review as review_row,
     agent_goal_run as goal_row, agent_run_event, agent_session,
@@ -21,8 +22,8 @@ use desk_diagnose_core::dynamic_run::{
 use desk_diagnose_core::session::{AgentSessionSurface, PersistedAgentSession};
 use sea_orm::sea_query::Expr;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, DatabaseTransaction, DbErr, EntityTrait,
-    QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait,
+    ActiveModelTrait, ColumnTrait, DbErr, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set,
+    TransactionTrait,
 };
 
 /// A claimed review is the sole permission to make one external reviewer call.
@@ -37,7 +38,6 @@ pub struct ClaimedPermissionReview {
     pub lease_deadline_unix_ms: u64,
     pub model_destination: desk_agent_protocol::data_lineage::DestinationIdentity,
     pub model_config_revision: u64,
-    pub prices: desk_diagnose_core::approval_cost::ApprovalTokenPrices,
     pub authorized: desk_diagnose_core::approval_egress::AuthorizedApprovalReview,
 }
 
@@ -234,7 +234,6 @@ pub async fn claim_permission_review(
     .await?;
     let config = crate::approval_model_provider::load(&txn).await?;
     let destination = config.destination_identity().map_err(|_| invalid())?;
-    let prices = config.prices.ok_or_else(invalid)?;
     let delegation_row = delegation_row::Entity::find()
         .filter(delegation_row::Column::DelegationId.eq(&candidate.delegation_id))
         .filter(delegation_row::Column::ConversationId.eq(&candidate.conversation_id))
@@ -320,16 +319,15 @@ pub async fn claim_permission_review(
         txn.commit().await?;
         return Ok(None);
     }
-    let (reserved_tokens, reserved_cost_micros) =
-        desk_diagnose_core::approval_cost::reviewer_reservation(
-            &authorized.prompt,
-            prices,
-            u64::try_from(config.gateway.max_context_bytes.ok_or_else(invalid)?)
-                .map_err(|_| invalid())?,
-        )
-        .ok_or_else(invalid)?;
+    let reserved_tokens = desk_diagnose_core::approval_usage::reviewer_token_reservation(
+        &authorized.prompt,
+        u64::try_from(config.gateway.max_context_bytes.ok_or_else(invalid)?)
+            .map_err(|_| invalid())?,
+        u64::try_from(config.gateway.runtime_max_output_tokens).map_err(|_| invalid())?,
+    )
+    .ok_or_else(invalid)?;
     delegation
-        .reserve(reserved_tokens, reserved_cost_micros)
+        .reserve_tokens(reserved_tokens)
         .map_err(|_| invalid())?;
     let changed = delegation_row::Entity::update_many()
         .col_expr(
@@ -381,7 +379,6 @@ pub async fn claim_permission_review(
         lease_owner: Set(Some(lease_owner.to_owned())),
         lease_deadline: Set(Some(as_i64(lease_deadline_unix_ms)?)),
         reserved_tokens: Set(as_i64(reserved_tokens)?),
-        reserved_cost_micros: Set(as_i64(reserved_cost_micros)?),
         expires_at: Set(as_i64(candidate.expires_at_unix_ms)?),
         created_at: Set(as_i64(now_unix_ms)?),
         updated_at: Set(as_i64(now_unix_ms)?),
@@ -394,8 +391,8 @@ pub async fn claim_permission_review(
         candidate,
         &destination,
         &authorized,
-        prices,
         reserved_tokens,
+        u64::try_from(config.gateway.runtime_max_output_tokens).map_err(|_| invalid())?,
         i64::try_from(now_unix_ms).map_err(|_| invalid())?,
     )
     .await?;
@@ -410,7 +407,6 @@ pub async fn claim_permission_review(
         model_destination: destination,
         model_config_revision: u64::try_from(config.configuration_revision)
             .map_err(|_| invalid())?,
-        prices,
         authorized,
     }))
 }
@@ -426,7 +422,6 @@ pub async fn settle_permission_review(
     lease_epoch: u64,
     decision: Option<&desk_diagnose_core::approval_review::ApprovalReviewDecision>,
     actual_tokens: Option<u64>,
-    actual_cost_micros: Option<u64>,
     readiness_revision: u64,
     now_unix_ms: u64,
 ) -> Result<String, DbErr> {
@@ -452,7 +447,6 @@ pub async fn settle_permission_review(
         || row.action_sha256 != candidate.action_sha256
         || row.expires_at != as_i64(candidate.expires_at_unix_ms)?
         || row.reserved_tokens <= 0
-        || row.reserved_cost_micros <= 0
     {
         return Err(invalid());
     }
@@ -526,15 +520,12 @@ pub async fn settle_permission_review(
         &txn,
         &row,
         actual_tokens,
-        actual_cost_micros,
         i64::try_from(now_unix_ms).map_err(|_| invalid())?,
     )
     .await?;
     let actual_tokens = physical.tokens;
-    let actual_cost_micros = physical.cost_micros;
-    let accounted = physical.settlement(row.reserved_tokens, row.reserved_cost_micros)?;
-    let usage_in_bounds = actual_tokens.is_none_or(|used| used <= row.reserved_tokens as u64)
-        && actual_cost_micros.is_none_or(|used| used <= row.reserved_cost_micros as u64);
+    let accounted = physical.settlement(row.reserved_tokens)?;
+    let usage_in_bounds = actual_tokens.is_none_or(|used| used <= row.reserved_tokens as u64);
     let valid_decision = physical.dispatched
         && decision.is_some_and(|review| review.validate_for(candidate).is_ok());
     let status = if expired {
@@ -550,16 +541,11 @@ pub async fn settle_permission_review(
     };
     if physical.dispatched {
         delegation
-            .settle(
-                row.reserved_tokens as u64,
-                row.reserved_cost_micros as u64,
-                Some(accounted.tokens),
-                Some(accounted.cost_micros),
-            )
+            .settle_tokens(row.reserved_tokens as u64, Some(accounted.tokens))
             .map_err(|_| invalid())?;
     } else {
         delegation
-            .release_unstarted_review(row.reserved_tokens as u64, row.reserved_cost_micros as u64)
+            .release_unstarted_review_tokens(row.reserved_tokens as u64)
             .map_err(|_| invalid())?;
     }
     crate::agent_approval_usage::record_usage_on(
@@ -672,27 +658,19 @@ pub async fn expire_review_leases(
             .await?
             .ok_or_else(invalid)?;
         let mut delegation = decode(&stored)?;
-        if row.reserved_tokens <= 0 || row.reserved_cost_micros <= 0 {
+        if row.reserved_tokens <= 0 {
             return Err(invalid());
         }
         let physical =
-            crate::agent_subagent_store::settle_review_call_on(&txn, &row, None, None, now).await?;
-        let accounted = physical.settlement(row.reserved_tokens, row.reserved_cost_micros)?;
+            crate::agent_subagent_store::settle_review_call_on(&txn, &row, None, now).await?;
+        let accounted = physical.settlement(row.reserved_tokens)?;
         if physical.dispatched {
             delegation
-                .settle(
-                    row.reserved_tokens as u64,
-                    row.reserved_cost_micros as u64,
-                    Some(accounted.tokens),
-                    Some(accounted.cost_micros),
-                )
+                .settle_tokens(row.reserved_tokens as u64, Some(accounted.tokens))
                 .map_err(|_| invalid())?;
         } else {
             delegation
-                .release_unstarted_review(
-                    row.reserved_tokens as u64,
-                    row.reserved_cost_micros as u64,
-                )
+                .release_unstarted_review_tokens(row.reserved_tokens as u64)
                 .map_err(|_| invalid())?;
         }
         crate::agent_approval_usage::record_usage_on(&txn, &row, accounted, now).await?;
@@ -1391,7 +1369,7 @@ pub async fn open_for_subject(
     if session.input_revision != expected_input_revision || session.turn_state.is_active() {
         return Err(invalid());
     }
-    desk_diagnose_core::assistant_policy::require_current_policy(session.policy_revision)
+    desk_diagnose_core::assistant_policy::require_approval_policy(&session)
         .map_err(|_| invalid())?;
     let config = crate::approval_model_provider::load(&txn).await?;
     config.destination_identity().map_err(|_| invalid())?;
@@ -1403,7 +1381,7 @@ pub async fn open_for_subject(
     if active.is_some() {
         return Err(invalid());
     }
-    let delegation = ApprovalDelegation::new(
+    let delegation = ApprovalDelegation::new_usage_only(
         format!("approval-delegation-{}", uuid::Uuid::new_v4()),
         conversation_id.to_owned(),
         owner_id.to_owned(),

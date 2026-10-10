@@ -321,14 +321,14 @@ impl SignalAgentRunEventStore {
 }
 
 pub(crate) async fn original_on(
-    txn: &sea_orm::DatabaseTransaction,
+    txn: &crate::config::connection::DatabaseTransaction,
     session: &PersistedAgentSession,
 ) -> Result<Option<ReadContextSelection>, AgentError> {
     Ok(original_with_time_on(txn, session).await?.0)
 }
 
 async fn original_with_time_on(
-    txn: &sea_orm::DatabaseTransaction,
+    txn: &crate::config::connection::DatabaseTransaction,
     session: &PersistedAgentSession,
 ) -> Result<(Option<ReadContextSelection>, DateTime<Utc>), AgentError> {
     if let Some((creation, created_at)) = crate::agent_subagent_store::task_context_on(txn, session)

@@ -1,10 +1,11 @@
 //! Versioned task edits and tombstones preserve immutable running snapshots.
 use super::queue::database_now;
 use super::{ScheduleStore, ScheduleStoreError, entity, json};
+use crate::config::connection::DatabaseTransaction;
 use crate::entity::agent_schedule_run as run;
 use desk_agent_protocol::schedule::ScheduleSpec;
 use desk_diagnose_core::schedule::{normalize, validate_publication};
-use sea_orm::{ColumnTrait, DatabaseTransaction, EntityTrait, QueryFilter, Set};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
 
 /// Called only while the task's version CAS owns the transaction.
 pub(super) async fn stop_pending(

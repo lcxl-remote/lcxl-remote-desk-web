@@ -23,6 +23,13 @@ impl crate::seam::LeaseHeartbeat for HealthyChildLease {
 struct AuditedChildModel<'a>(&'a ScriptModel);
 #[async_trait(?Send)]
 impl ModelSeam for AuditedChildModel<'_> {
+    fn model_output_token_limit(&self, request: &ModelRequest) -> Result<i64, AgentError> {
+        Ok(request
+            .caller_output_hard_cap
+            .unwrap_or(128_000)
+            .min(128_000))
+    }
+
     fn model_egress_policy(
         &self,
     ) -> Result<Option<crate::model_egress::ModelEgressPolicy>, AgentError> {

@@ -1,8 +1,9 @@
 use super::super::publication::tests::{Verifier, fixture_on as publication_fixture};
 use super::*;
+use crate::config::connection::DatabaseConnection;
 use crate::entity::{agent_schedule_run as run, agent_task_authorization as authorization};
 use desk_agent_protocol::schedule::{ScheduledRunStatus, contract::TaskContract};
-use sea_orm::{ConnectionTrait, Database, DatabaseConnection, TransactionTrait};
+use sea_orm::{ConnectionTrait, TransactionTrait};
 
 pub(crate) async fn fixture_on(
     db: DatabaseConnection,
@@ -88,7 +89,12 @@ async fn fixture() -> (
     authorization::Model,
     run::Model,
 ) {
-    fixture_on(Database::connect("sqlite::memory:").await.unwrap()).await
+    fixture_on(
+        crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap(),
+    )
+    .await
 }
 
 pub(crate) async fn reserve(
@@ -529,8 +535,13 @@ async fn reserve_rule(
 
 #[tokio::test]
 async fn per_rule_quota_uses_the_automatic_limit_and_cannot_be_rebound_on_replay() {
-    let (store, task, _, work) =
-        fixture_with_rule_limit(Database::connect("sqlite::memory:").await.unwrap(), 1).await;
+    let (store, task, _, work) = fixture_with_rule_limit(
+        crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap(),
+        1,
+    )
+    .await;
     assert!(matches!(
         reserve_rule(&store, &task, &work, "missing", None).await,
         Err(ScheduleStoreError::Invalid)

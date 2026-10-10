@@ -1,10 +1,11 @@
 //! Require original durable owner disposition; a note alone is not evidence.
 use super::{ScheduleStoreError, entity};
+use crate::config::connection::DatabaseTransaction;
 use crate::entity::{agent_action_item as action, agent_schedule_run as run, agent_session};
 use desk_diagnose_core::session::{
     ExecutionState, ManualOutcomeDisposition, PersistedAgentSession, TriggerOrigin, TurnState,
 };
-use sea_orm::{ColumnTrait, DatabaseTransaction, EntityTrait, QueryFilter, QuerySelect, Set};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect, Set};
 
 pub(super) async fn evidence(
     txn: &DatabaseTransaction,

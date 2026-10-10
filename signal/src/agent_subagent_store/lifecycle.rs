@@ -1,5 +1,6 @@
 //! Child report settlement shares the session lease and commits its inbox atomically.
 use super::*;
+use crate::config::connection::DatabaseTransaction;
 use desk_diagnose_core::{
     chat::ChatRole,
     session::TurnState,
@@ -9,7 +10,7 @@ use desk_diagnose_core::{
         state::{CompletionDisposition, PlanningFence},
     },
 };
-use sea_orm::DatabaseTransaction;
+
 use sha2::Digest;
 
 pub(crate) async fn child_records_on(

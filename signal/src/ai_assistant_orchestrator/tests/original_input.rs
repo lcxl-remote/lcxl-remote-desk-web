@@ -16,9 +16,12 @@ async fn production_input_entry_freezes_objects_and_rejects_changed_retry_withou
         base_url: Some(format!("http://{address}")),
         api_key: Some("test-only-key".into()),
         max_context_bytes: Some(131_072),
+        runtime_max_output_tokens: 128_000,
         ..Default::default()
     };
-    let db = Database::connect("sqlite::memory:").await.unwrap();
+    let db = crate::config::test_support::Database::connect("sqlite::memory:")
+        .await
+        .unwrap();
     crate::db::initialize_schema(&db).await.unwrap();
     crate::ai_assistant_gate::enable_test_host();
     crate::model_provider::save(&db, config).await.unwrap();
@@ -81,6 +84,10 @@ async fn production_input_entry_freezes_objects_and_rejects_changed_retry_withou
         .unwrap();
     let body = String::from_utf8(body).unwrap();
     assert!(body.contains("original requirement"));
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&body).unwrap()["max_tokens"],
+        128_000
+    );
     assert!(!body.contains("opaque-original-file"));
     let events = SignalAgentRunEventStore::new(db.clone());
     let frozen = events

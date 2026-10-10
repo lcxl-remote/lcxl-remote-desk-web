@@ -1,13 +1,13 @@
 //! Cumulative reviewer accounting; late usage never grants new authority.
+use crate::config::connection::{DatabaseConnection, DatabaseTransaction};
 use crate::entity::{
     agent_approval_delegation as delegation_row, agent_approval_review as review_row,
 };
 use desk_diagnose_core::{
-    approval_cost::ReviewUsageSettlement, subagent::reservation::ReviewCallAuthority,
+    approval_usage::ReviewTokenUsageSettlement, subagent::reservation::ReviewCallAuthority,
 };
 use sea_orm::{
-    ColumnTrait, DatabaseConnection, DatabaseTransaction, DbErr, EntityTrait, QueryFilter,
-    QueryOrder, QuerySelect, QueryTrait, Set,
+    ColumnTrait, DbErr, EntityTrait, QueryFilter, QueryOrder, QuerySelect, QueryTrait, Set,
 };
 
 fn invalid() -> DbErr {
@@ -42,14 +42,11 @@ pub(crate) fn pinned_reservation_ids() -> sea_orm::sea_query::SelectStatement {
 pub(crate) async fn record_usage_on(
     txn: &DatabaseTransaction,
     row: &review_row::Model,
-    usage: ReviewUsageSettlement,
+    usage: ReviewTokenUsageSettlement,
     now_ms: i64,
 ) -> Result<(), DbErr> {
     usage
-        .validate(
-            u64::try_from(row.reserved_tokens).map_err(|_| invalid())?,
-            u64::try_from(row.reserved_cost_micros).map_err(|_| invalid())?,
-        )
+        .validate(u64::try_from(row.reserved_tokens).map_err(|_| invalid())?)
         .ok_or_else(invalid)?;
     let changed = review_row::Entity::update_many()
         .set(review_row::ActiveModel {
@@ -122,19 +119,17 @@ async fn reconcile_one(
         return Err(invalid());
     }
     let encoded = row.usage_settlement_json.as_deref().ok_or_else(invalid)?;
-    let previous: ReviewUsageSettlement = serde_json::from_str(encoded).map_err(|_| invalid())?;
+    let previous: ReviewTokenUsageSettlement =
+        serde_json::from_str(encoded).map_err(|_| invalid())?;
     previous
-        .validate(
-            u64::try_from(row.reserved_tokens).map_err(|_| invalid())?,
-            u64::try_from(row.reserved_cost_micros).map_err(|_| invalid())?,
-        )
+        .validate(u64::try_from(row.reserved_tokens).map_err(|_| invalid())?)
         .ok_or_else(invalid)?;
     if previous.state() != "unknown" || row.provider_receipt_id.is_none() {
         return Err(invalid());
     }
     let physical =
-        crate::agent_subagent_store::settle_review_call_on(&txn, &row, None, None, now_ms).await?;
-    let actual = physical.settlement(row.reserved_tokens, row.reserved_cost_micros)?;
+        crate::agent_subagent_store::settle_review_call_on(&txn, &row, None, now_ms).await?;
+    let actual = physical.settlement(row.reserved_tokens)?;
     if !actual.usage_known {
         return Ok(false);
     }
@@ -152,7 +147,7 @@ async fn reconcile_one(
         .ok_or_else(invalid)?;
     let mut delegation = crate::agent_approval_store::decode(&stored)?;
     delegation
-        .reconcile_review_usage(previous, actual)
+        .reconcile_review_token_usage(previous, actual)
         .map_err(|_| invalid())?;
     let changed = delegation_row::Entity::update_many()
         .set(delegation_row::ActiveModel {

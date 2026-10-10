@@ -122,7 +122,7 @@ Controlled-device settings live at **platform-standard paths** — one profile s
 | Linux (regular user) | `$XDG_CONFIG_HOME/lcxl-remote-desk/config.toml` (`~/.config/lcxl-remote-desk/config.toml` when unset) | `$XDG_STATE_HOME/lcxl-remote-desk/logs` (`~/.local/state/lcxl-remote-desk/logs` when unset) |
 | macOS | `~/Library/Application Support/com.lcxl.remote-desk/config/config.toml` | `~/Library/Logs/lcxl-remote-desk` |
 
-Use `-c, --config-file-path <PATH>` for an explicit profile override; the databases, runtime socket, and other sibling files follow that path. `LRD_*` environment variables can still override individual settings. When the file is absent it is generated from defaults: port `8081` bound to `0.0.0.0` / `::`, IPv6 enabled, no signaling or manager URL (embedded signaling only), and plaintext dials to public signaling refused. The bundled TURN switch defaults on, but relays nothing until `[[turn.interfaces]]` is configured. See the [config.toml reference](docs/config/config-toml.md) for every field.
+Use `-c, --config-file-path <PATH>` for an explicit profile override; the databases, runtime socket, and other sibling files follow that path. `LRD_*` environment variables can still override host settings; OSS global AI/search/policy sections are file-only. When the file is absent it is generated from defaults: port `8081` bound to `0.0.0.0` / `::`, IPv6 enabled, no signaling or manager URL (embedded signaling only), and plaintext dials to public signaling refused. The bundled TURN switch defaults on, but relays nothing until `[[turn.interfaces]]` is configured. See the [config.toml reference](docs/config/config-toml.md) for every field.
 
 The local console persists host settings such as:
 

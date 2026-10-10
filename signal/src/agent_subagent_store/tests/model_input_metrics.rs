@@ -1,4 +1,4 @@
-async fn configure_limit(db: &sea_orm::DatabaseConnection, unfinished: u32) {
+async fn configure_limit(db: &crate::config::connection::DatabaseConnection, unfinished: u32) {
     let current = crate::subagent_policy::read(db).await.unwrap();
     crate::subagent_policy::update(
         db,

@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 
 use super::{
     DelegationSource,
-    budget::{DelegationLimits, Usage},
+    budget::{Allowance, DelegationLimits},
     group::{DelegationGroup, SourceAdmission},
 };
 use crate::{
@@ -23,10 +23,6 @@ pub use scheduled::ScheduledCreationSource;
 
 pub const DEFAULT_GROUP_MODEL_CALLS: u64 = 160;
 pub const DEFAULT_GROUP_TOOL_CALLS: u64 = 200;
-// Admission reserves rendered bytes conservatively before provider usage is
-// known. Keep a finite source budget large enough for ordinary configured
-// context windows plus child work; goal/task limits still narrow this ceiling.
-pub const DEFAULT_GROUP_TOKENS: u64 = 1_000_000;
 pub const DEFAULT_GROUP_LIFETIME_MS: i64 = 2 * 60 * 60 * 1_000;
 pub const MAX_CREATION_ENVELOPE_BYTES: usize = 512 * 1024;
 
@@ -431,10 +427,10 @@ impl CreationEnvelope {
     ) -> Result<DelegationGroup, AgentError> {
         self.validate()?;
         let mut limits = DelegationLimits {
-            total: Usage {
+            total: Allowance {
                 model_calls: DEFAULT_GROUP_MODEL_CALLS,
                 tool_calls: DEFAULT_GROUP_TOOL_CALLS,
-                tokens: DEFAULT_GROUP_TOKENS,
+                tokens: None,
             },
             max_context_bytes: crate::MAX_MODEL_CONTEXT_BYTES as u64,
             max_result_bytes: desk_agent_protocol::ai_assistant::subagent::MAX_SUBAGENT_REPORT_BYTES
@@ -467,8 +463,7 @@ impl CreationEnvelope {
                     .total
                     .tool_calls
                     .min(u64::from(goal.limits.tool_calls));
-                limits.total.tokens =
-                    crate::goal::DEFAULT_MODEL_TOKENS.min(goal.limits.model_tokens);
+                limits.total.tokens = goal.effective_budget_limits().model_tokens;
                 limits.deadline_ms = limits.deadline_ms.min(
                     i64::try_from(goal.deadline_unix_ms)
                         .map_err(|_| super::invalid("invalid source deadline"))?,
@@ -487,10 +482,7 @@ impl CreationEnvelope {
                     .total
                     .tool_calls
                     .min(u64::from(contract.contract().budget.max_calls_per_run));
-                limits.total.tokens = limits
-                    .total
-                    .tokens
-                    .min(contract.contract().budget.max_model_tokens_per_run);
+                limits.total.tokens = Some(contract.contract().budget.max_model_tokens_per_run);
                 limits.deadline_ms = limits.deadline_ms.min(source.deadline_ms()?);
             }
             _ => {}

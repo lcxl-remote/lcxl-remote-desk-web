@@ -1,10 +1,10 @@
 //! Fresh command policy for authenticated single-account assistant requests.
 
+use crate::config::connection::DatabaseConnection;
 use desk_agent_protocol::authz::ExecAdmissionPolicy;
 use desk_agent_protocol::{AgentError, AgentErrorKind, RiskLevel};
 use desk_diagnose_core::command_confirmation::CommandPolicyContext;
 use desk_signal_facade::model::connection::SharedConnectionMap;
-use sea_orm::DatabaseConnection;
 
 pub(crate) async fn current(
     db: &DatabaseConnection,

@@ -96,13 +96,17 @@ impl ScheduleStore {
 mod tests {
     use super::super::publication::tests::{Verifier, fixture_on};
     use super::*;
-    use sea_orm::{ActiveValue::NotSet, Database, IntoActiveModel, Set};
+    use sea_orm::{ActiveValue::NotSet, IntoActiveModel, Set};
 
     #[tokio::test]
     async fn public_run_selector_requires_started_original_subject() {
         use sea_orm::ActiveModelTrait;
-        let (store, task, _, publication) =
-            fixture_on(Database::connect("sqlite::memory:").await.unwrap()).await;
+        let (store, task, _, publication) = fixture_on(
+            crate::config::test_support::Database::connect("sqlite::memory:")
+                .await
+                .unwrap(),
+        )
+        .await;
         store
             .publish_task(1, &publication, &Verifier(true))
             .await
@@ -173,8 +177,12 @@ mod tests {
 
     #[tokio::test]
     async fn history_is_task_scoped_and_new_inserts_do_not_shift_the_cursor() {
-        let (store, task, _, publication) =
-            fixture_on(Database::connect("sqlite::memory:").await.unwrap()).await;
+        let (store, task, _, publication) = fixture_on(
+            crate::config::test_support::Database::connect("sqlite::memory:")
+                .await
+                .unwrap(),
+        )
+        .await;
         store
             .publish_task(1, &publication, &Verifier(true))
             .await

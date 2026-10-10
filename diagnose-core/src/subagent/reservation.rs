@@ -316,6 +316,48 @@ mod tests {
         }
     }
     #[test]
+    fn independent_approval_uses_runtime_budget_with_exact_delegation_authority() {
+        let candidate = crate::approval_review::approval_probe_cases()
+            .remove(0)
+            .candidate;
+        let mut request = crate::approval_review::reviewer_model_request(
+            &candidate,
+            crate::approval_review::review_user_prompt(&candidate).unwrap(),
+        )
+        .unwrap();
+        let digest = crate::approval_review::reviewer_request_digest(&request).unwrap();
+        let mut reservation = receipt();
+        reservation.arguments_sha256 = digest.clone();
+        reservation
+            .review_authority
+            .as_mut()
+            .unwrap()
+            .request_sha256 = digest;
+        request.delegation_call = Some(reservation.clone());
+        assert_eq!(request.caller_output_hard_cap, None);
+        assert!(request.validate_delegation_call().is_ok());
+
+        request.messages[1].text.push_str("changed");
+        assert!(request.validate_delegation_call().is_err());
+        let original_len = request.messages[1].text.len() - "changed".len();
+        request.messages[1].text.truncate(original_len);
+        request.caller_output_hard_cap = Some(2048);
+        assert!(request.validate_delegation_call().is_err());
+        request.caller_output_hard_cap = None;
+        let reservation = request.delegation_call.as_mut().unwrap();
+        reservation.review_authority = None;
+        reservation.planning_lease_token = Some(1);
+        assert!(request.validate_delegation_call().is_err());
+        request.use_case = crate::model_profile::ModelUseCase::Agent;
+        request.delegation_call.as_mut().unwrap().kind = DelegationCallKind::Model;
+        assert!(request.validate_delegation_call().is_err());
+        request.caller_output_hard_cap = Some(5000);
+        assert!(request.validate_delegation_call().is_ok());
+        request.caller_output_hard_cap = Some(5001);
+        assert!(request.validate_delegation_call().is_err());
+    }
+
+    #[test]
     fn review_lease_is_disjoint_from_planning_and_never_authorizes_other_call_kinds() {
         let original = receipt();
         assert!(original.validate().is_ok());

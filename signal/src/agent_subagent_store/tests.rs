@@ -486,18 +486,20 @@ use desk_diagnose_core::{
     goal::GoalPauseReason,
     subagent::{
         DelegatedTaskBinding, DelegationSource,
-        budget::{BudgetLedger, DelegationLimits, Usage},
+        budget::{Allowance, BudgetLedger, DelegationLimits, Usage},
         state::TaskDependency,
     },
 };
-use sea_orm::{ActiveModelTrait, Database, Schema};
+use sea_orm::{ActiveModelTrait, Schema};
 
 async fn database() -> DatabaseConnection {
     database_at("sqlite::memory:").await
 }
 
 async fn database_at(url: &str) -> DatabaseConnection {
-    let db = Database::connect(url).await.unwrap();
+    let db = crate::config::test_support::Database::connect(url)
+        .await
+        .unwrap();
     let schema = Schema::new(db.get_database_backend());
     for statement in [
         schema.create_table_from_entity(session_row::Entity),
@@ -509,8 +511,6 @@ async fn database_at(url: &str) -> DatabaseConnection {
         schema.create_table_from_entity(group_row::Entity),
         schema.create_table_from_entity(goal_row::Entity),
         schema.create_table_from_entity(crate::entity::model_egress_receipt::Entity),
-        schema.create_table_from_entity(crate::entity::goal_budget_policy::Entity),
-        schema.create_table_from_entity(crate::entity::subagent_policy::Entity),
         schema.create_table_from_entity(run_row::Entity),
         schema.create_table_from_entity(crate::entity::agent_subagent_inbox::Entity),
         schema.create_table_from_entity(crate::entity::agent_delegation_reservation::Entity),
@@ -626,10 +626,10 @@ async fn seed_task(db: &DatabaseConnection, group_id: &str, goal_id: &str) -> Su
         parent_control_revision: 1,
         parent_active: true,
         limits: DelegationLimits {
-            total: Usage {
+            total: Allowance {
                 model_calls: 10,
                 tool_calls: 20,
-                tokens: 1000,
+                tokens: Some(1000),
             },
             max_context_bytes: 4096,
             max_result_bytes: 8192,

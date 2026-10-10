@@ -65,6 +65,13 @@ pub(super) fn scheduled_policy() -> crate::model_egress::ModelEgressPolicy {
 pub(super) struct ScheduledModel<'a>(pub(super) &'a dyn ModelSeam);
 #[async_trait(?Send)]
 impl ModelSeam for ScheduledModel<'_> {
+    fn model_output_token_limit(&self, request: &ModelRequest) -> Result<i64, AgentError> {
+        Ok(request
+            .caller_output_hard_cap
+            .unwrap_or(128_000)
+            .min(128_000))
+    }
+
     fn model_egress_policy(
         &self,
     ) -> Result<Option<crate::model_egress::ModelEgressPolicy>, AgentError> {
@@ -381,6 +388,13 @@ struct ExpiringModel<'a> {
 }
 #[async_trait(?Send)]
 impl ModelSeam for ExpiringModel<'_> {
+    fn model_output_token_limit(&self, request: &ModelRequest) -> Result<i64, AgentError> {
+        Ok(request
+            .caller_output_hard_cap
+            .unwrap_or(128_000)
+            .min(128_000))
+    }
+
     async fn context_policy(
         &self,
         requirements: crate::model_capability::ModelRequirements,

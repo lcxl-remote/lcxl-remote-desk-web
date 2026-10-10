@@ -5,7 +5,10 @@ use crate::entity::{agent_delegation_reservation as cost, agent_subagent_inbox a
 use desk_agent_protocol::{AgentError, AgentErrorKind};
 use sea_orm::{PaginatorTrait, TransactionTrait};
 
-async fn saved(db: &sea_orm::DatabaseConnection, root: &str) -> PersistedAgentSession {
+async fn saved(
+    db: &crate::config::connection::DatabaseConnection,
+    root: &str,
+) -> PersistedAgentSession {
     let row = agent_session::Entity::find()
         .filter(agent_session::Column::ConversationId.eq(root))
         .one(db)
@@ -15,7 +18,7 @@ async fn saved(db: &sea_orm::DatabaseConnection, root: &str) -> PersistedAgentSe
     PersistedAgentSession::decode_json(&row.state_json).unwrap()
 }
 
-async fn occurrence(db: &sea_orm::DatabaseConnection, root: &str) -> run::Model {
+async fn occurrence(db: &crate::config::connection::DatabaseConnection, root: &str) -> run::Model {
     run::Entity::find()
         .filter(run::Column::RunId.eq(root))
         .one(db)
@@ -329,7 +332,7 @@ async fn crashed_notification_claim_preserves_the_same_source_counters_and_event
 }
 
 async fn assert_result_only_authority(
-    db: &sea_orm::DatabaseConnection,
+    db: &crate::config::connection::DatabaseConnection,
     recovered: &PersistedAgentSession,
     task_id: &str,
 ) {
@@ -397,7 +400,7 @@ async fn assert_result_only_authority(
     assert_eq!(occurrence(db, &recovered.conversation_id).await, source);
 }
 
-async fn restart_snapshot(db: &sea_orm::DatabaseConnection) -> serde_json::Value {
+async fn restart_snapshot(db: &crate::config::connection::DatabaseConnection) -> serde_json::Value {
     use crate::entity::{agent_delegation_group as group, agent_task_budget_reservation as quota};
     use sea_orm::QueryOrder;
     serde_json::json!({
@@ -469,7 +472,7 @@ async fn scheduled_reopen_worker() {
         &std::fs::read(std::env::var("LRD_SCHEDULED_REOPEN_EXPECTED").unwrap()).unwrap(),
     )
     .unwrap();
-    let db = sea_orm::Database::connect(format!("sqlite://{file}?mode=rw"))
+    let db = crate::config::test_support::Database::connect(format!("sqlite://{file}?mode=rw"))
         .await
         .unwrap();
     assert_eq!(restart_snapshot(&db).await, expected["snapshot"]);

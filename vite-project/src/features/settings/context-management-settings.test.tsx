@@ -9,20 +9,20 @@ beforeEach(() => { vi.resetAllMocks(); });
 
 describe('context management settings', () => {
     it('loads the default and saves an explicit window choice with the revision', async () => {
-        api.getContextManagement.mockResolvedValue({ success: true, data: { revision: 0, strategy: 'checkpoint_summary' } });
-        api.updateContextManagement.mockResolvedValue({ success: true, data: { revision: 1, strategy: 'window' } });
+        api.getContextManagement.mockResolvedValue({ success: true, data: { revision: 0, strategy: 'checkpoint_summary', summaryMaxOutputTokens: 4096 } });
+        api.updateContextManagement.mockResolvedValue({ success: true, data: { revision: 1, strategy: 'window', summaryMaxOutputTokens: 4096 } });
         render(<ContextManagementSettings />);
         await waitFor(() => expect(screen.getByRole('switch')).not.toBeDisabled());
         expect(screen.getByRole('switch')).toHaveAttribute('aria-checked', 'true');
         fireEvent.click(screen.getByRole('switch'));
         fireEvent.click(screen.getByRole('button', { name: 'pages.contextManagement.save' }));
-        await waitFor(() => expect(api.updateContextManagement).toHaveBeenCalledWith({ expectedRevision: 0, strategy: 'window' }));
+        await waitFor(() => expect(api.updateContextManagement).toHaveBeenCalledWith({ expectedRevision: 0, strategy: 'window', summaryMaxOutputTokens: 4096 }));
         expect(await screen.findByRole('status')).toHaveTextContent('pages.contextManagement.saved');
     });
 
     it('does not pretend success on a conflict and reloads the current setting', async () => {
-        api.getContextManagement.mockResolvedValueOnce({ success: true, data: { revision: 0, strategy: 'checkpoint_summary' } })
-            .mockResolvedValueOnce({ success: true, data: { revision: 4, strategy: 'checkpoint_summary' } });
+        api.getContextManagement.mockResolvedValueOnce({ success: true, data: { revision: 0, strategy: 'checkpoint_summary', summaryMaxOutputTokens: 4096 } })
+            .mockResolvedValueOnce({ success: true, data: { revision: 4, strategy: 'checkpoint_summary', summaryMaxOutputTokens: 4096 } });
         api.updateContextManagement.mockResolvedValue({ success: false });
         render(<ContextManagementSettings />);
         await waitFor(() => expect(screen.getByRole('switch')).not.toBeDisabled());

@@ -4,7 +4,7 @@ use crate::entity::agent_exec_task as task;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 
 pub(super) async fn list(
-    db: &sea_orm::DatabaseConnection,
+    db: &crate::config::connection::DatabaseConnection,
     run: &str,
 ) -> Result<Vec<CommandTaskDto>, DeskSignalError> {
     let mut result = Vec::new();
@@ -61,8 +61,10 @@ mod tests {
     use super::*;
     #[actix_web::test]
     async fn command_task_list_keeps_sessions_separate_and_active_tasks_visible() {
-        use sea_orm::{ConnectionTrait, Database, Schema};
-        let db = Database::connect("sqlite::memory:").await.unwrap();
+        use sea_orm::{ConnectionTrait, Schema};
+        let db = crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap();
         db.execute(&Schema::new(db.get_database_backend()).create_table_from_entity(task::Entity))
             .await
             .unwrap();

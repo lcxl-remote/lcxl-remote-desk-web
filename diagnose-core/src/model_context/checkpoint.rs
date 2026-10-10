@@ -22,7 +22,6 @@ pub use egress::*;
 
 pub const CONTEXT_SUMMARY_PROMPT_VERSION: &str = "checkpoint-summary-v5";
 pub const CONTEXT_SUMMARY_SCHEMA_VERSION: u16 = 1;
-pub const CONTEXT_SUMMARY_OUTPUT_HARD_CAP_TOKENS: i64 = 4096;
 pub const MAX_CONTEXT_SUMMARY_SERIALIZED_BYTES: usize = 256 * 1024;
 const MAX_FACTS_PER_FIELD: usize = 64;
 const MAX_TOTAL_FACTS: usize = 256;

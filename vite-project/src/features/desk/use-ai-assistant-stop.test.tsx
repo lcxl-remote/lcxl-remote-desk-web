@@ -61,6 +61,44 @@ describe('durable owner stop', () => {
         unmount();
     });
 
+    it('stops an active restored snapshot without an optional stream request id', async () => {
+        let snapshot = { ...root(), requestId: undefined };
+        const fetch = vi.fn(async (url: string, init?: RequestInit) => {
+            if (url.endsWith('/stop')) {
+                expect(JSON.parse(init!.body as string)).toMatchObject({
+                    session: 'main-session', conversation: 'owner-conversation',
+                    control: { expected_input_revision: 1, expected_control_revision: 1 },
+                });
+                snapshot = { ...snapshot, seq: 11, controlRevision: 2, active: false, mainStopped: true };
+                return ok({ input_revision: 1, control_revision: 2, stopped_subagents: [] });
+            }
+            return ok(snapshot);
+        });
+        vi.stubGlobal('fetch', fetch);
+        const { result, sendMessage, unmount } = mount(false);
+        await waitFor(() => expect(result.current.turnRunning).toBe(true));
+        expect(result.current.canStop).toBe(true);
+        act(() => result.current.stop());
+        await waitFor(() => expect(result.current.mainStopped).toBe(true));
+        expect(result.current.turnRunning).toBe(false);
+        expect(fetch.mock.calls.filter(([url]) => url.endsWith('/stop'))).toHaveLength(1);
+        expect(sendMessage).not.toHaveBeenCalled();
+        unmount();
+    });
+
+    it('waits for a durable snapshot before enabling stop on a new local turn', () => {
+        const sendMessage = vi.fn().mockReturnValue('local-request');
+        const { result, unmount } = renderHook(() => useAiAssistantChat({ deskId: 'first-stop',
+            subscribe: () => () => undefined, sendMessage }));
+        act(() => { expect(result.current.start('A new request')).toBe(true); });
+        expect(result.current.turnRunning).toBe(true);
+        expect(result.current.canStop).toBe(false);
+        act(() => result.current.stop());
+        expect(result.current.stopping).toBe(false);
+        expect(sendMessage).toHaveBeenCalledOnce();
+        unmount();
+    });
+
     it('opens confirmation without changing child state; dismiss is a no-op', async () => {
         const fetch = vi.fn().mockResolvedValue(ok(root([child]))); vi.stubGlobal('fetch', fetch);
         const { result, unmount } = mount();

@@ -105,4 +105,17 @@ describe('compression headroom meter', () => {
         expect(screen.getByRole('button').getAttribute('aria-label')).toContain('unknown');
         expect(screen.queryByText('50%')).toBeNull();
     });
+    it('shows actual provider input independently of the local byte estimate and never subtracts clearing twice', async () => {
+        render(<AssistantContextMeter usage={{ usedBytes: -1, limitBytes: 1000, strategy: 'window', latestModelCall: {
+            observedAtUnixMs: 1_800_000_000_000, stale: true, inputTokens: 1500,
+            clearedThinkingTurns: 2, clearedInputTokens: 700, requestBytes: 900,
+        } }} draft="" />);
+        fireEvent.click(screen.getByRole('button'));
+        const panel = await screen.findByRole('dialog');
+        expect(within(panel).getByText('pages.aiAssistant.contextMeter.inputTokens').nextElementSibling).toHaveTextContent('1,500');
+        expect(within(panel).getByText('pages.aiAssistant.contextMeter.clearedTokens').nextElementSibling).toHaveTextContent('700');
+        expect(within(panel).getByText('pages.aiAssistant.contextMeter.stale')).toBeInTheDocument();
+        expect(within(panel).getByText('pages.aiAssistant.contextMeter.reasoningTokens').nextElementSibling).toHaveTextContent('—');
+    });
+
 });

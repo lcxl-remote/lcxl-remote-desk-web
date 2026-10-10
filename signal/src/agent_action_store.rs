@@ -1,5 +1,6 @@
 //! SQLite durable-action lifecycle for the single-node OSS signal runtime.
 
+use crate::config::connection::DatabaseConnection;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -9,10 +10,7 @@ use desk_diagnose_core::durable_action::{
 };
 use desk_diagnose_core::session::WorkKind;
 use sea_orm::sea_query::Expr;
-use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, ExprTrait, QueryFilter,
-    Set,
-};
+use sea_orm::{ActiveModelTrait, ColumnTrait, DbErr, EntityTrait, ExprTrait, QueryFilter, Set};
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -736,10 +734,12 @@ impl DurableActionLifecycle<DbErr> for SignalActionStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sea_orm::{ConnectionTrait, Database, Schema};
+    use sea_orm::{ConnectionTrait, Schema};
 
     async fn store() -> SignalActionStore {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
+        let db = crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap();
         let schema = Schema::new(db.get_database_backend());
         db.execute(&schema.create_table_from_entity(agent_action_item::Entity))
             .await

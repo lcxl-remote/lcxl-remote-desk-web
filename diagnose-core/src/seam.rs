@@ -42,6 +42,12 @@ pub struct ModelRequest {
     /// Optional business hard cap. This may only narrow the configured runtime
     /// limit; probe requests must leave it unset.
     pub caller_output_hard_cap: Option<i64>,
+    /// Frozen host-only aliases allocated before the durable request boundary.
+    pub context_conversation_id: Option<String>,
+    pub pinned_source_context_key: Option<crate::replay::SourceContextKey>,
+    pub ui_references: Option<crate::ui_references::UiReferenceState>,
+    pub thinking_prefix: Option<crate::thinking_context::ThinkingPrefixState>,
+    pub protected_replay_message_ids: std::collections::BTreeSet<String>,
     pub previous_cache_projection: Option<crate::prompt_cache::WireObservation>,
     /// Trusted admission receipt carried to the audited provider boundary. It
     /// never becomes a wire parameter or a model-controlled tool argument.
@@ -103,7 +109,12 @@ impl ModelRequest {
             }
         };
         if receipt.kind != expected
-            || self.caller_output_hard_cap.is_none_or(|cap| cap <= 0)
+            || match self.caller_output_hard_cap {
+                Some(cap) => cap <= 0,
+                None => {
+                    self.use_case != ModelUseCase::Approval || receipt.review_authority.is_none()
+                }
+            }
             || self
                 .caller_output_hard_cap
                 .is_some_and(|cap| cap as u64 > receipt.upper.tokens)
@@ -137,6 +148,11 @@ impl ModelRequest {
             tool_choice: ToolChoice::Auto,
             response_format,
             use_case: ModelUseCase::Agent,
+            thinking_prefix: None,
+            protected_replay_message_ids: Default::default(),
+            context_conversation_id: None,
+            pinned_source_context_key: None,
+            ui_references: None,
             previous_cache_projection: None,
             delegation_call: None,
             caller_output_hard_cap: None,
@@ -378,6 +394,16 @@ pub trait ModelSeam {
         _origin: crate::model_observability::Origin,
     ) -> Option<crate::model_observability::ObservationContext> {
         None
+    }
+    /// Effective positive output limit from the already pinned model profile.
+    fn model_output_token_limit(&self, _request: &ModelRequest) -> Result<i64, AgentError> {
+        Err(AgentError {
+            kind: AgentErrorKind::Internal,
+            message: "model seam does not expose a pinned output limit".into(),
+            retryable: false,
+            safe_for_model: true,
+            error_code: None,
+        })
     }
     /// Conservative input units for the rendered provider payload. Host-only
     /// lineage and control fields must not inflate a physical request quote.
@@ -1350,6 +1376,11 @@ mod tests {
             tool_choice: ToolChoice::Auto,
             response_format: ResponseFormatSpec::None,
             use_case: ModelUseCase::Agent,
+            thinking_prefix: None,
+            protected_replay_message_ids: Default::default(),
+            context_conversation_id: None,
+            pinned_source_context_key: None,
+            ui_references: None,
             previous_cache_projection: None,
             delegation_call: None,
             caller_output_hard_cap: None,

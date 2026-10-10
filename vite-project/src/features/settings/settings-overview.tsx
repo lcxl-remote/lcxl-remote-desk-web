@@ -17,6 +17,7 @@ export function SettingsOverview() {
 
     const isDeskServer = serverInfo.startup_mode === startupModeEnum["desk-server"];
     const isSignaling = serverInfo.startup_mode === startupModeEnum.signaling;
+    const hasModelProvider = serverInfo.startup_mode === startupModeEnum.default || isSignaling;
     // macOS-only ServerInfo field; non-null only on macOS. The IDD virtual
     // display is Windows-only, so its entry is hidden on macOS.
     const isMac = serverInfo.background_start != null;
@@ -115,6 +116,17 @@ export function SettingsOverview() {
                                 </CardHeader>
                             </Card>
                         </Link>
+                        {hasModelProvider && <Link to="/system/approval-model" className="block outline-none">
+                            <Card className="hover:bg-muted/50 transition-colors h-full cursor-pointer">
+                                <CardHeader>
+                                    <div className="flex items-center gap-2">
+                                        <ShieldCheck className="h-5 w-5 text-primary" />
+                                        <CardTitle className="text-lg">{t('pages.approvalModel.title')}</CardTitle>
+                                    </div>
+                                    <CardDescription className="mt-2 line-clamp-2">{t('pages.approvalModel.overview')}</CardDescription>
+                                </CardHeader>
+                            </Card>
+                        </Link>}
                         <Link to="/system/model-metrics-settings" className="block outline-none">
                             <Card className="hover:bg-muted/50 transition-colors h-full cursor-pointer">
                                 <CardHeader>
@@ -168,6 +180,11 @@ export function SettingsOverview() {
                                     </div>
                                     <CardDescription className="mt-2 line-clamp-2">{t('pages.settings.overview.goalBudgetDescription')}</CardDescription>
                                 </CardHeader>
+                            </Card>
+                        </Link>
+                        <Link to="/system/terminal-completion" className="block outline-none">
+                            <Card className="hover:bg-muted/50 transition-colors h-full cursor-pointer">
+                                <CardHeader><CardTitle className="text-lg">{t('pages.terminalCompletion.title')}</CardTitle><CardDescription>{t('pages.terminalCompletion.description')}</CardDescription></CardHeader>
                             </Card>
                         </Link>
                         <Link to="/system/context-management" className="block outline-none">

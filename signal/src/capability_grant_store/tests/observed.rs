@@ -143,9 +143,12 @@ async fn observed_scope_stays_exact_through_prepare_intent_completion_and_reopen
         .unwrap();
     drop(store);
     db.close().await.unwrap();
-    let reopened = Database::connect(format!("sqlite://{}?mode=rw", path.display()))
-        .await
-        .unwrap();
+    let reopened = crate::config::test_support::Database::connect(format!(
+        "sqlite://{}?mode=rw",
+        path.display()
+    ))
+    .await
+    .unwrap();
     let work = agent_action_item::Entity::find_by_id(prepared.work_id)
         .one(&reopened)
         .await

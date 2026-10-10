@@ -174,7 +174,9 @@ impl ReplayDisposition {
 
     pub fn model_context_cost(&self) -> usize {
         match self {
-            Self::Present { envelope } => envelope.encoded_cost(),
+            Self::Present { envelope } => {
+                serde_json::to_vec(&envelope.payload).map_or(0, |bytes| bytes.len())
+            }
             _ => 0,
         }
     }
@@ -183,6 +185,8 @@ impl ReplayDisposition {
 /// Provider metadata normalized by stream scanners.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderResponseMeta {
+    pub context_observation: Option<crate::thinking_context::ProviderContextObservation>,
+    pub thinking_prefix: Option<crate::thinking_context::ThinkingPrefixObservation>,
     #[serde(skip)]
     pub cache_projection: Option<crate::prompt_cache::WireObservation>,
     /// Readable provider reasoning for reviewed owner presentation only.
@@ -206,6 +210,8 @@ pub struct ProviderResponseMeta {
 impl Default for ProviderResponseMeta {
     fn default() -> Self {
         Self {
+            context_observation: None,
+            thinking_prefix: None,
             cache_projection: None,
             display_reasoning: None,
             reasoning_observed: false,

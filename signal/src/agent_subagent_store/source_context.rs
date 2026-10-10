@@ -1,11 +1,11 @@
 //! Frozen child input survives compression; reading it grants no execution authority.
 use super::*;
+use crate::config::connection::DatabaseTransaction;
 use desk_diagnose_core::subagent::creation::TaskCreationEnvelope;
-use sea_orm::DatabaseTransaction;
 
 /// Callers hold owner, root and child control before using this in an authority
 /// transaction. Read-only callers may use one coherent snapshot without a lease.
-pub(crate) async fn task_context_on<C: ConnectionTrait>(
+pub(crate) async fn task_context_on<C: ConnectionTrait + crate::config::ConfigConnection>(
     db: &C,
     session: &PersistedAgentSession,
 ) -> Result<Option<(TaskCreationEnvelope, chrono::DateTime<chrono::Utc>)>, DbErr> {
@@ -50,7 +50,9 @@ pub(crate) async fn task_context_on<C: ConnectionTrait>(
 }
 
 /// An unclaimed real decision must retain its dedicated continuation path.
-pub(crate) async fn child_pending_decision_on<C: ConnectionTrait>(
+pub(crate) async fn child_pending_decision_on<
+    C: ConnectionTrait + crate::config::ConfigConnection,
+>(
     db: &C,
     session: &PersistedAgentSession,
 ) -> Result<bool, DbErr> {
@@ -74,7 +76,9 @@ pub(crate) async fn child_pending_decision_on<C: ConnectionTrait>(
 
 /// A saved approval may be inspected while paused, but only an open original
 /// source may claim planning. This check never consumes the permission decision.
-pub(crate) async fn child_resume_admitted_on<C: ConnectionTrait>(
+pub(crate) async fn child_resume_admitted_on<
+    C: ConnectionTrait + crate::config::ConfigConnection,
+>(
     db: &C,
     session: &PersistedAgentSession,
     now_ms: i64,
@@ -110,10 +114,8 @@ pub(crate) async fn child_resume_admitted_on<C: ConnectionTrait>(
         .map_err(|_| invalid())?;
     Ok(!run.source_paused
         && group.source_admission == SourceAdmission::Open
-        && charged.model_calls < group.limits.total.model_calls
-        && charged.tokens < group.limits.total.tokens
-        && children.model_calls < group.limits.child_ceiling().model_calls
-        && children.tokens < group.limits.child_ceiling().tokens)
+        && group.limits.total.has_model_capacity(charged)
+        && group.limits.child_ceiling().has_model_capacity(children))
 }
 
 /// Called after begin_turn in the same approval/session transaction. Task rows

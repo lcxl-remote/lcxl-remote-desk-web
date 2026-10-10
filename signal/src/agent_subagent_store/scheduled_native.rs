@@ -1,6 +1,6 @@
 //! Classify original native facts for schedule settlement; never dispatch or replay.
 use super::*;
-use sea_orm::DatabaseTransaction;
+use crate::config::connection::DatabaseTransaction;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ScheduledNativeDisposition {

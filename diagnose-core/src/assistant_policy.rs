@@ -8,7 +8,7 @@
 
 use crate::{
     seam::ClaimTurnParams,
-    session::{AgentSessionSurface, TriggerOrigin},
+    session::{AgentSessionSurface, PersistedAgentSession, TriggerOrigin},
 };
 use desk_agent_protocol::{AgentError, AgentErrorKind};
 
@@ -26,6 +26,19 @@ pub fn require_current_policy(revision: i64) -> Result<(), AgentError> {
             error_code: None,
         })
     }
+}
+
+/// The owner may enable review before the first input adopts a compiled policy.
+/// This does not adopt a policy or authorize a turn or device action.
+pub fn require_approval_policy(session: &PersistedAgentSession) -> Result<(), AgentError> {
+    if session.surface == AgentSessionSurface::AiAssistant
+        && session.policy_revision == 0
+        && session.input_revision == 0
+        && session.conversation.is_empty()
+    {
+        return Ok(());
+    }
+    require_current_policy(session.policy_revision)
 }
 
 /// Call before changing any persisted turn/lease state. Only explicit user
@@ -50,6 +63,47 @@ pub fn validate_claim(
 mod tests {
     use super::*;
     use desk_agent_protocol::{AgentScope, ExecutionMode};
+
+    #[test]
+    fn empty_owner_conversation_can_enable_review_without_adopting_a_policy() {
+        let mut session = PersistedAgentSession::new(
+            "conversation",
+            "owner",
+            "device",
+            0,
+            AgentScope {
+                granted: vec![],
+                mode: ExecutionMode::ReadOnly,
+                expires_at: None,
+                policy_name: None,
+            },
+            "2026-10-09T00:00:00Z",
+        );
+        session.surface = AgentSessionSurface::AiAssistant;
+        assert!(require_approval_policy(&session).is_ok());
+        assert_eq!(session.policy_revision, 0);
+        assert!(require_current_policy(session.policy_revision).is_err());
+        session.input_revision = 1;
+        assert!(require_approval_policy(&session).is_err());
+        session.input_revision = 0;
+        session.conversation.push(crate::chat::ChatMessage::text(
+            "message",
+            crate::chat::ChatRole::User,
+            "old input",
+        ));
+        assert!(require_approval_policy(&session).is_err());
+        session.conversation.clear();
+        session.surface = AgentSessionSurface::TerminalAiAssistant;
+        assert!(require_approval_policy(&session).is_err());
+        session.surface = AgentSessionSurface::AiAssistant;
+        for revision in [-1, PERSONAL_ASSISTANT_POLICY_REVISION + 1, i64::MAX] {
+            session.policy_revision = revision;
+            assert!(require_approval_policy(&session).is_err());
+        }
+        session.policy_revision = PERSONAL_ASSISTANT_POLICY_REVISION;
+        session.input_revision = 1;
+        assert!(require_approval_policy(&session).is_ok());
+    }
 
     #[test]
     fn only_user_input_may_adopt_the_compiled_personal_policy() {

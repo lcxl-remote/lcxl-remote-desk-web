@@ -8,6 +8,7 @@ use utoipa::ToSchema;
 pub struct ContextManagementDto {
     pub revision: u64,
     pub strategy: ContextManagementStrategyDto,
+    pub summary_max_output_tokens: u32,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema)]
@@ -40,4 +41,5 @@ impl From<ContextManagementStrategyDto> for ContextManagementStrategy {
 pub struct UpdateContextManagementRequest {
     pub expected_revision: u64,
     pub strategy: ContextManagementStrategyDto,
+    pub summary_max_output_tokens: u32,
 }

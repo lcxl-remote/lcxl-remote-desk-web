@@ -1,6 +1,6 @@
 use std::{ops::Deref, sync::Arc};
 
-use config::{Config, Environment, File};
+use config::{Config, Environment, File, Source};
 use desk_signal_facade::model::{
     desk_settings::DeskSettings, security_settings::SecuritySettings, terminal::TerminalSettings,
 };
@@ -33,6 +33,31 @@ pub use system::*;
 pub use turn_client::*;
 pub use user::*;
 pub use virtual_display::*;
+
+/// The central configuration sections have exactly one source: the file.
+#[derive(Clone, Debug)]
+struct HostEnvironment;
+
+impl Source for HostEnvironment {
+    fn clone_into_box(&self) -> Box<dyn Source + Send + Sync> {
+        Box::new(self.clone())
+    }
+    fn collect(&self) -> Result<config::Map<String, config::Value>, config::ConfigError> {
+        let mut values = Environment::with_prefix("LRD").collect()?;
+        retain_host_environment(&mut values);
+        Ok(values)
+    }
+}
+
+fn retain_host_environment(values: &mut config::Map<String, config::Value>) {
+    values.retain(|key, _| {
+        !desk_signal::config::SECTION_NAMES.iter().any(|section| {
+            key == section
+                || key.starts_with(&format!("{section}."))
+                || key.starts_with(&format!("{section}_"))
+        })
+    });
+}
 
 #[derive(Clone, Debug)]
 pub struct SettingsStore {
@@ -109,6 +134,10 @@ pub struct Settings {
     #[serde(default = "default_ai_assistant_settings")]
     pub ai_assistant: AiAssistantSettings,
 
+    /// File-owned central settings, also carried by the existing worker Init.
+    #[serde(flatten)]
+    pub global_config: desk_signal::config::GlobalConfig,
+
     /// Command line arguments, come from clap and do not load from or save to config file
     #[serde(skip)]
     pub args: Args,
@@ -133,6 +162,7 @@ impl Default for Settings {
             collection_policy: Default::default(),
             computer_use: Default::default(),
             ai_assistant: default_ai_assistant_settings(),
+            global_config: Default::default(),
             args: Default::default(),
             store: None,
         }
@@ -153,11 +183,21 @@ impl Settings {
         );
         let config = Config::builder()
             .add_source(File::from(store.paths().config_file()).required(false))
-            .add_source(Environment::with_prefix("LRD"))
+            .add_source(HostEnvironment)
             .build()?;
         let mut settings = config.try_deserialize::<Settings>()?;
         settings.args = args.clone();
         settings.store = Some(store);
+        // Validate and persist file identity before any generated host setting
+        // can cause the complete document to be saved.
+        if settings.global_config.initialize_metadata().map_err(|_| {
+            DeskError::new_custom_error(
+                desk_utils::error::DeskErrorCode::INVALID_PARAMS,
+                "invalid OSS file configuration",
+            )
+        })? {
+            settings.save()?;
+        }
         if settings.system.get_client_id().is_err() {
             settings.system.generate_client_id();
             settings.save()?;
@@ -240,7 +280,7 @@ impl Settings {
     pub fn load_readonly_from_store(args: &Args, store: SettingsStore) -> Result<Self, DeskError> {
         let config = Config::builder()
             .add_source(File::from(store.paths().config_file()).required(false))
-            .add_source(Environment::with_prefix("LRD"))
+            .add_source(HostEnvironment)
             .build()?;
         let mut settings = config.try_deserialize::<Settings>()?;
         settings.args = args.clone();
@@ -331,6 +371,20 @@ impl Deref for SharedSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn central_sections_are_file_only_and_host_environment_is_preserved() {
+        let mut values = config::Map::new();
+        for section in desk_signal::config::SECTION_NAMES {
+            values.insert(section.to_owned(), config::Value::from("ignored"));
+            values.insert(format!("{section}.enabled"), config::Value::from(true));
+            values.insert(format!("{section}_enabled"), config::Value::from(true));
+        }
+        values.insert("system_port".into(), config::Value::from(8082));
+        retain_host_environment(&mut values);
+        assert_eq!(values.len(), 1);
+        assert!(values.contains_key("system_port"));
+    }
 
     fn settings_at(path: &std::path::Path, locale: &str) -> Settings {
         let mut settings = Settings::for_test_config(path);

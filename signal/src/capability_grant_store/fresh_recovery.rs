@@ -1,8 +1,9 @@
 //! Restore original results or proven undispatched calls in the scheduler transaction.
 use super::*;
+use crate::config::connection::DatabaseTransaction;
 mod unknown;
 use desk_diagnose_core::session::{ExecutionState, TriggerOrigin};
-use sea_orm::{DatabaseTransaction, QueryOrder, QuerySelect};
+use sea_orm::{QueryOrder, QuerySelect};
 
 fn invalid() -> DbErr {
     DbErr::Custom("invalid completed task recovery receipt".into())

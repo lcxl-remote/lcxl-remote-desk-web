@@ -190,6 +190,12 @@ export const router = createBrowserRouter([
                         }),
                     },
                     {
+                        path: 'approval-model',
+                        lazy: async () => ({
+                            Component: (await import('@/features/settings/approval-model-settings')).ApprovalModelSettings,
+                        }),
+                    },
+                    {
                         path: 'ai-policy',
                         lazy: async () => ({
                             Component: (await import('@/features/settings/ai-policy-settings')).AiPolicySettings,
@@ -210,6 +216,10 @@ export const router = createBrowserRouter([
                     {
                         path: 'goal-budget',
                         lazy: async () => ({ Component: (await import('@/features/settings/goal-budget-policy-settings')).default }),
+                    },
+                    {
+                        path: 'terminal-completion',
+                        lazy: async () => ({ Component: (await import('@/features/settings/terminal-completion-settings')).TerminalCompletionSettings }),
                     },
                     {
                         path: 'context-management',

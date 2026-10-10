@@ -3,7 +3,6 @@ use super::*;
 use crate::goal::GoalUsage;
 use crate::subagent::reservation::{CallAdmission, DelegationCallKind, DelegationCallReservation};
 
-pub(super) const OUTPUT_HARD_CAP: i64 = 8_192;
 const EXHAUSTED: &str =
     "The delegation source has exhausted its call budget or reached its deadline.";
 
@@ -101,7 +100,8 @@ pub(super) async fn reserve_model(
         ));
     }
     let original_output_cap = request.caller_output_hard_cap;
-    let (digest, mut upper) = prepare_model_budget(request)?;
+    let (digest, mut upper) =
+        prepare_model_budget(request, deps.model.model_output_token_limit(request)?)?;
     if let Some(input_tokens) = deps.model.model_input_token_upper_bound(request)? {
         upper.input_tokens = input_tokens;
     }
@@ -114,11 +114,10 @@ pub(super) async fn reserve_model(
     Ok(admitted)
 }
 
-fn prepare_model_budget(request: &mut ModelRequest) -> Result<(String, GoalUsage), AgentError> {
-    let output_cap = request
-        .caller_output_hard_cap
-        .unwrap_or(OUTPUT_HARD_CAP)
-        .min(OUTPUT_HARD_CAP);
+fn prepare_model_budget(
+    request: &mut ModelRequest,
+    output_cap: i64,
+) -> Result<(String, GoalUsage), AgentError> {
     if output_cap <= 0 {
         return Err(crate::subagent::invalid("invalid model budget output cap"));
     }
@@ -249,11 +248,7 @@ mod tests {
 
     #[test]
     fn neutral_budget_caps_the_actual_output_and_covers_rendered_framing() {
-        for (configured, expected) in [
-            (None, OUTPUT_HARD_CAP),
-            (Some(256), 256),
-            (Some(32_768), OUTPUT_HARD_CAP),
-        ] {
+        for (configured, expected) in [(None, 128_000), (Some(256), 256), (Some(32_768), 32_768)] {
             let mut request = ModelRequest::text_only(
                 vec![crate::chat::ChatMessage::text(
                     "budget-input",
@@ -263,7 +258,7 @@ mod tests {
                 crate::prompt::ResponseFormatSpec::None,
             );
             request.caller_output_hard_cap = configured;
-            let (_, upper) = prepare_model_budget(&mut request).unwrap();
+            let (_, upper) = prepare_model_budget(&mut request, expected).unwrap();
             assert_eq!(request.caller_output_hard_cap, Some(expected));
             assert_eq!(upper.output_tokens, expected as u64);
             let wire = serde_json::json!({"model": "pinned-model", "messages": [{"role": "user", "content": "hello"}], "max_tokens": expected});
@@ -276,7 +271,7 @@ mod tests {
             let mut request =
                 ModelRequest::text_only(Vec::new(), crate::prompt::ResponseFormatSpec::None);
             request.caller_output_hard_cap = Some(invalid);
-            assert!(prepare_model_budget(&mut request).is_err());
+            assert!(prepare_model_budget(&mut request, invalid).is_err());
         }
     }
 

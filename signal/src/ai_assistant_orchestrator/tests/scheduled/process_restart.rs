@@ -84,7 +84,9 @@ async fn exercise_process(reconnect: bool) {
         "sqlite://{}?mode=rwc",
         durable.path().join("desk_signal.db").display()
     );
-    let db = Database::connect(&database_url).await.unwrap();
+    let db = crate::config::test_support::Database::connect(&database_url)
+        .await
+        .unwrap();
     crate::db::initialize_schema(&db).await.unwrap();
     crate::ai_assistant_gate::enable_test_host();
     crate::model_provider::save(

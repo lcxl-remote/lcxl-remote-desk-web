@@ -89,11 +89,13 @@ mod tests {
         action_turn_fence::AssistantTurnFence,
         session::{AgentSessionSurface, PersistedAgentSession, TurnState},
     };
-    use sea_orm::{ActiveModelTrait, ConnectionTrait, Database, Schema, Set};
+    use sea_orm::{ActiveModelTrait, ConnectionTrait, Schema, Set};
 
     #[tokio::test]
     async fn persisted_state_is_shared_and_corruption_is_not_revocation() {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
+        let db = crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap();
         let backend = db.get_database_backend();
         let schema = Schema::new(backend);
         db.execute(&schema.create_table_from_entity(agent_session::Entity))

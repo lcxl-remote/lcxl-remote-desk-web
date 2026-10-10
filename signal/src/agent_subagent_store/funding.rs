@@ -1,5 +1,6 @@
 //! Reserve the source goal and allocation group in one host transaction.
 use super::*;
+use crate::config::connection::DatabaseTransaction;
 use crate::entity::agent_goal_run as goal_row;
 use desk_diagnose_core::{
     goal::{GoalRun, GoalUsage},
@@ -8,7 +9,7 @@ use desk_diagnose_core::{
         reservation::{DelegationCallKind, DelegationCallReservation},
     },
 };
-use sea_orm::{DatabaseTransaction, QuerySelect};
+use sea_orm::QuerySelect;
 
 async fn source_goal_on(
     txn: &DatabaseTransaction,

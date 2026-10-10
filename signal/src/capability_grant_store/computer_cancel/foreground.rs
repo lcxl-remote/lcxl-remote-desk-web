@@ -115,7 +115,9 @@ impl SignalCapabilityGrantStore {
     }
 
     /// Stop the original accepted action inside a caller-owned control transaction.
-    pub(crate) async fn request_computer_execution_cancel_on<C: sea_orm::ConnectionTrait>(
+    pub(crate) async fn request_computer_execution_cancel_on<
+        C: sea_orm::ConnectionTrait + crate::config::ConfigConnection,
+    >(
         txn: &C,
         task: &str,
         run: &str,

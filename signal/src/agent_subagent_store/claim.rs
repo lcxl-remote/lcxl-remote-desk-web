@@ -167,10 +167,11 @@ impl SubAgentStore {
             .child_charged
             .checked_add(group.budget.child_outstanding)
             .map_err(|_| invalid())?;
-        if charged.model_calls >= group.limits.total.model_calls
-            || charged.tokens >= group.limits.total.tokens
-            || child_charged.model_calls >= group.limits.child_ceiling().model_calls
-            || child_charged.tokens >= group.limits.child_ceiling().tokens
+        if !group.limits.total.has_model_capacity(charged)
+            || !group
+                .limits
+                .child_ceiling()
+                .has_model_capacity(child_charged)
         {
             return Err(invalid());
         }

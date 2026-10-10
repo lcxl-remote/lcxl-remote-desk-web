@@ -125,7 +125,9 @@ async fn run_case_with_live_inner(change: Option<&str>, mode: ResumeMode, live: 
     } else {
         "sqlite::memory:".into()
     };
-    let db = Database::connect(&url).await.unwrap();
+    let db = crate::config::test_support::Database::connect(&url)
+        .await
+        .unwrap();
     crate::db::initialize_schema(&db).await.unwrap();
     crate::ai_assistant_gate::enable_test_host();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -478,7 +480,9 @@ async fn run_case_with_live_inner(change: Option<&str>, mode: ResumeMode, live: 
     );
     let executor = crate::permission_resume_executor::SignalPermissionResumeExecutor::new(
         if scanner {
-            Database::connect(&url).await.unwrap()
+            crate::config::test_support::Database::connect(&url)
+                .await
+                .unwrap()
         } else {
             db.clone()
         },

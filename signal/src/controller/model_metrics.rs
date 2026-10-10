@@ -1,5 +1,6 @@
 //! Current observation API. Authorization precedes every metrics access.
 
+use crate::config::ConfigConnection;
 use crate::error::DeskSignalError;
 use actix_session::Session;
 use actix_web::{HttpResponse, get, put, web};
@@ -199,7 +200,13 @@ pub async fn get_model_metrics_call(
 #[get("/model/metrics/settings")]
 pub async fn get_model_metrics_settings(session: Session) -> Result<HttpResponse, DeskSignalError> {
     authorize(&session)?;
-    let settings = read(store()?.load_settings()).await?;
+    let db = crate::db::try_get_db().ok_or_else(|| {
+        DeskSignalError::new_custom_error(
+            DeskErrorCode::PRECONDITION_FAILED,
+            "OSS file configuration is unavailable",
+        )
+    })?;
+    let settings = db.config_read().await.model_metrics.clone();
     Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(settings)))
 }
 
@@ -214,7 +221,13 @@ pub async fn update_model_metrics_settings(
     requested.validate().map_err(|reason| {
         DeskSignalError::new_custom_error(DeskErrorCode::INVALID_PARAMS, reason)
     })?;
-    let settings = read(store()?.save_settings(requested, chrono::Utc::now().timestamp_millis()))
+    let db = crate::db::try_get_db().ok_or_else(|| {
+        DeskSignalError::new_custom_error(
+            DeskErrorCode::PRECONDITION_FAILED,
+            "OSS file configuration is unavailable",
+        )
+    })?;
+    let settings = read(crate::config::save_metrics(db.config_context(), requested))
         .await?
         .ok_or_else(|| {
             DeskSignalError::new_custom_error(

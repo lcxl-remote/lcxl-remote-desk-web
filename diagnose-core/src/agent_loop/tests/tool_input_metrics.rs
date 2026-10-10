@@ -450,6 +450,13 @@ async fn real_empty_and_truncated_recovery_branches_emit_only_the_first_projecte
 
 #[async_trait(?Send)]
 impl ModelSeam for ObservedScript<'_> {
+    fn model_output_token_limit(&self, request: &ModelRequest) -> Result<i64, AgentError> {
+        Ok(request
+            .caller_output_hard_cap
+            .unwrap_or(128_000)
+            .min(128_000))
+    }
+
     fn observation_context(
         &self,
         _use_case: crate::model_profile::ModelUseCase,

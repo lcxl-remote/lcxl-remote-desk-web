@@ -4,6 +4,13 @@ struct CompletionModel(ScriptModel);
 
 #[async_trait(?Send)]
 impl ModelSeam for CompletionModel {
+    fn model_output_token_limit(&self, request: &ModelRequest) -> Result<i64, AgentError> {
+        Ok(request
+            .caller_output_hard_cap
+            .unwrap_or(128_000)
+            .min(128_000))
+    }
+
     fn command_completion_event_id(&self) -> Option<&str> {
         Some("completed-1")
     }

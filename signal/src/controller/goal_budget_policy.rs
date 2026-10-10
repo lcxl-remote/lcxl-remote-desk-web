@@ -7,7 +7,7 @@ use actix_web::{HttpResponse, get, put, web};
 use desk_agent_protocol::ai_assistant::goal_budget::{GoalBudgetPolicy, UpdateGoalBudgetPolicy};
 use desk_utils::{error::DeskErrorCode, rest::RestResponse};
 
-fn db() -> Result<&'static sea_orm::DatabaseConnection, DeskSignalError> {
+fn db() -> Result<&'static crate::config::connection::DatabaseConnection, DeskSignalError> {
     crate::db::try_get_db().ok_or_else(|| {
         DeskSignalError::new_custom_error(
             DeskErrorCode::PRECONDITION_FAILED,

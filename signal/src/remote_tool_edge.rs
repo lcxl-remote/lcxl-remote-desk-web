@@ -4,6 +4,7 @@
 //! local reads and confirmed mutations. Reads use server-stamped remote-tool
 //! frames; writes use exact durable grants and sealed Computer Action plans.
 
+use crate::config::connection::DatabaseConnection;
 mod application;
 pub(crate) mod directory;
 pub(crate) mod document_preview;
@@ -83,7 +84,7 @@ use desk_diagnose_core::sink_authorizer::{
 use desk_signal_facade::model::connection::{ConnectionState, SharedConnectionMap};
 use desk_signal_facade::model::signal::{SignalingModel, SignalingType};
 use desk_signal_facade::service::{ComputerActionObserver, RemoteToolObserver};
-use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use sha2::{Digest, Sha256};
 use tokio::sync::oneshot;
 
@@ -3078,7 +3079,13 @@ impl SignalAiAssistantTools {
                 },
             )
             .await
-            .unwrap_or(crate::agent_approval_concrete::ConcreteReviewResult::Unavailable);
+            .unwrap_or_else(|error| {
+                log::warn!(
+                    "[approval] concrete UI review preparation failed for work {}: {error}",
+                    prepared.work_id,
+                );
+                crate::agent_approval_concrete::ConcreteReviewResult::Unavailable
+            });
             let closure = match &review {
                 crate::agent_approval_concrete::ConcreteReviewResult::NotRequired
                 | crate::agent_approval_concrete::ConcreteReviewResult::Approved => None,
@@ -6499,7 +6506,9 @@ mod tests {
 
     #[tokio::test]
     async fn office_batch_preflight_requires_file_without_live_selection() {
-        let db = sea_orm::Database::connect("sqlite::memory:").await.unwrap();
+        let db = crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap();
         let tools_for = |roots| {
             SignalAiAssistantTools::new(
                 db.clone(),

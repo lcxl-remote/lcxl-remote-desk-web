@@ -91,3 +91,5 @@ are the same machine.
 ## System Audio
 
 When requested by the controller and allowed by the host's independent system-audio permission, remote playback is captured and sent live to the controller as Opus. It is separate from controller-microphone uplink and is not recorded or persisted by this feature. See [Remote Control & Streaming](/features/streaming#audio).
+
+Edit completion output in Settings / Terminal completion. The default is 512 and each request uses the smaller of this value and the model runtime limit. A thinking budget must be smaller than the effective output limit; incompatible settings produce an explicit error. Configuration is saved in config.toml.

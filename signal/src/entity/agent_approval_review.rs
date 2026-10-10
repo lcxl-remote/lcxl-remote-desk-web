@@ -23,7 +23,6 @@ pub struct Model {
     pub context_hmac_sha256: String,
     /// Frozen review lease and original task source; contains no prompt body.
     pub call_authority_json: Option<String>,
-    pub token_prices_json: Option<String>,
     pub delegation_reservation_id: Option<String>,
     pub provider_receipt_kind: Option<String>,
     pub provider_receipt_id: Option<String>,
@@ -39,7 +38,6 @@ pub struct Model {
     pub lease_owner: Option<String>,
     pub lease_deadline: Option<i64>,
     pub reserved_tokens: i64,
-    pub reserved_cost_micros: i64,
     pub expires_at: i64,
     pub created_at: i64,
     pub updated_at: i64,

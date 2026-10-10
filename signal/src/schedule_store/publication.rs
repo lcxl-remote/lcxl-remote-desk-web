@@ -1,6 +1,7 @@
 //! Immutable task contracts and explicit owner publication in one schedule transaction.
 use super::queue::database_now;
 use super::{ScheduleStore, ScheduleStoreError, digest, entity, json};
+use crate::config::connection::DatabaseTransaction;
 use crate::entity::{
     agent_task_authorization as authorization, agent_task_contract as contract_row,
 };
@@ -13,9 +14,7 @@ use desk_diagnose_core::schedule::{
 };
 #[cfg(test)]
 use sea_orm::TransactionTrait;
-use sea_orm::{
-    ColumnTrait, ConnectionTrait, DatabaseTransaction, EntityTrait, QueryFilter, QueryOrder, Set,
-};
+use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder, Set};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize)]
@@ -78,7 +77,7 @@ pub(super) fn valid_digest(value: &str) -> bool {
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
-async fn owned<C: ConnectionTrait>(
+async fn owned<C: ConnectionTrait + crate::config::ConfigConnection>(
     db: &C,
     owner: i32,
     id: &str,
@@ -90,7 +89,7 @@ async fn owned<C: ConnectionTrait>(
         .await?
         .ok_or(ScheduleStoreError::NotFound)
 }
-pub(super) async fn load_contract<C: ConnectionTrait>(
+pub(super) async fn load_contract<C: ConnectionTrait + crate::config::ConfigConnection>(
     db: &C,
     owner: i32,
     schedule: &str,

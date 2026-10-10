@@ -83,7 +83,7 @@ pub async fn list_ai_assistant_attention(
 }
 
 async fn read_action_permission_reasons(
-    db: &sea_orm::DatabaseConnection,
+    db: &crate::config::connection::DatabaseConnection,
     run: &str,
     requests: &[desk_diagnose_core::dynamic_run::PermissionRequest],
 ) -> Result<std::collections::BTreeMap<String, String>, DeskSignalError> {
@@ -624,7 +624,7 @@ pub async fn decide_ai_assistant_permission(
 }
 
 pub(crate) async fn decide_permission_on(
-    db: &sea_orm::DatabaseConnection,
+    db: &crate::config::connection::DatabaseConnection,
     connection_map: web::Data<SharedConnectionMap>,
     body: web::Json<PermissionDecisionBody>,
 ) -> Result<HttpResponse, DeskSignalError> {

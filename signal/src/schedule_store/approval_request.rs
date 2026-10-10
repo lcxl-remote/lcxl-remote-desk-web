@@ -1,10 +1,10 @@
 //! Live task ceiling checks for proposals; no decision or grant is manufactured.
 use super::{ScheduleStore, ScheduleStoreError};
+use crate::config::connection::DatabaseTransaction;
 use desk_diagnose_core::{
     dynamic_run::PermissionRequest,
     session::{PersistedAgentSession, TriggerOrigin},
 };
-use sea_orm::DatabaseTransaction;
 
 impl ScheduleStore {
     pub async fn validate_task_permission_request(

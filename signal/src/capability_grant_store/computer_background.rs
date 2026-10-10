@@ -3,12 +3,13 @@
 use super::computer_binding::{ComputerAcceptance, ComputerBinding, original_on, validate_binding};
 use super::computer_completion::terminal_result;
 use super::*;
+use crate::config::connection::DatabaseTransaction;
 use desk_agent_protocol::capability_provider::CapabilityTaskRef;
 use desk_agent_protocol::computer_use::ComputerActionResultClass;
 use desk_diagnose_core::dynamic_run::{
     BACKGROUND_TASK_SCHEMA_VERSION, BackgroundTaskRecord, BackgroundTaskState,
 };
-use sea_orm::{DatabaseTransaction, QueryOrder};
+use sea_orm::QueryOrder;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -102,7 +103,7 @@ fn acceptance(
     Ok(Some(accepted))
 }
 
-pub(crate) async fn task_on<C: sea_orm::ConnectionTrait>(
+pub(crate) async fn task_on<C: sea_orm::ConnectionTrait + crate::config::ConfigConnection>(
     txn: &C,
     work: &agent_action_item::Model,
     now_ms: u64,

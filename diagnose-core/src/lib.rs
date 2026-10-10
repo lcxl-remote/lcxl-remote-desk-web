@@ -36,6 +36,7 @@ pub mod approval_cost;
 pub mod approval_delegation;
 pub mod approval_egress;
 pub mod approval_review;
+pub mod approval_usage;
 pub mod assistant_policy;
 pub mod background_input;
 pub mod browser_control;
@@ -67,6 +68,7 @@ pub mod exec_classify;
 pub mod exec_tools;
 pub mod file_scope;
 pub mod focus_epoch;
+pub mod future;
 pub mod goal;
 pub mod goal_budget;
 pub mod goal_tools;
@@ -113,6 +115,7 @@ pub mod subagent;
 pub mod task_status_tools;
 pub mod terminal_ai_assistant;
 pub mod terminal_complete;
+pub mod terminal_completion_policy;
 mod text_parse;
 pub mod trim;
 pub mod visual_evidence;
@@ -157,7 +160,9 @@ pub mod ui_model_output;
 
 pub mod conversation_image;
 
+pub mod thinking_context;
 pub mod ui_model_ids;
+pub mod ui_references;
 
 pub mod model_input;
 

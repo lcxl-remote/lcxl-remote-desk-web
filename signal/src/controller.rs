@@ -11,6 +11,7 @@ pub mod schedule_budget_policy;
 pub mod signaling;
 pub mod subagent_policy;
 pub mod terminal;
+pub mod terminal_completion;
 pub mod turn_usage;
 pub mod usage_retention;
 pub mod web_search;

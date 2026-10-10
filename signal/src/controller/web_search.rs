@@ -10,7 +10,7 @@ use desk_utils::{error::DeskErrorCode, rest::RestResponse};
 
 const TAG: &str = "WebSearch";
 
-fn db() -> Result<&'static sea_orm::DatabaseConnection, DeskSignalError> {
+fn db() -> Result<&'static crate::config::connection::DatabaseConnection, DeskSignalError> {
     crate::db::try_get_db().ok_or_else(|| {
         DeskSignalError::new_custom_error(
             DeskErrorCode::PRECONDITION_FAILED,

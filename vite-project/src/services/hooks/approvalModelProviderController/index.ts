@@ -1,5 +1,6 @@
 export type { GetApprovalModelProviderQueryKey } from "./useGetApprovalModelProvider.ts";
 export type { GetApprovalModelProviderSuspenseQueryKey } from "./useGetApprovalModelProviderSuspense.ts";
+export type { ReuseAiGatewayForApprovalMutationKey } from "./useReuseAiGatewayForApproval.ts";
 export type { TestApprovalModelProviderMutationKey } from "./useTestApprovalModelProvider.ts";
 export type { UpdateApprovalModelProviderMutationKey } from "./useUpdateApprovalModelProvider.ts";
 export { getApprovalModelProviderQueryKey } from "./useGetApprovalModelProvider.ts";
@@ -8,6 +9,9 @@ export { useGetApprovalModelProvider } from "./useGetApprovalModelProvider.ts";
 export { getApprovalModelProviderSuspenseQueryKey } from "./useGetApprovalModelProviderSuspense.ts";
 export { getApprovalModelProviderSuspenseQueryOptions } from "./useGetApprovalModelProviderSuspense.ts";
 export { useGetApprovalModelProviderSuspense } from "./useGetApprovalModelProviderSuspense.ts";
+export { reuseAiGatewayForApprovalMutationKey } from "./useReuseAiGatewayForApproval.ts";
+export { reuseAiGatewayForApprovalMutationOptions } from "./useReuseAiGatewayForApproval.ts";
+export { useReuseAiGatewayForApproval } from "./useReuseAiGatewayForApproval.ts";
 export { testApprovalModelProviderMutationKey } from "./useTestApprovalModelProvider.ts";
 export { testApprovalModelProviderMutationOptions } from "./useTestApprovalModelProvider.ts";
 export { useTestApprovalModelProvider } from "./useTestApprovalModelProvider.ts";

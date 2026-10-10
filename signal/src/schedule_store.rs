@@ -1,11 +1,12 @@
 //! Owner-scoped durable draft storage; transport authorization happens upstream.
+use crate::config::connection::DatabaseConnection;
 use crate::entity::agent_schedule as entity;
 use desk_agent_protocol::schedule::ScheduleDraft;
 use desk_diagnose_core::schedule::{
     SCHEDULE_CALC_VERSION, lifecycle::FailureState, normalize_draft,
 };
 use sea_orm::{
-    ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set,
+    ColumnTrait, DbErr, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set,
     sea_query::OnConflict,
 };
 use sha2::{Digest, Sha256};
@@ -101,7 +102,7 @@ impl From<DbErr> for ScheduleStoreError {
 /// A conversation timer must run before its source session can be reclaimed.
 /// Checked under the caller's transaction against the current window.
 pub(super) async fn check_resume_retention(
-    txn: &sea_orm::DatabaseTransaction,
+    txn: &crate::config::connection::DatabaseTransaction,
     spec: &desk_agent_protocol::schedule::ScheduleSpec,
     now_ms: i64,
 ) -> Result<(), ScheduleStoreError> {
@@ -231,7 +232,9 @@ impl ScheduleStore {
         Self::create_draft_on(&self.db, owner, request, now_ms).await
     }
 
-    pub(crate) async fn create_draft_on<C: sea_orm::ConnectionTrait>(
+    pub(crate) async fn create_draft_on<
+        C: sea_orm::ConnectionTrait + crate::config::ConfigConnection,
+    >(
         db: &C,
         owner: i32,
         request: &ScheduleDraft,
@@ -383,7 +386,7 @@ pub(crate) mod tests {
     use desk_agent_protocol::schedule::{
         ScheduleCreationSource, ScheduleRule, ScheduleSpec, ScheduledTaskKind,
     };
-    use sea_orm::{ConnectionTrait, Database, Schema};
+    use sea_orm::{ConnectionTrait, Schema};
     pub(crate) fn draft() -> ScheduleDraft {
         ScheduleDraft {
             time_confirmation: None,
@@ -406,11 +409,10 @@ pub(crate) mod tests {
         }
     }
     pub(super) async fn store() -> ScheduleStore {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
-        let schema = Schema::new(db.get_database_backend());
-        db.execute(&schema.create_table_from_entity(crate::entity::schedule_budget_policy::Entity))
+        let db = crate::config::test_support::Database::connect("sqlite::memory:")
             .await
             .unwrap();
+        let schema = Schema::new(db.get_database_backend());
         db.execute(&schema.create_table_from_entity(crate::entity::agent_schedule_run::Entity))
             .await
             .unwrap();

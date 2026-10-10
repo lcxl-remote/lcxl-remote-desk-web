@@ -1,5 +1,6 @@
 //! Root-scoped, idempotent child creation and independent session persistence.
 use super::*;
+use crate::config::connection::DatabaseTransaction;
 use desk_diagnose_core::{
     chat::ToolCall,
     session::TriggerOrigin,
@@ -9,7 +10,7 @@ use desk_diagnose_core::{
         tools::{self, Operation, SpawnRequest},
     },
 };
-use sea_orm::{ActiveModelTrait, DatabaseTransaction};
+use sea_orm::ActiveModelTrait;
 use sha2::{Digest, Sha256};
 
 pub(crate) async fn parent_planning_on(
@@ -157,10 +158,8 @@ pub(crate) async fn spawn_on(
         .charged
         .checked_add(group.budget.outstanding)
         .map_err(|_| invalid())?;
-    if child_used.model_calls >= group.limits.child_ceiling().model_calls
-        || child_used.tokens >= group.limits.child_ceiling().tokens
-        || total_used.model_calls >= group.limits.total.model_calls
-        || total_used.tokens >= group.limits.total.tokens
+    if !group.limits.child_ceiling().has_model_capacity(child_used)
+        || !group.limits.total.has_model_capacity(total_used)
     {
         return Err(invalid());
     }

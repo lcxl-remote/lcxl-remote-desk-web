@@ -104,10 +104,11 @@ pub async fn run_service_daemon_inner(
     // Required because open_signaling_handle calls get_or_create_device_code() which
     // calls get_db() and panics if the DB has not been initialized.
     let signal_db_dir = paths.signal_db_dir().to_string_lossy().to_string();
-    let signal_db = desk_signal::db::init_db(&signal_db_dir)
+    let configuration = crate::model::oss_config::context(shared_settings.clone()).await?;
+    let signal_db = desk_signal::db::init_db(&signal_db_dir, configuration.clone())
         .await
         .map_err(|e| format!("Failed to init signal DB: {e}"))?;
-    desk_signal::model_metrics::runtime::initialize(&signal_db_dir);
+    desk_signal::model_metrics::runtime::initialize(&signal_db_dir, configuration);
     info!("Signal database initialized at {signal_db_dir}");
     let exec_ledger = open_exec_ledger(&paths).await?;
     // Age-based retention cleanup for the local usage rollups (collect-only

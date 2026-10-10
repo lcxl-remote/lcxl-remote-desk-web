@@ -1,5 +1,6 @@
 //! Original action evidence inside the caller's schedule transaction.
 use super::*;
+use crate::config::connection::DatabaseTransaction;
 use desk_diagnose_core::{
     action_result::ActionResultOrigin,
     action_turn_fence::AssistantTurnFence,
@@ -7,7 +8,7 @@ use desk_diagnose_core::{
     dynamic_run::BackgroundTaskState,
     session::{ActionIdentity, ExecutionState, TriggerOrigin, TurnState, WorkKind},
 };
-use sea_orm::{DatabaseTransaction, QueryOrder, QuerySelect};
+use sea_orm::{QueryOrder, QuerySelect};
 use std::collections::BTreeSet;
 
 pub(super) mod command;

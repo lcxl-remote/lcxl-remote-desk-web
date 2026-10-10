@@ -1,13 +1,14 @@
 //! Initialize finite source budgets before the first parent model call.
 
 use super::*;
+use crate::config::connection::DatabaseTransaction;
 use desk_diagnose_core::{
     chat::ChatMessage,
     goal::GoalRun,
     input_read_context::ReadContextSelection,
     subagent::{DelegationSource, creation::CreationEnvelope},
 };
-use sea_orm::{ActiveModelTrait, DatabaseTransaction};
+use sea_orm::ActiveModelTrait;
 
 pub(crate) fn decode_creation(row: &group_row::Model) -> Result<CreationEnvelope, DbErr> {
     let creation: CreationEnvelope =

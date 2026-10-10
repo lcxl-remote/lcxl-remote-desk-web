@@ -1,12 +1,13 @@
 //! One occurrence quota for parent, children, compression and safety calls.
 
 use super::*;
+use crate::config::connection::DatabaseTransaction;
 use crate::entity::{agent_delegation_reservation as cost, agent_task_budget_reservation as quota};
 use desk_diagnose_core::subagent::{
     budget::Usage,
     reservation::{DelegationCallKind, DelegationCallReservation},
 };
-use sea_orm::{DatabaseTransaction, sea_query::Expr};
+use sea_orm::sea_query::Expr;
 use sha2::{Digest, Sha256};
 
 fn key(reservation: &DelegationCallReservation) -> String {

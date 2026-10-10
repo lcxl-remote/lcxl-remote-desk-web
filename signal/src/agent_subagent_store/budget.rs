@@ -1,11 +1,12 @@
 //! Durable call-cost reservations; control receipts use a separate operation kind.
 use super::*;
+use crate::config::connection::DatabaseTransaction;
 use crate::entity::agent_delegation_reservation as reservation_row;
 use desk_diagnose_core::subagent::{
     budget::Usage,
     reservation::{DelegationCallKind, DelegationCallReservation, ReviewCallAuthority},
 };
-use sea_orm::{ActiveModelTrait, DatabaseTransaction};
+use sea_orm::ActiveModelTrait;
 use sha2::{Digest, Sha256};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,7 +68,7 @@ pub(super) fn decode_reservation(
     Ok(reservation)
 }
 
-pub(crate) async fn replace_group_on<C: ConnectionTrait>(
+pub(crate) async fn replace_group_on<C: ConnectionTrait + crate::config::ConfigConnection>(
     db: &C,
     old: &group_row::Model,
     group: &DelegationGroup,

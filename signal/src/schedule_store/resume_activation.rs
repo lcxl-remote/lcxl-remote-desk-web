@@ -93,7 +93,7 @@ impl ScheduleStore {
 
     async fn enable_conversation_resume_on(
         &self,
-        txn: &sea_orm::DatabaseTransaction,
+        txn: &crate::config::connection::DatabaseTransaction,
         owner: i32,
         schedule_id: &str,
         expected_revision: i64,
@@ -191,7 +191,7 @@ mod tests;
 
 /// Hold the unchanged source input while editing or enabling its continuation.
 pub(super) async fn lock_original_requirement(
-    txn: &sea_orm::DatabaseTransaction,
+    txn: &crate::config::connection::DatabaseTransaction,
     owner: i32,
     task: &entity::Model,
 ) -> Result<(), ScheduleStoreError> {
@@ -255,7 +255,7 @@ pub(super) async fn lock_original_requirement(
 
 /// Persist the authoritative activation receipt without creating a new user input.
 pub(super) async fn record_decision_on(
-    txn: &sea_orm::DatabaseTransaction,
+    txn: &crate::config::connection::DatabaseTransaction,
     task: &entity::Model,
     now: i64,
 ) -> Result<(), ScheduleStoreError> {

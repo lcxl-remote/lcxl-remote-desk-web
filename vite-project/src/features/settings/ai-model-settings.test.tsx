@@ -49,7 +49,6 @@ beforeEach(() => {
         max_context_bytes: 131072,
         request_options: {},
         output_limit_field: "max_tokens",
-        probe_max_output_tokens: 512,
         runtime_max_output_tokens: 4096,
         supports_image_input: false,
         connection_revision: 1,
@@ -64,6 +63,22 @@ beforeEach(() => {
 })
 
 describe("AiModelSettings", () => {
+    it("uses the edited runtime budget for connection tests and saved settings", async () => {
+        render(<AiModelSettings />)
+        await waitFor(() => expect(screen.getByDisplayValue("gpt-4o-mini")).toBeInTheDocument())
+        expect(screen.queryByLabelText("Probe output tokens")).toBeNull()
+        fireEvent.change(screen.getByLabelText("Runtime output tokens"), { target: { value: "8192" } })
+        fireEvent.click(screen.getByRole("button", { name: "Test connection" }))
+        await waitFor(() => expect(h.testMutateAsync).toHaveBeenCalledOnce())
+        const payload = (h.testMutateAsync.mock.calls[0][0] as { data: Record<string, unknown> }).data
+        expect(payload.runtime_max_output_tokens).toBe(8192)
+        expect(payload).not.toHaveProperty("probe_max_output_tokens")
+        fireEvent.click(screen.getAllByText("Save Settings")[0])
+        await waitFor(() => expect(h.providerMutateAsync).toHaveBeenCalledOnce())
+        expect(lastProviderPayload().runtime_max_output_tokens).toBe(8192)
+        expect(lastProviderPayload()).not.toHaveProperty("probe_max_output_tokens")
+    })
+
     it("hydrates the provider form and saves its complete profile while omitting a blank api_key", async () => {
         render(<AiModelSettings />)
         // Hydration populated the form from the masked public view.
@@ -248,6 +263,7 @@ describe("AiModelSettings", () => {
     it("tests the current unsaved form values without saving them", async () => {
         render(<AiModelSettings />)
         await waitFor(() => expect(screen.getByDisplayValue("gpt-4o-mini")).toBeInTheDocument())
+        expect(screen.getByLabelText("Runtime output tokens")).toHaveValue(4096)
 
         fireEvent.change(screen.getByDisplayValue("gpt-4o-mini"), {
             target: { value: "unsaved-vision-model" },
@@ -268,9 +284,10 @@ describe("AiModelSettings", () => {
                     model: "unsaved-vision-model",
                     supports_image_input: true,
                     base_url: "https://unsaved.example/v1",
+                    reasoning_contract: 'conservative',
+                    anthropic_prefix_binding: false,
                     request_options: {},
                     output_limit_field: "max_tokens",
-                    probe_max_output_tokens: 512,
                     runtime_max_output_tokens: 4096,
                     max_context_bytes: 131072,
                     api_key: "unsaved-key",
@@ -280,22 +297,21 @@ describe("AiModelSettings", () => {
         expect(h.providerMutateAsync).not.toHaveBeenCalled()
     })
 
-    it("materializes the frozen preset budgets and disables the incompatible manual preset", async () => {
+    it("materializes the preset budgets and allows configured manual thinking", async () => {
+        expect(presetProfile("standard")).toEqual({ requestOptions: {}, runtimeBudget: 65536 })
         expect(presetProfile("deepseek")).toEqual({
             requestOptions: { thinking: { type: "disabled" } },
-            probeBudget: 512,
-            runtimeBudget: 4096,
+            runtimeBudget: 65536,
         })
         expect(presetProfile("anthropic_adaptive")).toEqual({
             requestOptions: { thinking: { type: "adaptive", display: "omitted" } },
-            probeBudget: 4096,
-            runtimeBudget: 8192,
+            runtimeBudget: 65536,
         })
-        expect(isProfilePresetSelectable("anthropic_manual")).toBe(false)
+        expect(isProfilePresetSelectable("anthropic_manual")).toBe(true)
         expect(isProfilePresetSelectable("anthropic_adaptive")).toBe(true)
 
         render(<AiModelSettings />)
         await waitFor(() => expect(screen.getByDisplayValue("gpt-4o-mini")).toBeInTheDocument())
-        expect(screen.getByText(/terminal completion has a 512-token hard cap/i)).toBeInTheDocument()
+        expect(screen.getByText(/thinking budget must be smaller than the effective output limit/i)).toBeInTheDocument()
     })
 })

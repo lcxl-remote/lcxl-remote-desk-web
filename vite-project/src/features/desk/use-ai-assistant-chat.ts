@@ -239,7 +239,7 @@ export type AiAssistantApprovalDelegation = {
     status: string;
     reviewsUsed: number;
     tokensUsed: number;
-    costUsedMicros: number;
+    costUsedMicros?: number | null;
     createdAtUnixMs: number;
 };
 
@@ -441,6 +441,10 @@ export function useAiAssistantChat({
     const [hydrating, setHydrating] = useState(false);
     const [remoteActive, setRemoteActive] = useState(false);
     const [contextUpdating, setContextUpdating] = useState(false);
+    const [approvalInitializing, setApprovalInitializing] = useState(false);
+    const [approvalInitializationFailed, setApprovalInitializationFailed] = useState(false);
+    const approvalInitializationAttempt = useRef<string | null>(null);
+    const approvalContextRequest = useRef<string | null>(null);
     const [taskStatusProjection, setTaskStatusProjection] =
         useState<AiAssistantTaskStatusProjection | null>(null);
     const [goal, setGoal] = useState<AiAssistantGoal | null>(null);
@@ -583,7 +587,8 @@ export function useAiAssistantChat({
         expectedConversationId: string,
         showHydrating = false,
         reportFailure = false,
-    ) => {
+        requireApprovalState = false,
+    ): Promise<'ready' | 'missing' | 'ignored' | 'failed'> => {
         const expectedEpoch = snapshotEpoch.current;
         const expectedRequestOrder = ++snapshotRequestOrder.current;
         if (showHydrating) setHydrating(true);
@@ -601,8 +606,12 @@ export function useAiAssistantChat({
                 snapshotEpoch.current !== expectedEpoch
                 || expectedRequestOrder < snapshotAcceptanceFloor.current
                 || conversationId.current !== expectedConversationId
-                || !Array.isArray(body?.data?.messages)
-            ) return;
+            ) return 'ignored';
+            if (!Array.isArray(body?.data?.messages)) {
+                return response.ok && body?.success === false
+                    && body?.code === deskErrorCodeEnum.PERMISSION_ERROR && body.data == null
+                    ? 'missing' : 'failed';
+            }
             const snapshot = body.data as PersistedSnapshot;
             if (pendingDelivery.current?.conversation === expectedConversationId
                 && snapshot.messages.some(message => message.id === pendingDelivery.current?.id && message.role === 'user')) {
@@ -619,7 +628,8 @@ export function useAiAssistantChat({
                 || !Array.isArray(snapshot.subagents.attention_tasks) || !Number.isSafeInteger(snapshot.subagents.attention_count)
                 || snapshot.subagents.attention_count < 0
                 || snapshot.subagents.task !== null || snapshot.subagents.parent_session_id !== null
-            ) return;
+                || (requireApprovalState && typeof snapshot.approvalModelReadiness?.available !== 'boolean')
+            ) return 'failed';
             const watermark = snapshotWatermark.current;
             if (
                 watermark
@@ -635,7 +645,7 @@ export function useAiAssistantChat({
                         && expectedRequestOrder <= watermark.requestOrder
                     )
                 )
-            ) return;
+            ) return 'ignored';
             snapshotWatermark.current = {
                 conversationId: expectedConversationId,
                 sessionId: snapshot.sessionId,
@@ -692,6 +702,7 @@ export function useAiAssistantChat({
             setPendingGoalOpenRequest(snapshot.pendingGoalOpenRequest ?? null);
             setApprovalDelegation(snapshot.approvalDelegation ?? null);
             setApprovalModelReadiness(snapshot.approvalModelReadiness ?? null);
+            if (typeof snapshot.approvalModelReadiness?.available === 'boolean') setApprovalInitializationFailed(false);
             setPermissionRequests(projected.permissionRequests);
             setBackgroundTasks(projected.backgroundTasks);
             setCommandTasks(snapshot.commandTasks ?? []);
@@ -758,11 +769,13 @@ export function useAiAssistantChat({
                     setError(null);
                 }
             }
+            return 'ready';
         } catch {
             // A transient poll failure must not erase the last durable view.
             if (reportFailure && snapshotEpoch.current === expectedEpoch && conversationId.current === expectedConversationId) {
                 setError('history_restore_failed');
             }
+            return 'failed';
         } finally {
             window.clearTimeout(timeout);
             if (
@@ -873,6 +886,10 @@ export function useAiAssistantChat({
         setPendingGoalOpenRequest(null);
         setApprovalDelegation(null);
         setApprovalModelReadiness(null);
+        setApprovalInitializing(false);
+        setApprovalInitializationFailed(false);
+        approvalInitializationAttempt.current = null;
+        approvalContextRequest.current = null;
         setPermissionRequests([]);
         setBackgroundTasks([]);
         setCommandTasks([]);
@@ -921,6 +938,10 @@ export function useAiAssistantChat({
             setPendingGoalOpenRequest(null);
             setApprovalDelegation(null);
             setApprovalModelReadiness(null);
+            setApprovalInitializing(false);
+            setApprovalInitializationFailed(false);
+            approvalInitializationAttempt.current = null;
+            approvalContextRequest.current = null;
             setPermissionRequests([]);
             setBackgroundTasks([]);
             setCommandTasks([]);
@@ -1035,7 +1056,16 @@ export function useAiAssistantChat({
             contextRequest.current = null;
             setContextUpdating(false);
             if (ack.error) setError(ack.error);
-            if (conversationId.current) void loadSnapshot(conversationId.current);
+            const initializingApproval = approvalContextRequest.current === message.request_id;
+            if (initializingApproval) approvalContextRequest.current = null;
+            if (conversationId.current) {
+                const selected = conversationId.current;
+                void loadSnapshot(selected, false, false, initializingApproval).then(outcome => {
+                    if (initializingApproval && conversationId.current === selected && outcome !== 'ignored') {
+                        setApprovalInitializationFailed(outcome !== 'ready' || Boolean(ack.error));
+                    }
+                });
+            }
             return;
         }
         if (message.signaling_type !== SIGNALING_TYPE_CODE_AI_ASSISTANT_UPDATED) return;
@@ -1194,6 +1224,10 @@ export function useAiAssistantChat({
         );
         contextTimer.current = window.setTimeout(() => {
             contextTimer.current = null;
+            if (approvalContextRequest.current !== null && approvalContextRequest.current === contextRequest.current) {
+                approvalContextRequest.current = null;
+                setApprovalInitializationFailed(true);
+            }
             contextRequest.current = null;
             setContextUpdating(false);
             setError('AI Assistant context update timed out.');
@@ -1201,6 +1235,37 @@ export function useAiAssistantChat({
         }, 10_000);
         return true;
     }, [deskId, ensureConversation, loadSnapshot, remoteActive, sendMessage, rehearsal]);
+
+    const initializeApprovalConversation = useCallback(async (retry = false) => {
+        if (rehearsal || connected === false || hydrating || approvalInitializing
+            || activeRequest.current || remoteActive || contextRequest.current) return false;
+        const selected = ensureConversation();
+        if (snapshotWatermark.current?.conversationId === selected && approvalModelReadiness) return true;
+        if (!retry && approvalInitializationAttempt.current === selected) return false;
+        approvalInitializationAttempt.current = selected;
+        setApprovalInitializing(true);
+        setApprovalInitializationFailed(false);
+        setError(null);
+        try {
+            // A client UUID alone is not a persisted conversation. Confirm its
+            // absence before sending an empty selection that could clear context.
+            const outcome = await loadSnapshot(selected, false, false, true);
+            if (conversationId.current !== selected || outcome === 'ignored') return false;
+            if (outcome === 'ready') return true;
+            if (outcome === 'missing' && updateContext([])) {
+                approvalContextRequest.current = contextRequest.current;
+                return true;
+            }
+            setApprovalInitializationFailed(true);
+            return false;
+        } catch {
+            if (conversationId.current === selected) setApprovalInitializationFailed(true);
+            return false;
+        } finally {
+            if (conversationId.current === selected) setApprovalInitializing(false);
+        }
+    }, [rehearsal, connected, hydrating, approvalInitializing, remoteActive,
+        ensureConversation, approvalModelReadiness, loadSnapshot, updateContext]);
 
     const detachAttachment = useCallback((attachmentId: string) => {
         if (rehearsal && (rehearsal.status === 'completed' || rehearsal.status === 'cancelled' || rehearsal.status === 'failed' || (!rehearsalSent.current && rehearsal.status !== 'running'))) return false;
@@ -1294,7 +1359,7 @@ export function useAiAssistantChat({
         // A follow-up is durable input, not a second foreground workflow. Replace
         // the locally observed request stream with the newest request; the server
         // supersedes the older model turn under its input-revision fence.
-        if (!trimmed || hydrating || contextRequest.current || !sessionTargetReady) return false;
+        if (!trimmed || hydrating || approvalInitializing || contextRequest.current || !sessionTargetReady) return false;
         const selectedObjects = attachments.filter(attachment => attachment.state === 'active' && attachment.kind !== 'interactive_session');
         if (selectedObjects.some(attachment => attachment.expiresAtUnixMs <= Date.now())) {
             deliveryFailure.current = 'selected_context_expired';
@@ -1346,7 +1411,7 @@ export function useAiAssistantChat({
             setDeliveryState('unconfirmed');
         }
         return true;
-    }, [attachments, deskId, ensureConversation, sendMessage, sessionTargetReady, hydrating, rehearsal]);
+    }, [attachments, deskId, ensureConversation, sendMessage, sessionTargetReady, hydrating, approvalInitializing, rehearsal]);
 
     const retryDelivery = useCallback(async () => {
         const pending = pendingDelivery.current;
@@ -1754,6 +1819,10 @@ export function useAiAssistantChat({
         setPendingGoalOpenRequest(null);
         setApprovalDelegation(null);
         setApprovalModelReadiness(null);
+        setApprovalInitializing(false);
+        setApprovalInitializationFailed(false);
+        approvalInitializationAttempt.current = null;
+        approvalContextRequest.current = null;
         setPermissionRequests([]);
         setBackgroundTasks([]);
         setCommandTasks([]);
@@ -1822,6 +1891,9 @@ export function useAiAssistantChat({
         requestDocumentPreviewPage,
         hydrating,
         contextUpdating,
+        approvalInitializing,
+        approvalInitializationFailed,
+        initializeApprovalConversation,
         taskStatusProjection,
         goal,
         goalUpdating,
@@ -1856,11 +1928,11 @@ export function useAiAssistantChat({
         stopConfirmation,
         dismissStopConfirmation: () => { if (!stopPending.current) setStopConfirmation(null); },
         confirmStop,
-        canStop: !hydrating && !!snapshotWatermark.current && (!!(activeRequest.current ?? snapshotActiveRequest.current)
+        canStop: !hydrating && !!snapshotWatermark.current && (remoteActive || !!(activeRequest.current ?? snapshotActiveRequest.current)
             || (subagents.tasks?.unfinished ?? 0) > 0 || subagents.active_tasks.length > 0
             || (!mainStopped && !!goal && !['completed', 'failed', 'cancelled'].includes(goal.state))),
         turnRunning: activeRequest.current !== null || remoteActive,
-        running: activeRequest.current !== null || remoteActive || contextUpdating || permissionUpdating || outcomeDisposing,
+        running: activeRequest.current !== null || remoteActive || contextUpdating || approvalInitializing || permissionUpdating || outcomeDisposing,
         start,
         deliveryState,
         acceptedInput,

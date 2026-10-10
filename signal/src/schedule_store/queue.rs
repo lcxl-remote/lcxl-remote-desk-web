@@ -17,7 +17,9 @@ use sea_orm::{
     sea_query::{Alias, Expr, Query},
 };
 
-pub(super) async fn database_now<C: ConnectionTrait>(db: &C) -> Result<i64, ScheduleStoreError> {
+pub(super) async fn database_now<C: ConnectionTrait + crate::config::ConfigConnection>(
+    db: &C,
+) -> Result<i64, ScheduleStoreError> {
     let query = Query::select()
         .expr_as(Expr::current_timestamp(), Alias::new("now"))
         .to_owned();
@@ -347,7 +349,7 @@ impl ScheduleStore {
     /// claimed occurrence with its fresh session and current authorization.
     /// This function never commits and grants no permission to execute tools.
     pub async fn claim_queued_on(
-        txn: &sea_orm::DatabaseTransaction,
+        txn: &crate::config::connection::DatabaseTransaction,
         run_id: &str,
         node_id: &str,
         lease_seconds: u32,

@@ -4,6 +4,7 @@
 //! contract. It owns only model metering and the bounded, tool-free follow-up
 //! used after a durable background execution completes.
 
+use crate::config::connection::DatabaseConnection;
 use desk_agent_protocol::{AgentError, AgentErrorKind};
 use desk_diagnose_core::agent_loop::{LoopDeps, LoopOutcome, resume_agent_turn};
 use desk_diagnose_core::agentic_prompt::build_agentic_system_message;
@@ -15,7 +16,7 @@ use desk_diagnose_core::session::{
     AgentSessionSurface, PersistedAgentSession, TriggerOrigin, WorkKind,
 };
 use desk_utils::error::DeskErrorCode;
-use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use sha2::{Digest, Sha256};
 
 use crate::model_dial::SignalModelSeam;
@@ -80,6 +81,16 @@ struct MeteredSignalModel {
 
 #[async_trait::async_trait(?Send)]
 impl ModelSeam for MeteredSignalModel {
+    fn model_output_token_limit(&self, request: &ModelRequest) -> Result<i64, AgentError> {
+        self.inner.model_output_token_limit(request)
+    }
+    fn model_input_token_upper_bound(
+        &self,
+        request: &ModelRequest,
+    ) -> Result<Option<u64>, AgentError> {
+        self.inner.model_input_token_upper_bound(request)
+    }
+
     fn observation_context(
         &self,
         use_case: desk_diagnose_core::model_profile::ModelUseCase,
@@ -163,6 +174,16 @@ struct CompletionModel {
 
 #[async_trait::async_trait(?Send)]
 impl ModelSeam for CompletionModel {
+    fn model_output_token_limit(&self, request: &ModelRequest) -> Result<i64, AgentError> {
+        self.inner.model_output_token_limit(request)
+    }
+    fn model_input_token_upper_bound(
+        &self,
+        request: &ModelRequest,
+    ) -> Result<Option<u64>, AgentError> {
+        self.inner.model_input_token_upper_bound(request)
+    }
+
     fn observation_context(
         &self,
         use_case: desk_diagnose_core::model_profile::ModelUseCase,
@@ -322,7 +343,15 @@ impl TurnSink for DiscardTurnSink {
 }
 
 /// Run one bounded, tool-free model turn after a durable execution completion.
-pub async fn resume_completion_turn(
+pub fn resume_completion_turn(
+    db: DatabaseConnection,
+    session: PersistedAgentSession,
+    work_kind: desk_diagnose_core::session::WorkKind,
+) -> std::pin::Pin<Box<impl std::future::Future<Output = Result<LoopOutcome, AgentError>>>> {
+    desk_diagnose_core::future::boxed(move || resume_completion_turn_inner(db, session, work_kind))
+}
+
+async fn resume_completion_turn_inner(
     db: DatabaseConnection,
     session: PersistedAgentSession,
     work_kind: desk_diagnose_core::session::WorkKind,

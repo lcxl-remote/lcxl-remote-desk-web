@@ -1,0 +1,1 @@
+{"type":"object","required":["expectedRevision","maxOutputTokens"],"properties":{"expectedRevision":{"type":"integer","format":"int64","minimum":0},"maxOutputTokens":{"type":"integer","format":"int32","minimum":0}},"additionalProperties":false,"x-readme-ref-name":"UpdateTerminalCompletionRequest"}

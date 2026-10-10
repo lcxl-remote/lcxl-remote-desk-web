@@ -1,4 +1,5 @@
 //! Grant scope matching against current task authority in the dispatch transaction.
+use crate::config::connection::DatabaseTransaction;
 use crate::entity::agent_session;
 use desk_agent_protocol::capability_grant::{CapabilityGrant, CapabilityGrantIssuer};
 use desk_diagnose_core::{
@@ -9,7 +10,7 @@ use desk_diagnose_core::{
     },
     session::{PersistedAgentSession, TriggerOrigin},
 };
-use sea_orm::{ColumnTrait, DatabaseTransaction, DbErr, EntityTrait, QueryFilter};
+use sea_orm::{ColumnTrait, DbErr, EntityTrait, QueryFilter};
 
 pub(super) async fn match_current_on(
     txn: &DatabaseTransaction,

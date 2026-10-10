@@ -1,8 +1,9 @@
 //! Resume a published task against its existing authorization; never renew grants.
 use super::publication::{TaskPublicationVerifier, TaskRehearsalEvidence};
 use super::{ScheduleStore, ScheduleStoreError, entity};
+use crate::config::connection::DatabaseTransaction;
 use crate::entity::agent_task_authorization as authorization;
-use sea_orm::{ColumnTrait, DatabaseTransaction, EntityTrait, QueryFilter, QuerySelect};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
 
 struct PublishedAuthorizer<'a>(&'a dyn TaskPublicationVerifier);
 

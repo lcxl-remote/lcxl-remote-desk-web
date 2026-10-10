@@ -2,14 +2,11 @@ use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
-#[sea_orm(table_name = "model_metric_settings")]
+#[sea_orm(table_name = "model_metric_state")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub id: i32,
     pub schema_version: i32,
-    pub revision: i64,
-    #[sea_orm(column_type = "Text")]
-    pub settings_json: String,
     pub available_from_ms: i64,
     pub updated_at_ms: i64,
     pub frozen_before_ms: i64,

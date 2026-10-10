@@ -1,7 +1,7 @@
 //! A frozen scheduled source is revalidated under its publication write fence.
 
 use super::*;
-use sea_orm::DatabaseTransaction;
+use crate::config::connection::DatabaseTransaction;
 
 /// Owner/root/child controls are already held. Acquire a scheduled source fence
 /// before locking the child's session or creating any new business authority.

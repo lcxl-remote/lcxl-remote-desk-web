@@ -534,6 +534,13 @@ const PROJECTION_TEST_MODEL_CONTEXT_BYTES: usize = crate::MIN_MODEL_CONTEXT_BYTE
 
 #[async_trait(?Send)]
 impl ModelSeam for ProjectionMetricsModel {
+    fn model_output_token_limit(&self, request: &ModelRequest) -> Result<i64, AgentError> {
+        Ok(request
+            .caller_output_hard_cap
+            .unwrap_or(128_000)
+            .min(128_000))
+    }
+
     async fn context_policy(
         &self,
         _requirements: crate::model_capability::ModelRequirements,
@@ -590,6 +597,13 @@ impl crate::seam::LeaseHeartbeat for UnhealthyHeartbeat {
 
 #[async_trait(?Send)]
 impl ModelSeam for CompressionScriptModel {
+    fn model_output_token_limit(&self, request: &ModelRequest) -> Result<i64, AgentError> {
+        Ok(request
+            .caller_output_hard_cap
+            .unwrap_or(128_000)
+            .min(128_000))
+    }
+
     async fn context_policy(
         &self,
         _requirements: crate::model_capability::ModelRequirements,
@@ -646,6 +660,13 @@ impl ModelSeam for CompressionScriptModel {
 }
 #[async_trait(?Send)]
 impl ModelSeam for ScriptModel {
+    fn model_output_token_limit(&self, request: &ModelRequest) -> Result<i64, AgentError> {
+        Ok(request
+            .caller_output_hard_cap
+            .unwrap_or(128_000)
+            .min(128_000))
+    }
+
     async fn context_policy(
         &self,
         _requirements: crate::model_capability::ModelRequirements,
@@ -686,6 +707,13 @@ struct SupersedingModel {
 
 #[async_trait(?Send)]
 impl ModelSeam for SupersedingModel {
+    fn model_output_token_limit(&self, request: &ModelRequest) -> Result<i64, AgentError> {
+        Ok(request
+            .caller_output_hard_cap
+            .unwrap_or(128_000)
+            .min(128_000))
+    }
+
     async fn context_policy(
         &self,
         _requirements: crate::model_capability::ModelRequirements,
@@ -881,6 +909,15 @@ fn compression_failure_errors_are_closed_and_provider_failures_are_classified() 
         "model context compression failed: invalid_schema"
     );
     assert!(!error.message.contains("provider-secret"));
+    let truncated = context_compression_error(Kind::Truncated);
+    assert!(truncated.message.contains("original history retained"));
+    assert!(truncated.message.contains("summary maximum output tokens"));
+    assert!(truncated.message.contains("model runtime output limit"));
+    assert!(!truncated.retryable);
+    assert_eq!(
+        truncated.error_code,
+        Some(desk_utils::error::DeskErrorCode::AI_CONTEXT_SUMMARY_OUTPUT_TRUNCATED.code())
+    );
 
     let provider_error = |kind, message: &str| AgentError {
         kind,
@@ -951,6 +988,8 @@ fn tool_meta() -> ProviderResponseMeta {
     let source_context_key =
         SourceContextKey::derive(WireProtocol::OpenAiChatCompletions, "test", "test", "test");
     ProviderResponseMeta {
+        context_observation: None,
+        thinking_prefix: None,
         cache_projection: None,
         stop_reason: StopReason::ToolUse,
         replay: Some(ReplayDisposition::NotRequired { source_context_key }),
@@ -1827,7 +1866,8 @@ async fn ai_assistant_user_followup_reprojects_latest_browser_page_ref() {
         .iter()
         .find(|message| message.text.contains("CURRENT REUSABLE PROVIDER RESULTS"))
         .expect("ordinary user follow-up must receive the bounded provider result registry");
-    assert!(projection.text.contains("gmail-page-after-compression"));
+    assert!(projection.text.contains("\"page_id\":\"p1\""));
+    assert!(!projection.text.contains("gmail-page-after-compression"));
     assert!(
         projection
             .text
@@ -3181,6 +3221,15 @@ async fn a_second_compression_need_in_the_same_turn_fails_without_redial() {
 
 #[tokio::test]
 async fn rejected_compression_summary_records_usage_but_no_checkpoint_or_notice() {
+    crate::future::boxed(|| assert_rejected_compression_summary(StopReason::EndTurn)).await;
+}
+
+#[tokio::test]
+async fn truncated_compression_preserves_history_and_returns_output_limit_guidance() {
+    crate::future::boxed(|| assert_rejected_compression_summary(StopReason::MaxTokens)).await;
+}
+
+async fn assert_rejected_compression_summary(stop_reason: StopReason) {
     let sess = MemSession::default();
     let mut existing = PersistedAgentSession::new(
         "conv",
@@ -3207,13 +3256,13 @@ async fn rejected_compression_summary_records_usage_but_no_checkpoint_or_notice(
     .to_string();
     let compression_turn = ModelTurn {
         text: summary,
-        stop_reason: StopReason::EndTurn,
+        stop_reason,
         usage: crate::chat::TokenUsage {
             input_tokens: Some(10),
             output_tokens: Some(5),
             ..Default::default()
         },
-        provider_meta: ProviderResponseMeta::without_reasoning(StopReason::EndTurn),
+        provider_meta: ProviderResponseMeta::without_reasoning(stop_reason),
         ..Default::default()
     };
     let requests = Rc::new(RefCell::new(Vec::new()));
@@ -3256,10 +3305,13 @@ async fn rejected_compression_summary_records_usage_but_no_checkpoint_or_notice(
     .await
     .expect_err("a rejected candidate summary must fail the turn");
 
-    assert_eq!(
-        error.error_code,
-        Some(desk_utils::error::DeskErrorCode::AI_CONTEXT_COMPRESSION_FAILED.code())
-    );
+    let truncated = stop_reason == StopReason::MaxTokens;
+    let expected_code = if truncated {
+        desk_utils::error::DeskErrorCode::AI_CONTEXT_SUMMARY_OUTPUT_TRUNCATED
+    } else {
+        desk_utils::error::DeskErrorCode::AI_CONTEXT_COMPRESSION_FAILED
+    };
+    assert_eq!(error.error_code, Some(expected_code.code()));
     assert_eq!(requests.borrow().len(), 1, "the main model is never called");
     let stored = sess.inner.borrow();
     let stored = stored.as_ref().unwrap();
@@ -3271,6 +3323,18 @@ async fn rejected_compression_summary_records_usage_but_no_checkpoint_or_notice(
     assert_eq!(stored.current_turn_steps, 0);
     assert_eq!(stored.current_turn_tokens.input_tokens, Some(10));
     assert_eq!(stored.current_turn_tokens.output_tokens, Some(5));
+    for (id, text) in [("old-a", "a".repeat(5000)), ("old-b", "b".repeat(6000))] {
+        assert_eq!(
+            stored
+                .conversation
+                .iter()
+                .find(|message| message.message_id == id)
+                .unwrap()
+                .text,
+            text,
+            "rejected compression must retain the original history"
+        );
+    }
     assert!(
         stored
             .model_context_state
@@ -3305,12 +3369,21 @@ async fn rejected_compression_summary_records_usage_but_no_checkpoint_or_notice(
     );
     assert_eq!(
         *kind,
-        crate::seam::ContextCompressionFailureKind::UnsafeOutput
+        if truncated {
+            crate::seam::ContextCompressionFailureKind::Truncated
+        } else {
+            crate::seam::ContextCompressionFailureKind::UnsafeOutput
+        }
     );
-    assert_eq!(
-        error.message,
-        "model context compression failed: unsafe_output"
-    );
+    if truncated {
+        assert!(error.message.contains("summary maximum output tokens"));
+        assert!(error.message.contains("original history retained"));
+    } else {
+        assert_eq!(
+            error.message,
+            "model context compression failed: unsafe_output"
+        );
+    }
 }
 
 #[tokio::test]
@@ -4284,7 +4357,8 @@ async fn projection_metrics_preserve_history_and_keep_capability_catalog_bounded
             .unwrap();
         let request_budget = usage.request_budget.as_ref().unwrap();
         let requests = model.requests.borrow();
-        let request = &requests[0];
+        let projected_request = crate::ui_model_ids::project_request(&requests[0]);
+        let request = &projected_request;
         let history_ids = restored
             .conversation
             .iter()
@@ -4795,6 +4869,8 @@ async fn exact_permission_resume_retries_one_precommit_protocol_error() {
             arguments_json: "{}".into(),
         }],
         provider_meta: ProviderResponseMeta {
+            context_observation: None,
+            thinking_prefix: None,
             cache_projection: None,
             stop_reason: StopReason::EndTurn,
             ..Default::default()
@@ -6524,6 +6600,8 @@ async fn reasoning_only_max_tokens_reports_runtime_budget_configuration_error() 
     let truncated = ModelTurn {
         stop_reason: StopReason::MaxTokens,
         provider_meta: ProviderResponseMeta {
+            context_observation: None,
+            thinking_prefix: None,
             cache_projection: None,
             reasoning_observed: true,
             reasoning_tokens: Some(8192),
@@ -6564,6 +6642,8 @@ async fn reasoning_only_end_turn_retries_once_with_server_recovery_notice() {
     let reasoning_only = ModelTurn {
         stop_reason: StopReason::EndTurn,
         provider_meta: ProviderResponseMeta {
+            context_observation: None,
+            thinking_prefix: None,
             cache_projection: None,
             reasoning_observed: true,
             reasoning_tokens: Some(128),
@@ -6613,6 +6693,8 @@ async fn repeated_reasoning_only_end_turn_fails_after_one_bounded_retry() {
     let reasoning_only = || ModelTurn {
         stop_reason: StopReason::EndTurn,
         provider_meta: ProviderResponseMeta {
+            context_observation: None,
+            thinking_prefix: None,
             cache_projection: None,
             reasoning_observed: true,
             reasoning_tokens: Some(128),
@@ -6727,6 +6809,8 @@ async fn unknown_stop_is_protocol_error_without_retry_or_tool_execution() {
             arguments_json: "{}".into(),
         }],
         provider_meta: ProviderResponseMeta {
+            context_observation: None,
+            thinking_prefix: None,
             cache_projection: None,
             stop_reason: StopReason::Other,
             replay: Some(ReplayDisposition::legacy_unknown()),
@@ -6918,6 +7002,8 @@ async fn enforced_model_turn_block_reviews_once_and_persists_only_fixed_placehol
                 ],
                 stop_reason: StopReason::ToolUse,
                 provider_meta: ProviderResponseMeta {
+                    context_observation: None,
+                    thinking_prefix: None,
                     cache_projection: None,
                     display_reasoning: Some("blocked thinking".into()),
                     ..tool_meta()
@@ -8391,7 +8477,7 @@ fn permission_resume_projection_restores_only_bounded_reusable_references() {
         projected_value["result_summary"]["output_type"],
         "BrowserActionResult / ComputerActionCompleted<BrowserActionResult>"
     );
-    let projection = reusable_provider_result_projection(&conversation, "projection", 9_000)
+    let projection = reusable_provider_result_projection(&conversation, "projection", 9_000, None)
         .unwrap()
         .unwrap();
     assert!(projection.text.contains("spreadsheet-merge-preview-1"));
@@ -8528,7 +8614,7 @@ fn permission_resume_projection_restores_only_bounded_reusable_references() {
     assert_eq!(projected.retention.expires_at_unix_ms, Some(9_999));
 
     let after_expiry =
-        reusable_provider_result_projection(&conversation, "projection-after-expiry", 9_999)
+        reusable_provider_result_projection(&conversation, "projection-after-expiry", 9_999, None)
             .unwrap()
             .unwrap();
     assert!(!after_expiry.text.contains("page-slack-1"));
@@ -9341,7 +9427,7 @@ async fn unknown_outcome_allows_requesting_a_new_authorized_mutation() {
             [tool_use_args(
                 "permission-call",
                 crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME,
-                r#"{"items":[{"item_id":"command","tool_name":"execute_ui_actions","application_scope":{"application_id":"original","actions":["invoke"]},"suggested_ttl_seconds":120,"suggested_max_uses":1,"reason":"Create event"}]}"#,
+                r#"{"items":[{"item_id":"command","tool_name":"execute_ui_actions","application_scope":{"application_id":"a1","actions":["invoke"]},"suggested_ttl_seconds":120,"suggested_max_uses":1,"reason":"Create event"}]}"#,
             ), answer("Please review the unresolved action.")]
             .into(),
         ),

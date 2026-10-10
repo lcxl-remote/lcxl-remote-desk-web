@@ -14,7 +14,7 @@ import { formatLocalTime } from '@/lib/local-time';
 import { AssistantPermissionRequest } from './assistant-permission-request';
 import { AssistantDirectoryApproval } from './assistant-directory-approval';
 import { AssistantAttachments } from './assistant-attachments';
-import { AssistantPermissionRecords } from './assistant-permission-records';
+import { AssistantPermissionRecords, permissionIsAutomaticallyReviewed } from './assistant-permission-records';
 import { AssistantFileScope } from './assistant-file-scope';
 import { AssistantBackgroundTasks } from './assistant-background-tasks';
 import { AssistantDetailsSheet } from './assistant-details-sheet';
@@ -91,7 +91,9 @@ export function AssistantSubagents({ agents, connected, canDecide, interactive, 
     const { scrollRef, contentRef, onScroll, showJumpToLatest, jumpToLatest } = useFollowLatest(true, child?.sessionId ?? task?.child_session_id ?? '');
     if (!task) return null;
     const pendingDirectories = child?.fileScope?.directories.filter(directory => directory.state === 'pending') ?? [];
-    const pendingPermissions = child?.permissionRequests?.filter(request => ['pending', 'needs_revalidation'].includes(request.state)) ?? [];
+    const automaticApproval = child?.approvalDelegation?.status === 'active';
+    const pendingPermissions = child?.permissionRequests?.filter(request => ['pending', 'needs_revalidation'].includes(request.state)
+        && !permissionIsAutomaticallyReviewed(request, automaticApproval)) ?? [];
     const runningTaskCount = [...(child?.commandTasks ?? []), ...(child?.backgroundTasks ?? [])]
         .filter(work => ['running', 'cancel_requested', 'outcome_unknown'].includes(work.state)).length;
     const jumpToPending = (id?: string) => {
@@ -176,7 +178,7 @@ export function AssistantSubagents({ agents, connected, canDecide, interactive, 
                                 busy={agents.updating} onUpdate={agents.updateDirectory} />
                         </div>)}
                         <div data-assistant-pending={pendingPermissions.length > 0 ? '' : undefined} tabIndex={-1}>
-                        <AssistantPermissionRecords key={child.sessionId} requests={child.permissionRequests ?? []}
+                        <AssistantPermissionRecords key={child.sessionId} requests={child.permissionRequests ?? []} automaticApproval={automaticApproval}
                             open={panel === 'permissions'} onOpenChange={open => setPanel(open ? 'permissions' : null)}>
                             {permission => <AssistantPermissionRequest key={`${child.sessionId}:${permission.requestId}:${permission.inputRevision}`}
                                 request={permission} canDecide={canDecide && !subagentIsTerminal(task) && permission.inputRevision === child.inputRevision}

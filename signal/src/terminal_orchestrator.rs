@@ -15,6 +15,7 @@
 //! one operator and the inline context is sufficient. The model dial is `!Send`
 //! (`awc`), so callers spawn these on actix's single-threaded runtime.
 
+use crate::config::connection::DatabaseConnection;
 use actix_web::web;
 use desk_agent_protocol::provenance::AiProvenance;
 use desk_agent_protocol::terminal_ai_assistant::{
@@ -36,7 +37,6 @@ use desk_diagnose_core::terminal_complete::{
 };
 use desk_signal_facade::model::connection::{ConnectionState, SharedConnectionMap};
 use desk_signal_facade::model::signal::{SignalingModel, SignalingType};
-use sea_orm::DatabaseConnection;
 
 use crate::agent_runtime::record_metered;
 use crate::model_dial::SignalModelSeam;
@@ -122,7 +122,7 @@ async fn dial(
 
 async fn dial_request(
     db: &DatabaseConnection,
-    mut request: ModelRequest,
+    request: ModelRequest,
     sink: &mut dyn TurnSink,
 ) -> Result<
     (
@@ -135,7 +135,22 @@ async fn dial_request(
     let config = model_provider::load(db)
         .await
         .map_err(|e| transport_error(format!("failed to load model provider config: {e}")))?;
-    let seam = SignalModelSeam::from_config(&config)?;
+    dial_configured_request(&config, request, sink).await
+}
+
+async fn dial_configured_request(
+    config: &model_provider::ModelProviderConfig,
+    mut request: ModelRequest,
+    sink: &mut dyn TurnSink,
+) -> Result<
+    (
+        ModelTurn,
+        Option<String>,
+        Option<desk_diagnose_core::model_observability::ObservationContext>,
+    ),
+    AgentError,
+> {
+    let seam = SignalModelSeam::from_config(config)?;
     request.observation = seam.observation_context(
         request.use_case,
         desk_diagnose_core::model_observability::Origin::User,
@@ -147,7 +162,7 @@ async fn dial_request(
     let turn = seam.call(request, sink).await?;
     record_metered(observation.as_ref());
     // Return the model name so the caller can stamp AI provenance on the answer.
-    Ok((turn, config.model, observation))
+    Ok((turn, config.model.clone(), observation))
 }
 
 /// Redact every browser-supplied free-text field of a assistant ask fail-closed. Any
@@ -207,10 +222,13 @@ async fn run_completion_turn(
 
     let default_shell = ask.context.shell.clone();
     let prefix = ask.prefix.clone();
-    let request = build_completion_model_request(&ask);
+    use crate::config::ConfigConnection;
+    let config = db.config_read().await;
+    let request =
+        build_completion_model_request(&ask, config.terminal_completion.max_output_tokens);
     // Completion has no progressive UI: the candidates render together, so the
     // model text is not streamed.
-    match dial_request(db, request, &mut NullTurnSink).await {
+    match dial_configured_request(&config.ai_gateway, request, &mut NullTurnSink).await {
         Ok((turn, model, observation)) => {
             let completions = parse_completions_observed(
                 &turn,
@@ -364,15 +382,19 @@ mod tests {
     use std::cell::RefCell;
     use std::rc::Rc;
 
-    /// A sqlite memory DB with just the model-provider table (empty → the default
-    /// config has no api_key, so the seam build fails closed).
+    /// A runtime probe table and an unconfigured file gateway; seam creation
+    /// fails because the default configuration has no API key.
     async fn provider_db() -> DatabaseConnection {
-        use crate::entity::model_provider;
-        use sea_orm::{ConnectionTrait, Database, Schema};
-        let db = Database::connect("sqlite::memory:").await.unwrap();
+        use sea_orm::{ConnectionTrait, Schema};
+        let db = crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap();
         let schema = Schema::new(db.get_database_backend());
-        let stmt = schema.create_table_from_entity(model_provider::Entity);
-        db.execute(&stmt).await.unwrap();
+        db.execute(
+            &schema.create_table_from_entity(crate::entity::model_probe_observation::Entity),
+        )
+        .await
+        .unwrap();
         db
     }
 
@@ -399,6 +421,87 @@ mod tests {
             model_id: None,
             org_id: None,
         }
+    }
+
+    #[actix_web::test]
+    async fn completion_dials_saved_policy_capped_only_by_the_model_runtime_limit() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let db = provider_db().await;
+        model_provider::save(
+            &db,
+            model_provider::ModelProviderConfig {
+                wire_protocol: Some(
+                    desk_diagnose_core::model_profile::WireProtocol::OpenAiChatCompletions,
+                ),
+                base_url: Some(format!("http://{}", listener.local_addr().unwrap())),
+                model: Some("completion-test".into()),
+                api_key: Some("synthetic-key".into()),
+                runtime_max_output_tokens: 128000,
+                max_context_bytes: Some(131072),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let capture = actix_web::rt::spawn(async move {
+            let mut requests = Vec::<serde_json::Value>::new();
+            for _ in 0..3 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut bytes = Vec::new();
+                loop {
+                    let mut buffer = [0; 8192];
+                    let n = socket.read(&mut buffer).await.unwrap();
+                    assert!(n > 0);
+                    bytes.extend_from_slice(&buffer[..n]);
+                    if let Some(head) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
+                        let length = String::from_utf8_lossy(&bytes[..head])
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().unwrap())
+                            })
+                            .unwrap();
+                        if bytes.len() >= head + 4 + length {
+                            requests.push(
+                                serde_json::from_slice(&bytes[head + 4..head + 4 + length])
+                                    .unwrap(),
+                            );
+                            break;
+                        }
+                    }
+                }
+                let answer = serde_json::json!({"choices":[{"delta":{"content":"{\"completions\":[{\"command\":\"echo hi\",\"note\":\"print\"}]}"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5}});
+                let body = format!("data: {answer}\n\ndata: [DONE]\n\n");
+                socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+            }
+            requests
+        });
+        for (revision, cap) in [32768, 256, 200000].into_iter().enumerate() {
+            crate::terminal_completion_config::update(
+                &db,
+                &desk_signal_facade::terminal_completion::UpdateTerminalCompletionRequest {
+                    expected_revision: revision as u64,
+                    max_output_tokens: cap,
+                },
+            )
+            .await
+            .unwrap();
+            let result = run_completion_turn(&db, "completion", complete_ask("echo ", "")).await;
+            assert_eq!(result.completions.len(), 1, "{result:?}");
+        }
+        let requests = tokio::time::timeout(std::time::Duration::from_secs(5), capture)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            requests
+                .iter()
+                .map(|request| request["max_tokens"].as_u64().unwrap())
+                .collect::<Vec<_>>(),
+            [32768, 256, 128000]
+        );
     }
 
     fn assistant_ask(recent: &str, err: Option<&str>) -> TerminalAiAssistantAsk {

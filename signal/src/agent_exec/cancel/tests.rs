@@ -9,11 +9,13 @@ use desk_agent_protocol::{
     capability_provider::CapabilityEffect,
     data_lineage::{RetentionBoundary, Sensitivity},
 };
-use sea_orm::{ActiveModelTrait, Database, Set};
+use sea_orm::{ActiveModelTrait, Set};
 use sha2::{Digest, Sha256};
 
 async fn fixture() -> (DatabaseConnection, i64) {
-    let db = Database::connect("sqlite::memory:").await.unwrap();
+    let db = crate::config::test_support::Database::connect("sqlite::memory:")
+        .await
+        .unwrap();
     crate::db::initialize_schema(&db).await.unwrap();
     let now = chrono::Utc::now();
     let tool = desk_diagnose_core::command_confirmation::COMMAND_TOOL;

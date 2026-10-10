@@ -143,7 +143,7 @@ mod tests {
         connection::{ConnectionModel, ConnectionState},
         version::VersionInfo,
     };
-    use sea_orm::{ConnectionTrait, Database, Schema};
+    use sea_orm::{ConnectionTrait, Schema};
 
     mod executor;
     mod model_gateway;
@@ -187,7 +187,9 @@ mod tests {
 
     #[actix_web::test]
     async fn fresh_admission_requires_one_live_token_device_and_rolls_back_denials() {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
+        let db = crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap();
         let (store, task, _, publication) = fixture_on(db).await;
         store
             .db

@@ -1,12 +1,13 @@
 //! Persist a fresh context under the same transaction as the occurrence claim.
 use super::{CurrentTaskAuthority, ScheduleStore, ScheduleStoreError, entity};
+use crate::config::connection::DatabaseTransaction;
 use crate::entity::{agent_schedule_run, agent_session};
 use desk_agent_protocol::AgentScope;
 use desk_diagnose_core::{
     schedule::fresh_session::{FreshSessionInput, initial_session},
     session::PersistedAgentSession,
 };
-use sea_orm::{ColumnTrait, DatabaseTransaction, EntityTrait, QueryFilter, Set};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
 
 impl ScheduleStore {
     /// The caller resolves current subject/device policy and commits only after
@@ -117,11 +118,13 @@ mod tests {
     use super::*;
     use crate::entity::{agent_task_authorization, agent_task_budget_reservation as budget_row};
     use desk_agent_protocol::ExecutionMode;
-    use sea_orm::{ConnectionTrait, Database, Schema, TransactionTrait};
+    use sea_orm::{ConnectionTrait, Schema, TransactionTrait};
 
     #[tokio::test]
     async fn fresh_session_and_claim_commit_or_rollback_as_one_unit() {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
+        let db = crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap();
         let (store, task, _, publication) = fixture_on(db).await;
         store
             .db
@@ -687,6 +690,7 @@ mod tests {
                     cache_read_tokens: Some(4),
                     cache_write_tokens: Some(5),
                 },
+                None,
             )
             .await
             .unwrap();

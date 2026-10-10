@@ -1,5 +1,6 @@
 //! Automatic completion delivery uses genuine server events, never invented tool calls.
 use super::*;
+use crate::config::connection::DatabaseTransaction;
 use crate::entity::agent_subagent_inbox as inbox;
 use desk_diagnose_core::{
     chat::{ChatMessage, ChatRole},
@@ -9,7 +10,7 @@ use desk_diagnose_core::{
         notification::{NotificationEvent, ParentNotification},
     },
 };
-use sea_orm::DatabaseTransaction;
+
 use sha2::{Digest, Sha256};
 
 fn scoped_events(parent: &PersistedAgentSession, group: &str) -> sea_orm::Select<inbox::Entity> {

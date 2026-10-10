@@ -1,6 +1,7 @@
 //! Read all child history in bounded pages without a cumulative task limit.
 use super::*;
-use sea_orm::{DatabaseTransaction, PaginatorTrait};
+use crate::config::connection::DatabaseTransaction;
+use sea_orm::PaginatorTrait;
 
 pub(crate) async fn group_children_on(
     txn: &DatabaseTransaction,

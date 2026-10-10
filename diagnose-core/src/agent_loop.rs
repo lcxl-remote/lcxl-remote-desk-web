@@ -130,10 +130,20 @@ fn model_context_error(error: crate::model_context::ModelContextError) -> AgentE
 fn context_compression_error(kind: crate::seam::ContextCompressionFailureKind) -> AgentError {
     AgentError {
         kind: AgentErrorKind::Internal,
-        message: format!("model context compression failed: {}", kind.as_str()),
+        message: if kind == crate::seam::ContextCompressionFailureKind::Truncated {
+            "model context compression failed: truncated; original history retained. Increase summary maximum output tokens in Context management and check the model runtime output limit before continuing.".into()
+        } else {
+            format!("model context compression failed: {}", kind.as_str())
+        },
         retryable: false,
         safe_for_model: true,
-        error_code: Some(desk_utils::error::DeskErrorCode::AI_CONTEXT_COMPRESSION_FAILED.code()),
+        error_code: Some(
+            if kind == crate::seam::ContextCompressionFailureKind::Truncated {
+                desk_utils::error::DeskErrorCode::AI_CONTEXT_SUMMARY_OUTPUT_TRUNCATED.code()
+            } else {
+                desk_utils::error::DeskErrorCode::AI_CONTEXT_COMPRESSION_FAILED.code()
+            },
+        ),
     }
 }
 
@@ -1841,6 +1851,16 @@ async fn prepare_model_context(
                 // Rebuild protection and re-plan against the new version/floor.
             }
             crate::model_context::ContextBuildPlan::NeedsCompression(plan) => {
+                if pinned_context.anthropic_prefix_binding {
+                    let protected = crate::thinking_context::protected_replay_ids(session);
+                    if session.conversation.iter().any(|message| protected.contains(&message.message_id)
+                        && matches!(&message.replay_disposition, Some(crate::replay::ReplayDisposition::Present { envelope })
+                            if envelope.codec == crate::replay::ReplayCodec::AnthropicContentBlocks)) {
+                        return Err(AgentError { kind: AgentErrorKind::InvalidInput,
+                            message: "Anthropic thinking is bound to an active tool-chain prefix. Compression must wait until this chain finishes; no summary request was sent.".into(),
+                            retryable: false, safe_for_model: true, error_code: None });
+                    }
+                }
                 if configuration_changed {
                     return Err(AgentError { kind: AgentErrorKind::InvalidInput,
                         message: "The current model cannot fit this conversation, including its existing summary, tools and output reserve. Select a model with a larger context or explicitly compress using the previous compatible configuration. No history was removed.".into(),
@@ -1900,11 +1920,14 @@ async fn prepare_model_context(
                     tool_choice: crate::chat::ToolChoice::None,
                     response_format: crate::prompt::ResponseFormatSpec::None,
                     use_case: crate::model_profile::ModelUseCase::ContextCompression,
+                    thinking_prefix: None,
+                    protected_replay_message_ids: Default::default(),
+                    context_conversation_id: None,
+                    pinned_source_context_key: None,
+                    ui_references: None,
                     previous_cache_projection: None,
                     delegation_call: None,
-                    caller_output_hard_cap: Some(
-                        crate::model_context::CONTEXT_SUMMARY_OUTPUT_HARD_CAP_TOKENS,
-                    ),
+                    caller_output_hard_cap: Some(i64::from(plan.policy.summary_max_output_tokens)),
                 };
                 let _observation_preflight = crate::model_observability::PreflightObservation::new(
                     request.observation.clone(),
@@ -2149,7 +2172,11 @@ async fn prepare_model_context(
                 };
                 let previous_state = session.model_context_state.clone();
                 let previous_notices = session.context_notices.clone();
+                let previous_observation = session.latest_model_context.clone();
                 session.model_context_state = next_state;
+                if let Some(observation) = &mut session.latest_model_context {
+                    observation.stale = true;
+                }
                 session.record_context_notice(
                     crate::model_context::ContextNotice::compacted(
                         turn_id,
@@ -2161,6 +2188,7 @@ async fn prepare_model_context(
                 if !lease_is_current(deps).await {
                     session.model_context_state = previous_state;
                     session.context_notices = previous_notices;
+                    session.latest_model_context = previous_observation;
                     return Err(report_context_compression_failure(
                         deps.model,
                         FailureKind::StaleContext,
@@ -2172,6 +2200,7 @@ async fn prepare_model_context(
                 if let Err(error) = deps.session_seam.save(session).await {
                     session.model_context_state = previous_state;
                     session.context_notices = previous_notices;
+                    session.latest_model_context = previous_observation;
                     let _ = error;
                     return Err(report_context_compression_failure(
                         deps.model,
@@ -2936,6 +2965,9 @@ async fn run_inner_impl(
             )? {
                 messages.push(artifact_projection);
             }
+            if session.ui_references.observe(&session.conversation)? {
+                deps.session_seam.save(session).await?;
+            }
             if let Some(result_projection) = reusable_provider_result_projection(
                 &session.conversation,
                 &format!(
@@ -2943,6 +2975,7 @@ async fn run_inner_impl(
                     session.input_revision
                 ),
                 current_unix_ms(deps.clock)?,
+                Some(&session.ui_references),
             )? {
                 messages.push(result_projection);
             }
@@ -3122,7 +3155,7 @@ async fn run_inner_impl(
             let marker_id = format!(
                 "runtime-post-tool-permission-protocol-retry-{turn_id}-{post_tool_permission_protocol_retries}"
             );
-            let marker_text = "RUNTIME RECOVERY NOTICE (server authoritative): the previous request_permissions call had invalid JSON arguments and was discarded before it was recorded or executed. Rebuild exactly one valid request_permissions call from the current capability catalog and CURRENT REUSABLE PROVIDER RESULTS. Copy complete opaque page and element references verbatim, keep the exact downstream tool input bounded, and do not repeat the preceding Provider action. This notice grants no authority; normal permission planning and final server validation remain authoritative.";
+            let marker_text = "RUNTIME RECOVERY NOTICE (server authoritative): the previous request_permissions call had invalid JSON arguments and was discarded before it was recorded or executed. Rebuild exactly one valid request_permissions call from the current capability catalog and CURRENT REUSABLE PROVIDER RESULTS. Copy observed short page and element IDs verbatim, keep the exact downstream tool input bounded, and do not repeat the preceding Provider action. This notice grants no authority; normal permission planning and final server validation remain authoritative.";
             // This server-authored notice contains no Provider output bytes.
             // Inherit the delegated projection or owner requirement, keeping
             // the same model destination and retention without fabricating a
@@ -3144,15 +3177,29 @@ async fn run_inner_impl(
         // history window is selected. All transient blocks are included; only
         // protocol framing uses the reserve. Final wire encoding is rechecked.
         const REQUEST_FRAMING_RESERVE_BYTES: usize = 1024;
-        let tool_spec_bytes = serde_json::to_vec(&specs)
+        if session.ui_references.observe(&session.conversation)? {
+            deps.session_seam.save(session).await?;
+        }
+        let mut overhead_request = ModelRequest::text_only(
+            messages
+                .iter()
+                .cloned()
+                .chain(split_runtime.then_some(stable_system.clone()))
+                .collect(),
+            deps.response_format.clone(),
+        );
+        overhead_request.tools = specs.clone();
+        overhead_request.ui_references = Some(session.ui_references.clone());
+        let overhead_request = crate::ui_model_ids::project_request(&overhead_request);
+        let tool_spec_bytes = serde_json::to_vec(&overhead_request.tools)
             .map_err(|_| {
                 model_context_error(crate::model_context::ModelContextError::ContextCostOverflow)
             })?
             .len();
         let mut system_prompt_bytes = Some(0usize);
-        let message_overhead_bytes = messages
+        let message_overhead_bytes = overhead_request
+            .messages
             .iter()
-            .chain(split_runtime.then_some(&stable_system))
             .try_fold(0usize, |total, message| {
                 let cost = crate::trim::model_context_cost(message);
                 if message.role == ChatRole::System {
@@ -3184,19 +3231,49 @@ async fn run_inner_impl(
                     .checked_add(REQUEST_FRAMING_RESERVE_BYTES)?,
             })
         });
+        if let Some(observation) = &mut session.latest_model_context {
+            observation.stale |= observation.source_context_key.as_ref()
+                != Some(&pinned_context.source_context_key)
+                || observation.profile_revision != pinned_context.profile_revision;
+        }
+        if session.ui_references.observe(&session.conversation)? {
+            deps.session_seam.save(session).await?;
+        }
+        for source in &mut session.conversation {
+            let mut projected = source.clone();
+            projected.prepared_context_cost.0 = None;
+            crate::ui_model_ids::project_tool_message(&mut projected);
+            session.ui_references.project_message(&mut projected);
+            crate::thinking_context::project_replay(
+                &mut projected,
+                pinned_context.reasoning_contract,
+            );
+            if pinned_context.anthropic_prefix_binding {
+                crate::thinking_context::project_known_invalid(
+                    &mut projected,
+                    &session.thinking_prefix,
+                );
+            }
+            source.prepared_context_cost.0 = Some(crate::trim::PreparedMessageCost {
+                bytes: crate::trim::model_context_cost(&projected),
+                replay_bytes: crate::trim::model_replay_cost(&projected),
+            });
+        }
         crate::conversation_attachment::model_read::validate_pending_reads(
             deps.session_seam,
             session,
         )
         .await?;
-        let mut context_view = match prepare_model_context(
-            deps,
-            session,
-            turn_id,
-            &history_policy,
-            &mut compression_attempted,
-            sink,
-        )
+        let mut context_view = match crate::future::boxed(|| {
+            prepare_model_context(
+                deps,
+                session,
+                turn_id,
+                &history_policy,
+                &mut compression_attempted,
+                sink,
+            )
+        })
         .await
         {
             Ok(view) => view,
@@ -3389,12 +3466,14 @@ async fn run_inner_impl(
                 deps.response_format.clone()
             },
             use_case: crate::model_profile::ModelUseCase::Agent,
+            thinking_prefix: Some(session.thinking_prefix.clone()),
+            protected_replay_message_ids: crate::thinking_context::protected_replay_ids(session),
+            context_conversation_id: Some(session.conversation_id.clone()),
+            pinned_source_context_key: Some(pinned_context.source_context_key.clone()),
+            ui_references: Some(session.ui_references.clone()),
             previous_cache_projection: session.cache_projection.clone(),
             delegation_call: None,
-            caller_output_hard_cap: (session.trigger_origin == TriggerOrigin::GoalContinuation
-                || session.delegation_group_id.is_some()
-                || session.agent_role.binding().is_some())
-            .then_some(call_budget::OUTPUT_HARD_CAP),
+            caller_output_hard_cap: None,
         };
         if session.surface == crate::session::AgentSessionSurface::TerminalAiAssistant
             && let Some(context) = &mut request.observation
@@ -3660,6 +3739,15 @@ async fn run_inner_impl(
         ensure_lease_healthy(deps).await?;
         session.cache_projection = turn.provider_meta.cache_projection.clone();
         session.record_step(turn.usage);
+        if !completion_only {
+            session.latest_model_context = turn.provider_meta.context_observation.clone();
+        }
+        if let Some(prefix) = &turn.provider_meta.thinking_prefix {
+            session
+                .thinking_prefix
+                .invalidated
+                .extend(prefix.invalidated.iter().cloned());
+        }
         if completion_only
             && (!turn.tool_calls.is_empty()
                 || crate::command_completion::contains_tool_invocation(&turn.text))
@@ -4005,6 +4093,12 @@ async fn run_inner_impl(
                 let mut message =
                     ChatMessage::text(mint(), crate::chat::ChatRole::Assistant, turn.text.clone())
                         .with_turn_id(session.current_turn_id.clone().unwrap_or_default());
+                if let Some(prefix) = &turn.provider_meta.thinking_prefix {
+                    session
+                        .thinking_prefix
+                        .bindings
+                        .insert(message.message_id.clone(), prefix.request_prefix.clone());
+                }
                 message.data_envelope = turn.provider_meta.data_envelope.clone();
                 message.replay_disposition = turn.provider_meta.replay.clone();
                 message.reasoning = turn
@@ -4066,6 +4160,12 @@ async fn run_inner_impl(
                     replay,
                 )
                 .with_turn_id(session.current_turn_id.clone().unwrap_or_default());
+                if let Some(prefix) = &turn.provider_meta.thinking_prefix {
+                    session
+                        .thinking_prefix
+                        .bindings
+                        .insert(message.message_id.clone(), prefix.request_prefix.clone());
+                }
                 message.data_envelope = turn.provider_meta.data_envelope.clone();
                 message.reasoning = turn
                     .provider_meta
@@ -4847,33 +4947,37 @@ async fn run_inner_impl(
                             }
                         }
                         ToolEffect::Mutating => {
-                            if let Some(outcome) = run_mutating(
-                                deps,
-                                session,
-                                turn_id,
-                                call,
-                                &turn.tool_calls[call_index + 1..],
-                                &mut mint,
-                                &mut halted,
-                                sink,
-                                &tool_observation,
-                            )
+                            if let Some(outcome) = crate::future::boxed(|| {
+                                run_mutating(
+                                    deps,
+                                    session,
+                                    turn_id,
+                                    call,
+                                    &turn.tool_calls[call_index + 1..],
+                                    &mut mint,
+                                    &mut halted,
+                                    sink,
+                                    &tool_observation,
+                                )
+                            })
                             .await?
                             {
                                 return Ok(outcome);
                             }
                         }
                         ToolEffect::WaitTask => {
-                            if let Some(outcome) = run_wait(
-                                deps,
-                                session,
-                                call,
-                                &turn.tool_calls[call_index + 1..],
-                                &mut mint,
-                                &mut halted,
-                                sink,
-                                &tool_observation,
-                            )
+                            if let Some(outcome) = crate::future::boxed(|| {
+                                run_wait(
+                                    deps,
+                                    session,
+                                    call,
+                                    &turn.tool_calls[call_index + 1..],
+                                    &mut mint,
+                                    &mut halted,
+                                    sink,
+                                    &tool_observation,
+                                )
+                            })
                             .await?
                             {
                                 return Ok(outcome);
@@ -6351,6 +6455,7 @@ fn reusable_provider_result_projection(
     conversation: &[ChatMessage],
     message_id: &str,
     now_unix_ms: u64,
+    ui_references: Option<&crate::ui_references::UiReferenceState>,
 ) -> Result<Option<ChatMessage>, AgentError> {
     const MAX_WEB_SOURCES: usize = 8;
     const MAX_BROWSER_RESULTS: usize = 2;
@@ -6495,10 +6600,14 @@ fn reusable_provider_result_projection(
                     (semantic_priority, role_priority)
                 });
                 elements.truncate(MAX_BROWSER_ELEMENTS_PER_RESULT);
-                browser_results.push(serde_json::json!({
+                let mut references = serde_json::json!({
                     "page": crate::browser_model_ids::page_projection(&result.page),
                     "elements": elements.iter().map(crate::browser_model_ids::element_projection).collect::<Vec<_>>(),
-                }));
+                });
+                if let Some(aliases) = ui_references {
+                    aliases.shorten_value(&mut references, Some(&message.message_id));
+                }
+                browser_results.push(references);
                 browser_envelopes.push(envelope.clone());
             }
         }
@@ -7002,10 +7111,11 @@ fn append_mutating_result(
                 && message.tool_calls.iter().any(|candidate| {
                     candidate.id == call.id
                         && candidate.name == call.name
-                        && crate::ui_model_ids::same_call_input(
+                        && crate::ui_model_ids::same_call_input_with_references(
                             &call.name,
                             &candidate.arguments_json,
                             &call.arguments_json,
+                            Some(&session.ui_references),
                         )
                 })
         })
@@ -8024,12 +8134,19 @@ async fn read_conversation_attachment(
         // Keep original authorization/hash separate from the stable model representation.
         if part.metadata.kind == ContentKind::Json {
             let mut projected = ChatMessage::tool_result(
-                "attachment-source",
-                &call.id,
+                &part.metadata.message_id,
+                &part.metadata.tool_call_id,
                 String::from_utf8(part.content.clone())
                     .map_err(|_| invalid("Invalid attachment encoding"))?,
             );
+            projected.data_envelope = Some(source_envelope.clone());
+            let mut history = session.conversation.clone();
+            history.push(projected.clone());
+            if session.ui_references.observe(&history)? {
+                deps.session_seam.save(session).await?;
+            }
             crate::ui_model_ids::project_tool_message(&mut projected);
+            session.ui_references.project_message(&mut projected);
             part.content = projected.text.into_bytes();
             part.metadata.size_bytes = part.content.len() as u64;
             part.metadata.original_bytes = part.metadata.size_bytes;

@@ -5,7 +5,7 @@ struct Allow;
 impl super::super::ScheduleAuthorizer for Allow {
     async fn authorize(
         &self,
-        _: &sea_orm::DatabaseTransaction,
+        _: &crate::config::connection::DatabaseTransaction,
         _: &entity::Model,
     ) -> Result<(), ScheduleStoreError> {
         Ok(())
@@ -16,7 +16,7 @@ struct Deny;
 impl super::super::ScheduleAuthorizer for Deny {
     async fn authorize(
         &self,
-        _: &sea_orm::DatabaseTransaction,
+        _: &crate::config::connection::DatabaseTransaction,
         _: &entity::Model,
     ) -> Result<(), ScheduleStoreError> {
         Err(ScheduleStoreError::Invalid)
@@ -26,7 +26,9 @@ impl super::super::ScheduleAuthorizer for Deny {
 #[tokio::test]
 async fn resume_requires_current_authority_and_starts_a_fresh_future_epoch() {
     use desk_agent_protocol::schedule::SchedulePauseReason;
-    let clock_db = Database::connect("sqlite::memory:").await.unwrap();
+    let clock_db = crate::config::test_support::Database::connect("sqlite::memory:")
+        .await
+        .unwrap();
     let now = database_now(&clock_db).await.unwrap();
     let (store, task) = fixture(
         ScheduleRule::Daily {
@@ -78,7 +80,9 @@ async fn resume_requires_current_authority_and_starts_a_fresh_future_epoch() {
 #[tokio::test]
 async fn past_once_cannot_resume_until_explicitly_rescheduled() {
     use desk_agent_protocol::schedule::ScheduleSpec;
-    let clock_db = Database::connect("sqlite::memory:").await.unwrap();
+    let clock_db = crate::config::test_support::Database::connect("sqlite::memory:")
+        .await
+        .unwrap();
     let now = database_now(&clock_db).await.unwrap();
     let at = now - 60_000;
     let (store, task) = fixture(
@@ -119,7 +123,9 @@ async fn past_once_cannot_resume_until_explicitly_rescheduled() {
 #[tokio::test]
 async fn edits_preserve_running_snapshot_and_do_not_reactivate_a_changed_requirement() {
     use desk_agent_protocol::schedule::ScheduledRunStatus;
-    let clock_db = Database::connect("sqlite::memory:").await.unwrap();
+    let clock_db = crate::config::test_support::Database::connect("sqlite::memory:")
+        .await
+        .unwrap();
     let now = database_now(&clock_db).await.unwrap();
     let at = now - 30_000;
     let (store, task) = fixture(
@@ -189,7 +195,9 @@ async fn edits_preserve_running_snapshot_and_do_not_reactivate_a_changed_require
 
 #[tokio::test]
 async fn no_op_time_save_and_rename_keep_utc_and_authorization_unchanged() {
-    let clock_db = Database::connect("sqlite::memory:").await.unwrap();
+    let clock_db = crate::config::test_support::Database::connect("sqlite::memory:")
+        .await
+        .unwrap();
     let now = database_now(&clock_db).await.unwrap();
     let (store, task) = fixture(
         ScheduleRule::Daily {
@@ -226,7 +234,9 @@ async fn no_op_time_save_and_rename_keep_utc_and_authorization_unchanged() {
 
 #[tokio::test]
 async fn deleting_pending_task_keeps_history_and_prevents_recreation_by_retry() {
-    let clock_db = Database::connect("sqlite::memory:").await.unwrap();
+    let clock_db = crate::config::test_support::Database::connect("sqlite::memory:")
+        .await
+        .unwrap();
     let now = database_now(&clock_db).await.unwrap();
     let at = now - 30_000;
     let (store, task) = fixture(
@@ -271,7 +281,9 @@ async fn deleting_pending_task_keeps_history_and_prevents_recreation_by_retry() 
 
 #[tokio::test]
 async fn cancel_unstarted_is_terminal_but_running_only_records_intent() {
-    let clock_db = Database::connect("sqlite::memory:").await.unwrap();
+    let clock_db = crate::config::test_support::Database::connect("sqlite::memory:")
+        .await
+        .unwrap();
     let now = database_now(&clock_db).await.unwrap();
     let at = now - 30_000;
     let rule = ScheduleRule::Once {
@@ -329,7 +341,9 @@ async fn cancel_unstarted_is_terminal_but_running_only_records_intent() {
 
 #[tokio::test]
 async fn manual_run_has_separate_identity_and_leaves_calendar_unchanged() {
-    let clock_db = Database::connect("sqlite::memory:").await.unwrap();
+    let clock_db = crate::config::test_support::Database::connect("sqlite::memory:")
+        .await
+        .unwrap();
     let now = database_now(&clock_db).await.unwrap();
     let future = now + 600_000;
     let (store, task) = fixture(
@@ -378,7 +392,9 @@ async fn manual_run_has_separate_identity_and_leaves_calendar_unchanged() {
 #[tokio::test]
 async fn finalization_counts_once_and_threshold_prevents_the_next_claim() {
     use desk_agent_protocol::schedule::{SchedulePauseReason, ScheduledRunStatus};
-    let clock_db = Database::connect("sqlite::memory:").await.unwrap();
+    let clock_db = crate::config::test_support::Database::connect("sqlite::memory:")
+        .await
+        .unwrap();
     let now = database_now(&clock_db).await.unwrap();
     let at = now - 30_000;
     let (store, task) = fixture(
@@ -465,7 +481,9 @@ async fn finalization_counts_once_and_threshold_prevents_the_next_claim() {
 #[tokio::test]
 async fn unknown_effect_pauses_without_waiting_for_failure_threshold() {
     use desk_agent_protocol::schedule::{SchedulePauseReason, ScheduledRunStatus};
-    let clock_db = Database::connect("sqlite::memory:").await.unwrap();
+    let clock_db = crate::config::test_support::Database::connect("sqlite::memory:")
+        .await
+        .unwrap();
     let now = database_now(&clock_db).await.unwrap();
     let at = now - 30_000;
     let (store, task) = fixture(
@@ -508,10 +526,12 @@ async fn unknown_effect_pauses_without_waiting_for_failure_threshold() {
     );
 }
 use desk_agent_protocol::schedule::ScheduleRule;
-use sea_orm::{Database, Schema};
+use sea_orm::Schema;
 
 async fn fixture(rule: ScheduleRule, next: i64) -> (ScheduleStore, entity::Model) {
-    let db = Database::connect("sqlite::memory:").await.unwrap();
+    let db = crate::config::test_support::Database::connect("sqlite::memory:")
+        .await
+        .unwrap();
     let schema = Schema::new(db.get_database_backend());
     db.execute(&schema.create_table_from_entity(entity::Entity))
         .await
@@ -548,7 +568,9 @@ async fn fixture(rule: ScheduleRule, next: i64) -> (ScheduleStore, entity::Model
 
 #[tokio::test]
 async fn due_materialization_claim_and_renew_are_fenced() {
-    let time_db = Database::connect("sqlite::memory:").await.unwrap();
+    let time_db = crate::config::test_support::Database::connect("sqlite::memory:")
+        .await
+        .unwrap();
     let now = database_now(&time_db).await.unwrap();
     let at = now - 120_000;
     let rule = ScheduleRule::Interval {
@@ -603,7 +625,9 @@ async fn due_materialization_claim_and_renew_are_fenced() {
 
 #[tokio::test]
 async fn once_expiry_completes_without_claim_or_failure_charge() {
-    let time_db = Database::connect("sqlite::memory:").await.unwrap();
+    let time_db = crate::config::test_support::Database::connect("sqlite::memory:")
+        .await
+        .unwrap();
     let now = database_now(&time_db).await.unwrap();
     let at = now - 7_200_000;
     let (store, task) = fixture(
@@ -634,7 +658,9 @@ async fn once_expiry_completes_without_claim_or_failure_charge() {
 
 #[tokio::test]
 async fn pause_between_materialization_and_claim_blocks_dispatch() {
-    let time_db = Database::connect("sqlite::memory:").await.unwrap();
+    let time_db = crate::config::test_support::Database::connect("sqlite::memory:")
+        .await
+        .unwrap();
     let now = database_now(&time_db).await.unwrap();
     let at = now - 30_000;
     let (store, task) = fixture(
@@ -666,7 +692,9 @@ async fn pause_between_materialization_and_claim_blocks_dispatch() {
 #[tokio::test]
 async fn pending_expiry_releases_slot_and_charges_only_device_timeout_once() {
     for offline in [false, true] {
-        let clock_db = Database::connect("sqlite::memory:").await.unwrap();
+        let clock_db = crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap();
         let now = database_now(&clock_db).await.unwrap();
         let (store, task) = fixture(
             ScheduleRule::Daily {
@@ -748,7 +776,9 @@ async fn pending_expiry_releases_slot_and_charges_only_device_timeout_once() {
 
 #[tokio::test]
 async fn expired_execution_lease_is_never_treated_as_unstarted_work() {
-    let clock_db = Database::connect("sqlite::memory:").await.unwrap();
+    let clock_db = crate::config::test_support::Database::connect("sqlite::memory:")
+        .await
+        .unwrap();
     let now = database_now(&clock_db).await.unwrap();
     let (store, task) = fixture(
         ScheduleRule::Once {
@@ -814,7 +844,9 @@ async fn expired_execution_lease_is_never_treated_as_unstarted_work() {
 #[tokio::test]
 async fn offline_wait_holds_only_the_slot_and_can_be_claimed_or_paused() {
     for pause in [false, true] {
-        let clock_db = Database::connect("sqlite::memory:").await.unwrap();
+        let clock_db = crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap();
         let now = database_now(&clock_db).await.unwrap();
         let (store, task) = fixture(
             ScheduleRule::Once {
@@ -874,7 +906,9 @@ async fn offline_wait_holds_only_the_slot_and_can_be_claimed_or_paused() {
 
 #[tokio::test]
 async fn fresh_claim_rejects_reused_context_terminal_markers_and_changed_snapshot() {
-    let clock_db = Database::connect("sqlite::memory:").await.unwrap();
+    let clock_db = crate::config::test_support::Database::connect("sqlite::memory:")
+        .await
+        .unwrap();
     let now = database_now(&clock_db).await.unwrap();
     for mismatch in [
         "started",
@@ -962,7 +996,9 @@ async fn fresh_claim_rejects_reused_context_terminal_markers_and_changed_snapsho
 
 #[tokio::test]
 async fn caller_owned_claim_rolls_back_occurrence_and_task_together() {
-    let clock_db = Database::connect("sqlite::memory:").await.unwrap();
+    let clock_db = crate::config::test_support::Database::connect("sqlite::memory:")
+        .await
+        .unwrap();
     let now = database_now(&clock_db).await.unwrap();
     let (store, task) = fixture(
         ScheduleRule::Once {

@@ -128,7 +128,7 @@ async fn subagent_capacity_and_unavailable_database_leave_parameter_conclusion_u
     }
 }
 
-async fn seed_permission_wait(db: &sea_orm::DatabaseConnection,conversation_id: &str) -> PersistedAgentSession {
+async fn seed_permission_wait(db: &DatabaseConnection,conversation_id: &str) -> PersistedAgentSession {
     let row=session_row::Entity::find()
         .filter(session_row::Column::ConversationId.eq(conversation_id))
         .one(db).await.unwrap().unwrap();

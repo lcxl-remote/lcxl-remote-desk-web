@@ -1,8 +1,9 @@
 //! Fence owner decisions and cancellation of the original conversation pause.
 use super::{ScheduleStore, ScheduleStoreError, entity};
+use crate::config::connection::DatabaseTransaction;
 use crate::entity::{agent_action_item, agent_exec_task, agent_schedule_run as run, agent_session};
 use desk_diagnose_core::session::{AgentSessionSurface, PersistedAgentSession, TriggerOrigin};
-use sea_orm::{ColumnTrait, DatabaseTransaction, EntityTrait, QueryFilter, QuerySelect, Set};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect, Set};
 
 #[cfg(test)]
 mod tests;

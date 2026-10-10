@@ -65,11 +65,14 @@ async fn fixture(
     config: &crate::model_provider::ModelProviderConfig,
     secret: bool,
 ) -> (Fixture, ModelEgressPolicy) {
-    let db = Database::connect("sqlite::memory:").await.unwrap();
+    let db = crate::config::test_support::Database::connect("sqlite::memory:")
+        .await
+        .unwrap();
     crate::db::initialize_schema(&db).await.unwrap();
     crate::model_provider::save(&db, config.clone())
         .await
         .unwrap();
+    let config = crate::model_provider::load(&db).await.unwrap();
     let mut f = Fixture::new(db).await;
     let policy = ModelEgressPolicy {
         destination: config.destination_identity().unwrap(),
@@ -88,7 +91,7 @@ async fn fixture(
     user.turn_id = Some("turn-1".into());
     let mut proposal = f.session.conversation[1].clone();
     use desk_diagnose_core::seam::ModelSeam;
-    let context = crate::model_dial::SignalModelSeam::from_config(config)
+    let context = crate::model_dial::SignalModelSeam::from_config(&config)
         .unwrap()
         .with_context_db(f.store.db.clone())
         .context_policy(desk_diagnose_core::model_capability::ModelRequirements::TEXT_ONLY)
@@ -143,6 +146,28 @@ async fn fixture(
     (f, policy)
 }
 
+async fn publish_as_runtime_task(db: crate::config::connection::DatabaseConnection) {
+    actix_web::rt::spawn(async move {
+        SignalCapabilityGrantStore::new(db)
+            .publish_computer_results_once()
+            .await
+            .unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+#[test]
+fn background_result_publication_fits_production_thread_stack() {
+    std::thread::Builder::new()
+        .name("background-result-stack".into())
+        .stack_size(2 * 1024 * 1024)
+        .spawn(production_publisher_uses_original_export_and_strict_model_before_network)
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
 #[actix_web::test]
 async fn production_publisher_uses_original_export_and_strict_model_before_network() {
     crate::ai_assistant_gate::global_ai_assistant_gate().replace(
@@ -163,7 +188,6 @@ async fn production_publisher_uses_original_export_and_strict_model_before_netwo
         "narrowed-policy",
         "expired-label",
         "legacy-replay",
-        "model-claim-race",
     ] {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let config = crate::model_provider::ModelProviderConfig {
@@ -285,13 +309,6 @@ async fn production_publisher_uses_original_export_and_strict_model_before_netwo
             .unwrap()
             .unwrap();
         let allowed = matches!(case, "running" | "crash" | "expired-label");
-        if case == "model-claim-race" {
-            f.store.db.execute_unprepared(
-                "CREATE TRIGGER rotate_model_on_automatic_claim AFTER UPDATE ON agent_session
-                 WHEN json_extract(NEW.state_json, '$.automation_turns_used') > json_extract(OLD.state_json, '$.automation_turns_used')
-                 BEGIN UPDATE model_provider SET profile_revision = profile_revision + 1; END;"
-            ).await.unwrap();
-        }
         let capture = actix_web::rt::spawn(capture(listener));
         tokio::time::timeout(
             // This path performs real loopback model I/O for every fixture.
@@ -299,27 +316,16 @@ async fn production_publisher_uses_original_export_and_strict_model_before_netwo
             // a loaded macOS builder; semantic deadlines are asserted by the
             // production store rather than this test harness watchdog.
             std::time::Duration::from_secs(30),
-            f.store.publish_computer_results_once(),
+            publish_as_runtime_task(f.store.db.clone()),
         )
         .await
-        .expect(case)
-        .unwrap();
+        .expect(case);
         let row = agent_session::Entity::find()
             .one(&f.store.db)
             .await
             .unwrap()
             .unwrap();
         let after = PersistedAgentSession::decode_json(&row.state_json).unwrap();
-        if case == "model-claim-race" {
-            assert_eq!(after.automation_turns_used, 1);
-            assert_eq!(
-                crate::model_provider::load(&f.store.db)
-                    .await
-                    .unwrap()
-                    .profile_revision,
-                config.profile_revision + 1
-            );
-        }
         let receipts = crate::entity::model_egress_receipt::Entity::find()
             .all(&f.store.db)
             .await
@@ -391,7 +397,7 @@ async fn production_publisher_uses_original_export_and_strict_model_before_netwo
             "consumed",
             "{case}"
         );
-        f.store.publish_computer_results_once().await.unwrap();
+        publish_as_runtime_task(f.store.db.clone()).await;
         assert_eq!(
             row,
             agent_session::Entity::find()

@@ -503,9 +503,12 @@ async fn concurrent_acceptance_survives_reopen_and_keeps_original_timestamp() {
     assert!(receipt.accepted_at_unix_ms > 0);
     let started = fixture.started.clone();
     fixture.store.db.close().await.unwrap();
-    let reopened = Database::connect(format!("sqlite://{}?mode=rw", path.display()))
-        .await
-        .unwrap();
+    let reopened = crate::config::test_support::Database::connect(format!(
+        "sqlite://{}?mode=rw",
+        path.display()
+    ))
+    .await
+    .unwrap();
     let store = SignalCapabilityGrantStore::new(reopened.clone());
     assert_eq!(
         store
@@ -740,9 +743,12 @@ async fn abrupt_process_loss_preserves_only_committed_original_binding_acceptanc
         .unwrap();
         child.0.kill().unwrap();
         assert!(!child.0.wait().unwrap().success());
-        let db = Database::connect(format!("sqlite://{}?mode=rw", path.display()))
-            .await
-            .unwrap();
+        let db = crate::config::test_support::Database::connect(format!(
+            "sqlite://{}?mode=rw",
+            path.display()
+        ))
+        .await
+        .unwrap();
         let row = agent_capability_dispatch_outbox::Entity::find()
             .one(&db)
             .await

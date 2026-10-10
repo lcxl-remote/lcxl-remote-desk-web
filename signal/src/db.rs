@@ -1,7 +1,8 @@
+use crate::config::connection::DatabaseConnection;
 use sea_orm::sea_query::Index;
 use sea_orm::{
-    ConnectOptions, ConnectionTrait, Database, DatabaseConnection, DbErr, EntityTrait,
-    FromQueryResult, Schema, Statement, TransactionTrait,
+    ConnectOptions, ConnectionTrait, Database, DbErr, EntityTrait, FromQueryResult, Schema,
+    Statement, TransactionTrait,
 };
 use std::collections::HashSet;
 use std::path::Path;
@@ -15,7 +16,7 @@ use crate::entity::{
     agent_capability_dispatch_outbox, agent_capability_grant, agent_exec_task,
     agent_goal_open_request, agent_goal_run, agent_grant_reservation, agent_run_event,
     agent_session, approval_review_secret, device_code, host_remote_access_state,
-    model_egress_receipt, turn_usage, usage_retention,
+    model_egress_receipt, turn_usage,
 };
 use crate::error::DeskSignalError;
 use sea_orm::sqlx::sqlite::{SqliteJournalMode, SqliteSynchronous};
@@ -26,7 +27,7 @@ use sea_orm::sqlx::sqlite::{SqliteJournalMode, SqliteSynchronous};
 pub(crate) async fn begin_write<E: EntityTrait>(
     db: &DatabaseConnection,
     _entity: E,
-) -> Result<sea_orm::DatabaseTransaction, DbErr> {
+) -> Result<crate::config::connection::DatabaseTransaction, DbErr> {
     use sea_orm::{Iterable, PrimaryKeyToColumn, QueryFilter};
     let column = E::PrimaryKey::iter()
         .next()
@@ -157,7 +158,10 @@ fn validate_signal_db_location_platform(_path: &Path) -> Result<(), DbErr> {
 }
 
 /// Initialize database connection and return it.
-pub async fn init_db(config_dir: &str) -> Result<&'static DatabaseConnection, DeskSignalError> {
+pub async fn init_db(
+    config_dir: &str,
+    configuration: std::sync::Arc<crate::config::ConfigContext>,
+) -> Result<&'static DatabaseConnection, DeskSignalError> {
     DB_CONN
         .get_or_try_init(|| async {
             let db_path = Path::new(config_dir).join("desk_signal.db");
@@ -181,7 +185,7 @@ pub async fn init_db(config_dir: &str) -> Result<&'static DatabaseConnection, De
                     .busy_timeout(Duration::from_secs(5))
             });
 
-            let db = Database::connect(opt).await?;
+            let db = DatabaseConnection::new(Database::connect(opt).await?, configuration);
             verify_sqlite_durability(&db).await?;
 
             initialize_schema(&db).await?;
@@ -212,7 +216,7 @@ pub async fn init_db(config_dir: &str) -> Result<&'static DatabaseConnection, De
         .await
 }
 
-const SIGNAL_SCHEMA_VERSION: i32 = 23;
+const SIGNAL_SCHEMA_VERSION: i32 = 26;
 const SCHEMA_LOCK_TABLE: &str = "signal_schema_init_lock";
 
 #[derive(Debug, FromQueryResult)]
@@ -259,17 +263,16 @@ pub(crate) async fn initialize_schema(db: &DatabaseConnection) -> Result<(), DbE
     Ok(())
 }
 
-async fn create_latest_schema<C: ConnectionTrait>(db: &C) -> Result<(), DbErr> {
+async fn create_latest_schema<C: ConnectionTrait + crate::config::ConfigConnection>(
+    db: &C,
+) -> Result<(), DbErr> {
     let schema = Schema::new(db.get_database_backend());
     create_schedule_schema(db).await?;
     create_entity(db, &schema, device_code::Entity).await?;
     create_entity(db, &schema, turn_usage::Entity).await?;
-    create_latest_model_provider(db).await?;
     create_latest_probe_observation(db).await?;
-    create_latest_approval_model_provider(db).await?;
     create_latest_approval_model_probe_observation(db).await?;
     create_entity(db, &schema, approval_review_secret::Entity).await?;
-    create_entity(db, &schema, usage_retention::Entity).await?;
     create_entity(db, &schema, host_remote_access_state::Entity).await?;
     create_entity(db, &schema, agent_session::Entity).await?;
     create_entity(db, &schema, crate::entity::agent_delegation_group::Entity).await?;
@@ -307,16 +310,6 @@ async fn create_latest_schema<C: ConnectionTrait>(db: &C) -> Result<(), DbErr> {
     create_entity(db, &schema, model_egress_receipt::Entity).await?;
     create_entity(db, &schema, agent_run_event::Entity).await?;
     create_entity(db, &schema, crate::entity::agent_permission_resume::Entity).await?;
-    create_entity(db, &schema, crate::entity::web_search_config::Entity).await?;
-    create_entity(db, &schema, crate::entity::schedule_budget_policy::Entity).await?;
-    create_entity(db, &schema, crate::entity::goal_budget_policy::Entity).await?;
-    create_entity(db, &schema, crate::entity::subagent_policy::Entity).await?;
-    create_entity(
-        db,
-        &schema,
-        crate::entity::context_management_config::Entity,
-    )
-    .await?;
 
     for index in [
         Index::create()
@@ -411,7 +404,9 @@ async fn create_latest_schema<C: ConnectionTrait>(db: &C) -> Result<(), DbErr> {
     Ok(())
 }
 
-async fn create_subagent_indexes<C: ConnectionTrait>(db: &C) -> Result<(), DbErr> {
+async fn create_subagent_indexes<C: ConnectionTrait + crate::config::ConfigConnection>(
+    db: &C,
+) -> Result<(), DbErr> {
     use crate::entity::{
         agent_delegation_reservation as reservation, agent_subagent_inbox as inbox,
         agent_subagent_run as run,
@@ -485,34 +480,9 @@ async fn create_subagent_indexes<C: ConnectionTrait>(db: &C) -> Result<(), DbErr
     Ok(())
 }
 
-async fn create_latest_model_provider<C: ConnectionTrait>(db: &C) -> Result<(), DbErr> {
-    db.execute_unprepared(
-        "CREATE TABLE model_provider (\
-           id INTEGER PRIMARY KEY NOT NULL CHECK (id = 1),\
-           wire_protocol TEXT NULL, model TEXT NULL,\
-           supports_image_input INTEGER NOT NULL DEFAULT 0,\
-           base_url TEXT NULL, api_key TEXT NULL,\
-           profile_schema_version INTEGER NOT NULL CHECK (profile_schema_version >= 1),\
-           request_options TEXT NOT NULL CHECK (json_valid(request_options) AND json_type(request_options) = 'object'),\
-           output_limit_field TEXT NOT NULL,\
-           probe_max_output_tokens INTEGER NOT NULL CHECK (probe_max_output_tokens > 0),\
-           runtime_max_output_tokens INTEGER NOT NULL CHECK (runtime_max_output_tokens > 0),\
-           max_context_bytes INTEGER NOT NULL CHECK (max_context_bytes BETWEEN 4096 AND 16777216),\
-           connection_revision INTEGER NOT NULL CHECK (connection_revision >= 1),\
-           profile_revision INTEGER NOT NULL CHECK (profile_revision >= 1),\
-           response_format TEXT NOT NULL, execution_mode TEXT NOT NULL,\
-           max_same_tool_calls_per_turn INTEGER NOT NULL,\
-           max_steps_per_turn INTEGER NOT NULL,\
-           exec_approval_timeout_secs INTEGER NOT NULL DEFAULT 120 \
-             CHECK (exec_approval_timeout_secs BETWEEN 30 AND 1800),\
-           updated_at TEXT NOT NULL\
-         )",
-    )
-    .await?;
-    Ok(())
-}
-
-async fn create_latest_probe_observation<C: ConnectionTrait>(db: &C) -> Result<(), DbErr> {
+async fn create_latest_probe_observation<C: ConnectionTrait + crate::config::ConfigConnection>(
+    db: &C,
+) -> Result<(), DbErr> {
     db.execute_unprepared(
         "CREATE TABLE model_probe_observation (\
            model_provider_id INTEGER PRIMARY KEY NOT NULL CHECK (model_provider_id = 1),\
@@ -522,37 +492,16 @@ async fn create_latest_probe_observation<C: ConnectionTrait>(db: &C) -> Result<(
            reasoning_tokens INTEGER NULL CHECK (reasoning_tokens IS NULL OR reasoning_tokens >= 0),\
            stop_reason TEXT NULL,\
            validated_capabilities TEXT NOT NULL CHECK (json_valid(validated_capabilities) AND json_type(validated_capabilities) = 'object'),\
-           FOREIGN KEY (model_provider_id) REFERENCES model_provider(id) ON DELETE CASCADE\
+           config_instance TEXT NOT NULL\
          )",
     )
     .await?;
     Ok(())
 }
 
-async fn create_latest_approval_model_provider<C: ConnectionTrait>(db: &C) -> Result<(), DbErr> {
-    db.execute_unprepared(
-        "CREATE TABLE approval_model_provider (\
-           id INTEGER PRIMARY KEY NOT NULL CHECK (id = 1),\
-           enabled INTEGER NOT NULL DEFAULT 0,\
-           wire_protocol TEXT NULL, model TEXT NULL, base_url TEXT NULL, api_key TEXT NULL,\
-           profile_schema_version INTEGER NOT NULL CHECK (profile_schema_version >= 1),\
-           request_options TEXT NOT NULL CHECK (json_valid(request_options) AND json_type(request_options) = 'object'),\
-           output_limit_field TEXT NOT NULL,\
-           probe_max_output_tokens INTEGER NOT NULL CHECK (probe_max_output_tokens > 0),\
-           runtime_max_output_tokens INTEGER NOT NULL CHECK (runtime_max_output_tokens > 0),\
-           max_context_bytes INTEGER NOT NULL CHECK (max_context_bytes BETWEEN 4096 AND 16777216),\
-           prices_json TEXT NULL CHECK (prices_json IS NULL OR (json_valid(prices_json) AND json_type(prices_json) = 'object')),\
-           connection_revision INTEGER NOT NULL CHECK (connection_revision >= 1),\
-           profile_revision INTEGER NOT NULL CHECK (profile_revision >= 1),\
-           configuration_revision INTEGER NOT NULL CHECK (configuration_revision >= 1),\
-           updated_at TEXT NOT NULL\
-         )",
-    )
-    .await?;
-    Ok(())
-}
-
-async fn create_latest_approval_model_probe_observation<C: ConnectionTrait>(
+async fn create_latest_approval_model_probe_observation<
+    C: ConnectionTrait + crate::config::ConfigConnection,
+>(
     db: &C,
 ) -> Result<(), DbErr> {
     db.execute_unprepared(
@@ -565,7 +514,7 @@ async fn create_latest_approval_model_probe_observation<C: ConnectionTrait>(
            reasoning_tokens INTEGER NULL CHECK (reasoning_tokens IS NULL OR reasoning_tokens >= 0),\
            stop_reason TEXT NULL,\
            validated_capabilities TEXT NOT NULL CHECK (json_valid(validated_capabilities) AND json_type(validated_capabilities) = 'object'),\
-           FOREIGN KEY (approval_model_provider_id) REFERENCES approval_model_provider(id) ON DELETE CASCADE\
+           config_instance TEXT NOT NULL\
          )",
     )
     .await?;
@@ -619,7 +568,7 @@ async fn verify_sqlite_durability(db: &DatabaseConnection) -> Result<(), DbErr> 
     Ok(())
 }
 
-async fn validate_latest_schema<C: ConnectionTrait>(
+async fn validate_latest_schema<C: ConnectionTrait + crate::config::ConfigConnection>(
     db: &C,
     tables: &HashSet<String>,
 ) -> Result<(), DbErr> {
@@ -644,12 +593,9 @@ async fn validate_latest_schema<C: ConnectionTrait>(
     }
     check_entity!(device_code);
     check_entity!(turn_usage);
-    check_entity!(model_provider);
     check_entity!(model_probe_observation);
-    check_entity!(approval_model_provider);
     check_entity!(approval_model_probe_observation);
     check_entity!(approval_review_secret);
-    check_entity!(usage_retention);
     check_entity!(host_remote_access_state);
     check_entity!(agent_session);
     check_entity!(agent_delegation_group);
@@ -671,11 +617,6 @@ async fn validate_latest_schema<C: ConnectionTrait>(
     check_entity!(model_egress_receipt);
     check_entity!(agent_run_event);
     check_entity!(agent_permission_resume);
-    check_entity!(web_search_config);
-    check_entity!(context_management_config);
-    check_entity!(schedule_budget_policy);
-    check_entity!(goal_budget_policy);
-    check_entity!(subagent_policy);
     check_entity!(agent_schedule);
     check_entity!(agent_schedule_run);
     check_entity!(agent_task_contract);
@@ -690,7 +631,9 @@ async fn validate_latest_schema<C: ConnectionTrait>(
     Ok(())
 }
 
-async fn create_schedule_schema<C: ConnectionTrait>(db: &C) -> Result<(), DbErr> {
+async fn create_schedule_schema<C: ConnectionTrait + crate::config::ConfigConnection>(
+    db: &C,
+) -> Result<(), DbErr> {
     use crate::entity::{
         agent_schedule, agent_schedule_run, agent_task_authorization, agent_task_contract,
     };
@@ -726,7 +669,9 @@ async fn create_schedule_schema<C: ConnectionTrait>(db: &C) -> Result<(), DbErr>
     Ok(())
 }
 
-async fn query_user_version<C: ConnectionTrait>(db: &C) -> Result<i32, DbErr> {
+async fn query_user_version<C: ConnectionTrait + crate::config::ConfigConnection>(
+    db: &C,
+) -> Result<i32, DbErr> {
     let row = UserVersionRow::find_by_statement(Statement::from_string(
         db.get_database_backend(),
         "PRAGMA user_version".to_string(),
@@ -737,7 +682,9 @@ async fn query_user_version<C: ConnectionTrait>(db: &C) -> Result<i32, DbErr> {
     Ok(row.user_version)
 }
 
-async fn application_tables<C: ConnectionTrait>(db: &C) -> Result<HashSet<String>, DbErr> {
+async fn application_tables<C: ConnectionTrait + crate::config::ConfigConnection>(
+    db: &C,
+) -> Result<HashSet<String>, DbErr> {
     Ok(NameRow::find_by_statement(Statement::from_string(
         db.get_database_backend(),
         format!(
@@ -752,7 +699,10 @@ async fn application_tables<C: ConnectionTrait>(db: &C) -> Result<HashSet<String
     .collect())
 }
 
-async fn table_columns<C: ConnectionTrait>(db: &C, table: &str) -> Result<HashSet<String>, DbErr> {
+async fn table_columns<C: ConnectionTrait + crate::config::ConfigConnection>(
+    db: &C,
+    table: &str,
+) -> Result<HashSet<String>, DbErr> {
     Ok(NameRow::find_by_statement(Statement::from_string(
         db.get_database_backend(),
         format!("SELECT name FROM pragma_table_info('{table}')"),
@@ -766,7 +716,7 @@ async fn table_columns<C: ConnectionTrait>(db: &C, table: &str) -> Result<HashSe
 
 async fn create_entity<C, E>(db: &C, schema: &Schema, entity: E) -> Result<(), DbErr>
 where
-    C: ConnectionTrait,
+    C: ConnectionTrait + crate::config::ConfigConnection,
     E: EntityTrait + Copy,
 {
     let mut table = schema.create_table_from_entity(entity);
@@ -798,7 +748,7 @@ pub fn try_get_db() -> Option<&'static DatabaseConnection> {
 mod tests {
     use std::collections::HashSet;
 
-    use sea_orm::{Database, FromQueryResult, Statement};
+    use sea_orm::{FromQueryResult, Statement};
 
     use super::*;
 
@@ -835,7 +785,9 @@ mod tests {
 
     #[tokio::test]
     async fn current_schema_is_idempotent_and_has_no_migration_history() {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
+        let db = crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap();
         initialize_schema(&db).await.unwrap();
         initialize_schema(&db).await.unwrap();
 
@@ -855,13 +807,10 @@ mod tests {
         for required in [
             "device_code",
             "turn_usage_hourly",
-            "model_provider",
             "model_probe_observation",
-            "approval_model_provider",
             "approval_model_probe_observation",
             "approval_review_secret",
             SCHEMA_LOCK_TABLE,
-            "usage_retention",
             "host_remote_access_state",
             "agent_session",
             "agent_delegation_group",
@@ -903,6 +852,34 @@ mod tests {
                 "missing schema object {required}"
             );
         }
+        for removed in [
+            "model_provider",
+            "approval_model_provider",
+            "web_search_config",
+            "context_management_config",
+            "subagent_policy",
+            "goal_budget_policy",
+            "schedule_budget_policy",
+            "usage_retention",
+        ] {
+            assert!(
+                !objects.contains(removed),
+                "unexpected configuration table {removed}"
+            );
+        }
+        for table in [
+            "model_probe_observation",
+            "approval_model_probe_observation",
+        ] {
+            let foreign_keys = db
+                .query_all_raw(Statement::from_string(
+                    db.get_database_backend(),
+                    format!("PRAGMA foreign_key_list({table})"),
+                ))
+                .await
+                .unwrap();
+            assert!(foreign_keys.is_empty());
+        }
         assert!(!objects.contains("seaql_migrations"));
         assert_eq!(
             query_user_version(&db).await.unwrap(),
@@ -911,8 +888,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn oss_approval_schema_has_no_price_or_currency_columns() {
+        let db = crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap();
+        initialize_schema(&db).await.unwrap();
+        for table in ["approval_model_probe_observation", "agent_approval_review"] {
+            let columns = db
+                .query_all_raw(Statement::from_string(
+                    db.get_database_backend(),
+                    format!("PRAGMA table_info({table})"),
+                ))
+                .await
+                .unwrap();
+            for column in columns {
+                let name: String = column.try_get("", "name").unwrap();
+                assert!(
+                    !name.contains("price") && !name.contains("cost"),
+                    "{table}.{name}"
+                );
+            }
+        }
+        initialize_schema(&db).await.unwrap();
+    }
+
+    #[tokio::test]
     async fn latest_missing_acceptance_column_fails_without_silent_repair() {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
+        let db = crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap();
         initialize_schema(&db).await.unwrap();
         db.execute_unprepared(
             "ALTER TABLE agent_capability_dispatch_outbox DROP COLUMN computer_acceptance_json",
@@ -929,7 +933,9 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_future_schema_version_fails_closed() {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
+        let db = crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap();
         create_latest_schema(&db).await.unwrap();
         db.execute_unprepared("PRAGMA user_version = 99")
             .await
@@ -940,7 +946,9 @@ mod tests {
 
     #[tokio::test]
     async fn schedules_initialize_and_survive_reinitialization() {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
+        let db = crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap();
         initialize_schema(&db).await.unwrap();
         initialize_schema(&db).await.unwrap();
         let tables = application_tables(&db).await.unwrap();
@@ -957,7 +965,9 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_empty_database_startup_creates_one_complete_schema() {
-        let db = Database::connect("sqlite::memory:").await.unwrap();
+        let db = crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap();
         let (first, second) = tokio::join!(initialize_schema(&db), initialize_schema(&db));
         first.unwrap();
         second.unwrap();
@@ -973,7 +983,9 @@ mod tests {
     #[tokio::test]
     async fn obsolete_schema_is_rejected_without_migration_or_data_deletion() {
         for version in 0..SIGNAL_SCHEMA_VERSION {
-            let db = Database::connect("sqlite::memory:").await.unwrap();
+            let db = crate::config::test_support::Database::connect("sqlite::memory:")
+                .await
+                .unwrap();
             initialize_schema(&db).await.unwrap();
             db.execute_unprepared("CREATE TABLE development_marker(value TEXT); INSERT INTO development_marker VALUES ('preserve')").await.unwrap();
             db.execute_unprepared(&format!("PRAGMA user_version = {version}"))
@@ -1011,7 +1023,6 @@ pub(crate) async fn ensure_lifecycle_tables(db: &DatabaseConnection) {
     use crate::entity::*;
     let schema = Schema::new(db.get_database_backend());
     for mut statement in [
-        schema.create_table_from_entity(usage_retention::Entity),
         schema.create_table_from_entity(agent_goal_run::Entity),
         schema.create_table_from_entity(agent_goal_open_request::Entity),
         schema.create_table_from_entity(agent_approval_delegation::Entity),

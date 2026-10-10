@@ -1,8 +1,9 @@
 //! Single-instance durable permission continuation claims and maintenance.
 use super::*;
+use crate::config::connection::DatabaseTransaction;
 use crate::entity::agent_permission_resume as resume;
 use desk_diagnose_core::{dynamic_run::PermissionDecidedEvent, session::TriggerOrigin};
-use sea_orm::{ConnectionTrait, DatabaseTransaction};
+use sea_orm::ConnectionTrait;
 
 #[derive(Clone)]
 pub(super) struct ClaimBinding {

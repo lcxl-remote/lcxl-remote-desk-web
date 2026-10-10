@@ -1,4 +1,5 @@
 //! Transactional attachment metadata with immutable, durably written local files.
+use crate::config::connection::{DatabaseConnection, DatabaseTransaction};
 use crate::entity::{agent_attachment as attachment, agent_goal_run as goal_row, agent_session};
 use desk_diagnose_core::{
     conversation_attachment::{
@@ -8,9 +9,8 @@ use desk_diagnose_core::{
     session::PersistedAgentSession,
 };
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction,
-    DbBackend, DbErr, EntityTrait, ExprTrait, QueryFilter, QueryOrder, QuerySelect, Set, Statement,
-    sea_query::Expr,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DbBackend, DbErr, EntityTrait, ExprTrait,
+    QueryFilter, QueryOrder, QuerySelect, Set, Statement, sea_query::Expr,
 };
 
 fn invalid() -> DbErr {

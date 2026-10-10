@@ -1,9 +1,10 @@
 //! Stable installation-local HMAC key for review-context audit digests.
 
+use crate::config::connection::DatabaseConnection;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use sea_orm::sea_query::OnConflict;
-use sea_orm::{ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, Set};
+use sea_orm::{ColumnTrait, DbErr, EntityTrait, QueryFilter, Set};
 
 use crate::entity::approval_review_secret;
 
@@ -54,12 +55,16 @@ async fn load(db: &DatabaseConnection) -> Result<Option<[u8; 32]>, DbErr> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sea_orm::{ConnectionTrait, Database, Schema};
+    use sea_orm::{ConnectionTrait, Schema};
 
     #[tokio::test]
     async fn key_is_stable_and_different_installations_do_not_share_it() {
-        let first = Database::connect("sqlite::memory:").await.unwrap();
-        let second = Database::connect("sqlite::memory:").await.unwrap();
+        let first = crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let second = crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap();
         for db in [&first, &second] {
             let schema = Schema::new(db.get_database_backend());
             db.execute(&schema.create_table_from_entity(approval_review_secret::Entity))

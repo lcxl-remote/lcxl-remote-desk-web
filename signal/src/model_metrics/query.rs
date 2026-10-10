@@ -1,5 +1,8 @@
 //! Bounded, consistent query snapshots over validated observation projections.
 
+use crate::config::ConfigConnection;
+
+use crate::config::connection::DatabaseTransaction;
 use std::collections::{BTreeMap, BTreeSet};
 
 use desk_diagnose_core::model_observability::{ObservationEvent, aggregate::Totals};
@@ -8,15 +11,15 @@ use desk_signal_facade::{
     service::model_metrics::{ResolvedQuery, observed_summary, record, timestamp},
 };
 use sea_orm::{
-    AccessMode, ColumnTrait, Condition, DatabaseTransaction, DbErr, EntityTrait, IsolationLevel,
-    PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
+    AccessMode, ColumnTrait, Condition, DbErr, EntityTrait, IsolationLevel, PaginatorTrait,
+    QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
 };
 
 use super::{
     entity::{
         model_metric_compact as compact, model_metric_event as event,
         model_metric_health as health, model_metric_record as detail,
-        model_metric_rollup as rollup, model_metric_settings as settings,
+        model_metric_rollup as rollup, model_metric_state as settings,
     },
     store::{SeriesDimensions, Store, decode},
 };
@@ -669,7 +672,7 @@ impl Store {
             .one(&txn)
             .await?
             .ok_or_else(|| DbErr::Custom("metrics unavailable".into()))?;
-        let retention: MetricsSettings = decode(&config.settings_json)?;
+        let retention = txn.config_read().await.model_metrics.clone();
         let cutoff = now.saturating_sub(i64::from(retention.detail_days) * 86_400_000);
         let mut selection = detail::Entity::find()
             .filter(detail::Column::Kind.eq("unassociated"))
@@ -1095,7 +1098,7 @@ impl Store {
             .one(&txn)
             .await?
             .ok_or_else(|| DbErr::Custom("metrics unavailable".into()))?;
-        let config: MetricsSettings = decode(&row.settings_json)?;
+        let config = txn.config_read().await.model_metrics.clone();
         let nodes = health::Entity::find()
             .filter(health::Column::ReportedAtMs.gte(now.saturating_sub(7 * 86_400_000)))
             .limit(1_001)

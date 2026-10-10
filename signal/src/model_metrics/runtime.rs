@@ -1,5 +1,6 @@
 //! Background-only SQLite initialization and process-local observation handles.
 
+use crate::config::connection::DatabaseConnection;
 use std::{
     path::PathBuf,
     sync::{
@@ -16,16 +17,14 @@ use desk_signal_facade::{
         self, AggregateProgress, Collector, MetricsBackend, WriterHealth,
     },
 };
-use sea_orm::{
-    ConnectOptions, ConnectionTrait, Database, DatabaseConnection, DbErr, Schema, TransactionTrait,
-};
+use sea_orm::{ConnectOptions, ConnectionTrait, Database, DbErr, Schema, TransactionTrait};
 
 use super::{entity::*, store::Store};
 
 static COLLECTOR: OnceLock<Arc<Collector>> = OnceLock::new();
 static STORE: OnceLock<Store> = OnceLock::new();
 
-pub fn initialize(config_dir: &str) {
+pub fn initialize(config_dir: &str, configuration: std::sync::Arc<crate::config::ConfigContext>) {
     let (collector, receiver) = Collector::channel();
     if COLLECTOR.set(collector.clone()).is_err() {
         return;
@@ -33,6 +32,7 @@ pub fn initialize(config_dir: &str) {
     let backend = Arc::new(LocalBackend {
         path: PathBuf::from(config_dir).join("model-metrics.sqlite"),
         creating_current_schema: AtomicBool::new(false),
+        configuration,
     });
     tokio::spawn(collector::run(collector, receiver, backend));
 }
@@ -71,6 +71,7 @@ pub fn submit(event: ObservationEvent) {
 }
 
 struct LocalBackend {
+    configuration: std::sync::Arc<crate::config::ConfigContext>,
     path: PathBuf,
     creating_current_schema: AtomicBool,
 }
@@ -80,7 +81,12 @@ impl LocalBackend {
         if let Some(store) = STORE.get() {
             return Ok(store);
         }
-        let store = open_current_store(&self.path, &self.creating_current_schema).await?;
+        let store = open_current_store(
+            &self.path,
+            &self.creating_current_schema,
+            self.configuration.clone(),
+        )
+        .await?;
         let _ = STORE.set(store);
         STORE.get().ok_or(())
     }
@@ -89,6 +95,7 @@ impl LocalBackend {
 async fn open_current_store(
     path: &std::path::Path,
     creating_current_schema: &AtomicBool,
+    configuration: std::sync::Arc<crate::config::ConfigContext>,
 ) -> Result<Store, ()> {
     let existing = tokio::fs::try_exists(path).await.map_err(|_| ())?;
     if !existing {
@@ -114,7 +121,10 @@ async fn open_current_store(
             .pragma("wal_autocheckpoint", "256")
             .pragma("journal_size_limit", "1048576")
     });
-    let db = Database::connect(options).await.map_err(|_| ())?;
+    let db = DatabaseConnection::new(
+        Database::connect(options).await.map_err(|_| ())?,
+        configuration,
+    );
     // Retry only a file this process began creating. Existing components
     // are never upgraded, rebuilt or read through an older-format adapter.
     if creating_current_schema.load(Ordering::Relaxed) {
@@ -150,7 +160,7 @@ pub async fn create_schema(db: &DatabaseConnection) -> Result<(), DbErr> {
     create!(model_metric_compact);
     create!(model_metric_record);
     create!(model_metric_rollup);
-    create!(model_metric_settings);
+    create!(model_metric_state);
     create!(model_metric_health);
     create!(model_metric_lease);
     macro_rules! index {
@@ -259,7 +269,7 @@ pub async fn create_schema(db: &DatabaseConnection) -> Result<(), DbErr> {
 #[async_trait::async_trait]
 impl MetricsBackend for LocalBackend {
     async fn settings(&self) -> Result<MetricsSettings, ()> {
-        self.connect().await?.load_settings().await.map_err(|_| ())
+        Ok(self.configuration.read().await.model_metrics.clone())
     }
     async fn persist(&self, events: &[ObservationEvent], now: i64) -> Result<u32, ()> {
         MetricsBackend::persist(self.connect().await?, events, now).await

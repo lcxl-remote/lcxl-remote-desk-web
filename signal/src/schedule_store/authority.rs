@@ -1,13 +1,14 @@
 //! Current parent authority read under the same task fence as publication and revocation.
 use super::publication::{TaskRehearsalEvidence, key, load_contract, valid_digest};
 use super::{ScheduleStore, ScheduleStoreError, digest, entity, json};
+use crate::config::connection::DatabaseTransaction;
 use crate::entity::{agent_schedule_run as run, agent_task_authorization as authorization};
 use desk_agent_protocol::{capability_grant::TaskGrantProvenance, schedule::SchedulePauseReason};
 use desk_diagnose_core::schedule::{
     SCHEDULE_CALC_VERSION, contract::ValidatedTaskContract, lifecycle::FailureState,
 };
 use sea_orm::{
-    ColumnTrait, ConnectionTrait, DatabaseTransaction, DbBackend, EntityTrait, QueryFilter, Set,
+    ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, QueryFilter, Set,
     sea_query::{Alias, Expr, Query},
 };
 

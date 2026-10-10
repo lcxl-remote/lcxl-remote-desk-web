@@ -1,10 +1,11 @@
 //! Atomic root stop covers spawn races while retaining independent child sources.
 use super::*;
+use crate::config::connection::DatabaseTransaction;
 use crate::entity::agent_delegation_reservation as receipt_row;
 use desk_agent_protocol::ai_assistant::subagent::{
     AiAssistantStopControl, AiAssistantStopResult, SubAgentStopChoice,
 };
-use sea_orm::{ActiveModelTrait, DatabaseTransaction};
+use sea_orm::ActiveModelTrait;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 

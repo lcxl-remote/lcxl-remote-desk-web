@@ -145,7 +145,8 @@ pub struct ApprovalDelegationDto {
     pub status: String,
     pub reviews_used: u64,
     pub tokens_used: u64,
-    pub cost_used_micros: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost_used_micros: Option<u64>,
     pub created_at_unix_ms: u64,
 }
 
@@ -852,7 +853,20 @@ impl From<desk_diagnose_core::file_scope::SessionFileScope> for FileScopeDto {
 
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
+pub struct ModelContextObservationDto {
+    pub observed_at_unix_ms: i64,
+    pub input_tokens: Option<u64>,
+    pub reasoning_tokens: Option<u64>,
+    pub cleared_thinking_turns: Option<u64>,
+    pub cleared_input_tokens: Option<u64>,
+    pub request_bytes: Option<u64>,
+    pub stale: bool,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct ContextUsageDto {
+    pub latest_model_call: Option<ModelContextObservationDto>,
     pub used_bytes: u64,
     pub limit_bytes: u64,
     pub strategy: String,
@@ -881,6 +895,17 @@ pub struct ContextUsageBreakdownDto {
 impl From<desk_diagnose_core::context_usage::ContextUsage> for ContextUsageDto {
     fn from(value: desk_diagnose_core::context_usage::ContextUsage) -> Self {
         Self {
+            latest_model_call: value
+                .latest_model_call
+                .map(|call| ModelContextObservationDto {
+                    observed_at_unix_ms: call.observed_at_unix_ms,
+                    input_tokens: call.input_tokens,
+                    reasoning_tokens: call.reasoning_tokens,
+                    cleared_thinking_turns: call.cleared_thinking_turns,
+                    cleared_input_tokens: call.cleared_input_tokens,
+                    request_bytes: call.request_bytes,
+                    stale: call.stale,
+                }),
             used_bytes: value.used_bytes as u64,
             limit_bytes: value.limit_bytes as u64,
             strategy: value.strategy,
@@ -1964,6 +1989,37 @@ pub struct AiAssistantAttentionListDto {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn approval_projection_omits_oss_money_and_preserves_manager_costs() {
+        use desk_diagnose_core::approval_delegation::ApprovalDelegation;
+        let oss = ApprovalDelegation::new_usage_only(
+            "delegation".into(),
+            "conversation".into(),
+            "owner".into(),
+            "device".into(),
+            "owner-enabled".into(),
+            1000,
+        )
+        .unwrap();
+        let public = serde_json::to_value(super::ApprovalDelegationDto::from(&oss)).unwrap();
+        assert!(public.get("costUsedMicros").is_none());
+        assert_eq!(public["tokensUsed"], 0);
+        let mut manager = ApprovalDelegation::new(
+            "delegation".into(),
+            "conversation".into(),
+            "owner".into(),
+            "device".into(),
+            "owner-enabled".into(),
+            1000,
+        )
+        .unwrap();
+        manager.reserve(100, 200).unwrap();
+        manager.settle(100, 200, Some(7), Some(9)).unwrap();
+        let public = serde_json::to_value(super::ApprovalDelegationDto::from(&manager)).unwrap();
+        assert_eq!(public["costUsedMicros"], 9);
+        assert_eq!(public["tokensUsed"], 7);
+    }
+
     use super::*;
 
     #[test]
@@ -2034,6 +2090,7 @@ mod tests {
     #[test]
     fn context_usage_exposes_only_budget_metadata() {
         let dto = ContextUsageDto::from(desk_diagnose_core::context_usage::ContextUsage {
+            latest_model_call: None,
             used_bytes: 42,
             limit_bytes: 128,
             strategy: "checkpoint_summary".into(),
@@ -2063,6 +2120,7 @@ mod tests {
     #[test]
     fn unmeasured_request_budget_is_null_instead_of_zero() {
         let dto = ContextUsageDto::from(desk_diagnose_core::context_usage::ContextUsage {
+            latest_model_call: None,
             used_bytes: 0,
             limit_bytes: 128,
             strategy: "window".into(),

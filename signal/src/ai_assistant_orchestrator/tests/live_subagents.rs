@@ -78,6 +78,25 @@ async fn host(connections: &SharedConnectionMap) {
 
 #[actix_web::test]
 async fn formatted_delegation_calls_create_children_without_rewriting_model_history() {
+    desk_diagnose_core::future::boxed(formatted_delegation_scenario).await;
+}
+
+#[test]
+fn ordinary_delegation_fits_production_thread_stack() {
+    std::thread::Builder::new()
+        .name("ordinary-delegation-stack".into())
+        .stack_size(2 * 1024 * 1024)
+        .spawn(|| {
+            actix_web::rt::System::new().block_on(desk_diagnose_core::future::boxed(
+                formatted_delegation_scenario,
+            ));
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+async fn formatted_delegation_scenario() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let originals = ["first", "second"].map(|name| {
@@ -103,7 +122,9 @@ async fn formatted_delegation_calls_create_children_without_rewriting_model_hist
         )
         .await;
     });
-    let db = Database::connect("sqlite::memory:").await.unwrap();
+    let db = crate::config::test_support::Database::connect("sqlite::memory:")
+        .await
+        .unwrap();
     crate::db::initialize_schema(&db).await.unwrap();
     crate::ai_assistant_gate::enable_test_host();
     crate::model_provider::save(
@@ -415,7 +436,9 @@ async fn sample(
     prompt: String,
     cutoff: ComparisonCutoff,
 ) -> Value {
-    let db = Database::connect("sqlite::memory:").await.unwrap();
+    let db = crate::config::test_support::Database::connect("sqlite::memory:")
+        .await
+        .unwrap();
     crate::db::initialize_schema(&db).await.unwrap();
     crate::model_provider::save(&db, config()).await.unwrap();
     crate::ai_assistant_gate::enable_test_host();
