@@ -9,7 +9,9 @@ import { Disclosure } from '@/components/ui/disclosure';
 import { deleteAssistantImage, getAssistantImage, listAssistantImages } from '@/services/clients';
 import type { AiAssistantVisualEvidence } from './ai-assistant-event';
 
-function StoredImage({ frame, onDelete }: { frame: AiAssistantVisualEvidence; onDelete: (id: string) => void }) {
+function StoredImage({ frame, onDelete, autoLoad = false }: {
+    frame: AiAssistantVisualEvidence; onDelete: (id: string) => void; autoLoad?: boolean;
+}) {
     const { t } = useTranslation();
     const { confirm, dialog } = useConfirm();
     const [url, setUrl] = useState<string | null>(null);
@@ -20,7 +22,7 @@ function StoredImage({ frame, onDelete }: { frame: AiAssistantVisualEvidence; on
     // Only an explicit artifact reference denotes durable storage.
     const durable = frame.status === 'available' && frame.content?.kind === 'artifact' && frame.content.artifact_id === frame.evidence_id;
     useEffect(() => {
-        if (!durable || !requested) return;
+        if (!durable || (!autoLoad && !requested)) return;
         const controller = new AbortController();
         let objectUrl: string | null = null;
         setFailed(false);
@@ -32,7 +34,7 @@ function StoredImage({ frame, onDelete }: { frame: AiAssistantVisualEvidence; on
                 setUrl(objectUrl);
             }).catch(() => { if (!controller.signal.aborted) setFailed(true); });
         return () => { controller.abort(); if (objectUrl) URL.revokeObjectURL(objectUrl); };
-    }, [durable, requested, frame.conversation_id, frame.evidence_id]);
+    }, [durable, autoLoad, requested, frame.conversation_id, frame.evidence_id]);
     const source = url ?? (!durable ? frame.preview_data_url : null);
     const remove = async () => {
         if (deleting) return;
@@ -43,18 +45,23 @@ function StoredImage({ frame, onDelete }: { frame: AiAssistantVisualEvidence; on
             onDelete(frame.evidence_id);
         } catch { setFailed(true); } finally { setDeleting(false); }
     };
+    const recordedAt = new Date(frame.captured_at_unix_ms);
+    const hasRecordedTime = Number.isSafeInteger(frame.captured_at_unix_ms) && frame.captured_at_unix_ms > 0
+        && Number.isFinite(recordedAt.getTime());
     return <div className="overflow-hidden rounded-md border bg-muted/30">
         {dialog}
         {source ? <Button variant="unstyled" type="button" className="block w-full" onClick={() => setOpen(true)} aria-label={t('pages.aiAssistant.imageOpen')}>
             <img src={source} alt={t('pages.aiAssistant.visualEvidenceAlt')} loading="lazy" className="max-h-56 w-full object-contain" />
-        </Button> : durable && !requested ? <Button type="button" variant="ghost" className="w-full" onClick={() => setRequested(true)}>{t('pages.aiAssistant.imageOpen')}</Button> : <div className="flex h-24 items-center justify-center px-3 text-center text-xs text-muted-foreground">
+        </Button> : durable && !autoLoad && !requested ? <Button type="button" variant="ghost" className="w-full" onClick={() => setRequested(true)}>{t('pages.aiAssistant.imageOpen')}</Button> : <div className="flex h-24 items-center justify-center px-3 text-center text-xs text-muted-foreground">
             {t(durable ? (failed ? 'pages.aiAssistant.imageUnavailable' : 'pages.aiAssistant.imageLoading')
                 : frame.status === 'expired' ? 'pages.aiAssistant.visualEvidenceExpired' : 'pages.aiAssistant.visualEvidenceNotRetained')}
         </div>}
         <AssistantFrameTiming frame={frame.frame_observation} />
         <div className="flex items-center justify-between gap-2 border-t p-2 text-xs">
             <div><div>{t(`pages.aiAssistant.visualEvidencePhase.${frame.phase}`)}</div>
-                <div className="text-muted-foreground">{new Date(frame.captured_at_unix_ms).toLocaleString()}</div></div>
+                <div className="text-muted-foreground">{hasRecordedTime
+                    ? t('pages.aiAssistant.imageRecordedAt', { time: recordedAt.toLocaleString() })
+                    : t('pages.aiAssistant.imageTimeUnrecorded')}</div></div>
             {durable && <Button type="button" size="sm" variant="ghost" disabled={deleting} onClick={() => void remove()}>{t('pages.aiAssistant.imageDelete')}</Button>}
         </div>
         <Dialog open={open} onOpenChange={setOpen}><DialogContent className="max-w-[95vw] sm:max-w-[90vw]">
@@ -62,6 +69,18 @@ function StoredImage({ frame, onDelete }: { frame: AiAssistantVisualEvidence; on
             {source && <img src={source} alt={t('pages.aiAssistant.visualEvidenceAlt')} className="max-h-[80vh] w-full object-contain" />}
         </DialogContent></Dialog>
     </div>;
+}
+
+function ActivityGroup({ count, hasImages, children }: { count: number; hasImages: boolean; children: ReactNode }) {
+    const { t } = useTranslation();
+    // Follow asynchronously loaded screenshots until the user chooses a state.
+    const [expanded, setExpanded] = useState<boolean | null>(null);
+    return <Disclosure open={expanded ?? hasImages} onOpenChange={setExpanded}
+        title={t('pages.aiAssistant.activityGroup', { count })}
+        className="w-full max-w-full rounded-lg border bg-muted/30 px-3 py-2 text-sm sm:max-w-[90%]"
+        summaryClassName="text-muted-foreground">
+        <div className="space-y-3 pt-3">{children}</div>
+    </Disclosure>;
 }
 
 export function AssistantImages({ sessionId, evidence, messages, renderMessage, renderReasoning, renderToolGroup }: {
@@ -117,9 +136,9 @@ export function AssistantImages({ sessionId, evidence, messages, renderMessage, 
             setFailed(false);
         } catch { setFailed(true); } finally { setLoading(false); }
     };
-    const renderImages = (items: AiAssistantVisualEvidence[]) => items.length > 0 ? (
+    const renderImages = (items: AiAssistantVisualEvidence[], autoLoad = false) => items.length > 0 ? (
         <div data-testid="ai-assistant-visual-evidence" className="grid w-full max-w-full gap-3 sm:max-w-[90%] sm:grid-cols-2">
-            {items.map((frame) => <StoredImage key={frame.evidence_id} frame={frame}
+            {items.map((frame) => <StoredImage key={frame.evidence_id} frame={frame} autoLoad={autoLoad}
                 onDelete={(id) => setDeleted((previous) => new Set([...previous, id]))} />)}
         </div>
     ) : null;
@@ -144,7 +163,7 @@ export function AssistantImages({ sessionId, evidence, messages, renderMessage, 
             const index = anchorFor(frame);
             if (index !== undefined) byMessage.set(index, [...(byMessage.get(index) ?? []), frame]);
         }
-        type TimelineEntry = { key: string; kind: 'body' | 'boundary' | 'activity'; count: number; content: ReactNode };
+        type TimelineEntry = { key: string; kind: 'body' | 'boundary' | 'activity'; count: number; hasImages?: boolean; content: ReactNode };
         const timeline: TimelineEntry[] = [];
         let group: AiAssistantMessage[] = [];
         let groupEnd = -1;
@@ -155,10 +174,11 @@ export function AssistantImages({ sessionId, evidence, messages, renderMessage, 
             timeline.push({
                 key: `tool-group:${members[0].id}`,
                 kind: 'activity',
+                hasImages: byMessage.has(end),
                 count: new Set(members.map(item => item.toolCallId).filter(Boolean)).size
                     || members.filter(item => item.role === 'tool_call').length || members.length,
                 content: <>{renderToolGroup ? renderToolGroup(members) : members.map(renderMessage)}
-                    {renderImages(byMessage.get(end) ?? [])}</>,
+                    {renderImages(byMessage.get(end) ?? [], true)}</>,
             });
             group = [];
             groupEnd = -1;
@@ -177,17 +197,19 @@ export function AssistantImages({ sessionId, evidence, messages, renderMessage, 
                     content: renderReasoning(message) });
                 if (message.text.trim()) {
                     timeline.push({ key: message.id, kind: 'body', count: 0,
-                        content: <>{renderMessage({ ...message, reasoning: null })}{renderImages(byMessage.get(index) ?? [])}</> });
+                        content: <>{renderMessage({ ...message, reasoning: null })}{renderImages(byMessage.get(index) ?? [], true)}</> });
                 } else {
                     timeline.push({ key: `reasoning-notices:${message.id}`, kind: 'activity', count: 0,
-                        content: <>{renderMessage({ ...message, reasoning: null })}{renderImages(byMessage.get(index) ?? [])}</> });
+                        hasImages: byMessage.has(index),
+                        content: <>{renderMessage({ ...message, reasoning: null })}{renderImages(byMessage.get(index) ?? [], true)}</> });
                 }
             } else {
                 timeline.push({ key: message.id,
                     kind: message.role === 'assistant' && message.text.trim() ? 'body'
                         : message.role === 'user' ? 'boundary' : 'activity',
                     count: message.role === 'tool_call' ? 1 : 0,
-                    content: <>{renderMessage(message)}{renderImages(byMessage.get(index) ?? [])}</> });
+                    hasImages: byMessage.has(index),
+                    content: <>{renderMessage(message)}{renderImages(byMessage.get(index) ?? [], true)}</> });
             }
         });
         flushGroup();
@@ -198,12 +220,10 @@ export function AssistantImages({ sessionId, evidence, messages, renderMessage, 
             if (!pending.length) return;
             const count = pending.reduce((sum, entry) => sum + entry.count, 0);
             if (previousBody && closedByBody && count > 1) {
-                folded.push(<Disclosure key={`activity:${pending[0].key}`}
-                    title={t('pages.aiAssistant.activityGroup', { count })}
-                    className="w-full max-w-full rounded-lg border bg-muted/30 px-3 py-2 text-sm sm:max-w-[90%]"
-                    summaryClassName="text-muted-foreground">
-                    <div className="space-y-3 pt-3">{pending.map(entry => <Fragment key={entry.key}>{entry.content}</Fragment>)}</div>
-                </Disclosure>);
+                folded.push(<ActivityGroup key={`activity:${pending[0].key}`} count={count}
+                    hasImages={pending.some(entry => entry.hasImages)}>
+                    {pending.map(entry => <Fragment key={entry.key}>{entry.content}</Fragment>)}
+                </ActivityGroup>);
             } else {
                 folded.push(...pending.map(entry => <Fragment key={entry.key}>{entry.content}</Fragment>));
             }

@@ -101,7 +101,11 @@ pub fn record_live_observation(
     call_id: &str,
     image_data_url: &str,
     image: &ImageDataUrlInfo,
+    recorded_at_unix_ms: u64,
 ) -> Result<VisualEvidenceFrame, &'static str> {
+    if recorded_at_unix_ms == 0 {
+        return Err("visual evidence has no observation record time");
+    }
     let message = session
         .conversation
         .iter()
@@ -115,18 +119,14 @@ pub fn record_live_observation(
     envelope
         .validate()
         .map_err(|_| "visual evidence has an invalid data envelope")?;
-    let (frame_id, expires_at_unix_ms, captured_at_unix_ms) = match &envelope.content {
+    let (frame_id, expires_at_unix_ms) = match &envelope.content {
         ContentRef::EphemeralObservation {
             observation_id,
             expires_at_unix_ms,
             ..
-        } => (
-            observation_id.clone(),
-            Some(*expires_at_unix_ms),
-            expires_at_unix_ms.saturating_sub(5 * 60 * 1000),
-        ),
-        ContentRef::ImmutableBlob { blob_id, .. } => (blob_id.clone(), None, 0),
-        ContentRef::Artifact { artifact_id, .. } => (artifact_id.clone(), None, 0),
+        } => (observation_id.clone(), Some(*expires_at_unix_ms)),
+        ContentRef::ImmutableBlob { blob_id, .. } => (blob_id.clone(), None),
+        ContentRef::Artifact { artifact_id, .. } => (artifact_id.clone(), None),
     };
     let turn_id = session
         .current_turn_id
@@ -164,7 +164,9 @@ pub fn record_live_observation(
         frame_id,
         phase: VisualEvidencePhase::Observation,
         status: VisualEvidenceStatus::Available,
-        captured_at_unix_ms,
+        // The server records receipt time, independently of retention expiry or
+        // the producer's presentation clock. Device frame timing stays separate.
+        captured_at_unix_ms: recorded_at_unix_ms,
         expires_at_unix_ms,
         device_id: session.device_id.clone(),
         display_summary: None,
@@ -342,12 +344,77 @@ mod tests {
     }
 
     #[test]
+    fn observation_record_time_is_preserved_for_every_content_kind() {
+        let data_url = "data:image/png;base64,AQID";
+        let info = validate_image_data_url(data_url).unwrap();
+        let recorded_at_unix_ms = 1_791_590_400_000;
+        for content in [
+            ContentRef::EphemeralObservation {
+                observation_id: "frame-1".into(),
+                size_bytes: 3,
+                expires_at_unix_ms: recorded_at_unix_ms + 60_000,
+            },
+            ContentRef::ImmutableBlob {
+                blob_id: "frame-1".into(),
+                sha256: "a".repeat(64),
+                size_bytes: 3,
+                media_type: "image/png".into(),
+            },
+            ContentRef::Artifact {
+                artifact_id: "frame-1".into(),
+                sha256: "a".repeat(64),
+                size_bytes: 3,
+                media_type: "image/png".into(),
+            },
+        ] {
+            let mut session = session_with_observation();
+            session
+                .conversation
+                .last_mut()
+                .unwrap()
+                .data_envelope
+                .as_mut()
+                .unwrap()
+                .content = content;
+            let frame = record_live_observation(
+                &mut session,
+                "call-1",
+                data_url,
+                &info,
+                recorded_at_unix_ms,
+            )
+            .unwrap();
+            assert_eq!(frame.captured_at_unix_ms, recorded_at_unix_ms);
+            let encoded = session.encode_json_for_storage().unwrap();
+            let recovered = PersistedAgentSession::decode_json(&encoded).unwrap();
+            assert_eq!(
+                recovered.visual_evidence[0].captured_at_unix_ms,
+                recorded_at_unix_ms
+            );
+        }
+    }
+
+    #[test]
+    fn missing_observation_record_time_is_rejected() {
+        let mut session = session_with_observation();
+        let data_url = "data:image/png;base64,AQID";
+        let info = validate_image_data_url(data_url).unwrap();
+        assert_eq!(
+            record_live_observation(&mut session, "call-1", data_url, &info, 0),
+            Err("visual evidence has no observation record time"),
+        );
+        assert!(session.visual_evidence.is_empty());
+    }
+
+    #[test]
     fn live_preview_is_deduplicated_bounded_and_never_persisted() {
         let mut session = session_with_observation();
         let data_url = "data:image/png;base64,AQID";
         let info = validate_image_data_url(data_url).unwrap();
-        let first = record_live_observation(&mut session, "call-1", data_url, &info).unwrap();
-        let second = record_live_observation(&mut session, "call-1", data_url, &info).unwrap();
+        let first =
+            record_live_observation(&mut session, "call-1", data_url, &info, 300_000).unwrap();
+        let second =
+            record_live_observation(&mut session, "call-1", data_url, &info, 300_000).unwrap();
         assert_eq!(first.evidence_id, second.evidence_id);
         assert_eq!(session.visual_evidence.len(), 1);
         assert_eq!(
@@ -371,7 +438,8 @@ mod tests {
         let mut session = session_with_observation();
         let data_url = "data:image/png;base64,AQID";
         let info = validate_image_data_url(data_url).unwrap();
-        let template = record_live_observation(&mut session, "call-1", data_url, &info).unwrap();
+        let template =
+            record_live_observation(&mut session, "call-1", data_url, &info, 300_000).unwrap();
         let frames = (0..MAX_VISUAL_EVIDENCE_ITEMS)
             .map(|index| {
                 let mut frame = template.clone();
@@ -405,6 +473,7 @@ mod tests {
             "call-1",
             url,
             &validate_image_data_url(url).unwrap(),
+            300_000,
         )
         .unwrap();
         let encoded = session.encode_json_for_storage().unwrap();

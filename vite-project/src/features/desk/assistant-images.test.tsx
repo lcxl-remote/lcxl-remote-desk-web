@@ -1,11 +1,14 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AssistantImages } from './assistant-images';
+import { AssistantReasoning } from './assistant-reasoning';
+import { AssistantToolCall } from './assistant-tool-call';
+import { AssistantToolGroup } from './assistant-tool-group';
 import { deleteAssistantImage, getAssistantImage, listAssistantImages } from '@/services/clients';
 import type { AiAssistantVisualEvidence } from './ai-assistant-event';
 vi.mock('@/services/clients', () => ({ deleteAssistantImage: vi.fn(), getAssistantImage: vi.fn(), listAssistantImages: vi.fn() }));
-vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string, values?: { count?: number }) =>
-    values?.count === undefined ? key : `${key}:${values.count}` }) }));
+vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string, values?: { count?: number; time?: string }) =>
+    values?.time !== undefined ? `${key}:${values.time}` : values?.count === undefined ? key : `${key}:${values.count}` }) }));
 const frame: AiAssistantVisualEvidence = {
     content: { kind: 'artifact', artifact_id: 'visual-image', media_type: 'image/png', sha256: 'a'.repeat(64), size_bytes: 3 },
     schema_version: 1, evidence_id: 'visual-image', conversation_id: 'stored-run', focus_input_revision: 1,
@@ -21,6 +24,28 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.clearAllMocks(); vi.unstubAllGlobals(); });
 describe('durable assistant images', () => {
+    it('labels the stored observation record time and preserves it when reopening', async () => {
+        const recordedAt = Date.UTC(2026, 9, 10, 12, 30);
+        vi.mocked(listAssistantImages).mockResolvedValue({ data: [{ ...frame, captured_at_unix_ms: recordedAt }], success: true, code: 0 });
+        const view = render(<AssistantImages sessionId="stored-run" evidence={[]} />);
+        const text = `pages.aiAssistant.imageRecordedAt:${new Date(recordedAt).toLocaleString()}`;
+        expect(await screen.findByText(text)).toBeTruthy();
+        expect(screen.queryByText('pages.aiAssistant.imageTimeUnrecorded')).toBeNull();
+        view.unmount();
+        render(<AssistantImages sessionId="stored-run" evidence={[]} />);
+        expect(await screen.findByText(text)).toBeTruthy();
+    });
+
+    it.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1, 8_640_000_000_000_001])(
+        'shows time not recorded for invalid timestamp %s instead of an epoch or invalid date', async capturedAt => {
+            vi.mocked(listAssistantImages).mockResolvedValue({ data: [{ ...frame, captured_at_unix_ms: capturedAt }], success: true, code: 0 });
+            render(<AssistantImages sessionId="stored-run" evidence={[]} />);
+            expect(await screen.findByText('pages.aiAssistant.imageTimeUnrecorded')).toBeTruthy();
+            expect(screen.queryByText(/pages.aiAssistant.imageRecordedAt/)).toBeNull();
+            expect(screen.queryByText(/1970|1969|Invalid Date/)).toBeNull();
+        },
+    );
+
     it('does not load durable pixels while listing conversation history', async () => {
         render(<AssistantImages sessionId="stored-run" evidence={[]} />);
         await screen.findByRole('button', { name: 'pages.aiAssistant.imageOpen' });
@@ -47,7 +72,6 @@ describe('durable assistant images', () => {
             { id: 'capture', role: 'tool_call', toolCallId: 'capture-call', text: 'Screenshot tool' },
             { id: 'answer', role: 'assistant', text: 'The result is visible' },
         ]} renderMessage={message => <p>{message.text}</p>} />);
-        fireEvent.click(await screen.findByRole('button', { name: 'pages.aiAssistant.imageOpen' }));
         const image = await screen.findByRole('img');
         expect(screen.getByText('Screenshot tool').compareDocumentPosition(image) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
         expect(image.compareDocumentPosition(screen.getByText('The result is visible')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
@@ -67,10 +91,10 @@ describe('durable assistant images', () => {
             { id: 'answer', role: 'assistant', text: 'Later reply' },
         ]} renderMessage={renderMessage} />);
         await waitFor(() => expect(screen.queryByText('pages.aiAssistant.imageEarlier')).toBeNull());
-        const button = screen.getByRole('button', { name: 'pages.aiAssistant.imageOpen' });
+        const button = await screen.findByRole('button', { name: 'pages.aiAssistant.imageOpen' });
         expect(screen.getAllByRole('button', { name: 'pages.aiAssistant.imageOpen' })).toHaveLength(1);
         expect(screen.getByText('Earlier capture').compareDocumentPosition(button) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-        expect(getAssistantImage).toHaveBeenCalledTimes(1);
+        expect(getAssistantImage).toHaveBeenCalledTimes(2);
     });
     it('uses the server turn when a screenshot has no tool call and splits adjacent turns', async () => {
         const turnFrame = { ...frame, tool_call_id: '' };
@@ -85,7 +109,7 @@ describe('durable assistant images', () => {
         expect(screen.getByText('Second')).toBeTruthy();
         expect(screen.queryByText('First, Second')).toBeNull();
         expect(screen.queryByText('pages.aiAssistant.imageEarlier')).toBeNull();
-        const imageButton = screen.getByRole('button', { name: 'pages.aiAssistant.imageOpen' });
+        const imageButton = await screen.findByRole('button', { name: 'pages.aiAssistant.imageOpen' });
         expect(screen.getByText('Second').compareDocumentPosition(imageButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
         expect(imageButton.compareDocumentPosition(screen.getByText('Answer')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     });
@@ -139,6 +163,7 @@ describe('assistant activity folding', () => {
     const renderToolGroup = (group: { text: string }[]) => <details><summary>Tools</summary>{group.map(item => <p key={item.text}>{item.text}</p>)}</details>;
 
     it('folds multiple activities between assistant bodies and keeps nested disclosures independent', async () => {
+        vi.mocked(listAssistantImages).mockResolvedValue({ data: [], success: true, code: 0 });
         render(<AssistantImages sessionId="stored-run" evidence={[]} messages={[
             { id: 'first', role: 'assistant', text: 'First answer' },
             { id: 'capture', role: 'tool_call', turnId: 'turn', toolCallId: 'capture-call', text: 'Capture tool' },
@@ -152,10 +177,63 @@ describe('assistant activity folding', () => {
         expect(outer.getAttribute('data-state')).toBe('open');
         expect(screen.getByText('Tools').closest('details')?.open).toBe(false);
         expect(screen.getByText('Thinking').closest('details')?.open).toBe(false);
-        const imageButton = await screen.findByRole('button', { name: 'pages.aiAssistant.imageOpen' });
-        expect(screen.getByText('Capture tool').compareDocumentPosition(imageButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-        expect(imageButton.compareDocumentPosition(screen.getByText('Checked the image')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+        expect(screen.getByText('Capture tool').compareDocumentPosition(screen.getByText('Checked the image')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
         expect(screen.getByText('Checked the image').compareDocumentPosition(screen.getByText('Second answer')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    });
+
+    it('expands a screenshot process and displays its thumbnail while keeping sibling tools and reasoning folded', async () => {
+        const tools = [
+            { callId: 'read-call', name: 'inspect_desktop_ui', status: 'ok' as const, argumentsJson: '{}', output: 'UI result' },
+            { callId: 'capture-call', name: 'read_current_screen', status: 'ok' as const, argumentsJson: '{}', output: 'Capture result' },
+        ];
+        render(<AssistantImages sessionId="stored-run" evidence={[]} messages={[
+            { id: 'first', role: 'assistant', text: 'First answer' },
+            { id: 'read', role: 'tool_call', turnId: 'read-turn', toolCallId: 'read-call', text: '' },
+            { id: 'capture', role: 'tool_call', turnId: 'turn', toolCallId: 'capture-call', text: '' },
+            { id: 'second', role: 'assistant', text: 'Second answer', reasoning: 'Checked the image' },
+        ]} renderMessage={message => message.role === 'tool_call'
+            ? <AssistantToolCall tool={tools.find(tool => tool.callId === message.toolCallId)} running={false} /> : renderMessage(message)}
+            renderReasoning={message => <AssistantReasoning text={message.reasoning} />}
+            renderToolGroup={group => <AssistantToolGroup messages={group} tools={tools}
+                renderMessage={message => <AssistantToolCall tool={tools.find(tool => tool.callId === message.toolCallId)} running={false} />} />} />);
+        const image = await screen.findByRole('img', { name: 'pages.aiAssistant.visualEvidenceAlt' });
+        expect(image.closest('[data-state="closed"]')).toBeNull();
+        const outer = screen.getByRole('button', { name: 'pages.aiAssistant.activityGroup:3' });
+        expect(outer.getAttribute('data-state')).toBe('open');
+        expect(screen.getAllByRole('button', { name: /pages.aiAssistant.workspace.toolGroup:1/ })).toHaveLength(2);
+        for (const button of screen.getAllByRole('button', { name: /pages.aiAssistant.workspace.toolGroup:1/ })) {
+            expect(button.getAttribute('data-state')).toBe('closed');
+        }
+        expect(screen.getByRole('button', { name: 'pages.aiAssistant.reasoning' }).getAttribute('data-state')).toBe('closed');
+        expect(screen.getByText('Checked the image').closest('[data-state="closed"]')).toBeTruthy();
+        fireEvent.click(screen.getByRole('button', { name: 'pages.aiAssistant.imageOpen' }));
+        expect(await screen.findByRole('dialog')).toBeVisible();
+    });
+
+    it('opens when screenshots arrive asynchronously and preserves a subsequent manual collapse', async () => {
+        let resolveImages!: (value: Awaited<ReturnType<typeof listAssistantImages>>) => void;
+        vi.mocked(listAssistantImages).mockReturnValue(new Promise(resolve => { resolveImages = resolve; }));
+        const messages = [
+            { id: 'first', role: 'assistant' as const, text: 'First answer' },
+            { id: 'capture', role: 'tool_call' as const, turnId: 'turn', toolCallId: 'capture-call', text: 'Capture tool' },
+            { id: 'second', role: 'assistant' as const, text: 'Second answer', reasoning: 'Checked the image' },
+        ];
+        const evidence: AiAssistantVisualEvidence[] = [];
+        const view = render(<AssistantImages sessionId="stored-run" evidence={evidence} messages={messages}
+            renderMessage={renderMessage} renderReasoning={renderReasoning} renderToolGroup={renderToolGroup} />);
+        const outer = screen.getByRole('button', { name: 'pages.aiAssistant.activityGroup:2' });
+        expect(outer.getAttribute('data-state')).toBe('closed');
+        resolveImages({ data: [frame], success: true, code: 0 });
+        expect(await screen.findByRole('img')).toBeVisible();
+        expect(outer.getAttribute('data-state')).toBe('open');
+        fireEvent.click(outer);
+        expect(outer.getAttribute('data-state')).toBe('closed');
+        view.rerender(<AssistantImages sessionId="stored-run" evidence={evidence}
+            messages={messages.map(message => message.id === 'second' ? { ...message, text: 'Updated answer' } : message)}
+            renderMessage={renderMessage} renderReasoning={renderReasoning} renderToolGroup={renderToolGroup} />);
+        expect(outer.getAttribute('data-state')).toBe('closed');
+        expect(screen.getByAltText('pages.aiAssistant.visualEvidenceAlt').closest('[data-state="closed"]')).toBeTruthy();
+        expect(getAssistantImage).toHaveBeenCalledTimes(1);
     });
 
     it('keeps a single activity visible and folds two calls even when they share one tool group', () => {

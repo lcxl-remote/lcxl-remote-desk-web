@@ -1533,6 +1533,8 @@ export default {
   'pages.aiAssistant.imageDelete': 'Delete image',
   'pages.aiAssistant.imageUnavailable': 'Image unavailable. It may have been deleted or access is no longer allowed.',
   'pages.aiAssistant.imageLoading': 'Loading image…',
+  'pages.aiAssistant.imageRecordedAt': 'Observation recorded: {{time}}',
+  'pages.aiAssistant.imageTimeUnrecorded': 'Time not recorded',
   'pages.aiAssistant.deliverySending': 'Sending; waiting for server confirmation…',
   'pages.aiAssistant.selectedContextExpired': 'Selected context has expired. Re-select or remove it before sending again. Your input is retained.',
   'pages.aiAssistant.deliveryUnconfirmed': 'Receipt is unconfirmed. Your input is retained. Retrying reuses the same message.',

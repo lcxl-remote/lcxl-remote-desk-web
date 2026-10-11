@@ -1531,6 +1531,8 @@ export default {
   'pages.aiAssistant.imageDelete': '删除图片',
   'pages.aiAssistant.imageUnavailable': '图片无法读取，可能已删除或当前无权访问。',
   'pages.aiAssistant.imageLoading': '正在加载图片…',
+  'pages.aiAssistant.imageRecordedAt': '观察记录时间：{{time}}',
+  'pages.aiAssistant.imageTimeUnrecorded': '时间未记录',
   'pages.aiAssistant.deliverySending': '正在发送，等待服务端确认…',
   'pages.aiAssistant.selectedContextExpired': '所选上下文已过期。请重新选择或移除该上下文后再发送，输入已保留。',
   'pages.aiAssistant.deliveryUnconfirmed': '尚未确认接收，输入已保留。重试不会重复创建消息。',

@@ -272,6 +272,7 @@ mod tests {
             "call",
             url,
             &validate_image_data_url(url).unwrap(),
+            300_000,
         )
         .unwrap();
         let (attachment, pixels) = ImageAttachment::prepare(&session, &frame, None).unwrap();
@@ -309,6 +310,9 @@ mod tests {
         let (session, image, pixels) = fixture();
         let mut part = image.attachment_record(&session, &pixels).unwrap();
         assert_eq!(part.metadata.size_bytes, pixels.len() as u64);
+        assert_eq!(part.metadata.created_at_unix_ms, 300_000);
+        assert_eq!(part.metadata.last_accessed_at_unix_ms, 300_000);
+        assert_eq!(image.frame.captured_at_unix_ms, 300_000);
         let encoded = serde_json::to_string(&part.metadata).unwrap();
         assert!(!encoded.contains("data:image"));
         let restored: crate::conversation_attachment::AttachmentMetadata =

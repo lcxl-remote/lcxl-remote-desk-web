@@ -1369,6 +1369,8 @@ async fn append_reviewed_tool_result_inner(
 
     let info =
         crate::image_input::validate_image_data_url(&image_data_url).map_err(image_input_error)?;
+    // Read the clock before review, but require it only for retained owner evidence.
+    let image_received_at_unix_ms = current_unix_ms(deps.clock);
     match review_image(deps, &image_data_url, &info.media_type).await {
         Ok(ContentSafetyDecision::Allow) => {
             let mut message = ChatMessage::tool_result(message_id, call_id, content);
@@ -1394,6 +1396,7 @@ async fn append_reviewed_tool_result_inner(
                     call_id,
                     &image_data_url,
                     &info,
+                    image_received_at_unix_ms?,
                 )
                 .map_err(|message| AgentError {
                     kind: AgentErrorKind::Internal,
