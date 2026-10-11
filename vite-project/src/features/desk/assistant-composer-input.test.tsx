@@ -9,7 +9,7 @@ const storageKey = 'ai-assistant-send-shortcut';
 const hints = {
     enter: 'Enter to send · Shift+Enter for a new line',
     'shift-enter': 'Shift+Enter to send · Enter for a new line',
-    'ctrl-enter': 'Ctrl/⌘+Enter to send · Enter for a new line',
+    'ctrl-enter': 'Ctrl+Enter to send · Enter for a new line',
 };
 
 function mount(props: Partial<ComponentProps<typeof AssistantComposerInput>> = {}) {
@@ -29,10 +29,37 @@ async function chooseShortcut(value: keyof typeof hints) {
     await waitFor(() => expect(screen.queryByRole('menu')).toBeNull());
 }
 
-beforeEach(() => localStorage.removeItem(storageKey));
+beforeEach(() => {
+    localStorage.removeItem(storageKey);
+    vi.spyOn(navigator, 'platform', 'get').mockReturnValue('Win32');
+});
 afterEach(() => { cleanup(); vi.restoreAllMocks(); localStorage.removeItem(storageKey); });
 
 describe('assistant send shortcuts', () => {
+    it.each(['enter', 'shift-enter', 'ctrl-enter'] as const)('shows Mac symbols for %s while keeping accessible labels and the saved shortcut', async mode => {
+        vi.spyOn(navigator, 'platform', 'get').mockReturnValue('MacIntel');
+        localStorage.setItem(storageKey, mode);
+        const { input, onSubmit } = mount();
+        const macHints = {
+            enter: ['↩ to send · ⇧↩ for a new line', 'Return to send · Shift+Return for a new line'],
+            'shift-enter': ['⇧↩ to send · ↩ for a new line', 'Shift+Return to send · Return for a new line'],
+            'ctrl-enter': ['⌘↩ to send · ↩ for a new line', 'Command+Return to send · Return for a new line'],
+        };
+        expect(screen.getByText(macHints[mode][0])).toBeVisible();
+        expect(input).toHaveAccessibleDescription(macHints[mode][1]);
+        fireEvent.keyDown(screen.getByRole('button', { name: 'Send shortcut' }), { key: 'Enter' });
+        for (const [value, [display, description]] of Object.entries(macHints)) {
+            const option = await screen.findByRole('menuitemradio', { name: description });
+            expect(option).toHaveTextContent(display);
+            expect(option).toHaveAttribute('aria-checked', String(mode === value));
+        }
+        fireEvent.keyDown(screen.getByRole('menu'), { key: 'Escape' });
+        await waitFor(() => expect(screen.queryByRole('menu')).toBeNull());
+        fireEvent.keyDown(input, { key: 'Enter', shiftKey: mode === 'shift-enter', metaKey: mode === 'ctrl-enter' });
+        expect(onSubmit).toHaveBeenCalledOnce();
+        expect(localStorage.getItem(storageKey)).toBe(mode);
+    });
+
     it('defaults to Enter, keeps Shift+Enter available for newlines and submits through the same form as the button', () => {
         const { input, onSubmit, ref, getByRole } = mount();
         expect(ref.current).toBe(input);

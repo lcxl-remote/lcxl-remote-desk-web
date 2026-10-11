@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { ChevronDown, Keyboard } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
+import { getLocalKeyboardLabels } from '@/lib/keyboard-labels';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuLabel, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 
 const STORAGE_KEY = 'ai-assistant-send-shortcut';
@@ -69,7 +70,9 @@ export const AssistantComposerInput = forwardRef<HTMLTextAreaElement, AssistantC
         const [shortcut, setShortcut] = useSendShortcut();
         const composing = useRef(false);
         const hintId = useId();
-        const hint = t(shortcutKeys[shortcut]);
+        const keyboardLabels = getLocalKeyboardLabels();
+        const hint = t(shortcutKeys[shortcut], keyboardLabels.display);
+        const accessibleHint = t(shortcutKeys[shortcut], keyboardLabels.description);
         return <>
             <Textarea {...props} ref={ref}
                 aria-describedby={[props['aria-describedby'], hintId].filter(Boolean).join(' ')}
@@ -95,7 +98,8 @@ export const AssistantComposerInput = forwardRef<HTMLTextAreaElement, AssistantC
                             className="h-auto min-h-8 max-w-full gap-1.5 whitespace-normal py-1 text-left text-xs text-muted-foreground"
                             aria-label={t('pages.aiAssistant.sendShortcut.label')}>
                             <Keyboard className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                            <span id={hintId}>{hint}</span>
+                            <span aria-hidden="true">{hint}</span>
+                            <span id={hintId} className="sr-only">{accessibleHint}</span>
                             <ChevronDown className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
                         </Button>
                     </DropdownMenuTrigger>
@@ -103,7 +107,8 @@ export const AssistantComposerInput = forwardRef<HTMLTextAreaElement, AssistantC
                         <DropdownMenuLabel>{t('pages.aiAssistant.sendShortcut.label')}</DropdownMenuLabel>
                         <DropdownMenuRadioGroup value={shortcut} onValueChange={setShortcut}>
                             {shortcuts.map(value => <DropdownMenuRadioItem key={value} value={value}
-                                className="whitespace-normal">{t(shortcutKeys[value])}</DropdownMenuRadioItem>)}
+                                aria-label={t(shortcutKeys[value], keyboardLabels.description)}
+                                className="whitespace-normal">{t(shortcutKeys[value], keyboardLabels.display)}</DropdownMenuRadioItem>)}
                         </DropdownMenuRadioGroup>
                     </DropdownMenuContent>
                 </DropdownMenu>
