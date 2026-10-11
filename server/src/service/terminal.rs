@@ -7,6 +7,7 @@ use desk_signal_facade::model::terminal::{
 };
 use desk_utils::error::DeskErrorCode;
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
+use std::collections::HashSet;
 use std::io::Write;
 use std::sync::Arc;
 use std::time::Duration;
@@ -39,31 +40,29 @@ pub async fn inner_fetch_terminal_list(
         }
     }
 
-    let mut current = 0;
     let settings = &settings.read().await.terminal;
-    if let Some(ref current_terminal) = settings.current_terminal {
-        log::info!(
-            "Default terminal command from settings: {:?}",
-            current_terminal
-        );
-        // find the index of the default command in the terminal list
-        for index in 0..terminal_list.len() {
-            if terminal_list[index] == *current_terminal {
-                log::info!(
-                    "Found default terminal command: {:?} at index {}",
-                    current_terminal,
-                    index
-                );
-                current = index;
-                break;
-            }
-        }
-    }
+    Ok(terminal_list_from_commands(
+        terminal_list,
+        settings.current_terminal.as_deref(),
+    ))
+}
 
-    Ok(TerminalList {
-        commands: terminal_list,
-        current,
-    })
+fn terminal_list_from_commands(
+    mut commands: Vec<Vec<String>>,
+    current_terminal: Option<&[String]>,
+) -> TerminalList {
+    // Repeated PATH directories and overlapping probes can return the same
+    // command more than once. Preserve first-occurrence order and distinct
+    // executable paths or arguments, including separate virtual environments.
+    let mut seen = HashSet::new();
+    commands.retain(|command| seen.insert(command.clone()));
+
+    // Resolve the saved command only after deduplication changes the indices.
+    let current = current_terminal
+        .and_then(|saved| commands.iter().position(|command| command == saved))
+        .unwrap_or(0);
+
+    TerminalList { commands, current }
 }
 
 /// Fetches the list of available terminals on a Windows
@@ -488,11 +487,76 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn repeated_python_paths_appear_once_in_discovery_order() {
+        let bash = vec!["/bin/bash".to_string()];
+        let python = vec!["/local/bin/python3.12".to_string()];
+        let system_python = vec!["/usr/bin/python3".to_string()];
+        let result = terminal_list_from_commands(
+            vec![
+                bash.clone(),
+                python.clone(),
+                python.clone(),
+                python.clone(),
+                python.clone(),
+                system_python.clone(),
+            ],
+            Some(&python),
+        );
+
+        assert_eq!(result.commands, vec![bash, python, system_python]);
+        assert_eq!(result.current, 1);
+    }
+
+    #[test]
+    fn saved_terminal_index_is_resolved_after_deduplication() {
+        let bash = vec!["/bin/bash".to_string()];
+        let python = vec!["/local/bin/python3.12".to_string()];
+        let zsh = vec!["/bin/zsh".to_string()];
+        let result = terminal_list_from_commands(
+            vec![bash.clone(), python.clone(), bash, python, zsh.clone()],
+            Some(&zsh),
+        );
+
+        assert_eq!(result.current, 2);
+        assert_eq!(result.commands[result.current], zsh);
+    }
+
+    #[test]
+    fn different_executable_paths_and_arguments_remain_selectable() {
+        let commands = vec![
+            vec!["/usr/bin/python3".to_string()],
+            vec!["/project/.venv/bin/python3".to_string()],
+            vec!["/usr/bin/python3".to_string(), "-q".to_string()],
+        ];
+        let result = terminal_list_from_commands(commands.clone(), Some(&commands[2]));
+
+        assert_eq!(result.commands, commands);
+        assert_eq!(result.current, 2);
+    }
+
+    #[test]
+    fn absent_or_unavailable_saved_terminal_falls_back_to_zero() {
+        let commands = vec![vec!["/bin/bash".to_string()]];
+        let missing = vec!["/missing/python3".to_string()];
+
+        for saved in [None, Some(missing.as_slice())] {
+            let result = terminal_list_from_commands(commands.clone(), saved);
+            assert_eq!(result.commands, commands);
+            assert_eq!(result.current, 0);
+
+            let empty = terminal_list_from_commands(Vec::new(), saved);
+            assert!(empty.commands.is_empty());
+            assert_eq!(empty.current, 0);
+        }
+    }
+
     #[tokio::test]
     async fn test_fetch_terminal_list() -> Result<(), DeskError> {
         let settings = web::Data::new(SharedSettings::from(Settings::default()));
         let result = fetch_terminal_list(settings).await?;
-        println!("Terminal list: {:?}", result);
+        let unique: HashSet<_> = result.commands.iter().collect();
+        assert_eq!(unique.len(), result.commands.len());
         assert!(!result.commands.is_empty()); // Ensure that the terminal list is not empty
         Ok(())
     }
