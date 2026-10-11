@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react"
+import { useEffect } from "react"
 import { useForm } from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
 import * as z from "zod"
@@ -32,7 +32,7 @@ export function LogSettings() {
     const { t } = useTranslation()
     const { toast } = useToast()
 
-    const { data: settingsResponse, isLoading } = useQueryLogSettings()
+    const { data: settingsResponse, isLoading, refetch: refetchSettings } = useQueryLogSettings()
     const { mutateAsync: updateSettings, isPending: isUpdating } = useUpdateLogSettings()
 
     const form = useForm<LogSettingsFormValues>({
@@ -46,11 +46,9 @@ export function LogSettings() {
         },
     })
 
-    // Update form values once data is loaded
-    const didHydrateRef = useRef(false)
+    // Refresh pristine forms without overwriting unsaved edits.
     useEffect(() => {
-        if (settingsResponse?.data && !isLoading && !didHydrateRef.current) {
-            didHydrateRef.current = true
+        if (settingsResponse?.data && !isLoading && !form.formState.isDirty) {
             const data = settingsResponse.data
             const normalizedLogLevel = typeof data.log_level === "string"
                 ? data.log_level.trim().toLowerCase()
@@ -69,8 +67,11 @@ export function LogSettings() {
     }, [settingsResponse?.data, isLoading, form])
 
     const onSubmit = async (values: LogSettingsFormValues) => {
+        let saved = false
         try {
             await updateSettings({ data: values })
+            saved = true
+            await refetchSettings({ throwOnError: true })
             toast({
                 title: t('pages.system.settings.success'),
                 description: t('pages.log.settings.updateSucceedMessage'),
@@ -79,7 +80,7 @@ export function LogSettings() {
             toast({
                 variant: "destructive",
                 title: t('pages.system.settings.error'),
-                description: t('pages.log.settings.updateFailedMessage'),
+                description: t(saved ? 'pages.system.settings.savedButRefreshFailedMessage' : 'pages.log.settings.updateFailedMessage'),
             })
         }
     }
@@ -224,8 +225,8 @@ export function LogSettings() {
                             </div>
 
                             <div className="flex justify-end">
-                                <Button type="submit" disabled={isUpdating}>
-                                    {isUpdating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
+                                <Button type="submit" disabled={isUpdating || form.formState.isSubmitting}>
+                                    {isUpdating || form.formState.isSubmitting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
                                     {t('pages.system.settings.save')}
                                 </Button>
                             </div>

@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react"
+import { useEffect } from "react"
 import { useForm } from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
 import * as z from "zod"
@@ -78,9 +78,9 @@ export function AiPolicySettings() {
 
     // Both policies are enforced by the Desk Server on this device. The central
     // Signal grant can only narrow the resulting permissions, never widen them.
-    const { data: policyResponse, isLoading: isPolicyLoading } = useQueryAiPolicySettings()
+    const { data: policyResponse, isLoading: isPolicyLoading, refetch: refetchPolicy } = useQueryAiPolicySettings()
     const { mutateAsync: updatePolicy, isPending: isPolicyUpdating } = useUpdateAiPolicySettings()
-    const { data: collectionResponse, isLoading: isCollectionLoading } = useQueryCollectionPolicySettings()
+    const { data: collectionResponse, isLoading: isCollectionLoading, refetch: refetchCollection } = useQueryCollectionPolicySettings()
     const { mutateAsync: updateCollection, isPending: isCollectionUpdating } = useUpdateCollectionPolicySettings()
     const assistantSettings = useQueryAiAssistantSettings()
     const assistantSettingsMutation = useUpdateAiAssistantSettings()
@@ -100,10 +100,8 @@ export function AiPolicySettings() {
         defaultValues: { allow_screen: true, allow_logs: false },
     })
 
-    const didHydratePolicyRef = useRef(false)
     useEffect(() => {
-        if (policyResponse?.data && !isPolicyLoading && !didHydratePolicyRef.current) {
-            didHydratePolicyRef.current = true
+        if (policyResponse?.data && !isPolicyLoading && !policyForm.formState.isDirty) {
             policyForm.reset({
                 execution_mode: normalizeExecutionMode(policyResponse.data.execution_mode),
                 max_concurrent_executions:
@@ -117,10 +115,8 @@ export function AiPolicySettings() {
         }
     }, [policyResponse?.data, isPolicyLoading, policyForm])
 
-    const didHydrateCollectionRef = useRef(false)
     useEffect(() => {
-        if (collectionResponse?.data && !isCollectionLoading && !didHydrateCollectionRef.current) {
-            didHydrateCollectionRef.current = true
+        if (collectionResponse?.data && !isCollectionLoading && !collectionForm.formState.isDirty) {
             collectionForm.reset({
                 allow_screen: collectionResponse.data.allow_screen ?? true,
                 allow_logs: collectionResponse.data.allow_logs ?? false,
@@ -129,6 +125,7 @@ export function AiPolicySettings() {
     }, [collectionResponse?.data, isCollectionLoading, collectionForm])
 
     const onSubmitPolicy = async (values: PolicyFormValues) => {
+        let saved = false
         const payload: AiExecutionPolicyUpdate = {
             execution_mode: values.execution_mode,
             max_concurrent_executions: values.max_concurrent_executions,
@@ -138,6 +135,8 @@ export function AiPolicySettings() {
         }
         try {
             await updatePolicy({ data: payload })
+            saved = true
+            await refetchPolicy({ throwOnError: true })
             toast({
                 title: t("pages.system.settings.success"),
                 description: t("pages.aiPolicy.updateSucceedMessage"),
@@ -146,18 +145,21 @@ export function AiPolicySettings() {
             toast({
                 variant: "destructive",
                 title: t("pages.system.settings.error"),
-                description: t("pages.aiPolicy.updateFailedMessage"),
+                description: t(saved ? "pages.system.settings.savedButRefreshFailedMessage" : "pages.aiPolicy.updateFailedMessage"),
             })
         }
     }
 
     const onSubmitCollection = async (values: CollectionPolicyFormValues) => {
+        let saved = false
         const payload: CollectionPolicySettingsUpdate = {
             allow_screen: values.allow_screen,
             allow_logs: values.allow_logs,
         }
         try {
             await updateCollection({ data: payload })
+            saved = true
+            await refetchCollection({ throwOnError: true })
             toast({
                 title: t("pages.system.settings.success"),
                 description: t("pages.collectionPolicy.updateSucceedMessage"),
@@ -166,7 +168,7 @@ export function AiPolicySettings() {
             toast({
                 variant: "destructive",
                 title: t("pages.system.settings.error"),
-                description: t("pages.collectionPolicy.updateFailedMessage"),
+                description: t(saved ? "pages.system.settings.savedButRefreshFailedMessage" : "pages.collectionPolicy.updateFailedMessage"),
             })
         }
     }
@@ -399,8 +401,8 @@ export function AiPolicySettings() {
                                 )}
                             />
                             <div className="flex justify-end">
-                                <Button type="submit" disabled={isPolicyUpdating}>
-                                    {isPolicyUpdating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
+                                <Button type="submit" disabled={isPolicyUpdating || policyForm.formState.isSubmitting}>
+                                    {isPolicyUpdating || policyForm.formState.isSubmitting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
                                     {t("pages.system.settings.save")}
                                 </Button>
                             </div>
@@ -452,8 +454,8 @@ export function AiPolicySettings() {
                                 )}
                             />
                             <div className="flex justify-end">
-                                <Button type="submit" disabled={isCollectionUpdating}>
-                                    {isCollectionUpdating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
+                                <Button type="submit" disabled={isCollectionUpdating || collectionForm.formState.isSubmitting}>
+                                    {isCollectionUpdating || collectionForm.formState.isSubmitting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
                                     {t("pages.system.settings.save")}
                                 </Button>
                             </div>

@@ -40,7 +40,7 @@ vi.mock("@/services/hooks/turnController/useGetTurnInfo", () => ({
     getTurnInfoQueryKey: () => [{ url: "/api/turn/info" }],
 }))
 vi.mock("@/services/hooks/turnController/useQueryTurnSettings", () => ({
-    useQueryTurnSettings: () => turnQuery,
+    useQueryTurnSettings: () => ({ ...turnQuery, refetch: vi.fn(async () => turnQuery) }),
 }))
 vi.mock("@/services/hooks/turnController/useUpdateTurnSettings", () => ({
     useUpdateTurnSettings: () => ({ mutateAsync: updateTurnSettings, isPending: false }),

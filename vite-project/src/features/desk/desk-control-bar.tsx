@@ -243,6 +243,7 @@ export function DeskControlBar({
                         <TooltipTrigger asChild>
                             <Button
                                 className="controlButton"
+                                aria-label={isFullscreen ? t("pages.desk.exitFullscreen") : t("pages.desk.fullscreen")}
                                 onClick={onToggleFullscreen}
                                 variant="ghost"
                             >

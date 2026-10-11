@@ -1,4 +1,5 @@
 import { Hand, Scan, ZoomIn, ZoomOut } from 'lucide-react';
+import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
@@ -10,6 +11,24 @@ export function MobileDeskControls({ interaction, onOpenChange }: {
 }) {
     const { t } = useTranslation();
     const { model: m, change } = interaction;
+    const [isTouchController, setIsTouchController] = useState(() =>
+        window.matchMedia?.('(pointer: coarse)').matches ?? false);
+    useEffect(() => {
+        const query = window.matchMedia?.('(pointer: coarse)');
+        if (!query) return;
+        const update = () => setIsTouchController(query.matches);
+        update();
+        query.addEventListener('change', update);
+        return () => query.removeEventListener('change', update);
+    }, []);
+    useEffect(() => {
+        if (!isTouchController) {
+            // Restore the local view when its touch controls are no longer available.
+            change(model => model.resetViewport());
+            onOpenChange(false);
+        }
+    }, [isTouchController, change, onOpenChange]);
+    if (!isTouchController) return null;
     const label = (key: string) => t(`pages.desk.mobile.${key}`);
     return <>
         <Popover onOpenChange={open => { change(model => model.cancel(true)); onOpenChange(open); }}>

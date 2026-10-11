@@ -16,13 +16,13 @@ const h = vi.hoisted(() => ({
 }))
 
 vi.mock("@/services/hooks/aiModelController/useQueryAiPolicySettings", () => ({
-    useQueryAiPolicySettings: () => ({ data: { data: h.policyData }, isLoading: false }),
+    useQueryAiPolicySettings: () => ({ data: { data: h.policyData }, isLoading: false, refetch: vi.fn(async () => ({ data: { data: h.policyData } })) }),
 }))
 vi.mock("@/services/hooks/aiModelController/useUpdateAiPolicySettings", () => ({
     useUpdateAiPolicySettings: () => ({ mutateAsync: h.policyMutateAsync, isPending: false }),
 }))
 vi.mock("@/services/hooks/aiModelController/useQueryCollectionPolicySettings", () => ({
-    useQueryCollectionPolicySettings: () => ({ data: { data: h.collectionData }, isLoading: false }),
+    useQueryCollectionPolicySettings: () => ({ data: { data: h.collectionData }, isLoading: false, refetch: vi.fn(async () => ({ data: { data: h.collectionData } })) }),
 }))
 vi.mock("@/services/hooks/aiModelController/useUpdateCollectionPolicySettings", () => ({
     useUpdateCollectionPolicySettings: () => ({ mutateAsync: h.collectionMutateAsync, isPending: false }),

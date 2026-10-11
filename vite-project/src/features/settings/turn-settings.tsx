@@ -95,7 +95,7 @@ export function TurnSettings() {
 
     const queryClient = useQueryClient()
 
-    const { data: turnSettingsResponse, isLoading } = useQueryTurnSettings()
+    const { data: turnSettingsResponse, isLoading, refetch: refetchSettings } = useQueryTurnSettings()
     const { mutateAsync: updateTurnSettings, isPending: isUpdating } = useUpdateTurnSettings()
     const { mutateAsync: regenerateSecret, isPending: isRegenerating } = useRegenerateTurnSecret()
     const [regenerateDialogOpen, setRegenerateDialogOpen] = useState(false)
@@ -152,6 +152,7 @@ export function TurnSettings() {
     }, [turnSettingsResponse?.data, isLoading, form])
 
     const onSubmit = async (values: TurnSettingsFormValues) => {
+        let saved = false
         try {
             // merge with existing settings to keep static_credentials and static_auth_secret untouched by frontend
             const currentSettings = turnSettingsResponse?.data || {}
@@ -160,7 +161,9 @@ export function TurnSettings() {
                 ...values,
             } as TurnSettings;
             await updateTurnSettings({ data: payload })
+            saved = true
             rereadRuntime()
+            await refetchSettings({ throwOnError: true })
             toast({
                 title: t('pages.system.settings.success'),
                 description: t('pages.turn.settings.updateSucceedMessage'),
@@ -169,7 +172,7 @@ export function TurnSettings() {
             toast({
                 variant: "destructive",
                 title: t('pages.system.settings.error'),
-                description: t('pages.turn.settings.updateFailedMessage'),
+                description: t(saved ? 'pages.system.settings.savedButRefreshFailedMessage' : 'pages.turn.settings.updateFailedMessage'),
             })
         }
     }
@@ -177,9 +180,12 @@ export function TurnSettings() {
     const onRegenerateSecret = async () => {
         if (regeneratePendingRef.current) return
         regeneratePendingRef.current = true
+        let saved = false
         try {
             await regenerateSecret()
+            saved = true
             rereadRuntime()
+            await refetchSettings({ throwOnError: true })
             toast({
                 title: t('pages.system.settings.success'),
                 description: t('pages.system.settings.regenerateSecretSuccess'),
@@ -189,7 +195,7 @@ export function TurnSettings() {
             toast({
                 variant: "destructive",
                 title: t('pages.system.settings.error'),
-                description: t('pages.system.settings.regenerateSecretError'),
+                description: t(saved ? 'pages.system.settings.savedButRefreshFailedMessage' : 'pages.system.settings.regenerateSecretError'),
             })
         } finally {
             regeneratePendingRef.current = false
@@ -383,8 +389,8 @@ export function TurnSettings() {
                                 <p className="text-sm text-muted-foreground text-right">
                                     {t('pages.turn.settings.restartNotice')}
                                 </p>
-                                <Button type="submit" disabled={isUpdating}>
-                                    {isUpdating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
+                                <Button type="submit" disabled={isUpdating || form.formState.isSubmitting}>
+                                    {isUpdating || form.formState.isSubmitting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
                                     {t('pages.turn.settings.save')}
                                 </Button>
                             </div>

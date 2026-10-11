@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest"
-import { render, screen, fireEvent, waitFor } from "@testing-library/react"
+import { render as renderComponent, screen, fireEvent, waitFor, act } from "@testing-library/react"
+import type { ReactElement } from "react"
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 
 // i18n: real en-US locale, interpolating {{name}} placeholders like i18next.
 vi.mock("react-i18next", () => import("@/test-utils/i18n-mock").then((m) => m.reactI18nextMock()))
@@ -16,9 +18,18 @@ const h = vi.hoisted(() => ({
     toast: vi.fn(),
 }))
 
-vi.mock("@/services/hooks/modelProviderController/useGetModelProvider", () => ({
-    useGetModelProvider: () => ({ data: { data: h.providerData }, isLoading: false }),
-}))
+vi.mock("@/services/hooks/modelProviderController/useGetModelProvider", async () => {
+    const { useQuery } = await import("@tanstack/react-query")
+    const getModelProviderQueryKey = () => [{ url: '/api/model/provider' }] as const
+    return {
+        getModelProviderQueryKey,
+        useGetModelProvider: () => useQuery({
+            queryKey: getModelProviderQueryKey(),
+            queryFn: async () => ({ success: true, data: h.providerData }),
+            staleTime: Infinity,
+        }),
+    }
+})
 vi.mock("@/services/hooks/modelProviderController/useUpdateModelProvider", () => ({
     useUpdateModelProvider: () => ({ mutateAsync: h.providerMutateAsync, isPending: false }),
 }))
@@ -32,13 +43,22 @@ import {
     presetProfile,
 } from "./ai-model-settings"
 import { RestResponseError } from "@/lib/kubb-client"
+import { deskErrorCodeEnum } from "@/services/types"
+
+let queryClient: QueryClient
+function render(component: ReactElement) {
+    return renderComponent(component, {
+        wrapper: ({ children }) => <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>,
+    })
+}
 
 function lastProviderPayload() {
     return (h.providerMutateAsync.mock.calls[0][0] as { data: Record<string, unknown> }).data
 }
 
 beforeEach(() => {
-    h.providerMutateAsync.mockClear()
+    queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    h.providerMutateAsync.mockReset()
     h.testMutateAsync.mockReset()
     h.testMutateAsync.mockResolvedValue({})
     h.toast.mockClear()
@@ -60,9 +80,82 @@ beforeEach(() => {
         exec_approval_timeout_secs: 300,
         api_key_set: true,
     }
+    h.providerMutateAsync.mockResolvedValue({ success: true, data: h.providerData })
 })
 
 describe("AiModelSettings", () => {
+    it("uses the saved revisions on subsequent saves without refetching or losing edits", async () => {
+        h.providerMutateAsync.mockResolvedValueOnce({
+            success: true,
+            data: { ...h.providerData, connection_revision: 2, profile_revision: 3 },
+        })
+        render(<AiModelSettings />)
+        await screen.findByDisplayValue("gpt-4o-mini")
+        fireEvent.change(screen.getByDisplayValue("gpt-4o-mini"), { target: { value: "edited-model" } })
+        fireEvent.click(screen.getByRole("button", { name: "Save Settings" }))
+        await waitFor(() => expect(h.toast).toHaveBeenCalledWith(expect.objectContaining({ title: "Success" })))
+        expect(lastProviderPayload()).toMatchObject({ expected_connection_revision: 1, expected_profile_revision: 1 })
+        expect(queryClient.getQueryData([{ url: '/api/model/provider' }])).toMatchObject({
+            data: { connection_revision: 2, profile_revision: 3 },
+        })
+        expect(screen.getByDisplayValue("edited-model")).toBeInTheDocument()
+        fireEvent.change(screen.getByLabelText("Runtime output tokens"), { target: { value: "8192" } })
+        fireEvent.click(screen.getByRole("button", { name: "Save Settings" }))
+        await waitFor(() => expect(h.providerMutateAsync).toHaveBeenCalledTimes(2))
+        expect(h.providerMutateAsync.mock.calls[1][0]).toMatchObject({
+            data: { expected_connection_revision: 2, expected_profile_revision: 3, model: "edited-model", runtime_max_output_tokens: 8192 },
+        })
+    })
+
+    it("explains a real revision conflict and preserves the unsaved form", async () => {
+        h.providerMutateAsync.mockRejectedValueOnce(new RestResponseError(
+            "Custom desk error(8): provider configuration revision conflict", deskErrorCodeEnum.PRECONDITION_FAILED, null,
+        ))
+        render(<AiModelSettings />)
+        await screen.findByDisplayValue("gpt-4o-mini")
+        fireEvent.change(screen.getByDisplayValue("gpt-4o-mini"), { target: { value: "unsaved-model" } })
+        fireEvent.click(screen.getByRole("button", { name: "Save Settings" }))
+        await waitFor(() => expect(h.toast).toHaveBeenCalledWith({
+            variant: "destructive",
+            title: "Error",
+            description: "The model configuration was updated elsewhere. Refresh this page, review the latest settings, and save again.",
+        }))
+        expect(screen.getByDisplayValue("unsaved-model")).toBeInTheDocument()
+        expect(h.providerMutateAsync).toHaveBeenCalledOnce()
+        expect(queryClient.getQueryData([{ url: '/api/model/provider' }])).toMatchObject({
+            data: { connection_revision: 1, profile_revision: 1 },
+        })
+    })
+
+    it("shows other backend save errors instead of only the generic failure", async () => {
+        h.providerMutateAsync.mockRejectedValueOnce(new RestResponseError(
+            "Custom desk error(2): base_url is not permitted by the server's provider policy", deskErrorCodeEnum.INVALID_PARAMS, null,
+        ))
+        render(<AiModelSettings />)
+        await screen.findByDisplayValue("gpt-4o-mini")
+        fireEvent.click(screen.getByRole("button", { name: "Save Settings" }))
+        await waitFor(() => expect(h.toast).toHaveBeenCalledWith(expect.objectContaining({
+            variant: "destructive",
+            description: "base_url is not permitted by the server's provider policy",
+        })))
+    })
+
+    it("prevents another save or probe while the previous save is completing", async () => {
+        let finish!: (value: unknown) => void
+        h.providerMutateAsync.mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+        render(<AiModelSettings />)
+        await screen.findByDisplayValue("gpt-4o-mini")
+        const save = screen.getByRole("button", { name: "Save Settings" })
+        fireEvent.click(save)
+        await waitFor(() => expect(h.providerMutateAsync).toHaveBeenCalledOnce())
+        expect(save).toBeDisabled()
+        expect(screen.getByRole("button", { name: "Test connection" })).toBeDisabled()
+        fireEvent.click(save)
+        expect(h.providerMutateAsync).toHaveBeenCalledOnce()
+        await act(async () => finish({ success: true, data: h.providerData }))
+        await waitFor(() => expect(save).not.toBeDisabled())
+    })
+
     it("uses the edited runtime budget for connection tests and saved settings", async () => {
         render(<AiModelSettings />)
         await waitFor(() => expect(screen.getByDisplayValue("gpt-4o-mini")).toBeInTheDocument())

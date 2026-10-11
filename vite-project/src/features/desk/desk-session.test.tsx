@@ -1,6 +1,6 @@
 import { act, render, screen, fireEvent, waitFor } from '@testing-library/react';
 import '@testing-library/jest-dom';
-import { describe, it, expect, vi } from 'vitest';
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import DeskSession from './desk-session';
@@ -24,6 +24,11 @@ import { SIGNALING_TYPE_CODE_MEDIA_PIPELINE_STATE_CHANGED } from './constants';
 const signalingHarness = vi.hoisted(() => ({
   subscribers: new Set<(message: any) => void>(),
 }));
+const fullscreenHarness = vi.hoisted(() => ({
+  toast: vi.fn(),
+  t: vi.fn((key: string, fallback?: unknown) => typeof fallback === 'string' ? fallback : key),
+}));
+vi.mock('@/hooks/use-toast', () => ({ useToast: () => ({ toast: fullscreenHarness.toast }) }));
 
 describe('settings apply model', () => {
   it('keeps an unsupported host adaptive-bitrate setting at its suggestion', () => {
@@ -93,8 +98,7 @@ vi.mock('react-router-dom', () => ({
 // Mock translations
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
-    t: (key: string, fallback?: unknown) =>
-      typeof fallback === 'string' ? fallback : key,
+    t: fullscreenHarness.t,
   }),
 }));
 
@@ -300,6 +304,97 @@ describe('DeskSession Control Bar', () => {
 
     // We expect it to still be expanded
     expect(content).toHaveClass('expanded');
+  });
+});
+
+describe('DeskSession fullscreen', () => {
+  let active: Element | null;
+  let enabled: boolean;
+  let request: ReturnType<typeof vi.fn>;
+  let exit: ReturnType<typeof vi.fn>;
+  let restore: (() => void)[];
+
+  beforeEach(() => {
+    active = null;
+    enabled = true;
+    fullscreenHarness.toast.mockClear();
+    fullscreenHarness.t.mockClear();
+    const change = () => document.dispatchEvent(new Event('fullscreenchange'));
+    request = vi.fn(function (this: Element) {
+      active = this;
+      change();
+      return Promise.resolve();
+    });
+    exit = vi.fn(async () => { active = null; change(); });
+    restore = [];
+    const replace = (object: object, key: string, descriptor: PropertyDescriptor) => {
+      const previous = Object.getOwnPropertyDescriptor(object, key);
+      Object.defineProperty(object, key, { configurable: true, ...descriptor });
+      restore.push(() => {
+        if (previous) Object.defineProperty(object, key, previous);
+        else Reflect.deleteProperty(object, key);
+      });
+    };
+    replace(HTMLElement.prototype, 'requestFullscreen', { value: request, writable: true });
+    replace(document, 'exitFullscreen', { value: exit });
+    replace(document, 'fullscreenElement', { get: () => active });
+    replace(document, 'fullscreenEnabled', { get: () => enabled });
+  });
+
+  afterEach(() => restore.reverse().forEach(fn => fn()));
+
+  function open() {
+    const view = render(<DeskSession />);
+    fireEvent.mouseEnter(view.container.querySelector('.controlBar')!);
+    return view;
+  }
+
+  it('requests fullscreen directly from the toolbar click and updates the exit button', async () => {
+    const view = open();
+    fireEvent.click(screen.getByRole('button', { name: 'pages.desk.fullscreen' }));
+    expect(request).toHaveBeenCalledOnce();
+    expect(active).toBe(view.container.querySelector('.videoWrapper'));
+    fireEvent.click(await screen.findByRole('button', { name: 'pages.desk.exitFullscreen' }));
+    await waitFor(() => expect(exit).toHaveBeenCalledOnce());
+    expect(screen.getByRole('button', { name: 'pages.desk.fullscreen' })).toBeInTheDocument();
+    expect(fullscreenHarness.toast).not.toHaveBeenCalled();
+  });
+
+  it('shows the browser error when a fullscreen request is rejected', async () => {
+    request.mockRejectedValueOnce(new DOMException('Permissions check failed', 'NotAllowedError'));
+    open();
+    fireEvent.click(screen.getByRole('button', { name: 'pages.desk.fullscreen' }));
+    await waitFor(() => expect(fullscreenHarness.toast).toHaveBeenCalledWith({
+      title: 'pages.desk.fullscreenFailed', description: 'pages.desk.fullscreenFailedDetail', variant: 'destructive',
+    }));
+    expect(fullscreenHarness.t).toHaveBeenCalledWith('pages.desk.fullscreenFailedDetail', { error: 'Permissions check failed' });
+    expect(active).toBeNull();
+  });
+
+  it('explains a browser or embedding policy that disables fullscreen', async () => {
+    enabled = false;
+    open();
+    fireEvent.click(screen.getByRole('button', { name: 'pages.desk.fullscreen' }));
+    await waitFor(() => expect(fullscreenHarness.toast).toHaveBeenCalledWith(expect.objectContaining({ description: 'pages.desk.fullscreenBlocked' })));
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it('explains an unavailable fullscreen API', async () => {
+    Reflect.deleteProperty(HTMLElement.prototype, 'requestFullscreen');
+    open();
+    fireEvent.click(screen.getByRole('button', { name: 'pages.desk.fullscreen' }));
+    await waitFor(() => expect(fullscreenHarness.toast).toHaveBeenCalledWith(expect.objectContaining({ description: 'pages.desk.fullscreenUnsupported' })));
+  });
+
+  it('handles a rejected exit request and retains the fullscreen state', async () => {
+    open();
+    fireEvent.click(screen.getByRole('button', { name: 'pages.desk.fullscreen' }));
+    exit.mockRejectedValueOnce(new Error('Document is not fully active'));
+    fireEvent.click(await screen.findByRole('button', { name: 'pages.desk.exitFullscreen' }));
+    await waitFor(() => expect(fullscreenHarness.toast).toHaveBeenCalledWith(expect.objectContaining({ variant: 'destructive' })));
+    expect(fullscreenHarness.t).toHaveBeenCalledWith('pages.desk.fullscreenFailedDetail', { error: 'Document is not fully active' });
+    expect(active).not.toBeNull();
+    expect(screen.getByRole('button', { name: 'pages.desk.exitFullscreen' })).toBeInTheDocument();
   });
 });
 

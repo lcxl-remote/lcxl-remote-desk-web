@@ -7,9 +7,10 @@ import { zodResolver } from "@hookform/resolvers/zod"
 import * as z from "zod"
 import type { TFunction } from "i18next"
 import { useTranslation } from "react-i18next"
+import { useQueryClient } from "@tanstack/react-query"
 import { Loader2, Save, PlugZap } from "lucide-react"
 
-import { useGetModelProvider } from "@/services/hooks/modelProviderController/useGetModelProvider"
+import { getModelProviderQueryKey, useGetModelProvider } from "@/services/hooks/modelProviderController/useGetModelProvider"
 import { useUpdateModelProvider } from "@/services/hooks/modelProviderController/useUpdateModelProvider"
 import { useTestModelProvider } from "@/services/hooks/modelProviderController/useTestModelProvider"
 import type { ModelProviderUpdate, ProviderTestParams } from "@/services/types"
@@ -133,10 +134,13 @@ function errorMessage(error: unknown, fallback: string): string {
     return error instanceof Error && error.message ? error.message : fallback
 }
 
-function connectionTestErrorMessage(error: unknown, t: TFunction, fallback: string): string {
+function modelProviderErrorMessage(error: unknown, t: TFunction, fallback: string): string {
     if (!(error instanceof RestResponseError)) return errorMessage(error, fallback)
 
     const message = error.message.replace(/^Custom desk error\(-?\d+\):\s*/, "")
+    if (message === "provider configuration revision conflict") {
+        return t("pages.aiModel.settings.updateRevisionConflictMessage")
+    }
     const gatewayFailure = message.match(
         /^Test failed: model gateway returned status ([^:]+)(?::\s*([\s\S]*))?$/,
     )
@@ -157,6 +161,7 @@ function connectionTestErrorMessage(error: unknown, t: TFunction, fallback: stri
 export function AiModelSettings() {
     const { t } = useTranslation()
     const { toast } = useToast()
+    const queryClient = useQueryClient()
 
     // Model provider lives on the central signaling brain. In portable mode the
     // signaling server is embedded in this process, so the same origin serves it.
@@ -259,7 +264,13 @@ export function AiModelSettings() {
         }
 
         try {
-            await updateProvider({ data: payload })
+            const response = await updateProvider({ data: payload })
+            if (!response.success || !response.data) {
+                throw new Error(response.message || t("pages.aiModel.settings.updateFailedMessage"))
+            }
+            // Cancel older reads before publishing the saved revisions to the query.
+            await queryClient.cancelQueries({ queryKey: getModelProviderQueryKey() })
+            queryClient.setQueryData(getModelProviderQueryKey(), response)
             // Reflect the new key state and reset the transient secret inputs.
             if (values.clear_api_key) setApiKeySet(false)
             else if (api_key) setApiKeySet(true)
@@ -269,11 +280,11 @@ export function AiModelSettings() {
                 title: t("pages.system.settings.success"),
                 description: t("pages.aiModel.settings.updateSucceedMessage"),
             })
-        } catch {
+        } catch (error) {
             toast({
                 variant: "destructive",
                 title: t("pages.system.settings.error"),
-                description: t("pages.aiModel.settings.updateFailedMessage"),
+                description: modelProviderErrorMessage(error, t, t("pages.aiModel.settings.updateFailedMessage")),
             })
         }
     }
@@ -323,7 +334,7 @@ export function AiModelSettings() {
             toast({
                 variant: "destructive",
                 title: t("pages.aiModel.settings.testFailed"),
-                description: connectionTestErrorMessage(
+                description: modelProviderErrorMessage(
                     error,
                     t,
                     t("pages.aiModel.settings.testFailed"),
@@ -826,12 +837,12 @@ export function AiModelSettings() {
                             />
 
                             <div className="flex justify-end gap-2">
-                                <Button type="button" variant="outline" onClick={onTestConnection} disabled={isTesting || isProviderUpdating || !PROVIDERS.includes(form.watch("wire_protocol") as (typeof PROVIDERS)[number])}>
+                                <Button type="button" variant="outline" onClick={onTestConnection} disabled={isTesting || isProviderUpdating || form.formState.isSubmitting || !PROVIDERS.includes(form.watch("wire_protocol") as (typeof PROVIDERS)[number])}>
                                     {isTesting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <PlugZap className="mr-2 h-4 w-4" />}
                                     {t("pages.aiModel.settings.testConnection")}
                                 </Button>
-                                <Button type="submit" disabled={isProviderUpdating || !PROVIDERS.includes(form.watch("wire_protocol") as (typeof PROVIDERS)[number])}>
-                                    {isProviderUpdating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
+                                <Button type="submit" disabled={isProviderUpdating || form.formState.isSubmitting || !PROVIDERS.includes(form.watch("wire_protocol") as (typeof PROVIDERS)[number])}>
+                                    {isProviderUpdating || form.formState.isSubmitting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
                                     {t("pages.system.settings.save")}
                                 </Button>
                             </div>

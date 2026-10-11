@@ -1599,21 +1599,36 @@ export default function DeskSession({
     };
 
     const handleFullscreen = async () => {
-        if (!document.fullscreenElement) {
-            try {
-                await videoWrapperRef.current?.requestFullscreen();
-            } catch (err) {
-                console.log(`Error attempting to enable fullscreen: ${(err as Error).message}`);
-                return;
+        try {
+            if (!document.fullscreenElement) {
+                const wrapper = videoWrapperRef.current;
+                if (!wrapper) return;
+                if (typeof wrapper.requestFullscreen !== 'function' || document.fullscreenEnabled === false) {
+                    toast({
+                        title: t('pages.desk.fullscreenFailed'),
+                        description: t(typeof wrapper.requestFullscreen !== 'function'
+                            ? 'pages.desk.fullscreenUnsupported'
+                            : 'pages.desk.fullscreenBlocked'),
+                        variant: 'destructive',
+                    });
+                    return;
+                }
+                await wrapper.requestFullscreen();
+                // Lock Escape only after fullscreen is actually active.
+                if (document.fullscreenElement === wrapper) await lockEscapeKey();
+            } else {
+                // The fullscreenchange listener releases the keyboard lock,
+                // including exits initiated by the browser's Escape shortcut.
+                await document.exitFullscreen();
             }
-            // Lock Escape only after fullscreen is actually active, otherwise
-            // Chromium does not engage the press-and-hold-to-exit behaviour and
-            // keeps swallowing Escape (so the host never receives it).
-            await lockEscapeKey();
-        } else {
-            // Releasing the lock is handled by the fullscreenchange listener so
-            // it also covers exiting via press-and-hold Escape.
-            document.exitFullscreen();
+        } catch (error) {
+            toast({
+                title: t('pages.desk.fullscreenFailed'),
+                description: (error instanceof Error || error instanceof DOMException) && error.message
+                    ? t('pages.desk.fullscreenFailedDetail', { error: error.message })
+                    : t('pages.desk.fullscreenBlocked'),
+                variant: 'destructive',
+            });
         }
     };
 

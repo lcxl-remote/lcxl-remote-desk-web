@@ -224,6 +224,7 @@ export function DeskConnectionSettings() {
         ) {
             return
         }
+        let saved = false
         try {
             // `update_settings` is a full-struct replace, so the payload must
             // carry every SystemSettings field. Refetch the latest settings and
@@ -233,6 +234,8 @@ export function DeskConnectionSettings() {
             const fresh = await refetchSettings()
             const base = fresh.data?.data ?? settingsResponse?.data ?? {}
             await updateSettings({ data: mergeSystemSettings(base, values) })
+            saved = true
+            await refetchSettings({ throwOnError: true })
             toast({
                 title: t('pages.system.settings.success'),
                 description: t('pages.system.settings.updateSucceedMessage'),
@@ -241,7 +244,7 @@ export function DeskConnectionSettings() {
             toast({
                 variant: "destructive",
                 title: t('pages.system.settings.error'),
-                description: t('pages.system.settings.updateFailedMessage'),
+                description: t(saved ? 'pages.system.settings.savedButRefreshFailedMessage' : 'pages.system.settings.updateFailedMessage'),
             })
         }
     }
@@ -385,7 +388,7 @@ export function DeskConnectionSettings() {
 
                             <div className="flex justify-end">
                                 <Button type="submit" disabled={isUpdating || form.formState.isSubmitting}>
-                                    {isUpdating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
+                                    {isUpdating || form.formState.isSubmitting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
                                     {t('pages.system.settings.save')}
                                 </Button>
                             </div>

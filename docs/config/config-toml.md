@@ -2,6 +2,8 @@
 
 Server settings use a startup-mode-independent platform default: `%ProgramData%\LCXL Remote Desktop\config\config.toml` on Windows, `XDG_CONFIG_HOME/lcxl-remote-desk/config.toml` (or `~/.config/lcxl-remote-desk/config.toml`) for a non-root Linux user, `/etc/lcxl-remote-desk/config.toml` for Linux root, and `~/Library/Application Support/com.lcxl.remote-desk/config/config.toml` on macOS. `-c, --config-file-path <PATH>` explicitly selects another profile; services and LaunchAgents inherit it only when it was explicitly supplied.
 
+After saving system, connection, log, TURN, TURN client or AI execution and collection settings, the page rereads the saved configuration and updates its cache. Returning to the page shows the saved values. The save button stays disabled until this refresh finishes; edits made during the refresh are preserved. If the write succeeds but this read fails, the message confirms that settings were saved and asks you to reload the page to check the saved values.
+
 ## System `[system]`
 
 - `enable_ipv6` — whether to enable IPv6 support.

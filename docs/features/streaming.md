@@ -42,6 +42,10 @@ For signed-in owner access, the Web controller saves device settings in this bro
 
 Mouse and keyboard input are injected on the controlled device over a dedicated data channel. In service-daemon mode, injection runs inside the user's desktop session — see [Startup Modes](/guide/startup-modes).
 
+## Browser fullscreen
+
+The toolbar's **Fullscreen** button makes the remote-desktop viewing area fullscreen on the controller. It uses the browser's native fullscreen permission and does not require remote-control approval. If the browser disables fullscreen, does not expose the API, or rejects entry or exit, the page displays an error notification with the browser's message when available. Embedded pages also need fullscreen authorization from their containing page. Use the toolbar's **Exit Fullscreen** button to return to the normal view.
+
 ## Prepare the controlled host
 
 The controlled host's home page shows the local actions required before it can accept a desktop session. Windows keeps the **Install service** action there; macOS reports Screen Recording and Accessibility separately and can open their system permission prompts from the same area.
@@ -80,6 +84,8 @@ Automatic changes run only while exactly one remote desktop connection exists. O
 ## Mobile touch and local zoom
 
 Mobile Web, iOS and Android offer two modes, with Direct touch selected initially. Open **Touch and zoom** in the toolbar to change modes or read the gesture help.
+
+The Web toolbar shows Touch and zoom, Zoom in, Zoom out and Fit screen when touch is the primary pointing input. Desktop browsers using a mouse hide this group, including in narrow windows, while keeping Fullscreen and the other general controls. Switching to mouse input closes the touch menu and restores the local view to Fit screen.
 
 | Action | Direct touch | Touchpad |
 | --- | --- | --- |

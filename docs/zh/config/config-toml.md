@@ -2,6 +2,8 @@
 
 服务端设置使用与启动模式无关的平台默认路径：Windows 为 `%ProgramData%\LCXL Remote Desktop\config\config.toml`；Linux 普通用户为 `XDG_CONFIG_HOME/lcxl-remote-desk/config.toml`（未设置时 `~/.config/lcxl-remote-desk/config.toml`），root 为 `/etc/lcxl-remote-desk/config.toml`；macOS 为 `~/Library/Application Support/com.lcxl.remote-desk/config/config.toml`。`-c, --config-file-path <PATH>` 用于显式选择其他 profile；只有显式传值时服务或 LaunchAgent 才继承该路径。
 
+系统、连接、日志、TURN 服务、TURN 客户端及 AI 执行与采集策略保存后，页面会重新读取已保存配置并更新缓存，返回页面时显示已保存的值。保存按钮在刷新完成前保持禁用，刷新期间继续编辑的内容会保留。如果写入成功而读取失败，提示会明确说明配置已保存，并请你重新加载页面确认已保存的值。
+
 ## 系统 `[system]`
 
 - `enable_ipv6`——是否启用 IPv6 支持。

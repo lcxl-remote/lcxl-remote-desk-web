@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react"
+import { useEffect } from "react"
 import { useForm } from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
 import * as z from "zod"
@@ -25,7 +25,7 @@ export function TurnClientSettingsPage() {
     const { t } = useTranslation()
     const { toast } = useToast()
 
-    const { data: turnClientSettingsResponse, isLoading } = useQueryTurnClientSettings()
+    const { data: turnClientSettingsResponse, isLoading, refetch: refetchSettings } = useQueryTurnClientSettings()
     const { mutateAsync: updateTurnClientSettings, isPending: isUpdating } = useUpdateTurnClientSettings()
 
     const form = useForm<TurnClientSettingsFormValues>({
@@ -35,10 +35,8 @@ export function TurnClientSettingsPage() {
         },
     })
 
-    const didHydrateRef = useRef(false)
     useEffect(() => {
-        if (turnClientSettingsResponse?.data && !isLoading && !didHydrateRef.current) {
-            didHydrateRef.current = true
+        if (turnClientSettingsResponse?.data && !isLoading && !form.formState.isDirty) {
             const data = turnClientSettingsResponse.data
             form.reset({
                 traversal_mode: data.traversal_mode || "turn",
@@ -47,11 +45,14 @@ export function TurnClientSettingsPage() {
     }, [turnClientSettingsResponse?.data, isLoading, form])
 
     const onSubmit = async (values: TurnClientSettingsFormValues) => {
+        let saved = false
         try {
             const payload: TurnClientSettings = {
                 ...values,
             } as TurnClientSettings;
             await updateTurnClientSettings({ data: payload })
+            saved = true
+            await refetchSettings({ throwOnError: true })
             toast({
                 title: t('pages.system.settings.success'),
                 description: t('pages.turnClient.settings.updateSucceedMessage'),
@@ -60,7 +61,7 @@ export function TurnClientSettingsPage() {
             toast({
                 variant: "destructive",
                 title: t('pages.system.settings.error'),
-                description: t('pages.turnClient.settings.updateFailedMessage'),
+                description: t(saved ? 'pages.system.settings.savedButRefreshFailedMessage' : 'pages.turnClient.settings.updateFailedMessage'),
             })
         }
     }
@@ -98,7 +99,7 @@ export function TurnClientSettingsPage() {
                                     render={({ field }) => (
                                         <FormItem>
                                             <FormLabel>{t("pages.turnClient.settings.traversalMode")}</FormLabel>
-                                            <Select onValueChange={field.onChange} value={field.value}>
+                                            <Select key={field.value} onValueChange={field.onChange} value={field.value}>
                                                 <FormControl>
                                                     <SelectTrigger>
                                                         <SelectValue placeholder="Select traversal mode" />
@@ -120,8 +121,8 @@ export function TurnClientSettingsPage() {
                             </div>
 
                             <div className="flex justify-end">
-                                <Button type="submit" disabled={isUpdating}>
-                                    {isUpdating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
+                                <Button type="submit" disabled={isUpdating || form.formState.isSubmitting}>
+                                    {isUpdating || form.formState.isSubmitting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
                                     {t('common.save')}
                                 </Button>
                             </div>
