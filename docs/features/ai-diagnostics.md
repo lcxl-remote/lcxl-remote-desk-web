@@ -302,6 +302,14 @@ Short references locate original evidence within the current conversation and do
 
 Natural-language goals, delegated tasks and schedule prompts count Unicode characters. Files, message bodies, commands and native input retain separately stated UTF-8 byte limits. Format errors identify the field and constraint and provide a structural example generated from the current tool definition. The server fixes defaults before approval; examples never replace observed IDs. Prefer named scroll directions and positive `amount`: semantic UI uses `up/down/left/right` with 1 (small) or 2 (large) increments; background input uses `up/down` with window-pixel distances and still requires `position`. Numeric axes remain available for diagonal scrolling and cannot be mixed with direction parameters.
 
+## Web fetching and host authorization
+
+AI can choose public HTTP or HTTPS URLs for your task, including links from search results or earlier messages. The URL does not need to appear in your current message. The first permission card authorizes the complete hostname, such as `example.com`.
+
+Within that conversation and the approved expiry, other paths, query parameters, HTTP/HTTPS schemes and ports on the same host can be accessed repeatedly without consuming uses. Other subdomains, such as `docs.example.com`, require separate authorization. Hostname case, internationalized names and trailing dots are normalized. Revoked or expired grants require fresh authorization.
+
+The fetcher reads bounded public text and checks connection addresses and redirects. Redirects within the approved host are allowed; redirects to another host return an error. Local/private addresses, URL credentials and other schemes are unavailable. Returned content is treated as external source material.
+
 ## Configuration
 
 The **model provider** (provider, base URL, model, API key, output format, granted execution mode, per-turn reasoning-round limit, per-turn same-tool call limit, and command approval timeout) is configured on the **central signaling server**. The reasoning-round limit defaults to **40**, accepts **1–80**, counts model responses rather than individual tool calls, and cannot be lower than the same-tool limit. The same-tool limit defaults to **20**, accepts **1–50**, and counts calls to one tool type even when its arguments differ. Both are independent of the Desk Server's simultaneous-command-process limit. **API keys are strictly server-side secrets** — they are never returned to the browser, never written to logs, and never included in any public settings DTO.

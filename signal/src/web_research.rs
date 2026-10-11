@@ -4,7 +4,7 @@ use desk_agent_protocol::AgentError;
 use desk_diagnose_core::seam::ToolRunOutput;
 pub use desk_diagnose_core::web_research::{
     ValidatedFetch, ValidatedSearch, WEB_FETCH_TOOL_NAME, WEB_SEARCH_TOOL_NAME,
-    validate_fetch_call, validate_search_call,
+    validate_fetch_arguments, validate_search_call,
 };
 use desk_signal_facade::web_search::SearchConfig;
 
@@ -28,15 +28,21 @@ mod tests {
     use desk_diagnose_core::chat::ToolCall;
 
     #[test]
-    fn exact_owner_inputs_are_required_before_any_network_call() {
+    fn fetch_uses_url_validation_and_search_uses_exact_owner_input() {
         let url = "https://example.com/report?q=1";
         let fetch = ToolCall {
             id: "fetch-1".into(),
             name: WEB_FETCH_TOOL_NAME.into(),
             arguments_json: serde_json::json!({"url":url}).to_string(),
         };
-        assert!(validate_fetch_call(&fetch, &format!("请读取 {url}")).is_ok());
-        assert!(validate_fetch_call(&fetch, "读取刚才的网址").is_err());
+        assert_eq!(
+            validate_fetch_arguments(&fetch)
+                .unwrap()
+                .initial_url()
+                .as_str(),
+            url
+        );
+        desk_diagnose_core::web_research::validate_exact_call(&fetch, "读取官方文档").unwrap();
 
         let search = ToolCall {
             id: "search-1".into(),

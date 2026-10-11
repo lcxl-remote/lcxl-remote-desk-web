@@ -16,9 +16,7 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use crate::capability_availability::CapabilityAvailability;
-use crate::capability_grant::{
-    canonical_compiled_scope, exact_external_url_resource_scope, fresh_object_resource_scope,
-};
+use crate::capability_grant::{canonical_compiled_scope, fresh_object_resource_scope};
 use crate::chat::{ToolCall, ToolSpec};
 use crate::dynamic_run::{
     GrantRequestItem, MAX_PERMISSION_REASON_BYTES, MAX_PERMISSION_REQUEST_ITEMS,
@@ -55,7 +53,7 @@ pub(crate) fn permission_input_mode(capability: &CapabilityDescriptor) -> &'stat
     ) || capability.required_capability == Capability::SpreadsheetFormulaWorkbookCreateConfirmed
         || matches!(
             capability.wire.authorization_hint.resources.as_slice(),
-            [AuthorizationResourceKind::ExternalUrl]
+            [AuthorizationResourceKind::ExternalWebHost]
                 | [AuthorizationResourceKind::ExternalQuery]
                 | [AuthorizationResourceKind::ExactCommand]
         )
@@ -253,12 +251,16 @@ pub fn capability_authorization_prompt(
             "tool_name": grant.tool_name,
             "effect": grant.effect,
             "risk_tier": grant.risk_tier,
+            "use_policy": grant.use_policy,
             "state": state,
             "remaining_uses": grant.remaining_uses,
             "expires_at_unix_ms": grant.expires_at_unix_ms,
             "resource_scope": grant.resource_scope,
             "operation_scope": grant.operation_scope,
         });
+        if !grant.use_policy.consumes_uses() {
+            entry.as_object_mut().unwrap().remove("remaining_uses");
+        }
         if grant.canonical_input_digest_sha256.is_none()
             && let Some(mut scope) = permission_requests
                 .iter()
@@ -369,7 +371,7 @@ pub fn capability_authorization_prompt(
     }
     CapabilityAuthorizationPrompt {
         text: format!(
-            "The following JSON authorization snapshot is server-authored for this run and supersedes any older assistant statement that a permission request is still pending. It does not widen the current tool list and does not itself dispatch anything. When a tool is present in the current tool list and has state=active here, do not refuse it based on stale permission text in conversation history; call it when the user requested it and let the server authorizer perform the final match. For any active grant bound to an exact input, approved_exact_input is the immutable server-canonicalized JSON that was approved: use it as that tool's arguments without adding, removing, or changing any field, never repeat it in prose, and never reuse it beyond remaining_uses. Exact input is deliberately omitted for every non-active or non-exact grant. For an active application_scope, use its application_id in the approved UI or background-input tool, use current observed target IDs and an approved action; do not request another exact permission for each control within that scope. A state=denied_item entry identifies one denied item, not every use of that tool; any other active grant remains independently valid. Do not retry an unchanged denied action. A narrower action after an AI approval denial requires a new permission request, while an owner denial requires new owner input. A legacy state=denied entry reports an entire refused request. Never invent or reveal a grant id.\n<capability_authorization>{}</capability_authorization>",
+            "The following JSON authorization snapshot is server-authored for this run and supersedes any older assistant statement that a permission request is still pending. It does not widen the current tool list and does not itself dispatch anything. When a tool is present in the current tool list and has state=active here, do not refuse it based on stale permission text in conversation history; call it when the user requested it and let the server authorizer perform the final match. For any active grant bound to an exact input, approved_exact_input is the immutable server-canonicalized JSON that was approved: use it as that tool's arguments without adding, removing, or changing any field, never repeat it in prose, and never reuse it beyond remaining_uses. For an active use_policy=until_expiry grant, choose any public HTTP or HTTPS URL on its exact external_web_host scope until expiry; this grant has no call-count limit and does not authorize another host or subdomain. Exact input is deliberately omitted for every non-active or non-exact grant. For an active application_scope, use its application_id in the approved UI or background-input tool, use current observed target IDs and an approved action; do not request another exact permission for each control within that scope. A state=denied_item entry identifies one denied item, not every use of that tool; any other active grant remains independently valid. Do not retry an unchanged denied action. A narrower action after an AI approval denial requires a new permission request, while an owner denial requires new owner input. A legacy state=denied entry reports an entire refused request. Never invent or reveal a grant id.\n<capability_authorization>{}</capability_authorization>",
             serde_json::to_string(&entries).expect("authorization projection is serializable")
         ),
         approved_exact_input_expires_at_unix_ms,
@@ -975,8 +977,8 @@ pub fn build_permission_request(
                 "formula workbook creation requires exact_input so the formula, target, preview, and output name are immutable",
             ));
         }
-        let exact_external_url = capability.wire.authorization_hint.resources
-            == [AuthorizationResourceKind::ExternalUrl];
+        let external_web_host = capability.wire.authorization_hint.resources
+            == [AuthorizationResourceKind::ExternalWebHost];
         let exact_external_query = capability.wire.authorization_hint.resources
             == [AuthorizationResourceKind::ExternalQuery];
         let exact_command = capability.wire.authorization_hint.resources
@@ -1199,11 +1201,11 @@ pub fn build_permission_request(
                     .map_err(|error| invalid(format!("Slack account unavailable: {error}")))?,
             );
         }
-        if (exact_external_url || exact_external_query || exact_command)
+        if (external_web_host || exact_external_query || exact_command)
             && canonical_input_digest_sha256.is_none()
         {
             return Err(invalid(
-                "exact URL/query/command permissions require exact_input so the approved input is immutable",
+                "web host/query/command permissions require exact_input to derive the approved scope",
             ));
         }
         let command_confirmation = if exact_command {
@@ -1231,12 +1233,15 @@ pub fn build_permission_request(
             } else {
                 fresh_object_resource_scope(targets)
             }
-        } else if exact_external_url {
-            exact_external_url_resource_scope(
-                canonical_input_digest_sha256
-                    .as_deref()
-                    .expect("ExternalUrl exact input was checked"),
-            )
+        } else if external_web_host {
+            crate::web_research::validate_fetch_arguments(&ToolCall {
+                id: item.item_id.clone(),
+                name: item.tool_name.clone(),
+                arguments_json: canonical_input_json
+                    .clone()
+                    .expect("web host input checked"),
+            })?
+            .resource_scope()
         } else if exact_external_query {
             registry
                 .web_search_binding()
@@ -1347,7 +1352,8 @@ pub fn build_permission_request(
                 .suggested_ttl_seconds
                 .unwrap_or(300)
                 .clamp(1, MAX_REQUEST_TTL_SECONDS),
-            suggested_max_uses: if inherently_r3
+            suggested_max_uses: if external_web_host
+                || inherently_r3
                 || exact_command
                 || exact_outlook_handoff
                 || exact_gmail_handoff
@@ -1991,7 +1997,7 @@ mod tests {
     }
 
     #[test]
-    fn external_url_permission_requires_and_binds_exact_input() {
+    fn web_host_permission_requires_valid_url_and_derives_only_its_host() {
         let registry = crate::ai_assistant::ai_assistant_provider_registry();
         let missing = r#"{"items":[{"item_id":"web","provider_id":"web.research","tool_name":"fetch_public_web_page","expected_effect":"read_external","resource_scope":["model:chosen"],"suggested_ttl_seconds":60,"suggested_max_uses":1,"reason":"Read the cited page"}]}"#;
         assert!(
@@ -2015,8 +2021,8 @@ mod tests {
         )
         .unwrap();
         let item = &request.items[0];
-        assert_eq!(item.operation_scope, vec!["fetch_public_https"]);
-        assert!(item.resource_scope[0].starts_with("external_url_input:sha256:"));
+        assert_eq!(item.operation_scope, vec!["fetch_public_web"]);
+        assert_eq!(item.resource_scope, ["external_web_host:example.com"]);
         assert!(
             !item
                 .resource_scope

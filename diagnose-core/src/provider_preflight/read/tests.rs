@@ -185,6 +185,94 @@ fn selected_device_read_is_bounded_and_mutations_or_unselected_calls_are_refused
 }
 
 #[test]
+fn web_fetch_preflight_reuses_host_scope_on_both_surfaces_and_freezes_each_input() {
+    let registry = ai_assistant_provider_registry();
+    let destination = destination();
+    let original = ReadContextSelection {
+        tool_names: vec![crate::web_research::WEB_FETCH_TOOL_NAME.into()],
+        expires_at: None,
+        object_attachments: vec![],
+        live_targets: vec![],
+    };
+    let binding = ObjectReadBinding {
+        original: &original,
+        destination: &destination,
+        now_unix_ms: 1_000,
+    };
+    let subject = ProviderCallSubject {
+        actor_id: "7",
+        run_id: "run",
+        input_revision: 1,
+        target_device_id: "42",
+        policy_revision: 1,
+        readiness_revision: 1,
+        now_unix_ms: 1_000,
+    };
+    for surface in [
+        ProductSurface::OssPersonalOwner,
+        ProductSurface::ManagerPersonalOwner,
+    ] {
+        let mut inputs = std::collections::HashSet::new();
+        for url in [
+            "https://EXAMPLE.com./docs",
+            "http://example.com:8080/news?q=1",
+        ] {
+            let call = ToolCall {
+                id: "fetch".into(),
+                name: crate::web_research::WEB_FETCH_TOOL_NAME.into(),
+                arguments_json: serde_json::json!({"url":url}).to_string(),
+            };
+            let preflight = ReadCallPreflight::build_central_web(
+                &registry,
+                surface,
+                &call,
+                &binding,
+                "Read the official documentation",
+            )
+            .unwrap();
+            let authority = preflight.grant_call(&subject).unwrap();
+            assert_eq!(authority.resource_scope, ["external_web_host:example.com"]);
+            assert_eq!(authority.operation_scope, ["fetch_public_web"]);
+            assert!(inputs.insert(authority.canonical_input_digest_sha256.to_string()));
+            let unselected = ReadContextSelection {
+                tool_names: vec![],
+                ..original.clone()
+            };
+            assert!(
+                ReadCallPreflight::build_central_web(
+                    &registry,
+                    surface,
+                    &call,
+                    &ObjectReadBinding {
+                        original: &unselected,
+                        ..binding
+                    },
+                    ""
+                )
+                .is_err()
+            );
+            let expired = ReadContextSelection {
+                expires_at: Some("1970-01-01T00:00:01Z".into()),
+                ..original.clone()
+            };
+            assert!(
+                ReadCallPreflight::build_central_web(
+                    &registry,
+                    surface,
+                    &call,
+                    &ObjectReadBinding {
+                        original: &expired,
+                        ..binding
+                    },
+                    ""
+                )
+                .is_err()
+            );
+        }
+    }
+}
+
+#[test]
 fn central_web_authority_is_exact_and_fixes_the_search_destination() {
     let registry = ai_assistant_provider_registry().with_web_search_binding(Some(
         crate::web_research::SearchBinding {

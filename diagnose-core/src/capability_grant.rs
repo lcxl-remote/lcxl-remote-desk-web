@@ -53,15 +53,14 @@ pub fn canonical_compiled_scope(
             ],
         });
     }
-    if authorization_resources == [AuthorizationResourceKind::ExternalUrl]
+    if authorization_resources == [AuthorizationResourceKind::ExternalWebHost]
         && effect == CapabilityEffect::ReadExternal
     {
         return Some(CanonicalGrantScope {
-            // The placeholder is replaced with a digest of the exact
-            // server-canonicalized input before a permission request is stored,
-            // a grant is issued, or dispatch is prepared.
-            resources: vec!["external_url:exact_input_required".into()],
-            operations: vec!["fetch_public_https".into()],
+            // The server replaces this placeholder with the normalized host
+            // derived from a validated public HTTP/HTTPS URL.
+            resources: vec!["external_web_host:validated_url_required".into()],
+            operations: vec!["fetch_public_web".into()],
         });
     }
     if authorization_resources == [AuthorizationResourceKind::ExternalQuery]
@@ -89,15 +88,6 @@ pub fn canonical_compiled_scope(
         });
     }
     None
-}
-
-/// Stable authority label for an exact externally fetched URL. The canonical
-/// input digest binds all tool arguments, while keeping the raw URL out of grant
-/// rows and audit projections.
-pub fn exact_external_url_resource_scope(canonical_input_digest_sha256: &str) -> Vec<String> {
-    vec![format!(
-        "external_url_input:sha256:{canonical_input_digest_sha256}"
-    )]
 }
 
 /// Stable authority label for an exact query sent to a server-owned Web

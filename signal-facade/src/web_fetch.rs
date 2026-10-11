@@ -1,4 +1,4 @@
-//! Shared bounded public-HTTPS fetcher for central Web Research.
+//! Shared bounded public HTTP/HTTPS fetcher for central Web Research.
 
 use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
@@ -26,7 +26,7 @@ pub async fn fetch_public_web_page(validated: ValidatedFetch) -> Result<ToolRunO
             )
             .send()
             .await
-            .map_err(|_| transport("Web Research HTTPS request failed"))?;
+            .map_err(|_| transport("Web Research request failed"))?;
         if response.status().is_redirection() {
             if redirect_count == MAX_REDIRECTS {
                 return Err(invalid("Web Research redirect limit exceeded"));
@@ -36,16 +36,7 @@ pub async fn fetch_public_web_page(validated: ValidatedFetch) -> Result<ToolRunO
                 .get(reqwest::header::LOCATION)
                 .and_then(|value| value.to_str().ok())
                 .ok_or_else(|| invalid("Web Research redirect has no valid Location"))?;
-            let next = current
-                .join(location)
-                .map_err(|_| invalid("Web Research redirect URL is invalid"))?;
-            desk_diagnose_core::web_research::validate_public_url(next.as_str(), true)?;
-            if !validated.same_approved_origin(&next) {
-                return Err(invalid(
-                    "Web Research redirects may not leave the approved host",
-                ));
-            }
-            current = next;
+            current = validated_redirect(&validated, &current, location)?;
             continue;
         }
         if !response.status().is_success() {
@@ -123,6 +114,23 @@ pub async fn fetch_public_web_page(validated: ValidatedFetch) -> Result<ToolRunO
     unreachable!("bounded redirect loop returns or continues")
 }
 
+fn validated_redirect(
+    validated: &ValidatedFetch,
+    current: &url::Url,
+    location: &str,
+) -> Result<url::Url, AgentError> {
+    let next = current
+        .join(location)
+        .map_err(|_| invalid("Web Research redirect URL is invalid"))?;
+    desk_diagnose_core::web_research::validate_public_url(next.as_str(), true)?;
+    if !validated.same_approved_host(&next) {
+        return Err(invalid(
+            "Web Research redirects may not leave the approved host",
+        ));
+    }
+    Ok(next)
+}
+
 async fn pinned_public_client(url: &url::Url) -> Result<reqwest::Client, AgentError> {
     let host = url
         .host_str()
@@ -132,7 +140,8 @@ async fn pinned_public_client(url: &url::Url) -> Result<reqwest::Client, AgentEr
         .await
         .map_err(|_| transport("Web Research DNS lookup failed"))?
         .filter(|address| {
-            desk_utils::ssrf::check_transport(address.ip(), false, true, true).is_ok()
+            desk_utils::ssrf::check_transport(address.ip(), false, url.scheme() == "https", false)
+                .is_ok()
         })
         .collect::<Vec<_>>();
     if addresses.is_empty() {
@@ -141,7 +150,6 @@ async fn pinned_public_client(url: &url::Url) -> Result<reqwest::Client, AgentEr
         ));
     }
     reqwest::Client::builder()
-        .https_only(true)
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(std::time::Duration::from_secs(10))
         .timeout(std::time::Duration::from_secs(20))
@@ -303,6 +311,54 @@ fn internal(message: impl Into<String>) -> AgentError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn redirects_allow_same_host_protocols_and_ports_but_reject_other_authority() {
+        let validated = desk_diagnose_core::web_research::validate_fetch_arguments(
+            &desk_diagnose_core::chat::ToolCall {
+                id: "fetch".into(),
+                name: desk_diagnose_core::web_research::WEB_FETCH_TOOL_NAME.into(),
+                arguments_json: r#"{"url":"https://example.com/docs"}"#.into(),
+            },
+        )
+        .unwrap();
+        for (location, allowed) in [
+            ("/other?q=1", true),
+            ("http://example.com:8080/news", true),
+            ("https://EXAMPLE.com.:8443/news", true),
+            ("https://sub.example.com/", false),
+            ("https://example.com.attacker.example/", false),
+            ("http://127.0.0.1/", false),
+            ("ftp://example.com/", false),
+            ("https://user:secret@example.com/", false),
+            ("/docs#fragment", false),
+        ] {
+            assert_eq!(
+                validated_redirect(&validated, validated.initial_url(), location).is_ok(),
+                allowed,
+                "{location}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn public_http_and_https_clients_build_requests_and_private_targets_fail() {
+        for raw in [
+            "http://93.184.216.34/docs",
+            "https://93.184.216.34:8443/docs",
+        ] {
+            let url = desk_diagnose_core::web_research::validate_public_url(raw, true).unwrap();
+            let client = pinned_public_client(&url).await.unwrap();
+            assert_eq!(client.get(raw).build().unwrap().url(), &url);
+        }
+        for raw in ["http://127.0.0.1/", "https://10.0.0.1:8443/"] {
+            assert!(
+                pinned_public_client(&url::Url::parse(raw).unwrap())
+                    .await
+                    .is_err()
+            );
+        }
+    }
 
     #[test]
     fn html_projection_keeps_evidence_and_drops_active_blocks() {

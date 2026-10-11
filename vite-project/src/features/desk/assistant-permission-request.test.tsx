@@ -15,6 +15,18 @@ const request = (items = [item()]): PermissionRequestDto => ({
 });
 const submit = () => screen.getByRole('button', { name: 'pages.aiAssistant.permissionSubmitSelection' });
 describe('shared permission review', () => {
+    it('shows host expiry reuse and omits the counted-use control for web reads', () => {
+        const onDecide = vi.fn().mockResolvedValue(true);
+        const value = request([item({ toolName: 'fetch_public_web_page', providerId: 'web.research',
+            expectedEffect: 'read_external', resourceScope: ['external_web_host:example.com'],
+            operationScope: ['fetch_public_web'], suggestedMaxUses: 1 })]);
+        render(<AssistantPermissionRequest request={value} canDecide onDecide={onDecide} />);
+        expect(screen.getByText('pages.aiAssistant.webHostReusableUntilExpiry')).toBeInTheDocument();
+        expect(screen.queryByText('pages.aiAssistant.permissionMaxUses')).not.toBeInTheDocument();
+        expect(screen.getAllByRole('spinbutton')).toHaveLength(1);
+        fireEvent.click(submit());
+        expect(onDecide.mock.calls[0][1][0]).toMatchObject({ resource_scope: ['external_web_host:example.com'], ttl_seconds: 300 });
+    });
     it('shows a pending state only once in the review card', () => {
         render(<AssistantPermissionRequest request={request()} canDecide onDecide={vi.fn()} />);
         expect(screen.getAllByText('pages.aiAssistant.permissionState.pending')).toHaveLength(1);

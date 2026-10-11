@@ -67,8 +67,8 @@ use desk_diagnose_core::ai_assistant::{
     EXECUTE_CONFIRMED_UI_ACTION_TOOL, PREVIEW_COMPUTER_ACTION_TOOL, validate_preview_call,
 };
 use desk_diagnose_core::capability_grant::{
-    CapabilityGrantCall, canonical_compiled_scope, exact_external_url_resource_scope,
-    fresh_object_resource_scope, is_capability_grant_candidate,
+    CapabilityGrantCall, canonical_compiled_scope, fresh_object_resource_scope,
+    is_capability_grant_candidate,
 };
 use desk_diagnose_core::chat::ToolCall;
 use desk_diagnose_core::chunk::ByteReassembler;
@@ -95,7 +95,7 @@ use crate::capability_grant_store::{
 use crate::entity::agent_session;
 use crate::web_research::{
     WEB_FETCH_TOOL_NAME, WEB_SEARCH_TOOL_NAME, fetch_public_web_page, search_public_web,
-    validate_fetch_call, validate_search_call,
+    validate_fetch_arguments, validate_search_call,
 };
 
 pub(crate) mod completion;
@@ -1104,7 +1104,7 @@ impl SignalAiAssistantTools {
             return Ok(());
         }
         if capability == desk_agent_protocol::Capability::WebResearchFetch {
-            validate_fetch_call(call, &self.current_user_message)?;
+            validate_fetch_arguments(call)?;
             return Ok(());
         }
         if capability == desk_agent_protocol::Capability::WebResearchSearch {
@@ -1483,9 +1483,10 @@ impl SignalAiAssistantTools {
             || vec!["target:current_device".to_string()],
             |scope| scope.resources.clone(),
         );
-        if capability.wire.authorization_hint.resources == [AuthorizationResourceKind::ExternalUrl]
+        if capability.wire.authorization_hint.resources
+            == [AuthorizationResourceKind::ExternalWebHost]
         {
-            resource_scope = exact_external_url_resource_scope(&canonical_input_digest_sha256);
+            resource_scope = validate_fetch_arguments(call)?.resource_scope();
         }
         if capability.wire.authorization_hint.resources
             == [AuthorizationResourceKind::ExternalQuery]
@@ -5377,7 +5378,7 @@ impl SignalAiAssistantTools {
         authority_expiry: u64,
     ) -> Result<ToolRunOutput, ProviderInvokeError> {
         if call.name == WEB_FETCH_TOOL_NAME {
-            let validated = validate_fetch_call(call, &self.current_user_message)?;
+            let validated = validate_fetch_arguments(call)?;
             return fetch_public_web_page(validated).await.map_err(Into::into);
         }
         if call.name == WEB_SEARCH_TOOL_NAME {
@@ -6589,6 +6590,61 @@ mod tests {
                 tools_for(vec![object_ref("source", ObjectKind::File)])
                     .preflight_selected_context(&call, capability)
                     .is_err()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn web_fetch_preflight_allows_task_urls_without_message_provenance() {
+        let db = crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let tools = SignalAiAssistantTools::new(
+            db,
+            desk_diagnose_core::ai_assistant::ai_assistant_provider_registry(),
+            Arc::new(SharedConnectionMap::default()),
+            Arc::new(SignalRemoteToolPendingStore::default()),
+            "host".into(),
+            "device".into(),
+            "owner".into(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            vec![],
+            vec![],
+            vec![],
+            None,
+            None,
+            "Read official documentation".into(),
+            "run".into(),
+            "turn".into(),
+            1,
+            1,
+            vec![],
+            30_000,
+        );
+        for (url, valid) in [
+            ("http://example.com/docs", true),
+            ("https://example.com:8443/docs", true),
+            ("ftp://example.com/docs", false),
+            ("http://127.0.0.1/", false),
+        ] {
+            let call = ToolCall {
+                id: "fetch".into(),
+                name: WEB_FETCH_TOOL_NAME.into(),
+                arguments_json: serde_json::json!({"url":url}).to_string(),
+            };
+            assert_eq!(
+                tools
+                    .preflight_selected_context(
+                        &call,
+                        desk_agent_protocol::Capability::WebResearchFetch
+                    )
+                    .is_ok(),
+                valid
             );
         }
     }

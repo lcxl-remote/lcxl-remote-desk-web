@@ -257,7 +257,7 @@ fn validate_web_output(
             if value.schema_version != 1
                 || !value.untrusted_external_content
                 || value.requested_url != expected.initial_url().as_str()
-                || !expected.same_approved_origin(&final_url)
+                || !expected.same_approved_host(&final_url)
                 || value
                     .title
                     .as_ref()

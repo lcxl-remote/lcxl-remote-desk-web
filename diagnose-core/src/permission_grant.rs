@@ -417,7 +417,25 @@ pub fn build_permission_grants(
         let text_mutation = crate::provider_preflight::text_file::TextMutationPreflight::supports(
             &requested.tool_name,
         );
-        let resource_scope = if let Some(scope) = &application_scope {
+        let external_web_host = capability.wire.authorization_hint.resources
+            == [AuthorizationResourceKind::ExternalWebHost];
+        let resource_scope = if external_web_host {
+            let call = crate::chat::ToolCall {
+                id: requested.item_id.clone(),
+                name: requested.tool_name.clone(),
+                arguments_json: requested
+                    .canonical_input_json
+                    .clone()
+                    .ok_or_else(|| internal("approved web host has no URL input"))?,
+            };
+            let expected = crate::web_research::validate_fetch_arguments(&call)?.resource_scope();
+            if requested.resource_scope != expected || *resource_scope != expected {
+                return Err(internal(
+                    "approved web host does not match its validated URL",
+                ));
+            }
+            expected
+        } else if let Some(scope) = &application_scope {
             let expected = crate::application_ui::resource(&scope.application);
             if expected != *resource_scope
                 || operation_scope.is_empty()
@@ -611,13 +629,8 @@ pub fn build_permission_grants(
                     .filter(|scope| resource_scope.contains(scope))
                     .collect()
             }
-        } else if capability.wire.authorization_hint.resources
-            == [AuthorizationResourceKind::ExternalUrl]
-            || exact_external_query
-        {
-            // External URL authority is server-derived from the immutable exact
-            // input stored on the pending request. Decision payload labels are
-            // display data and cannot widen or replace it.
+        } else if exact_external_query {
+            // Query authority is derived from the immutable request input.
             requested
                 .resource_scope
                 .iter()
@@ -636,7 +649,9 @@ pub fn build_permission_grants(
                 unpredictable_input: false,
             },
         );
-        let (use_policy, canonical_input_digest_sha256) = if application_scope.is_some() {
+        let (use_policy, canonical_input_digest_sha256) = if external_web_host {
+            (CapabilityGrantUsePolicy::UntilExpiry, None)
+        } else if application_scope.is_some() {
             (CapabilityGrantUsePolicy::Reusable, None)
         } else if risk_tier == desk_agent_protocol::capability_grant::CapabilityRiskTier::R3
             || exact_raw_input
@@ -715,11 +730,11 @@ pub fn build_permission_grants(
             issued_by: CapabilityGrantIssuer::UserDecision,
             issued_at_unix_ms: context.now_unix_ms,
             expires_at_unix_ms,
-            remaining_uses: *max_uses,
+            remaining_uses: if external_web_host { 1 } else { *max_uses },
             limits: CapabilityGrantLimits {
                 max_bytes_per_call: capability.wire.limits.max_output_bytes,
                 max_items_per_call: capability.wire.limits.max_objects,
-                max_calls: *max_uses,
+                max_calls: if external_web_host { 1 } else { *max_uses },
             },
             policy_revision: session.policy_revision,
             readiness_revision: context.readiness_revision,

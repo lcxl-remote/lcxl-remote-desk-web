@@ -71,6 +71,182 @@ fn decision_fixture() -> (
 }
 
 #[test]
+fn web_host_grants_reuse_urls_until_expiry_on_both_surfaces() {
+    let (session, _, _) = decision_fixture();
+    let registry = crate::ai_assistant::ai_assistant_provider_registry();
+    let request = crate::permission_tools::build_permission_request(
+        &crate::chat::ToolCall {
+            id: "permission".into(), name: crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME.into(),
+            arguments_json: serde_json::json!({"items":[{"item_id":"web", "tool_name":"fetch_public_web_page", "exact_input":{"url":"https://EXAMPLE.com./docs"}, "reason":"Read official documentation", "suggested_ttl_seconds":300}]}).to_string(),
+        }, &registry, "permission-web".into(), 1, "2026-10-11T00:00:00Z".into(),
+    ).unwrap();
+    let item = &request.items[0];
+    let decisions = vec![PermissionDecisionItem {
+        item_id: item.item_id.clone(),
+        decision: PermissionItemDecision::Approve {
+            resource_scope: item.resource_scope.clone(),
+            operation_scope: item.operation_scope.clone(),
+            export_destinations: vec![],
+            ttl_seconds: 60,
+            max_uses: 1,
+        },
+    }];
+    let capability = registry.capability_for_tool(&item.tool_name).unwrap();
+    let inventory = vec![CapabilityAvailability {
+        provider_id: item.provider_id.clone(),
+        capability_id: capability.wire.capability_id.clone(),
+        tool_name: item.tool_name.clone(),
+        compiled: true,
+        enabled: true,
+        connected: true,
+        ready: true,
+        reason: None,
+    }];
+    let original = ReadContextSelection {
+        tool_names: vec![item.tool_name.clone()],
+        expires_at: None,
+        object_attachments: vec![],
+        live_targets: vec![],
+    };
+    let destination = DestinationIdentity::Model {
+        connection_id: "model".into(),
+        connection_revision: 1,
+        model_id: "model".into(),
+        profile_revision: 1,
+    };
+    let binding = ObjectReadBinding {
+        original: &original,
+        destination: &destination,
+        now_unix_ms: 1_000,
+    };
+    for surface in [
+        ProductSurface::OssPersonalOwner,
+        ProductSurface::ManagerPersonalOwner,
+    ] {
+        let grant = build_permission_grants(
+            &session,
+            &request,
+            &decisions,
+            &PermissionGrantIssuanceContext {
+                surface,
+                registry: &registry,
+                inventory: &inventory,
+                readiness_revision: 7,
+                now_unix_ms: 1_000,
+                implicit_fresh_object_refs: &[],
+            },
+            None,
+        )
+        .unwrap()
+        .remove(0);
+        assert_eq!(grant.use_policy, CapabilityGrantUsePolicy::UntilExpiry);
+        assert!(!grant.use_policy.consumes_uses());
+        assert_eq!(grant.canonical_input_digest_sha256, None);
+        assert_eq!(grant.resource_scope, ["external_web_host:example.com"]);
+        for change in 0..4 {
+            let mut invalid = grant.clone();
+            match change {
+                0 => invalid.canonical_input_digest_sha256 = Some("a".repeat(64)),
+                1 => invalid.tool_name = "search_public_web".into(),
+                2 => invalid.resource_scope = vec!["external_url_input:digest".into()],
+                _ => invalid.remaining_uses = 0,
+            }
+            assert!(invalid.validate().is_err());
+        }
+        for (url, allowed) in [
+            ("http://example.com:8080/news?q=1", true),
+            ("https://example.com:8443/other", true),
+            ("https://sub.example.com/", false),
+            ("https://example.com.attacker.example/", false),
+        ] {
+            let call = crate::chat::ToolCall {
+                id: "fetch".into(),
+                name: item.tool_name.clone(),
+                arguments_json: serde_json::json!({"url":url}).to_string(),
+            };
+            let preflight = crate::provider_preflight::read::ReadCallPreflight::build_central_web(
+                &registry,
+                surface,
+                &call,
+                &binding,
+                "Read official documentation",
+            )
+            .unwrap();
+            let subject = crate::provider_preflight::ProviderCallSubject {
+                actor_id: &session.actor_id,
+                run_id: &session.conversation_id,
+                input_revision: 1,
+                target_device_id: &session.device_id,
+                policy_revision: session.policy_revision,
+                readiness_revision: 7,
+                now_unix_ms: 2_000,
+            };
+            let mut authority = preflight.grant_call(&subject).unwrap();
+            let mut ai_grant = grant.clone();
+            let parent = desk_agent_protocol::capability_grant::AiApprovalGrantProvenance {
+                delegation_id: "delegation".into(),
+                delegation_revision: 1,
+                model_config_revision: 1,
+                candidate_id: "candidate".into(),
+                decision_event_id: "decision".into(),
+                goal_id: None,
+                goal_revision: None,
+            };
+            ai_grant.issued_by =
+                desk_agent_protocol::capability_grant::CapabilityGrantIssuer::AiApproval(
+                    parent.clone(),
+                );
+            assert_eq!(
+                crate::capability_grant::is_capability_grant_candidate(&ai_grant, &authority),
+                allowed
+            );
+            assert_eq!(
+                crate::capability_grant::match_ai_capability_grant(&ai_grant, &authority, &parent)
+                    .is_ok(),
+                allowed
+            );
+            assert_eq!(
+                crate::capability_grant::match_capability_grant(&grant, &authority).is_ok(),
+                allowed
+            );
+            if allowed {
+                let mut revoked = grant.clone();
+                revoked.revoked_at_unix_ms = Some(2_000);
+                revoked.revoked_reason = Some("owner revoked".into());
+                assert!(
+                    crate::capability_grant::match_capability_grant(&revoked, &authority).is_err()
+                );
+                authority.now_unix_ms = grant.expires_at_unix_ms;
+                assert!(
+                    crate::capability_grant::match_capability_grant(&grant, &authority).is_err()
+                );
+            }
+        }
+        let prompt = crate::permission_tools::capability_authorization_prompt(
+            &[grant],
+            &[],
+            &[],
+            2_000,
+            1,
+            7,
+        );
+        assert!(prompt.text.contains("until_expiry"));
+        let snapshot: serde_json::Value = serde_json::from_str(
+            prompt
+                .text
+                .split("<capability_authorization>")
+                .nth(1)
+                .unwrap()
+                .split("</capability_authorization>")
+                .next()
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(snapshot[0].get("remaining_uses").is_none());
+    }
+}
+
+#[test]
 fn ai_permission_grant_is_bound_to_review_expiry_without_switch_deadline() {
     let (mut session, request, decisions) = decision_fixture();
     session.surface = AgentSessionSurface::AiAssistant;

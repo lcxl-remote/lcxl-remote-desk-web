@@ -77,7 +77,6 @@ const fn default_results() -> u8 {
 pub struct ValidatedFetch {
     initial_url: Url,
     approved_host: String,
-    approved_port: u16,
 }
 
 impl ValidatedFetch {
@@ -85,10 +84,13 @@ impl ValidatedFetch {
         &self.initial_url
     }
 
-    pub fn same_approved_origin(&self, url: &Url) -> bool {
+    pub fn resource_scope(&self) -> Vec<String> {
+        vec![format!("external_web_host:{}", self.approved_host)]
+    }
+
+    pub fn same_approved_host(&self, url: &Url) -> bool {
         url.host_str()
-            .is_some_and(|host| host.eq_ignore_ascii_case(&self.approved_host))
-            && url.port_or_known_default() == Some(self.approved_port)
+            .is_some_and(|host| normalized_host(host) == self.approved_host)
     }
 }
 
@@ -108,19 +110,6 @@ impl ValidatedSearch {
     }
 }
 
-pub fn validate_fetch_call(
-    call: &ToolCall,
-    current_user_message: &str,
-) -> Result<ValidatedFetch, AgentError> {
-    let validated = validate_fetch_arguments(call)?;
-    if !current_user_message.contains(validated.initial_url().as_str()) {
-        return Err(invalid(
-            "Web Research URL must appear verbatim in the owner's current message",
-        ));
-    }
-    Ok(validated)
-}
-
 pub fn validate_fetch_arguments(call: &ToolCall) -> Result<ValidatedFetch, AgentError> {
     if call.name != WEB_FETCH_TOOL_NAME {
         return Err(invalid("not a Web Research fetch call"));
@@ -135,17 +124,13 @@ pub fn validate_fetch_arguments(call: &ToolCall) -> Result<ValidatedFetch, Agent
         return Err(invalid("Web Research URL is invalid"));
     }
     let url = validate_public_url(&args.url, true)?;
-    let approved_host = url
-        .host_str()
-        .expect("validated URL has a host")
-        .to_ascii_lowercase();
-    let approved_port = url
-        .port_or_known_default()
-        .expect("HTTPS has a known default port");
+    let approved_host = normalized_host(url.host_str().expect("validated URL has a host"));
+    if approved_host.is_empty() {
+        return Err(invalid("Web Research URL has no valid host"));
+    }
     Ok(ValidatedFetch {
         initial_url: url,
         approved_host,
-        approved_port,
     })
 }
 
@@ -187,7 +172,7 @@ pub fn validate_search_arguments(call: &ToolCall) -> Result<ValidatedSearch, Age
 
 pub fn validate_exact_call(call: &ToolCall, current_user_message: &str) -> Result<(), AgentError> {
     match call.name.as_str() {
-        WEB_FETCH_TOOL_NAME => validate_fetch_call(call, current_user_message).map(|_| ()),
+        WEB_FETCH_TOOL_NAME => validate_fetch_arguments(call).map(|_| ()),
         WEB_SEARCH_TOOL_NAME => validate_search_call(call, current_user_message).map(|_| ()),
         _ => Err(invalid("not a central Web Research call")),
     }
@@ -195,20 +180,23 @@ pub fn validate_exact_call(call: &ToolCall, current_user_message: &str) -> Resul
 
 pub fn validate_public_url(raw: &str, reject_fragment: bool) -> Result<Url, AgentError> {
     let url = Url::parse(raw).map_err(|_| invalid("Web Research URL is invalid"))?;
-    if url.scheme() != "https"
+    if !matches!(url.scheme(), "http" | "https")
         || url.host_str().is_none()
         || !url.username().is_empty()
         || url.password().is_some()
         || (reject_fragment && url.fragment().is_some())
-        || !matches!(url.port(), None | Some(443))
     {
         return Err(invalid(
-            "Web Research accepts only public HTTPS URLs without credentials or non-443 ports",
+            "Web Research accepts public HTTP and HTTPS URLs without credentials",
         ));
     }
-    desk_utils::ssrf::check_transport_for_url(raw, false, true, true)
-        .map_err(|_| invalid("Web Research target is not a permitted public HTTPS address"))?;
+    desk_utils::ssrf::check_transport_for_url(raw, false, url.scheme() == "https", false)
+        .map_err(|_| invalid("Web Research target is not a permitted public address"))?;
     Ok(url)
+}
+
+fn normalized_host(host: &str) -> String {
+    host.trim_end_matches('.').to_ascii_lowercase()
 }
 
 fn invalid(message: impl Into<String>) -> AgentError {
@@ -257,19 +245,89 @@ mod tests {
     }
 
     #[test]
-    fn exact_owner_query_and_public_url_are_required() {
+    fn search_query_still_requires_the_current_owner_message() {
         let query = call(
             WEB_SEARCH_TOOL_NAME,
             serde_json::json!({"query":"Rust language","max_results":5}),
         );
         assert!(validate_search_call(&query, "请搜索 Rust language").is_ok());
         assert!(validate_search_call(&query, "请搜索刚才的关键词").is_err());
-        let url = call(
-            WEB_FETCH_TOOL_NAME,
-            serde_json::json!({"url":"https://example.com/a"}),
+        assert!(validate_exact_call(&query, "请搜索刚才的关键词").is_err());
+    }
+
+    #[test]
+    fn fetch_accepts_task_selected_urls_without_current_message_provenance() {
+        for url in ["https://example.com", "http://example.com:8080/docs?q=rust"] {
+            let fetch = call(WEB_FETCH_TOOL_NAME, serde_json::json!({"url":url}));
+            let validated = validate_fetch_arguments(&fetch).unwrap();
+            assert_eq!(validated.initial_url().host_str(), Some("example.com"));
+            for message in [
+                "",
+                "Read the official documentation",
+                "Use the earlier link",
+            ] {
+                validate_exact_call(&fetch, message).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn fetch_rejects_invalid_urls_and_inputs_without_owner_message_checks() {
+        for url in [
+            "ftp://example.com/docs",
+            "https://127.0.0.1/docs",
+            "https://10.0.0.1/docs",
+            "https://[::1]/docs",
+            "https://user:password@example.com/docs",
+            "https://example.com/docs#section",
+            " https://example.com/docs",
+            "https://example.com/docs\n",
+            "not a URL",
+            "",
+        ] {
+            let fetch = call(WEB_FETCH_TOOL_NAME, serde_json::json!({"url":url}));
+            let error = validate_exact_call(&fetch, "Read the official documentation").unwrap_err();
+            assert_eq!(error.kind, AgentErrorKind::InvalidInput, "{url}");
+        }
+        for arguments in [
+            serde_json::json!({"url":format!("https://example.com/{}", "a".repeat(MAX_URL_BYTES))}),
+            serde_json::json!({"url":"https://example.com/", "headers":{}}),
+            serde_json::json!({}),
+        ] {
+            let fetch = call(WEB_FETCH_TOOL_NAME, arguments);
+            assert!(validate_fetch_arguments(&fetch).is_err());
+        }
+        assert!(
+            validate_fetch_arguments(&call(WEB_SEARCH_TOOL_NAME, serde_json::json!({}))).is_err()
         );
-        assert!(validate_fetch_call(&url, "https://example.com/a").is_ok());
-        assert!(validate_fetch_call(&url, "another URL").is_err());
-        assert!(validate_public_url("https://127.0.0.1/a", true).is_err());
+    }
+
+    #[test]
+    fn web_host_scope_normalizes_names_and_reuses_protocols_ports_and_paths() {
+        let expected = vec!["external_web_host:xn--bcher-kva.example".to_string()];
+        for url in [
+            "https://BÜCHER.example./docs",
+            "http://xn--bcher-kva.example:8080/news?q=1",
+            "https://xn--bcher-kva.example:8443/",
+        ] {
+            let validated = validate_fetch_arguments(&call(
+                WEB_FETCH_TOOL_NAME,
+                serde_json::json!({"url":url}),
+            ))
+            .unwrap();
+            assert_eq!(validated.resource_scope(), expected);
+            assert!(
+                validated.same_approved_host(
+                    &Url::parse("http://xn--bcher-kva.example./other").unwrap()
+                )
+            );
+            assert!(
+                !validated
+                    .same_approved_host(&Url::parse("https://sub.xn--bcher-kva.example/").unwrap())
+            );
+            assert!(!validated.same_approved_host(
+                &Url::parse("https://xn--bcher-kva.example.attacker.example/").unwrap()
+            ));
+        }
     }
 }

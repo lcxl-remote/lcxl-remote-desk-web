@@ -140,6 +140,14 @@ impl TaskGrantProvenance {
 pub enum CapabilityGrantUsePolicy {
     Reusable,
     OneShotExact,
+    /// Repeated public web reads within the original host and expiry.
+    UntilExpiry,
+}
+
+impl CapabilityGrantUsePolicy {
+    pub fn consumes_uses(self) -> bool {
+        self != Self::UntilExpiry
+    }
 }
 
 #[derive(
@@ -262,6 +270,21 @@ impl CapabilityGrant {
                         .ok_or(CapabilityGrantError::ExactGrantMissingDigest)?,
                 )?;
             }
+            CapabilityGrantUsePolicy::UntilExpiry => {
+                // Counter fields retain one placeholder use. Authorizers must
+                // neither consume nor restore it for this expiry-only policy.
+                if self.tool_name != "fetch_public_web_page"
+                    || self.effect != CapabilityEffect::ReadExternal
+                    || self.canonical_input_digest_sha256.is_some()
+                    || self.resource_scope.len() != 1
+                    || !self.resource_scope[0].starts_with("external_web_host:")
+                    || self.resource_scope[0] == "external_web_host:"
+                    || self.remaining_uses != 1
+                    || self.limits.max_calls != 1
+                {
+                    return Err(CapabilityGrantError::InvalidLimitOrRevision);
+                }
+            }
         }
         match (self.revoked_at_unix_ms, self.revoked_reason.as_deref()) {
             (None, None) => {}
@@ -371,6 +394,31 @@ fn validate_digest(value: &str) -> Result<(), CapabilityGrantError> {
 #[cfg(test)]
 mod task_tests {
     use super::*;
+
+    #[test]
+    fn only_expiry_reuse_skips_counting_and_all_policies_round_trip() {
+        let cfg = wincode::config::Configuration::default();
+        for policy in [
+            CapabilityGrantUsePolicy::Reusable,
+            CapabilityGrantUsePolicy::OneShotExact,
+            CapabilityGrantUsePolicy::UntilExpiry,
+        ] {
+            assert_eq!(
+                policy.consumes_uses(),
+                policy != CapabilityGrantUsePolicy::UntilExpiry
+            );
+            let bytes = wincode::config::serialize(&policy, cfg).unwrap();
+            assert_eq!(
+                wincode::config::deserialize::<CapabilityGrantUsePolicy, _>(&bytes, cfg).unwrap(),
+                policy
+            );
+            let json = serde_json::to_string(&policy).unwrap();
+            assert_eq!(
+                serde_json::from_str::<CapabilityGrantUsePolicy>(&json).unwrap(),
+                policy
+            );
+        }
+    }
 
     fn parent() -> TaskGrantProvenance {
         TaskGrantProvenance {

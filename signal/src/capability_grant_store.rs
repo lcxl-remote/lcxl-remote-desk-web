@@ -581,7 +581,9 @@ impl SignalCapabilityGrantStore {
         }
         .insert(&txn)
         .await?;
-        grant.remaining_uses -= 1;
+        if grant.use_policy.consumes_uses() {
+            grant.remaining_uses -= 1;
+        }
         let remaining = i32::try_from(grant.remaining_uses)
             .map_err(|_| DbErr::Custom("grant uses exceed SQLite range".into()))?;
         let updated = agent_capability_grant::Entity::update_many()
@@ -1549,12 +1551,14 @@ async fn release_before_intent<C: sea_orm::ConnectionTrait + crate::config::Conf
         .await?
         .ok_or_else(|| DbErr::Custom("reserved capability grant was not found".into()))?;
     let mut grant = decode_grant(&grant_row)?;
-    if grant.remaining_uses >= grant.limits.max_calls {
-        return Err(DbErr::Custom(
-            "released grant use would exceed its issued limit".into(),
-        ));
+    if grant.use_policy.consumes_uses() {
+        if grant.remaining_uses >= grant.limits.max_calls {
+            return Err(DbErr::Custom(
+                "released grant use would exceed its issued limit".into(),
+            ));
+        }
+        grant.remaining_uses += 1;
     }
-    grant.remaining_uses += 1;
     let now = timestamp(now_unix_ms)?;
     let released = agent_grant_reservation::Entity::update_many()
         .col_expr(
@@ -2850,6 +2854,82 @@ mod tests {
             1
         );
         db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn web_host_grant_keeps_its_authority_across_calls_and_releases() {
+        let directory = tempfile::tempdir().unwrap();
+        let db = file_db(&directory.path().join("web-host.db")).await;
+        insert_session(&db, 1, 1).await;
+        let store = SignalCapabilityGrantStore::new(db.clone());
+        let mut issued = grant(1);
+        issued.provider_id = "web.research".into();
+        issued.capability_id = "web.research.fetch".into();
+        issued.tool_name = "fetch_public_web_page".into();
+        issued.effect = CapabilityEffect::ReadExternal;
+        issued.risk_tier = CapabilityRiskTier::R1;
+        issued.resource_scope = vec!["external_web_host:example.com".into()];
+        issued.operation_scope = vec!["fetch_public_web".into()];
+        issued.use_policy = CapabilityGrantUsePolicy::UntilExpiry;
+        store.issue(&issued).await.unwrap();
+        for index in 0..3 {
+            let call_id = format!("web-call-{index}");
+            let canonical =
+                serde_json::json!({"url":format!("http://example.com/page-{index}")}).to_string();
+            let digest = format!("{:x}", Sha256::digest(canonical.as_bytes()));
+            let mut input = request(
+                &call_id,
+                &canonical,
+                &digest,
+                &issued.resource_scope,
+                &issued.operation_scope,
+                1,
+            );
+            input.call.provider_id = &issued.provider_id;
+            input.call.capability_id = &issued.capability_id;
+            input.call.tool_name = &issued.tool_name;
+            input.call.effect = issued.effect;
+            input.call.risk_tier = issued.risk_tier;
+            let prepared = store.prepare(input).await.unwrap();
+            assert_eq!(
+                decode_grant(
+                    &agent_capability_grant::Entity::find()
+                        .one(&db)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                )
+                .unwrap(),
+                issued
+            );
+            store
+                .close_prepared_after_review(
+                    &call_id,
+                    prepared.work_id,
+                    600,
+                    "ai_review_unavailable",
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                decode_grant(
+                    &agent_capability_grant::Entity::find()
+                        .one(&db)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                )
+                .unwrap(),
+                issued
+            );
+        }
+        assert_eq!(
+            agent_grant_reservation::Entity::find()
+                .count(&db)
+                .await
+                .unwrap(),
+            3
+        );
     }
 
     #[tokio::test]

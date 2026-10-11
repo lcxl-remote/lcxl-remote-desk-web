@@ -1,4 +1,4 @@
-import { permissionToolLabel, permissionEffectLabel, permissionResourceLabel, permissionOperationLabel } from './assistant-permission-labels';
+import { permissionToolLabel, permissionEffectLabel, permissionResourceLabel, permissionOperationLabel, isReusableWebHost } from './assistant-permission-labels';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { AlertTriangle, Check, X } from 'lucide-react';
@@ -137,6 +137,7 @@ export function AssistantPermissionRequest({ request, canDecide, disabled = fals
                         ?? defaultItemIds;
                     const approved = selected.includes(item.itemId);
                     const isExternalSend = item.expectedEffect === 'send_external';
+                    const reusableWebHost = isReusableWebHost(item);
                     const sendConfirmation = item.externalSendConfirmation;
                     const commandConfirmation = item.commandConfirmation;
                     const outputBlocked = outputApprovalBlocked(item);
@@ -340,7 +341,9 @@ export function AssistantPermissionRequest({ request, canDecide, disabled = fals
                                                     )}
                                                 />
                                             </label>
-                                            <label className="space-y-1 text-xs">
+                                            {reusableWebHost ? <p className="self-center text-xs text-muted-foreground">
+                                                {t('pages.aiAssistant.webHostReusableUntilExpiry')}
+                                            </p> : <label className="space-y-1 text-xs">
                                                 <span>{t('pages.aiAssistant.permissionMaxUses')}</span>
                                                 <Input
                                                     type="number"
@@ -360,7 +363,7 @@ export function AssistantPermissionRequest({ request, canDecide, disabled = fals
                                                         }),
                                                     )}
                                                 />
-                                            </label>
+                                            </label>}
                                         </div>
                                     </div>
                                 )}
@@ -431,7 +434,7 @@ export function AssistantPermissionRequest({ request, canDecide, disabled = fals
                                     export_destinations: item.exportDestinations.filter((_, index) =>
                                         destinationIndexes.includes(index)),
                                     ttl_seconds: edit.ttlSeconds ?? item.suggestedTtlSeconds,
-                                    max_uses: item.expectedEffect === 'send_external' || isOutputInput(item)
+                                    max_uses: isReusableWebHost(item) || item.expectedEffect === 'send_external' || isOutputInput(item)
                                         ? 1
                                         : (edit.maxUses ?? item.suggestedMaxUses),
                                 };

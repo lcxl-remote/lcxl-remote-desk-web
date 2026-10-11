@@ -1,6 +1,6 @@
 import { AssistantGoalPanel, goalPlanningAction } from './assistant-goal-panel';
 import { AssistantTranscript } from './assistant-transcript';
-import { permissionToolLabel, permissionResourceLabel, permissionOperationLabel } from './assistant-permission-labels';
+import { permissionToolLabel, permissionResourceLabel, permissionOperationLabel, isReusableWebHost } from './assistant-permission-labels';
 import { AssistantAttachments } from './assistant-attachments';
 import { requireRecoveryZip } from '@/lib/file-recovery-error';
 import { AssistantComposerInput } from './assistant-composer-input';
@@ -543,7 +543,9 @@ export function AiAssistantWorkspace({
                                             </Badge>
                                         </div>
                                         <div className="space-y-1 text-xs text-muted-foreground">
-                                            <p>{t('pages.aiAssistant.grantRemainingUses', { count: grant.remainingUses })}</p>
+                                            <p>{isReusableWebHost(grant)
+                                                ? t('pages.aiAssistant.webHostReusableUntilExpiry')
+                                                : t('pages.aiAssistant.grantRemainingUses', { count: grant.remainingUses })}</p>
                                             <p>{t('pages.aiAssistant.grantExpiresAt', {
                                                 time: new Date(grant.expiresAtUnixMs).toLocaleString(),
                                             })}</p>

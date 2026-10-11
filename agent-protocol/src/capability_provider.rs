@@ -282,9 +282,9 @@ pub enum AuthorizationResourceKind {
     TargetDevice,
     FreshObjectReference,
     WorkspaceRoot,
-    /// One server-validated public HTTPS URL, bound to the canonical tool
-    /// input digest. Model-provided resource labels are never authority.
-    ExternalUrl,
+    /// One normalized host derived from a server-validated public HTTP/HTTPS
+    /// URL. Paths, queries, schemes and ports do not widen this host scope.
+    ExternalWebHost,
     /// One exact owner-supplied Web Search query, bound to the canonical tool
     /// input digest and to a server-owned connector destination.
     ExternalQuery,

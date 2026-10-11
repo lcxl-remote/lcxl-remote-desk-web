@@ -12,6 +12,11 @@ function label(t: TFunction, group: string, value: string): string {
 export const permissionToolLabel = (t: TFunction, value: string) => label(t, 'permissionTool', value);
 export const permissionEffectLabel = (t: TFunction, value: string) => label(t, 'permissionEffect', value);
 
+export function isReusableWebHost(value: { toolName: string; resourceScope: string[] }): boolean {
+    return value.toolName === 'fetch_public_web_page'
+        && value.resourceScope.some((scope) => scope.startsWith('external_web_host:'));
+}
+
 export function permissionOperationLabel(t: TFunction, value: string): string {
     if (/^(ui|background_input):/.test(value)) {
         const key = `pages.aiAssistant.uiAction_${value.slice(value.indexOf(':') + 1)}`;

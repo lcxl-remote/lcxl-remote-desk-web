@@ -6,7 +6,7 @@ import zh from '@/locales/zh-CN/pages';
 import en from '@/locales/en-US/pages';
 import type { PermissionRequestDto } from '@/services/types';
 import { AssistantPermissionRequest } from './assistant-permission-request';
-import { permissionOperationLabel, permissionResourceLabel, permissionToolLabel } from './assistant-permission-labels';
+import { permissionOperationLabel, permissionResourceLabel, permissionToolLabel, isReusableWebHost } from './assistant-permission-labels';
 
 describe('permission internationalization', () => {
     it('switches language without changing selected authorization identifiers', async () => {
@@ -50,5 +50,9 @@ describe('permission internationalization', () => {
         expect(permissionResourceLabel(i18n.t, 'selected:sha256:abc')).toBe('所选对象：sha256:abc');
         expect(permissionResourceLabel(i18n.t, 'selected:sha256:def')).toBe('所选对象：sha256:def');
         expect(permissionOperationLabel(i18n.t, 'launch_application')).toBe('启动应用');
+        expect(permissionOperationLabel(i18n.t, 'fetch_public_web')).toBe('读取公开网页');
+        expect(permissionResourceLabel(i18n.t, 'external_web_host:example.com')).toBe('网页域名：example.com');
+        expect(isReusableWebHost({ toolName: 'fetch_public_web_page', resourceScope: ['external_web_host:example.com'] })).toBe(true);
+        expect(isReusableWebHost({ toolName: 'fetch_public_web_page', resourceScope: ['external_url_input:sha256:old'] })).toBe(false);
     });
 });

@@ -192,8 +192,9 @@ impl ReadCallPreflight {
         })
     }
 
-    /// Central Web Research has no edge object or device readiness, but still
-    /// consumes the same durable read grant under the original owner message.
+    /// Central Web Research has no edge object or device readiness. Each call
+    /// binds its original selection and exact input; fetch authority is scoped
+    /// to a host, while search queries retain owner-message provenance.
     pub fn build_central_web(
         registry: &ProviderRegistry,
         surface: ProductSurface,
@@ -241,9 +242,8 @@ impl ReadCallPreflight {
         .ok_or_else(unavailable)?;
         let (root_count, export_destinations) = match call.name.as_str() {
             crate::web_research::WEB_FETCH_TOOL_NAME => {
-                scope.resources = crate::capability_grant::exact_external_url_resource_scope(
-                    &canonical_input_digest_sha256,
-                );
+                scope.resources =
+                    crate::web_research::validate_fetch_arguments(call)?.resource_scope();
                 (1, Vec::new())
             }
             crate::web_research::WEB_SEARCH_TOOL_NAME => {
