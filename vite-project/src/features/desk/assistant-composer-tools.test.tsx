@@ -27,6 +27,16 @@ describe('assistant composer tools', () => {
     });
 });
 
+it('keeps the background task count in the tooltip and accessible name when the label is hidden', () => {
+    render(<AssistantComposerTools meter={null} onDetails={() => {}} onPermissionHistory={() => {}}
+        onTasks={() => {}} runningTaskCount={4} />);
+    const tasks = screen.getByRole('button', { name: 'pages.aiAssistant.tasks.title (4)' });
+    tasks.querySelector<HTMLElement>('.assistant-action-label')!.style.display = 'none';
+    expect(tasks).toHaveAccessibleName('pages.aiAssistant.tasks.title (4)');
+    expect(tasks.title).toBe('pages.aiAssistant.tasks.title (4)');
+    expect(tasks.querySelector('svg')).not.toBeNull();
+});
+
 it('places scheduled tasks immediately after directories and opens them without submitting', () => {
     const onSchedules = vi.fn();
     const onSubmit = vi.fn();

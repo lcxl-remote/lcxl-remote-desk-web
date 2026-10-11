@@ -3,7 +3,7 @@ import { AssistantTranscript } from './assistant-transcript';
 import { AssistantContextMeter } from './assistant-context-meter';
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ClipboardList, ArrowDown, Paperclip, FolderKey, ListTodo, ShieldCheck, ChevronLeft, ChevronRight, ListFilter, Plus } from 'lucide-react';
+import { Bot, ClipboardList, ArrowDown, Paperclip, FolderKey, Layers, ListTodo, ListTree, ShieldCheck, ChevronLeft, ChevronRight, ListFilter, Plus } from 'lucide-react';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -19,7 +19,8 @@ import { AssistantFileScope } from './assistant-file-scope';
 import { AssistantBackgroundTasks } from './assistant-background-tasks';
 import { AssistantDetailsSheet } from './assistant-details-sheet';
 import { AssistantComposerTools } from './assistant-composer-tools';
-import { AssistantMoreMenu } from './assistant-more-menu';
+import { AssistantComposerMenu } from './assistant-composer-menu';
+import { AssistantComposerStatus } from './assistant-composer-status';
 import { permissionToolLabel, permissionOperationLabel } from './assistant-permission-labels';
 import { subagentIsTerminal, useAiAssistantSubagents } from './use-ai-assistant-subagents';
 import type { InteractiveCommandContext } from './assistant-interactive-command';
@@ -47,27 +48,28 @@ export function AssistantSubagentMenu({ onSelect, onDeviceSettings, onApprovalSe
     onSelect: (panel: AssistantSubagentPanel) => void; onDeviceSettings?: () => void; onApprovalSettings?: () => void;
 }) {
     const { t } = useTranslation();
-    return <AssistantMoreMenu sections={[
+    return <AssistantComposerMenu sections={[
         { label: t('pages.aiAssistant.workspace.resources'), actions: [
             { label: t('pages.aiAssistant.attachments.title'), icon: Paperclip, onSelect: () => onSelect('attachments') },
-            { label: t('pages.aiAssistant.contextTitle'), onSelect: () => onSelect('context') },
+            { label: t('pages.aiAssistant.contextTitle'), icon: Layers, onSelect: () => onSelect('context') },
             { label: t('pages.aiAssistant.directories.title'), icon: FolderKey, onSelect: () => onSelect('directories') },
         ] },
         { label: t('pages.aiAssistant.workspace.manage'), actions: [
             { label: t('pages.aiAssistant.tasks.title'), icon: ListTodo, onSelect: () => onSelect('tasks') },
             { label: t('pages.aiAssistant.permissionHistory'), icon: ShieldCheck, onSelect: () => onSelect('permissions') },
-            ...(onApprovalSettings ? [{ label: t('pages.aiAssistant.autoApprovalTitle'), icon: ShieldCheck, onSelect: onApprovalSettings }] : []),
+            ...(onApprovalSettings ? [{ label: t('pages.aiAssistant.autoApprovalTitle'), icon: Bot, onSelect: onApprovalSettings }] : []),
             ...(onDeviceSettings ? [{ label: t('pages.aiAssistant.workspace.deviceSettings'), onSelect: onDeviceSettings }] : []),
         ] },
         { label: t('pages.aiAssistant.workspace.troubleshoot'), actions: [
-            { label: t('pages.aiAssistant.workspace.details'), onSelect: () => onSelect('details') },
+            { label: t('pages.aiAssistant.workspace.details'), icon: ListTree, onSelect: () => onSelect('details') },
             { label: t('pages.aiAssistant.workspace.capabilities'), onSelect: () => onSelect('capabilities') },
         ] },
     ]} />;
 }
 
 export function AssistantSubagents({ agents, connected, canDecide, interactive, exportBackup, panel: externalPanel,
-    onPanelChange, deskId, sessionTargetId, capabilityList, adjustment: externalAdjustment, onAdjustmentChange }: {
+    onPanelChange, deskId, sessionTargetId, capabilityList, adjustment: externalAdjustment, onAdjustmentChange,
+    onDeviceSettings, onApprovalSettings }: {
     agents: ReturnType<typeof useAiAssistantSubagents>; connected: boolean; canDecide: boolean;
     interactive?: Omit<InteractiveCommandContext, 'runId'>;
     mainStopped: boolean; exportBackup?: (session: string, id: string) => Promise<void>;
@@ -75,6 +77,7 @@ export function AssistantSubagents({ agents, connected, canDecide, interactive, 
     deskId?: string; sessionTargetId?: string | null;
     capabilityList?: ReactNode;
     adjustment?: string; onAdjustmentChange?: (text: string) => void;
+    onDeviceSettings?: () => void; onApprovalSettings?: () => void;
 }) {
     const { t } = useTranslation();
     const [localAdjustment, setLocalAdjustment] = useState('');
@@ -195,31 +198,32 @@ export function AssistantSubagents({ agents, connected, canDecide, interactive, 
                 className="assistant-jump-action absolute bottom-3 right-3 rounded-full bg-background shadow-md"
                 aria-label={t('pages.aiAssistant.scrollToLatest')}><ArrowDown className="h-4 w-4" /></Button>}
         </div>
-        <div className="assistant-composer mx-auto w-full max-w-[840px] shrink-0 space-y-2 rounded-xl border bg-background p-3 shadow-sm">
+        <form className="assistant-composer mx-auto w-full max-w-[840px] shrink-0 space-y-2 rounded-xl border bg-background p-3 shadow-sm" onSubmit={event => {
+            event.preventDefault();
+            if (!subagentIsTerminal(task) && !sendDisabled) void agents.control(task, { kind: 'adjust', message: adjustment.trim() }).then(ok => {
+                if (ok) setAdjustment('');
+            });
+        }}>
             <AssistantSubagentApprovalNotice agents={agents} />
-            {!subagentIsTerminal(task) && <form className="space-y-2" onSubmit={event => {
-                event.preventDefault();
-                if (!sendDisabled) void agents.control(task, { kind: 'adjust', message: adjustment.trim() }).then(ok => {
-                    if (ok) setAdjustment('');
-                });
-            }}>
-                <AssistantComposerInput sendDisabled={sendDisabled}
-                    aria-label={t('pages.aiAssistant.subagents.adjustMessage')} placeholder={t('pages.aiAssistant.subagents.adjustMessage')}
-                    value={adjustment} maxLength={16_384} disabled={!canDecide || !connected || agents.updating}
-                    onChange={event => setAdjustment(event.target.value)} className="min-h-16 max-h-40 resize-y" />
-                <div className="flex flex-wrap items-center justify-between gap-2">
+            {!subagentIsTerminal(task) && <AssistantComposerInput sendDisabled={sendDisabled}
+                aria-label={t('pages.aiAssistant.subagents.adjustMessage')} placeholder={t('pages.aiAssistant.subagents.adjustMessage')}
+                value={adjustment} maxLength={16_384} disabled={!canDecide || !connected || agents.updating}
+                onChange={event => setAdjustment(event.target.value)} className="min-h-16 max-h-40 resize-y" />}
+            <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex min-w-0 flex-wrap items-center gap-1">
+                    <AssistantSubagentMenu onSelect={setPanel} onDeviceSettings={onDeviceSettings} onApprovalSettings={onApprovalSettings} />
+                    {automaticApproval && <AssistantComposerStatus automaticApproval onApprovalSettings={onApprovalSettings} />}
                     <AssistantComposerTools meter={<AssistantContextMeter usage={child?.contextUsage ?? null} draft={adjustment} />}
                         onDetails={() => setPanel('details')} onPermissionHistory={() => setPanel('permissions')}
                         onDirectories={() => setPanel('directories')} onTasks={() => setPanel('tasks')} runningTaskCount={runningTaskCount} />
-                    <div className="flex items-center gap-2">
-                        <Button type="button" variant="outline" disabled={!canDecide || !connected || agents.updating}
-                            onClick={() => void agents.control(task, { kind: 'cancel' })}>{t('pages.aiAssistant.subagents.cancel')}</Button>
-                        <Button type="submit" disabled={sendDisabled}>
-                            {t('pages.aiAssistant.subagents.applyAdjustment')}</Button>
-                    </div>
                 </div>
-            </form>}
-        </div>
+                {!subagentIsTerminal(task) && <div className="flex items-center gap-2">
+                    <Button type="button" variant="outline" disabled={!canDecide || !connected || agents.updating}
+                        onClick={() => void agents.control(task, { kind: 'cancel' })}>{t('pages.aiAssistant.subagents.cancel')}</Button>
+                    <Button type="submit" disabled={sendDisabled}>{t('pages.aiAssistant.subagents.applyAdjustment')}</Button>
+                </div>}
+            </div>
+        </form>
         <AssistantDetailsSheet panel={panel === 'details' || panel === 'context' || panel === 'capabilities' ? panel : null}
             onPanelChange={next => setPanel(next === 'details' || next === 'context' || next === 'capabilities' ? next : null)} sections={{ details: detailsContent, ...(capabilityList ? { capabilities: capabilityList } : {}), context: child ? <div className="space-y-3">
                         {!!child.contextAttachments?.length && <Disclosure title={t('pages.aiAssistant.attachmentTitle')} defaultOpen summaryClassName="text-sm">

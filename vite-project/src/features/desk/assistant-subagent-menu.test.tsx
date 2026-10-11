@@ -11,12 +11,16 @@ it('opens the shared owner approval settings without retargeting a child permiss
     const onApprovalSettings = vi.fn();
     const onSelect = vi.fn();
     const view = render(<AssistantSubagentMenu onSelect={onSelect} onApprovalSettings={onApprovalSettings} />);
-    fireEvent.click(screen.getByRole('button', { name: tMock('pages.aiAssistant.workspace.more') }));
+    fireEvent.click(screen.getByRole('button', { name: tMock('pages.aiAssistant.workspace.actions') }));
+    expect(screen.getByRole('button', { name: tMock('pages.aiAssistant.contextTitle') }).querySelector('svg')).toHaveClass('lucide-layers');
+    expect(screen.getByRole('button', { name: tMock('pages.aiAssistant.workspace.details') }).querySelector('svg')).toHaveClass('lucide-list-tree');
+    expect(screen.getByRole('button', { name: tMock('pages.aiAssistant.autoApprovalTitle') }).querySelector('svg')).toHaveClass('lucide-bot');
+    expect(screen.getByRole('button', { name: tMock('pages.aiAssistant.permissionHistory') }).querySelector('svg')).toHaveClass('lucide-shield-check');
     fireEvent.click(screen.getByRole('button', { name: tMock('pages.aiAssistant.autoApprovalTitle') }));
     expect(onApprovalSettings).toHaveBeenCalledExactlyOnceWith();
     expect(onSelect).not.toHaveBeenCalled();
     view.rerender(<AssistantSubagentMenu onSelect={onSelect} />);
-    fireEvent.click(screen.getByRole('button', { name: tMock('pages.aiAssistant.workspace.more') }));
+    fireEvent.click(screen.getByRole('button', { name: tMock('pages.aiAssistant.workspace.actions') }));
     expect(screen.queryByRole('button', { name: tMock('pages.aiAssistant.autoApprovalTitle') })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: tMock('pages.aiAssistant.permissionHistory') }));
     expect(onSelect).toHaveBeenCalledExactlyOnceWith('permissions');

@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { useState, type ReactNode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AssistantSubagentApprovalNotice, AssistantSubagents, AssistantConversationTabs } from './assistant-subagents';
@@ -8,6 +8,7 @@ import type { AiAssistantSubAgentSummary, PermissionRequestDto } from '@/service
 
 const lifecycle = vi.hoisted(() => ({ attachments: [] as string[], images: [] as string[] }));
 vi.mock('react-i18next', () => import('@/test-utils/i18n-mock').then(m => m.reactI18nextMock()));
+vi.mock('@/hooks/use-mobile', () => ({ useIsMobile: () => false }));
 vi.mock('./assistant-attachments', async () => {
     const { useEffect } = await import('react');
     return {
@@ -53,6 +54,31 @@ function agentsFor(childId: string): ReturnType<typeof useAiAssistantSubagents> 
 }
 
 afterEach(() => { cleanup(); lifecycle.attachments.length = 0; lifecycle.images.length = 0; vi.clearAllMocks(); vi.restoreAllMocks(); });
+it('shows child approval in the composer status area and clears it when switching to an inactive child', () => {
+    const agents = agentsFor('child-1');
+    agents.detail!.session.approvalDelegation = { delegationId: 'child-approval', status: 'active',
+        reviewsUsed: 0, tokensUsed: 0, createdAtUnixMs: 1 };
+    const onApprovalSettings = vi.fn();
+    const view = render(<AssistantSubagents agents={agents} connected canDecide mainStopped={false} onApprovalSettings={onApprovalSettings} />);
+    const status = screen.getByTestId('assistant-composer-status');
+    expect(status.closest('form')).toHaveClass('assistant-composer');
+    fireEvent.click(within(status).getByRole('button', { name: 'AI approval is on' }));
+    expect(onApprovalSettings).toHaveBeenCalledOnce();
+    expect(agents.control).not.toHaveBeenCalled();
+    view.rerender(<AssistantSubagents agents={agentsFor('child-2')} connected canDecide mainStopped={false} onApprovalSettings={onApprovalSettings} />);
+    expect(screen.queryByText('AI approval is on')).toBeNull();
+});
+it('keeps the + menu available for a completed child and opens its context panel', async () => {
+    const agents = agentsFor('child-1');
+    const task = { ...agents.selected!, state: 'completed' as const };
+    agents.selected = task; agents.tasks = [task]; agents.detail!.result.task = task;
+    render(<AssistantSubagents agents={agents} connected canDecide mainStopped={false} />);
+    expect(screen.queryByRole('textbox')).toBeNull();
+    fireEvent.keyDown(screen.getByRole('button', { name: 'Conversation actions' }), { key: 'Enter' });
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Conversation context' }));
+    expect(await screen.findByText('Context child-1')).toBeVisible();
+    expect(agents.control).not.toHaveBeenCalled();
+});
 it('keeps an oversized UTF-8 adjustment draft without submitting an invalid child control request', () => {
     const agents = agentsFor('child-1');
     render(<AssistantSubagents agents={agents} connected canDecide mainStopped={false} />);

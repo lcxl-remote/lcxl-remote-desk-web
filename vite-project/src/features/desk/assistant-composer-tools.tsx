@@ -13,6 +13,7 @@ export function AssistantComposerTools({ meter, onDetails, onPermissionHistory, 
     onDirectories?: () => void;
 }) {
     const { t } = useTranslation();
+    const taskLabel = `${t('pages.aiAssistant.tasks.title')}${runningTaskCount > 0 ? ` (${runningTaskCount})` : ''}`;
     return <div className="flex min-w-0 flex-wrap items-center gap-1" data-testid="assistant-composer-tools">
         {meter}
         <Button type="button" size="sm" variant="ghost" className="assistant-action" title={t('pages.aiAssistant.workspace.details')}
@@ -23,11 +24,10 @@ export function AssistantComposerTools({ meter, onDetails, onPermissionHistory, 
             aria-label={t('pages.aiAssistant.permissionHistory')} aria-haspopup="dialog" onClick={onPermissionHistory}>
             <ClipboardList className="h-4 w-4 shrink-0" aria-hidden="true" /><span className="assistant-action-label">{t('pages.aiAssistant.permissionHistory')}</span>
         </Button>
-        {onTasks && <Button type="button" size="sm" variant="ghost" className="assistant-action" title={t('pages.aiAssistant.tasks.title')}
-            aria-label={t('pages.aiAssistant.tasks.title')} aria-haspopup="dialog" onClick={onTasks}>
+        {onTasks && <Button type="button" size="sm" variant="ghost" className="assistant-action" title={taskLabel}
+            aria-label={taskLabel} aria-haspopup="dialog" onClick={onTasks}>
             <ListTodo className="h-4 w-4 shrink-0" aria-hidden="true" />
-            <span className="assistant-action-label">{t('pages.aiAssistant.tasks.title')}</span>
-            {runningTaskCount > 0 && <span className="ml-1 tabular-nums">({runningTaskCount})</span>}
+            <span className="assistant-action-label">{taskLabel}</span>
         </Button>}
         {onDirectories && <Button type="button" size="sm" variant="ghost" className="assistant-action" title={t('pages.aiAssistant.directories.title')}
             aria-label={t('pages.aiAssistant.directories.title')} aria-haspopup="dialog" onClick={onDirectories}>

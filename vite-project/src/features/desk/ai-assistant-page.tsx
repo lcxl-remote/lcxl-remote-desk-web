@@ -10,7 +10,7 @@ import './assistant-responsive.css';
 import { AssistantSchedules } from './assistant-schedules';
 import { AssistantDocumentPreviews } from './assistant-document-preview';
 import { AssistantBackgroundTasks } from './assistant-background-tasks';
-import { AssistantSubagentApprovalNotice, AssistantSubagents, AssistantConversationTabs, AssistantSubagentMenu, type AssistantSubagentPanel } from './assistant-subagents';
+import { AssistantSubagentApprovalNotice, AssistantSubagents, AssistantConversationTabs, type AssistantSubagentPanel } from './assistant-subagents';
 import { AssistantStopConfirmation } from './assistant-stop-confirmation';
 import { AssistantComposerActions } from './assistant-composer-actions';
 import { AssistantAutomaticApproval } from './assistant-automatic-approval';
@@ -25,15 +25,14 @@ import { FileRecoverySettings } from '@/features/settings/file-recovery-settings
 import { AssistantPermissionRequest } from './assistant-permission-request';
 import { AssistantPermissionRecords, permissionIsAutomaticallyReviewed } from './assistant-permission-records';
 import { AssistantHistory } from './assistant-history';
-import { AssistantMoreMenu, type AssistantMoreSection } from './assistant-more-menu';
-import { useIsMobile } from '@/hooks/use-mobile';
-import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
+import { AssistantComposerMenu, type AssistantMenuSection } from './assistant-composer-menu';
+import { AssistantComposerStatus } from './assistant-composer-status';
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
 import { capabilityDescriptionKey } from './assistant-capability-copy';
 import { type FormEvent, useEffect, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { Check, AlertTriangle, ArrowDown, ArrowLeft, CalendarClock, Eye, FolderKey, ListTodo, LoaderCircle, Monitor, Paperclip, Plus, RefreshCw, Settings2, ShieldCheck, X } from 'lucide-react';
+import { Bot, Check, AlertTriangle, ArrowDown, ArrowLeft, CalendarClock, Eye, FolderKey, ListTodo, ListTree, LoaderCircle, Monitor, Paperclip, RefreshCw, Settings2, ShieldCheck, X } from 'lucide-react';
 
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
@@ -250,7 +249,6 @@ export function AiAssistantWorkspace({
 }) {
     const { t } = useTranslation();
     const { i18n } = useTranslation();
-    const isMobile = useIsMobile();
     const { isConnected, subscribe, sendMessage } = useDeskSignaling();
     const { entries, inspectSession, inspectUi, scheduleUi, cancelDelayedUi, remainingSeconds, applications, listApplications, applicationSelectionAvailable } = useAiAssistantObservation({
         deskId,
@@ -321,7 +319,6 @@ export function AiAssistantWorkspace({
         focusGoalComposer();
     };
     const [approvalSettingsOpen, setApprovalSettingsOpen] = useState(false);
-    const [addContextOpen, setAddContextOpen] = useState(false);
     const [pendingScheduleCount, setPendingScheduleCount] = useState(0);
     const [deviceSettingsOpen, setDeviceSettingsOpen] = useState(false);
     const [panel, setPanel] = useState<AssistantPanelId | null>(null);
@@ -331,7 +328,7 @@ export function AiAssistantWorkspace({
     };
     useEffect(() => {
         setChildPanel(null); setPanel(null); setAttachmentsOpen(false); setTaskPanelSession(null);
-        setPermissionHistorySession(null); setDirectorySession(null); setAddContextOpen(false);
+        setPermissionHistorySession(null); setDirectorySession(null);
         setApprovalSettingsOpen(false); setDeviceSettingsOpen(false); setGoalDetailsOpen(false); setSchedulesOpen(false);
     }, [subagents.selected?.task_id]);
     const [permissionHistorySession, setPermissionHistorySession] = useState<string | null>(null);
@@ -600,7 +597,7 @@ export function AiAssistantWorkspace({
         </div>
     );
 
-    const moreSections: AssistantMoreSection[] = [
+    const menuSections: AssistantMenuSection[] = [
         { label: t('pages.aiAssistant.workspace.resources'), actions: [
             { label: t('pages.aiAssistant.attachments.title'), icon: Paperclip,
                 disabled: !chat.sessionId, onSelect: () => setAttachmentsOpen(true) },
@@ -620,13 +617,13 @@ export function AiAssistantWorkspace({
                 icon: ListTodo, onSelect: () => setTaskPanelSession(permissionHistoryKey) },
             { label: t('pages.aiAssistant.permissionHistory'), icon: ShieldCheck,
                 onSelect: () => setPermissionHistorySession(permissionHistoryKey) },
-            ...(featureProfile.approval_delegation ? [{ label: t('pages.aiAssistant.autoApprovalTitle'), icon: ShieldCheck,
+            ...(featureProfile.approval_delegation ? [{ label: t('pages.aiAssistant.autoApprovalTitle'), icon: Bot,
                 onSelect: () => setApprovalSettingsOpen(true) }] : []),
             { label: t('pages.aiAssistant.workspace.deviceSettings'), icon: Settings2,
                 onSelect: () => setDeviceSettingsOpen(true) },
         ] },
         { label: t('pages.aiAssistant.workspace.troubleshoot'), actions: [
-            { label: t('pages.aiAssistant.workspace.details'), onSelect: () => setPanel('details') },
+            { label: t('pages.aiAssistant.workspace.details'), icon: ListTree, onSelect: () => setPanel('details') },
         ] },
     ];
 
@@ -830,8 +827,6 @@ export function AiAssistantWorkspace({
                                     setSelectedCapabilityIds([]);
                                     return true;
                                 }} onNew={resetConversation} />
-                            {subagents.selected ? <AssistantSubagentMenu onSelect={setSelectedChildPanel} onDeviceSettings={() => setDeviceSettingsOpen(true)}
-                                onApprovalSettings={!rehearsal && featureProfile.approval_delegation ? () => setApprovalSettingsOpen(true) : undefined} /> : <AssistantMoreMenu sections={moreSections} />}
                         </div>
                     </div>
                 </CardHeader>
@@ -842,14 +837,12 @@ export function AiAssistantWorkspace({
                         onDetails={() => setGoalDetailsOpen(true)} onAction={action => void chat.controlGoal(action)}
                         onReply={focusGoalComposer} onContinue={continueCompletedGoal} />}
                     <div role="tabpanel" id="assistant-main-panel" aria-labelledby="assistant-tab-main" hidden={!!subagents.selected} className={subagents.selected ? 'hidden' : 'contents'}>
-                    {(pendingCount > 0 || runningTaskCount > 0 || chat.approvalDelegation?.status === 'active') && (
+                    {(pendingCount > 0 || runningTaskCount > 0) && (
                         <div className="flex w-full min-w-0 shrink-0 items-center gap-2 overflow-x-auto px-1 text-xs">
                             {pendingCount > 0 && <Button type="button" size="sm" variant="outline" className="shrink-0 border-amber-500/50"
                                 onClick={() => jumpToPending()}>{t('pages.aiAssistant.workspace.pendingCount', { count: pendingCount })}</Button>}
                             {runningTaskCount > 0 && <Button type="button" size="sm" variant="ghost" className="shrink-0" onClick={() => setTaskPanelSession(permissionHistoryKey)}>
                                 {t('pages.aiAssistant.workspace.runningTasks', { count: runningTaskCount })}</Button>}
-                            {chat.approvalDelegation?.status === 'active' && <Button type="button" size="sm" variant="ghost" className="shrink-0" onClick={() => setApprovalSettingsOpen(true)}>
-                                {t('pages.aiAssistant.workspace.autoApprovalActive')}</Button>}
                         </div>
                     )}
                     <div className="relative min-h-0 flex-1">
@@ -1055,56 +1048,15 @@ export function AiAssistantWorkspace({
                             className="min-h-16 max-h-40 w-full resize-y rounded-md border-0 bg-background px-3 py-2 shadow-sm outline-none placeholder:text-muted-foreground focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
                         />
                         <div className="flex min-w-0 items-center gap-1">
-                            {isMobile ? <>
-                                <Button type="button" variant="ghost" size="icon" className="assistant-add-action h-11 w-11 shrink-0"
-                                    aria-label={t('pages.aiAssistant.workspace.addContext')} onClick={() => setAddContextOpen(true)}>
-                                    <Plus className="h-4 w-4" aria-hidden="true" />
-                                </Button>
-                                <Sheet open={addContextOpen} onOpenChange={setAddContextOpen}>
-                                    <SheetContent side="bottom" className="max-h-[85dvh] overflow-y-auto rounded-t-xl px-4 pb-[calc(1rem+env(safe-area-inset-bottom))] pt-5">
-                                        <SheetHeader><SheetTitle>{t('pages.aiAssistant.workspace.addContext')}</SheetTitle></SheetHeader>
-                                        <div className="mt-4 space-y-2">
-                                            <Button type="button" variant="ghost" className="min-h-11 w-full justify-start"
-                                                onClick={() => { setAddContextOpen(false); setPanel('context'); }}>
-                                                {t('pages.aiAssistant.workspace.addContext')}
-                                            </Button>
-                                            {!rehearsal && <Button type="button" variant="ghost" className="min-h-11 w-full justify-start gap-2"
-                                                aria-pressed={startGoal} disabled={!assistantEnabled || chat.turnRunning || !!chat.deliveryState}
-                                                onClick={() => { setStartGoal(!startGoal); setPreviousCompletedGoalId(null); }}>
-                                                <span className="inline-flex h-4 w-4 shrink-0 items-center justify-center">{startGoal && <Check className="h-4 w-4" aria-hidden="true" />}</span>
-                                                {t('pages.aiAssistant.goalStart')}
-                                            </Button>}
-                                            {!rehearsal && startGoal && goalBudgetPolicy && <GoalLimitsSummary policy={goalBudgetPolicy} />}
-                                        </div>
-                                    </SheetContent>
-                                </Sheet>
-                            </> : <DropdownMenu>
-                                <DropdownMenuTrigger asChild>
-                                    <Button type="button" variant="ghost" size="icon" className="assistant-add-action h-11 w-11 shrink-0"
-                                        aria-label={t('pages.aiAssistant.workspace.addContext')}>
-                                        <Plus className="h-4 w-4" aria-hidden="true" />
-                                    </Button>
-                                </DropdownMenuTrigger>
-                                <DropdownMenuContent align="start" className="max-w-[min(90vw,20rem)]">
-                                    <DropdownMenuItem onSelect={() => setPanel('context')}>
-                                        {t('pages.aiAssistant.workspace.addContext')}
-                                    </DropdownMenuItem>
-                                    {!rehearsal && <DropdownMenuCheckboxItem checked={startGoal}
-                                        disabled={!assistantEnabled || chat.turnRunning || !!chat.deliveryState}
-                                        onCheckedChange={checked => { setStartGoal(checked); setPreviousCompletedGoalId(null); }}>
-                                        {t('pages.aiAssistant.goalStart')}
-                                    </DropdownMenuCheckboxItem>}
-                                    {!rehearsal && startGoal && goalBudgetPolicy && <div className="px-2 py-1"><GoalLimitsSummary policy={goalBudgetPolicy} /></div>}
-                                </DropdownMenuContent>
-                            </DropdownMenu>}
-                            {selectedContextCount > 0 && <Button type="button" size="sm" variant="secondary" className="min-w-0 max-w-[min(28vw,10rem)] truncate"
-                                onClick={() => setPanel('context')}>
-                                {t('pages.aiAssistant.workspace.contextCount', { count: selectedContextCount })}
-                            </Button>}
-                            {startGoal && <Button type="button" size="sm" variant="secondary" className="min-w-0 max-w-[min(28vw,10rem)] gap-1"
-                                onClick={() => { setStartGoal(false); setPreviousCompletedGoalId(null); }}>
-                                <span className="truncate">{t('pages.aiAssistant.goalStart')}</span><X className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                            </Button>}
+                            <AssistantComposerMenu key={`${permissionHistoryKey}:${subagents.selected?.task_id ?? 'main'}`} sections={menuSections} onContext={() => setPanel('context')}
+                                goal={!rehearsal ? {
+                                    checked: startGoal, disabled: !assistantEnabled || chat.turnRunning || !!chat.deliveryState,
+                                    onCheckedChange: checked => { setStartGoal(checked); setPreviousCompletedGoalId(null); },
+                                    summary: startGoal && goalBudgetPolicy ? <GoalLimitsSummary policy={goalBudgetPolicy} /> : undefined,
+                                } : undefined} />
+                            <AssistantComposerStatus automaticApproval={automaticApproval} onApprovalSettings={() => setApprovalSettingsOpen(true)}
+                                contextCount={selectedContextCount} onContext={() => setPanel('context')} startGoal={startGoal}
+                                onClearGoal={() => { setStartGoal(false); setPreviousCompletedGoalId(null); }} />
                             <div className="ml-auto flex shrink-0 items-center gap-1">
                                 <AssistantContextMeter usage={chat.contextUsage} draft={question} />
                                 <AssistantComposerActions turnRunning={chat.turnRunning} canStop={chat.canStop}
@@ -1122,6 +1074,8 @@ export function AiAssistantWorkspace({
                             [selectedChildTask.task_id]: { revision: selectedChildTask.input_revision, text } })); }}
                         panel={childPanel?.taskId === subagents.selected?.task_id ? childPanel?.panel ?? null : null}
                         onPanelChange={setSelectedChildPanel} deskId={deskId}
+                        onDeviceSettings={() => setDeviceSettingsOpen(true)}
+                        onApprovalSettings={!rehearsal && featureProfile.approval_delegation ? () => setApprovalSettingsOpen(true) : undefined}
                         sessionTargetId={chat.sessionTargetReady ? (chat.sessionTarget?.target_id ?? null) : undefined}
                         capabilityList={<AssistantCapabilityList entries={capabilities.snapshot?.entries ?? []}
                             loading={capabilities.loading} error={Boolean(capabilities.error)}

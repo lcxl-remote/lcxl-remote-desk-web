@@ -10,7 +10,8 @@ describe('assistant page header layout', () => {
         expect(source).toContain('data-testid="assistant-title-row" className="flex items-center justify-between gap-2"');
         const header = source.slice(source.indexOf('<CardHeader className="assistant-header'), source.indexOf('</CardHeader>', source.indexOf('<CardHeader className="assistant-header')));
         expect(header).toContain('<AssistantHistory ');
-        expect(header).toContain('<AssistantMoreMenu sections={moreSections} />');
+        expect(header).not.toContain('<AssistantComposerMenu');
+        expect(header).not.toContain('<AssistantSubagentMenu');
         expect(header).not.toContain('<CardDescription>');
     });
 });
@@ -21,12 +22,21 @@ it('keeps the context trigger below the input beside send or stop', () => {
     const composer = page.slice(page.indexOf('<form onSubmit={submit} className="assistant-composer'), page.indexOf('</form>', page.indexOf('<form onSubmit={submit} className="assistant-composer')));
     const input = composer.indexOf('<AssistantComposerInput');
     const actions = composer.indexOf('<div className="flex min-w-0 items-center gap-1">');
-    const add = composer.indexOf("aria-label={t('pages.aiAssistant.workspace.addContext')}");
+    const add = composer.indexOf('<AssistantComposerMenu');
+    const status = composer.indexOf('<AssistantComposerStatus');
+    const statusEnd = composer.indexOf('/>', status);
     const send = composer.indexOf('<AssistantComposerActions ');
     expect(input).toBeGreaterThanOrEqual(0);
     expect(actions).toBeGreaterThan(input);
     expect(add).toBeGreaterThan(actions);
-    expect(send).toBeGreaterThan(add);
+    expect(composer).toContain('sections={menuSections}');
+    expect(status).toBeGreaterThan(add);
+    expect(composer.slice(status, statusEnd)).toContain('automaticApproval={automaticApproval}');
+    expect(composer.slice(status, statusEnd)).toContain('contextCount={selectedContextCount}');
+    expect(send).toBeGreaterThan(statusEnd);
+    const main = page.slice(page.indexOf('id="assistant-main-panel"'), page.indexOf('data-testid="assistant-scroll-area"'));
+    expect(main).not.toContain('approvalDelegation');
+    expect(main).not.toContain('<AssistantComposerStatus');
 });
 
 it('keeps standalone back navigation beside the conversation heading without the outer title or width cap', () => {

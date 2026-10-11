@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ShieldCheck } from 'lucide-react';
+import { Bot } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import type { useAiAssistantChat } from './use-ai-assistant-chat';
 
@@ -26,7 +26,7 @@ export function AssistantAutomaticApproval({ chat, enabled, connected }: {
     return <div data-testid="ai-assistant-automatic-approval" className="rounded-md border px-3 py-2 text-xs">
         <div className="flex items-center justify-between gap-3">
             <div className="min-w-0">
-                <p className="flex items-center gap-2 font-medium"><ShieldCheck className="h-4 w-4" />{t('pages.aiAssistant.autoApprovalTitle')}</p>
+                <p className="flex items-center gap-2 font-medium"><Bot className="h-4 w-4" aria-hidden="true" />{t('pages.aiAssistant.autoApprovalTitle')}</p>
                 <p className="mt-1 text-muted-foreground">{t('pages.aiAssistant.autoApprovalDescription')}</p>
             </div>
             <Button size="sm" variant="outline"

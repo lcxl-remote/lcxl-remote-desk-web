@@ -1,5 +1,6 @@
 .assistant-composer, .assistant-header { container-type: inline-size; }
 .assistant-action { gap: 0.5rem; min-width: 44px; min-height: 44px; }
+.assistant-status-action { flex-shrink: 0; }
 
 .assistant-approval-tab-title { color: #9a3412; font-weight: 600; animation: assistant-approval-title 2s ease-in-out infinite; }
 .dark .assistant-approval-tab-title { color: #fbbf24; }
@@ -114,6 +115,15 @@
 @container (max-width: 760px) {
     .assistant-action-label { display: none; }
     .assistant-action { padding-inline: 0.625rem; }
+    .assistant-status-action {
+        width: 44px;
+        min-width: 44px;
+        max-width: 44px;
+        height: 44px;
+        justify-content: center;
+        gap: 0;
+        padding: 0;
+    }
 
     .assistant-header-actions { gap: 8px; }
 
