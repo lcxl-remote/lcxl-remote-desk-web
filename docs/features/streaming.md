@@ -87,6 +87,8 @@ Mobile Web, iOS and Android offer two modes, with Direct touch selected initiall
 
 The Web toolbar shows Touch and zoom, Zoom in, Zoom out and Fit screen when touch is the primary pointing input. Desktop browsers using a mouse hide this group, including in narrow windows, while keeping Fullscreen and the other general controls. Switching to mouse input closes the touch menu and restores the local view to Fit screen.
 
+The toolbar hides its scrollbar to keep its height stable while expanding and collapsing. When buttons exceed the available width, horizontal scrolling and keyboard focus still let you reach the remaining controls.
+
 | Action | Direct touch | Touchpad |
 | --- | --- | --- |
 | Tap | Click at your finger | Click at the local cursor |

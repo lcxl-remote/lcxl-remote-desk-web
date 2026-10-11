@@ -147,7 +147,13 @@
     display: flex;
     align-items: center;
     overflow: hidden;
+    /* Avoid scrollbar allocation changing the height during the width animation. */
+    scrollbar-width: none;
     transition: max-width 0.3s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.3s ease, margin 0.3s ease;
+}
+
+.controlBarContent::-webkit-scrollbar {
+    display: none;
 }
 
 .controlBarContent.collapsed {

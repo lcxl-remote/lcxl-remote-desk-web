@@ -239,6 +239,25 @@ vi.mock('@/components/ui/dropdown-menu', () => {
 });
 
 describe('DeskSession Control Bar', () => {
+  it('keeps expanded controls scrollable without reserving scrollbar space', () => {
+    const style = document.createElement('style');
+    style.textContent = readFileSync(resolve(process.cwd(), 'src/features/desk/desk-session.css'), 'utf8');
+    document.head.append(style);
+    try {
+      const { container } = render(<DeskSession />);
+      const bar = container.querySelector('.controlBar')!;
+      const content = container.querySelector('.controlBarContent')!;
+      expect(getComputedStyle(content).scrollbarWidth).toBe('none');
+      fireEvent.mouseEnter(bar);
+      expect(getComputedStyle(content).overflowX).toBe('auto');
+      expect(getComputedStyle(content).scrollbarWidth).toBe('none');
+      fireEvent.mouseLeave(bar);
+      expect(getComputedStyle(content).overflow).toBe('hidden');
+    } finally {
+      style.remove();
+    }
+  });
+
   it('should initially be collapsed', () => {
     const { container } = render(<DeskSession />);
     
