@@ -73,6 +73,21 @@ function renderPanel(
 }
 
 describe("TerminalAiAssistantPanel exec promotion", () => {
+    it("sends with Enter while preserving IME confirmation and Shift+Enter for newlines", () => {
+        localStorage.removeItem('ai-assistant-send-shortcut');
+        const onAsk = vi.fn();
+        render(<TerminalAiAssistantPanel state={baseState} onAsk={onAsk}
+            onReset={vi.fn()} onClose={vi.fn()} onFill={vi.fn()} />);
+        const input = screen.getByPlaceholderText("Describe what you want to do…");
+        fireEvent.change(input, { target: { value: "show disk usage" } });
+        fireEvent.keyDown(input, { key: 'Enter', isComposing: true });
+        fireEvent.keyDown(input, { key: 'Enter', shiftKey: true });
+        expect(onAsk).not.toHaveBeenCalled();
+        fireEvent.keyDown(input, { key: 'Enter' });
+        expect(onAsk).toHaveBeenCalledExactlyOnceWith("how_to", "show disk usage", null);
+        expect(input).toHaveValue("");
+    });
+
     it("clears the question after submitting it", () => {
         const onAsk = vi.fn();
         render(

@@ -1,4 +1,4 @@
-import { Textarea } from '@/components/ui/textarea';
+import { AssistantComposerInput } from '../desk/assistant-composer-input';
 import { type PointerEvent as ReactPointerEvent, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
@@ -483,16 +483,13 @@ export function TerminalAiAssistantPanel({
                     </Button>
                 </div>
                 {mode === 'how_to' ? (
-                    <Textarea
+                    <AssistantComposerInput sendDisabled={running || !question.trim()} onSend={submit}
                         className="min-h-16 w-full resize-none rounded-md border border-input bg-background px-2 py-1 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                         placeholder={t(
                             'pages.deskTerminal.assistant.askPlaceholder',
                         )}
                         value={question}
                         onChange={(e) => setQuestion(e.target.value)}
-                        onKeyDown={(e) => {
-                            if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) submit();
-                        }}
                     />
                 ) : (
                     <p className="text-xs text-muted-foreground">

@@ -8,7 +8,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Disclosure } from '@/components/ui/disclosure';
-import { Textarea } from '@/components/ui/textarea';
+import { AssistantComposerInput } from './assistant-composer-input';
 import { MarkdownContent } from '@/components/markdown-content';
 import { formatLocalTime } from '@/lib/local-time';
 import { AssistantPermissionRequest } from './assistant-permission-request';
@@ -80,6 +80,7 @@ export function AssistantSubagents({ agents, connected, canDecide, interactive, 
     const [localAdjustment, setLocalAdjustment] = useState('');
     const adjustment = externalAdjustment ?? localAdjustment;
     const validAdjustment = adjustment.trim().length > 0 && new TextEncoder().encode(adjustment.trim()).length <= 16_384;
+    const sendDisabled = !validAdjustment || !canDecide || !connected || agents.updating;
     const setAdjustment = onAdjustmentChange ?? setLocalAdjustment;
     const [localPanel, setLocalPanel] = useState<AssistantSubagentPanel | null>(null);
     const panel = externalPanel === undefined ? localPanel : externalPanel;
@@ -198,11 +199,12 @@ export function AssistantSubagents({ agents, connected, canDecide, interactive, 
             <AssistantSubagentApprovalNotice agents={agents} />
             {!subagentIsTerminal(task) && <form className="space-y-2" onSubmit={event => {
                 event.preventDefault();
-                if (validAdjustment && canDecide && connected) void agents.control(task, { kind: 'adjust', message: adjustment.trim() }).then(ok => {
+                if (!sendDisabled) void agents.control(task, { kind: 'adjust', message: adjustment.trim() }).then(ok => {
                     if (ok) setAdjustment('');
                 });
             }}>
-                <Textarea aria-label={t('pages.aiAssistant.subagents.adjustMessage')} placeholder={t('pages.aiAssistant.subagents.adjustMessage')}
+                <AssistantComposerInput sendDisabled={sendDisabled}
+                    aria-label={t('pages.aiAssistant.subagents.adjustMessage')} placeholder={t('pages.aiAssistant.subagents.adjustMessage')}
                     value={adjustment} maxLength={16_384} disabled={!canDecide || !connected || agents.updating}
                     onChange={event => setAdjustment(event.target.value)} className="min-h-16 max-h-40 resize-y" />
                 <div className="flex flex-wrap items-center justify-between gap-2">
@@ -212,7 +214,7 @@ export function AssistantSubagents({ agents, connected, canDecide, interactive, 
                     <div className="flex items-center gap-2">
                         <Button type="button" variant="outline" disabled={!canDecide || !connected || agents.updating}
                             onClick={() => void agents.control(task, { kind: 'cancel' })}>{t('pages.aiAssistant.subagents.cancel')}</Button>
-                        <Button type="submit" disabled={!validAdjustment || !canDecide || !connected || agents.updating}>
+                        <Button type="submit" disabled={sendDisabled}>
                             {t('pages.aiAssistant.subagents.applyAdjustment')}</Button>
                     </div>
                 </div>

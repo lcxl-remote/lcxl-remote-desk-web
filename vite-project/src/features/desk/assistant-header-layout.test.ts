@@ -19,7 +19,7 @@ describe('assistant page header layout', () => {
 it('keeps the context trigger below the input beside send or stop', () => {
     const page = readFileSync('src/features/desk/ai-assistant-page.tsx', 'utf8');
     const composer = page.slice(page.indexOf('<form onSubmit={submit} className="assistant-composer'), page.indexOf('</form>', page.indexOf('<form onSubmit={submit} className="assistant-composer')));
-    const input = composer.indexOf('<Textarea');
+    const input = composer.indexOf('<AssistantComposerInput');
     const actions = composer.indexOf('<div className="flex min-w-0 items-center gap-1">');
     const add = composer.indexOf("aria-label={t('pages.aiAssistant.workspace.addContext')}");
     const send = composer.indexOf('<AssistantComposerActions ');

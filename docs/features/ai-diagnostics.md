@@ -2,6 +2,10 @@
 
 Device owners can open [Model call metrics](/features/model-metrics) from **Usage** to inspect call errors, tool parameter checks and Token usage. Statistics may be incomplete in exceptional situations and are for reference. The page does not store conversation content or recalculate earlier calls.
 
+## Sending messages and inserting newlines
+
+In the Web and desktop AI Assistant, **Enter** sends a message and **Shift+Enter** inserts a new line by default. Open **Send shortcut** below the input to choose **Shift+Enter** or **Ctrl/⌘+Enter** to send instead; unmodified Enter then inserts a new line. This preference is saved in the current browser and shared by main conversations, child adjustments and the terminal AI Assistant. It is not an account setting synchronized across devices. Confirming an IME composition does not send a message, and shortcuts respect the same availability conditions as the send button.
+
 ## Subagents
 
 Main and child tab titles pulse while approval remains pending. Reading a tab or marking it read does not clear approval attention; resolving approval does. Reduced-motion settings use a static highlight. Child attachments, context, working directories, permission history, background tasks and task details use the main conversation’s menu and panel presentation. Chat, images and pending consent actions stay in the transcript. Switching tabs closes the prior panels without retargeting consent. The context meter separately shows the bytes and shares of total budget reserved for system instructions, tool definitions and other request content. It then breaks conversation usage into conversation/events, tool calls/results, protocol replay (including reasoning), and summaries/projections. Reserved space is already deducted from the conversation budget, and display copies of reasoning are not counted twice. Cumulative tokens sum multiple calls rather than measuring current occupancy.

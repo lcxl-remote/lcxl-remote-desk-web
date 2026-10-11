@@ -62,8 +62,23 @@ it('keeps an oversized UTF-8 adjustment draft without submitting an invalid chil
     const submit = screen.getByRole('button', { name: 'Apply adjustment' });
     expect(submit).toBeDisabled();
     fireEvent.click(submit);
+    fireEvent.keyDown(input, { key: 'Enter' });
     expect(input).toHaveValue(message);
     expect(agents.control).not.toHaveBeenCalled();
+});
+it('submits a child adjustment with Enter and keeps the draft when the server rejects it', async () => {
+    localStorage.removeItem('ai-assistant-send-shortcut');
+    const agents = agentsFor('child-1');
+    vi.mocked(agents.control).mockResolvedValue(false);
+    render(<AssistantSubagents agents={agents} connected canDecide mainStopped={false} />);
+    const input = screen.getByRole('textbox', { name: 'New requirements for this subtask' });
+    fireEvent.change(input, { target: { value: 'Check the logs first' } });
+    fireEvent.keyDown(input, { key: 'Enter', shiftKey: true });
+    expect(agents.control).not.toHaveBeenCalled();
+    fireEvent.keyDown(input, { key: 'Enter' });
+    await waitFor(() => expect(agents.control).toHaveBeenCalledExactlyOnceWith(agents.selected,
+        { kind: 'adjust', message: 'Check the logs first' }));
+    expect(input).toHaveValue('Check the logs first');
 });
 describe('subagent approval notice', () => {
     it('shows pending approvals outside the collapsed task list and opens the original child', () => {

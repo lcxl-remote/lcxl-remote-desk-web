@@ -3,7 +3,7 @@ import { AssistantTranscript } from './assistant-transcript';
 import { permissionToolLabel, permissionResourceLabel, permissionOperationLabel } from './assistant-permission-labels';
 import { AssistantAttachments } from './assistant-attachments';
 import { requireRecoveryZip } from '@/lib/file-recovery-error';
-import { Textarea } from '@/components/ui/textarea';
+import { AssistantComposerInput } from './assistant-composer-input';
 import { AssistantObservationResult } from './assistant-observation-result';
 import { useFollowLatest } from '@/hooks/use-follow-latest';
 import './assistant-responsive.css';
@@ -447,10 +447,13 @@ export function AiAssistantWorkspace({
         setSelectedCapabilityIds(current => current.filter(id => id !== CURRENT_SCREEN_CAPABILITY_ID));
     }, [chat.acceptedInput]);
 
+    const sendDisabled = chat.turnRunning || chat.stopping || !!chat.deliveryState || !rehearsalCanStart
+        || !assistantEnabled || !question.trim() || !isConnected || chat.hydrating || !chat.sessionTargetReady
+        || chat.sessionTargetResolving || chat.contextUpdating || !providerConfig?.api_key_set
+        || !providerConfig?.model || (startGoal && !goalBudgetPolicy);
     const submit = (event: FormEvent) => {
         event.preventDefault();
-        if (chat.turnRunning || chat.stopping || chat.deliveryState) return;
-        if (!assistantEnabled || !rehearsalCanStart || (startGoal && !goalBudgetPolicy)) return;
+        if (sendDisabled) return;
         const selectedContext = featureProfile.object_context ? selectedCapabilityIds : [];
         chat.start(question, i18n.language, selectedContext, startGoal, previousCompletedGoalId);
     };
@@ -1040,8 +1043,9 @@ export function AiAssistantWorkspace({
                             </p>
                         )}
                         <AssistantSubagentApprovalNotice agents={subagents} />
-                        <Textarea
+                        <AssistantComposerInput
                             ref={goalReplyRef}
+                            sendDisabled={sendDisabled}
                             value={question}
                             readOnly={!!rehearsal}
                             onChange={(event) => setQuestion(event.target.value)}
@@ -1105,7 +1109,7 @@ export function AiAssistantWorkspace({
                                 <AssistantContextMeter usage={chat.contextUsage} draft={question} />
                                 <AssistantComposerActions turnRunning={chat.turnRunning} canStop={chat.canStop}
                                     stopping={chat.stopping} onStop={chat.stop} rehearsal={!!rehearsal}
-                                    sendDisabled={!!chat.deliveryState || !rehearsalCanStart || !assistantEnabled || !question.trim() || !isConnected || chat.hydrating || !chat.sessionTargetReady || chat.sessionTargetResolving || chat.contextUpdating || !providerConfig?.api_key_set || !providerConfig?.model || (startGoal && !goalBudgetPolicy)} />
+                                    sendDisabled={sendDisabled} />
                             </div>
                         </div>
                     </form>
