@@ -1,6 +1,7 @@
 
 import { useEffect, useRef, useCallback } from 'react';
 import type { RefObject } from 'react';
+import type { MouseIntent, Point } from './mobile-interaction';
 
 // Windows virtual-key codes of the modifier keys, mapped to the modifier flag
 // they drive. Used to reconstruct the modifier state of a synthetic key
@@ -121,7 +122,13 @@ type UseDeskInputProps = {
     keyboardChannel: RefObject<RTCDataChannel | null>;
     mouseMoveChannel?: RefObject<RTCDataChannel | null>;
     isConnected: boolean;
+    peerConnection?: RefObject<RTCPeerConnection | null>;
     ignoreInputEvents?: boolean; // When true, don't steal focus or send events (e.g. user is typing in UI)
+    isInputAllowed?: () => boolean;
+    managedTouches?: boolean;
+    mapPosition?: (clientX: number, clientY: number) => Point | null;
+    onPointerPosition?: (target: Point) => void;
+    onRelease?: () => void;
     remapCtrlToCommand?: boolean; // Windows/Linux controller → macOS host compatibility
 };
 
@@ -180,7 +187,7 @@ export function buildPhysicalKeyboardEvent(
     };
 }
 
-export function useDeskInput({ videoRef, mouseChannel, keyboardChannel, mouseMoveChannel, isConnected, ignoreInputEvents = false, remapCtrlToCommand = false }: UseDeskInputProps) {
+export function useDeskInput({ videoRef, mouseChannel, keyboardChannel, mouseMoveChannel, isConnected, ignoreInputEvents = false, remapCtrlToCommand = false, managedTouches = false, peerConnection, isInputAllowed, mapPosition, onPointerPosition, onRelease }: UseDeskInputProps) {
     const dimensionsRef = useRef({ width: 0, height: 0 });
     const sequenceNumberRef = useRef(0);
     const pressedKeysRef = useRef<Map<string, PressedKey>>(new Map());
@@ -191,47 +198,67 @@ export function useDeskInput({ videoRef, mouseChannel, keyboardChannel, mouseMov
     // where the cursor actually is instead of the surface's top-left.
     const lastPositionRef = useRef({ x: 0, y: 0 });
 
-    const releaseAllInputs = useCallback(() => {
-        // Release before a PeerConnection is closed. React effect cleanup can run
-        // after closeRTC(), when the DataChannels are already unusable, so callers
-        // also invoke this function synchronously at lifecycle boundaries.
-        if (mouseChannel.current?.readyState === "open") {
-            pressedButtonsRef.current.forEach(button => {
-                mouseChannel.current?.send(JSON.stringify({
-                    event: "mouseup",
-                    x: lastPositionRef.current.x,
-                    y: lastPositionRef.current.y,
-                    button,
-                    buttons: 0,
-                    alt_key: false,
-                    delta_x: 0,
-                    delta_y: 0,
-                    sequence_number: 0,
-                }));
-            });
-        }
-        pressedButtonsRef.current.clear();
+    const currentRef = useRef({ isConnected, ignoreInputEvents, isInputAllowed, mapPosition, onPointerPosition, onRelease });
+    currentRef.current = { isConnected, ignoreInputEvents, isInputAllowed, mapPosition, onPointerPosition, onRelease };
 
-        if (keyboardChannel.current?.readyState === "open") {
-            pressedKeysRef.current.forEach(pressedKey => {
-                keyboardChannel.current?.send(JSON.stringify({
-                    event: "keyup",
-                    key: "",
-                    code: pressedKey.code,
-                    key_code: pressedKey.key_code,
-                    alt_key: false,
-                    ctrl_key: false,
-                    shift_key: false,
-                    meta_key: false,
-                    repeat: false,
-                    location: 0,
-                    is_composing: false,
-                }));
-            });
-        }
+    const inputOpen = useCallback(() => currentRef.current.isConnected && !currentRef.current.ignoreInputEvents
+        && (currentRef.current.isInputAllowed?.() ?? true)
+        && (!peerConnection || peerConnection.current?.connectionState === 'connected')
+        && mouseChannel.current?.readyState === 'open' && keyboardChannel.current?.readyState === 'open'
+        && (!mouseMoveChannel || mouseMoveChannel.current?.readyState === 'open'), [peerConnection, mouseChannel, keyboardChannel, mouseMoveChannel]);
+
+    const releaseAllInputs = useCallback(() => {
+        const buttons = [...pressedButtonsRef.current];
+        const keys = [...pressedKeysRef.current.values()];
+        pressedButtonsRef.current.clear();
         pressedKeysRef.current.clear();
         physicalControlStateRef.current = { left: false, right: false };
+        for (const button of buttons) {
+            try {
+                if (mouseChannel.current?.readyState === 'open') mouseChannel.current.send(JSON.stringify({
+                    event: 'mouseup', ...lastPositionRef.current, button, buttons: 0,
+                    alt_key: false, delta_x: 0, delta_y: 0, sequence_number: 0,
+                }));
+            } catch { /* Continue releasing the remaining held inputs. */ }
+        }
+        for (const key of keys) {
+            try {
+                if (keyboardChannel.current?.readyState === 'open') keyboardChannel.current.send(JSON.stringify({
+                    event: 'keyup', key: '', ...key, alt_key: false, ctrl_key: false,
+                    shift_key: false, meta_key: false, repeat: false, location: 0, is_composing: false,
+                }));
+            } catch { /* Host lifecycle cleanup also covers a closed channel. */ }
+        }
+        currentRef.current.onRelease?.();
     }, [keyboardChannel, mouseChannel]);
+
+    const sendMouseIntent = useCallback((intent: MouseIntent) => {
+        if (!inputOpen()) return;
+        const channel = intent.event === 'mousemove' ? mouseMoveChannel?.current : mouseChannel.current;
+        if (channel?.readyState !== 'open') return;
+        channel.send(JSON.stringify({
+            event: intent.event === 'position' ? 'mousemove' : intent.event,
+            ...intent.target, button: intent.button, buttons: intent.buttons,
+            alt_key: false, delta_x: intent.deltaX, delta_y: intent.deltaY,
+            sequence_number: intent.event === 'mousemove' ? ++sequenceNumberRef.current : 0,
+        }));
+        lastPositionRef.current = intent.target;
+        if (intent.event === 'mousedown') pressedButtonsRef.current.add(intent.button);
+        if (intent.event === 'mouseup') pressedButtonsRef.current.delete(intent.button);
+    }, [mouseChannel, mouseMoveChannel, inputOpen]);
+
+    useEffect(() => {
+        if (!isConnected) releaseAllInputs();
+        const channels = [mouseChannel.current, keyboardChannel.current, mouseMoveChannel?.current];
+        for (const channel of channels) channel?.addEventListener?.('close', releaseAllInputs);
+        const pc = peerConnection?.current;
+        const stateChanged = () => { if (pc?.connectionState !== 'connected') releaseAllInputs(); };
+        pc?.addEventListener('connectionstatechange', stateChanged);
+        return () => {
+            for (const channel of channels) channel?.removeEventListener?.('close', releaseAllInputs);
+            pc?.removeEventListener('connectionstatechange', stateChanged);
+        };
+    }, [isConnected, keyboardChannel, mouseChannel, mouseMoveChannel, peerConnection, releaseAllInputs]);
 
     useEffect(() => {
         const element = videoRef.current;
@@ -258,6 +285,8 @@ export function useDeskInput({ videoRef, mouseChannel, keyboardChannel, mouseMov
         if (!element || !isConnected || ignoreInputEvents) return;
 
         const handleMouseEvent = (eventType: string, event: MouseEvent | WheelEvent) => {
+            if (!inputOpen()) return;
+            if ((event as MouseEvent & { sourceCapabilities?: { firesTouchEvents: boolean } }).sourceCapabilities?.firesTouchEvents) return;
             const isMouseMove = eventType === "mousemove";
             const channel = isMouseMove ? mouseMoveChannel?.current : mouseChannel.current;
 
@@ -288,8 +317,11 @@ export function useDeskInput({ videoRef, mouseChannel, keyboardChannel, mouseMov
             trueX = Math.max(0, Math.min(trueX, renderedWidth));
             trueY = Math.max(0, Math.min(trueY, renderedHeight));
 
-            const x_ratio = trueX / renderedWidth;
-            const y_ratio = trueY / renderedHeight;
+            const mapped = currentRef.current.mapPosition?.(event.clientX, event.clientY);
+            if (currentRef.current.mapPosition && !mapped) return;
+            const x_ratio = mapped?.x ?? trueX / renderedWidth;
+            const y_ratio = mapped?.y ?? trueY / renderedHeight;
+            currentRef.current.onPointerPosition?.({ x: x_ratio, y: y_ratio });
             lastPositionRef.current = { x: x_ratio, y: y_ratio };
             let delta_x = 0;
             let delta_y = 0;
@@ -322,6 +354,7 @@ export function useDeskInput({ videoRef, mouseChannel, keyboardChannel, mouseMov
         };
 
         const handleKeyboardEvent = (eventType: string, event: KeyboardEvent) => {
+            if (!inputOpen()) return;
             if (!keyboardChannel.current || keyboardChannel.current.readyState !== "open") {
                 return;
             }
@@ -438,10 +471,12 @@ export function useDeskInput({ videoRef, mouseChannel, keyboardChannel, mouseMov
         element.addEventListener("keydown", onKeyDown);
         element.addEventListener("keyup", onKeyUp);
 
-        element.addEventListener("touchstart", onTouchStart, { passive: false });
-        element.addEventListener("touchmove", onTouchMove, { passive: false });
-        element.addEventListener("touchend", onTouchEnd, { passive: false });
-        element.addEventListener("touchcancel", onTouchCancel, { passive: false });
+        if (!managedTouches) {
+            element.addEventListener("touchstart", onTouchStart, { passive: false });
+            element.addEventListener("touchmove", onTouchMove, { passive: false });
+            element.addEventListener("touchend", onTouchEnd, { passive: false });
+            element.addEventListener("touchcancel", onTouchCancel, { passive: false });
+        }
 
         element.addEventListener("blur", releaseAllInputs);
         window.addEventListener("blur", releaseAllInputs);
@@ -466,16 +501,18 @@ export function useDeskInput({ videoRef, mouseChannel, keyboardChannel, mouseMov
             window.removeEventListener("blur", releaseAllInputs);
             document.removeEventListener("visibilitychange", handleVisibilityChange);
         };
-    }, [videoRef, isConnected, mouseChannel, keyboardChannel, mouseMoveChannel, ignoreInputEvents, remapCtrlToCommand, releaseAllInputs]);
+    }, [videoRef, isConnected, mouseChannel, keyboardChannel, mouseMoveChannel, ignoreInputEvents, remapCtrlToCommand, managedTouches, releaseAllInputs, inputOpen]);
 
     const sendKeyboardEvents = useCallback((events: SyntheticKeyEvent[]) => {
-        if (!keyboardChannel.current || keyboardChannel.current.readyState !== "open") {
-            return;
-        }
         for (const kbEvent of buildKeyboardEventSequence(events)) {
-            keyboardChannel.current?.send(JSON.stringify(kbEvent));
+            const channel = keyboardChannel.current;
+            if (!inputOpen() || !channel) break;
+            channel.send(JSON.stringify(kbEvent));
+            const id = kbEvent.code || `keyCode:${kbEvent.key_code}`;
+            if (kbEvent.event === 'keydown') pressedKeysRef.current.set(id, { key_code: kbEvent.key_code, code: kbEvent.code });
+            else pressedKeysRef.current.delete(id);
         }
-    }, [keyboardChannel]);
+    }, [keyboardChannel, inputOpen]);
 
-    return { sendKeyboardEvents, releaseAllInputs };
+    return { sendKeyboardEvents, sendMouseIntent, releaseAllInputs };
 }

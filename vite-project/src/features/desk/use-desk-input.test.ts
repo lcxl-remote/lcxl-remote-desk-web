@@ -442,3 +442,38 @@ describe('useDeskInput — hidden page releases held keys', () => {
         });
     });
 });
+
+describe('held synthetic input cleanup', () => {
+    function setup() {
+        const element=document.createElement('video');
+        const mouse=new EventTarget() as EventTarget & {readyState: RTCDataChannelState;send: ReturnType<typeof vi.fn>};
+        const keyboard=new EventTarget() as typeof mouse;
+        mouse.readyState='open';keyboard.readyState='open';mouse.send=vi.fn();keyboard.send=vi.fn();
+        const hook=renderHook(({ connected }) => useDeskInput({videoRef:{current:element},mouseChannel:{current:mouse as unknown as RTCDataChannel},keyboardChannel:{current:keyboard as unknown as RTCDataChannel},isConnected:connected}),{initialProps:{connected:true}});
+        return {hook,mouse,keyboard};
+    }
+    it('tracks shortcut keys and tries every release even after an individual send throws', () => {
+        const {hook,keyboard,mouse}=setup();
+        act(() => {
+            hook.result.current.sendKeyboardEvents([{event:'keydown',keyCode:17},{event:'keydown',keyCode:18}]);
+            hook.result.current.sendMouseIntent({event:'mousedown',target:{x:.7,y:.8},button:2,buttons:2,deltaX:0,deltaY:0});
+        });
+        keyboard.send.mockClear();mouse.send.mockClear();
+        keyboard.send.mockImplementationOnce(() => {throw new Error('channel closed during release')});
+        act(() => hook.result.current.releaseAllInputs());
+        expect(keyboard.send).toHaveBeenCalledTimes(2);
+        expect(JSON.parse(mouse.send.mock.calls[0][0])).toMatchObject({event:'mouseup',button:2,x:.7,y:.8});
+        act(() => hook.result.current.releaseAllInputs());
+        expect(keyboard.send).toHaveBeenCalledTimes(2);
+    });
+    it('clears on input channel close and stops a shortcut sequence when input becomes unavailable', () => {
+        const {hook,keyboard,mouse}=setup();
+        act(() => hook.result.current.sendKeyboardEvents([{event:'keydown',keyCode:17}]));
+        mouse.readyState='closed';
+        act(() => mouse.dispatchEvent(new Event('close')));
+        expect(JSON.parse(keyboard.send.mock.calls.at(-1)![0])).toMatchObject({event:'keyup',key_code:17});
+        keyboard.send.mockClear();
+        act(() => hook.result.current.sendKeyboardEvents([{event:'keydown',keyCode:18}]));
+        expect(keyboard.send).not.toHaveBeenCalled();
+    });
+});

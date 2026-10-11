@@ -10,6 +10,7 @@ use tokio::sync::RwLock;
 use webrtc::data_channel::RTCDataChannel;
 use webrtc::peer_connection::RTCPeerConnection;
 
+use super::input_lifecycle::InputLifecycle;
 use crate::daemon::worker_manager::WorkerManager;
 // =====================================================================
 // DataChannel routing daemon → worker
@@ -153,6 +154,14 @@ pub(super) async fn route_is_permitted(
     }
 }
 
+/// Shared output slots populated when browser channels arrive.
+pub struct BrowserChannelSlots {
+    pub cursor: Arc<RwLock<Option<Arc<RTCDataChannel>>>>,
+    pub latest_cursor_payload: Arc<RwLock<Option<String>>>,
+    pub clipboard: Arc<RwLock<Option<Arc<RTCDataChannel>>>>,
+    pub file_transfer: Arc<RwLock<Option<Arc<RTCDataChannel>>>>,
+}
+
 /// Install the daemon's `on_data_channel` callback. Each browser-opened
 /// DataChannel either (a) gets its `on_message` wired into the
 /// IPC-forwarding closure that ships to the worker via
@@ -172,12 +181,16 @@ pub fn register_data_channel_router(
     pc: Arc<RTCPeerConnection>,
     connection_id: String,
     signaling_state: Arc<RwLock<SignalingState>>,
-    cursor_data_channel: Arc<RwLock<Option<Arc<RTCDataChannel>>>>,
-    latest_cursor_payload: Arc<RwLock<Option<String>>>,
-    clipboard_data_channel: Arc<RwLock<Option<Arc<RTCDataChannel>>>>,
-    file_transfer_data_channel: Arc<RwLock<Option<Arc<RTCDataChannel>>>>,
+    slots: BrowserChannelSlots,
     worker_mgr: WorkerManager,
+    input_lifecycle: Arc<InputLifecycle>,
 ) {
+    let BrowserChannelSlots {
+        cursor: cursor_data_channel,
+        latest_cursor_payload,
+        clipboard: clipboard_data_channel,
+        file_transfer: file_transfer_data_channel,
+    } = slots;
     pc.on_data_channel(Box::new(move |dc: Arc<RTCDataChannel>| {
         let label = dc.label().to_owned();
         let dc_id = dc.id();
@@ -188,6 +201,7 @@ pub fn register_data_channel_router(
         let clipboard_data_channel = Arc::clone(&clipboard_data_channel);
         let file_transfer_data_channel = Arc::clone(&file_transfer_data_channel);
         let worker_mgr = worker_mgr.clone();
+        let input_lifecycle = input_lifecycle.clone();
         Box::pin(async move {
             log::info!("[DcRouter] {connection_id}: new DataChannel label='{label}' id={dc_id}");
             let route = match classify_dc_label(&label) {
@@ -254,12 +268,55 @@ pub fn register_data_channel_router(
                 // `WorkerManager::send_file_to_worker` — see the
                 // FileTransfer special case inside the forwarder.
             }
+            let input_token = Arc::as_ptr(&dc) as usize;
+            if matches!(
+                route,
+                DcRoute::Mouse | DcRoute::MouseMove | DcRoute::Keyboard
+            ) {
+                input_lifecycle
+                    .state
+                    .lock()
+                    .await
+                    .register_channel(&label, input_token);
+                let open_lifecycle = input_lifecycle.clone();
+                let open_label = label.clone();
+                dc.on_open(Box::new(move || {
+                    let lifecycle = open_lifecycle.clone();
+                    let label = open_label.clone();
+                    Box::pin(async move {
+                        lifecycle
+                            .state
+                            .lock()
+                            .await
+                            .set_channel_open(&label, input_token, true);
+                    })
+                }));
+                let close_lifecycle = input_lifecycle.clone();
+                let close_label = label.clone();
+                let close_worker = worker_mgr.clone();
+                let close_connection = connection_id.clone();
+                dc.on_close(Box::new(move || {
+                    let lifecycle = close_lifecycle.clone();
+                    let label = close_label.clone();
+                    let worker = close_worker.clone();
+                    let connection = close_connection.clone();
+                    Box::pin(async move {
+                        let mut state = lifecycle.state.lock().await;
+                        if state.set_channel_open(&label, input_token, false) {
+                            lifecycle
+                                .release_locked(&mut state, &connection, Some(&worker))
+                                .await;
+                        }
+                    })
+                }));
+            }
             install_browser_dc_message_forwarder(
                 dc,
                 connection_id,
                 route,
                 signaling_state,
                 worker_mgr,
+                input_lifecycle,
             );
         })
     }));
@@ -276,15 +333,40 @@ fn install_browser_dc_message_forwarder(
     route: DcRoute,
     signaling_state: Arc<RwLock<SignalingState>>,
     worker_mgr: WorkerManager,
+    input_lifecycle: Arc<InputLifecycle>,
 ) {
+    let input_label = dc.label().to_owned();
+    let input_token = Arc::as_ptr(&dc) as usize;
     dc.on_message(Box::new(
         move |msg: webrtc::data_channel::data_channel_message::DataChannelMessage| {
             let connection_id = connection_id.clone();
             let signaling_state = Arc::clone(&signaling_state);
             let worker_mgr = worker_mgr.clone();
+            let input_lifecycle = input_lifecycle.clone();
+            let input_label = input_label.clone();
             let bytes = msg.data.to_vec();
             let is_text = msg.is_string;
             Box::pin(async move {
+                if matches!(
+                    route,
+                    DcRoute::Mouse | DcRoute::MouseMove | DcRoute::Keyboard
+                ) {
+                    let input = input_lifecycle.state.lock().await;
+                    if !input.can_forward()
+                        || !input.is_current_channel(&input_label, input_token)
+                        || !route_is_permitted(route, &signaling_state).await
+                    {
+                        return;
+                    }
+                    let svc_msg = route_to_service_msg(route, &connection_id, bytes);
+                    if let Err(error) = worker_mgr
+                        .send_to_interactive_connection_worker(&connection_id, svc_msg)
+                        .await
+                    {
+                        log::warn!("[DcRouter] {connection_id}: input forwarding failed: {error}");
+                    }
+                    return;
+                }
                 if !route_is_permitted(route, &signaling_state).await {
                     log::debug!(
                         "[DcRouter] {connection_id}: dropped {route:?} message (permission denied)"
@@ -330,18 +412,9 @@ fn install_browser_dc_message_forwarder(
                     return;
                 }
                 let svc_msg = route_to_service_msg(route, &connection_id, bytes);
-                let result = if matches!(
-                    route,
-                    DcRoute::Mouse | DcRoute::MouseMove | DcRoute::Keyboard
-                ) {
-                    worker_mgr
-                        .send_to_interactive_connection_worker(&connection_id, svc_msg)
-                        .await
-                } else {
-                    worker_mgr
-                        .send_to_connection_worker(&connection_id, svc_msg)
-                        .await
-                };
+                let result = worker_mgr
+                    .send_to_connection_worker(&connection_id, svc_msg)
+                    .await;
                 if let Err(e) = result {
                     log::warn!(
                         "[DcRouter] {connection_id}: failed to forward {route:?} to worker: {e}"

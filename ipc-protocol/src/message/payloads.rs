@@ -474,6 +474,13 @@ pub struct InputPayload {
     pub data: Vec<u8>,
 }
 
+/// Identifies the PC whose held input must be released.
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
+pub struct ReleaseInputStatePayload {
+    pub connection_id: String,
+    pub connection_epoch: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub struct ClipboardPayload {
     pub connection_id: String,

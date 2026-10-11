@@ -18,6 +18,8 @@ import { useDeskSignaling } from "./use-desk-signaling"
 import type { SignalingMessage } from "./use-desk-signaling"
 import { useDeskRTC } from "./use-desk-rtc"
 import { useDeskInput } from "./use-desk-input"
+import { useMobileDeskInteraction } from "./use-mobile-desk-interaction"
+import { MobileDeskOverlay } from "./mobile-desk-overlay"
 import { lockEscapeKey, unlockKeyboard, isKeyboardLockSupported } from "./fullscreen-keyboard"
 import { useBeforeUnloadConfirm } from "./use-before-unload-confirm"
 import { useDeskClipboard } from "./use-desk-clipboard"
@@ -809,16 +811,32 @@ export default function DeskSession({
         initData?.operation_system,
     );
 
-    const { sendKeyboardEvents, releaseAllInputs } = useDeskInput({
+    const isInputAllowed = useCallback(() => controlRequestRef.current?.kind !== "release", []);
+    const mobileInteraction = useMobileDeskInteraction({
+        videoRef,
+        available: isRTCConnected && hasControl && !isWaitingApproval,
+        isInputAllowed,
+        blocked: whiteboard.isInteractive || !!whiteboard.textInput,
+        targetKey: `${initData?.connection_epoch ?? ''}:${activeSettings?.image_capture ?? ''}:${activeSettings?.video_device_name ?? ''}`,
+        peerConnection, mouseChannel, keyboardChannel, mouseMoveChannel,
+    });
+    const { sendKeyboardEvents, sendMouseIntent, releaseAllInputs } = useDeskInput({
         videoRef,
         mouseChannel,
         keyboardChannel,
         mouseMoveChannel,
         isConnected: isRTCConnected && hasControl, // Only enable inputs if we have control
-        ignoreInputEvents: !!whiteboard.textInput,
+        ignoreInputEvents: whiteboard.isInteractive || !!whiteboard.textInput,
+        managedTouches: true,
+        isInputAllowed,
+        peerConnection,
+        mapPosition: mobileInteraction.mapPosition,
+        onPointerPosition: mobileInteraction.onPointerPosition,
+        onRelease: mobileInteraction.onRelease,
         remapCtrlToCommand: macKeyboardMappingController !== undefined,
     });
     releaseInputsRef.current = releaseAllInputs;
+    mobileInteraction.senderRef.current = sendMouseIntent;
 
     const microphone = useDeskMicrophone({
         peerConnection,
@@ -1701,10 +1719,11 @@ export default function DeskSession({
                         className="videoWrapper"
                         ref={videoWrapperRef}
                     >
+                        <div className="deskInteractionSurface" ref={mobileInteraction.surfaceRef}>
                         <video
                             ref={videoRef}
                             className="videoElement h-full w-full object-contain"
-                            style={{ cursor: cursorStyle }}
+                            style={{ cursor: cursorStyle, transform: mobileInteraction.model.videoTransform, transformOrigin: '0 0' }}
                             autoPlay
                             playsInline
                             muted={isMuted}
@@ -1716,6 +1735,17 @@ export default function DeskSession({
                                 }
                             }}
                         />
+
+                        <MobileDeskOverlay model={mobileInteraction.model} />
+                        </div>
+
+                        {mobileInteraction.model.mode === 'touchpad' && mobileInteraction.model.canControl
+                            && mobileInteraction.model.cursor && !mobileInteraction.model.cursorVisible && (
+                            <Button className="absolute bottom-24 left-3 z-20 max-w-[90%] whitespace-normal"
+                                onClick={() => mobileInteraction.change(model => model.locateCursor())}>
+                                {t('pages.desk.mobile.offscreen')} · {t('pages.desk.mobile.locate')}
+                            </Button>
+                        )}
 
                         {/* Escape hint shown in fullscreen when the Keyboard
                             Lock API can't capture Esc. Lives inside the
@@ -1968,6 +1998,7 @@ export default function DeskSession({
                                 onChangeVolume={handleVolumeChange}
                                 onDisconnect={handleDisconnect}
                                 onDragStart={handleDragStart}
+                                mobileInteraction={mobileInteraction}
                                 onOpenSettings={() => setIsConfigOpen(true)}
                                 onRequestControl={handleRequestControl}
                                 onSendKeyboardEvents={sendKeyboardEvents}

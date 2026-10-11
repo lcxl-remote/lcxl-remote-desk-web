@@ -217,11 +217,14 @@ pub async fn handle_request_remote(
             Arc::clone(&ctx_guard.pc),
             from_connection_id.to_string(),
             Arc::clone(&ctx_guard.signaling_state),
-            Arc::clone(&ctx_guard.cursor_data_channel),
-            Arc::clone(&ctx_guard.latest_cursor_payload),
-            Arc::clone(&ctx_guard.clipboard_data_channel),
-            Arc::clone(&ctx_guard.file_transfer_data_channel),
+            BrowserChannelSlots {
+                cursor: Arc::clone(&ctx_guard.cursor_data_channel),
+                latest_cursor_payload: Arc::clone(&ctx_guard.latest_cursor_payload),
+                clipboard: Arc::clone(&ctx_guard.clipboard_data_channel),
+                file_transfer: Arc::clone(&ctx_guard.file_transfer_data_channel),
+            },
             mgr.clone(),
+            Arc::clone(&ctx_guard.input_lifecycle),
         );
         // Cleanup hook: when ICE detects the browser is gone (Failed) or
         // the PC is explicitly closed, drop the registry entry and tell
@@ -235,6 +238,7 @@ pub async fn handle_request_remote(
             mgr.clone(),
             virtual_display.cloned(),
             from_connection_id.to_string(),
+            Arc::clone(&ctx_guard.input_lifecycle),
         );
     }
 

@@ -1,6 +1,22 @@
 import modelMetrics from './model-metrics';
 
 export default {
+    "pages.desk.mobile.controls": "触摸与缩放",
+    "pages.desk.mobile.toolbar": "展开或拖动工具栏",
+    "pages.desk.mobile.direct": "直接触控",
+    "pages.desk.mobile.touchpad": "触控板",
+    "pages.desk.mobile.drag": "拖拽（下一次滑动）",
+    "pages.desk.mobile.offscreen": "光标在画面外",
+    "pages.desk.mobile.locate": "定位光标",
+    "pages.desk.mobile.pan": "双指：平移",
+    "pages.desk.mobile.scroll": "双指：滚动",
+    "pages.desk.mobile.zoomIn": "放大",
+    "pages.desk.mobile.zoomOut": "缩小",
+    "pages.desk.mobile.fit": "适应屏幕",
+    "pages.desk.mobile.directHelp": "轻点点击手指所指位置；单指滑动拖拽；长按右键一次。右键反馈为虚线双环。",
+    "pages.desk.mobile.touchpadHelp": "滑动移动本地光标，轻点在光标位置点击；长按右键一次；开启拖拽后滑动并抬手释放。",
+    "pages.desk.mobile.zoomHelp": "双指捏合局部放大。放大后双指默认平移，可切换为远端滚动。观看时也可缩放和平移。",
+
     "pages.aiModel.thinking.contract": "思考回传契约",
     "pages.aiModel.thinking.contract.conservative": "保守（未知网关）",
     "pages.aiModel.thinking.contract.openai_chat": "标准 OpenAI Chat",

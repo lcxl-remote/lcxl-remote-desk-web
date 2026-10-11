@@ -12,7 +12,7 @@ use super::*;
 /// 1. [`handle_close_remote_session`] — explicit browser session teardown.
 /// 2. The on_peer_connection_state_change hook installed in
 ///    [`register_peer_connection_state_cleanup`] — fires when ICE
-///    detects the browser is gone (Failed/Closed/Disconnected).
+///    detects the browser is gone (Failed/Closed). Disconnected only releases input.
 ///
 /// All errors swallowed: a dead worker / already-closed PC are normal
 /// teardown paths, not failure modes the caller can recover from.
@@ -23,7 +23,49 @@ pub async fn cleanup_pc(
     connection_id: &str,
     reason: &str,
 ) {
-    let removed = registry.remove(connection_id).await;
+    cleanup_pc_if_epoch(
+        registry,
+        worker_mgr,
+        virtual_display,
+        connection_id,
+        reason,
+        None,
+    )
+    .await;
+}
+
+async fn cleanup_pc_if_epoch(
+    registry: &PcRegistry,
+    worker_mgr: &WorkerManager,
+    virtual_display: Option<&Arc<crate::daemon::virtual_display::VirtualDisplaySupervisor>>,
+    connection_id: &str,
+    reason: &str,
+    expected_epoch: Option<&str>,
+) -> bool {
+    let candidate = registry.get(connection_id).await;
+    let removed = if let Some(candidate) = candidate {
+        let (epoch, input_lifecycle) = {
+            let ctx = candidate.read().await;
+            (ctx.connection_epoch.clone(), ctx.input_lifecycle.clone())
+        };
+        if expected_epoch.is_some_and(|expected| expected != epoch) {
+            return false;
+        }
+        let mut input = input_lifecycle.state.lock().await;
+        if input.closed {
+            return false;
+        }
+        input.closed = true;
+        input_lifecycle
+            .release_locked(&mut input, connection_id, Some(worker_mgr))
+            .await;
+        // Publication remains blocked by the registry entry until input is fenced.
+        registry.remove_if_current(connection_id, &candidate).await
+    } else if expected_epoch.is_some() {
+        return false;
+    } else {
+        None
+    };
     if removed.is_some()
         && let Some(activity) = registry.host_activity()
     {
@@ -52,6 +94,7 @@ pub async fn cleanup_pc(
     // is revoked after the old PC closes but before the new PC is registered.
     if let Some(ctx) = &removed {
         let ctx = ctx.read().await;
+        let pc = ctx.pc.clone();
         ctx.media_paused.store(true, Ordering::Relaxed);
         ctx.media_output_fence.write().await.audio_open = false;
         let mut coordinator = ctx.media_coordinator.lock().await;
@@ -64,7 +107,8 @@ pub async fn cleanup_pc(
         coordinator.audio_expected_terminal = None;
         coordinator.audio_desired_active = false;
         drop(coordinator);
-        if let Err(e) = ctx.pc.close().await {
+        drop(ctx);
+        if let Err(e) = pc.close().await {
             log::warn!("[pc_manager] PC close failed for {connection_id}: {e}");
         }
         log::info!("[pc_manager] Closed PC for {connection_id} (reason: {reason})");
@@ -180,6 +224,7 @@ pub async fn cleanup_pc(
     {
         restore_physical_displays_if_unused(registry, worker_mgr, connection_id).await;
     }
+    removed.is_some()
 }
 
 /// Restore remembered physical modes through their owning session workers.
@@ -443,17 +488,15 @@ pub async fn close_grants_up_to_generation(
 /// `peer_state_change_sender → DeskSessionMessage::WebRTCDropped` chain
 /// that used to live in `service::signaling::DeskSession::init_ptc_peer_connection`.
 ///
-/// Only `Failed` and `Closed` trigger cleanup. `Disconnected` is transient
-/// (a momentary network blip can recover) and webrtc-rs will follow it
-/// with `Failed` after its internal disconnected-timeout if the peer
-/// stays gone, so reacting to `Disconnected` would tear down working
-/// connections during normal jitter.
+/// Transient disconnection releases input while preserving the PC and media.
+/// Only Failed/Closed terminate the media session.
 pub(super) fn register_peer_connection_state_cleanup(
     pc: Arc<RTCPeerConnection>,
     registry: PcRegistry,
     worker_mgr: WorkerManager,
     virtual_display: Option<Arc<crate::daemon::virtual_display::VirtualDisplaySupervisor>>,
     connection_id: String,
+    input_lifecycle: Arc<input_lifecycle::InputLifecycle>,
 ) {
     // A real ICE restart can temporarily make the RTP path unavailable while
     // the worker keeps encoding. The first decodable frame after connectivity
@@ -468,9 +511,19 @@ pub(super) fn register_peer_connection_state_cleanup(
         let virtual_display = virtual_display.clone();
         let connection_id = connection_id.clone();
         let has_connected_once = Arc::clone(&has_connected_once);
+        let input_lifecycle = Arc::clone(&input_lifecycle);
         Box::pin(async move {
+            {
+                let input = input_lifecycle.state.lock().await;
+                if input.closed {
+                    return;
+                }
+            }
             match state {
                 RTCPeerConnectionState::Connected => {
+                    let mut input = input_lifecycle.state.lock().await;
+                    if input.closed { return; }
+                    input.connected = true;
                     if let Some(activity) = registry.host_activity() {
                         activity.set_pc_connected(&connection_id, true);
                     }
@@ -492,17 +545,27 @@ pub(super) fn register_peer_connection_state_cleanup(
                         }
                     }
                 }
+                RTCPeerConnectionState::Disconnected => {
+                    let mut input = input_lifecycle.state.lock().await;
+                    if input.closed { return; }
+                    input.connected = false;
+                    input_lifecycle.release_locked(&mut input, &connection_id, Some(&worker_mgr)).await;
+                    if let Some(activity) = registry.host_activity() {
+                        activity.set_pc_connected(&connection_id, false);
+                    }
+                }
                 RTCPeerConnectionState::Failed | RTCPeerConnectionState::Closed => {
                     log::info!(
                         "[pc_manager] PC for {connection_id} reached terminal state {state:?}; \
                          tearing down daemon-side context + StopMedia to worker"
                     );
-                    cleanup_pc(
+                    cleanup_pc_if_epoch(
                         &registry,
                         &worker_mgr,
                         virtual_display.as_ref(),
                         &connection_id,
                         "pc_state_terminal",
+                        Some(&input_lifecycle.connection_epoch),
                     )
                     .await;
                 }
@@ -536,14 +599,18 @@ pub async fn handle_close_remote_session(
         if context.read().await.connection_epoch != payload.connection_epoch {
             return Ok(());
         }
-        cleanup_pc(
+        if !cleanup_pc_if_epoch(
             registry,
             worker_mgr,
             virtual_display,
             from_connection_id,
             "close_remote_session",
+            Some(&payload.connection_epoch),
         )
-        .await;
+        .await
+        {
+            return Ok(());
+        }
     }
     if payload.finalize_logical_connection {
         finalize_logical_connection(

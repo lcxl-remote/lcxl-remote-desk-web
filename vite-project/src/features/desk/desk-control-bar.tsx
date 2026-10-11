@@ -1,7 +1,9 @@
+import { MobileDeskControls } from "./mobile-desk-controls"
+import type { useMobileDeskInteraction } from "./use-mobile-desk-interaction"
 import { AiAssistantIcon } from "@/components/ai-assistant-icon"
 import { useState } from "react"
 import type {
-    MouseEvent as ReactMouseEvent,
+    PointerEvent as ReactPointerEvent,
     RefObject,
 } from "react"
 import { useTranslation } from "react-i18next"
@@ -68,6 +70,7 @@ import { getKeyboardShortcuts } from "./keyboard-shortcuts"
 import type { DesktopControllerPlatform } from "./keyboard-mapping"
 
 type DeskControlBarProps = {
+    mobileInteraction?: ReturnType<typeof useMobileDeskInteraction>
     onToggleAssistant?: () => void
     assistantOpen?: boolean
     audioVolume: number
@@ -85,7 +88,7 @@ type DeskControlBarProps = {
     microphone: ReturnType<typeof useDeskMicrophone>
     onChangeVolume: (value: number) => void
     onDisconnect: () => void
-    onDragStart: (event: ReactMouseEvent) => void
+    onDragStart: (event: ReactPointerEvent) => void
     onOpenSettings: () => void
     onRequestControl: () => void
     onSendKeyboardEvents: ReturnType<typeof useDeskInput>["sendKeyboardEvents"]
@@ -101,6 +104,7 @@ type DeskControlBarProps = {
 }
 
 export function DeskControlBar({
+    mobileInteraction,
     onToggleAssistant,
     assistantOpen,
     audioVolume,
@@ -150,17 +154,25 @@ export function DeskControlBar({
     return (
         <div
             className="controlBar"
+            onPointerDownCapture={() => mobileInteraction?.change(model => model.cancel(true))}
             onMouseEnter={() => setIsHovered(true)}
             onMouseLeave={() => setIsHovered(false)}
             ref={controlBarRef}
         >
-            <div
+            <button
+                type="button"
+                aria-label={t('pages.desk.mobile.toolbar')}
+                aria-expanded={isExpanded}
                 className="controlBarDragHandle"
-                onMouseDown={onDragStart}
-                onTouchStart={() => setIsHovered((hovered) => !hovered)}
+                onPointerDown={onDragStart}
+                onClick={event => {
+                    if (event.currentTarget.dataset.wasDragged) {
+                        delete event.currentTarget.dataset.wasDragged;
+                    } else setIsHovered(hovered => !hovered);
+                }}
             >
                 <Menu className="h-5 w-5" />
-            </div>
+            </button>
             <div
                 className={`controlBarContent ${isExpanded ? "expanded" : "collapsed"}`}
                 inert={!isExpanded ? true : undefined}
@@ -172,6 +184,7 @@ export function DeskControlBar({
                 onFocus={() => setIsHovered(true)}
             >
                 <div className="controlButtons">
+                    {mobileInteraction && <MobileDeskControls interaction={mobileInteraction} onOpenChange={setIsMenuOpen} />}
                     {onToggleAssistant && (
                         <Tooltip>
                             <TooltipTrigger asChild>

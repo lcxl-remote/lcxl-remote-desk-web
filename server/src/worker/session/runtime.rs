@@ -934,6 +934,7 @@ impl WorkerSession {
                                         remote_access_locked.load(Ordering::Acquire);
                                     let (cancelled_terminals, cancelled_transfers, cancelled_execs) =
                                         if now_locked && !was_locked {
+                                            input_dispatcher.shutdown();
                                             let cancelled_terminals = if let Some(session) =
                                                 desk_session.as_mut()
                                             {
@@ -951,7 +952,6 @@ impl WorkerSession {
                                                 0
                                             };
                                             let cancelled_execs = exec_registry.cancel_all();
-                                            input_dispatcher.shutdown();
                                             if let Some(dispatcher) = clipboard_dispatcher.as_ref() {
                                                 dispatcher.shutdown().await;
                                             }
@@ -990,16 +990,9 @@ impl WorkerSession {
                                     // event can slip into the old desktop during teardown.
                                     interactive_route_active = payload.active;
                                     if !payload.active {
-                                        let mut connection_ids = input_dispatcher
-                                            .connection_ids()
-                                            .into_iter()
-                                            .collect::<HashSet<_>>();
+                                        input_dispatcher.shutdown();
                                         if let Some(producer) = media_producer.as_ref() {
-                                            connection_ids.extend(producer.stop_all_media());
-                                        }
-                                        for connection_id in connection_ids {
-                                            input_dispatcher
-                                                .stop_connection_by_id(&connection_id);
+                                            producer.stop_all_media();
                                         }
                                     }
                                     let ack = WorkerToService::InteractiveRouteApplied(
@@ -1125,11 +1118,11 @@ impl WorkerSession {
                                         .await;
                                 }
                                 ServiceToWorker::StopMedia(payload) => {
+                                    input_dispatcher.stop_connection(&payload);
                                     vd_state.record_stop(&payload.connection_id);
                                     if let Some(producer) = media_producer.as_ref() {
                                         producer.stop_media(&payload);
                                     }
-                                    input_dispatcher.stop_connection(&payload);
                                     if let Some(d) = clipboard_dispatcher.as_ref() {
                                         d.stop_connection(&payload).await;
                                     }
@@ -1147,6 +1140,9 @@ impl WorkerSession {
                                         session.clear_file_permissions(&payload.connection_id);
                                     }
                                     connection_ceilings.clear(&payload.connection_id).await;
+                                }
+                                ServiceToWorker::ReleaseInputState(payload) => {
+                                    input_dispatcher.release_connection_inputs(&payload);
                                 }
                                 ServiceToWorker::ForceKeyframe(payload) => {
                                     if interactive_route_active
@@ -3532,6 +3528,7 @@ impl WorkerSession {
         // operations may still retain sender clones; only messages already
         // queued at that boundary are drained before the forwarder exits.
         heartbeat_task.abort();
+        input_dispatcher.shutdown();
         #[cfg(target_os = "linux")]
         drop(linux_turn_monitor);
         #[cfg(any(target_os = "macos", target_os = "linux", windows))]
@@ -3562,7 +3559,6 @@ impl WorkerSession {
         if let Some(producer) = media_producer.as_ref() {
             producer.shutdown();
         }
-        input_dispatcher.shutdown();
         if let Some(d) = clipboard_dispatcher.as_ref() {
             d.shutdown().await;
         }

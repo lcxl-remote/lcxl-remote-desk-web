@@ -1,6 +1,22 @@
 import modelMetrics from './model-metrics';
 
 export default {
+    "pages.desk.mobile.controls": "Touch and zoom",
+    "pages.desk.mobile.toolbar": "Expand or drag toolbar",
+    "pages.desk.mobile.direct": "Direct touch",
+    "pages.desk.mobile.touchpad": "Touchpad",
+    "pages.desk.mobile.drag": "Drag on next swipe",
+    "pages.desk.mobile.offscreen": "Cursor is outside the view",
+    "pages.desk.mobile.locate": "Locate cursor",
+    "pages.desk.mobile.pan": "Two fingers: pan",
+    "pages.desk.mobile.scroll": "Two fingers: scroll",
+    "pages.desk.mobile.zoomIn": "Zoom in",
+    "pages.desk.mobile.zoomOut": "Zoom out",
+    "pages.desk.mobile.fit": "Fit screen",
+    "pages.desk.mobile.directHelp": "Tap to click at your finger; swipe to drag; hold for one right click. A dashed double ring marks a right click.",
+    "pages.desk.mobile.touchpadHelp": "Swipe to move the local cursor; tap to click there; hold for one right click. Arm Drag, swipe, then lift to release.",
+    "pages.desk.mobile.zoomHelp": "Pinch to zoom a region. Two fingers pan when zoomed; switch to scroll the remote desktop. Zoom and pan also work while viewing.",
+
     "pages.aiModel.thinking.contract": "Thinking replay contract",
     "pages.aiModel.thinking.contract.conservative": "Conservative (unknown gateway)",
     "pages.aiModel.thinking.contract.openai_chat": "Standard OpenAI Chat",

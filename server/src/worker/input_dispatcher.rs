@@ -56,7 +56,9 @@ use desk_input_injection::model::geometry::{
     MonitorGeometry, SharedMonitorGeometry, shared as shared_geometry,
 };
 use desk_input_injection::mouse_event::mouse_event_factory::create_mouse_event_handler;
-use desk_ipc_protocol::message::{InputPayload, StartMediaPayload, StopMediaPayload};
+use desk_ipc_protocol::message::{
+    InputPayload, ReleaseInputStatePayload, StartMediaPayload, StopMediaPayload,
+};
 use desk_signal_facade::model::desk_settings::DeskSettings;
 use desk_signal_facade::model::image_capture::DisplayInfo;
 #[cfg(target_os = "linux")]
@@ -69,6 +71,7 @@ use log::{debug, error, info, warn};
 /// constructs them at `StartMedia` time rather than at first DC open.
 struct ConnectionInputState {
     generation: u64,
+    connection_epoch: String,
     mouse: Box<dyn MouseEventHandler + Send + Sync>,
     keyboard: Box<dyn KeyboardEventHandler + Send + Sync>,
     pressed_mouse_buttons: HashSet<i32>,
@@ -197,6 +200,7 @@ impl InputDispatcher {
         let prev = map.insert(
             payload.connection_id.clone(),
             ConnectionInputState {
+                connection_epoch: payload.connection_epoch.clone(),
                 generation,
                 mouse,
                 keyboard,
@@ -306,7 +310,24 @@ impl InputDispatcher {
     /// Drop per-connection input handlers. Called from
     /// `ServiceToWorker::StopMedia`. No-op on unknown id.
     pub fn stop_connection(&self, payload: &StopMediaPayload) {
-        self.stop_connection_by_id(&payload.connection_id);
+        let mut map = self.inner.lock().expect("input dispatcher lock poisoned");
+        if map
+            .get(&payload.connection_id)
+            .is_some_and(|state| state.connection_epoch == payload.connection_epoch)
+            && let Some(mut state) = map.remove(&payload.connection_id)
+        {
+            release_input_state(&mut state, &payload.connection_id);
+        }
+    }
+
+    /// Releases held input while retaining geometry and platform handlers.
+    pub fn release_connection_inputs(&self, payload: &ReleaseInputStatePayload) {
+        let mut map = self.inner.lock().expect("input dispatcher lock poisoned");
+        if let Some(state) = map.get_mut(&payload.connection_id)
+            && state.connection_epoch == payload.connection_epoch
+        {
+            release_input_state(state, &payload.connection_id);
+        }
     }
 
     /// Drop per-connection input handlers when only the logical connection id
@@ -739,22 +760,22 @@ mod tests {
         });
     }
 
-    /// `start_connection` then `stop_connection` removes the entry —
-    /// reflected by an additional `start_connection` after stop not
-    /// triggering the "duplicate" warning path (we can't observe the
-    /// warning directly but we can verify the entry is in / out by
-    /// re-stopping).
+    /// Teardown is independent of native handler creation and is idempotent.
     #[test]
     fn start_then_stop_releases_state() {
         let d = dispatcher();
-        let payload = start_payload("conn-x");
-        d.start_connection(&payload);
+        d.inner.lock().unwrap().insert(
+            "conn-x".into(),
+            fake_state(
+                None,
+                shared_geometry(MonitorGeometry::new(0, 0, 1920, 1080)),
+            ),
+        );
         d.stop_connection(&StopMediaPayload {
             connection_id: "conn-x".into(),
             connection_epoch: "test-epoch".to_string(),
         });
-        // Second stop is a no-op; the assertion is just that this
-        // doesn't panic — entry was removed by the first stop.
+        assert!(d.inner.lock().unwrap().is_empty());
         d.stop_connection(&StopMediaPayload {
             connection_id: "conn-x".into(),
             connection_epoch: "test-epoch".to_string(),
@@ -766,9 +787,17 @@ mod tests {
     #[test]
     fn shutdown_clears_state() {
         let d = dispatcher();
-        d.start_connection(&start_payload("conn-a"));
-        d.start_connection(&start_payload("conn-b"));
+        for id in ["conn-a", "conn-b"] {
+            d.inner.lock().unwrap().insert(
+                id.into(),
+                fake_state(
+                    None,
+                    shared_geometry(MonitorGeometry::new(0, 0, 1920, 1080)),
+                ),
+            );
+        }
         d.shutdown();
+        assert!(d.inner.lock().unwrap().is_empty());
         d.dispatch_keyboard(&InputPayload {
             connection_id: "conn-a".into(),
             data: br#"{"key":"a","event_type":"key_down"}"#.to_vec(),
@@ -938,6 +967,7 @@ mod tests {
     ) -> ConnectionInputState {
         ConnectionInputState {
             generation: 1,
+            connection_epoch: "test-epoch".into(),
             mouse: Box::new(NoopMouse),
             keyboard: Box::new(NoopKeyboard),
             pressed_mouse_buttons: HashSet::new(),
@@ -955,6 +985,7 @@ mod tests {
         let keyboard_events = Arc::new(StdMutex::new(Vec::new()));
         let geometry = shared_geometry(MonitorGeometry::new(0, 0, 1920, 1080));
         let mut state = ConnectionInputState {
+            connection_epoch: "test-epoch".into(),
             generation: 1,
             mouse: Box::new(RecordingMouse(Arc::clone(&mouse_events))),
             keyboard: Box::new(RecordingKeyboard(Arc::clone(&keyboard_events))),
@@ -1015,6 +1046,106 @@ mod tests {
         assert!(keyboard_events.iter().all(|event| !event.ctrl_key));
         assert!(state.pressed_mouse_buttons.is_empty());
         assert!(state.pressed_keys.is_empty());
+    }
+
+    #[test]
+    fn release_preserves_handlers_and_ignores_old_pc_epochs() {
+        let d = dispatcher();
+        let keys = Arc::new(StdMutex::new(Vec::new()));
+        let mouse = Arc::new(StdMutex::new(Vec::new()));
+        let mut state = fake_state(
+            None,
+            shared_geometry(MonitorGeometry::new(0, 0, 1920, 1080)),
+        );
+        state.keyboard = Box::new(RecordingKeyboard(keys.clone()));
+        state.mouse = Box::new(RecordingMouse(mouse.clone()));
+        state.last_mouse_seq = 42;
+        d.inner.lock().unwrap().insert("controller".into(), state);
+        let mut sibling = fake_state(
+            None,
+            shared_geometry(MonitorGeometry::new(0, 0, 1920, 1080)),
+        );
+        sibling.pressed_keys.insert(
+            "ControlLeft".into(),
+            KeyboardEventData {
+                event: "keydown".into(),
+                code: "ControlLeft".into(),
+                key_code: 17,
+                ..KeyboardEventData::default()
+            },
+        );
+        d.inner
+            .lock()
+            .unwrap()
+            .insert("other-controller".into(), sibling);
+        let key = KeyboardEventData {
+            event: "keydown".into(),
+            code: "ControlLeft".into(),
+            key_code: 17,
+            ..KeyboardEventData::default()
+        };
+        for repeat in [false, true, true] {
+            let mut event = key.clone();
+            event.repeat = repeat;
+            d.dispatch_keyboard(&InputPayload {
+                connection_id: "controller".into(),
+                data: serde_json::to_vec(&event).unwrap(),
+            });
+        }
+        let down = MouseEventData {
+            event: "mousedown".into(),
+            button: 0,
+            buttons: 1,
+            x: 0.4,
+            y: 0.7,
+            ..MouseEventData::default()
+        };
+        d.dispatch_mouse(&InputPayload {
+            connection_id: "controller".into(),
+            data: serde_json::to_vec(&down).unwrap(),
+        });
+        let mut release = ReleaseInputStatePayload {
+            connection_id: "controller".into(),
+            connection_epoch: "old-epoch".into(),
+        };
+        d.release_connection_inputs(&release);
+        d.stop_connection(&StopMediaPayload {
+            connection_id: release.connection_id.clone(),
+            connection_epoch: release.connection_epoch.clone(),
+        });
+        assert_eq!(d.inner.lock().unwrap()["controller"].pressed_keys.len(), 1);
+        release.connection_epoch = "test-epoch".into();
+        d.release_connection_inputs(&release);
+        d.release_connection_inputs(&release);
+        assert_eq!(
+            keys.lock()
+                .unwrap()
+                .iter()
+                .filter(|e| e.event == "keyup")
+                .count(),
+            1
+        );
+        assert_eq!(
+            mouse
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|e| e.event == "mouseup")
+                .count(),
+            1
+        );
+        let states = d.inner.lock().unwrap();
+        let retained = &states["controller"];
+        assert!(retained.pressed_keys.is_empty());
+        assert!(retained.pressed_mouse_buttons.is_empty());
+        assert_eq!(retained.last_mouse_seq, 42);
+        assert_eq!(states["other-controller"].pressed_keys.len(), 1);
+        drop(states);
+        d.dispatch_keyboard(&InputPayload {
+            connection_id: "controller".into(),
+            data: serde_json::to_vec(&key).unwrap(),
+        });
+        assert_eq!(d.inner.lock().unwrap()["controller"].pressed_keys.len(), 1);
     }
 
     /// `refresh_geometry_in(Some(device))` writes only into the

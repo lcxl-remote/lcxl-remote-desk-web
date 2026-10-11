@@ -297,6 +297,8 @@ pub enum ServiceToWorker {
     /// Local authenticated OS-user request; never forwarded from signaling.
     ManageLocalFileRecovery(crate::local_file_recovery::LocalFileRecoveryRequest),
     ComputerTurnStatus(ComputerTurnStatusPayload),
+    /// Release held keyboard keys and mouse buttons without stopping media.
+    ReleaseInputState(ReleaseInputStatePayload),
 }
 
 impl ServiceToWorker {
@@ -321,6 +323,7 @@ impl ServiceToWorker {
                         | Self::MouseInput(_)
                         | Self::MouseMoveInput(_)
                         | Self::KeyboardInput(_)
+                        | Self::ReleaseInputState(_)
                         | Self::RefreshCapabilities
                         | Self::SetLocale(_)
                         | Self::UpdateSecurityPolicy(_)

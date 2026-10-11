@@ -76,3 +76,22 @@ Automatic changes run only while exactly one remote desktop connection exists. O
 - Lower `video_fps` (e.g. 30) to reduce CPU and bandwidth.
 - Raise `video_quality` number for smaller bitrate, lower for better picture.
 - Enable `enable_dirty_rect` for largely static screens.
+
+## Mobile touch and local zoom
+
+Mobile Web, iOS and Android offer two modes, with Direct touch selected initially. Open **Touch and zoom** in the toolbar to change modes or read the gesture help.
+
+| Action | Direct touch | Touchpad |
+| --- | --- | --- |
+| Tap | Click at your finger | Click at the local cursor |
+| One-finger swipe | Hold the left button and drag; lift to release | Move the cursor relatively |
+| Hold still | One right click at your finger | One right click at the cursor |
+| Arm Drag, then swipe | Direct touch already supports dragging | Press at the original cursor, move, then lift to release |
+
+Each tap sends one click; two taps still double-click remotely. A brief ring marks a click, a double ring marks the second tap, and a dashed double ring marks a right click. These are local operation hints.
+
+Pinch to zoom a region, or use Zoom in, Zoom out and Fit screen. The maximum follows the frame and viewport sizes, capped at 16×. Local zoom does not change the remote display resolution. When zoomed, two fingers pan the view by default; switch to scroll the remote desktop. Viewers can also zoom and pan locally without control.
+
+The touchpad arrow is drawn immediately by the controller. Manual panning can move it outside the view; unseen targets cannot be clicked. Locate cursor moves only the local view back to it. A remote system pointer embedded in the video may remain visible as a second pointer.
+
+Releasing control, ending the session, or detecting a disconnected connection or closed input channel clears held keys and mouse buttons on the client and host. Existing connection-detection delay still applies. Handling a physical key or finger held through reconnection is outside this change.

@@ -340,6 +340,7 @@ pub struct PerConnectionMediaCoordinator {
 pub struct PeerConnectionContext {
     pub connection_id: String,
     pub connection_epoch: String,
+    pub input_lifecycle: Arc<input_lifecycle::InputLifecycle>,
     pub host_settings: DeskSettings,
     pub pc: Arc<RTCPeerConnection>,
     pub signaling_state: Arc<RwLock<SignalingState>>,
@@ -869,10 +870,24 @@ impl PcRegistry {
     pub async fn fail_media_worker_restart_required(&self) {
         let ids = self.all_connection_ids().await;
         for connection_id in ids {
-            let Some(pc) = self.remove(&connection_id).await else {
+            let Some(candidate) = self.get(&connection_id).await else {
                 continue;
             };
+            let lifecycle = candidate.read().await.input_lifecycle.clone();
+            let mut input = lifecycle.state.lock().await;
+            if !input.closed {
+                input.closed = true;
+                let worker_mgr = self.worker_manager();
+                lifecycle
+                    .release_locked(&mut input, &connection_id, worker_mgr.as_ref())
+                    .await;
+            }
+            let Some(pc) = self.remove_if_current(&connection_id, &candidate).await else {
+                continue;
+            };
+            drop(input);
             let pc = pc.read().await;
+            let pc_to_close = pc.pc.clone();
             pc.media_paused.store(true, Ordering::Release);
             pc.media_output_fence.write().await.audio_open = false;
             let mut coordinator = pc.media_coordinator.lock().await;
@@ -917,12 +932,12 @@ impl PcRegistry {
                     let _ = outbound.send(text);
                 }
             }
-            if let Err(error) = pc.pc.close().await {
+            drop(pc);
+            if let Err(error) = pc_to_close.close().await {
                 log::warn!(
                     "[pc_manager] failed to close {connection_id} after unsafe media-worker stop: {error}"
                 );
             }
-            drop(pc);
             self.unindex_grant_connection(&connection_id).await;
             self.clear_admission(&connection_id).await;
             log::error!(
@@ -1070,6 +1085,23 @@ impl PcRegistry {
 
     pub async fn remove(&self, connection_id: &str) -> Option<Arc<RwLock<PeerConnectionContext>>> {
         self.inner.write().await.remove(connection_id)
+    }
+
+    /// Keeps identity comparison and removal under one registry write guard.
+    pub async fn remove_if_current(
+        &self,
+        connection_id: &str,
+        expected: &Arc<RwLock<PeerConnectionContext>>,
+    ) -> Option<Arc<RwLock<PeerConnectionContext>>> {
+        let mut map = self.inner.write().await;
+        if map
+            .get(connection_id)
+            .is_some_and(|current| Arc::ptr_eq(current, expected))
+        {
+            map.remove(connection_id)
+        } else {
+            None
+        }
     }
 
     pub async fn connection_ids(&self) -> Vec<String> {
@@ -1446,9 +1478,11 @@ impl PcRegistry {
             self.worker_manager(),
         );
 
+        let connection_epoch = uuid::Uuid::new_v4().to_string();
         let ctx = Arc::new(RwLock::new(PeerConnectionContext {
             connection_id: connection_id.to_string(),
-            connection_epoch: uuid::Uuid::new_v4().to_string(),
+            connection_epoch: connection_epoch.clone(),
+            input_lifecycle: Arc::new(input_lifecycle::InputLifecycle::new(connection_epoch)),
             host_settings: local_settings.desk.clone(),
             pc: Arc::new(pc),
             signaling_state: Arc::new(RwLock::new(SignalingState::default())),
@@ -1486,10 +1520,20 @@ impl PcRegistry {
                 "Connection was terminated by the host",
             )));
         }
-        self.inner
-            .write()
-            .await
-            .insert(connection_id.to_string(), Arc::clone(&ctx));
+        {
+            let mut map = self.inner.write().await;
+            if map.contains_key(connection_id) {
+                drop(map);
+                drop(tombstones);
+                let pc = ctx.read().await.pc.clone();
+                let _ = pc.close().await;
+                return Err(DeskError::CustomError(CustomDeskError::new(
+                    DeskErrorCode::INVALID_STATE,
+                    "Peer connection already exists",
+                )));
+            }
+            map.insert(connection_id.to_string(), Arc::clone(&ctx));
+        }
         drop(tombstones);
 
         Ok(ctx)
@@ -1916,7 +1960,7 @@ impl PcRegistry {
 
 mod data_channel;
 
-pub use data_channel::register_data_channel_router;
+pub use data_channel::{BrowserChannelSlots, register_data_channel_router};
 #[cfg(test)]
 use data_channel::{DcRoute, classify_dc_label, route_is_permitted, route_to_service_msg};
 // =====================================================================
@@ -2072,6 +2116,7 @@ fn spawn_rtcp_feedback_task(
     });
 }
 
+mod input_lifecycle;
 mod signaling_helpers;
 use signaling_helpers::*;
 

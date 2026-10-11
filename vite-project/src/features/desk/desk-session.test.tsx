@@ -121,8 +121,14 @@ vi.mock('./use-desk-signaling', () => ({
   }),
 }));
 
+const rtcInputRefs = vi.hoisted(() => ({
+  peerConnection: { current: null }, mouseChannel: { current: null },
+  keyboardChannel: { current: null }, mouseMoveChannel: { current: null },
+}));
+
 vi.mock('./use-desk-rtc', () => ({
   useDeskRTC: () => ({
+    ...rtcInputRefs,
     isRTCConnected: true,
     rtcStats: { fps: 60, bitrate: 1000 },
     connect: vi.fn(),
@@ -132,6 +138,7 @@ vi.mock('./use-desk-rtc', () => ({
 
 vi.mock('./use-desk-input', () => ({
   useDeskInput: () => ({
+    sendMouseIntent: vi.fn(),
     sendKeyboardEvents: vi.fn(),
     releaseAllInputs: vi.fn(),
   }),

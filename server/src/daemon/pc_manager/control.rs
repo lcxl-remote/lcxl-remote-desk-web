@@ -96,9 +96,15 @@ pub async fn handle_require_control(
         log::warn!("[pc_manager] {from_connection_id}: RemoteControl denied");
         {
             let ctx = ctx.read().await;
+            let mut input = ctx.input_lifecycle.state.lock().await;
             let mut s = ctx.signaling_state.write().await;
             s.accept_control = false;
             s.accept_clipboard_sync = false;
+            drop(s);
+            let worker_mgr = registry.worker_manager();
+            ctx.input_lifecycle
+                .release_locked(&mut input, from_connection_id, worker_mgr.as_ref())
+                .await;
         }
         send_response::<()>(
             outbound,
@@ -148,6 +154,13 @@ pub async fn handle_require_control(
 
     {
         let ctx = ctx.read().await;
+        let input = ctx.input_lifecycle.state.lock().await;
+        if input.closed || input.cleanup_pending {
+            return Err(DeskError::CustomError(CustomDeskError::new(
+                DeskErrorCode::INVALID_STATE,
+                "Input cleanup has not completed",
+            )));
+        }
         let mut s = ctx.signaling_state.write().await;
         s.accept_control = true;
         s.accept_clipboard_sync = clipboard_approved;
@@ -190,10 +203,16 @@ pub async fn handle_release_control(
 
     let currently_has_control = {
         let ctx = ctx.read().await;
+        let mut input = ctx.input_lifecycle.state.lock().await;
         let mut state = ctx.signaling_state.write().await;
         let had_control = state.accept_control;
         state.accept_control = false;
         state.accept_clipboard_sync = false;
+        drop(state);
+        let worker_mgr = registry.worker_manager();
+        ctx.input_lifecycle
+            .release_locked(&mut input, from_connection_id, worker_mgr.as_ref())
+            .await;
         had_control
     };
 

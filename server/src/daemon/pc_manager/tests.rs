@@ -15,6 +15,64 @@ fn system_audio_revocation_only_runs_for_a_stricter_effective_permission() {
     assert!(!security_permission_is_tighter(Some(false), None));
 }
 
+#[tokio::test]
+async fn old_pc_identity_cannot_remove_a_replacement() {
+    let registry = PcRegistry::new();
+    let request = RequestRemoteModel {
+        session_target_id: None,
+        requested_wayland_control_mode: Some("auto".into()),
+        purpose: RemoteSessionPurpose::RemoteDesktop,
+        ice_servers: vec![],
+        grant_session_id: None,
+        org_id: None,
+    };
+    let settings = Settings::default();
+    let old = registry
+        .create_for_request_remote("same-id", &request, &settings)
+        .await
+        .unwrap();
+    assert!(registry.remove_if_current("same-id", &old).await.is_some());
+    let current = registry
+        .create_for_request_remote("same-id", &request, &settings)
+        .await
+        .unwrap();
+    assert!(registry.remove_if_current("same-id", &old).await.is_none());
+    assert!(Arc::ptr_eq(
+        &registry.get("same-id").await.unwrap(),
+        &current
+    ));
+    let old_pc = old.read().await.pc.clone();
+    let current_pc = current.read().await.pc.clone();
+    old_pc.close().await.unwrap();
+    current_pc.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn concurrent_request_remote_publication_keeps_one_pc() {
+    let registry = PcRegistry::new();
+    let request = RequestRemoteModel {
+        session_target_id: None,
+        requested_wayland_control_mode: Some("auto".into()),
+        purpose: RemoteSessionPurpose::RemoteDesktop,
+        ice_servers: vec![],
+        grant_session_id: None,
+        org_id: None,
+    };
+    let settings = Settings::default();
+    let (a, b) = tokio::join!(
+        registry.create_for_request_remote("same-id", &request, &settings),
+        registry.create_for_request_remote("same-id", &request, &settings),
+    );
+    assert_eq!(usize::from(a.is_ok()) + usize::from(b.is_ok()), 1);
+    let winner = a.or(b).unwrap();
+    assert!(Arc::ptr_eq(
+        &registry.get("same-id").await.unwrap(),
+        &winner
+    ));
+    let pc = winner.read().await.pc.clone();
+    pc.close().await.unwrap();
+}
+
 #[test]
 fn rtcp_bitrate_targets_the_current_stable_video_generation() {
     let mut coordinator = PerConnectionMediaCoordinator::default();
@@ -2034,6 +2092,7 @@ async fn peer_connection_state_change_terminal_removes_registry_entry() {
         worker_mgr,
         None,
         "conn-cleanup".to_string(),
+        ctx.read().await.input_lifecycle.clone(),
     );
 
     assert!(
@@ -2323,6 +2382,10 @@ async fn pc_cleanup_preserves_logical_activity_until_signaling_connection_ends()
     assert!(!during_handoff.sessions[0].remote_control);
     assert!(!during_handoff.sessions[0].system_audio_capture);
     assert!(registry.admission("conn-handoff").await.is_some());
+    assert!(matches!(
+        ipc_rx.try_recv(),
+        Ok(ServiceToWorker::ReleaseInputState(_))
+    ));
     assert!(matches!(
         ipc_rx.try_recv(),
         Ok(ServiceToWorker::StopMedia(_))
@@ -3439,11 +3502,14 @@ async fn register_data_channel_router_smoke() {
         Arc::new(pc),
         "conn-smoke".to_string(),
         signaling_state,
-        cursor_dc,
-        latest_cursor_payload,
-        clipboard_dc,
-        file_transfer_dc,
+        BrowserChannelSlots {
+            cursor: cursor_dc,
+            latest_cursor_payload,
+            clipboard: clipboard_dc,
+            file_transfer: file_transfer_dc,
+        },
         worker_mgr,
+        Arc::new(input_lifecycle::InputLifecycle::new("smoke-epoch".into())),
     );
 }
 
@@ -4483,10 +4549,29 @@ async fn handle_release_control_emits_result_and_resets_state() {
         s.accept_clipboard_sync = true;
     }
 
+    let (worker_mgr, _) = WorkerManager::new(
+        actix_web::web::Data::from(Arc::clone(&settings)),
+        registry.clone(),
+    );
+    let (ipc_tx, mut ipc_rx) = tokio::sync::mpsc::unbounded_channel();
+    worker_mgr.install_active_for_test(ipc_tx).await;
+    registry.set_worker_manager(worker_mgr);
+    let epoch = ctx.read().await.connection_epoch.clone();
+
     let model = release_control_model("conn-release");
     handle_release_control(&registry, &outbound_tx, &model)
         .await
         .expect("handle ok");
+
+    assert!(
+        matches!(ipc_rx.try_recv().unwrap(), ServiceToWorker::ReleaseInputState(payload)
+        if payload.connection_id == "conn-release" && payload.connection_epoch == epoch)
+    );
+    assert!(
+        registry.get("conn-release").await.is_some(),
+        "release must preserve the viewing PC"
+    );
+    assert!(ipc_rx.try_recv().is_err(), "release must not stop media");
 
     let text = outbound_rx.recv().await.expect("ControlReleased reply");
     let reply: SignalingModel = serde_json::from_str(&text).expect("decode");
@@ -4630,6 +4715,68 @@ async fn handle_require_control_unknown_connection_errors() {
     let model = require_control_model("ghost", true);
     let result = handle_require_control(&registry, &outbound_tx, &policy, &hub, &model).await;
     assert!(result.is_err(), "unknown connection must surface an error");
+}
+
+#[tokio::test]
+async fn unsafe_media_worker_stop_fences_input_before_releasing_registry_slot() {
+    let registry = PcRegistry::new();
+    let request = RequestRemoteModel {
+        session_target_id: None,
+        requested_wayland_control_mode: Some("auto".into()),
+        purpose: RemoteSessionPurpose::RemoteDesktop,
+        ice_servers: vec![],
+        grant_session_id: None,
+        org_id: None,
+    };
+    let s = settings_with_startup(StartupMode::ServiceDaemon);
+    let ctx = registry
+        .create_for_request_remote("held", &request, &s)
+        .await
+        .unwrap();
+    let lifecycle = ctx.read().await.input_lifecycle.clone();
+    let input = lifecycle.state.lock().await;
+    let settings = actix_web::web::Data::new(SharedSettings::from(s));
+    let (worker, _) = WorkerManager::new(settings, registry.clone());
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    worker.install_active_for_test(tx).await;
+    registry.set_worker_manager(worker.clone());
+    let stopping_registry = registry.clone();
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let stop = tokio::spawn(async move {
+        started_tx.send(()).unwrap();
+        stopping_registry.fail_media_worker_restart_required().await;
+    });
+    started_rx.await.unwrap();
+    tokio::task::yield_now().await;
+    assert!(
+        registry.contains("held").await,
+        "replacement must wait for admitted input to finish"
+    );
+    worker
+        .send_to_interactive_connection_worker(
+            "held",
+            ServiceToWorker::KeyboardInput(desk_ipc_protocol::message::InputPayload {
+                connection_id: "held".into(),
+                data: b"down".to_vec(),
+            }),
+        )
+        .await
+        .unwrap();
+    drop(input);
+    tokio::time::timeout(std::time::Duration::from_secs(2), stop)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!registry.contains("held").await);
+    assert!(lifecycle.state.lock().await.closed);
+    assert!(matches!(
+        rx.try_recv().unwrap(),
+        ServiceToWorker::KeyboardInput(_)
+    ));
+    assert!(
+        matches!(rx.try_recv().unwrap(), ServiceToWorker::ReleaseInputState(p)
+        if p.connection_epoch == ctx.read().await.connection_epoch)
+    );
 }
 
 /// Multi-connection: independent contexts coexist; closing one

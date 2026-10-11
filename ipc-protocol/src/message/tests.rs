@@ -18,6 +18,21 @@ use desk_signal_facade::model::virtual_display::PhysicalDisplayCapability;
 use std::collections::BTreeMap;
 
 #[test]
+fn release_input_state_preserves_pc_identity_and_is_allowed_on_restricted_desktops() {
+    let request = ServiceToWorker::ReleaseInputState(ReleaseInputStatePayload {
+        connection_id: "controller".into(),
+        connection_epoch: "pc-epoch".into(),
+    });
+    assert!(request.allowed_for_profile(WorkerProfile::SessionUser));
+    assert!(request.allowed_for_profile(WorkerProfile::RestrictedDesktop));
+    let ServiceToWorker::ReleaseInputState(decoded) = wincode_round_trip(&request) else {
+        panic!("wrong input release variant")
+    };
+    assert_eq!(decoded.connection_id, "controller");
+    assert_eq!(decoded.connection_epoch, "pc-epoch");
+}
+
+#[test]
 fn physical_capability_identity_survives_worker_ipc() {
     let capability = PhysicalDisplayCapability {
         available: true,
