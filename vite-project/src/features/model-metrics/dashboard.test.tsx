@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
 import { MetricsDashboard } from './dashboard';
@@ -7,6 +7,7 @@ import { metricTime } from './format';
 import { MetricsRuntimePanel } from './runtime-panel';
 import { apiFixture, coverage, groups, recordFixture, summary } from './test-fixtures';
 import type { MetricsApi } from './dashboard';
+import { selectOption } from '@/test-utils/select-option';
 
 vi.mock('react-i18next', () => import('@/test-utils/i18n-mock').then((module) => module.reactI18nextMock()));
 const clients: QueryClient[] = [];
@@ -24,6 +25,11 @@ describe('model metric dashboard isolation and attribution', () => {
         vi.mocked(api.calls).mockResolvedValue({ coverage: coverage(), records: [recordFixture()], next_cursor: null, received_before: '2026-10-09T00:00:00Z' });
         const view = mount(api);
         await waitFor(() => expect(api.status).toHaveBeenCalled());
+        expect(await screen.findByRole('combobox', { name: 'Metric' })).toHaveTextContent('Request failure rate');
+        const refresh = screen.getByRole('checkbox', { name: 'Auto refresh' });
+        expect(refresh).toBeChecked();
+        fireEvent.click(refresh);
+        expect(refresh).not.toBeChecked();
         expect(screen.queryByRole('tab', { name: 'Collection settings' })).toBeNull();
         expect(api.settings).not.toHaveBeenCalled();
         await waitFor(() => expect(view.container.querySelector('time')?.textContent).toBe(metricTime('2026-10-09T00:00:00Z', 'en-US')));
@@ -104,12 +110,17 @@ describe('model metric dashboard isolation and attribution', () => {
         await screen.findByText('$.items[].count');
         expect(screen.getByText(/Only some parameter fields are shown/)).toBeTruthy();
         expect(screen.getByText(/Second model · provider-2 \/ model-2/).textContent).toContain('9,007,199,254,740,993');
-        fireEvent.change(screen.getByRole('combobox', { name: 'Sort groups before Top N' }), { target: { value: 'input_rejection_rate' } });
+        await selectOption(screen.getByRole('combobox', { name: 'Sort groups before Top N' }), 'Input rejection rate, highest first');
         await waitFor(() => expect(vi.mocked(api.tools).mock.calls.at(-1)![0].group_sort).toBe('input_rejection_rate'));
         fireEvent.click((await screen.findByText(/Second model · provider-2 \/ model-2/)).closest('div')!.querySelector('button')!);
         await waitFor(() => expect(api.calls).toHaveBeenCalled());
         expect(vi.mocked(api.calls).mock.calls.at(-1)![0]).toMatchObject({ tool: 'read_file', provider_id: 'provider-2', model_id: 'model-2' });
         expect(vi.mocked(api.calls).mock.calls.at(-1)![0].group_sort).toBeUndefined();
+        const active = screen.getByRole('group', { name: 'Active filters' });
+        expect(within(active).getByText('Tool: read_file')).toBeTruthy();
+        expect(within(active).getByText('Provider ID: provider-2')).toBeTruthy();
+        expect(within(active).getByText('Model ID: model-2')).toBeTruthy();
+        expect(screen.getByRole('button', { name: 'Filters', exact: true })).toHaveAttribute('aria-expanded', 'true');
     });
 
     it('shows P95 latency with sample counts and preserves gaps instead of connecting missing buckets', async () => {
@@ -122,7 +133,7 @@ describe('model metric dashboard isolation and attribution', () => {
         ] });
         mount(api);
         const selection = await screen.findByRole('combobox', { name: 'Metric' });
-        fireEvent.change(selection, { target: { value: 'duration' } });
+        await selectOption(selection, 'Request duration P95');
         const plot = screen.getByRole('img', { name: 'Trend' });
         expect(plot.querySelectorAll('circle')).toHaveLength(2);
         expect(plot.querySelectorAll('line')).toHaveLength(0);
@@ -179,7 +190,11 @@ describe('model metric dashboard isolation and attribution', () => {
         fireEvent.click(button);
         expect(api.calls).not.toHaveBeenCalled();
         expect(screen.queryByText('0.00%')).toBeNull();
-        expect((screen.getByRole('combobox', { name: 'Model' }) as HTMLSelectElement).options.length).toBe(1);
+        fireEvent.keyDown(screen.getByRole('combobox', { name: 'Model' }), { key: 'ArrowDown' });
+        const choices = await screen.findAllByRole('option');
+        expect(choices).toHaveLength(1);
+        expect(choices[0]).toHaveTextContent('All categories');
+        fireEvent.click(choices[0]);
     });
     it('lists missing facts by reception time without model filters or invented rates', async () => {
         const api = apiFixture();
@@ -280,6 +295,33 @@ describe('model metric dashboard isolation and attribution', () => {
         expect(request.model_id).toBeUndefined();
     });
 
+    it('keeps automatically applied tool filters visible after folding and switching tabs, and clears them without resetting the time range', async () => {
+        const api = apiFixture();
+        vi.mocked(api.tools).mockResolvedValue(groups('request_permissions'));
+        mount(api);
+        const disclosure = screen.getByRole('button', { name: 'Filters', exact: true });
+        expect(disclosure).toHaveAttribute('aria-expanded', 'false');
+        fireEvent.click(screen.getByRole('tab', { name: 'Tool inputs / references / correction' }));
+        fireEvent.click(await screen.findByRole('button', { name: 'View calls' }));
+        await waitFor(() => expect(vi.mocked(api.calls).mock.calls.at(-1)![0].tool).toBe('request_permissions'));
+        expect(disclosure).toHaveAttribute('aria-expanded', 'true');
+        const selectedRange = vi.mocked(api.calls).mock.calls.at(-1)![0];
+        await waitFor(() => expect(api.tools).toHaveBeenCalledWith(expect.objectContaining({ limit: 200 }), expect.anything()));
+        fireEvent.click(disclosure);
+        await waitFor(() => expect(disclosure).toHaveAttribute('aria-expanded', 'false'));
+        const active = screen.getByRole('group', { name: 'Active filters' });
+        expect(disclosure.closest('[data-slot=disclosure]')!.contains(active)).toBe(false);
+        expect(within(active).getByText('Tool: request_permissions')).toBeTruthy();
+        fireEvent.click(screen.getByRole('tab', { name: 'Tool inputs / references / correction' }));
+        await waitFor(() => expect(vi.mocked(api.tools).mock.calls.at(-1)![0].tool).toBe('request_permissions'));
+        expect(disclosure).toHaveAttribute('aria-expanded', 'false');
+        expect(screen.getByRole('group', { name: 'Active filters' })).toBeTruthy();
+        fireEvent.click(within(active).getByRole('button', { name: 'Clear filters' }));
+        await waitFor(() => expect(vi.mocked(api.tools).mock.calls.at(-1)![0].tool).toBeUndefined());
+        expect(screen.queryByRole('group', { name: 'Active filters' })).toBeNull();
+        expect(vi.mocked(api.tools).mock.calls.at(-1)![0]).toMatchObject({ from: selectedRange.from, to: selectedRange.to, granularity: selectedRange.granularity });
+    });
+
     it('does not display collected zero counts for a pre-activation range', async () => {
         const api = apiFixture();
         vi.mocked(api.overview).mockResolvedValue({ coverage: coverage('not_collected'), summary: summary(), previous: null });
@@ -306,6 +348,10 @@ describe('model metric dashboard isolation and attribution', () => {
         const view = render(<QueryClientProvider client={client}><MetricsRuntimePanel api={api} identity="platform:one" allowed queryFilters={filters} autoRefresh={false}/></QueryClientProvider>);
         await waitFor(() => expect(api.runtime).toHaveBeenCalled());
         expect(vi.mocked(api.runtime).mock.calls[0][0]).toMatchObject(filters);
+        await selectOption(screen.getByRole('combobox', { name: 'Observation category' }), 'Compression');
+        await waitFor(() => expect(vi.mocked(api.runtime).mock.calls.at(-1)![0]).toMatchObject({ ...filters, category: 'compression' }));
+        await selectOption(screen.getByRole('combobox', { name: 'Observation category' }), 'All categories');
+        await waitFor(() => expect(vi.mocked(api.runtime).mock.calls.at(-1)![0].category).toBeUndefined());
         const requests = vi.mocked(api.runtime).mock.calls.length;
         view.rerender(<QueryClientProvider client={client}><MetricsRuntimePanel api={api} identity="platform:one" allowed queryFilters={{ ...filters, model_id: 'model-a' }} autoRefresh={false}/></QueryClientProvider>);
         expect(screen.getByText(/Runtime observations do not support these filters/)).toBeTruthy();

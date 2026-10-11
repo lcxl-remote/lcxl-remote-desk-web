@@ -1,6 +1,8 @@
+import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '@/components/ui/table';
 import { useTranslation } from 'react-i18next';
 import type { MetricsUnassociated } from '@/services/types';
 import { Button } from '@/components/ui/button';
+import { Disclosure } from '@/components/ui/disclosure';
 import { MetricsCoverage } from './coverage';
 import { MetricTime } from './time';
 
@@ -9,14 +11,14 @@ export function UnassociatedFacts({ value, select }: { value: MetricsUnassociate
     return <div className="space-y-4">
         <p className="text-sm text-muted-foreground">{t('modelMetrics.unassociated.hint')}</p>
         <MetricsCoverage value={value.coverage} empty={value.records.length === 0}/>
-        <div className="overflow-x-auto"><table className="w-full text-sm"><thead><tr className="border-b text-left">
-            <th>{t('modelMetrics.unassociated.received')}</th><th>{t('modelMetrics.field.kind')}</th>
-            <th>{t('modelMetrics.unassociated.missing')}</th><th>{t('modelMetrics.state')}</th><th>{t('modelMetrics.model')}</th><th>{t('modelMetrics.detail')}</th>
-        </tr></thead><tbody>{value.records.map((row) => <tr key={row.id} className="border-b align-top">
-            <td className="py-3"><MetricTime value={row.received_at}/></td><td>{t(`modelMetrics.value.kind.${row.kind}`)}</td>
-            <td>{t(`modelMetrics.unassociated.missing.${row.missing}`)}</td><td>{t(`modelMetrics.unassociated.state.${row.state}`)}</td>
-            <td>{row.original_model?.model_name ?? t('modelMetrics.value.unknown')}<p className="text-xs text-muted-foreground">{row.tool ?? ''}</p></td>
-            <td className="py-3"><details><summary>{t('modelMetrics.detail')}</summary><dl className="space-y-2 pt-2 min-w-64">
+        <Table><TableHeader><TableRow className="border-b text-left">
+            <TableHead>{t('modelMetrics.unassociated.received')}</TableHead><TableHead>{t('modelMetrics.field.kind')}</TableHead>
+            <TableHead>{t('modelMetrics.unassociated.missing')}</TableHead><TableHead>{t('modelMetrics.state')}</TableHead><TableHead>{t('modelMetrics.model')}</TableHead><TableHead>{t('modelMetrics.detail')}</TableHead>
+        </TableRow></TableHeader><TableBody>{value.records.map((row) => <TableRow key={row.id} className="[&>td]:align-top">
+            <TableCell className="py-3"><MetricTime value={row.received_at}/></TableCell><TableCell>{t(`modelMetrics.value.kind.${row.kind}`)}</TableCell>
+            <TableCell>{t(`modelMetrics.unassociated.missing.${row.missing}`)}</TableCell><TableCell>{t(`modelMetrics.unassociated.state.${row.state}`)}</TableCell>
+            <TableCell>{row.original_model?.model_name ?? t('modelMetrics.value.unknown')}<p className="text-xs text-muted-foreground">{row.tool ?? ''}</p></TableCell>
+            <TableCell className="py-3"><Disclosure title={t('modelMetrics.detail')}><dl className="space-y-2 pt-2 min-w-64">
                 <div><dt>{t('modelMetrics.field.id')}</dt><dd className="font-mono break-all">{row.id}</dd></div>
                 <div><dt>{t('modelMetrics.field.started_at')}</dt><dd><MetricTime value={row.started_at}/></dd></div>
                 <div><dt>{t('modelMetrics.unassociated.occurred')}</dt><dd><MetricTime value={row.occurred_at}/></dd></div>
@@ -39,7 +41,7 @@ export function UnassociatedFacts({ value, select }: { value: MetricsUnassociate
                 </>}
                 {row.tool_observation_id && <Button variant="outline" size="sm" onClick={() => select(row.tool_observation_id!)}>{t('modelMetrics.unassociated.originalTool')}</Button>}
                 {!row.tool_observation_id && row.call_id && row.original_model && <Button variant="outline" size="sm" onClick={() => select(row.call_id!)}>{t('modelMetrics.unassociated.originalCall')}</Button>}
-            </dl></details></td>
-        </tr>)}</tbody></table></div>
+            </dl></Disclosure></TableCell>
+        </TableRow>)}</TableBody></Table>
     </div>;
 }

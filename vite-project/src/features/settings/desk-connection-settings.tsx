@@ -1,3 +1,4 @@
+import { useConfirm } from '@/components/confirm-dialog';
 import { useCallback, useEffect, useState } from "react"
 import { useForm } from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
@@ -59,6 +60,7 @@ type VerifyState =
 
 export function DeskConnectionSettings() {
     const { t } = useTranslation()
+    const { confirm, dialog } = useConfirm();
     const { toast } = useToast()
 
     const { data: settingsResponse, isLoading, refetch: refetchSettings } = useQuerySettings()
@@ -218,7 +220,7 @@ export function DeskConnectionSettings() {
         if (
             previousToken &&
             values.manager_api_token !== previousToken &&
-            !window.confirm(t('pages.deskConnection.managerToken.replaceConfirm'))
+            !await confirm({ title: t('pages.deskConnection.managerToken.replaceConfirm') })
         ) {
             return
         }
@@ -254,6 +256,7 @@ export function DeskConnectionSettings() {
 
     return (
         <div className="container mx-auto max-w-4xl py-8">
+            {dialog}
             <div className="mb-8">
                 <h1 className="text-3xl font-bold tracking-tight">{t('pages.deskConnection.title')}</h1>
                 <p className="text-muted-foreground">
@@ -381,7 +384,7 @@ export function DeskConnectionSettings() {
                             </div>
 
                             <div className="flex justify-end">
-                                <Button type="submit" disabled={isUpdating}>
+                                <Button type="submit" disabled={isUpdating || form.formState.isSubmitting}>
                                     {isUpdating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
                                     {t('pages.system.settings.save')}
                                 </Button>

@@ -1758,7 +1758,7 @@ export default function DeskSession({
                         {/* Whiteboard text input overlay */}
                         {whiteboard.textInput && (
                             <form
-                                className="fixed z-[9999] flex items-center gap-2 bg-background p-2 rounded-lg shadow-lg border border-white/20"
+                                className="fixed z-[9999] flex items-center gap-2 bg-popover text-popover-foreground p-2 rounded-lg shadow-lg border border-border"
                                 style={{
                                     left: Math.min(whiteboard.textInput.clientX, window.innerWidth - 300),
                                     top: Math.min(whiteboard.textInput.clientY, window.innerHeight - 60)

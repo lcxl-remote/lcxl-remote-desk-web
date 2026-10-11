@@ -23,7 +23,7 @@ export function TelemetryDisclosure() {
                     </span>
                 </Button>
             </PopoverTrigger>
-            <PopoverContent className="w-80 p-4 shadow-xl border-slate-200 dark:border-slate-800 bg-white/95 backdrop-blur-md dark:bg-slate-950/95">
+            <PopoverContent className="w-80 p-4 shadow-xl border-border bg-popover/95 backdrop-blur-md">
                 <div className="space-y-3">
                     <h4 className="font-semibold text-sm leading-none flex items-center gap-2">
                         <Info className="h-4 w-4 text-primary" />
@@ -32,13 +32,13 @@ export function TelemetryDisclosure() {
                     <p className="text-xs text-muted-foreground leading-relaxed">
                         {t("pages.init.telemetry.disclosure.description")}
                     </p>
-                    <ul className="text-xs space-y-2 list-disc pl-4 text-slate-700 dark:text-slate-300">
+                    <ul className="text-xs space-y-2 list-disc pl-4 text-muted-foreground">
                         <li>{t("pages.init.telemetry.disclosure.item.serviceInfo")}</li>
                         <li>{t("pages.init.telemetry.disclosure.item.osInfo")}</li>
                         <li>{t("pages.init.telemetry.disclosure.item.hostInfo")}</li>
                         <li>{t("pages.init.telemetry.disclosure.item.clientId")}</li>
                     </ul>
-                    <div className="pt-2 border-t border-slate-100 dark:border-slate-800">
+                    <div className="pt-2 border-t border-border">
                         <p className="text-[10px] text-muted-foreground leading-tight italic">
                             {t("pages.init.telemetry.disclosure.footnote")}
                         </p>

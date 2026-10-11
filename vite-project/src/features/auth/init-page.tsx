@@ -1,3 +1,4 @@
+import { useConfirm } from '@/components/confirm-dialog';
 import { useState } from "react"
 import { useNavigate } from "react-router-dom"
 import { useTranslation } from "react-i18next"
@@ -54,6 +55,7 @@ type SchemeStatus =
 
 export default function InitPage() {
     const { t } = useTranslation()
+    const { confirm, dialog } = useConfirm();
     const navigate = useNavigate()
     const { toast } = useToast()
     const queryClient = useQueryClient()
@@ -364,6 +366,7 @@ export default function InitPage() {
 
     return (
         <div className="relative flex min-h-screen w-full flex-col bg-[url('https://mdn.alipayobjects.com/yuyan_qk0oxh/afts/img/V-_oS6r-i7wAAAAAAAAAAAAAFl94AQBr')] bg-cover bg-center">
+            {dialog}
             <div className="absolute top-4 right-4 flex items-center gap-2">
                 <LanguageToggle />
                 <ModeToggle />
@@ -551,10 +554,10 @@ export default function InitPage() {
                                     <Switch
                                         id="host-access-indicator"
                                         checked={hostAccessIndicatorEnabled}
-                                        onCheckedChange={value => {
+                                        onCheckedChange={async value => {
                                             if (
                                                 !value
-                                                && !window.confirm(t('pages.init.hostAccessIndicator.confirm'))
+                                                && !await confirm({ title: t('pages.init.hostAccessIndicator.confirm') })
                                             ) {
                                                 return
                                             }

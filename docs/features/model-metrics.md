@@ -8,6 +8,8 @@ Use this page to see whether model calls succeed, which tool parameters cause pr
 
 Choose a time range, then filter by model, feature, purpose, tool or error category. A query can cover up to 90 days.
 
+Clicking a statistics card or **View calls** on a model or tool group applies the corresponding filters and expands the filter controls. Active filters remain visible outside the collapsible area, with controls to remove one filter or clear them all. Switching statistics tabs preserves these filters. Clearing filters keeps the selected time range and granularity.
+
 - **Overview**: call counts, error rates, duration and trends. Click a statistics card to see matching records.
 - **Models**: compare calls across models.
 - **Tool inputs / references / correction**: inspect parameter checks and the changes a model makes after feedback.

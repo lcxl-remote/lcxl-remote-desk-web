@@ -1,5 +1,6 @@
 import ReactMarkdown, { type Components } from "react-markdown"
 import remarkGfm from "remark-gfm"
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 
 const components: Components = {
     h1: ({ children }) => (
@@ -22,43 +23,45 @@ const components: Components = {
     ),
     li: ({ children }) => <li className="pl-0.5">{children}</li>,
     blockquote: ({ children }) => (
-        <blockquote className="mb-2 border-l-2 border-white/30 pl-2 text-white/70 last:mb-0">
+        <blockquote className="mb-2 border-l-2 border-border pl-2 text-muted-foreground last:mb-0">
             {children}
         </blockquote>
     ),
-    hr: () => <hr className="my-3 border-white/20" />,
+    hr: () => <hr className="my-3 border-border" />,
     pre: ({ children }) => (
-        <pre className="mb-2 overflow-x-auto whitespace-pre rounded bg-black/40 p-2 text-xs last:mb-0">
+        <pre className="mb-2 overflow-x-auto whitespace-pre rounded bg-muted p-2 text-foreground [&_code]:bg-transparent [&_code]:p-0 text-xs last:mb-0">
             {children}
         </pre>
     ),
     code: ({ children }) => (
-        <code className="rounded bg-black/30 px-1 py-0.5 font-mono text-[0.9em] text-green-300">
+        <code className="rounded bg-muted px-1 py-0.5 font-mono text-[0.9em] text-foreground">
             {children}
         </code>
     ),
     table: ({ children }) => (
-        <div className="mb-2 overflow-x-auto rounded border border-white/15 last:mb-0">
-            <table className="w-full border-collapse text-left text-xs">{children}</table>
+        <div className="mb-2 rounded border border-border last:mb-0">
+            <Table className="text-xs">{children}</Table>
         </div>
     ),
-    thead: ({ children }) => <thead className="bg-white/10">{children}</thead>,
+    thead: ({ children }) => <TableHeader className="bg-muted">{children}</TableHeader>,
+    tbody: ({ children }) => <TableBody>{children}</TableBody>,
+    tr: ({ children }) => <TableRow>{children}</TableRow>,
     th: ({ children }) => (
-        <th className="border-b border-r border-white/15 px-2 py-1.5 font-semibold last:border-r-0">
+        <TableHead className="h-auto border-r border-border px-2 py-1.5 last:border-r-0">
             {children}
-        </th>
+        </TableHead>
     ),
     td: ({ children }) => (
-        <td className="border-b border-r border-white/10 px-2 py-1.5 align-top last:border-r-0">
+        <TableCell className="border-r border-border px-2 py-1.5 align-top last:border-r-0">
             {children}
-        </td>
+        </TableCell>
     ),
     a: ({ children, ...props }) => (
         <a
             {...props}
             target="_blank"
             rel="noopener noreferrer"
-            className="text-blue-300 underline decoration-blue-300/50 underline-offset-2 hover:text-blue-200"
+            className="text-primary underline decoration-primary/50 underline-offset-2 hover:opacity-80"
         >
             {children}
         </a>

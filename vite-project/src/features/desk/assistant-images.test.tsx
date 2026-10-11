@@ -16,7 +16,6 @@ beforeEach(() => {
     vi.mocked(listAssistantImages).mockResolvedValue({ data: [frame], success: true, code: 0 });
     vi.mocked(getAssistantImage).mockResolvedValue(new Blob(['image'], { type: 'image/png' }) as never);
     vi.mocked(deleteAssistantImage).mockResolvedValue({ data: true, success: true, code: 0 });
-    vi.stubGlobal('confirm', vi.fn(() => true));
     URL.createObjectURL = vi.fn(() => 'blob:stored-image');
     URL.revokeObjectURL = vi.fn();
 });
@@ -111,6 +110,8 @@ describe('durable assistant images', () => {
         fireEvent.click(await screen.findByRole('button', { name: 'pages.aiAssistant.imageOpen' }));
         await screen.findByRole('img');
         fireEvent.click(screen.getByRole('button', { name: 'pages.aiAssistant.imageDelete' }));
+        expect(deleteAssistantImage).not.toHaveBeenCalled();
+        fireEvent.click(screen.getByRole('button', { name: 'common.confirm' }));
         await waitFor(() => expect(screen.queryByRole('img')).toBeNull());
         view.rerender(<AssistantImages sessionId="stored-run" evidence={[{ ...frame }]} />);
         await waitFor(() => expect(listAssistantImages).toHaveBeenCalledTimes(2));

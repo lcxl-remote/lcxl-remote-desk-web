@@ -1,3 +1,4 @@
+import { useConfirm } from '@/components/confirm-dialog';
 import { useEffect } from "react"
 import { useForm } from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
@@ -42,6 +43,7 @@ type SystemSettingsFormValues = z.infer<typeof systemSettingsSchema>
 
 export function SystemSettings() {
     const { t } = useTranslation()
+    const { confirm, dialog } = useConfirm();
     const { toast } = useToast()
 
     const { data: settingsResponse, isLoading, refetch: refetchSettings } = useQuerySettings()
@@ -100,7 +102,7 @@ export function SystemSettings() {
             if (
                 base.host_access_indicator_enabled !== false
                 && !values.host_access_indicator_enabled
-                && !window.confirm(t('pages.system.settings.hostAccessIndicator.confirm'))
+                && !await confirm({ title: t('pages.system.settings.hostAccessIndicator.confirm') })
             ) {
                 return
             }
@@ -128,6 +130,7 @@ export function SystemSettings() {
 
     return (
         <div className="container mx-auto max-w-4xl py-8">
+            {dialog}
             <div className="mb-8">
                 <h1 className="text-3xl font-bold tracking-tight">{t('pages.system.settings.title')}</h1>
                 <p className="text-muted-foreground">
@@ -247,7 +250,7 @@ export function SystemSettings() {
                             </div>
 
                             <div className="flex justify-end">
-                                <Button type="submit" disabled={isUpdating}>
+                                <Button type="submit" disabled={isUpdating || form.formState.isSubmitting}>
                                     {isUpdating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
                                     {t('pages.system.settings.save')}
                                 </Button>

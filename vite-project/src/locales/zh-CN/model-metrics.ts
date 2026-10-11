@@ -557,6 +557,8 @@ export default {
     "modelMetrics.dropped": "已知未能保存的记录",
     "modelMetrics.coverageHint": "统计在一些极端场景下可能并不完整，数据仅供参考。",
     "modelMetrics.filters": "筛选",
+    "modelMetrics.activeFilters": "当前筛选",
+    "modelMetrics.removeFilter": "移除筛选：{{filter}}",
     "modelMetrics.granularity": "时间精度",
     "modelMetrics.hour": "小时",
     "modelMetrics.fiveMinutes": "五分钟",

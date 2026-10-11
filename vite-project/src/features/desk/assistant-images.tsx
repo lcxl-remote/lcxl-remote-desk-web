@@ -1,3 +1,4 @@
+import { useConfirm } from '@/components/confirm-dialog';
 import { AssistantFrameTiming } from './assistant-frame-timing';
 import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { AiAssistantMessage } from './use-ai-assistant-chat';
@@ -10,6 +11,7 @@ import type { AiAssistantVisualEvidence } from './ai-assistant-event';
 
 function StoredImage({ frame, onDelete }: { frame: AiAssistantVisualEvidence; onDelete: (id: string) => void }) {
     const { t } = useTranslation();
+    const { confirm, dialog } = useConfirm();
     const [url, setUrl] = useState<string | null>(null);
     const [failed, setFailed] = useState(false);
     const [open, setOpen] = useState(false);
@@ -33,14 +35,16 @@ function StoredImage({ frame, onDelete }: { frame: AiAssistantVisualEvidence; on
     }, [durable, requested, frame.conversation_id, frame.evidence_id]);
     const source = url ?? (!durable ? frame.preview_data_url : null);
     const remove = async () => {
-        if (!window.confirm(t('pages.aiAssistant.imageDeleteConfirm'))) return;
+        if (deleting) return;
         setDeleting(true);
         try {
+            if (!await confirm({ title: t('pages.aiAssistant.imageDeleteConfirm') })) return;
             await deleteAssistantImage({ session: frame.conversation_id, attachment: frame.evidence_id });
             onDelete(frame.evidence_id);
         } catch { setFailed(true); } finally { setDeleting(false); }
     };
     return <div className="overflow-hidden rounded-md border bg-muted/30">
+        {dialog}
         {source ? <Button variant="unstyled" type="button" className="block w-full" onClick={() => setOpen(true)} aria-label={t('pages.aiAssistant.imageOpen')}>
             <img src={source} alt={t('pages.aiAssistant.visualEvidenceAlt')} loading="lazy" className="max-h-56 w-full object-contain" />
         </Button> : durable && !requested ? <Button type="button" variant="ghost" className="w-full" onClick={() => setRequested(true)}>{t('pages.aiAssistant.imageOpen')}</Button> : <div className="flex h-24 items-center justify-center px-3 text-center text-xs text-muted-foreground">

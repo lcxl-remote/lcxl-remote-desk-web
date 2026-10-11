@@ -2,6 +2,10 @@ import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Paperclip } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { Checkbox } from '@/components/ui/checkbox';
+import { SelectField } from '@/components/ui/select-field';
+import { SelectItem } from '@/components/ui/select';
+import { useConfirm } from '@/components/confirm-dialog';
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
 import { Textarea } from '@/components/ui/textarea';
 import { deleteAssistantAttachments, getAssistantAttachment, listAssistantAttachments, readAssistantAttachment } from '@/services/clients';
@@ -34,6 +38,7 @@ export function AssistantAttachments({ sessionId, attachmentIds, open, onOpenCha
 
 function AttachmentPanel({ sessionId, attachmentIds }: { sessionId: string; attachmentIds?: string[] }) {
     const { t } = useTranslation();
+    const { confirm, dialog } = useConfirm();
     const label = (key: string) => t(`pages.aiAssistant.attachments.${key}`);
     const [list, setList] = useState<AttachmentListDto | null>(null);
     const [kind, setKind] = useState('all');
@@ -136,10 +141,11 @@ function AttachmentPanel({ sessionId, attachmentIds }: { sessionId: string; atta
         finally { if (!signal.aborted) setBusy(false); }
     };
     const remove = async (ids: string[]) => {
-        if (!ids.length || !window.confirm(label('deleteConfirm'))) return;
+        if (!ids.length || busy) return;
         setBusy(true); setFailed(false);
         const signal = lifetime.current.signal;
         try {
+            if (!await confirm({ title: label('deleteConfirm') }) || signal.aborted) return;
             const response = await deleteAssistantAttachments({ session: sessionId, attachment_ids: ids }, { signal });
             if (signal.aborted) return;
             if (!response.success || !response.data) throw new Error('Delete failed');
@@ -155,14 +161,15 @@ function AttachmentPanel({ sessionId, attachmentIds }: { sessionId: string; atta
     }
     const visible = list?.attachments.filter(item => (!attachmentIds || attachmentIds.includes(item.attachment_id)) && (kind === 'all' || item.kind === kind) && (status === 'all' || item.status === status)) ?? [];
     return <div className="flex min-h-0 flex-col gap-3 overflow-y-auto assistant-scrollbar">
+        {dialog}
         {list && <p className="text-sm text-muted-foreground">{t('pages.aiAssistant.attachments.usage', { used: (list.used_bytes / 1048576).toFixed(2), capacity: list.capacity_bytes / 1048576 })}</p>}
         <div className="flex flex-wrap items-center gap-2">
-            <select aria-label={label('type')} className="rounded border bg-background p-2 text-sm" value={kind} onChange={event => setKind(event.target.value)}>
-                {['all', 'image', 'text', 'json'].map(value => <option key={value} value={value}>{label(value)}</option>)}
-            </select>
-            <select aria-label={label('status')} className="rounded border bg-background p-2 text-sm" value={status} onChange={event => setStatus(event.target.value)}>
-                {['all', 'available', 'deleted', 'evicted'].map(value => <option key={value} value={value}>{label(value)}</option>)}
-            </select>
+            <SelectField aria-label={label('type')} className="w-40" value={kind} onValueChange={setKind}>
+                {['all', 'image', 'text', 'json'].map(value => <SelectItem key={value} value={value}>{label(value)}</SelectItem>)}
+            </SelectField>
+            <SelectField aria-label={label('status')} className="w-40" value={status} onValueChange={setStatus}>
+                {['all', 'available', 'deleted', 'evicted'].map(value => <SelectItem key={value} value={value}>{label(value)}</SelectItem>)}
+            </SelectField>
             <Button variant="outline" size="sm" disabled={busy} onClick={() => { setSelected(new Set()); setFailed(false); void load(); }}>{label('refresh')}</Button>
             <Button variant="outline" size="sm" disabled={busy || !selected.size} onClick={() => void remove([...selected])}>{label('deleteSelected')} ({selected.size}/32)</Button>
         </div>
@@ -171,8 +178,8 @@ function AttachmentPanel({ sessionId, attachmentIds }: { sessionId: string; atta
         {list && !visible.length && <p className="text-sm text-muted-foreground">{label('empty')}</p>}
         <ul className="space-y-2">
             {visible.map(item => <li key={item.attachment_id} className="flex flex-wrap items-center gap-2 rounded border p-2 text-sm">
-                <input type="checkbox" aria-label={`${label('select')} ${item.attachment_id}`} checked={selected.has(item.attachment_id)} disabled={busy || item.status !== 'available' || (!selected.has(item.attachment_id) && selected.size >= 32)} onChange={event => setSelected(previous => {
-                    const next = new Set(previous); if (event.target.checked) next.add(item.attachment_id); else next.delete(item.attachment_id); return next;
+                <Checkbox aria-label={`${label('select')} ${item.attachment_id}`} checked={selected.has(item.attachment_id)} disabled={busy || item.status !== 'available' || (!selected.has(item.attachment_id) && selected.size >= 32)} onCheckedChange={checked => setSelected(previous => {
+                    const next = new Set(previous); if (checked === true) next.add(item.attachment_id); else next.delete(item.attachment_id); return next;
                 })} />
                 <div className="min-w-0 flex-1 break-all">
                     <p>{label(item.kind)} · {item.part} · {label(item.status)} · {item.stored_bytes.toLocaleString()} B</p>

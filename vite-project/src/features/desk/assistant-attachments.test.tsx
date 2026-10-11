@@ -1,5 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { selectOption } from '@/test-utils/select-option';
 import { AssistantAttachments, AssistantResultAttachments } from './assistant-attachments';
 import { deleteAssistantAttachments, getAssistantAttachment, listAssistantAttachments, readAssistantAttachment } from '@/services/clients';
 
@@ -26,14 +27,13 @@ beforeEach(() => {
         has_more: false, json_fragment: false, storage_truncated: false,
         lines: [{ line: 1, byte_offset_in_line: 0, text: '<script>bad()</script>', matched_queries: [], context: false, line_complete: true }],
     } });
-    vi.stubGlobal('confirm', vi.fn(() => true));
     URL.createObjectURL = vi.fn(() => 'blob:attachment');
     URL.revokeObjectURL = vi.fn();
 });
 afterEach(() => { cleanup(); vi.resetAllMocks(); vi.unstubAllGlobals(); });
 async function open() {
     fireEvent.click(screen.getByRole('button', { name: key('title') }));
-    await screen.findByRole('button', { name: key('view') });
+    await screen.findAllByRole('button', { name: key('view') });
 }
 
 it('lists metadata only, including refresh and filters, until an explicit view', async () => {
@@ -41,7 +41,7 @@ it('lists metadata only, including refresh and filters, until an explicit view',
     expect(listAssistantAttachments).not.toHaveBeenCalled();
     await open();
     fireEvent.click(screen.getByRole('button', { name: key('refresh') }));
-    fireEvent.change(screen.getByRole('combobox', { name: key('type') }), { target: { value: 'text' } });
+    await selectOption(screen.getByRole('combobox', { name: key('type') }), key('text'));
     expect(getAssistantAttachment).not.toHaveBeenCalled();
     expect(readAssistantAttachment).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: key('view') }));
@@ -71,6 +71,12 @@ it('confirms deletion, refreshes quota and retains the tombstone without a new c
     vi.mocked(listAssistantAttachments).mockResolvedValue(listing('deleted'));
     fireEvent.click(screen.getByRole('checkbox'));
     fireEvent.click(screen.getByRole('button', { name: /deleteSelected/ }));
+    expect(deleteAssistantAttachments).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'common.cancel' }));
+    expect(deleteAssistantAttachments).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.getByRole('button', { name: /deleteSelected/ })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: /deleteSelected/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'common.confirm' }));
     await waitFor(() => expect(deleteAssistantAttachments).toHaveBeenCalledWith({ session: 'run', attachment_ids: [item.attachment_id] }, expect.anything()));
     await waitFor(() => expect((screen.getByRole('button', { name: key('view') }) as HTMLButtonElement).disabled).toBe(true));
     expect(readAssistantAttachment).not.toHaveBeenCalled();
@@ -88,6 +94,24 @@ it('aborts old conversation requests and ignores a late metadata response', asyn
     expect(oldSignal?.aborted).toBe(true);
     finish({ ...listing(), data: { ...listing().data, attachments: [{ ...item, attachment_id: 'old-only' }] } });
     await waitFor(() => expect(screen.queryByLabelText(`${key('select')} old-only`)).toBeNull());
+});
+
+it('filters type and availability with the themed menus and disables unavailable selection', async () => {
+    vi.mocked(listAssistantAttachments).mockResolvedValue({ ...listing(), data: {
+        ...listing().data, attachments: [item, { ...item, attachment_id: 'deleted-image', kind: 'image', status: 'deleted', part: 'old-image' }],
+    } });
+    render(<AssistantAttachments sessionId="run" />);
+    await open();
+    await selectOption(screen.getByRole('combobox', { name: key('type') }), key('image'));
+    expect(screen.getByText(/old-image/)).toBeVisible();
+    expect(screen.getByRole('checkbox')).toBeDisabled();
+    expect(screen.queryByLabelText(`${key('select')} ${item.attachment_id}`)).toBeNull();
+    await selectOption(screen.getByRole('combobox', { name: key('status') }), key('available'));
+    expect(screen.queryByRole('checkbox')).toBeNull();
+    expect(screen.getByText(key('empty'))).toBeVisible();
+    await selectOption(screen.getByRole('combobox', { name: key('type') }), key('all'));
+    expect(screen.getByRole('checkbox')).toBeEnabled();
+    expect(getAssistantAttachment).not.toHaveBeenCalled();
 });
 
 it('opens only references from the result without fetching bodies automatically', async () => {

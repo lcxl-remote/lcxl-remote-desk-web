@@ -343,7 +343,7 @@ export function DeskControlBar({
                             </Tooltip>
                             <DropdownMenuContent
                                 align="end"
-                                className="w-64 border-white/10 bg-background/90 backdrop-blur-md"
+                                className="w-64 border-border bg-popover/95 backdrop-blur-md"
                             >
                                 {operationSystem === "Linux" && (
                                     <>
@@ -365,7 +365,7 @@ export function DeskControlBar({
                                 ))}
                                 {macKeyboardMappingController && (
                                     <DropdownMenuItem
-                                        className="mt-1 border-t border-white/10 pt-2"
+                                        className="mt-1 border-t border-border pt-2"
                                         onClick={() => setIsKeyboardMappingOpen(true)}
                                     >
                                         <Info className="mr-2 h-4 w-4" />
@@ -436,7 +436,7 @@ export function DeskControlBar({
                         </Tooltip>
                         <PopoverContent
                             align="center"
-                            className="flex w-32 flex-col items-center gap-2 border-white/10 bg-background/90 px-3 py-4 backdrop-blur-md"
+                            className="flex w-32 flex-col items-center gap-2 border-border bg-popover/95 px-3 py-4 backdrop-blur-md"
                             onOpenAutoFocus={(event) => event.preventDefault()}
                             side="top"
                             sideOffset={16}

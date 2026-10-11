@@ -9,13 +9,13 @@ import { ExecPtyTerminal } from './exec-pty-terminal'
 function riskClass(risk: string): string {
     switch (risk) {
         case "low":
-            return "border-green-500/40 bg-green-500/20 text-green-300"
+            return "border-green-500/40 bg-green-500/20 text-green-700 dark:text-green-300"
         case "medium":
-            return "border-yellow-500/40 bg-yellow-500/20 text-yellow-300"
+            return "border-yellow-500/40 bg-yellow-500/20 text-yellow-800 dark:text-yellow-300"
         case "high":
-            return "border-orange-500/40 bg-orange-500/20 text-orange-300"
+            return "border-orange-500/40 bg-orange-500/20 text-orange-700 dark:text-orange-300"
         default:
-            return "border-red-500/40 bg-red-500/20 text-red-300"
+            return "border-red-500/40 bg-red-500/20 text-red-700 dark:text-red-300"
     }
 }
 
@@ -54,7 +54,7 @@ export function ExecLifecycle({
 
     if (entry.phase === "previewing") {
         return (
-            <div className="mt-2 flex items-center gap-2 text-xs text-blue-300">
+            <div className="mt-2 flex items-center gap-2 text-xs text-primary">
                 <Loader2 className="h-3 w-3 animate-spin" />
                 {t("pages.exec.classifying")}
             </div>
@@ -66,7 +66,7 @@ export function ExecLifecycle({
         return (
             <div className="mt-2 flex flex-col gap-1.5 rounded-md border border-amber-500/40 bg-amber-500/10 p-2">
                 <div className="flex items-center justify-between gap-2">
-                    <span className="text-xs font-semibold text-amber-200">
+                    <span className="text-xs font-semibold text-amber-800 dark:text-amber-200">
                         {t("pages.exec.confirmTitle")}
                     </span>
                     <Badge
@@ -76,23 +76,23 @@ export function ExecLifecycle({
                         {t(`pages.exec.risk.${p.risk}`, p.risk)}
                     </Badge>
                 </div>
-                <div className="flex items-center gap-1 text-[10px] uppercase text-white/50">
+                <div className="flex items-center gap-1 text-[10px] uppercase text-muted-foreground">
                     <TerminalIcon className="h-3 w-3" />
                     {p.shell}
                 </div>
-                <pre className="overflow-x-auto whitespace-pre-wrap break-all rounded bg-black/40 p-1.5 font-mono text-xs text-green-300">
+                <pre className="overflow-x-auto whitespace-pre-wrap break-all rounded bg-muted p-1.5 font-mono text-xs text-green-700 dark:text-green-300">
                     {p.command}
                 </pre>
                 {p.execution_basis === "owner_blocklist_only" && (
-                    <div className="rounded border border-red-500/50 bg-red-950/40 p-1.5 text-[11px] font-medium text-red-200">
+                    <div className="rounded border border-red-500/50 bg-destructive/10 p-1.5 text-[11px] font-medium text-red-700 dark:text-red-300">
                         {t("pages.exec.freeformWarning")}
                     </div>
                 )}
-                <div className="text-[10px] text-white/50">
+                <div className="text-[10px] text-muted-foreground">
                     {t("pages.exec.timeout")}: {Math.round(p.timeout_ms / 1000)}s
                 </div>
                 {p.io_mode.type === 'pty' && (
-                    <div className="rounded border border-blue-500/40 bg-blue-500/10 p-1.5 text-[11px] text-blue-200">
+                    <div className="rounded border border-blue-500/40 bg-blue-500/10 p-1.5 text-[11px] text-blue-700 dark:text-blue-200">
                         {t('pages.exec.ptyNotice')}
                     </div>
                 )}
@@ -100,7 +100,8 @@ export function ExecLifecycle({
                     <Button
                         type="button"
                         size="sm"
-                        className="h-7 flex-1 bg-red-600 text-xs hover:bg-red-700"
+                        variant="destructive"
+                        className="h-7 flex-1 text-xs"
                         onClick={onApprove}
                         disabled={approvalDisabled}
                     >
@@ -124,7 +125,7 @@ export function ExecLifecycle({
 
     if (entry.phase === 'preparing_carrier') {
         return (
-            <div className="mt-2 flex items-center gap-2 text-xs text-blue-300">
+            <div className="mt-2 flex items-center gap-2 text-xs text-primary">
                 <Loader2 className="h-3 w-3 animate-spin" />
                 {t('pages.exec.preparingCarrier')}
             </div>
@@ -137,7 +138,7 @@ export function ExecLifecycle({
     if (entry.phase === "dispatching") {
         return (
             <>
-                <div className="mt-2 flex items-center gap-2 text-xs text-blue-300">
+                <div className="mt-2 flex items-center gap-2 text-xs text-primary">
                     <Loader2 className="h-3 w-3 animate-spin" />
                     {t("pages.exec.dispatching")}
                 </div>
@@ -149,7 +150,7 @@ export function ExecLifecycle({
     if (entry.phase === "running") {
         return (
             <>
-                <div className="mt-2 flex items-center gap-2 text-xs text-blue-300">
+                <div className="mt-2 flex items-center gap-2 text-xs text-primary">
                     <Loader2 className="h-3 w-3 animate-spin" />
                     <span>
                         {t("pages.exec.running")}
@@ -157,7 +158,7 @@ export function ExecLifecycle({
                             ` (${Math.round(entry.runningMs / 1000)}s)`}
                     </span>
                     {entry.cancelRequested ? (
-                        <span className="text-white/50">{t("pages.exec.cancelRequested")}</span>
+                        <span className="text-muted-foreground">{t("pages.exec.cancelRequested")}</span>
                     ) : (
                         onCancel && (
                             <Button
@@ -183,34 +184,34 @@ export function ExecLifecycle({
         const split = o.streams.type === 'split' ? o.streams : null
         const terminal = o.streams.type === 'pty_combined' ? o.streams : null
         return (
-            <div className="mt-2 flex flex-col gap-1 rounded-md border border-white/10 bg-black/40 p-2">
+            <div className="mt-2 flex flex-col gap-1 rounded-md border border-border bg-muted/50 p-2">
                 <div className="flex items-center justify-between">
                     <Badge
                         variant="outline"
                         className={
                             ok
-                                ? "bg-green-500/20 text-green-300 border-green-500/40"
-                                : "bg-red-500/20 text-red-300 border-red-500/40"
+                                ? "bg-green-500/20 text-green-700 dark:text-green-300 border-green-500/40"
+                                : "bg-red-500/20 text-red-700 dark:text-red-300 border-red-500/40"
                         }
                     >
                         {t("pages.exec.exit")} {o.exit_code}
                     </Badge>
-                    <span className="text-[10px] text-white/40">{o.duration_ms}ms</span>
+                    <span className="text-[10px] text-muted-foreground">{o.duration_ms}ms</span>
                 </div>
                 {split?.stdout && (
-                    <pre className="max-h-32 overflow-auto whitespace-pre-wrap break-all font-mono text-[10px] text-white/80">
+                    <pre className="max-h-32 overflow-auto whitespace-pre-wrap break-all font-mono text-[10px] text-foreground">
                         {split.stdout}
                         {split.stdout_truncated && " …"}
                     </pre>
                 )}
                 {split?.stderr && (
-                    <pre className="max-h-24 overflow-auto whitespace-pre-wrap break-all font-mono text-[10px] text-red-300/80">
+                    <pre className="max-h-24 overflow-auto whitespace-pre-wrap break-all font-mono text-[10px] text-red-700 dark:text-red-300">
                         {split.stderr}
                         {split.stderr_truncated && " …"}
                     </pre>
                 )}
                 {terminal?.terminal && (
-                    <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all font-mono text-[10px] text-white/80">
+                    <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all font-mono text-[10px] text-foreground">
                         {terminal.terminal}
                         {terminal.truncated && " …"}
                     </pre>
@@ -230,7 +231,7 @@ export function ExecLifecycle({
     // error (blocked / off-template / mode-disabled / execution failure)
     return (
         <div className="mt-2 flex flex-col gap-1 rounded-md border border-red-500/30 bg-red-500/10 p-2">
-            <div className="flex items-start gap-1 text-xs text-red-300">
+            <div className="flex items-start gap-1 text-xs text-red-700 dark:text-red-300">
                 <Ban className="mt-0.5 h-3 w-3 shrink-0" />
                 <span>{entry.error ?? t("pages.exec.notExecutable")}</span>
             </div>

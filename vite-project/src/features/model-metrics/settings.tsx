@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import type { MetricsSettings } from '@/services/types';
 import { Button } from '@/components/ui/button';
+import { Checkbox } from '@/components/ui/checkbox';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -24,7 +25,7 @@ function MetricsSettingsForm({ settings, save, reload }: { settings: MetricsSett
         event.preventDefault(); setPending(true); setFailed(null);
         try { setDraft(await save(draft)); } catch (error) { setFailed(isMetricsRevisionConflict(error) ? 'conflict' : 'failed'); } finally { setPending(false); }
     }}>
-        <Label className="flex gap-2"><input type="checkbox" disabled={pending} checked={draft.enabled} onChange={(event) => setDraft({ ...draft, enabled: event.target.checked })}/>{t('modelMetrics.enabled')}</Label>
+        <Label className="flex items-center gap-2"><Checkbox aria-label={t('modelMetrics.enabled')} disabled={pending} checked={draft.enabled} onCheckedChange={(checked) => setDraft({ ...draft, enabled: checked === true })}/>{t('modelMetrics.enabled')}</Label>
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {Object.entries(fields).map(([field, [min, max]]) => <Label key={field} className="space-y-2">{t(`modelMetrics.setting.${field}`)}<Input type="number" aria-label={t(`modelMetrics.setting.${field}`)} min={min} max={max} step="1" required disabled={pending} value={draft[field as keyof typeof fields]} onChange={(event) => setDraft({ ...draft, [field]: Number(event.target.value) })}/></Label>)}
             <Label className="space-y-2">{t('modelMetrics.setting.storage_budget_bytes')}<Input aria-label={t('modelMetrics.setting.storage_budget_bytes')} inputMode="numeric" pattern="[1-9][0-9]*" required disabled={pending} value={draft.storage_budget_bytes} onChange={(event) => setDraft({ ...draft, storage_budget_bytes: event.target.value })}/></Label>

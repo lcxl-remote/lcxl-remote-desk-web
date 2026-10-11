@@ -26,6 +26,22 @@ function input(): ObservationRecord {
 }
 
 describe('observed correction group details', () => {
+    it('lets a reader toggle details and synchronizes expansion when the selected record changes', () => {
+        const record = input();
+        const view = render(<ObservationDetails record={record} expanded={false} select={vi.fn()}/>);
+        const trigger = screen.getByRole('button', { name: /Tool · request_permissions/ });
+        expect(trigger).toHaveAttribute('aria-expanded', 'false');
+        fireEvent.click(trigger);
+        expect(trigger).toHaveAttribute('aria-expanded', 'true');
+        view.rerender(<ObservationDetails record={record} expanded={false} select={vi.fn()}/>);
+        expect(trigger).toHaveAttribute('aria-expanded', 'true');
+        fireEvent.click(trigger);
+        view.rerender(<ObservationDetails record={record} expanded select={vi.fn()}/>);
+        expect(trigger).toHaveAttribute('aria-expanded', 'true');
+        view.rerender(<ObservationDetails record={record} expanded={false} select={vi.fn()}/>);
+        expect(trigger).toHaveAttribute('aria-expanded', 'false');
+    });
+
     it('keeps long internal correlation identities out of display while retaining the correct detail link', () => {
         const record = { ...input(), call_id: 'a'.repeat(64), correction_group: null };
         const select = vi.fn();

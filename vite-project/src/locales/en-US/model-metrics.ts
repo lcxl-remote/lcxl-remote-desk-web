@@ -557,6 +557,8 @@ export default {
     "modelMetrics.dropped": "Known unsaved records",
     "modelMetrics.coverageHint": "Statistics may be incomplete in exceptional situations. Use them as a reference.",
     "modelMetrics.filters": "Filters",
+    "modelMetrics.activeFilters": "Active filters",
+    "modelMetrics.removeFilter": "Remove filter: {{filter}}",
     "modelMetrics.granularity": "Granularity",
     "modelMetrics.hour": "Hour",
     "modelMetrics.fiveMinutes": "Five minutes",
