@@ -283,6 +283,14 @@ impl ProviderRegistry {
         mut self,
         binding: Option<crate::web_research::SearchBinding>,
     ) -> Self {
+        for provider in self.providers.values_mut() {
+            for capability in &mut provider.capabilities {
+                if capability.tool_spec.name == crate::web_research::WEB_SEARCH_TOOL_NAME {
+                    capability.tool_spec.description =
+                        crate::web_research::search_tool_description(binding.as_ref());
+                }
+            }
+        }
         self.web_search_binding = binding;
         self
     }

@@ -538,12 +538,19 @@ pub fn project_permission_authority(
                         {
                             return Err(ApprovalReviewError::InvalidContext);
                         }
-                        let status = if grant.revoked_at_unix_ms.is_some() {
+                        // Exhaustion and expiry are terminal authority facts. Later
+                        // expiry or revocation must not relabel a completed grant.
+                        let status = if grant.remaining_uses == 0 {
+                            ApprovalAuthorityStatus::Exhausted
+                        } else if grant
+                            .revoked_at_unix_ms
+                            .is_some_and(|revoked_at| revoked_at < grant.expires_at_unix_ms)
+                        {
                             ApprovalAuthorityStatus::Withdrawn
                         } else if grant.expires_at_unix_ms <= now_unix_ms {
                             ApprovalAuthorityStatus::Expired
-                        } else if grant.remaining_uses == 0 {
-                            ApprovalAuthorityStatus::Exhausted
+                        } else if grant.revoked_at_unix_ms.is_some() {
+                            ApprovalAuthorityStatus::Withdrawn
                         } else if grant.readiness_revision != current_readiness_revision {
                             ApprovalAuthorityStatus::NeedsRevalidation
                         } else {
@@ -3126,6 +3133,74 @@ mod tests {
             ),
             Err(ApprovalReviewError::InvalidContext)
         );
+    }
+
+    #[test]
+    fn terminal_permission_authority_stays_stable_after_time_and_readiness_changes() {
+        let mut request = permission_request();
+        let decisions = request
+            .items
+            .iter()
+            .enumerate()
+            .map(|(index, item)| PermissionDecisionItem {
+                item_id: item.item_id.clone(),
+                decision: if index == 0 {
+                    PermissionItemDecision::Approve {
+                        resource_scope: item.resource_scope.clone(),
+                        operation_scope: item.operation_scope.clone(),
+                        export_destinations: vec![],
+                        ttl_seconds: 300,
+                        max_uses: 1,
+                    }
+                } else {
+                    PermissionItemDecision::Deny
+                },
+            })
+            .collect::<Vec<_>>();
+        request.apply_user_decision(&decisions).unwrap();
+        let decision = decided(&request, decisions);
+        let project = |grant: &CapabilityGrant, now, readiness| {
+            project_permission_authority(
+                "conversation",
+                "owner",
+                "device",
+                &request,
+                Some(&decision),
+                std::slice::from_ref(grant),
+                now,
+                readiness,
+            )
+            .unwrap()
+        };
+        let mut grant = grant_for(&request, &request.items[0]);
+        assert_eq!(
+            project(&grant, 999, 1)[0].status,
+            ApprovalAuthorityStatus::ActiveGrant
+        );
+        grant.remaining_uses = 0;
+        let exhausted = project(&grant, 10, 1);
+        assert_eq!(exhausted[0].status, ApprovalAuthorityStatus::Exhausted);
+        assert!(exhausted[0].active_grant_ids.is_empty());
+        for now in [999, 1_000, 1_001, 2_000] {
+            assert_eq!(project(&grant, now, 2), exhausted);
+        }
+        grant.revoked_at_unix_ms = Some(1_001);
+        grant.revoked_reason = Some("Owner revoked the completed grant".into());
+        assert_eq!(project(&grant, 2_000, 2), exhausted);
+
+        let mut grant = grant_for(&request, &request.items[0]);
+        let expired = project(&grant, 1_000, 1);
+        assert_eq!(expired[0].status, ApprovalAuthorityStatus::Expired);
+        assert!(expired[0].active_grant_ids.is_empty());
+        assert_eq!(project(&grant, 2_000, 2), expired);
+        grant.revoked_at_unix_ms = Some(1_001);
+        grant.revoked_reason = Some("Owner revoked the expired grant".into());
+        assert_eq!(project(&grant, 2_000, 2), expired);
+
+        grant.revoked_at_unix_ms = Some(500);
+        let withdrawn = project(&grant, 999, 1);
+        assert_eq!(withdrawn[0].status, ApprovalAuthorityStatus::Withdrawn);
+        assert_eq!(project(&grant, 2_000, 2), withdrawn);
     }
 
     #[test]

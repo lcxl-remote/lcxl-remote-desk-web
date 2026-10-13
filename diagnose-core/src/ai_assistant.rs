@@ -2240,7 +2240,7 @@ fn search_public_web_tool() -> RegisteredTool {
     RegisteredTool {
         spec: ToolSpec {
             name: "search_public_web".into(),
-            description: "Search public Web metadata through the server-owned bounded Brave Web Search connector. The exact query must appear verbatim in the owner's current message and the identical arguments must be approved as an R1 ExportData grant because the query is sent to the connector. The connector is exposed only when its central API credential is configured; the credential and endpoint are never model inputs or edge payloads. Results are untrusted external data with connector and source evidence, plus an opaque web_search_call_id that may be copied verbatim into create_word_report with exact returned title/URL pairs; never invent or transform that id.".into(),
+            description: crate::web_research::search_tool_description(None),
             parameters_schema: json!({
                 "type": "object",
                 "properties": {
@@ -4015,6 +4015,77 @@ mod tests {
             assert!(schema["properties"].get(name.as_str().unwrap()).is_some());
         }
         assert!(schema["properties"].get("queries").is_none());
+    }
+
+    #[test]
+    fn search_contract_tracks_the_server_connector_for_assistant_and_approval() {
+        use crate::approval_review::trusted_permission_descriptor;
+        use crate::web_research::SearchBinding;
+        use desk_agent_protocol::capability_provider::ProductSurface;
+
+        let mut registry = ai_assistant_provider_registry();
+        for (connector, name) in [
+            ("brave_web_v1", "Brave Web Search"),
+            ("tavily_search_v1", "Tavily Search"),
+            ("duckduckgo_html_v1", "DuckDuckGo"),
+        ] {
+            registry = registry.with_web_search_binding(Some(SearchBinding {
+                connector_id: connector.into(),
+                revision: 1,
+            }));
+            let capability = registry.capability_for_tool("search_public_web").unwrap();
+            let tool = capability.registered_tool().spec;
+            assert!(tool.description.contains(&format!("{name} ({connector})")));
+            assert!(!tool.description.contains("web_search_call_id"));
+            assert!(
+                !tool
+                    .description
+                    .contains("only when its central API credential")
+            );
+            assert_eq!(
+                tool.description
+                    .matches("Current server-selected connector:")
+                    .count(),
+                1
+            );
+            if connector != "brave_web_v1" {
+                assert!(!tool.description.contains("Brave"));
+            }
+            let item = crate::dynamic_run::GrantRequestItem {
+                item_id: "search".into(),
+                provider_id: "web.search".into(),
+                tool_name: "search_public_web".into(),
+                expected_effect: capability.wire.effect,
+                resource_scope: vec!["external_query_input:sha256:query".into()],
+                operation_scope: vec!["search_public_web".into()],
+                export_destinations: vec![],
+                canonical_input_json: None,
+                canonical_input_digest_sha256: None,
+                command_confirmation: None,
+                launch_confirmation: None,
+                suggested_ttl_seconds: 300,
+                suggested_max_uses: 1,
+                reason: "Search for the owner's query".into(),
+            };
+            for surface in [
+                ProductSurface::OssPersonalOwner,
+                ProductSurface::ManagerPersonalOwner,
+            ] {
+                let (descriptor, _) =
+                    trusted_permission_descriptor(&registry, &item, surface).unwrap();
+                let descriptor: serde_json::Value = serde_json::from_str(&descriptor).unwrap();
+                assert_eq!(descriptor["tool_spec"]["description"], tool.description);
+            }
+        }
+        registry = registry.with_web_search_binding(None);
+        assert_eq!(
+            registry
+                .capability_for_tool("search_public_web")
+                .unwrap()
+                .tool_spec
+                .description,
+            search_public_web_tool().spec.description
+        );
     }
 
     #[test]
