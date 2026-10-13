@@ -822,6 +822,7 @@ async fn approve_with_independent_model(
         "1",
         "device",
         request_id,
+        false,
         registry,
         ProductSurface::OssPersonalOwner,
         1,

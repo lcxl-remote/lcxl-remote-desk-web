@@ -54,7 +54,7 @@ pub fn scope_prompt(session: &crate::session::PersistedAgentSession, now_unix_ms
 pub fn registry() -> Vec<RegisteredTool> {
     vec![RegisteredTool {
         spec: ToolSpec { name: REQUEST_DIRECTORY.into(),
-            description: "Request the owner's consent for one existing absolute directory on the controlled device in this conversation. Supply the path and purpose. Resolves directory identity only, without listing or reading contents. In interactive conversations, this call waits for the owner to approve or reject the canonical path in Conversation directories, then returns the decision. Continue the existing requirement after approval; do not ask for another directory confirmation. Directory consent does not grant file read, write or export permissions; request those separately when required.".into(),
+            description: "Request consent for one existing absolute directory on the controlled device in this conversation. Supply the path and purpose. Resolves directory identity only, without listing or reading contents. In interactive conversations, this call waits for AI approval when the owner enabled it, otherwise for the owner to approve or reject the canonical path in Conversation directories, then returns the decision. Continue the existing requirement after approval; do not ask for another directory confirmation. Directory consent does not grant file read, write or export permissions; request those separately when required.".into(),
             parameters_schema: json!({"type":"object","properties":{"path":{"type":"string","minLength":1,"maxLength":4096},"purpose":{"type":"string","minLength":1,"maxLength":2048}},"required":["path","purpose"],"additionalProperties":false}) },
         required_capability: Capability::SystemInfo,
         effect: ToolEffect::DirectoryPlanning,
@@ -168,6 +168,34 @@ pub fn decision_result(request_id: &str, approved: bool) -> serde_json::Value {
         "The owner approved this conversation directory. Continue the existing user requirement using CURRENT CONVERSATION DIRECTORIES. This grants no file read, write or export permission; request the required tool permission if missing. Do not request the same directory confirmation again."
     } else {
         "The owner rejected or removed this directory. Do not access it or request the same directory again unless the user asks. Explain the blocker or continue with an already approved alternative."
+    }})
+}
+
+pub fn reviewed_decision_result(
+    session: &crate::session::PersistedAgentSession,
+    request_id: &str,
+    approved: bool,
+) -> serde_json::Value {
+    let Some(decision) = session
+        .file_scope
+        .records()
+        .iter()
+        .find(|record| record.proposal.request_id == request_id)
+        .and_then(|record| record.decision.as_ref())
+    else {
+        return decision_result(request_id, approved);
+    };
+    let authority = match decision.source {
+        crate::dynamic_run::PermissionDecisionSource::UserDecision => "owner",
+        crate::dynamic_run::PermissionDecisionSource::AiApproval { .. } => "ai_approval",
+        crate::dynamic_run::PermissionDecisionSource::ReviewUnavailable { .. } => "system",
+    };
+    json!({"directory_request_id":request_id,"state":if approved {"approved"} else {"rejected"},
+    "authority":authority,"reason":decision.reason,"file_operation_authorized":false,
+    "message":if approved {
+        "Directory identity approved. Continue the current task using CURRENT CONVERSATION DIRECTORIES; file operations and export still require their own permissions."
+    } else {
+        "Directory not authorized. Do not retry the same directory under a new request ID in this input. Explain the reason or use an already approved alternative; the owner may explicitly select it later."
     }})
 }
 

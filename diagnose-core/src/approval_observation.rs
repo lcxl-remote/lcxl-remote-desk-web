@@ -184,6 +184,9 @@ impl ReviewTracking {
     pub fn new(authority: &crate::subagent::reservation::ReviewCallAuthority, now: i64) -> Self {
         let source_kind = match authority.source {
             crate::approval_review::ApprovalSource::PermissionItem { .. } => "permission_item",
+            crate::approval_review::ApprovalSource::DirectoryProposal { .. } => {
+                "directory_proposal"
+            }
             crate::approval_review::ApprovalSource::ConcreteCall { .. } => "concrete_call",
             crate::approval_review::ApprovalSource::OssCommand { .. } => "oss_command",
             crate::approval_review::ApprovalSource::ManagerCommand { .. } => "manager_command",

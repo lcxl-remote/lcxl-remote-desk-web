@@ -554,7 +554,9 @@ impl SignalCapabilityGrantStore {
             is_side_effecting: Set(request.call.effect.is_side_effecting()),
             payload_json: Set(serde_json::to_string(&payload).map_err(json_error)?),
             payload_schema_version: Set(1),
-            completion_event_id: Set(stable_id("capability-completion", request.call_id)),
+            completion_event_id: Set(desk_diagnose_core::native_ids::capability_completion(
+                request.call_id,
+            )),
             completion_delivery_state: Set("pending".into()),
             created_at: Set(now),
             updated_at: Set(now),

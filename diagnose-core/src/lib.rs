@@ -59,6 +59,7 @@ pub mod conversation_attachment;
 pub mod conversation_history;
 pub mod conversation_key;
 pub mod data_policy;
+pub mod directory_review;
 pub mod directory_tools;
 mod document_model_ids;
 pub mod durable_action;

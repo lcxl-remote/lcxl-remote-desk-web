@@ -216,6 +216,7 @@ async fn model_proposal_advances_only_its_held_version_and_never_approves() {
     store.update_file_scope(&update(), now()).await.unwrap();
     let mut held = state(&store).await;
     held.turn_state = desk_diagnose_core::session::TurnState::Running;
+    let request_id = directory_call(&mut held, "model-request");
     agent_session::Entity::update_many()
         .col_expr(
             agent_session::Column::StateJson,
@@ -227,7 +228,7 @@ async fn model_proposal_advances_only_its_held_version_and_never_approves() {
     let FileScopeMutation::Select { mut proposal } = update().mutation else {
         panic!()
     };
-    proposal.request_id = "model-request".into();
+    proposal.request_id = request_id.clone();
     proposal.source = DirectoryConsentSource::ModelProposal;
     let stale = held.clone();
     store
@@ -345,6 +346,7 @@ async fn directory_review_observes_owner_decision_once_and_rejects_changed_turn(
         store.update_file_scope(&update(), now).await.unwrap();
         let mut held = state(&store).await;
         held.turn_state = desk_diagnose_core::session::TurnState::Running;
+        let request_id = directory_call(&mut held, "waiting-directory");
         let deadline = now + chrono::Duration::minutes(5);
         agent_session::Entity::update_many()
             .col_expr(
@@ -361,7 +363,7 @@ async fn directory_review_observes_owner_decision_once_and_rejects_changed_turn(
         let FileScopeMutation::Select { mut proposal } = update().mutation else {
             panic!()
         };
-        proposal.request_id = "waiting-directory".into();
+        proposal.request_id = request_id.clone();
         proposal.source = DirectoryConsentSource::ModelProposal;
         store
             .propose_file_scope_for_turn(&mut held, proposal, now)
@@ -386,7 +388,7 @@ async fn directory_review_observes_owner_decision_once_and_rejects_changed_turn(
                 desk_diagnose_core::directory_tools::adopt_review_snapshot(
                     &mut held,
                     changed,
-                    "waiting-directory"
+                    &request_id
                 )
                 .is_err()
             );
@@ -395,7 +397,7 @@ async fn directory_review_observes_owner_decision_once_and_rejects_changed_turn(
 
         assert_eq!(
             store
-                .poll_file_scope_review(&mut held, "waiting-directory")
+                .poll_file_scope_review(&mut held, &request_id)
                 .await
                 .unwrap(),
             None
@@ -404,7 +406,7 @@ async fn directory_review_observes_owner_decision_once_and_rejects_changed_turn(
             client_request_id: "owner-decision".into(),
             expected_revision: held.file_scope.revision(),
             mutation: FileScopeMutation::Decide {
-                directory_request_id: "waiting-directory".into(),
+                directory_request_id: request_id.clone(),
                 approve,
             },
             ..update()
@@ -412,7 +414,7 @@ async fn directory_review_observes_owner_decision_once_and_rejects_changed_turn(
         store.update_file_scope(&decision, now).await.unwrap();
         assert_eq!(
             store
-                .poll_file_scope_review(&mut held, "waiting-directory")
+                .poll_file_scope_review(&mut held, &request_id)
                 .await
                 .unwrap(),
             Some(approve)
@@ -435,10 +437,32 @@ async fn directory_review_observes_owner_decision_once_and_rejects_changed_turn(
             .unwrap();
         assert!(
             store
-                .poll_file_scope_review(&mut held, "waiting-directory")
+                .poll_file_scope_review(&mut held, &request_id)
                 .await
                 .is_err()
         );
         assert_eq!(held, settled);
     }
+}
+
+fn directory_call(held: &mut PersistedAgentSession, call: &str) -> String {
+    held.current_turn_id = Some("directory-test-turn".into());
+    let mut message = desk_diagnose_core::chat::ChatMessage::assistant_tool_calls(
+        format!("directory-source-{call}"),
+        "",
+        vec![desk_diagnose_core::chat::ToolCallRef {
+            id: call.into(),
+            name: "request_directory".into(),
+            arguments_json: r#"{"path":"/private/tmp/test","purpose":"test"}"#.into(),
+        }],
+    );
+    message.turn_id = held.current_turn_id.clone();
+    held.conversation.push(message);
+    desk_diagnose_core::native_ids::stable(
+        desk_diagnose_core::native_ids::Kind::DirectoryRequest,
+        &(
+            "directory-proposal",
+            &(&held.conversation_id, held.input_revision, call),
+        ),
+    )
 }

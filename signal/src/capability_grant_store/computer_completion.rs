@@ -164,7 +164,8 @@ fn binding(
     )
     .map_err(|_| invalid())?;
     validate_binding(&value, outbox, work, payload)?;
-    if work.completion_event_id != stable_id("capability-completion", &payload.call_id)
+    if work.completion_event_id
+        != desk_diagnose_core::native_ids::capability_completion(&payload.call_id)
         || !matches!(
             work.completion_delivery_state.as_str(),
             "pending" | "consumed"

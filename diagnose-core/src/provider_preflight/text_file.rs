@@ -484,7 +484,7 @@ pub fn validate_mutation_permission_input(
     {
         return Err(error(
             AgentErrorKind::InvalidInput,
-            r#"A directory metadata result cannot authorize a text mutation. First request read_text_file with exact_input={"file_result_call_id":"<metadata call ID>","entry_name":"<exact file name>"}, then execute that read. For delete_text_file, use exact_input={"file_version_id":"<file_version_id from successful read/create/update result>"}; the server restores the complete file reference and SHA-256. update_text_file also requires change and the approved directory selector from its tool definition. If an existing successful read/create/update result already supplies the needed file and SHA-256, reuse it directly. No approval card was created; correct the source rather than asking the user to confirm again."#,
+            r#"A directory metadata result cannot authorize a text mutation. First request read_text_file with exact_input={"file_result_call_id":"<file_result_call_id from metadata result>","entry_name":"<exact file name>"}, then execute that read. For delete_text_file, use exact_input={"file_version_id":"<file_version_id from successful read/create/update result>"}; the server restores the complete file reference and SHA-256. update_text_file also requires change and the approved directory selector from its tool definition. If an existing successful read/create/update result already supplies the needed file and SHA-256, reuse it directly. No approval card was created; correct the source rather than asking the user to confirm again."#,
             false,
             true,
         ));
@@ -551,10 +551,16 @@ fn validate_read_selector(
         .flat_map(|m| &m.tool_calls)
         .filter(|c| c.id == id);
     let source = sources.next().ok_or_else(|| error(AgentErrorKind::InvalidInput,
-        "file_result_call_id is not a recorded tool call ID in this conversation. Copy the ID of a real creation/read/update or metadata result, not a snapshot ID. Do not infer expiry from this selector error.", false, true))?;
+        "file_result_call_id must be the result ID of a verified creation/read/update or metadata message in this conversation. Copy file_result_call_id from that result. Do not infer expiry from this selector error.", false, true))?;
     if sources.next().is_some() {
         return Err(unavailable());
     }
+    let result_id = session
+        .conversation
+        .iter()
+        .find(|message| message.tool_call_id.as_deref() == Some(id.as_str()))
+        .map(|message| message.message_id.as_str())
+        .ok_or_else(unavailable)?;
     let has_entry = args.get("entry_name").is_some_and(|v| !v.is_null());
     let metadata = source.name == "inspect_files";
     let direct_file = matches!(
@@ -566,18 +572,18 @@ fn validate_read_selector(
             | "convert_document"
     );
     if direct_file && has_entry {
-        let example = serde_json::json!({"file_result_call_id":id});
+        let example = serde_json::json!({"file_result_call_id":result_id});
         return Err(error(
             AgentErrorKind::InvalidInput,
             format!(
-                "Invalid entry_name: this call ID identifies a creation/read/update result for one file, not a directory listing. Remove entry_name. Required fields: [file_result_call_id]. Corrected tool arguments (also use as permission exact_input): {example}. This is a parameter mismatch, not evidence of expiry; do not refresh directory metadata. If the existing content and verified SHA-256 already suffice for the requested update, request update_text_file directly instead of this read."
+                "Invalid entry_name: this result ID identifies a creation/read/update result for one file, not a directory listing. Remove entry_name. Required fields: [file_result_call_id]. Corrected tool arguments (also use as permission exact_input): {example}. This is a parameter mismatch, not evidence of expiry; do not refresh directory metadata. If the existing content and verified SHA-256 already suffice for the requested update, request update_text_file directly instead of this read."
             ),
             false,
             true,
         ));
     }
     if metadata && !has_entry {
-        let example = serde_json::json!({"file_result_call_id":id,"entry_name":"<exact regular-file name from this metadata result>"});
+        let example = serde_json::json!({"file_result_call_id":result_id,"entry_name":"<exact regular-file name from this metadata result>"});
         return Err(error(
             AgentErrorKind::InvalidInput,
             format!(
@@ -590,7 +596,7 @@ fn validate_read_selector(
     if !metadata && !direct_file {
         return Err(error(
             AgentErrorKind::InvalidInput,
-            "file_result_call_id must identify a verified text creation/read/update result or inspect_files result, not an unrelated tool call.",
+            "file_result_call_id must identify a verified text creation/read/update result or inspect_files result, not an unrelated result.",
             false,
             true,
         ));
@@ -971,7 +977,7 @@ impl ResultFileRead {
         let source = session
             .conversation
             .iter()
-            .filter_map(|m| m.data_envelope.as_ref())
+            .filter_map(|m| m.trusted_tool_result().data_envelope.as_ref())
             .find(|e| e.envelope_id == source_id)
             .ok_or_else(unavailable)?;
         let owner = session
@@ -1413,6 +1419,8 @@ mod tests {
         );
         session.adopt_client_metadata(Some("client"), AgentSessionSurface::AiAssistant);
         session.input_revision = 1;
+        session.focus_epoch.input_revision = 1;
+        session.capability_disclosure.reset_for_input(1);
         let subject = session
             .file_scope_subject("owner", "device", "conversation")
             .unwrap();
@@ -1723,8 +1731,8 @@ mod tests {
         assert!(resolve_file_result(&session, "read-call", 1).is_err());
     }
 
-    #[test]
-    fn directory_child_read_requires_current_root_exact_receipt_and_separate_egress() {
+    #[tokio::test]
+    async fn directory_child_read_requires_current_root_exact_receipt_and_separate_egress() {
         use crate::chat::{ChatMessage, ToolCallRef};
         use desk_agent_protocol::computer_use::{
             DirectoryEntryProjection, FileMetadataInspectOutput, FileMetadataProjection,
@@ -1876,6 +1884,79 @@ mod tests {
                 .message
                 .contains("do not repeat the directory listing")
         );
+        let attachments = crate::conversation_attachment::delivery::tests::Store::default();
+        let mut externalized = session.clone();
+        let desk_agent_protocol::OperationOutput::ReadContext(
+            desk_agent_protocol::ReadContextOutput::FileMetadataInspect(mut large_metadata),
+        ) = serde_json::from_str(&session.conversation[2].text).unwrap()
+        else {
+            panic!("metadata")
+        };
+        for index in 0..16 {
+            let mut entry = large_metadata.directory_entries[0].clone();
+            entry.display_name = format!("other-{index}.txt");
+            entry.object_ref.as_mut().unwrap().token = format!("other-file-{index}");
+            large_metadata.directory_entries.push(entry);
+        }
+        let large_text = serde_json::to_string(&desk_agent_protocol::OperationOutput::ReadContext(
+            desk_agent_protocol::ReadContextOutput::FileMetadataInspect(large_metadata),
+        ))
+        .unwrap();
+        externalized.conversation[1].tool_calls[0].arguments_json =
+            r#"{"directory_request_id":"directory"}"#.into();
+        let mut large_receipt = ChatMessage::tool_result("receipt", &source.id, &large_text);
+        large_receipt.data_envelope = crate::model_message_labels::internal_tool_result_envelope(
+            externalized.conversation[0].data_envelope.as_ref(),
+            &source.id,
+            &large_text,
+            &source.name,
+        )
+        .unwrap();
+        large_receipt
+            .data_envelope
+            .as_mut()
+            .unwrap()
+            .provenance
+            .source_provider_id = crate::ai_assistant::FILE_WORKSPACE_PROVIDER_ID.into();
+        externalized.conversation[2] = crate::conversation_attachment::delivery::externalize(
+            &attachments,
+            &externalized,
+            large_receipt,
+            crate::seam::ToolOutputFormat::Operation,
+            None,
+            Ok(1000),
+        )
+        .await
+        .unwrap();
+        assert_ne!(
+            externalized.conversation[2].data_envelope,
+            session.conversation[2].data_envelope
+        );
+        let encoded = externalized.encode_json_for_storage().unwrap();
+        let mut restored = PersistedAgentSession::decode_json(&encoded).unwrap();
+        assert!(ResultFileRead::build(&restored, &call, &destination, 1000).is_err());
+        crate::conversation_attachment::delivery::resolve_session(&attachments, &mut restored)
+            .await
+            .unwrap();
+        assert_eq!(
+            ResultFileRead::build(&restored, &call, &destination, 1000)
+                .unwrap()
+                .reference(),
+            &evidence.reference
+        );
+        assert_document_sources(&restored, &destination, &evidence.reference);
+        assert!(
+            validate_read_permission_input(&restored, &call.name, Some(&call.arguments_json), 1000)
+                .is_ok()
+        );
+        let mut missing = PersistedAgentSession::decode_json(&encoded).unwrap();
+        crate::conversation_attachment::delivery::resolve_with(&mut missing, |_| async {
+            Err::<crate::conversation_attachment::batch::PreparedAttachment, _>(unavailable())
+        })
+        .await
+        .unwrap();
+        assert!(missing.conversation[2].resolved_result.is_none());
+        assert!(ResultFileRead::build(&missing, &call, &destination, 1000).is_err());
         let resolved = ResultFileRead::build(&session, &call, &destination, 1000).unwrap();
         assert_eq!(resolved.reference(), &evidence.reference);
         assert_document_sources(&session, &destination, &evidence.reference);
@@ -2175,7 +2256,7 @@ mod tests {
         assert!(
             failure
                 .message
-                .contains(r#"{"file_result_call_id":"read-call"}"#)
+                .contains(r#"{"file_result_call_id":"receipt"}"#)
         );
         let corrected = r#"{"file_result_call_id":"read-call"}"#;
         assert!(

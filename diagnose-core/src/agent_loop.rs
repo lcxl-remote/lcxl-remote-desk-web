@@ -4913,18 +4913,7 @@ async fn run_inner_impl(
                                         background_task,
                                     }) => (output, ok, event_id, data_envelope, background_task),
                                     Err(e) => (
-                                        crate::seam::ToolRunOutput {
-                                            format: crate::seam::ToolOutputFormat::Text,
-                                            content: if e.safe_for_model {
-                                                crate::model_input::describe_error(
-                                                    &call.name, &e.message,
-                                                )
-                                            } else {
-                                                "tool error: the tool could not complete".into()
-                                            },
-                                            image_data_url: None,
-                                            document_preview: None,
-                                        },
+                                        crate::model_input::error_output(&call.name, &e),
                                         false,
                                         None,
                                         None,
@@ -5548,7 +5537,8 @@ async fn run_inner_impl(
                             // Save the exact held state before the proposal transaction.
                             // Resolution metadata is for the owner's UI, not model egress.
                             deps.session_seam.save(session).await?;
-                            deps.session_seam
+                            let proposal_result = deps
+                                .session_seam
                                 .propose_directory(
                                     session,
                                     crate::directory_tools::proposal(
@@ -5558,7 +5548,20 @@ async fn run_inner_impl(
                                     ),
                                     current_unix_ms(deps.clock)?,
                                 )
-                                .await?;
+                                .await;
+                            if let Err(error) = proposal_result {
+                                append_internal_tool_result(
+                                    session,
+                                    turn.provider_meta.data_envelope.as_ref(),
+                                    mint(),
+                                    &call.id,
+                                    crate::model_input::error_output(&call.name, &error).content,
+                                    "directory_proposal_failed",
+                                )?;
+                                deps.session_seam.save(session).await?;
+                                finish_tool(session, &call.id, false, sink);
+                                continue;
+                            }
                             if let Some(alias) =
                                 crate::model_observability::ObservationAlias::directory_request(
                                     &session.conversation_id,
@@ -5618,9 +5621,13 @@ async fn run_inner_impl(
                                     turn.provider_meta.data_envelope.as_ref(),
                                     mint(),
                                     &call.id,
-                                    crate::directory_tools::decision_result(&request_id, approved)
-                                        .to_string(),
-                                    "directory_owner_decision",
+                                    crate::directory_tools::reviewed_decision_result(
+                                        session,
+                                        &request_id,
+                                        approved,
+                                    )
+                                    .to_string(),
+                                    "directory_decision",
                                 )?;
                                 deps.session_seam.save(session).await?;
                                 finish_tool(session, &call.id, true, sink);

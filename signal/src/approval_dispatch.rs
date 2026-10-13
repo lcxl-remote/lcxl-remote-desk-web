@@ -114,6 +114,19 @@ pub async fn process_pending_permission_review(
     let now = chrono::Utc::now();
     let Some(device) = current_device_context(&db, connections.as_ref(), &subject, now).await
     else {
+        if subject.directory_request {
+            return crate::agent_approval_store::deny_directory_unavailable(
+                &db,
+                &subject.conversation_id,
+                &subject.owner_id,
+                &subject.device_id,
+                &subject.request_id,
+                u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0),
+                true,
+            )
+            .await
+            .is_ok();
+        }
         return false;
     };
     let now_unix_ms = u64::try_from(now.timestamp_millis()).unwrap_or(0);
@@ -123,6 +136,7 @@ pub async fn process_pending_permission_review(
         &subject.owner_id,
         &subject.device_id,
         &subject.request_id,
+        subject.directory_request,
         &device.registry,
         ProductSurface::OssPersonalOwner,
         device.readiness_revision,
@@ -178,6 +192,19 @@ pub async fn process_pending_permission_review(
         {
             return false;
         }
+    }
+    if subject.directory_request {
+        return crate::agent_approval_store::deny_directory_unavailable(
+            &db,
+            &subject.conversation_id,
+            &subject.owner_id,
+            &subject.device_id,
+            &subject.request_id,
+            u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0),
+            false,
+        )
+        .await
+        .is_ok();
     }
     let now = chrono::Utc::now();
     let Some(device) = current_device_context(&db, connections.as_ref(), &subject, now).await

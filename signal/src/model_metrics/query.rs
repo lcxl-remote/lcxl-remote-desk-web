@@ -1379,6 +1379,7 @@ impl Store {
         if let Some(source) = &filters.source_kind
             && ![
                 "permission_item",
+                "directory_proposal",
                 "concrete_call",
                 "oss_command",
                 "manager_command",

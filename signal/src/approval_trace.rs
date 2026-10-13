@@ -62,6 +62,9 @@ impl Store {
                 request_id,
                 item_id,
             } => ("permission_item", format!("{request_id}/{item_id}")),
+            ApprovalSource::DirectoryProposal { request_id } => {
+                ("directory_proposal", request_id.clone())
+            }
             ApprovalSource::OssCommand { request_id } => ("oss_command", request_id.clone()),
             ApprovalSource::ManagerAction { work_id } => ("manager_action", work_id.clone()),
             ApprovalSource::ConcreteCall { call_id, .. } => ("concrete_call", call_id.clone()),
@@ -434,6 +437,41 @@ impl Store {
                     origin: "server".into(),
                     at_ms: item.created_at.timestamp_millis(),
                 });
+            }
+        }
+        if row.source_kind == "directory_proposal" {
+            let subject = desk_diagnose_core::file_scope::FileScopeSubject {
+                actor_id: owner.clone(),
+                device_id: row.device_id.clone(),
+                conversation_id: row.conversation_id.clone(),
+            };
+            let client_id = desk_diagnose_core::native_ids::stable(
+                desk_diagnose_core::native_ids::Kind::Lineage,
+                &("directory-review-decision", &row.source_id),
+            );
+            let event_id =
+                desk_diagnose_core::file_scope::transaction::receipt_event_id(&subject, &client_id);
+            if let Some(event) = crate::entity::agent_run_event::Entity::find()
+                .filter(crate::entity::agent_run_event::Column::EventId.eq(event_id))
+                .one(&self.db)
+                .await?
+            {
+                let receipt: desk_diagnose_core::file_scope::transaction::FileScopeReceipt =
+                    serde_json::from_str(&event.payload_json).map_err(|_| {
+                        sea_orm::DbErr::Custom("invalid directory review receipt".into())
+                    })?;
+                if receipt
+                    .decision
+                    .as_ref()
+                    .and_then(|decision| decision.candidate_id.as_deref())
+                    == Some(row.candidate_id.as_str())
+                {
+                    timeline.push(ApprovalTraceStageDto {
+                        stage: "directory_written".into(),
+                        origin: "server".into(),
+                        at_ms: event.created_at.timestamp_millis(),
+                    });
+                }
             }
         }
         let mut execution_state = None;

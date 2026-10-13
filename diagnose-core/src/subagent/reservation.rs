@@ -217,6 +217,7 @@ impl ReviewCallAuthority {
                 != matches!(
                     self.source,
                     crate::approval_review::ApprovalSource::ConcreteCall { .. }
+                        | crate::approval_review::ApprovalSource::DirectoryProposal { .. }
                 )
             || self
                 .source_planning_lease_token

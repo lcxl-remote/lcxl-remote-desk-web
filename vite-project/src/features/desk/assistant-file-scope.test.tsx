@@ -7,6 +7,22 @@ vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => k
 vi.mock('@/features/file-manager/remote-directory-picker', () => ({ RemoteDirectoryPicker: ({ onSelect }: { onSelect: (path: string) => void }) => <button onClick={() => onSelect('/private/tmp/a directory ')}>choose</button> }));
 
 describe('conversation directories', () => {
+    it('shows automatic review and its reason without exposing a second manual decision', () => {
+        const scope: AssistantFileScopeView = { revision: 3, directories: [{
+            requestId: 'directory', canonicalPath: '/work', purpose: 'report', state: 'pending',
+            source: 'model_proposal', referenceExpiresAt: '2030-01-01T00:00:00Z',
+        }] };
+        const props = { scope, open: true, onOpenChange: vi.fn(), disabled: false, onUpdate: vi.fn() };
+        const view = render(<AssistantFileScope {...props} automaticApproval />);
+        expect(screen.getByText('pages.aiAssistant.directories.pendingAi')).toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: 'pages.aiAssistant.directories.approve' })).toBeNull();
+        view.rerender(<AssistantFileScope {...props} automaticApproval={false} />);
+        expect(screen.getByRole('button', { name: 'pages.aiAssistant.directories.approve' })).toBeEnabled();
+        scope.directories[0] = { ...scope.directories[0], state: 'rejected', decisionActor: 'system', decisionReason: 'Reviewer timed out' };
+        view.rerender(<AssistantFileScope {...props} automaticApproval />);
+        expect(screen.getByText('pages.aiAssistant.directories.actor.system')).toBeInTheDocument();
+        expect(screen.getByText('Reviewer timed out')).toBeInTheDocument();
+    });
     it.each(['target', null])('adds a directory for selected target %s with the observed revision', (target) => {
         const update = vi.fn((..._args: unknown[]) => true);
         render(<AssistantFileScope deskId="device" sessionTargetId={target} scope={{ revision: 7, directories: [] }} open onOpenChange={() => {}} disabled={false} onUpdate={update} />);

@@ -173,6 +173,7 @@ pub struct FileScopeReceipt {
     pub scope_revision: u64,
     pub changed: bool,
     pub update: FileScopeUpdate,
+    pub decision: Option<crate::directory_review::DirectoryDecision>,
 }
 
 impl FileScopeUpdate {
@@ -266,12 +267,40 @@ pub fn prepare(
     }
     let changed = match &update.mutation {
         FileScopeMutation::Propose { proposal } | FileScopeMutation::Select { proposal } => {
+            if proposal.source == DirectoryConsentSource::ModelProposal
+                && next.file_scope.records.iter().any(|record| {
+                    record.state == DirectoryConsentState::Rejected
+                        && record.proposal.canonical_path == proposal.canonical_path
+                        && record
+                            .review_context
+                            .as_ref()
+                            .is_some_and(|context| context.input_revision == session.input_revision)
+                })
+            {
+                return Err(FileScopeError::InvalidTransition);
+            }
             let changed = next.file_scope.propose(
                 &update.subject,
                 update.expected_revision,
                 proposal.clone(),
                 now_unix_ms,
             )?;
+            if proposal.source == DirectoryConsentSource::ModelProposal {
+                let context = if session.turn_state.is_active() {
+                    Some(crate::directory_review::capture(
+                        session,
+                        proposal,
+                        now_unix_ms,
+                    )?)
+                } else {
+                    None
+                };
+                next.file_scope
+                    .records
+                    .last_mut()
+                    .ok_or(FileScopeError::InvalidProposal)?
+                    .review_context = context;
+            }
             if matches!(update.mutation, FileScopeMutation::Select { .. }) {
                 next.file_scope.decide(
                     &update.subject,
@@ -300,6 +329,42 @@ pub fn prepare(
             update.expected_revision,
             directory_request_id,
         )?,
+    };
+    let owner_decision = match &update.mutation {
+        FileScopeMutation::Decide {
+            directory_request_id,
+            approve,
+        } => Some((
+            directory_request_id,
+            if *approve {
+                "The owner approved this directory identity."
+            } else {
+                "The owner rejected this directory identity."
+            },
+        )),
+        FileScopeMutation::Revoke {
+            directory_request_id,
+        } => Some((
+            directory_request_id,
+            "The owner revoked this directory identity.",
+        )),
+        FileScopeMutation::Propose { .. } | FileScopeMutation::Select { .. } => None,
+    };
+    let decision = if let Some((request_id, reason)) = owner_decision {
+        let decision = crate::directory_review::DirectoryDecision {
+            source: crate::dynamic_run::PermissionDecisionSource::UserDecision,
+            reason: reason.into(),
+            candidate_id: None,
+        };
+        next.file_scope
+            .records
+            .iter_mut()
+            .find(|record| &record.proposal.request_id == request_id)
+            .ok_or(FileScopeError::InvalidTransition)?
+            .decision = Some(decision.clone());
+        Some(decision)
+    } else {
+        None
     };
     next.last_event_seq = next
         .last_event_seq
@@ -335,8 +400,17 @@ pub fn prepare(
         scope_revision: next.file_scope.revision(),
         changed,
         update: update.clone(),
+        decision,
     };
-    next.file_scope.archive_terminal_records();
+    next.file_scope.records.retain(|record| {
+        matches!(
+            record.state,
+            DirectoryConsentState::Pending | DirectoryConsentState::Approved
+        ) || record
+            .review_context
+            .as_ref()
+            .is_some_and(|context| context.input_revision == session.input_revision)
+    });
     Ok((next, receipt))
 }
 
@@ -367,4 +441,45 @@ pub fn replay(
         return Err(FileScopeError::RequestConflict);
     }
     Ok(())
+}
+
+/// Caller holds the review/session transaction and has revalidated its claim.
+pub fn prepare_ai_decision(
+    session: &PersistedAgentSession,
+    request_id: &str,
+    approved: bool,
+    decision: crate::directory_review::DirectoryDecision,
+    now: u64,
+) -> Result<(PersistedAgentSession, FileScopeReceipt), FileScopeError> {
+    crate::directory_review::pending(session, request_id)
+        .map_err(|_| FileScopeError::InvalidTransition)?;
+    let update = FileScopeUpdate {
+        subject: session.file_scope_subject(
+            &session.actor_id,
+            &session.device_id,
+            &session.conversation_id,
+        )?,
+        client_conversation_id: session
+            .file_scope_selector()
+            .ok_or(FileScopeError::WrongSubject)?
+            .into(),
+        client_request_id: crate::native_ids::stable(
+            crate::native_ids::Kind::Lineage,
+            &("directory-review-decision", request_id),
+        ),
+        expected_revision: session.file_scope.revision(),
+        mutation: FileScopeMutation::Decide {
+            directory_request_id: request_id.into(),
+            approve: approved,
+        },
+    };
+    let (mut next, mut receipt) = prepare(session, &update, now)?;
+    next.file_scope
+        .records
+        .iter_mut()
+        .find(|record| record.proposal.request_id == request_id)
+        .ok_or(FileScopeError::RequestConflict)?
+        .decision = Some(decision.clone());
+    receipt.decision = Some(decision);
+    Ok((next, receipt))
 }

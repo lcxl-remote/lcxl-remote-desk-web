@@ -1354,6 +1354,14 @@ export type DirectoryConsentDto = {
     */
     canonicalPath: string;
     /**
+     * @type string,null
+    */
+    decisionActor?: string | null;
+    /**
+     * @type string,null
+    */
+    decisionReason?: string | null;
+    /**
      * @type string
     */
     purpose: string;
@@ -1365,6 +1373,10 @@ export type DirectoryConsentDto = {
      * @type string
     */
     requestId: string;
+    /**
+     * @type string,null
+    */
+    reviewId?: string | null;
     /**
      * @type string
     */

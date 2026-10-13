@@ -1376,16 +1376,7 @@ impl SignalAiAssistantTools {
             self.authorize_and_invoke(call).await
         };
         if let Err(provider_error) = &result {
-            let output = ToolRunOutput {
-                format: desk_diagnose_core::seam::ToolOutputFormat::Text,
-                content: if provider_error.safe_for_model {
-                    format!("tool error: {}", provider_error.message)
-                } else {
-                    "tool error: the tool could not complete".into()
-                },
-                image_data_url: None,
-                document_preview: None,
-            };
+            let output = desk_diagnose_core::model_input::error_output(&call.name, provider_error);
             let (_, digest_sha256) = tool_output_fingerprint(&output)?;
             self.verified_read_labels
                 .lock()
@@ -6720,6 +6711,40 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn failed_preview_uses_identical_provider_and_history_bytes_without_bypassing_labels() {
+        let problem = error(
+            AgentErrorKind::InvalidInput,
+            "invalid action preview: missing action",
+            false,
+            true,
+        );
+        let frozen =
+            desk_diagnose_core::model_input::error_output("preview_computer_action", &problem);
+        assert!(frozen.content.contains("Structural example"));
+        let (_, digest_sha256) = tool_output_fingerprint(&frozen).unwrap();
+        let verified = VerifiedReadLabel {
+            digest_sha256,
+            expires_at_unix_ms: 200,
+            failed: true,
+        };
+        let mut history =
+            desk_diagnose_core::model_input::error_output("preview_computer_action", &problem);
+        verify_read_label(&history, &verified, 199).unwrap();
+        history.content.push(' ');
+        assert!(verify_read_label(&history, &verified, 199).is_err());
+        assert!(verify_read_label(&frozen, &verified, 200).is_err());
+        let private = error(
+            AgentErrorKind::Internal,
+            "secret provider detail",
+            false,
+            false,
+        );
+        let safe =
+            desk_diagnose_core::model_input::error_output("preview_computer_action", &private);
+        assert_eq!(safe.content, "tool error: the tool could not complete");
     }
 
     #[test]

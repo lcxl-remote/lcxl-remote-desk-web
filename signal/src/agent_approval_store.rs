@@ -48,6 +48,7 @@ pub struct PendingPermissionReview {
     pub owner_id: String,
     pub device_id: String,
     pub request_id: String,
+    pub directory_request: bool,
 }
 
 /// Page active delegations rather than scanning unbounded conversation JSON.
@@ -110,7 +111,6 @@ pub async fn pending_permission_reviews(
             let session = PersistedAgentSession::decode_json(&session_row.state_json)
                 .map_err(|_| invalid())?;
             if session.surface != AgentSessionSurface::AiAssistant
-                || session.turn_state.is_active()
                 || !session.allows_delegated_review()
                 || session.approval_delegation_conversation_id() != row.conversation_id
                 || !crate::agent_subagent_store::shared_approval_current_on(
@@ -120,6 +120,43 @@ pub async fn pending_permission_reviews(
                 )
                 .await?
             {
+                continue;
+            }
+            for record in session.file_scope.records() {
+                if desk_diagnose_core::directory_review::pending(
+                    &session,
+                    &record.proposal.request_id,
+                )
+                .is_ok()
+                {
+                    let delegation = decode(&row)?;
+                    let tracking = desk_diagnose_core::approval_observation::ReviewTracking::queued(
+                        &owner_id,
+                        &row.device_id,
+                        &session.conversation_id,
+                        &row.conversation_id,
+                        &delegation.delegation_id,
+                        delegation.revision,
+                        "directory_proposal",
+                        &record.proposal.request_id,
+                        now_unix_ms as i64,
+                    );
+                    crate::approval_metrics::submit(
+                        &tracking,
+                        desk_diagnose_core::model_observability::ObservationPhase::Started,
+                        0,
+                        now_unix_ms as i64,
+                    );
+                    pending.push(PendingPermissionReview {
+                        conversation_id: session.conversation_id.clone(),
+                        owner_id: row.actor_id.clone(),
+                        device_id: row.device_id.clone(),
+                        request_id: record.proposal.request_id.clone(),
+                        directory_request: true,
+                    });
+                }
+            }
+            if session.turn_state.is_active() {
                 continue;
             }
             for request in &session.permission_requests {
@@ -145,6 +182,7 @@ pub async fn pending_permission_reviews(
                         owner_id: row.actor_id.clone(),
                         device_id: row.device_id.clone(),
                         request_id: request.request_id.clone(),
+                        directory_request: false,
                     });
                 }
             }
@@ -307,54 +345,71 @@ pub async fn claim_permission_review(
         .as_ref()
         .map(crate::agent_goal_store::decode)
         .transpose()?;
-    let request = session
-        .permission_requests
-        .iter()
-        .find(|request| {
-            matches!(&candidate.source,
-            desk_diagnose_core::approval_review::ApprovalSource::PermissionItem { request_id, .. }
-                if request_id == &request.request_id)
-        })
-        .ok_or_else(invalid)?;
-    let item_id = match &candidate.source {
-        desk_diagnose_core::approval_review::ApprovalSource::PermissionItem { item_id, .. } => {
-            item_id
-        }
-        _ => return Err(invalid()),
-    };
-    let item = request
-        .items
-        .iter()
-        .find(|item| &item.item_id == item_id)
-        .ok_or_else(invalid)?;
-    let (descriptor, risk) =
-        desk_diagnose_core::approval_review::trusted_permission_descriptor(registry, item, surface)
-            .map_err(|_| invalid())?;
-    if candidate.descriptor_json != descriptor || candidate.risk != risk {
-        return Err(invalid());
-    }
-    if candidate.context.current_authority
-        != permission_authority_on(
-            &txn,
+    let authorized = if matches!(
+        candidate.source,
+        desk_diagnose_core::approval_review::ApprovalSource::DirectoryProposal { .. }
+    ) {
+        desk_diagnose_core::directory_review::authorize(
+            candidate,
             &session,
-            &request.request_id,
-            readiness_revision,
+            goal.as_ref(),
+            &delegation,
+            &destination,
             now_unix_ms,
         )
-        .await?
-    {
-        return Err(invalid());
-    }
-    let authorized = authorize_permission_review_egress(
-        candidate,
-        &session,
-        request,
-        goal.as_ref(),
-        &delegation,
-        &destination,
-        now_unix_ms,
-    )
-    .map_err(|_| invalid())?;
+        .map_err(|_| invalid())?
+    } else {
+        let request = session
+            .permission_requests
+            .iter()
+            .find(|request| {
+                matches!(&candidate.source,
+            desk_diagnose_core::approval_review::ApprovalSource::PermissionItem { request_id, .. }
+                if request_id == &request.request_id)
+            })
+            .ok_or_else(invalid)?;
+        let item_id = match &candidate.source {
+            desk_diagnose_core::approval_review::ApprovalSource::PermissionItem {
+                item_id, ..
+            } => item_id,
+            _ => return Err(invalid()),
+        };
+        let item = request
+            .items
+            .iter()
+            .find(|item| &item.item_id == item_id)
+            .ok_or_else(invalid)?;
+        let (descriptor, risk) =
+            desk_diagnose_core::approval_review::trusted_permission_descriptor(
+                registry, item, surface,
+            )
+            .map_err(|_| invalid())?;
+        if candidate.descriptor_json != descriptor || candidate.risk != risk {
+            return Err(invalid());
+        }
+        if candidate.context.current_authority
+            != permission_authority_on(
+                &txn,
+                &session,
+                &request.request_id,
+                readiness_revision,
+                now_unix_ms,
+            )
+            .await?
+        {
+            return Err(invalid());
+        }
+        authorize_permission_review_egress(
+            candidate,
+            &session,
+            request,
+            goal.as_ref(),
+            &delegation,
+            &destination,
+            now_unix_ms,
+        )
+        .map_err(|_| invalid())?
+    };
     if let Some(existing) = review_row::Entity::find()
         .filter(review_row::Column::CandidateId.eq(&candidate.candidate_id))
         .one(&txn)
@@ -407,11 +462,17 @@ pub async fn claim_permission_review(
     let lease_deadline_unix_ms = now_unix_ms
         .saturating_add(desk_diagnose_core::approval_review::APPROVAL_REVIEW_LEASE_MS)
         .min(candidate.expires_at_unix_ms);
-    let (request_id, item_id) = match &candidate.source {
+    let (source_kind, source_id) = match &candidate.source {
         desk_diagnose_core::approval_review::ApprovalSource::PermissionItem {
             request_id,
             item_id,
-        } => (request_id, item_id),
+        } => (
+            APPROVAL_REVIEW_SOURCE_PERMISSION_ITEM,
+            permission_review_source_id(request_id, item_id).map_err(|_| invalid())?,
+        ),
+        desk_diagnose_core::approval_review::ApprovalSource::DirectoryProposal { request_id } => {
+            ("directory_proposal", request_id.clone())
+        }
         _ => return Err(invalid()),
     };
     review_row::ActiveModel {
@@ -423,8 +484,8 @@ pub async fn claim_permission_review(
         model_config_revision: Set(as_i64(
             u64::try_from(config.configuration_revision).map_err(|_| invalid())?,
         )?),
-        source_kind: Set(APPROVAL_REVIEW_SOURCE_PERMISSION_ITEM.into()),
-        source_id: Set(permission_review_source_id(request_id, item_id).map_err(|_| invalid())?),
+        source_kind: Set(source_kind.into()),
+        source_id: Set(source_id),
         action_sha256: Set(candidate.action_sha256.clone()),
         context_hmac_sha256: Set(context_hmac),
         decision_json: Set(None),
@@ -511,7 +572,7 @@ pub async fn settle_permission_review(
     {
         return Err(invalid());
     }
-    let (_, session) = session_on(
+    let (session_row, session) = session_on(
         &txn,
         &candidate.conversation_id,
         &candidate.owner_id,
@@ -556,21 +617,52 @@ pub async fn settle_permission_review(
         .is_ok_and(|facts| facts == candidate.context.current_authority),
         _ => false,
     };
-    let authorized = match (request, config.destination_identity()) {
-        (Some(request), Ok(destination)) if model_revision_matches => {
-            authority_matches
-                && authorize_permission_review_egress(
-                    candidate,
-                    &session,
-                    request,
-                    goal.as_ref(),
-                    &delegation,
-                    &destination,
-                    now_unix_ms,
-                )
-                .is_ok()
+    let authorized = if matches!(candidate.source, ApprovalSource::DirectoryProposal { .. }) {
+        let lease_current = u64::try_from(session_row.lease_token).ok()
+            == Some(session.lease_token)
+            && session_row
+                .lease_deadline
+                .is_some_and(|deadline| deadline.timestamp_millis() > now_unix_ms as i64)
+            && crate::agent_subagent_store::shared_approval_current_on(
+                &txn,
+                &session,
+                as_i64(now_unix_ms)?,
+            )
+            .await?;
+
+        lease_current
+            && config
+                .destination_identity()
+                .ok()
+                .filter(|_| model_revision_matches)
+                .is_some_and(|destination| {
+                    desk_diagnose_core::directory_review::authorize(
+                        candidate,
+                        &session,
+                        goal.as_ref(),
+                        &delegation,
+                        &destination,
+                        now_unix_ms,
+                    )
+                    .is_ok()
+                })
+    } else {
+        match (request, config.destination_identity()) {
+            (Some(request), Ok(destination)) if model_revision_matches => {
+                authority_matches
+                    && authorize_permission_review_egress(
+                        candidate,
+                        &session,
+                        request,
+                        goal.as_ref(),
+                        &delegation,
+                        &destination,
+                        now_unix_ms,
+                    )
+                    .is_ok()
+            }
+            _ => false,
         }
-        _ => false,
     };
     let now_i64 = as_i64(now_unix_ms)?;
     let expired = now_unix_ms >= candidate.expires_at_unix_ms
@@ -666,6 +758,13 @@ pub async fn settle_permission_review(
         observation_reason,
         now_unix_ms as i64,
     );
+    let directory_failure = statistics_json
+        .as_deref()
+        .and_then(|value| {
+            serde_json::from_str::<desk_diagnose_core::approval_observation::ReviewTracking>(value)
+                .ok()
+        })
+        .and_then(|value| value.snapshot.reason);
     let changed = review_row::Entity::update_many()
         .col_expr(
             review_row::Column::StatisticsJson,
@@ -697,6 +796,7 @@ pub async fn settle_permission_review(
     if changed.rows_affected != 1 {
         return Err(invalid());
     }
+    commit_directory_on(&txn, &row, status, decision, directory_failure, now_unix_ms).await?;
     txn.commit().await?;
     crate::approval_metrics::committed(db, &candidate.candidate_id);
     Ok(status.to_owned())
@@ -794,6 +894,15 @@ pub async fn expire_review_leases(
         };
         let statistics_json =
             crate::approval_metrics::settled_json(&row, None, status, Some(reason), now);
+        let directory_failure = statistics_json
+            .as_deref()
+            .and_then(|value| {
+                serde_json::from_str::<desk_diagnose_core::approval_observation::ReviewTracking>(
+                    value,
+                )
+                .ok()
+            })
+            .and_then(|value| value.snapshot.reason);
         let changed = review_row::Entity::update_many()
             .col_expr(
                 review_row::Column::StatisticsJson,
@@ -817,6 +926,7 @@ pub async fn expire_review_leases(
         if changed.rows_affected != 1 {
             return Err(invalid());
         }
+        commit_directory_on(&txn, &row, status, None, directory_failure, now_unix_ms).await?;
         txn.commit().await?;
         crate::approval_metrics::committed(db, &row.candidate_id);
         settled += 1;
@@ -1276,6 +1386,7 @@ pub async fn prepare_permission_review_batch(
     owner_id: &str,
     device_id: &str,
     request_id: &str,
+    directory_request: bool,
     registry: &desk_diagnose_core::provider_registry::ProviderRegistry,
     surface: desk_agent_protocol::capability_provider::ProductSurface,
     readiness_revision: u64,
@@ -1290,7 +1401,7 @@ pub async fn prepare_permission_review_batch(
     }
     let txn = db.begin().await?;
     let (_, session) = session_on(&txn, conversation_id, owner_id, device_id).await?;
-    if session.turn_state.is_active()
+    if (!directory_request && session.turn_state.is_active())
         || !crate::agent_subagent_store::shared_approval_current_on(
             &txn,
             &session,
@@ -1299,17 +1410,6 @@ pub async fn prepare_permission_review_batch(
         .await?
     {
         return Err(invalid());
-    }
-    let request = session
-        .permission_requests
-        .iter()
-        .find(|request| request.request_id == request_id)
-        .ok_or_else(invalid)?;
-    // An interactive command needs the owner's live terminal at approval time,
-    // so AI auto-approval never decides it; the request stays with the owner.
-    if desk_diagnose_core::approval_review::requires_owner_decision(request) {
-        txn.commit().await?;
-        return Ok(Vec::new());
     }
     let delegation_row = delegation_row::Entity::find()
         .filter(
@@ -1336,6 +1436,38 @@ pub async fn prepare_permission_review_batch(
         .as_ref()
         .map(crate::agent_goal_store::decode)
         .transpose()?;
+    if directory_request {
+        let candidate = desk_diagnose_core::directory_review::candidate(
+            &session,
+            request_id,
+            &delegation,
+            goal.as_ref(),
+            now_unix_ms,
+        )
+        .map_err(|_| invalid())?;
+        desk_diagnose_core::directory_review::authorize(
+            &candidate,
+            &session,
+            goal.as_ref(),
+            &delegation,
+            &destination,
+            now_unix_ms,
+        )
+        .map_err(|_| invalid())?;
+        txn.commit().await?;
+        return Ok(vec![candidate]);
+    }
+    let request = session
+        .permission_requests
+        .iter()
+        .find(|request| request.request_id == request_id)
+        .ok_or_else(invalid)?;
+    // An interactive command needs the owner's live terminal at approval time,
+    // so AI auto-approval never decides it; the request stays with the owner.
+    if desk_diagnose_core::approval_review::requires_owner_decision(request) {
+        txn.commit().await?;
+        return Ok(Vec::new());
+    }
     let authority =
         permission_authority_on(&txn, &session, request_id, readiness_revision, now_unix_ms)
             .await?;
@@ -1646,4 +1778,233 @@ pub async fn close_for_subject(
     .await?;
     txn.commit().await?;
     Ok(delegation)
+}
+
+/// Apply only the still-waiting directory, without issuing any capability grant.
+async fn commit_directory_on(
+    txn: &DatabaseTransaction,
+    row: &review_row::Model,
+    status: &str,
+    review: Option<&desk_diagnose_core::approval_review::ApprovalReviewDecision>,
+    failure_reason: Option<desk_diagnose_core::approval_observation::ReviewReason>,
+    now: u64,
+) -> Result<(), DbErr> {
+    use desk_diagnose_core::directory_review::DirectoryDecision;
+    if row.source_kind != "directory_proposal" {
+        return Ok(());
+    }
+    let (session_row, session) =
+        session_on(txn, &row.conversation_id, &row.actor_id, &row.device_id).await?;
+    if desk_diagnose_core::directory_review::pending(&session, &row.source_id).is_err() {
+        return Ok(());
+    }
+    let authority: desk_diagnose_core::subagent::reservation::ReviewCallAuthority =
+        serde_json::from_str(row.call_authority_json.as_deref().ok_or_else(invalid)?)
+            .map_err(|_| invalid())?;
+    if session.input_revision != authority.input_revision
+        || session.control_revision != authority.control_revision
+        || Some(session.lease_token) != authority.source_planning_lease_token
+        || u64::try_from(session_row.lease_token).ok() != authority.source_planning_lease_token
+    {
+        return Ok(());
+    }
+    let approved = status == APPROVAL_REVIEW_STATUS_APPROVED;
+    let model_decision =
+        approved || status == desk_diagnose_core::approval_review::APPROVAL_REVIEW_STATUS_DENIED;
+    let decision = if model_decision {
+        let review = review.ok_or_else(invalid)?;
+        DirectoryDecision {
+            source: PermissionDecisionSource::AiApproval {
+                delegation_id: row.delegation_id.clone(),
+                delegation_revision: authority.delegation_revision,
+                reviews: vec![
+                    desk_diagnose_core::dynamic_run::AiPermissionDecisionEvidence {
+                        item_id: row.source_id.clone(),
+                        candidate_id: row.candidate_id.clone(),
+                        candidate_expires_at_unix_ms: u64::try_from(row.expires_at)
+                            .map_err(|_| invalid())?,
+                        reason_code: review.reason_code.clone(),
+                        reason: review.reason.clone(),
+                    },
+                ],
+            },
+            reason: review.reason.clone(),
+            candidate_id: Some(row.candidate_id.clone()),
+        }
+    } else {
+        let reason = desk_diagnose_core::directory_review::failure_reason(failure_reason);
+        DirectoryDecision {
+            source: PermissionDecisionSource::ReviewUnavailable {
+                reason_code: "directory_review_unavailable".into(),
+                reason: reason.into(),
+            },
+            reason: reason.into(),
+            candidate_id: Some(row.candidate_id.clone()),
+        }
+    };
+    save_directory_decision_on(
+        txn,
+        &session_row,
+        &session,
+        &row.source_id,
+        approved,
+        decision,
+        now,
+    )
+    .await
+}
+
+async fn save_directory_decision_on(
+    txn: &DatabaseTransaction,
+    session_row: &agent_session::Model,
+    session: &PersistedAgentSession,
+    request_id: &str,
+    approved: bool,
+    decision: desk_diagnose_core::directory_review::DirectoryDecision,
+    now: u64,
+) -> Result<(), DbErr> {
+    use desk_diagnose_core::file_scope::transaction::FILE_SCOPE_EVENT_KIND;
+    let (mut next, receipt) = desk_diagnose_core::file_scope::transaction::prepare_ai_decision(
+        session, request_id, approved, decision, now,
+    )
+    .map_err(|_| invalid())?;
+    let timestamp = DateTime::<Utc>::from_timestamp_millis(as_i64(now)?).ok_or_else(invalid)?;
+    let timestamp = timestamp.max(session_row.updated_at);
+    next.updated_at = timestamp.to_rfc3339();
+    let changed = agent_session::Entity::update_many()
+        .col_expr(
+            agent_session::Column::StateJson,
+            Expr::value(next.encode_json_for_storage().map_err(|_| invalid())?),
+        )
+        .col_expr(agent_session::Column::Version, Expr::value(next.version))
+        .col_expr(agent_session::Column::UpdatedAt, Expr::value(timestamp))
+        .filter(agent_session::Column::Id.eq(session_row.id))
+        .filter(agent_session::Column::Version.eq(session_row.version))
+        .filter(agent_session::Column::LeaseToken.eq(session_row.lease_token))
+        .exec(txn)
+        .await?;
+    if changed.rows_affected != 1 {
+        return Err(invalid());
+    }
+    agent_run_event::ActiveModel {
+        event_id: Set(receipt.event_id.clone()),
+        run_id: Set(next.conversation_id.clone()),
+        event_seq: Set(as_i64(receipt.event_seq)?),
+        input_revision: Set(as_i64(next.input_revision)?),
+        kind: Set(FILE_SCOPE_EVENT_KIND.into()),
+        actor_id: Set(Some(next.actor_id.clone())),
+        correlation_id: Set(Some(receipt.update.client_request_id.clone())),
+        input_seq: Set(None),
+        source_envelope_ids_json: Set("[]".into()),
+        result_envelope_ids_json: Set("[]".into()),
+        payload_json: Set(serde_json::to_string(&receipt).map_err(|_| invalid())?),
+        payload_schema_version: Set(1),
+        created_at: Set(timestamp),
+        ..Default::default()
+    }
+    .insert(txn)
+    .await?;
+    Ok(())
+}
+
+/// End an unreviewable proposal without leaving the running tool waiting forever.
+pub async fn deny_directory_unavailable(
+    db: &DatabaseConnection,
+    conversation: &str,
+    owner: &str,
+    device: &str,
+    request_id: &str,
+    now: u64,
+    only_expired: bool,
+) -> Result<(), DbErr> {
+    let txn = crate::db::begin_write(db, agent_session::Entity).await?;
+    let (session_row, session) = session_on(&txn, conversation, owner, device).await?;
+    if desk_diagnose_core::directory_review::pending(&session, request_id).is_err()
+        || !crate::agent_subagent_store::shared_approval_current_on(&txn, &session, as_i64(now)?)
+            .await?
+    {
+        return Ok(());
+    }
+    let record = desk_diagnose_core::directory_review::pending(&session, request_id)
+        .map_err(|_| invalid())?;
+    let expired = desk_diagnose_core::directory_review::deadline(record)
+        .is_ok_and(|deadline| now >= deadline);
+    if only_expired && !expired {
+        return Ok(());
+    }
+    if review_row::Entity::find()
+        .filter(review_row::Column::ConversationId.eq(conversation))
+        .filter(review_row::Column::DeviceId.eq(device))
+        .filter(review_row::Column::SourceKind.eq("directory_proposal"))
+        .filter(review_row::Column::SourceId.eq(request_id))
+        .filter(
+            review_row::Column::Status
+                .eq(desk_diagnose_core::approval_review::APPROVAL_REVIEW_STATUS_REVIEWING),
+        )
+        .one(&txn)
+        .await?
+        .is_some()
+    {
+        return Ok(());
+    }
+    let Some(row) = delegation_row::Entity::find()
+        .filter(
+            delegation_row::Column::ConversationId
+                .eq(session.approval_delegation_conversation_id()),
+        )
+        .filter(delegation_row::Column::Status.eq("active"))
+        .one(&txn)
+        .await?
+    else {
+        return Ok(());
+    };
+    let delegation = decode(&row)?;
+    delegation
+        .require_current_for_session(&session)
+        .map_err(|_| invalid())?;
+    let reason_category = crate::approval_metrics::unavailable_reason_on(&txn).await;
+    let reason_category = if expired {
+        desk_diagnose_core::approval_observation::ReviewReason::CandidateExpired
+    } else {
+        reason_category
+    };
+    let reason = desk_diagnose_core::directory_review::failure_reason(Some(reason_category));
+    let decision = desk_diagnose_core::directory_review::DirectoryDecision {
+        source: PermissionDecisionSource::ReviewUnavailable {
+            reason_code: "directory_review_unavailable".into(),
+            reason: reason.into(),
+        },
+        reason: reason.into(),
+        candidate_id: None,
+    };
+    save_directory_decision_on(
+        &txn,
+        &session_row,
+        &session,
+        request_id,
+        false,
+        decision,
+        now,
+    )
+    .await?;
+    txn.commit().await?;
+    let tracking = desk_diagnose_core::approval_observation::ReviewTracking::queued(
+        owner,
+        device,
+        conversation,
+        session.approval_delegation_conversation_id(),
+        &delegation.delegation_id,
+        delegation.revision,
+        "directory_proposal",
+        request_id,
+        now as i64,
+    )
+    .settled("unavailable", Some(reason_category), now as i64);
+    crate::approval_metrics::submit(
+        &tracking,
+        desk_diagnose_core::model_observability::ObservationPhase::Terminal,
+        0,
+        now as i64,
+    );
+    Ok(())
 }

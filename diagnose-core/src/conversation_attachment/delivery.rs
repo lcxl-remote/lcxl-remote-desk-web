@@ -507,11 +507,11 @@ where
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::cell::RefCell;
     #[derive(Default)]
-    struct Store(RefCell<Vec<PreparedAttachment>>);
+    pub(crate) struct Store(RefCell<Vec<PreparedAttachment>>);
     #[async_trait::async_trait(?Send)]
     impl SessionSeam for Store {
         async fn claim_turn(

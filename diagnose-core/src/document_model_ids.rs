@@ -226,6 +226,21 @@ pub(crate) fn resolve_with_references(
                 now,
                 expected,
             )?;
+            if action["action"]["adapter"] == "ui_in_application" {
+                restore_field(
+                    action
+                        .pointer_mut("/action/action")
+                        .and_then(Value::as_object_mut)
+                        .ok_or_else(|| {
+                            invalid("UI preview needs an application and semantic action")
+                        })?,
+                    "application",
+                    "application_id",
+                    history,
+                    now,
+                    expected,
+                )?;
+            }
         }
     }
     Ok(())
@@ -315,6 +330,13 @@ pub(crate) fn project_arguments(tool: &str, value: &mut Value) {
         for action in actions {
             if let Some(action) = action.as_object_mut() {
                 project_field(action, "target", "target_id");
+                if let Some(application) = action
+                    .get_mut("action")
+                    .and_then(|value| value.get_mut("action"))
+                    .and_then(Value::as_object_mut)
+                {
+                    project_field(application, "application", "application_id");
+                }
             }
         }
     }
@@ -361,6 +383,16 @@ pub(crate) fn project_tool(tool: &mut ToolSpec) {
             .pointer_mut("/properties/actions/items")
     {
         project_schema_field(action, "target", "target_id");
+        if let Some(variants) = action
+            .pointer_mut("/properties/action/oneOf")
+            .and_then(Value::as_array_mut)
+        {
+            for variant in variants {
+                if let Some(body) = variant.pointer_mut("/properties/action") {
+                    project_schema_field(body, "application", "application_id");
+                }
+            }
+        }
     }
 }
 

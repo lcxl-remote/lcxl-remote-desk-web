@@ -77,6 +77,10 @@ pub fn background_action(conversation: &str, turn: &str, call: &str) -> String {
     stable(Kind::BackgroundAction, &(conversation, turn, call))
 }
 
+pub fn capability_completion(call: &str) -> String {
+    stable(Kind::Message, &("capability-completion", call))
+}
+
 pub fn scheduled_message(run: &str) -> String {
     stable(Kind::Message, &("scheduled-task-input", run))
 }
@@ -98,6 +102,12 @@ mod tests {
         );
         assert!(is(Kind::Message, &scheduled_message("run")));
         assert_ne!(scheduled_message("run"), rehearsal_message("run"));
+        assert!(is(Kind::Message, &capability_completion("call")));
+        assert_eq!(capability_completion("call"), capability_completion("call"));
+        assert_ne!(
+            capability_completion("call"),
+            capability_completion("other-call")
+        );
     }
 
     #[test]

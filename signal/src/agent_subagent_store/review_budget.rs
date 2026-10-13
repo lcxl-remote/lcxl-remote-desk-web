@@ -244,6 +244,7 @@ pub(crate) async fn reserve_review_call_on(
         source_planning_lease_token: matches!(
             candidate.source,
             desk_diagnose_core::approval_review::ApprovalSource::ConcreteCall { .. }
+                | desk_diagnose_core::approval_review::ApprovalSource::DirectoryProposal { .. }
         )
         .then_some(session.lease_token),
         context_hmac_sha256: review.context_hmac_sha256.clone(),
@@ -508,6 +509,35 @@ async fn validate_review_subject_on(
                     && request.items.iter().any(|item| item.item_id == *item_id)
             });
             if !pending {
+                return Err(invalid());
+            }
+        }
+        ApprovalSource::DirectoryProposal { request_id } => {
+            let record = desk_diagnose_core::directory_review::pending(session, request_id)
+                .map_err(|_| invalid())?;
+            let row = review_row::Entity::find()
+                .filter(review_row::Column::CandidateId.eq(&authority.candidate_id))
+                .one(txn)
+                .await?
+                .ok_or_else(invalid)?;
+            use sha2::Digest;
+            if row.action_sha256
+                != format!(
+                    "{:x}",
+                    sha2::Sha256::digest(
+                        desk_diagnose_core::directory_review::action(session, record).as_bytes()
+                    )
+                )
+            {
+                return Err(invalid());
+            }
+            if Some(session.lease_token) != authority.source_planning_lease_token
+                || u64::try_from(session_row.lease_token).ok()
+                    != authority.source_planning_lease_token
+                || session_row
+                    .lease_deadline
+                    .is_none_or(|deadline| deadline.timestamp_millis() <= now_ms)
+            {
                 return Err(invalid());
             }
         }

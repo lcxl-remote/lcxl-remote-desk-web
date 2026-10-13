@@ -810,6 +810,23 @@ pub fn describe_error(name: &str, reason: &str) -> String {
     describe_error_with_schema(name, &tool.parameters_schema, reason)
 }
 
+/// Freeze the same model-safe error bytes at the provider and history boundary.
+pub fn error_output(
+    name: &str,
+    error: &desk_agent_protocol::AgentError,
+) -> crate::seam::ToolRunOutput {
+    crate::seam::ToolRunOutput {
+        format: crate::seam::ToolOutputFormat::Text,
+        content: if error.safe_for_model {
+            describe_error(name, &error.message)
+        } else {
+            "tool error: the tool could not complete".into()
+        },
+        image_data_url: None,
+        document_preview: None,
+    }
+}
+
 pub fn describe_error_with_schema(name: &str, schema: &Value, reason: &str) -> String {
     if reason.contains("Structural example") {
         return reason.into();

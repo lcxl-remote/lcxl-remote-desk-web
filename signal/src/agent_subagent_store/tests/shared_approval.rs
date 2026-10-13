@@ -9,6 +9,7 @@ use desk_diagnose_core::{
     chat::{ChatMessage, ToolCallRef},
     session::TriggerOrigin,
 };
+use sea_orm::sea_query::Expr;
 
 async fn enable(db: &DatabaseConnection, id: &str) -> ApprovalDelegation {
     let now = chrono::Utc::now().timestamp_millis();
@@ -333,6 +334,195 @@ async fn review_child_fixture() -> (
 }
 
 #[actix_web::test]
+async fn active_child_directory_is_claimed_once_and_fault_ends_only_directory_consent() {
+    use desk_agent_protocol::capability_provider::ProductSurface;
+    use desk_diagnose_core::file_scope::transaction::{self, FileScopeMutation, FileScopeUpdate};
+    let (db, mut session, _) = review_child_fixture().await;
+    let now = chrono::Utc::now();
+    session.turn_state = desk_diagnose_core::session::TurnState::Running;
+    session.current_turn_id = Some("directory-child-turn".into());
+    let id = desk_diagnose_core::native_ids::stable(
+        desk_diagnose_core::native_ids::Kind::DirectoryRequest,
+        &(
+            "directory-proposal",
+            &(
+                &session.conversation_id,
+                session.input_revision,
+                "directory-call",
+            ),
+        ),
+    );
+    let source = session
+        .authorization_requirement()
+        .unwrap()
+        .data_envelope
+        .clone()
+        .unwrap();
+    let mut assistant = ChatMessage::assistant_tool_calls(
+        "directory-assistant",
+        "",
+        vec![ToolCallRef {
+            id: "directory-call".into(),
+            name: "request_directory".into(),
+            arguments_json: r#"{"path":"/work","purpose":"report"}"#.into(),
+        }],
+    );
+    assistant.turn_id = session.current_turn_id.clone();
+    let bytes = desk_diagnose_core::model_egress::message_content_bytes(&assistant).unwrap();
+    assistant.data_envelope = Some(
+        desk_diagnose_core::subagent::projection::envelope(
+            "directory-assistant",
+            &String::from_utf8(bytes).unwrap(),
+            "test",
+            &[source],
+        )
+        .unwrap(),
+    );
+    session.conversation.push(assistant);
+    let update = FileScopeUpdate {
+        subject: session
+            .file_scope_subject(
+                &session.actor_id,
+                &session.device_id,
+                &session.conversation_id,
+            )
+            .unwrap(),
+        client_conversation_id: session.file_scope_selector().unwrap().into(),
+        client_request_id: id.clone(),
+        expected_revision: 0,
+        mutation: FileScopeMutation::Propose {
+            proposal: desk_diagnose_core::file_scope::DirectoryProposal {
+                request_id: id.clone(),
+                requested_path: "/work".into(),
+                canonical_path: "/work".into(),
+                purpose: "report".into(),
+                source: desk_diagnose_core::file_scope::DirectoryConsentSource::ModelProposal,
+                directory: desk_agent_protocol::computer_use::ObjectRef {
+                    token: "native-directory".into(),
+                    snapshot_id: "generation".into(),
+                    object_kind: desk_agent_protocol::computer_use::ObjectKind::Directory,
+                    expires_at: (now + chrono::Duration::hours(1)).to_rfc3339(),
+                },
+            },
+        },
+    };
+    session = transaction::prepare(&session, &update, now.timestamp_millis() as u64)
+        .unwrap()
+        .0;
+    session_row::Entity::update_many()
+        .col_expr(
+            session_row::Column::StateJson,
+            Expr::value(session.encode_json_for_storage().unwrap()),
+        )
+        .col_expr(session_row::Column::Version, Expr::value(session.version))
+        .col_expr(
+            session_row::Column::LeaseDeadline,
+            Expr::value(now + chrono::Duration::minutes(10)),
+        )
+        .filter(session_row::Column::ConversationId.eq(&session.conversation_id))
+        .exec(&db)
+        .await
+        .unwrap();
+    let pending = approval::pending_permission_reviews(&db, 0, 64, now.timestamp_millis() as u64)
+        .await
+        .unwrap()
+        .0;
+    assert!(pending.iter().any(|review| review.directory_request
+        && review.request_id == id
+        && review.conversation_id == session.conversation_id));
+    let registry = desk_diagnose_core::ai_assistant::ai_assistant_provider_registry();
+    let candidate = approval::prepare_permission_review_batch(
+        &db,
+        &session.conversation_id,
+        "1",
+        "1",
+        &id,
+        true,
+        &registry,
+        ProductSurface::OssPersonalOwner,
+        1,
+        now.timestamp_millis() as u64,
+    )
+    .await
+    .unwrap()
+    .remove(0);
+    let claim = approval::claim_permission_review(
+        &db,
+        &candidate,
+        &registry,
+        ProductSurface::OssPersonalOwner,
+        "node-a",
+        1,
+        now.timestamp_millis() as u64,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        approval::claim_permission_review(
+            &db,
+            &candidate,
+            &registry,
+            ProductSurface::OssPersonalOwner,
+            "node-b",
+            1,
+            now.timestamp_millis() as u64
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+    approval::deny_directory_unavailable(
+        &db,
+        &session.conversation_id,
+        "1",
+        "1",
+        &id,
+        now.timestamp_millis() as u64,
+        false,
+    )
+    .await
+    .unwrap();
+    approval::settle_permission_review(
+        &db,
+        &candidate,
+        &claim.lease_owner,
+        claim.lease_epoch,
+        None,
+        None,
+        1,
+        now.timestamp_millis() as u64 + 1,
+        None,
+    )
+    .await
+    .unwrap();
+    let row = session_row::Entity::find()
+        .filter(session_row::Column::ConversationId.eq(&session.conversation_id))
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    let current = PersistedAgentSession::decode_json(&row.state_json).unwrap();
+    assert!(current.scope_snapshot.granted.is_empty());
+    assert_eq!(current.permission_requests, session.permission_requests);
+    let mut held = session;
+    assert_eq!(
+        desk_diagnose_core::directory_tools::adopt_review_snapshot(&mut held, current, &id)
+            .unwrap(),
+        Some(false)
+    );
+    assert_eq!(
+        held.file_scope.records()[0]
+            .decision
+            .as_ref()
+            .unwrap()
+            .candidate_id
+            .as_deref(),
+        Some(candidate.candidate_id.as_str())
+    );
+}
+
+#[actix_web::test]
 async fn closed_child_claim_releases_the_root_reservation_without_dialing() {
     use desk_agent_protocol::capability_provider::ProductSurface;
     let (db, child, mut delegation) = review_child_fixture().await;
@@ -344,6 +534,7 @@ async fn closed_child_claim_releases_the_root_reservation_without_dialing() {
         "1",
         "1",
         &child.permission_requests[0].request_id,
+        false,
         &registry,
         ProductSurface::OssPersonalOwner,
         1,
@@ -467,6 +658,7 @@ async fn approved_child_review_keeps_its_grant_and_audit_in_the_child_and_usage_
         "1",
         "1",
         request_id,
+        false,
         &registry,
         ProductSurface::OssPersonalOwner,
         1,

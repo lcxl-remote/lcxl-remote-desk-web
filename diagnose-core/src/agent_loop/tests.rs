@@ -2290,7 +2290,15 @@ async fn directory_planning_waits_for_decision_then_continues_without_granting_a
         );
         let stored = sess.inner.borrow();
         let stored = stored.as_ref().unwrap();
-        assert_eq!(stored.file_scope.records().len(), usize::from(approved));
+        assert_eq!(stored.file_scope.records().len(), 1);
+        assert_eq!(
+            stored.file_scope.records()[0].state,
+            if approved {
+                crate::file_scope::DirectoryConsentState::Approved
+            } else {
+                crate::file_scope::DirectoryConsentState::Rejected
+            }
+        );
         if approved {
             assert_eq!(
                 stored.file_scope.records()[0].state,

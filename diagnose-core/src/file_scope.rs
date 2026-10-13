@@ -205,6 +205,8 @@ pub enum DirectoryConsentState {
 pub struct DirectoryConsent {
     pub proposal: DirectoryProposal,
     pub state: DirectoryConsentState,
+    pub review_context: Option<crate::directory_review::DirectoryReviewContext>,
+    pub decision: Option<crate::directory_review::DirectoryDecision>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -299,6 +301,8 @@ impl SessionFileScope {
         self.records.push(DirectoryConsent {
             proposal,
             state: DirectoryConsentState::Pending,
+            review_context: None,
+            decision: None,
         });
         self.subject = Some(subject.clone());
         self.revision = revision;

@@ -13,6 +13,9 @@ export type AssistantFileScopeView = {
         state: string;
         source: string;
         referenceExpiresAt: string;
+        decisionActor?: string | null;
+        decisionReason?: string | null;
+        reviewId?: string | null;
     }[];
 };
 
@@ -22,7 +25,7 @@ export type AssistantDirectoryOperation =
     | { kind: 'revoke_directory'; directory_request_id: string; expected_revision: number };
 
 export function AssistantFileScope({ scope, open, onOpenChange, disabled, onUpdate, deskId, sessionTargetId,
-    showPendingActions = true, onPendingJump, selectionDisabled = false }: {
+    showPendingActions = true, onPendingJump, selectionDisabled = false, automaticApproval = false }: {
     deskId?: string;
     // undefined: unresolved; null: selected anonymous in-process worker.
     sessionTargetId?: string | null;
@@ -33,6 +36,7 @@ export function AssistantFileScope({ scope, open, onOpenChange, disabled, onUpda
     selectionDisabled?: boolean;
     onUpdate: (operation: AssistantDirectoryOperation, timeoutMessage: string) => boolean;
     showPendingActions?: boolean;
+    automaticApproval?: boolean;
     onPendingJump?: (requestId: string) => void;
 }) {
     const { t } = useTranslation();
@@ -59,10 +63,14 @@ export function AssistantFileScope({ scope, open, onOpenChange, disabled, onUpda
                 {scope.directories.map(directory => <div key={directory.requestId} className="space-y-2 rounded-md border p-3">
                     <p className="break-all font-mono text-sm">{directory.canonicalPath}</p>
                     <p className="break-words text-xs text-muted-foreground">{directory.purpose}</p>
-                    <p className="text-xs">{directory.state === 'pending' ? t('pages.aiAssistant.directories.pending')
-                        : directory.state === 'approved' ? t('pages.aiAssistant.directories.approved') : directory.state}</p>
+                    <p className="text-xs">{directory.state === 'pending' ? t(automaticApproval && directory.source === 'model_proposal' ? 'pages.aiAssistant.directories.pendingAi' : 'pages.aiAssistant.directories.pending')
+                        : directory.state === 'approved' ? t('pages.aiAssistant.directories.approved')
+                            : directory.state === 'rejected' ? t('pages.aiAssistant.directories.rejected')
+                                : directory.state === 'revoked' ? t('pages.aiAssistant.directories.revoked') : directory.state}</p>
+                    {directory.decisionActor && <p className="text-xs text-muted-foreground">{t(`pages.aiAssistant.directories.actor.${directory.decisionActor}`)}</p>}
+                    {directory.decisionReason && <p className="whitespace-pre-wrap text-xs">{directory.decisionReason}</p>}
                     <div className="flex gap-2">
-                        {directory.state === 'pending' && showPendingActions ? <>
+                        {directory.state === 'pending' && automaticApproval && directory.source === 'model_proposal' ? null : directory.state === 'pending' && showPendingActions ? <>
                             <Button type="button" size="sm" disabled={disabled} onClick={() => {
                                 submit({ kind: 'decide_directory', directory_request_id: directory.requestId, approve: true, expected_revision: scope.revision });
                             }}>{t('pages.aiAssistant.directories.approve')}</Button>

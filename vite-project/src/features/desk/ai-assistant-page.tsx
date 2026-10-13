@@ -341,8 +341,9 @@ export function AiAssistantWorkspace({
     const selectedChildTask = subagents.detail?.result.task ?? subagents.selected;
     const selectedChildDraft = selectedChildTask && childDrafts[selectedChildTask.task_id];
     const { scrollRef, contentRef, onScroll, showJumpToLatest, jumpToLatest } = useFollowLatest(!subagents.selected, permissionHistoryKey);
-    const pendingDirectories = chat.fileScope.directories.filter(directory => directory.state === 'pending');
     const automaticApproval = chat.approvalDelegation?.status === 'active';
+    const pendingDirectories = chat.fileScope.directories.filter(directory => directory.state === 'pending'
+        && !(automaticApproval && directory.source === 'model_proposal'));
     const pendingPermissionCount = chat.permissionRequests.filter(request => ['pending', 'needs_revalidation'].includes(request.state)
         && !permissionIsAutomaticallyReviewed(request, automaticApproval)).length;
     const pendingCount = pendingDirectories.length + pendingPermissionCount + pendingScheduleCount + Number(Boolean(chat.pendingGoalOpenRequest));
@@ -966,13 +967,22 @@ export function AiAssistantWorkspace({
                         commands={chat.commandTasks} providers={chat.backgroundTasks} tools={chat.tools}
                         connected={isConnected} canCancelProvider={featureProfile.background_task_cancel}
                         cancelling={chat.taskCancelling} onCancel={chat.cancelTask} />
-                    <AssistantFileScope key={`directories:${permissionHistoryKey}`} scope={chat.fileScope}
+                    <AssistantFileScope key={`directories:${permissionHistoryKey}`} scope={chat.fileScope} automaticApproval={automaticApproval}
                         deskId={deskId} sessionTargetId={chat.sessionTargetReady ? (chat.sessionTarget?.target_id ?? null) : undefined}
                         open={directorySession === permissionHistoryKey} onOpenChange={open => setDirectorySession(open ? permissionHistoryKey : null)}
                         disabled={!assistantEnabled || !isConnected || chat.hydrating || chat.contextUpdating} onUpdate={chat.updateDirectory}
                         showPendingActions={false} onPendingJump={id => jumpToPending(`assistant-directory-${id}`)} />
                     <div data-assistant-pending={pendingPermissionCount > 0 ? '' : undefined} tabIndex={-1}>
-                    <AssistantPermissionRecords approvalRecords={!rehearsal && featureProfile.approval_delegation ? <ApprovalReviews onLocate={record => { if (record.task) subagents.openDetail(record.task); else subagents.closeDetail(); setPermissionHistorySession(null); }} session={chat.sessionId ?? null} open={permissionHistorySession === permissionHistoryKey}/> : undefined} key={permissionHistoryKey} requests={chat.permissionRequests} automaticApproval={automaticApproval}
+                    <AssistantPermissionRecords approvalRecords={!rehearsal && featureProfile.approval_delegation ? <ApprovalReviews onLocate={record => {
+                            if (record.task) {
+                                subagents.openDetail(record.task);
+                                if (record.source_kind === 'directory_proposal') setChildPanel({ taskId: record.task.task_id, panel: 'directories' });
+                            } else {
+                                subagents.closeDetail();
+                                if (record.source_kind === 'directory_proposal') setDirectorySession(permissionHistoryKey);
+                            }
+                            setPermissionHistorySession(null);
+                        }} session={chat.sessionId ?? null} open={permissionHistorySession === permissionHistoryKey}/> : undefined} key={permissionHistoryKey} requests={chat.permissionRequests} automaticApproval={automaticApproval}
                         open={permissionHistorySession === permissionHistoryKey}
                         onOpenChange={(open) => setPermissionHistorySession(open ? permissionHistoryKey : null)}>
                             {(request) => (

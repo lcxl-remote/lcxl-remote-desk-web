@@ -95,8 +95,9 @@ export function AssistantSubagents({ agents, connected, canDecide, interactive, 
     const report = agents.detail?.result.report;
     const { scrollRef, contentRef, onScroll, showJumpToLatest, jumpToLatest } = useFollowLatest(true, child?.sessionId ?? task?.child_session_id ?? '');
     if (!task) return null;
-    const pendingDirectories = child?.fileScope?.directories.filter(directory => directory.state === 'pending') ?? [];
     const automaticApproval = child?.approvalDelegation?.status === 'active';
+    const pendingDirectories = child?.fileScope?.directories.filter(directory => directory.state === 'pending'
+        && !(automaticApproval && directory.source === 'model_proposal')) ?? [];
     const pendingPermissions = child?.permissionRequests?.filter(request => ['pending', 'needs_revalidation'].includes(request.state)
         && !permissionIsAutomaticallyReviewed(request, automaticApproval)) ?? [];
     const runningTaskCount = [...(child?.commandTasks ?? []), ...(child?.backgroundTasks ?? [])]
@@ -243,7 +244,7 @@ export function AssistantSubagents({ agents, connected, canDecide, interactive, 
         {child && <>
             <AssistantAttachments key={`attachments:${child.sessionId}`} sessionId={child.sessionId} open={panel === 'attachments'}
                 onOpenChange={open => setPanel(open ? 'attachments' : null)} showTrigger={false} />
-            <AssistantFileScope key={`directories:${child.sessionId}`} scope={child.fileScope ?? { revision: 0, directories: [] }}
+            <AssistantFileScope key={`directories:${child.sessionId}`} scope={child.fileScope ?? { revision: 0, directories: [] }} automaticApproval={automaticApproval}
                 deskId={deskId} sessionTargetId={sessionTargetId} open={panel === 'directories'}
                 onOpenChange={open => setPanel(open ? 'directories' : null)}
                 disabled={!canDecide || !connected || agents.updating} selectionDisabled={child.active || subagentIsTerminal(task)}

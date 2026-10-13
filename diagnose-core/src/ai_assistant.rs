@@ -1135,11 +1135,15 @@ fn merge_provider_capabilities(
 /// AI Assistant tool registry: bounded host-side reads plus one central-only
 /// typed preview. The preview is classified read-only because it only validates
 /// and echoes a draft; it has no transport capable of reaching the worker.
+fn ui_semantic_action_schema() -> serde_json::Value {
+    execute_ui_actions_tool().spec.parameters_schema["properties"]["action"].clone()
+}
+
 fn preview_tool() -> RegisteredTool {
     RegisteredTool {
         spec: ToolSpec {
             name: PREVIEW_COMPUTER_ACTION_TOOL.into(),
-            description: "Create a typed preview of a proposed Windows UIA, macOS Accessibility, or Excel semantic change. This only shows a proposal to the owner and can never execute it.".into(),
+            description: "Create a typed UI or Excel preview that never executes. For application UI use actions[].target_id from an observed control and action.adapter=ui_in_application; action.action contains the observed application_id and a semantic action (invoke, toggle, select, set_value, scroll or focus). Obtain control and application IDs with inspect_desktop_ui. For Excel use an observed range target_id and action.adapter=excel with a typed Excel action. Never invent application or target identities.".into(),
             parameters_schema: json!({
                 "type": "object",
                 "properties": {
@@ -1179,14 +1183,15 @@ fn preview_tool() -> RegisteredTool {
                                         {
                                             "type": "object",
                                             "properties": {
-                                                "adapter": {"type": "string", "const": "ui"},
+                                                "adapter": {"type": "string", "const": "ui_in_application"},
                                                 "action": {
                                                     "type": "object",
                                                     "properties": {
-                                                        "kind": {"type": "string", "enum": ["invoke", "toggle", "select", "set_value", "scroll", "focus"]},
-                                                        "params": {"type": "object"}
+                                                        "application": {"type":"object", "properties":{"token":{"type":"string"},"snapshot_id":{"type":"string"},"object_kind":{"const":"application"},"expires_at":{"type":"string"}},"required":["token","snapshot_id","object_kind","expires_at"],"additionalProperties":false},
+                                                        "action": ui_semantic_action_schema()
                                                     },
-                                                    "required": ["kind"]
+                                                    "required": ["application", "action"],
+                                                    "additionalProperties": false
                                                 }
                                             },
                                             "required": ["adapter", "action"],
@@ -1196,14 +1201,12 @@ fn preview_tool() -> RegisteredTool {
                                             "type": "object",
                                             "properties": {
                                                 "adapter": {"type": "string", "const": "excel"},
-                                                "action": {
-                                                    "type": "object",
-                                                    "properties": {
-                                                        "kind": {"type": "string", "enum": ["set_formula", "fill_down", "set_value", "set_number_format"]},
-                                                        "params": {"type": "object"}
-                                                    },
-                                                    "required": ["kind"]
-                                                }
+                                                "action": {"oneOf":[
+                                                    {"type":"object","properties":{"kind":{"const":"set_formula"},"params":{"type":"object","properties":{"formula":{"type":"string"}},"required":["formula"],"additionalProperties":false}},"required":["kind","params"],"additionalProperties":false},
+                                                    {"type":"object","properties":{"kind":{"const":"fill_down"}},"required":["kind"],"additionalProperties":false},
+                                                    {"type":"object","properties":{"kind":{"const":"set_value"},"params":{"type":"object","properties":{"value":{"type":"string"}},"required":["value"],"additionalProperties":false}},"required":["kind","params"],"additionalProperties":false},
+                                                    {"type":"object","properties":{"kind":{"const":"set_number_format"},"params":{"type":"object","properties":{"format":{"type":"string"}},"required":["format"],"additionalProperties":false}},"required":["kind","params"],"additionalProperties":false}
+                                                ]}
                                             },
                                             "required": ["adapter", "action"],
                                             "additionalProperties": false
@@ -4990,5 +4993,44 @@ mod tests {
         let encoded = validate_preview_call(&call).unwrap();
         assert!(encoded.contains("office_excel"));
         assert!(encoded.contains("set_formula"));
+    }
+
+    #[test]
+    fn preview_schema_accepts_only_real_native_ui_and_excel_action_shapes() {
+        let tool = preview_tool();
+        assert!(
+            !tool
+                .spec
+                .parameters_schema
+                .to_string()
+                .contains("\"const\":\"ui\"")
+        );
+        for action in [
+            json!({"adapter":"ui_in_application","action":{"application":{"token":"app","snapshot_id":"snapshot","object_kind":"application","expires_at":"2030-01-01T00:00:00Z"},"action":{"kind":"invoke"}}}),
+            json!({"adapter":"ui_in_application","action":{"application":{"token":"app","snapshot_id":"snapshot","object_kind":"application","expires_at":"2030-01-01T00:00:00Z"},"action":{"kind":"toggle","params":{"desired":true}}}}),
+            json!({"adapter":"excel","action":{"kind":"set_formula","params":{"formula":"=1+1"}}}),
+            json!({"adapter":"excel","action":{"kind":"fill_down"}}),
+            json!({"adapter":"excel","action":{"kind":"set_value","params":{"value":"report"}}}),
+            json!({"adapter":"excel","action":{"kind":"set_number_format","params":{"format":"0.00"}}}),
+        ] {
+            let excel = action["adapter"] == "excel";
+            let input = json!({"schema_version":1,"adapter":{"kind":if excel {"office_excel"} else {"macos_accessibility"},"version":"test"},
+            "risk":"medium","reversible":true,"data_egress":false,"actions":[{
+                "target":{"token":"target","snapshot_id":"snapshot","object_kind":if excel {"range"} else {"ui_element"},"expires_at":"2030-01-01T00:00:00Z"},
+                "action":action,"before_summary":"idle","after_intent":"requested change","verification":"read back"
+            }]});
+            crate::model_input::validate_format_with_schema(
+                &tool.spec.name,
+                &tool.spec.parameters_schema,
+                &input,
+            )
+            .unwrap();
+            let call = ToolCall {
+                id: "preview".into(),
+                name: tool.spec.name.clone(),
+                arguments_json: input.to_string(),
+            };
+            assert!(validate_preview_call(&call).is_ok(), "{input}");
+        }
     }
 }

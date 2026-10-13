@@ -817,6 +817,9 @@ pub struct DirectoryConsentDto {
     pub state: String,
     pub source: String,
     pub reference_expires_at: String,
+    pub decision_actor: Option<String>,
+    pub decision_reason: Option<String>,
+    pub review_id: Option<String>,
 }
 
 impl From<desk_diagnose_core::file_scope::SessionFileScope> for FileScopeDto {
@@ -845,6 +848,13 @@ impl From<desk_diagnose_core::file_scope::SessionFileScope> for FileScopeDto {
                     }
                     .into(),
                     reference_expires_at: record.proposal.directory.expires_at.clone(),
+                    decision_actor: record.decision.as_ref().map(|decision| match decision.source {
+                        desk_diagnose_core::dynamic_run::PermissionDecisionSource::UserDecision => "owner",
+                        desk_diagnose_core::dynamic_run::PermissionDecisionSource::AiApproval { .. } => "ai_approval",
+                        desk_diagnose_core::dynamic_run::PermissionDecisionSource::ReviewUnavailable { .. } => "system",
+                    }.into()),
+                    decision_reason: record.decision.as_ref().map(|decision| decision.reason.clone()),
+                    review_id: record.decision.as_ref().and_then(|decision| decision.candidate_id.clone()),
                 })
                 .collect(),
         }
