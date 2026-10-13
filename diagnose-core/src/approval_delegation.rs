@@ -321,6 +321,26 @@ impl ApprovalDelegation {
         Ok(())
     }
 
+    /// Hosts must also verify the persisted child/run/source relationship.
+    pub fn require_current_for_session(
+        &self,
+        session: &crate::session::PersistedAgentSession,
+    ) -> Result<(), ApprovalDelegationError> {
+        if let Some(binding) = session.agent_role.binding() {
+            binding
+                .validate(&session.conversation_id)
+                .map_err(|_| ApprovalDelegationError::StaleAuthority)?;
+            if !binding.source.allows_delegated_review() {
+                return Err(ApprovalDelegationError::StaleAuthority);
+            }
+        }
+        self.require_current(
+            session.approval_delegation_conversation_id(),
+            &session.actor_id,
+            &session.device_id,
+        )
+    }
+
     /// Reserve before the model dial, in the same database transaction that
     /// claims the review candidate. The caller provides candidate idempotency.
     pub fn reserve(

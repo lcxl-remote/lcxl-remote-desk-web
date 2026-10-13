@@ -2,7 +2,7 @@ import type * as Clients from '@/services/clients';
 import { deskErrorCodeEnum } from '@/services/types';
 import type { MetricsApi } from './dashboard';
 
-type MetricsClients = Pick<typeof Clients, 'getModelMetricsStatus' | 'getModelMetricsOverview' | 'getModelMetricsSeries' | 'getModelMetricsModels' | 'getModelMetricsTools' | 'getModelMetricsRuntime' | 'getModelMetricsCalls' | 'getModelMetricsUnassociated' | 'getModelMetricsCall' | 'getModelMetricsSettings' | 'updateModelMetricsSettings'>;
+type MetricsClients = Pick<typeof Clients, 'getModelMetricsStatus' | 'getModelMetricsOverview' | 'getModelMetricsSeries' | 'getModelMetricsModels' | 'getModelMetricsTools' | 'getModelMetricsRuntime' | 'getModelMetricsCalls' | 'getModelMetricsUnassociated' | 'getModelMetricsCall' | 'getModelMetricsSettings' | 'updateModelMetricsSettings'> & Partial<Pick<typeof Clients, 'getApprovalMetricsOverview'>>;
 
 function data<T>(response: { data?: T | null }): T {
     if (response.data == null) throw new Error('Model metrics unavailable');
@@ -15,6 +15,7 @@ export function isMetricsRevisionConflict(error: unknown): boolean {
 
 export function createMetricsApi(clients: MetricsClients): MetricsApi {
     return {
+        approvalMetrics: clients.getApprovalMetricsOverview ? (query, signal) => clients.getApprovalMetricsOverview!(query, { signal }).then(response => { if (response.success === false || response.data == null) throw Object.assign(new Error(response.message || 'Approval metrics unavailable'), { code: response.code }); return response.data; }) : undefined,
         status: (signal) => clients.getModelMetricsStatus({ signal }).then((response) => data(response)),
         overview: (query, signal) => clients.getModelMetricsOverview(query, { signal }).then((response) => data(response)),
         series: (query, signal) => clients.getModelMetricsSeries(query, { signal }).then((response) => data(response)),

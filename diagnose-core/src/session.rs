@@ -1297,6 +1297,15 @@ impl PersistedAgentSession {
         }
     }
 
+    /// The owner switch belongs to the root; requests and grants stay local.
+    pub fn approval_delegation_conversation_id(&self) -> &str {
+        self.agent_role
+            .binding()
+            .map_or(self.conversation_id.as_str(), |binding| {
+                binding.root_conversation_id.as_str()
+            })
+    }
+
     pub fn bind_delegated_owner_requirement(
         &mut self,
         source: &crate::subagent::creation::CreationEnvelope,

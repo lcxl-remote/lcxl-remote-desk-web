@@ -181,7 +181,6 @@ async fn prepare_on_inner(
         .await?;
     let stored = delegation_row::Entity::find()
         .filter(delegation_row::Column::DelegationId.eq(&parent.delegation_id))
-        .filter(delegation_row::Column::ConversationId.eq(subject.conversation_id))
         .filter(delegation_row::Column::ActorId.eq(subject.actor_id))
         .filter(delegation_row::Column::DeviceId.eq(subject.device_id))
         .one(txn)
@@ -384,11 +383,11 @@ async fn claim_inner(
             _ => ConcreteReviewResult::Unavailable,
         };
         txn.commit().await?;
+        crate::approval_metrics::committed(db, &prepared.candidate.candidate_id);
         return Ok(ClaimState::Existing(result));
     }
     let stored = delegation_row::Entity::find()
         .filter(delegation_row::Column::DelegationId.eq(&candidate.delegation_id))
-        .filter(delegation_row::Column::ConversationId.eq(&candidate.conversation_id))
         .filter(delegation_row::Column::ActorId.eq(&candidate.owner_id))
         .filter(delegation_row::Column::DeviceId.eq(&candidate.device_id))
         .one(&txn)
@@ -467,6 +466,12 @@ async fn claim_inner(
     Ok(ClaimState::Claimed(
         prepared.candidate.clone(),
         ClaimedPermissionReview {
+            statistics: std::sync::Arc::new(std::sync::Mutex::new(
+                desk_diagnose_core::approval_observation::ReviewTracking::new(
+                    &call_authority,
+                    now_unix_ms as i64,
+                ),
+            )),
             call_authority,
             delegation_call,
             candidate_id: prepared.candidate.candidate_id,
@@ -540,7 +545,6 @@ async fn settle_inner(
     }
     let stored = delegation_row::Entity::find()
         .filter(delegation_row::Column::DelegationId.eq(&candidate.delegation_id))
-        .filter(delegation_row::Column::ConversationId.eq(subject.conversation_id))
         .filter(delegation_row::Column::ActorId.eq(subject.actor_id))
         .filter(delegation_row::Column::DeviceId.eq(subject.device_id))
         .one(&txn)
@@ -633,7 +637,33 @@ async fn settle_inner(
     } else {
         None
     };
+    let observation_reason = if delegation.status
+        != desk_diagnose_core::approval_delegation::ApprovalDelegationStatus::Active
+    {
+        Some(desk_diagnose_core::approval_observation::ReviewReason::Revoked)
+    } else if now_unix_ms >= candidate.expires_at_unix_ms {
+        Some(desk_diagnose_core::approval_observation::ReviewReason::CandidateExpired)
+    } else if row.lease_deadline.is_some_and(|v| v <= now_unix_ms as i64) {
+        Some(desk_diagnose_core::approval_observation::ReviewReason::LeaseExpired)
+    } else if !current {
+        Some(desk_diagnose_core::approval_observation::ReviewReason::SourceChanged)
+    } else if !usage_in_bounds {
+        Some(desk_diagnose_core::approval_observation::ReviewReason::Budget)
+    } else {
+        None
+    };
+    let statistics_json = crate::approval_metrics::settled_json(
+        &row,
+        claim.statistics.try_lock().ok().map(|value| value.clone()),
+        status,
+        observation_reason,
+        now_unix_ms as i64,
+    );
     let changed = review_row::Entity::update_many()
+        .col_expr(
+            review_row::Column::StatisticsJson,
+            Expr::value(statistics_json),
+        )
         .col_expr(review_row::Column::Status, Expr::value(status))
         .col_expr(review_row::Column::DecisionJson, Expr::value(decision_json))
         .col_expr(
@@ -658,6 +688,7 @@ async fn settle_inner(
         return Err(invalid());
     }
     txn.commit().await?;
+    crate::approval_metrics::committed(db, &candidate.candidate_id);
     Ok(match status {
         APPROVAL_REVIEW_STATUS_APPROVED => ConcreteReviewResult::Approved,
         APPROVAL_REVIEW_STATUS_DENIED => ConcreteReviewResult::Denied(
@@ -701,6 +732,12 @@ async fn review_prepared_call_inner(
         crate::approval_reviewer::call_claimed_permission_review(db, &candidate, &claim),
     )
     .await;
+    if response.is_err()
+        && let Ok(mut tracking) = claim.statistics.try_lock()
+    {
+        tracking.snapshot.reason =
+            Some(desk_diagnose_core::approval_observation::ReviewReason::Timeout);
+    }
     let (decision, tokens) = match &response {
         Ok(Ok(response)) => (
             response.decision.as_ref(),

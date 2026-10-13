@@ -57,12 +57,20 @@ pub fn decode<T: DeserializeOwned>(value: &str) -> Result<T, DbErr> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovalDimensions {
+    pub outcome: desk_diagnose_core::approval_observation::ReviewOutcome,
+    pub source_kind: String,
+    pub session_kind: desk_diagnose_core::approval_observation::SessionKind,
+    pub reason: Option<desk_diagnose_core::approval_observation::ReviewReason>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SeriesDimensions {
     pub attribution: Option<Attribution>,
     pub probe: bool,
     pub tool: Option<String>,
     pub runtime_definition: Option<runtime::RuntimeDefinition>,
     pub runtime_labels: Option<runtime::RuntimeLabels>,
+    pub approval: Option<ApprovalDimensions>,
     pub other: bool,
 }
 
@@ -610,7 +618,7 @@ impl Store {
         let existing = compact::Entity::find_by_id(&observed.object_id)
             .one(txn)
             .await?;
-        let (mut state, old, revision, trimmed) = if let Some(row) = &existing {
+        let (mut state, mut old, revision, trimmed) = if let Some(row) = &existing {
             let state: CompactState = decode(&row.snapshot_json)?;
             let old: Contribution = decode(&row.contribution_json)?;
             (state, old, row.state_revision, row.detail_trimmed)
@@ -647,6 +655,7 @@ impl Store {
         if let Some(group) = group {
             state.group = group;
         }
+        let previous_event = state.event.clone();
         if existing.is_some() {
             match aggregate::merge(&mut state.event, observed) {
                 MergeResult::Duplicate
@@ -660,6 +669,58 @@ impl Store {
                 }
                 MergeResult::Conflict => return Ok(Some("state_conflict")),
                 MergeResult::Applied | MergeResult::Duplicate => {}
+            }
+        }
+        if existing.is_some() && matches!(&state.event.payload, ObservationPayload::Approval(_)) {
+            let old_dims = match &previous_event.payload {
+                ObservationPayload::Approval(v) => {
+                    Some((&v.source_kind, v.session_kind, v.reason, v.outcome))
+                }
+                _ => None,
+            };
+            let new_dims = match &state.event.payload {
+                ObservationPayload::Approval(v) => {
+                    Some((&v.source_kind, v.session_kind, v.reason, v.outcome))
+                }
+                _ => None,
+            };
+            if previous_event.attribution != state.event.attribution || old_dims != new_dims {
+                for assigned in &state.assignments {
+                    let row = rollup::Entity::find()
+                        .filter(rollup::Column::SeriesKey.eq(&assigned.key))
+                        .one(txn)
+                        .await?
+                        .ok_or_else(|| DbErr::Custom("approval rollup missing".into()))?;
+                    if row.frozen {
+                        return Ok(Some("outside_window"));
+                    }
+                    let mut totals: Totals = decode(&row.totals_json)?;
+                    totals
+                        .change(
+                            &old,
+                            &Contribution {
+                                kind: old.kind,
+                                ..Default::default()
+                            },
+                        )
+                        .ok_or_else(|| DbErr::Custom("approval arithmetic unavailable".into()))?;
+                    let encoded = encode(&totals)?;
+                    let delta = encoded.len() as i64 - row.totals_json.len() as i64;
+                    if !resources::resize(txn, config, StorageKind::Rollup, 0, delta).await? {
+                        return Ok(Some("rollup_budget"));
+                    }
+                    rollup::Entity::update_many()
+                        .col_expr(rollup::Column::TotalsJson, Expr::value(encoded))
+                        .col_expr(
+                            rollup::Column::StorageBytes,
+                            Expr::value(row.storage_bytes + delta),
+                        )
+                        .filter(rollup::Column::Id.eq(row.id))
+                        .exec(txn)
+                        .await?;
+                }
+                state.assignments = self.assignments(txn, &state.event, config).await?;
+                old = Contribution::default();
             }
         }
         if !self.manager
@@ -839,6 +900,7 @@ impl Store {
         }
         let mut trimmed = trimmed;
         if !trimmed
+            && !matches!(&state.event.payload, ObservationPayload::Approval(_))
             && state.event.started_at_ms >= now.saturating_sub(i64::from(config.detail_days) * DAY)
         {
             let current = detail::Entity::find_by_id(&observed.object_id)
@@ -995,9 +1057,29 @@ impl Store {
                 tool: None,
                 runtime_definition: None,
                 runtime_labels: None,
+                approval: None,
                 other: false,
             },
         )];
+        if let ObservationPayload::Approval(review) = &observed.payload {
+            dimensions = vec![(
+                "approval",
+                SeriesDimensions {
+                    attribution: Some(observed.attribution.clone()),
+                    probe: false,
+                    tool: None,
+                    runtime_definition: None,
+                    runtime_labels: None,
+                    approval: Some(ApprovalDimensions {
+                        outcome: review.outcome,
+                        source_kind: review.source_kind.clone(),
+                        session_kind: review.session_kind,
+                        reason: review.reason,
+                    }),
+                    other: false,
+                },
+            )];
+        }
         if let ObservationPayload::Runtime(runtime) = &observed.payload {
             dimensions.push((
                 "runtime",
@@ -1007,10 +1089,11 @@ impl Store {
                     tool: None,
                     runtime_definition: Some(runtime.definition),
                     runtime_labels: Some(runtime.labels.clone()),
+                    approval: None,
                     other: false,
                 },
             ));
-        } else {
+        } else if !matches!(&observed.payload, ObservationPayload::Approval(_)) {
             dimensions.push((
                 "model",
                 SeriesDimensions {
@@ -1019,6 +1102,7 @@ impl Store {
                     tool: None,
                     runtime_definition: None,
                     runtime_labels: None,
+                    approval: None,
                     other: false,
                 },
             ));
@@ -1036,6 +1120,7 @@ impl Store {
                         tool: Some(tool_key.clone()),
                         runtime_definition: None,
                         runtime_labels: None,
+                        approval: None,
                         other: false,
                     },
                 ));
@@ -1068,6 +1153,7 @@ impl Store {
                             tool: None,
                             runtime_definition: None,
                             runtime_labels: None,
+                            approval: None,
                             other: true,
                         };
                         key = series_key(width, bucket, series_kind, &object_kind, &dims)?;
@@ -1167,6 +1253,21 @@ fn same_fact(rows: &[event::Model], observed: &ObservationEvent) -> bool {
             .ok()
             .is_some_and(|mut stored| {
                 stored.event_id.clone_from(&observed.event_id);
+                if let (ObservationPayload::Approval(old), ObservationPayload::Approval(new)) =
+                    (&mut stored.payload, &observed.payload)
+                {
+                    stored.occurred_at_ms = observed.occurred_at_ms;
+                    if observed.phase == ObservationPhase::Started
+                        && !old.terminal()
+                        && !new.terminal()
+                    {
+                        // Repeated scans describe one queued source. Preserve the first
+                        // persisted queue time; later claim/reconcile clocks are not new work.
+                        old.eligible_at_ms = new.eligible_at_ms;
+                        stored.started_at_ms = observed.started_at_ms;
+                    }
+                }
+
                 // Replaying a stable association or initial permission snapshot is the
                 // same fact even when another business continuation submits it later.
                 if matches!(&observed.relation, Some(ObservationRelation::Link { .. }))
@@ -1286,5 +1387,9 @@ mod tests {
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../signal-facade/tests/fixtures/model_metrics_unassociated.rs"
+    ));
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../signal-facade/tests/fixtures/approval_metrics.rs"
     ));
 }

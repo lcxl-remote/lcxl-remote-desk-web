@@ -22,6 +22,7 @@ mod response_restart;
 mod retention;
 mod role_recovery;
 pub(super) mod scheduled;
+mod shared_approval;
 mod ui_read;
 
 async fn active_parent_for_group(db: &DatabaseConnection, group_id: &str) -> PersistedAgentSession {

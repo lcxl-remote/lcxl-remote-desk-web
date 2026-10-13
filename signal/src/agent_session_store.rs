@@ -578,7 +578,33 @@ impl SignalAgentSessionStore {
                 txn.rollback().await.ok();
                 continue;
             }
+            let unclaimed_observations = if matches!(
+                event.decision_source,
+                desk_diagnose_core::dynamic_run::PermissionDecisionSource::ReviewUnavailable { .. }
+            ) {
+                match txn.begin().await {
+                    Ok(observer) => {
+                        let values = crate::approval_metrics::unavailable_on(
+                            &observer,
+                            &session,
+                            &requested,
+                            now_from(now).timestamp_millis(),
+                        )
+                        .await;
+                        let _ = observer.rollback().await;
+                        values
+                    }
+                    Err(_) => vec![],
+                }
+            } else {
+                vec![]
+            };
             agent_run_event::ActiveModel {
+                approval_statistics_at_ms: Set((!unclaimed_observations.is_empty())
+                    .then_some(now_from(now).timestamp_millis())),
+                approval_statistics_json: Set((!unclaimed_observations.is_empty())
+                    .then(|| serde_json::to_string(&unclaimed_observations).ok())
+                    .flatten()),
                 event_id: Set(event.event.event_id.clone()),
                 run_id: Set(event.event.run_id.clone()),
                 event_seq: Set(i64::try_from(event.event.event_seq)
@@ -632,6 +658,14 @@ impl SignalAgentSessionStore {
             txn.commit()
                 .await
                 .map_err(|error| internal(format!("commit permission decision: {error}")))?;
+            for observation in &unclaimed_observations {
+                crate::approval_metrics::submit(
+                    observation,
+                    desk_diagnose_core::model_observability::ObservationPhase::Completed,
+                    2,
+                    now_from(now).timestamp_millis(),
+                );
+            }
             desk_diagnose_core::model_observability::permission::decided(
                 &event,
                 now_from(now).timestamp_millis(),

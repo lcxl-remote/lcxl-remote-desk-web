@@ -700,10 +700,8 @@ pub(crate) fn project_tool_message(message: &mut ChatMessage) {
 pub fn project_request(request: &crate::seam::ModelRequest) -> crate::seam::ModelRequest {
     let mut request = request.clone();
     for message in &mut request.messages {
-        if request.use_case == crate::model_profile::ModelUseCase::Approval
-            && let Some(references) = &request.ui_references
-        {
-            project_review_message(message, references);
+        if request.use_case == crate::model_profile::ModelUseCase::Approval {
+            project_review_message(message, request.ui_references.as_ref());
         }
         project_tool_message(message);
         if let Some(references) = &request.ui_references {
@@ -713,8 +711,10 @@ pub fn project_request(request: &crate::seam::ModelRequest) -> crate::seam::Mode
             if let Ok(mut value) = serde_json::from_str::<Value>(&call.arguments_json) {
                 if let Some(references) = &request.ui_references {
                     references.alias_native_arguments(&mut value);
+                    references.alias_task_arguments(&call.name, &mut value);
                 }
                 project_arguments(&call.name, &mut value);
+                crate::model_input::project_protocol_versions(&call.name, &mut value);
                 call.arguments_json = value.to_string();
             }
         }
@@ -734,15 +734,18 @@ pub fn project_request(request: &crate::seam::ModelRequest) -> crate::seam::Mode
                             object.remove("canonical_input_digest_sha256");
                         }
                         if let Some(tool) = entry["tool_name"].as_str().map(str::to_owned)
-                            && (tool == "send_raw_input"
+                            && let Some(exact) = entry.get_mut("approved_exact_input")
+                        {
+                            if tool == "send_raw_input"
                                 || tool == "execute_wayland_output_input"
                                 || crate::browser_model_ids::supports(&tool)
                                 || crate::result_model_ids::supports(&tool)
                                 || crate::document_model_ids::supports(&tool)
-                                || !fields(&tool).is_empty())
-                            && let Some(exact) = entry.get_mut("approved_exact_input")
-                        {
-                            project_arguments(&tool, exact);
+                                || !fields(&tool).is_empty()
+                            {
+                                project_arguments(&tool, exact);
+                            }
+                            crate::model_input::project_protocol_versions(&tool, exact);
                         }
                     }
                     message
@@ -760,7 +763,7 @@ pub fn project_request(request: &crate::seam::ModelRequest) -> crate::seam::Mode
 
 fn project_review_message(
     message: &mut ChatMessage,
-    references: &crate::ui_references::UiReferenceState,
+    references: Option<&crate::ui_references::UiReferenceState>,
 ) {
     let Some(start) = message
         .text
@@ -784,20 +787,27 @@ fn project_review_message(
     if let Some(action) = candidate["action_json"].as_str()
         && let Ok(mut action) = serde_json::from_str::<Value>(action)
     {
-        references.alias_native_arguments(&mut action);
+        if let Some(references) = references {
+            references.alias_native_arguments(&mut action);
+        }
         project_scope(&mut action);
         if let Some(input) = action.get_mut("exact_input") {
             project_arguments(&tool, input);
+            crate::model_input::project_protocol_versions(&tool, input);
         }
         if candidate["input_kind"] == "concrete_call" {
             project_arguments(&tool, &mut action);
+            crate::model_input::project_protocol_versions(&tool, &mut action);
         }
         if let Some(input) = action["canonical_scope_input"].as_str()
             && let Ok(mut input) = serde_json::from_str::<Value>(input)
         {
-            references.alias_native_arguments(&mut input);
+            if let Some(references) = references {
+                references.alias_native_arguments(&mut input);
+            }
             project_scope(&mut input);
             project_arguments(&tool, &mut input);
+            crate::model_input::project_protocol_versions(&tool, &mut input);
             action["canonical_scope_input"] = Value::String(input.to_string());
         }
         candidate["action_json"] = Value::String(action.to_string());
@@ -811,7 +821,9 @@ fn project_review_message(
         descriptor["tool_spec"] = serde_json::to_value(spec).unwrap();
         candidate["descriptor_json"] = Value::String(descriptor.to_string());
     }
-    references.alias_native_arguments(&mut candidate["context"]);
+    if let Some(references) = references {
+        references.alias_native_arguments(&mut candidate["context"]);
+    }
     hide_references(&mut candidate["context"]);
     if let Some(evidence) = candidate["context"]["evidence"].as_array_mut() {
         for evidence in evidence {
@@ -823,7 +835,9 @@ fn project_review_message(
             {
                 let mut projected = ChatMessage::tool_result(id, "review-evidence", text);
                 project_tool_message(&mut projected);
-                references.project_message(&mut projected);
+                if let Some(references) = references {
+                    references.project_message(&mut projected);
+                }
                 evidence["text"] = Value::String(projected.text);
             }
         }
@@ -901,6 +915,129 @@ pub fn project_tool(tool: &mut crate::chat::ToolSpec) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn protocol_versions_are_hidden_in_grants_and_history_without_changing_authority() {
+        use crate::{chat::ToolCallRef, prompt::ResponseFormatSpec, seam::ModelRequest};
+        let canonical =
+            json!({"schema_version":1,"shell":"bash","command":"pwd","timeout_ms":10000});
+        let entries =
+            json!([{"tool_name":"exec_command","state":"active","approved_exact_input":canonical}]);
+        let authorization = ChatMessage::text(
+            "grants",
+            ChatRole::System,
+            format!(
+                "CURRENT AUTHORIZED GRANTS\n<capability_authorization>{entries}</capability_authorization>"
+            ),
+        );
+        let history = ChatMessage::assistant_tool_calls(
+            "history",
+            "",
+            vec![ToolCallRef {
+                id: "old-call".into(),
+                name: "request_permissions".into(),
+                arguments_json:
+                    json!({"items":[{"tool_name":"exec_command","exact_input":canonical}]})
+                        .to_string(),
+            }],
+        );
+        let command = ChatMessage::assistant_tool_calls(
+            "command",
+            "",
+            vec![ToolCallRef {
+                id: "command-call".into(),
+                name: "exec_command".into(),
+                arguments_json: canonical.to_string(),
+            }],
+        );
+        let request = ModelRequest::text_only(
+            vec![authorization, history, command],
+            ResponseFormatSpec::None,
+        );
+        let original = serde_json::to_string(&request.messages).unwrap();
+        let projected = project_request(&request);
+        let text = &projected.messages[0].text;
+        let start =
+            text.find("<capability_authorization>").unwrap() + "<capability_authorization>".len();
+        let mut stream = serde_json::Deserializer::from_str(&text[start..]).into_iter::<Value>();
+        let grants = stream.next().unwrap().unwrap();
+        let approved = &grants[0]["approved_exact_input"];
+        assert!(approved.get("schema_version").is_none());
+        assert_eq!(approved["command"], "pwd");
+        let input: Value =
+            serde_json::from_str(&projected.messages[1].tool_calls[0].arguments_json).unwrap();
+        assert_eq!(&input["items"][0]["exact_input"], approved);
+        let visible: Value =
+            serde_json::from_str(&projected.messages[2].tool_calls[0].arguments_json).unwrap();
+        assert_eq!(&visible, approved);
+        let resolved = resolve_call(
+            &ToolCall {
+                id: "next".into(),
+                name: "exec_command".into(),
+                arguments_json: approved.to_string(),
+            },
+            &[],
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&resolved.arguments_json).unwrap(),
+            canonical
+        );
+        let policy = crate::command_confirmation::test_policy();
+        let confirmation = policy.prepare(&canonical.to_string(), 1).unwrap();
+        policy
+            .revalidate(&confirmation, &resolved.arguments_json, 1)
+            .unwrap();
+        assert!(same_call_input(
+            "exec_command",
+            &approved.to_string(),
+            &resolved.arguments_json
+        ));
+        let mut changed = canonical.clone();
+        changed["command"] = json!("date");
+        assert!(!same_call_input(
+            "exec_command",
+            &canonical.to_string(),
+            &changed.to_string()
+        ));
+        changed = canonical.clone();
+        changed["schema_version"] = json!(99);
+        assert!(!same_call_input(
+            "exec_command",
+            &changed.to_string(),
+            &canonical.to_string()
+        ));
+        assert_eq!(serde_json::to_string(&request.messages).unwrap(), original);
+        assert_eq!(
+            serde_json::to_string(&project_request(&projected).messages).unwrap(),
+            serde_json::to_string(&projected.messages).unwrap()
+        );
+    }
+
+    #[test]
+    fn approval_candidates_hide_versions_without_requiring_ui_aliases() {
+        use crate::{model_profile::ModelUseCase, prompt::ResponseFormatSpec, seam::ModelRequest};
+        let action = json!({"schema_version":1,"shell":"bash","command":"pwd","timeout_ms":10000});
+        let candidate = json!({"tool_name":"exec_command","input_kind":"concrete_call","action_json":action.to_string(),"context":{}});
+        let message = ChatMessage::text(
+            "review",
+            ChatRole::System,
+            format!("<candidate_json>{candidate}</candidate_json>"),
+        );
+        let mut request = ModelRequest::text_only(vec![message], ResponseFormatSpec::None);
+        request.use_case = ModelUseCase::Approval;
+        let original = request.messages[0].text.clone();
+        let projected = project_request(&request);
+        let text = &projected.messages[0].text;
+        let start = text.find("<candidate_json>").unwrap() + "<candidate_json>".len();
+        let end = text.find("</candidate_json>").unwrap();
+        let result: Value = serde_json::from_str(&text[start..end]).unwrap();
+        let visible: Value = serde_json::from_str(result["action_json"].as_str().unwrap()).unwrap();
+        assert!(visible.get("schema_version").is_none());
+        assert_eq!(visible["command"], "pwd");
+        assert_eq!(request.messages[0].text, original);
+    }
     use crate::chat::ToolCallRef;
     #[test]
     fn self_only_search_returns_actionable_correction() {

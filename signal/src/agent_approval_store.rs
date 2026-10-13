@@ -29,6 +29,8 @@ use sea_orm::{
 /// A claimed review is the sole permission to make one external reviewer call.
 /// The raw candidate is never stored a second time in SQLite.
 pub struct ClaimedPermissionReview {
+    pub statistics:
+        std::sync::Arc<std::sync::Mutex<desk_diagnose_core::approval_observation::ReviewTracking>>,
     pub call_authority: desk_diagnose_core::subagent::reservation::ReviewCallAuthority,
     pub delegation_call:
         Option<desk_diagnose_core::subagent::reservation::DelegationCallReservation>,
@@ -54,7 +56,7 @@ pub async fn pending_permission_reviews(
     db: &DatabaseConnection,
     after_id: i64,
     limit: u64,
-    _now_unix_ms: u64,
+    now_unix_ms: u64,
 ) -> Result<(Vec<PendingPermissionReview>, Option<i64>), DbErr> {
     use desk_diagnose_core::dynamic_run::PermissionRequestState;
     let page_size = limit.clamp(1, 64);
@@ -70,33 +72,81 @@ pub async fn pending_permission_reviews(
         .flatten();
     let mut pending = Vec::new();
     for row in rows {
-        let session_row = agent_session::Entity::find()
-            .filter(agent_session::Column::ConversationId.eq(&row.conversation_id))
-            .filter(agent_session::Column::ActorId.eq(&row.actor_id))
-            .filter(agent_session::Column::DeviceId.eq(&row.device_id))
-            .one(db)
+        let owner_id = row.actor_id.clone();
+        let mut conversations = vec![row.conversation_id.clone()];
+        // Unfinished children are bounded by the root capacity, independent of
+        // the main turn's active/idle state and the time the switch was enabled.
+        let children = crate::entity::agent_subagent_run::Entity::find()
+            .filter(
+                crate::entity::agent_subagent_run::Column::RootConversationId
+                    .eq(&row.conversation_id),
+            )
+            .filter(crate::entity::agent_subagent_run::Column::ActorId.eq(&owner_id))
+            .filter(crate::entity::agent_subagent_run::Column::DeviceId.eq(&row.device_id))
+            .filter(crate::entity::agent_subagent_run::Column::State.is_not_in([
+                "completed",
+                "failed",
+                "cancelled",
+            ]))
+            .order_by_asc(crate::entity::agent_subagent_run::Column::Id)
+            .limit(desk_diagnose_core::subagent::SUBAGENT_ROOT_CAPACITY as u64)
+            .all(db)
             .await?;
-        let Some(session_row) = session_row else {
-            continue;
-        };
-        let session =
-            PersistedAgentSession::decode_json(&session_row.state_json).map_err(|_| invalid())?;
-        if session.surface != AgentSessionSurface::AiAssistant
-            || session.turn_state.is_active()
-            || !session.allows_delegated_review()
-        {
-            continue;
-        }
-        for request in &session.permission_requests {
-            if request.state == PermissionRequestState::Pending
-                && request.input_revision == session.input_revision
+        conversations.extend(
+            children
+                .into_iter()
+                .map(|child| child.child_conversation_id),
+        );
+        for conversation_id in conversations {
+            let session_row = agent_session::Entity::find()
+                .filter(agent_session::Column::ConversationId.eq(&conversation_id))
+                .filter(agent_session::Column::ActorId.eq(&owner_id))
+                .filter(agent_session::Column::DeviceId.eq(&row.device_id))
+                .one(db)
+                .await?;
+            let Some(session_row) = session_row else {
+                continue;
+            };
+            let session = PersistedAgentSession::decode_json(&session_row.state_json)
+                .map_err(|_| invalid())?;
+            if session.surface != AgentSessionSurface::AiAssistant
+                || session.turn_state.is_active()
+                || !session.allows_delegated_review()
+                || session.approval_delegation_conversation_id() != row.conversation_id
+                || !crate::agent_subagent_store::shared_approval_current_on(
+                    db,
+                    &session,
+                    as_i64(now_unix_ms)?,
+                )
+                .await?
             {
-                pending.push(PendingPermissionReview {
-                    conversation_id: row.conversation_id.clone(),
-                    owner_id: row.actor_id.clone(),
-                    device_id: row.device_id.clone(),
-                    request_id: request.request_id.clone(),
-                });
+                continue;
+            }
+            for request in &session.permission_requests {
+                if request.state == PermissionRequestState::Pending
+                    && request.input_revision == session.input_revision
+                {
+                    if !desk_diagnose_core::approval_review::requires_owner_decision(request) {
+                        let delegation = decode(&row)?;
+                        for item in &request.items {
+                            if let Ok(source) =
+                                desk_diagnose_core::approval_review::permission_review_source_id(
+                                    &request.request_id,
+                                    &item.item_id,
+                                )
+                            {
+                                let tracking=desk_diagnose_core::approval_observation::ReviewTracking::queued(&row.actor_id.clone(),&row.device_id,&session.conversation_id,&row.conversation_id,&delegation.delegation_id,delegation.revision,"permission_item",&source,now_unix_ms as i64);
+                                crate::approval_metrics::submit(&tracking,desk_diagnose_core::model_observability::ObservationPhase::Started,0,now_unix_ms as i64);
+                            }
+                        }
+                    }
+                    pending.push(PendingPermissionReview {
+                        conversation_id: session.conversation_id.clone(),
+                        owner_id: row.actor_id.clone(),
+                        device_id: row.device_id.clone(),
+                        request_id: request.request_id.clone(),
+                    });
+                }
             }
         }
     }
@@ -236,7 +286,10 @@ pub async fn claim_permission_review(
     let destination = config.destination_identity().map_err(|_| invalid())?;
     let delegation_row = delegation_row::Entity::find()
         .filter(delegation_row::Column::DelegationId.eq(&candidate.delegation_id))
-        .filter(delegation_row::Column::ConversationId.eq(&candidate.conversation_id))
+        .filter(
+            delegation_row::Column::ConversationId
+                .eq(session.approval_delegation_conversation_id()),
+        )
         .filter(delegation_row::Column::ActorId.eq(&candidate.owner_id))
         .filter(delegation_row::Column::DeviceId.eq(&candidate.device_id))
         .one(&txn)
@@ -317,6 +370,7 @@ pub async fn claim_permission_review(
             return Err(invalid());
         }
         txn.commit().await?;
+        crate::approval_metrics::committed(db, &candidate.candidate_id);
         return Ok(None);
     }
     let reserved_tokens = desk_diagnose_core::approval_usage::reviewer_token_reservation(
@@ -398,6 +452,12 @@ pub async fn claim_permission_review(
     .await?;
     txn.commit().await?;
     Ok(Some(ClaimedPermissionReview {
+        statistics: std::sync::Arc::new(std::sync::Mutex::new(
+            desk_diagnose_core::approval_observation::ReviewTracking::new(
+                &call_authority,
+                now_unix_ms as i64,
+            ),
+        )),
         call_authority,
         delegation_call,
         candidate_id: candidate.candidate_id.clone(),
@@ -424,6 +484,7 @@ pub async fn settle_permission_review(
     actual_tokens: Option<u64>,
     readiness_revision: u64,
     now_unix_ms: u64,
+    tracking: Option<desk_diagnose_core::approval_observation::ReviewTracking>,
 ) -> Result<String, DbErr> {
     use desk_diagnose_core::approval_egress::authorize_permission_review_egress;
     use desk_diagnose_core::approval_review::{
@@ -583,7 +644,33 @@ pub async fn settle_permission_review(
     } else {
         None
     };
+    let observation_reason = if delegation.status
+        != desk_diagnose_core::approval_delegation::ApprovalDelegationStatus::Active
+    {
+        Some(desk_diagnose_core::approval_observation::ReviewReason::Revoked)
+    } else if now_unix_ms >= candidate.expires_at_unix_ms {
+        Some(desk_diagnose_core::approval_observation::ReviewReason::CandidateExpired)
+    } else if row.lease_deadline.is_some_and(|v| v <= now_unix_ms as i64) {
+        Some(desk_diagnose_core::approval_observation::ReviewReason::LeaseExpired)
+    } else if !authorized {
+        Some(desk_diagnose_core::approval_observation::ReviewReason::SourceChanged)
+    } else if !usage_in_bounds {
+        Some(desk_diagnose_core::approval_observation::ReviewReason::Budget)
+    } else {
+        None
+    };
+    let statistics_json = crate::approval_metrics::settled_json(
+        &row,
+        tracking,
+        status,
+        observation_reason,
+        now_unix_ms as i64,
+    );
     let changed = review_row::Entity::update_many()
+        .col_expr(
+            review_row::Column::StatisticsJson,
+            Expr::value(statistics_json),
+        )
         .col_expr(review_row::Column::Status, Expr::value(status))
         .col_expr(
             review_row::Column::DecisionJson,
@@ -611,6 +698,7 @@ pub async fn settle_permission_review(
         return Err(invalid());
     }
     txn.commit().await?;
+    crate::approval_metrics::committed(db, &candidate.candidate_id);
     Ok(status.to_owned())
 }
 
@@ -651,7 +739,6 @@ pub async fn expire_review_leases(
         }
         let stored = delegation_row::Entity::find()
             .filter(delegation_row::Column::DelegationId.eq(&row.delegation_id))
-            .filter(delegation_row::Column::ConversationId.eq(&row.conversation_id))
             .filter(delegation_row::Column::ActorId.eq(&row.actor_id))
             .filter(delegation_row::Column::DeviceId.eq(&row.device_id))
             .one(&txn)
@@ -696,7 +783,22 @@ pub async fn expire_review_leases(
         } else {
             APPROVAL_REVIEW_STATUS_UNAVAILABLE
         };
+        let reason = if delegation.status
+            != desk_diagnose_core::approval_delegation::ApprovalDelegationStatus::Active
+        {
+            desk_diagnose_core::approval_observation::ReviewReason::Revoked
+        } else if row.expires_at <= now {
+            desk_diagnose_core::approval_observation::ReviewReason::CandidateExpired
+        } else {
+            desk_diagnose_core::approval_observation::ReviewReason::LeaseExpired
+        };
+        let statistics_json =
+            crate::approval_metrics::settled_json(&row, None, status, Some(reason), now);
         let changed = review_row::Entity::update_many()
+            .col_expr(
+                review_row::Column::StatisticsJson,
+                Expr::value(statistics_json),
+            )
             .col_expr(review_row::Column::Status, Expr::value(status))
             .col_expr(
                 review_row::Column::LeaseOwner,
@@ -716,6 +818,7 @@ pub async fn expire_review_leases(
             return Err(invalid());
         }
         txn.commit().await?;
+        crate::approval_metrics::committed(db, &row.candidate_id);
         settled += 1;
     }
     Ok(settled)
@@ -785,10 +888,18 @@ pub(crate) async fn reviewed_permission_batch_on(
     if candidates.len() != request.items.len() || candidates.is_empty() {
         return Err(invalid());
     }
+    if !crate::agent_subagent_store::shared_approval_current_on(txn, session, as_i64(now_unix_ms)?)
+        .await?
+    {
+        return Err(invalid());
+    }
     let first = &candidates[0];
     let stored = delegation_row::Entity::find()
         .filter(delegation_row::Column::DelegationId.eq(&first.delegation_id))
-        .filter(delegation_row::Column::ConversationId.eq(&session.conversation_id))
+        .filter(
+            delegation_row::Column::ConversationId
+                .eq(session.approval_delegation_conversation_id()),
+        )
         .filter(delegation_row::Column::ActorId.eq(&session.actor_id))
         .filter(delegation_row::Column::DeviceId.eq(&session.device_id))
         .one(txn)
@@ -898,7 +1009,7 @@ pub(crate) async fn reviewed_permission_batch_on(
         reviews.push(review);
     }
     let (decisions, source) =
-        permission_decision_from_reviews(request, &delegation, candidates, &reviews)
+        permission_decision_from_reviews(session, request, &delegation, candidates, &reviews)
             .map_err(|_| invalid())?;
     Ok(ReviewedPermissionBatch {
         decisions,
@@ -929,9 +1040,17 @@ pub(crate) async fn current_grant_parent_on(
     {
         return Err(invalid());
     }
+    if !crate::agent_subagent_store::shared_approval_current_on(txn, session, as_i64(now_unix_ms)?)
+        .await?
+    {
+        return Err(invalid());
+    }
     let row = delegation_row::Entity::find()
         .filter(delegation_row::Column::DelegationId.eq(&parent.delegation_id))
-        .filter(delegation_row::Column::ConversationId.eq(&session.conversation_id))
+        .filter(
+            delegation_row::Column::ConversationId
+                .eq(session.approval_delegation_conversation_id()),
+        )
         .filter(delegation_row::Column::ActorId.eq(&session.actor_id))
         .filter(delegation_row::Column::DeviceId.eq(&session.device_id))
         .one(txn)
@@ -950,11 +1069,7 @@ pub(crate) async fn current_grant_parent_on(
     )
     .await?;
     delegation
-        .require_current(
-            &session.conversation_id,
-            &session.actor_id,
-            &session.device_id,
-        )
+        .require_current_for_session(session)
         .map_err(|_| invalid())?;
     let event_row = agent_run_event::Entity::find()
         .filter(agent_run_event::Column::EventId.eq(&parent.decision_event_id))
@@ -1115,6 +1230,31 @@ pub async fn load_active_for_subject(
     owner_id: &str,
     device_id: &str,
 ) -> Result<Option<ApprovalDelegation>, DbErr> {
+    let session = agent_session::Entity::find()
+        .filter(agent_session::Column::ConversationId.eq(conversation_id))
+        .filter(agent_session::Column::ActorId.eq(owner_id.to_owned()))
+        .filter(agent_session::Column::DeviceId.eq(device_id))
+        .one(db)
+        .await?;
+    let session = session
+        .as_ref()
+        .map(|row| PersistedAgentSession::decode_json(&row.state_json).map_err(|_| invalid()))
+        .transpose()?;
+    if let Some(child) = session
+        .as_ref()
+        .filter(|session| !session.agent_role.is_main())
+        && !crate::agent_subagent_store::shared_approval_current_on(
+            db,
+            child,
+            chrono::Utc::now().timestamp_millis(),
+        )
+        .await?
+    {
+        return Ok(None);
+    }
+    let conversation_id = session.as_ref().map_or(conversation_id, |session| {
+        session.approval_delegation_conversation_id()
+    });
     let row = delegation_row::Entity::find()
         .filter(delegation_row::Column::ConversationId.eq(conversation_id))
         .filter(delegation_row::Column::ActorId.eq(owner_id))
@@ -1150,7 +1290,14 @@ pub async fn prepare_permission_review_batch(
     }
     let txn = db.begin().await?;
     let (_, session) = session_on(&txn, conversation_id, owner_id, device_id).await?;
-    if session.turn_state.is_active() {
+    if session.turn_state.is_active()
+        || !crate::agent_subagent_store::shared_approval_current_on(
+            &txn,
+            &session,
+            as_i64(now_unix_ms)?,
+        )
+        .await?
+    {
         return Err(invalid());
     }
     let request = session
@@ -1165,7 +1312,10 @@ pub async fn prepare_permission_review_batch(
         return Ok(Vec::new());
     }
     let delegation_row = delegation_row::Entity::find()
-        .filter(delegation_row::Column::ConversationId.eq(conversation_id))
+        .filter(
+            delegation_row::Column::ConversationId
+                .eq(session.approval_delegation_conversation_id()),
+        )
         .filter(delegation_row::Column::ActorId.eq(owner_id))
         .filter(delegation_row::Column::DeviceId.eq(device_id))
         .filter(delegation_row::Column::Status.eq("active"))
@@ -1229,6 +1379,31 @@ pub async fn load_latest_for_subject(
     owner_id: &str,
     device_id: &str,
 ) -> Result<Option<ApprovalDelegation>, DbErr> {
+    let session = agent_session::Entity::find()
+        .filter(agent_session::Column::ConversationId.eq(conversation_id))
+        .filter(agent_session::Column::ActorId.eq(owner_id.to_owned()))
+        .filter(agent_session::Column::DeviceId.eq(device_id))
+        .one(db)
+        .await?;
+    let session = session
+        .as_ref()
+        .map(|row| PersistedAgentSession::decode_json(&row.state_json).map_err(|_| invalid()))
+        .transpose()?;
+    if let Some(child) = session
+        .as_ref()
+        .filter(|session| !session.agent_role.is_main())
+        && !crate::agent_subagent_store::shared_approval_current_on(
+            db,
+            child,
+            chrono::Utc::now().timestamp_millis(),
+        )
+        .await?
+    {
+        return Ok(None);
+    }
+    let conversation_id = session.as_ref().map_or(conversation_id, |session| {
+        session.approval_delegation_conversation_id()
+    });
     let row = delegation_row::Entity::find()
         .filter(delegation_row::Column::ConversationId.eq(conversation_id))
         .filter(delegation_row::Column::ActorId.eq(owner_id))
@@ -1366,7 +1541,10 @@ pub async fn open_for_subject(
 ) -> Result<ApprovalDelegation, DbErr> {
     let txn = crate::db::begin_write(db, agent_session::Entity).await?;
     let (session_row, mut session) = session_on(&txn, conversation_id, owner_id, device_id).await?;
-    if session.input_revision != expected_input_revision || session.turn_state.is_active() {
+    if !session.agent_role.is_main()
+        || session.input_revision != expected_input_revision
+        || session.turn_state.is_active()
+    {
         return Err(invalid());
     }
     desk_diagnose_core::assistant_policy::require_approval_policy(&session)

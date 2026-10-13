@@ -588,6 +588,7 @@ impl SignalModelSeam {
         if let Some(observation) = observation {
             observation.outbound(chrono::Utc::now().timestamp_millis());
         }
+        sink.on_provider_request(&body);
         let mut response = http
             .insert_header(("Content-Type", "application/json"))
             .insert_header(("Accept", "text/event-stream"))
@@ -649,6 +650,35 @@ impl SignalModelSeam {
             ));
         }
 
+        if response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| {
+                v.split(';')
+                    .next()
+                    .is_some_and(|v| v.trim() == "application/json")
+            })
+        {
+            let body =
+                response.body().limit(16 * 1024 * 1024).await.map_err(|_| {
+                    transport_error("Non-streaming model response could not be read")
+                })?;
+            if let Ok(value) = serde_json::from_slice::<Value>(&body) {
+                sink.on_provider_json_response(&value);
+            }
+            if let Some(observation) = observation {
+                observation.finish(
+                    desk_diagnose_core::model_observability::RequestOutcome::StreamError,
+                    desk_diagnose_core::model_observability::OutputOutcome::NotEvaluated,
+                    chrono::Utc::now().timestamp_millis(),
+                );
+            }
+            return Err(transport_error(
+                "Provider returned JSON instead of the requested streaming response",
+            ));
+        }
+
         // Pump the SSE byte stream: frame complete events, apply each to the
         // dialect accumulator, and forward any text delta to the sink as it
         // arrives. The fully assembled, normalized turn is returned at the end.
@@ -666,6 +696,11 @@ impl SignalModelSeam {
                 transport_error(format!("model stream interrupted: {e}"))
             })?;
             for data in decoder.push(&chunk) {
+                if let Some(reasoning) =
+                    desk_diagnose_core::approval_observation::readable_reasoning_delta(&data)
+                {
+                    sink.on_reasoning_delta(&reasoning);
+                }
                 if let Some(delta) = state.apply(&data) {
                     sink.on_text_delta(&delta);
                 }
@@ -1888,6 +1923,106 @@ fn append_block_string(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn model_wire_hides_fixed_protocol_versions_in_approved_inputs() {
+        use desk_diagnose_core::chat::ToolCallRef;
+        let input = json!({"schema_version":1,"shell":"bash","command":"pwd","timeout_ms":10000});
+        let entries =
+            json!([{"tool_name":"exec_command","state":"active","approved_exact_input":input}]);
+        let system = ChatMessage::text(
+            "grants",
+            ChatRole::System,
+            format!("<capability_authorization>{entries}</capability_authorization>"),
+        );
+        let assistant = ChatMessage::assistant_tool_calls(
+            "previous",
+            "",
+            vec![ToolCallRef {
+                id: "command".into(),
+                name: "exec_command".into(),
+                arguments_json: input.to_string(),
+            }],
+        );
+        let mut request = ModelRequest::text_only(
+            vec![
+                system,
+                assistant,
+                ChatMessage::tool_result("result", "command", "completed"),
+            ],
+            ResponseFormatSpec::None,
+        );
+        request.tools.push(
+            desk_diagnose_core::ai_assistant::ai_assistant_provider_registry()
+                .registered_tools()
+                .into_iter()
+                .find(|tool| tool.spec.name == "exec_command")
+                .unwrap()
+                .spec,
+        );
+        let original = serde_json::to_string(&request.messages).unwrap();
+        let openai = build_openai_body("model", &request);
+        let anthropic = build_anthropic_body("model", &request);
+        let openai_args: Value = serde_json::from_str(
+            openai["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|message| message["tool_calls"].as_array().into_iter().flatten())
+                .find(|call| call["function"]["name"] == "exec_command")
+                .unwrap()["function"]["arguments"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        let anthropic_args = &anthropic["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|message| message["content"].as_array().into_iter().flatten())
+            .find(|block| block["type"] == "tool_use" && block["name"] == "exec_command")
+            .unwrap()["input"];
+        assert!(openai_args.get("schema_version").is_none());
+        assert!(anthropic_args.get("schema_version").is_none());
+        assert_eq!(&openai_args, anthropic_args);
+        let openai_text = openai["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let anthropic_text = anthropic["system"]
+            .as_str()
+            .map(str::to_owned)
+            .unwrap_or_else(|| {
+                anthropic["system"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|block| block["text"].as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            });
+        for text in [openai_text, anthropic_text] {
+            let start = text.find("<capability_authorization>").unwrap()
+                + "<capability_authorization>".len();
+            let grants = serde_json::Deserializer::from_str(&text[start..])
+                .into_iter::<Value>()
+                .next()
+                .unwrap()
+                .unwrap();
+            assert_eq!(grants[0]["approved_exact_input"], openai_args);
+        }
+        assert!(
+            openai["tools"][0]["function"]["parameters"]["properties"]
+                .get("schema_version")
+                .is_none()
+        );
+        assert!(
+            anthropic["tools"][0]["input_schema"]["properties"]
+                .get("schema_version")
+                .is_none()
+        );
+        assert_eq!(serde_json::to_string(&request.messages).unwrap(), original);
+    }
 
     #[test]
     fn final_thinking_and_native_clear_receipt_are_preserved() {

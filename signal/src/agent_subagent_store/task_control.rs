@@ -145,9 +145,11 @@ pub(crate) async fn apply_task_control_from_turn_on(
                 && message.tool_calls.iter().any(|reference| {
                     reference.id == call.id
                         && reference.name == call.name
-                        && desk_diagnose_core::subagent::tools::same_arguments(
+                        && desk_diagnose_core::subagent::tools::same_arguments_with_references(
+                            &call.name,
                             &reference.arguments_json,
                             &call.arguments_json,
+                            Some(&parent.ui_references),
                         )
                 })
         })

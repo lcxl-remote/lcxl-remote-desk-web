@@ -171,6 +171,7 @@ pub async fn process_pending_permission_review(
             tokens,
             current_revision,
             u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0),
+            claim.statistics.try_lock().ok().map(|value| value.clone()),
         )
         .await
         .is_err()

@@ -416,6 +416,18 @@ pub struct ObservedTurnSink<'a> {
 }
 
 impl TurnSink for ObservedTurnSink<'_> {
+    fn on_request_not_started(&mut self, reason: crate::model_observability::NotStartedReason) {
+        self.inner.on_request_not_started(reason);
+    }
+    fn on_provider_json_response(&mut self, body: &serde_json::Value) {
+        self.inner.on_provider_json_response(body);
+    }
+    fn on_provider_request(&mut self, body: &serde_json::Value) {
+        self.inner.on_provider_request(body);
+    }
+    fn on_reasoning_delta(&mut self, delta: &str) {
+        self.inner.on_reasoning_delta(delta);
+    }
     fn on_text_delta(&mut self, value: &str) {
         self.inner.on_text_delta(value);
     }

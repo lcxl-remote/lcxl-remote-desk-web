@@ -35,6 +35,8 @@ mod budget;
 mod funding;
 mod model_receipt;
 mod review_budget;
+mod shared_approval;
+pub(crate) use shared_approval::shared_approval_current_on;
 mod runtime_budget;
 mod ui_read;
 pub(crate) use funding::{reserve_call_budget_on, settle_call_budget_on};

@@ -170,4 +170,5 @@ pub mod tool_exposure;
 
 pub mod runtime_context;
 
+pub mod approval_observation;
 pub mod prompt_cache;

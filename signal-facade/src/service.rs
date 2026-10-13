@@ -1528,3 +1528,5 @@ impl<U: SignalingUser> SignalingHandler<U> {
 
 #[cfg(test)]
 mod tests;
+
+pub mod approval_trace;

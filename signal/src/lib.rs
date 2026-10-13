@@ -68,3 +68,7 @@ pub mod file_recovery_cleanup_store;
 pub mod file_recovery_scope_store;
 
 pub mod file_recovery_dispatch;
+
+pub mod approval_trace;
+
+pub mod approval_metrics;

@@ -3097,6 +3097,259 @@ export type ApprovalDelegationOpenBody = {
     session?: string | null;
 };
 
+export type ApprovalMetricCount = {
+    /**
+     * @type string
+    */
+    count: string;
+    /**
+     * @type string
+    */
+    kind: string;
+};
+
+export type ApprovalRateDto = {
+    /**
+     * @type number,null, double
+    */
+    approval_rate?: number | null;
+    /**
+     * @type string
+    */
+    approved: string;
+    /**
+     * @type number,null, double
+    */
+    denial_rate?: number | null;
+    /**
+     * @type string
+    */
+    denied: string;
+    /**
+     * @type string
+    */
+    denominator: string;
+    /**
+     * @type string
+    */
+    fault: string;
+    /**
+     * @type number,null, double
+    */
+    fault_rate?: number | null;
+};
+
+export type LatencySummary = {
+    /**
+     * @type number,null, double
+    */
+    average_ms?: number | null;
+    /**
+     * @type string
+    */
+    count: string;
+    /**
+     * @type boolean
+    */
+    estimated_percentiles: boolean;
+    /**
+     * @type boolean
+    */
+    extrema_unavailable: boolean;
+    /**
+     * @minLength 0
+     * @type integer,null, int64
+    */
+    max_ms?: number | null;
+    /**
+     * @minLength 0
+     * @type integer,null, int64
+    */
+    min_ms?: number | null;
+    /**
+     * @type string
+    */
+    overflow_count: string;
+    /**
+     * @minLength 0
+     * @type integer,null, int64
+    */
+    p50_ms?: number | null;
+    /**
+     * @minLength 0
+     * @type integer,null, int64
+    */
+    p95_ms?: number | null;
+    /**
+     * @minLength 0
+     * @type integer,null, int64
+    */
+    p99_ms?: number | null;
+};
+
+export type ApprovalMetricGroup = {
+    /**
+     * @type string
+    */
+    count: string;
+    /**
+     * @type string
+    */
+    key: string;
+    /**
+     * @type object
+    */
+    rates: ApprovalRateDto;
+    /**
+     * @type number,null, double
+    */
+    share?: number | null;
+    /**
+     * @type object
+    */
+    waiting: LatencySummary;
+};
+
+export type ApprovalMetricPoint = {
+    /**
+     * @type string
+    */
+    bucket: string;
+    /**
+     * @type string
+    */
+    count: string;
+    /**
+     * @type object
+    */
+    rates: ApprovalRateDto;
+};
+
+export const granularityEnum = {
+    five_minutes: "five_minutes",
+    hour: "hour"
+} as const;
+
+export type GranularityEnumKey = (typeof granularityEnum)[keyof typeof granularityEnum];
+
+export type Granularity = GranularityEnumKey;
+
+export const sampleStatusEnum = {
+    complete: "complete",
+    partial: "partial",
+    no_samples: "no_samples",
+    not_collected: "not_collected",
+    unknown: "unknown",
+    unavailable: "unavailable",
+    not_applicable: "not_applicable"
+} as const;
+
+export type SampleStatusEnumKey = (typeof sampleStatusEnum)[keyof typeof sampleStatusEnum];
+
+export type SampleStatus = SampleStatusEnumKey;
+
+export type QueryCoverage = {
+    /**
+     * @type string
+    */
+    as_of: string;
+    /**
+     * @type string
+    */
+    available_from: string;
+    /**
+     * @type string
+    */
+    cohort_basis: string;
+    /**
+     * @type string
+    */
+    effective_from: string;
+    /**
+     * @type string
+    */
+    effective_to: string;
+    /**
+     * @type string
+    */
+    granularity: Granularity;
+    /**
+     * @type boolean
+    */
+    live_pagination: boolean;
+    /**
+     * @type string,null
+    */
+    not_collected_before?: string | null;
+    /**
+     * @type string
+    */
+    requested_from: string;
+    /**
+     * @type string
+    */
+    requested_to: string;
+    /**
+     * @type string
+    */
+    sample_status: SampleStatus;
+    /**
+     * @type string,null
+    */
+    trimmed_before?: string | null;
+    /**
+     * @type array
+    */
+    usage_filter_dimensions: string[];
+    /**
+     * @type string
+    */
+    usage_source: string;
+};
+
+export type ApprovalMetricsOverviewDto = {
+    /**
+     * @type integer, int64
+    */
+    as_of_ms: number;
+    /**
+     * @type object
+    */
+    before_model: LatencySummary;
+    /**
+     * @type array
+    */
+    counts: ApprovalMetricCount[];
+    /**
+     * @type object
+    */
+    coverage: QueryCoverage;
+    /**
+     * @type object
+    */
+    pending_age: LatencySummary;
+    /**
+     * @type object
+    */
+    rates: ApprovalRateDto;
+    /**
+     * @type array
+    */
+    session_kinds: ApprovalMetricGroup[];
+    /**
+     * @type array
+    */
+    timeseries: ApprovalMetricPoint[];
+    /**
+     * @type string
+    */
+    unknown_waiting: string;
+    /**
+     * @type object
+    */
+    waiting: LatencySummary;
+};
+
 export type ApprovalModelProbeDto = {
     /**
      * @minLength 0
@@ -3341,6 +3594,187 @@ export type ApprovalModelUpdate = {
      * @type string,null
     */
     wire_protocol?: string | null;
+};
+
+export type ApprovalTraceStageDto = {
+    /**
+     * @type integer, int64
+    */
+    at_ms: number;
+    /**
+     * @type string
+    */
+    origin: string;
+    /**
+     * @type string
+    */
+    stage: string;
+};
+
+export type ApprovalReviewDto = {
+    /**
+     * @type integer,null, int64
+    */
+    business_finished_at_ms?: number | null;
+    /**
+     * @type string
+    */
+    captured_bytes: string;
+    /**
+     * @type integer, int64
+    */
+    created_at_ms: number;
+    decision?: any;
+    /**
+     * @type string,null
+    */
+    execution_state?: string | null;
+    /**
+     * @type integer,null, int64
+    */
+    finished_at_ms?: number | null;
+    /**
+     * @type array
+    */
+    grant_states: string[];
+    /**
+     * @type string
+    */
+    id: string;
+    /**
+     * @type string,null
+    */
+    model_name?: string | null;
+    /**
+     * @type string
+    */
+    model_revision: string;
+    /**
+     * @type string,null
+    */
+    output_limit?: string | null;
+    /**
+     * @type string,null
+    */
+    protocol?: string | null;
+    /**
+     * @type string,null
+    */
+    reason?: string | null;
+    /**
+     * @type string
+    */
+    recording_state: string;
+    /**
+     * @type string,null
+    */
+    root_session?: string | null;
+    /**
+     * @type string
+    */
+    session: string;
+    /**
+     * @type string
+    */
+    session_kind: string;
+    /**
+     * @type string,null
+    */
+    session_label?: string | null;
+    /**
+     * @type string
+    */
+    source_id: string;
+    /**
+     * @type string
+    */
+    source_kind: string;
+    /**
+     * @type string
+    */
+    status: string;
+    /**
+     * @type string,null
+    */
+    stop_reason?: string | null;
+    task?: (null | AiAssistantSubAgentSummary);
+    /**
+     * @type array
+    */
+    timeline: ApprovalTraceStageDto[];
+    usage?: any;
+};
+
+export type ApprovalReviewsDto = {
+    /**
+     * @type string,null
+    */
+    next_cursor?: string | null;
+    /**
+     * @type array
+    */
+    reviews: ApprovalReviewDto[];
+};
+
+export type ApprovalTracePartDto = {
+    /**
+     * @type integer, int64
+    */
+    at_ms: number;
+    /**
+     * @type string
+    */
+    kind: string;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    sequence: number;
+    /**
+     * @type string
+    */
+    text: string;
+};
+
+export type ApprovalTracePartsDto = {
+    /**
+     * @minLength 0
+     * @type integer,null, int32
+    */
+    next_after?: number | null;
+    /**
+     * @type array
+    */
+    parts: ApprovalTracePartDto[];
+    /**
+     * @type string
+    */
+    recording_state: string;
+};
+
+export type ApprovalTraceSettings = {
+    /**
+     * @type boolean
+    */
+    enabled: boolean;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    max_trace_bytes: number;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    retention_days: number;
+    /**
+     * @type string
+    */
+    revision: string;
+    /**
+     * @type string
+    */
+    storage_budget_bytes: string;
 };
 
 /**
@@ -5900,15 +6334,6 @@ export type GoalBudgetPolicy = {
     schemaVersion: number;
 };
 
-export const granularityEnum = {
-    five_minutes: "five_minutes",
-    hour: "hour"
-} as const;
-
-export type GranularityEnumKey = (typeof granularityEnum)[keyof typeof granularityEnum];
-
-export type Granularity = GranularityEnumKey;
-
 export type InitParams = {
     /**
      * @description Deployment bootstrap token. Required only when the server process was\nstarted with `LRD_BOOTSTRAP_TOKEN`.
@@ -6027,54 +6452,6 @@ export type KeyboardEventData = {
      * @type boolean
     */
     shift_key: boolean;
-};
-
-export type LatencySummary = {
-    /**
-     * @type number,null, double
-    */
-    average_ms?: number | null;
-    /**
-     * @type string
-    */
-    count: string;
-    /**
-     * @type boolean
-    */
-    estimated_percentiles: boolean;
-    /**
-     * @type boolean
-    */
-    extrema_unavailable: boolean;
-    /**
-     * @minLength 0
-     * @type integer,null, int64
-    */
-    max_ms?: number | null;
-    /**
-     * @minLength 0
-     * @type integer,null, int64
-    */
-    min_ms?: number | null;
-    /**
-     * @type string
-    */
-    overflow_count: string;
-    /**
-     * @minLength 0
-     * @type integer,null, int64
-    */
-    p50_ms?: number | null;
-    /**
-     * @minLength 0
-     * @type integer,null, int64
-    */
-    p95_ms?: number | null;
-    /**
-     * @minLength 0
-     * @type integer,null, int64
-    */
-    p99_ms?: number | null;
 };
 
 /**
@@ -6541,20 +6918,6 @@ export type MetricRateReasonEnumKey = (typeof metricRateReasonEnum)[keyof typeof
 
 export type MetricRateReason = MetricRateReasonEnumKey;
 
-export const sampleStatusEnum = {
-    complete: "complete",
-    partial: "partial",
-    no_samples: "no_samples",
-    not_collected: "not_collected",
-    unknown: "unknown",
-    unavailable: "unavailable",
-    not_applicable: "not_applicable"
-} as const;
-
-export type SampleStatusEnumKey = (typeof sampleStatusEnum)[keyof typeof sampleStatusEnum];
-
-export type SampleStatus = SampleStatusEnumKey;
-
 export type MetricRate = {
     /**
      * @type array
@@ -6926,65 +7289,6 @@ export type MetricsCallDetail = {
      * @type boolean
     */
     related_truncated: boolean;
-};
-
-export type QueryCoverage = {
-    /**
-     * @type string
-    */
-    as_of: string;
-    /**
-     * @type string
-    */
-    available_from: string;
-    /**
-     * @type string
-    */
-    cohort_basis: string;
-    /**
-     * @type string
-    */
-    effective_from: string;
-    /**
-     * @type string
-    */
-    effective_to: string;
-    /**
-     * @type string
-    */
-    granularity: Granularity;
-    /**
-     * @type boolean
-    */
-    live_pagination: boolean;
-    /**
-     * @type string,null
-    */
-    not_collected_before?: string | null;
-    /**
-     * @type string
-    */
-    requested_from: string;
-    /**
-     * @type string
-    */
-    requested_to: string;
-    /**
-     * @type string
-    */
-    sample_status: SampleStatus;
-    /**
-     * @type string,null
-    */
-    trimmed_before?: string | null;
-    /**
-     * @type array
-    */
-    usage_filter_dimensions: string[];
-    /**
-     * @type string
-    */
-    usage_source: string;
 };
 
 export type MetricsCalls = {
@@ -9405,6 +9709,66 @@ export type RestResponseApprovalDelegationDto = {
     success: boolean;
 };
 
+export type RestResponseApprovalMetricsOverviewDto = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @type integer, int64
+        */
+        as_of_ms: number;
+        /**
+         * @type object
+        */
+        before_model: LatencySummary;
+        /**
+         * @type array
+        */
+        counts: ApprovalMetricCount[];
+        /**
+         * @type object
+        */
+        coverage: QueryCoverage;
+        /**
+         * @type object
+        */
+        pending_age: LatencySummary;
+        /**
+         * @type object
+        */
+        rates: ApprovalRateDto;
+        /**
+         * @type array
+        */
+        session_kinds: ApprovalMetricGroup[];
+        /**
+         * @type array
+        */
+        timeseries: ApprovalMetricPoint[];
+        /**
+         * @type string
+        */
+        unknown_waiting: string;
+        /**
+         * @type object
+        */
+        waiting: LatencySummary;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
 export type RestResponseApprovalModelProbeDto = {
     /**
      * @type integer, int32
@@ -9520,6 +9884,220 @@ export type RestResponseApprovalModelPublic = {
          * @type string,null
         */
         wire_protocol?: string | null;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponseApprovalReviewDto = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @type integer,null, int64
+        */
+        business_finished_at_ms?: number | null;
+        /**
+         * @type string
+        */
+        captured_bytes: string;
+        /**
+         * @type integer, int64
+        */
+        created_at_ms: number;
+        decision?: any;
+        /**
+         * @type string,null
+        */
+        execution_state?: string | null;
+        /**
+         * @type integer,null, int64
+        */
+        finished_at_ms?: number | null;
+        /**
+         * @type array
+        */
+        grant_states: string[];
+        /**
+         * @type string
+        */
+        id: string;
+        /**
+         * @type string,null
+        */
+        model_name?: string | null;
+        /**
+         * @type string
+        */
+        model_revision: string;
+        /**
+         * @type string,null
+        */
+        output_limit?: string | null;
+        /**
+         * @type string,null
+        */
+        protocol?: string | null;
+        /**
+         * @type string,null
+        */
+        reason?: string | null;
+        /**
+         * @type string
+        */
+        recording_state: string;
+        /**
+         * @type string,null
+        */
+        root_session?: string | null;
+        /**
+         * @type string
+        */
+        session: string;
+        /**
+         * @type string
+        */
+        session_kind: string;
+        /**
+         * @type string,null
+        */
+        session_label?: string | null;
+        /**
+         * @type string
+        */
+        source_id: string;
+        /**
+         * @type string
+        */
+        source_kind: string;
+        /**
+         * @type string
+        */
+        status: string;
+        /**
+         * @type string,null
+        */
+        stop_reason?: string | null;
+        task?: (null | AiAssistantSubAgentSummary);
+        /**
+         * @type array
+        */
+        timeline: ApprovalTraceStageDto[];
+        usage?: any;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponseApprovalReviewsDto = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @type string,null
+        */
+        next_cursor?: string | null;
+        /**
+         * @type array
+        */
+        reviews: ApprovalReviewDto[];
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponseApprovalTracePartsDto = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @minLength 0
+         * @type integer,null, int32
+        */
+        next_after?: number | null;
+        /**
+         * @type array
+        */
+        parts: ApprovalTracePartDto[];
+        /**
+         * @type string
+        */
+        recording_state: string;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponseApprovalTraceSettings = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @type boolean
+        */
+        enabled: boolean;
+        /**
+         * @minLength 0
+         * @type integer, int32
+        */
+        max_trace_bytes: number;
+        /**
+         * @minLength 0
+         * @type integer, int32
+        */
+        retention_days: number;
+        /**
+         * @type string
+        */
+        revision: string;
+        /**
+         * @type string
+        */
+        storage_budget_bytes: string;
     };
     /**
      * @type string,null
@@ -15401,6 +15979,27 @@ export type VirtualDisplaySettings = {
     prompt_ms?: number;
 };
 
+export type GetApprovalTraceSettings200 = RestResponseApprovalTraceSettings;
+
+export type GetApprovalTraceSettingsQueryResponse = GetApprovalTraceSettings200;
+
+export type GetApprovalTraceSettingsQuery = {
+    Response: GetApprovalTraceSettings200;
+    Errors: any;
+};
+
+export type UpdateApprovalTraceSettings200 = RestResponseApprovalTraceSettings;
+
+export type UpdateApprovalTraceSettingsMutationRequest = ApprovalTraceSettings;
+
+export type UpdateApprovalTraceSettingsMutationResponse = UpdateApprovalTraceSettings200;
+
+export type UpdateApprovalTraceSettingsMutation = {
+    Response: UpdateApprovalTraceSettings200;
+    Request: UpdateApprovalTraceSettingsMutationRequest;
+    Errors: any;
+};
+
 export type GetContextManagement200 = RestResponseContextManagementDto;
 
 export type GetContextManagementQueryResponse = GetContextManagement200;
@@ -16618,6 +17217,55 @@ export type TestApprovalModelProviderMutation = {
     Errors: any;
 };
 
+export type GetApprovalMetricsOverviewQueryParams = {
+    /**
+     * @type string,null
+    */
+    from?: string | null;
+    /**
+     * @type string,null
+    */
+    to?: string | null;
+    /**
+     * @type string,null
+    */
+    granularity?: string | null;
+    /**
+     * @type string,null
+    */
+    model_id?: string | null;
+    /**
+     * @type string,null
+    */
+    provider_id?: string | null;
+    /**
+     * @type string,null
+    */
+    source_kind?: string | null;
+    /**
+     * @type string,null
+    */
+    session_kind?: string | null;
+    /**
+     * @type string,null
+    */
+    reason?: string | null;
+    /**
+     * @type string,null
+    */
+    outcome?: string | null;
+};
+
+export type GetApprovalMetricsOverview200 = RestResponseApprovalMetricsOverviewDto;
+
+export type GetApprovalMetricsOverviewQueryResponse = GetApprovalMetricsOverview200;
+
+export type GetApprovalMetricsOverviewQuery = {
+    Response: GetApprovalMetricsOverview200;
+    QueryParams: GetApprovalMetricsOverviewQueryParams;
+    Errors: any;
+};
+
 export type GetModelMetricsCallsQueryParams = {
     /**
      * @description Runtime endpoint only.
@@ -17543,6 +18191,87 @@ export type OpenAiAssistantApprovalDelegationMutationResponse = OpenAiAssistantA
 export type OpenAiAssistantApprovalDelegationMutation = {
     Response: OpenAiAssistantApprovalDelegation200;
     Request: OpenAiAssistantApprovalDelegationMutationRequest;
+    Errors: any;
+};
+
+export type GetApprovalReviewQueryParams = {
+    /**
+     * @type string
+    */
+    session: string;
+    /**
+     * @type string
+    */
+    id: string;
+};
+
+export type GetApprovalReview200 = RestResponseApprovalReviewDto;
+
+export type GetApprovalReviewQueryResponse = GetApprovalReview200;
+
+export type GetApprovalReviewQuery = {
+    Response: GetApprovalReview200;
+    QueryParams: GetApprovalReviewQueryParams;
+    Errors: any;
+};
+
+export type GetApprovalReviewPartsQueryParams = {
+    /**
+     * @type string
+    */
+    session: string;
+    /**
+     * @type string
+    */
+    id: string;
+    /**
+     * @type string
+    */
+    kind: string;
+    /**
+     * @minLength 0
+     * @type integer,null, int32
+    */
+    after?: number | null;
+};
+
+export type GetApprovalReviewParts200 = RestResponseApprovalTracePartsDto;
+
+export type GetApprovalReviewPartsQueryResponse = GetApprovalReviewParts200;
+
+export type GetApprovalReviewPartsQuery = {
+    Response: GetApprovalReviewParts200;
+    QueryParams: GetApprovalReviewPartsQueryParams;
+    Errors: any;
+};
+
+export type ListApprovalReviewsQueryParams = {
+    /**
+     * @type string
+    */
+    session: string;
+    /**
+     * @type boolean,null
+    */
+    include_children?: boolean | null;
+    /**
+     * @type string,null
+    */
+    cursor?: string | null;
+    /**
+     * @minLength 0
+     * @type integer,null, int32
+    */
+    limit?: number | null;
+};
+
+export type ListApprovalReviews200 = RestResponseApprovalReviewsDto;
+
+export type ListApprovalReviewsQueryResponse = ListApprovalReviews200;
+
+export type ListApprovalReviewsQuery = {
+    Response: ListApprovalReviews200;
+    QueryParams: ListApprovalReviewsQueryParams;
     Errors: any;
 };
 

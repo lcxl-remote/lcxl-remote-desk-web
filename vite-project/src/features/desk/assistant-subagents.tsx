@@ -1,3 +1,4 @@
+import { ApprovalReviews } from '@/features/approval/reviews';
 import { useFollowLatest } from '@/hooks/use-follow-latest';
 import { AssistantTranscript } from './assistant-transcript';
 import { AssistantContextMeter } from './assistant-context-meter';
@@ -182,7 +183,7 @@ export function AssistantSubagents({ agents, connected, canDecide, interactive, 
                                 busy={agents.updating} onUpdate={agents.updateDirectory} />
                         </div>)}
                         <div data-assistant-pending={pendingPermissions.length > 0 ? '' : undefined} tabIndex={-1}>
-                        <AssistantPermissionRecords key={child.sessionId} requests={child.permissionRequests ?? []} automaticApproval={automaticApproval}
+                        <AssistantPermissionRecords approvalRecords={<ApprovalReviews session={child.sessionId} open={panel === 'permissions'} includeChildren={false}/>} key={child.sessionId} requests={child.permissionRequests ?? []} automaticApproval={automaticApproval}
                             open={panel === 'permissions'} onOpenChange={open => setPanel(open ? 'permissions' : null)}>
                             {permission => <AssistantPermissionRequest key={`${child.sessionId}:${permission.requestId}:${permission.inputRevision}`}
                                 request={permission} canDecide={canDecide && !subagentIsTerminal(task) && permission.inputRevision === child.inputRevision}

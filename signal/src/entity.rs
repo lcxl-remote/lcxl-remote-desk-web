@@ -40,3 +40,6 @@ pub mod agent_subagent_run;
 pub mod agent_subagent_inbox;
 
 pub mod agent_delegation_reservation;
+
+pub mod agent_approval_trace;
+pub mod agent_approval_trace_part;

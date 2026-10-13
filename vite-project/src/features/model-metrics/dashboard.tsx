@@ -1,3 +1,4 @@
+import { ApprovalMetricsPanel } from '@/features/approval/metrics';
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '@/components/ui/table';
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
@@ -28,6 +29,7 @@ import { UsageRangePicker, presetRange, type UsageRangeParams } from '@/features
 
 type Query = GetModelMetricsOverviewQueryParams;
 export interface MetricsApi {
+    approvalMetrics?: (query: import('@/services/types').GetApprovalMetricsOverviewQueryParams, signal: AbortSignal) => Promise<import('@/services/types').ApprovalMetricsOverviewDto>;
     status(signal: AbortSignal): Promise<MetricsStatus>;
     overview(query: Query, signal: AbortSignal): Promise<MetricsOverview>;
     series(query: Query, signal: AbortSignal): Promise<MetricsSeries>;
@@ -93,7 +95,7 @@ function Trend({ value }: { value: MetricsSeries }) {
     return <Card><CardHeader><CardTitle>{t('modelMetrics.trend')}</CardTitle><SelectField aria-label={t('modelMetrics.metric')} value={metric} onValueChange={setMetric}>{(value.points[0]?.summary.rates ?? [{ key: 'request_failure' }]).map((rate) => <SelectItem key={rate.key} value={rate.key}>{t(`modelMetrics.rate.${rate.key}`, { defaultValue: rate.key })}</SelectItem>)}<SelectItem value="duration">{t('modelMetrics.durationP95')}</SelectItem><SelectItem value="first_content">{t('modelMetrics.firstContentP95')}</SelectItem></SelectField></CardHeader><CardContent>{valid.length ? <svg viewBox="0 0 1000 200" className="w-full" role="img" aria-label={t('modelMetrics.trend')}><path d="M0 10 V180 H1000" fill="none" stroke="currentColor" opacity=".25"/>{valid.map((point, index) => <g key={point.bucket}>{index > 0 && valid[index - 1].index + 1 === point.index && <line x1={valid[index - 1].x} y1={valid[index - 1].y} x2={point.x} y2={point.y} stroke="currentColor"/>}<circle cx={point.x} cy={point.y} r="3" fill="currentColor"><title>{metricTime(point.bucket, i18n.language)}: {display(point.number)} · {point.samples}</title></circle></g>)}</svg> : <p>{t('modelMetrics.noSamples')}</p>}{latency && <p className="text-sm text-muted-foreground">{t('modelMetrics.percentileHint')}</p>}<Disclosure title={t('modelMetrics.exactSamples')}><div className="max-h-64 overflow-auto"><Table><TableHeader><TableRow className="text-left"><TableHead>{t('modelMetrics.time')}</TableHead><TableHead>{t('modelMetrics.metric')}</TableHead><TableHead>{t('modelMetrics.sample')}</TableHead><TableHead>{t('modelMetrics.state')}</TableHead></TableRow></TableHeader><TableBody>{points.map((point) => <TableRow key={point.bucket}><TableCell><MetricTime value={point.bucket}/></TableCell><TableCell className="font-mono">{display(point.number)}</TableCell><TableCell className="font-mono">{point.samples}</TableCell><TableCell>{point.state ? t(`modelMetrics.state.${point.state}`) : '—'}</TableCell></TableRow>)}</TableBody></Table></div></Disclosure></CardContent></Card>;
 }
 
-export function MetricsDashboard({ api, identity, allowed, ledger, usage, settingsPath }: { api: MetricsApi; identity: string; allowed: boolean; ledger?: ReactNode; usage?: ReactNode; settingsPath?: string }) {
+export function MetricsDashboard({ api, identity, allowed, ledger, usage, settingsPath, manager = false }: { api: MetricsApi; identity: string; allowed: boolean; ledger?: ReactNode; usage?: ReactNode; settingsPath?: string; manager?: boolean }) {
     const { t, i18n } = useTranslation();
     const client = useQueryClient();
     const [mountIdentity] = useState(() => globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`);
@@ -120,7 +122,7 @@ export function MetricsDashboard({ api, identity, allowed, ledger, usage, settin
     useEffect(() => { setInvalidAccess(false); return () => { void client.cancelQueries({ queryKey: key }); client.removeQueries({ queryKey: key }); }; }, [client, key]);
     const enabled = allowed && !invalidAccess;
     const rangeVisible = !['ledger', 'usage'].includes(tab);
-    const filtersVisible = rangeVisible && tab !== 'unassociated';
+    const filtersVisible = rangeVisible && tab !== 'unassociated' && tab !== 'approval';
     const modelsApplicable = filters.tool == null;
     const callKind = callConditions.record_kind ?? (filters.tool || filters.error?.startsWith('input.') ? 'tool' : 'call');
     const callsApplicable = (!filters.tool || ['tool', 'operation'].includes(callKind)) && (!filters.error || (filters.error.startsWith('input.') ? callKind === 'tool' : filters.error.startsWith('request.') ? ['call', 'attempt'].includes(callKind) : callKind === 'call'));
@@ -135,8 +137,8 @@ export function MetricsDashboard({ api, identity, allowed, ledger, usage, settin
     const calls = useQuery({ queryKey: [...key, 'calls', callsQuery, cursor], queryFn: ({ signal }) => api.calls({ ...callsQuery, cursor }, signal), ...options, enabled: enabled && tab === 'calls' && callsApplicable });
     const unassociated = useQuery({ queryKey: [...key, 'unassociated', range, gapCursor], queryFn: ({ signal }) => api.unassociated({ from: range.from, to: range.to, cursor: gapCursor, limit: 50 }, signal), ...options, enabled: enabled && tab === 'unassociated' });
     const detail = useQuery({ queryKey: [...key, 'detail', selected], queryFn: ({ signal }) => api.detail(selected!, signal), ...options, enabled: enabled && selected != null });
-    const choicesQuery = { ...range, granularity: filters.granularity, include_probe: filters.include_probe, limit: 200 };
-    const modelChoices = useQuery({ queryKey: [...key, 'model-choices', choicesQuery], queryFn: ({ signal }) => api.models(choicesQuery, signal), ...options, enabled: enabled && filtersOpen && filtersVisible, refetchInterval: false });
+    const choicesQuery = { purpose: tab === 'approval' ? 'approval' : undefined, ...range, granularity: filters.granularity, include_probe: filters.include_probe, limit: 200 };
+    const modelChoices = useQuery({ queryKey: [...key, 'model-choices', choicesQuery], queryFn: ({ signal }) => api.models(choicesQuery, signal), ...options, enabled: enabled && (tab === 'approval' || (filtersOpen && filtersVisible)), refetchInterval: false });
     const toolChoices = useQuery({ queryKey: [...key, 'tool-choices', choicesQuery], queryFn: ({ signal }) => api.tools(choicesQuery, signal), ...options, enabled: enabled && filtersOpen && filtersVisible, refetchInterval: false });
     const accessFailed = [status, overview, series, models, tools, calls, unassociated, detail, modelChoices, toolChoices].some((result) => api.accessError(result.error));
     useEffect(() => { if (accessFailed) { setInvalidAccess(true); setSelected(null); void client.cancelQueries({ queryKey: key }); client.removeQueries({ queryKey: key }); } }, [accessFailed, client, key]);
@@ -180,9 +182,9 @@ export function MetricsDashboard({ api, identity, allowed, ledger, usage, settin
         </div>}
         {(tab === 'ledger' || tab === 'usage') && <p className="text-sm text-muted-foreground">{t(tab === 'ledger' ? 'modelMetrics.ledgerFiltersHint' : 'modelMetrics.usageFiltersHint')}</p>}
         <div role="tablist" aria-label={t('modelMetrics.title')} className="flex gap-2 overflow-auto">
-            {['overview', 'models', 'tools', 'calls', 'runtime', 'unassociated', ...(ledger ? ['ledger'] : []), ...(usage ? ['usage'] : [])].map((name) => <Button key={name} role="tab" aria-selected={tab === name} variant={tab === name ? 'default' : 'outline'} onClick={() => setTab(name)}>{t(`modelMetrics.tab.${name}`)}</Button>)}
+            {['overview', 'models', 'tools', 'calls', 'runtime', 'unassociated', ...(api.approvalMetrics ? ['approval'] : []), ...(ledger ? ['ledger'] : []), ...(usage ? ['usage'] : [])].map((name) => <Button key={name} role="tab" aria-selected={tab === name} variant={tab === name ? 'default' : 'outline'} onClick={() => setTab(name)}>{t(`modelMetrics.tab.${name}`)}</Button>)}
         </div>
-        {tab === 'runtime' ? <MetricsRuntimePanel api={api} identity={identity} allowed={enabled} queryFilters={query} autoRefresh={refresh}/>
+        {tab === 'approval' && api.approvalMetrics ? <ApprovalMetricsPanel manager={manager} load={api.approvalMetrics} range={range} identity={identity} enabled={enabled} autoRefresh={refresh && visible} models={modelChoices.data}/> : tab === 'runtime' ? <MetricsRuntimePanel api={api} identity={identity} allowed={enabled} queryFilters={query} autoRefresh={refresh}/>
             : tab === 'usage' ? usage : tab === 'ledger' ? ledger : <section role="tabpanel" className="space-y-5">
                 {active.isLoading && !(tab === 'models' && !modelsApplicable) && !(tab === 'calls' && !callsApplicable) && <p>{t('modelMetrics.loading')}</p>}
                 {active.error && <p role="alert">{t('modelMetrics.queryFailed')}</p>}

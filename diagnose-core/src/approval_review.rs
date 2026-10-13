@@ -857,10 +857,26 @@ const MAX_REVIEW_RECENT_MESSAGES: usize = 24;
 /// unreviewable after only a few minutes of device downtime.
 const PERMISSION_REVIEW_MAX_AGE_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
 
+pub(crate) fn review_evidence_message<'a>(
+    session: &'a PersistedAgentSession,
+    message_id: &str,
+) -> Option<&'a crate::chat::ChatMessage> {
+    session
+        .authorization_requirement()
+        .filter(|message| message.message_id == message_id)
+        .or_else(|| {
+            session
+                .conversation
+                .iter()
+                .find(|message| message.message_id == message_id)
+        })
+}
+
 fn recent_review_evidence(
     session: &PersistedAgentSession,
 ) -> Result<(String, Vec<ApprovalEvidence>), ApprovalReviewError> {
-    let user = crate::permission_resume::latest_user_requirement(&session.conversation)
+    let user = session
+        .authorization_requirement()
         .ok_or(ApprovalReviewError::InvalidContext)?;
     if user.text.trim().is_empty() || user.text.len() > 8 * 1_024 {
         return Err(ApprovalReviewError::InvalidContext);
@@ -877,9 +893,12 @@ fn recent_review_evidence(
     let user_index = session
         .conversation
         .iter()
-        .rposition(|message| message.message_id == user.message_id)
-        .ok_or(ApprovalReviewError::InvalidContext)?;
-    let prior = &session.conversation[..user_index];
+        .rposition(|message| message.message_id == user.message_id);
+    let prior = match user_index {
+        Some(index) if session.agent_role.is_main() => &session.conversation[..index],
+        _ if !session.agent_role.is_main() => &session.conversation[..0],
+        _ => return Err(ApprovalReviewError::InvalidContext),
+    };
     let prior_owner_index = prior.iter().rposition(|message| {
         message.role == ChatRole::User
             && !crate::permission_resume::is_resume_control_message(message)
@@ -1010,11 +1029,7 @@ pub fn permission_review_candidate(
     let policy_revision =
         u64::try_from(session.policy_revision).map_err(|_| ApprovalReviewError::InvalidContext)?;
     delegation
-        .require_current(
-            &session.conversation_id,
-            &session.actor_id,
-            &session.device_id,
-        )
+        .require_current_for_session(session)
         .map_err(|_| ApprovalReviewError::InvalidContext)?;
     if goal.is_some_and(|goal| {
         goal.conversation_id != session.conversation_id
@@ -1152,11 +1167,7 @@ pub fn source_review_candidate(
     let policy_revision =
         u64::try_from(session.policy_revision).map_err(|_| ApprovalReviewError::InvalidContext)?;
     delegation
-        .require_current(
-            &session.conversation_id,
-            &session.actor_id,
-            &session.device_id,
-        )
+        .require_current_for_session(session)
         .map_err(|_| ApprovalReviewError::InvalidContext)?;
     if goal.is_some_and(|goal| {
         goal.conversation_id != session.conversation_id
@@ -1413,6 +1424,7 @@ pub fn parse_review_decision(
 /// permission decision. A missing or uncertain item keeps the entire request
 /// with the owner; no partial grant is minted from this function.
 pub fn permission_decision_from_reviews(
+    session: &PersistedAgentSession,
     request: &PermissionRequest,
     delegation: &ApprovalDelegation,
     candidates: &[ApprovalReviewCandidate],
@@ -1430,6 +1442,9 @@ pub fn permission_decision_from_reviews(
     {
         return Err(ApprovalReviewError::InvalidDecision);
     }
+    delegation
+        .require_current_for_session(session)
+        .map_err(|_| ApprovalReviewError::InvalidDecision)?;
     let mut decisions = Vec::with_capacity(request.items.len());
     let mut evidence = Vec::with_capacity(request.items.len());
     for item in &request.items {
@@ -1442,7 +1457,7 @@ pub fn permission_decision_from_reviews(
             .filter(|candidate| candidate.source == source);
         let candidate = matches.next().ok_or(ApprovalReviewError::InvalidDecision)?;
         if matches.next().is_some()
-            || candidate.conversation_id != delegation.conversation_id
+            || candidate.conversation_id != session.conversation_id
             || candidate.owner_id != delegation.owner_id
             || candidate.device_id != delegation.device_id
             || candidate.input_revision != request.input_revision
@@ -2838,6 +2853,19 @@ mod tests {
 
     #[test]
     fn complete_review_batch_compiles_to_bounded_ai_decision() {
+        let session = PersistedAgentSession::new(
+            "conversation",
+            "owner",
+            "device",
+            1,
+            desk_agent_protocol::AgentScope {
+                granted: vec![],
+                mode: desk_agent_protocol::ExecutionMode::ReadOnly,
+                expires_at: None,
+                policy_name: None,
+            },
+            "2026-09-23T00:00:00Z",
+        );
         let mut request = permission_request();
         request.items.truncate(1);
         let delegation = ApprovalDelegation::new(
@@ -2877,6 +2905,7 @@ mod tests {
             evidence_event_ids: vec!["user-message".into()],
         };
         let (decisions, source) = permission_decision_from_reviews(
+            &session,
             &request,
             &delegation,
             &[candidate.clone()],
@@ -2892,9 +2921,14 @@ mod tests {
             PermissionDecisionSource::AiApproval { .. }
         ));
         review.verdict = ApprovalVerdict::Deny;
-        let (decisions, _) =
-            permission_decision_from_reviews(&request, &delegation, &[candidate], &[review])
-                .unwrap();
+        let (decisions, _) = permission_decision_from_reviews(
+            &session,
+            &request,
+            &delegation,
+            &[candidate],
+            &[review],
+        )
+        .unwrap();
         assert!(matches!(
             decisions[0].decision,
             PermissionItemDecision::Deny

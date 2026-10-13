@@ -22,6 +22,13 @@ pub struct Model {
     pub source_envelope_ids_json: String,
     pub result_envelope_ids_json: String,
     pub payload_json: String,
+    /// Anonymous review observations; excluded from public event serialization.
+    #[serde(skip)]
+    pub approval_statistics_json: Option<String>,
+    /// Fixed millisecond key for private review pagination, independent of reconciliation.
+    #[serde(skip)]
+    #[sea_orm(indexed)]
+    pub approval_statistics_at_ms: Option<i64>,
     pub payload_schema_version: i32,
     pub created_at: DateTimeUtc,
 }

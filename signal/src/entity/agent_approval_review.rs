@@ -32,6 +32,8 @@ pub struct Model {
     pub usage_settlement_state: Option<String>,
     pub usage_reconcile_at_ms: Option<i64>,
     pub decision_json: Option<String>,
+    /// Content-free review cohort, fixed timestamps and terminal classification.
+    pub statistics_json: Option<String>,
     #[sea_orm(indexed)]
     pub status: String,
     pub lease_epoch: i64,

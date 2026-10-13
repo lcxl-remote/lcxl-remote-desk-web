@@ -1,3 +1,4 @@
+import { ApprovalReviews, useOwnApprovalAccess } from '@/features/approval/reviews';
 import { AssistantGoalPanel, goalPlanningAction } from './assistant-goal-panel';
 import { AssistantTranscript } from './assistant-transcript';
 import { permissionToolLabel, permissionResourceLabel, permissionOperationLabel, isReusableWebHost } from './assistant-permission-labels';
@@ -331,6 +332,7 @@ export function AiAssistantWorkspace({
         setPermissionHistorySession(null); setDirectorySession(null);
         setApprovalSettingsOpen(false); setDeviceSettingsOpen(false); setGoalDetailsOpen(false); setSchedulesOpen(false);
     }, [subagents.selected?.task_id]);
+    const approvalAccess = useOwnApprovalAccess();
     const [permissionHistorySession, setPermissionHistorySession] = useState<string | null>(null);
     const [directorySession, setDirectorySession] = useState<string | null>(null);
     const permissionHistoryKey = `${deskId}:${chat.conversationId}`;
@@ -970,7 +972,7 @@ export function AiAssistantWorkspace({
                         disabled={!assistantEnabled || !isConnected || chat.hydrating || chat.contextUpdating} onUpdate={chat.updateDirectory}
                         showPendingActions={false} onPendingJump={id => jumpToPending(`assistant-directory-${id}`)} />
                     <div data-assistant-pending={pendingPermissionCount > 0 ? '' : undefined} tabIndex={-1}>
-                    <AssistantPermissionRecords key={permissionHistoryKey} requests={chat.permissionRequests} automaticApproval={automaticApproval}
+                    <AssistantPermissionRecords approvalRecords={!rehearsal && featureProfile.approval_delegation ? <ApprovalReviews onLocate={record => { if (record.task) subagents.openDetail(record.task); else subagents.closeDetail(); setPermissionHistorySession(null); }} session={chat.sessionId ?? null} open={permissionHistorySession === permissionHistoryKey}/> : undefined} key={permissionHistoryKey} requests={chat.permissionRequests} automaticApproval={automaticApproval}
                         open={permissionHistorySession === permissionHistoryKey}
                         onOpenChange={(open) => setPermissionHistorySession(open ? permissionHistoryKey : null)}>
                             {(request) => (
@@ -1172,7 +1174,8 @@ export function AiAssistantWorkspace({
                         <SheetContent className="w-full overflow-y-auto sm:max-w-xl">
                             <SheetHeader><SheetTitle>{t('pages.aiAssistant.autoApprovalTitle')}</SheetTitle></SheetHeader>
                             {approvalSettingsOpen && !rehearsal && featureProfile.approval_delegation && (
-                                <AssistantAutomaticApproval chat={chat} enabled={assistantEnabled} connected={isConnected} />
+                                <><AssistantAutomaticApproval chat={chat} enabled={assistantEnabled} connected={isConnected} />
+                                {approvalAccess.allowed && <Button type="button" variant="outline" className="mt-3" onClick={() => { setApprovalSettingsOpen(false); if (subagents.selected) setSelectedChildPanel('permissions'); else setPermissionHistorySession(permissionHistoryKey); }}><ListTree className="mr-2 size-4"/>{t('approval.records')}</Button>}</>
                             )}
                         </SheetContent>
                     </Sheet>

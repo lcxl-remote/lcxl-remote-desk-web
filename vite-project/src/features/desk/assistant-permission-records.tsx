@@ -10,12 +10,13 @@ export function permissionIsAutomaticallyReviewed(request: PermissionRequestDto,
         && !request.items.some(item => Boolean(item.commandConfirmation?.interactive));
 }
 
-export function AssistantPermissionRecords({ requests, children, open, onOpenChange, automaticApproval = false }: {
+export function AssistantPermissionRecords({ requests, children, open, onOpenChange, automaticApproval = false, approvalRecords }: {
     requests: PermissionRequestDto[];
     automaticApproval?: boolean;
     children: (request: PermissionRequestDto) => ReactNode;
     open: boolean;
     onOpenChange: (open: boolean) => void;
+    approvalRecords?: ReactNode;
 }) {
     const { t } = useTranslation();
     const pending = requests.filter(request => ['pending', 'needs_revalidation'].includes(request.state));
@@ -47,6 +48,7 @@ export function AssistantPermissionRecords({ requests, children, open, onOpenCha
                     <SheetDescription>{t('pages.aiAssistant.permissionHistoryHint')}</SheetDescription>
                 </SheetHeader>
                 <div className="min-h-0 flex-1 space-y-3 overflow-y-auto py-4">
+                    {approvalRecords}
                     {history.length ? [...history].reverse().map(children) : <p className="text-sm text-muted-foreground">{t('pages.aiAssistant.permissionHistoryEmpty')}</p>}
                 </div>
             </SheetContent>

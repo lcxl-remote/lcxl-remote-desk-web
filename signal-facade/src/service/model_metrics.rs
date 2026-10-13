@@ -823,6 +823,9 @@ pub fn record(event: &ObservationEvent, detail_trimmed: bool) -> ObservationReco
             result.tool = op.tool_key.clone();
             result.ordinal = Some(op.ordinal);
         }
+        ObservationPayload::Approval(_) => {
+            result.kind = "private_approval".into();
+        }
         ObservationPayload::Runtime(runtime) => {
             result.kind = "runtime".into();
             result.outcome = tag(&runtime.definition);

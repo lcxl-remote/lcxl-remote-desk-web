@@ -1,0 +1,1 @@
+{"type":"object","required":["stage","origin","at_ms"],"properties":{"at_ms":{"type":"integer","format":"int64"},"origin":{"type":"string"},"stage":{"type":"string"}},"x-readme-ref-name":"ApprovalTraceStageDto"}

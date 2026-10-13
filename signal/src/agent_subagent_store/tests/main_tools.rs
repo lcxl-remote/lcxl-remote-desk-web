@@ -1,4 +1,92 @@
 use super::*;
+
+#[tokio::test]
+async fn runtime_schema_defaults_preserve_result_and_list_call_authority() {
+    let db = database().await;
+    let (mut parent, calls) = super::creation::runnable_parent(&db).await;
+    let store = SubAgentStore::new(db.clone());
+    let task = store
+        .spawn_for_turn(&parent, &calls[0], &super::creation::spawn_request())
+        .await
+        .unwrap();
+    complete_child(&db, &task.task_id).await;
+    let projection = store.main_projection_for_turn(&parent).await.unwrap();
+    parent
+        .ui_references
+        .observe(std::slice::from_ref(&projection))
+        .unwrap();
+    save_main_delegation_session(&db, &mut parent)
+        .await
+        .unwrap();
+    for (id, name, arguments, field, default) in [
+        (
+            "read-default",
+            tools::RESULT,
+            serde_json::json!({"task_id": "t1"}),
+            "include_task",
+            serde_json::json!(false),
+        ),
+        (
+            "list-default",
+            tools::LIST,
+            serde_json::json!({}),
+            "limit",
+            serde_json::Value::Null,
+        ),
+    ] {
+        let original = committed_call(&db, &mut parent, id, name, arguments).await;
+        let resolved = desk_diagnose_core::ui_model_ids::resolve_session_call(
+            &original,
+            &parent,
+            chrono::Utc::now().timestamp_millis() as u64,
+        )
+        .unwrap();
+        let mut input: serde_json::Value = serde_json::from_str(&resolved.arguments_json).unwrap();
+        assert_eq!(input[field], default);
+        let operation = tools::parse(&parent, &resolved).unwrap();
+        let receipt = store
+            .execute_main_tool(&mut parent, &resolved, operation, &format!("{id}-result"))
+            .await
+            .unwrap();
+        if name == tools::RESULT {
+            assert!(
+                receipt.payload["answer"]
+                    .as_str()
+                    .is_some_and(|answer| !answer.is_empty())
+            );
+            assert!(receipt.payload.get("objective").is_none());
+            assert_eq!(parent.observed_subagent_results.len(), 1);
+        } else {
+            assert_eq!(receipt.payload["total"], 1);
+        }
+        let committed = parent
+            .conversation
+            .iter()
+            .flat_map(|message| &message.tool_calls)
+            .find(|call| call.id == original.id)
+            .unwrap();
+        assert_eq!(committed.arguments_json, original.arguments_json);
+        input[field] = if name == tools::RESULT {
+            serde_json::json!(true)
+        } else {
+            serde_json::json!(11)
+        };
+        let changed = ToolCall {
+            arguments_json: input.to_string(),
+            ..resolved
+        };
+        let operation = tools::parse(&parent, &changed).unwrap();
+        let unchanged = parent.clone();
+        assert!(
+            store
+                .execute_main_tool(&mut parent, &changed, operation, "changed-default-result")
+                .await
+                .is_err()
+        );
+        assert_eq!(parent, unchanged);
+    }
+}
+
 #[tokio::test]
 async fn normalized_json_matches_original_lineage_but_changed_task_is_rejected() {
     let db = database().await;
@@ -489,4 +577,114 @@ async fn projection_after_new_input_keeps_old_tasks_opaque_and_active_tasks_visi
         projection.data_envelope.unwrap().sensitivity,
         desk_agent_protocol::data_lineage::Sensitivity::UserContent
     );
+}
+
+#[tokio::test]
+async fn short_task_ids_keep_query_wait_and_control_call_authority() {
+    for tool in [
+        tools::STATUS,
+        tools::RESULT,
+        tools::WAIT,
+        tools::CANCEL,
+        tools::MESSAGE,
+    ] {
+        let db = database().await;
+        let (mut parent, calls) = super::creation::runnable_parent(&db).await;
+        let store = SubAgentStore::new(db.clone());
+        let receipt = store
+            .execute_main_tool(
+                &mut parent,
+                &calls[0],
+                Operation::Spawn(super::creation::spawn_request()),
+                "spawn-result",
+            )
+            .await
+            .unwrap();
+        let native = receipt.payload["task_id"].as_str().unwrap().to_owned();
+        parent.ui_references.observe(&parent.conversation).unwrap();
+        save_main_delegation_session(&db, &mut parent)
+            .await
+            .unwrap();
+        if matches!(tool, tools::RESULT | tools::WAIT) {
+            complete_child(&db, &native).await;
+        }
+        let arguments = match tool {
+            tools::WAIT => serde_json::json!({"task_ids":["t1"],"mode":"all_terminal"}),
+            tools::CANCEL => {
+                serde_json::json!({"task_id":"t1","expected_input_revision":1,"expected_control_revision":1})
+            }
+            tools::MESSAGE => {
+                serde_json::json!({"task_id":"t1","expected_input_revision":1,"expected_control_revision":1,"message":"Check one additional symptom"})
+            }
+            _ => serde_json::json!({"task_id":"t1"}),
+        };
+        let original = committed_call(&db, &mut parent, "short-call", tool, arguments).await;
+        let resolved =
+            desk_diagnose_core::ui_model_ids::resolve_session_call(&original, &parent, 1).unwrap();
+        let operation = tools::parse(&parent, &resolved).unwrap();
+        let receipt = store
+            .execute_main_tool(&mut parent, &resolved, operation, "short-result")
+            .await
+            .unwrap();
+        let returned_task = if tool == tools::WAIT {
+            &receipt.payload["tasks"][0]
+        } else {
+            &receipt.payload
+        };
+        assert_eq!(returned_task["task_id"], native);
+        assert_eq!(
+            parent
+                .conversation
+                .iter()
+                .flat_map(|message| &message.tool_calls)
+                .find(|call| call.id == original.id)
+                .unwrap()
+                .arguments_json,
+            original.arguments_json
+        );
+        parent.ui_references.observe(&parent.conversation).unwrap();
+        let mut request = desk_diagnose_core::seam::ModelRequest::text_only(
+            parent.conversation.clone(),
+            desk_diagnose_core::prompt::ResponseFormatSpec::None,
+        );
+        request.ui_references = Some(parent.ui_references.clone());
+        let projected = desk_diagnose_core::ui_model_ids::project_request(&request);
+        let output = projected
+            .messages
+            .iter()
+            .find(|message| message.message_id == "short-result")
+            .unwrap();
+        let output: serde_json::Value = serde_json::from_str(&output.text).unwrap();
+        assert_eq!(
+            if tool == tools::WAIT {
+                &output["tasks"][0]["task_id"]
+            } else {
+                &output["task_id"]
+            },
+            "t1"
+        );
+        assert_eq!(request.messages, parent.conversation);
+        if matches!(tool, tools::STATUS | tools::RESULT | tools::WAIT) {
+            let mut changed: serde_json::Value =
+                serde_json::from_str(&resolved.arguments_json).unwrap();
+            if tool == tools::WAIT {
+                changed["task_ids"][0] = serde_json::json!("other-task");
+            } else {
+                changed["task_id"] = serde_json::json!("other-task");
+            }
+            let changed = ToolCall {
+                arguments_json: changed.to_string(),
+                ..resolved
+            };
+            let operation = tools::parse(&parent, &changed).unwrap();
+            let unchanged = parent.clone();
+            assert!(
+                store
+                    .execute_main_tool(&mut parent, &changed, operation, "changed-short-result")
+                    .await
+                    .is_err()
+            );
+            assert_eq!(parent, unchanged);
+        }
+    }
 }

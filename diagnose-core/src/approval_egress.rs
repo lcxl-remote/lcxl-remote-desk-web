@@ -105,11 +105,7 @@ pub fn authorize_permission_review_egress(
         return Err(ApprovalReviewError::InvalidContext);
     }
     delegation
-        .require_current(
-            &session.conversation_id,
-            &session.actor_id,
-            &session.device_id,
-        )
+        .require_current_for_session(session)
         .map_err(|_| ApprovalReviewError::InvalidContext)?;
     if candidate.goal_id.as_deref() != goal.map(|goal| goal.goal_id.as_str())
         || candidate.goal_revision != goal.map(|goal| goal.goal_revision)
@@ -152,7 +148,8 @@ pub fn authorize_permission_review_egress(
         return Err(ApprovalReviewError::InvalidContext);
     }
 
-    let user = crate::permission_resume::latest_user_requirement(&session.conversation)
+    let user = session
+        .authorization_requirement()
         .ok_or(ApprovalReviewError::InvalidContext)?;
     if candidate.context.current_user_requirement != user.text {
         return Err(ApprovalReviewError::InvalidContext);
@@ -193,10 +190,7 @@ pub fn authorize_permission_review_egress(
         source_ids.insert(source.message_id.as_str());
     }
     for evidence in &candidate.context.evidence {
-        let message = session
-            .conversation
-            .iter()
-            .find(|message| message.message_id == evidence.event_id)
+        let message = crate::approval_review::review_evidence_message(session, &evidence.event_id)
             .ok_or(ApprovalReviewError::InvalidContext)?;
         if is_historical_permission_pause_result(message) {
             return Err(ApprovalReviewError::InvalidContext);
@@ -288,11 +282,7 @@ pub fn authorize_source_review_egress(
         return Err(ApprovalReviewError::InvalidContext);
     }
     delegation
-        .require_current(
-            &session.conversation_id,
-            &session.actor_id,
-            &session.device_id,
-        )
+        .require_current_for_session(session)
         .map_err(|_| ApprovalReviewError::InvalidContext)?;
     if candidate.goal_id.as_deref() != goal.map(|goal| goal.goal_id.as_str())
         || candidate.goal_revision != goal.map(|goal| goal.goal_revision)
@@ -300,7 +290,8 @@ pub fn authorize_source_review_egress(
     {
         return Err(ApprovalReviewError::InvalidContext);
     }
-    let user = crate::permission_resume::latest_user_requirement(&session.conversation)
+    let user = session
+        .authorization_requirement()
         .ok_or(ApprovalReviewError::InvalidContext)?;
     if candidate.context.current_user_requirement != user.text {
         return Err(ApprovalReviewError::InvalidContext);
@@ -332,10 +323,7 @@ pub fn authorize_source_review_egress(
         source_ids.insert(source.message_id.as_str());
     }
     for evidence in &candidate.context.evidence {
-        let message = session
-            .conversation
-            .iter()
-            .find(|message| message.message_id == evidence.event_id)
+        let message = crate::approval_review::review_evidence_message(session, &evidence.event_id)
             .ok_or(ApprovalReviewError::InvalidContext)?;
         if is_historical_permission_pause_result(message) {
             return Err(ApprovalReviewError::InvalidContext);
@@ -396,10 +384,7 @@ fn authorize_review_sources(
     };
     let mut sensitivity = Sensitivity::Public;
     for message_id in source_ids {
-        let message = session
-            .conversation
-            .iter()
-            .find(|message| message.message_id == message_id)
+        let message = crate::approval_review::review_evidence_message(session, message_id)
             .ok_or(ApprovalReviewError::InvalidContext)?;
         if message.image_data_url.is_some() {
             return Err(ApprovalReviewError::InvalidContext);
@@ -729,6 +714,90 @@ mod tests {
             &destination,
             10,
         )
+    }
+
+    #[test]
+    fn child_reviews_use_the_root_switch_and_frozen_owner_evidence() {
+        use crate::subagent::{AgentRole, DelegatedTaskBinding, DelegationSource};
+        let mut session = source_review_session();
+        let owner = session.conversation.remove(0);
+        session.conversation_id = "child".into();
+        session.trigger_origin = crate::session::TriggerOrigin::DelegatedTask;
+        session.delegated_owner_requirement = Some(owner.clone());
+        session.agent_role = AgentRole::SubAgent {
+            binding: Box::new(DelegatedTaskBinding {
+                root_conversation_id: "conversation".into(),
+                group_id: "group".into(),
+                task_id: "task".into(),
+                source: DelegationSource::UserInput { input_revision: 1 },
+                objective: "Model task is not owner authority".into(),
+                acceptance_criteria: vec!["Report actual output".into()],
+                input_revision: 1,
+                control_revision: 1,
+                source_epoch: 1,
+                deadline_ms: 60_000,
+            }),
+        };
+        for source in [
+            ApprovalSource::ManagerCommand {
+                work_id: "12".into(),
+            },
+            ApprovalSource::ConcreteCall {
+                call_id: "command-call".into(),
+                grant_id: "grant".into(),
+            },
+        ] {
+            let authorized = authorize_projected_source(&session, source).unwrap();
+            assert!(authorized.prompt.contains(&owner.text));
+            assert!(
+                authorized
+                    .source_audit
+                    .digests_sha256
+                    .contains(&owner.data_envelope.as_ref().unwrap().digest_sha256)
+            );
+        }
+        for invalid in 0..4 {
+            let mut altered = session.clone();
+            match invalid {
+                0 => {
+                    let AgentRole::SubAgent { binding } = &mut altered.agent_role else {
+                        unreachable!()
+                    };
+                    binding.root_conversation_id = "other".into();
+                }
+                1 => altered.actor_id = "other-owner".into(),
+                2 => altered.device_id = "other-device".into(),
+                3 => {
+                    let AgentRole::SubAgent { binding } = &mut altered.agent_role else {
+                        unreachable!()
+                    };
+                    binding.source = DelegationSource::ScheduledOccurrence {
+                        schedule_id: "schedule".into(),
+                        occurrence_id: "occurrence".into(),
+                    };
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                authorize_projected_source(
+                    &altered,
+                    ApprovalSource::ManagerCommand {
+                        work_id: "12".into()
+                    }
+                )
+                .is_err()
+            );
+        }
+        session.delegated_owner_requirement = None;
+        assert!(
+            authorize_projected_source(
+                &session,
+                ApprovalSource::ManagerCommand {
+                    work_id: "12".into()
+                }
+            )
+            .is_err()
+        );
     }
 
     #[test]

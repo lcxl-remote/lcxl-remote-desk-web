@@ -29,3 +29,5 @@ pub mod terminal;
 pub mod version;
 pub mod virtual_display;
 pub mod whiteboard;
+
+pub mod approval_trace;

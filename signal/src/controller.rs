@@ -19,3 +19,5 @@ pub mod web_search;
 pub mod file_recovery;
 
 pub mod model_metrics;
+
+pub mod approval_trace;

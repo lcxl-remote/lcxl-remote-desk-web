@@ -56,6 +56,6 @@ pub fn retention_priority(payload: &ObservationPayload) -> i32 {
             OperationOutcome::Pending => 1,
             _ => 2,
         },
-        ObservationPayload::Runtime(_) => 1,
+        ObservationPayload::Runtime(_) | ObservationPayload::Approval(_) => 1,
     }
 }

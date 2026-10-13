@@ -7,7 +7,7 @@ use desk_diagnose_core::approval_review::{
     ApprovalReviewCandidate, ApprovalReviewDecision, reviewer_model_decision_observed,
 };
 use desk_diagnose_core::chat::TokenUsage;
-use desk_diagnose_core::seam::{ModelSeam, NullTurnSink};
+use desk_diagnose_core::seam::ModelSeam;
 
 use crate::agent_approval_store::ClaimedPermissionReview;
 use crate::model_dial::SignalModelSeam;
@@ -15,6 +15,8 @@ use crate::model_dial::SignalModelSeam;
 pub struct ReviewerResponse {
     pub decision: Option<ApprovalReviewDecision>,
     pub usage: TokenUsage,
+    pub stop_reason: String,
+    pub failure_reason: Option<String>,
 }
 
 /// A malformed or incomplete model answer cannot become a grant. Its reported
@@ -24,6 +26,73 @@ pub async fn call_claimed_permission_review(
     db: &DatabaseConnection,
     candidate: &ApprovalReviewCandidate,
     claim: &ClaimedPermissionReview,
+) -> Result<ReviewerResponse, AgentError> {
+    let mut sink = crate::approval_trace::Store::new(db.clone())
+        .capture(candidate, claim)
+        .await;
+    sink.tracking = Some(claim.statistics.clone());
+    sink.publish = Some(std::sync::Arc::new(crate::model_metrics::runtime::submit));
+    sink.event("preparation");
+    let result = call_claimed_permission_review_inner(db, candidate, claim, &mut sink).await;
+    match &result {
+        Ok(response) => {
+            sink.model_finished();
+            if let Some(decision) = &response.decision
+                && let Ok(value) = serde_json::to_string(decision)
+            {
+                sink.text("decision", &value);
+            }
+            sink.event(if response.decision.is_some() {
+                "decision_parsed"
+            } else {
+                "decision_invalid"
+            });
+            sink.complete(
+                Some(response.stop_reason.clone()),
+                serde_json::to_string(&response.usage).ok(),
+                response.failure_reason.clone(),
+            );
+        }
+        Err(error) => {
+            let reason = if sink.stage() == "non_stream_response" {
+                "stream"
+            } else {
+                match error.kind {
+                    AgentErrorKind::Timeout => "timeout",
+                    AgentErrorKind::Cancelled => "cancelled",
+                    AgentErrorKind::TransportError => "transport",
+                    AgentErrorKind::ModelUnavailable => "provider",
+                    AgentErrorKind::ModelRejected => {
+                        if sink.model_started() {
+                            "provider"
+                        } else {
+                            "configuration"
+                        }
+                    }
+                    AgentErrorKind::ContentBlocked | AgentErrorKind::RiskBlocked => "policy",
+                    AgentErrorKind::PermissionDenied => {
+                        if sink.stage() == "configuration" {
+                            "configuration"
+                        } else {
+                            "revalidation"
+                        }
+                    }
+                    _ => "processing",
+                }
+            };
+            sink.model_finished();
+            sink.event("review_failed");
+            sink.complete(None, None, Some(reason.into()));
+        }
+    }
+    result
+}
+
+async fn call_claimed_permission_review_inner(
+    db: &DatabaseConnection,
+    candidate: &ApprovalReviewCandidate,
+    claim: &ClaimedPermissionReview,
+    sink: &mut desk_signal_facade::service::approval_trace::ApprovalTraceSink,
 ) -> Result<ReviewerResponse, AgentError> {
     let now_unix_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0);
     if claim.candidate_id != candidate.candidate_id
@@ -36,6 +105,7 @@ pub async fn call_claimed_permission_review(
     }
     // Retry only a pre-dial configuration read. Once provider I/O starts its
     // outcome may be unknown, so the claimed candidate must never be redialed.
+    sink.event("configuration");
     let config = match crate::approval_model_provider::load(db).await {
         Ok(config) => config,
         Err(_) => {
@@ -79,6 +149,13 @@ pub async fn call_claimed_permission_review(
         return Err(reviewer_unavailable());
     }
     let seam = SignalModelSeam::from_approval_config(&config)?.with_context_db(db.clone());
+    sink.protocol(
+        serde_json::to_value(config.gateway.wire_protocol)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_owned))
+            .unwrap_or_default(),
+    );
+    sink.event("admission");
     let permit = seam.acquire_admission().await?;
     let admitted_at = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(u64::MAX);
     if admitted_at >= claim.lease_deadline_unix_ms || admitted_at >= candidate.expires_at_unix_ms {
@@ -139,8 +216,22 @@ pub async fn call_claimed_permission_review(
         request.use_case,
         desk_diagnose_core::model_observability::Origin::System,
     );
+    if let Some(observation) = &request.observation {
+        sink.protocol(
+            serde_json::to_value(observation.attribution.protocol)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_owned))
+                .unwrap_or_default(),
+        );
+    }
+    sink.event("provider_admission");
+    if let Some(context) = &request.observation
+        && let Ok(mut tracking) = claim.statistics.try_lock()
+    {
+        tracking.attribution = context.attribution.clone();
+    }
     let observation = request.observation.clone();
-    let turn = match seam.call_admitted(request, &mut NullTurnSink, permit).await {
+    let turn = match seam.call_admitted(request, sink, permit).await {
         Ok(turn) => turn,
         Err(error) => {
             if let Err(audit_error) = store.mark_failed(&receipt_id).await {
@@ -223,8 +314,17 @@ pub async fn call_claimed_permission_review(
         }
     };
     Ok(ReviewerResponse {
-        decision,
+        decision: decision.clone(),
         usage: turn.usage,
+        stop_reason: format!("{:?}", turn.stop_reason),
+        failure_reason: decision.is_none().then(|| {
+            if turn.stop_reason == desk_diagnose_core::chat::StopReason::MaxTokens {
+                "output_truncated"
+            } else {
+                "invalid_decision"
+            }
+            .to_string()
+        }),
     })
 }
 

@@ -4945,7 +4945,12 @@ async fn exact_permission_resume_retries_one_precommit_protocol_error() {
     let recovery = requests[1].messages.last().unwrap();
     assert_eq!(recovery.role, ChatRole::SystemEvent);
     assert!(recovery.text.contains("no trailing characters"));
-    assert!(recovery.text.contains("copy it byte-for-byte"));
+    assert!(
+        recovery
+            .text
+            .contains("copy its displayed arguments unchanged")
+    );
+    assert!(recovery.text.contains("do not add protocol metadata"));
     assert!(
         !requests[2]
             .messages

@@ -1,3 +1,4 @@
+import { ApprovalTraceSettingsPanel } from '@/features/approval/settings';
 import { ModelThinkingSettings } from '@/components/model-thinking-settings';
 import { useEffect, useState, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -295,6 +296,7 @@ export function ApprovalModelSettings() {
                 </form>
             </CardContent>
         </Card>}
+        <ApprovalTraceSettingsPanel/>
         <AlertDialog open={reuseConfirmation !== null} onOpenChange={open => { if (!open) setReuseConfirmation(null); }}>
             <AlertDialogContent>
                 <AlertDialogHeader>

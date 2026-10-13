@@ -169,6 +169,12 @@ impl SignalAgentSessionStore {
             .await
             .map_err(save_backend)?;
         txn.commit().await.map_err(save_backend)?;
+        let trace_store = crate::approval_trace::Store::new(self.db.clone());
+        let deleted = id.to_owned();
+        let owner = actor.to_owned();
+        tokio::spawn(async move {
+            let _ = trace_store.delete_for_session(&deleted, &owner).await;
+        });
         permission_ends.submit(now_ms, crate::model_metrics::runtime::submit);
         Ok(session.current_request_id)
     }

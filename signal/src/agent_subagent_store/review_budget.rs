@@ -83,6 +83,9 @@ pub(crate) async fn validate_review_scope_on(
     {
         return Err(invalid());
     }
+    if !shared_approval_current_on(txn, &session, now_ms).await? {
+        return Err(invalid());
+    }
     let delegated = crate::entity::agent_approval_delegation::Entity::find()
         .filter(
             crate::entity::agent_approval_delegation::Column::DelegationId
@@ -90,7 +93,7 @@ pub(crate) async fn validate_review_scope_on(
         )
         .filter(
             crate::entity::agent_approval_delegation::Column::ConversationId
-                .eq(&authority.conversation_id),
+                .eq(session.approval_delegation_conversation_id()),
         )
         .filter(crate::entity::agent_approval_delegation::Column::ActorId.eq(&authority.actor_id))
         .filter(crate::entity::agent_approval_delegation::Column::DeviceId.eq(&authority.device_id))
@@ -99,11 +102,7 @@ pub(crate) async fn validate_review_scope_on(
         .ok_or_else(invalid)?;
     let delegated = crate::agent_approval_store::decode(&delegated)?;
     delegated
-        .require_current(
-            &authority.conversation_id,
-            &authority.actor_id,
-            &authority.device_id,
-        )
+        .require_current_for_session(&session)
         .map_err(|_| invalid())?;
     if delegated.revision != authority.delegation_revision {
         return Err(invalid());
@@ -257,6 +256,14 @@ pub(crate) async fn reserve_review_call_on(
     authority.validate().map_err(|_| invalid())?;
     let changed = review_row::Entity::update_many()
         .set(review_row::ActiveModel {
+            statistics_json: Set(Some(
+                serde_json::to_string(
+                    &desk_diagnose_core::approval_observation::ReviewTracking::new(
+                        &authority, now_ms,
+                    ),
+                )
+                .map_err(|_| invalid())?,
+            )),
             call_authority_json: Set(Some(
                 serde_json::to_string(&authority).map_err(|_| invalid())?,
             )),

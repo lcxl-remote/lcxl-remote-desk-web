@@ -25,9 +25,10 @@ use crate::{
     usage_retention::UsageRetentionConfig,
 };
 
-pub const SECTION_NAMES: [&str; 11] = [
+pub const SECTION_NAMES: [&str; 12] = [
     "ai_gateway",
     "approval_gateway",
+    "approval_trace",
     "web_search",
     "context_management",
     "terminal_completion",
@@ -51,6 +52,7 @@ pub struct Metadata {
 pub struct GlobalConfig {
     pub ai_gateway: ModelProviderConfig,
     pub approval_gateway: ApprovalModelConfig,
+    pub approval_trace: desk_signal_facade::model::approval_trace::ApprovalTraceSettings,
     pub web_search: SearchConfig,
     pub context_management: PlatformContextPolicy,
     pub terminal_completion:
@@ -68,6 +70,8 @@ impl Default for GlobalConfig {
         Self {
             ai_gateway: ModelProviderConfig::default(),
             approval_gateway: ApprovalModelConfig::default(),
+            approval_trace:
+                desk_signal_facade::model::approval_trace::ApprovalTraceSettings::defaults(false),
             web_search: SearchConfig::default(),
             context_management: PlatformContextPolicy::default(),
             terminal_completion: Default::default(),
@@ -89,6 +93,9 @@ impl std::fmt::Debug for GlobalConfig {
 
 impl GlobalConfig {
     pub fn validate(&self) -> Result<(), DbErr> {
+        self.approval_trace
+            .validate()
+            .map_err(|_| invalid("approval_trace"))?;
         file_codec::validate_gateway(&self.ai_gateway)?;
         file_codec::validate_gateway(&self.approval_gateway.gateway)?;
         if self.approval_gateway.configuration_revision < 1 {

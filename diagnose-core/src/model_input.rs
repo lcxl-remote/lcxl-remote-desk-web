@@ -219,6 +219,135 @@ pub(crate) fn project_fixed_arguments(tool: &str, value: &mut Value) {
     }
 }
 
+pub(crate) fn project_protocol_versions(tool: &str, value: &mut Value) {
+    if tool == "request_permissions"
+        && let Some(items) = value.get_mut("items").and_then(Value::as_array_mut)
+    {
+        for item in items {
+            if let Some(name) = item["tool_name"].as_str().map(str::to_owned)
+                && let Some(exact) = item.get_mut("exact_input")
+            {
+                project_protocol_versions(&name, exact);
+            }
+        }
+    }
+    if let Some(spec) = tools().get(tool) {
+        project_versions(&spec.parameters_schema, value);
+    }
+}
+
+/// Hide only schema-declared, matching fixed protocol versions. Unknown fields,
+/// unsupported versions and arbitrary business payloads remain unchanged.
+fn project_versions(schema: &Value, input: &mut Value) {
+    if let (Some(properties), Some(object)) =
+        (schema["properties"].as_object(), input.as_object_mut())
+    {
+        if let Some(version) = properties
+            .get("schema_version")
+            .and_then(|field| field.get("const"))
+            && object.get("schema_version") == Some(version)
+        {
+            object.remove("schema_version");
+        }
+        for (key, value) in object {
+            if let Some(child) = properties.get(key) {
+                project_versions(child, value);
+            }
+        }
+    }
+    if let Some(items) = input.as_array_mut() {
+        for value in items {
+            project_versions(&schema["items"], value);
+        }
+    }
+    for key in ["oneOf", "anyOf", "allOf"] {
+        if let Some(variants) = schema[key].as_array() {
+            for variant in variants {
+                if variant["properties"]["kind"]["const"].is_null()
+                    || variant["properties"]["kind"]["const"] == input["kind"]
+                {
+                    project_versions(variant, input);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod protocol_version_tests {
+    use super::*;
+
+    #[test]
+    fn registered_tool_versions_round_trip_without_changing_business_arguments() {
+        let mut affected = Vec::new();
+        for (name, spec) in tools() {
+            let mut canonical = example(&spec.parameters_schema);
+            fill_versions(name, &mut canonical);
+            let mut projected = canonical.clone();
+            project_protocol_versions(name, &mut projected);
+            if projected != canonical {
+                affected.push(name.as_str());
+            }
+            let stable = projected.clone();
+            project_protocol_versions(name, &mut projected);
+            assert_eq!(projected, stable, "projection must be stable for {name}");
+            fill_versions(name, &mut projected);
+            assert_eq!(
+                projected, canonical,
+                "approved values must survive for {name}"
+            );
+        }
+        assert!(affected.contains(&"exec_command"));
+        assert!(affected.contains(&"prepare_outlook_draft"));
+        assert!(affected.contains(&"send_gmail_message"));
+        eprintln!(
+            "Tools with fixed protocol versions: {}",
+            affected.join(", ")
+        );
+    }
+
+    #[test]
+    fn arbitrary_business_versions_and_unsupported_protocol_versions_are_preserved() {
+        let schema = json!({"properties":{
+            "schema_version":{"const":1},
+            "payload":{"type":"object","additionalProperties":true},
+            "revision":{"type":"integer"}
+        }});
+        let mut input = json!({"schema_version":1,"payload":{"schema_version":42},"revision":7});
+        project_versions(&schema, &mut input);
+        assert_eq!(input, json!({"payload":{"schema_version":42},"revision":7}));
+        input["schema_version"] = json!(99);
+        let original = input.clone();
+        project_versions(&schema, &mut input);
+        assert_eq!(input, original);
+    }
+
+    #[test]
+    fn permission_exact_inputs_use_each_target_tools_schema() {
+        let mut input = json!({"items":[
+            {"tool_name":"exec_command","exact_input":{"shell":"bash","command":"pwd","timeout_ms":10000,"schema_version":1}},
+            {"tool_name":"prepare_outlook_draft","exact_input":{"draft":{"schema_version":desk_agent_protocol::communication::COMMUNICATION_SCHEMA_VERSION,"body_plain_text":"unchanged","recipients":[]}}},
+            {"tool_name":"unknown","exact_input":{"schema_version":1}}
+        ]});
+        project_protocol_versions("request_permissions", &mut input);
+        assert!(
+            input["items"][0]["exact_input"]
+                .get("schema_version")
+                .is_none()
+        );
+        assert!(
+            input["items"][1]["exact_input"]["draft"]
+                .get("schema_version")
+                .is_none()
+        );
+        assert_eq!(
+            input["items"][1]["exact_input"]["draft"]["body_plain_text"],
+            "unchanged"
+        );
+        assert_eq!(input["items"][2]["exact_input"]["schema_version"], 1);
+    }
+}
+
 fn example(schema: &Value) -> Value {
     if let Some(value) = schema["examples"]
         .as_array()

@@ -3024,7 +3024,7 @@ async fn run_inner_impl(
                     "runtime-permission-continuation-{turn_id}-{}",
                     session.input_revision
                 );
-                let marker_text = "PERMISSION CONTINUATION CHECKPOINT (server authoritative): resume at the authorization boundary; do not restart the workflow. Re-read CURRENT AUTHORIZED GRANTS. Continue in dependency order using active authorized tools: finish required prerequisites (for example create a file before executing it), and do not execute a dependent action if its prerequisite failed. When calling a tool with approved_exact_input, use exactly that input with no changed fields. Do not unnecessarily repeat inspection, recreate a preview, or request an already active permission, because this can replace the approved ephemeral object reference. If no matching active grant exists, adapt to the recorded decision or explain the blocker. This checkpoint grants no authority; the server authorizer still performs the final match.";
+                let marker_text = "PERMISSION CONTINUATION CHECKPOINT (server authoritative): resume at the authorization boundary; do not restart the workflow. Re-read CURRENT AUTHORIZED GRANTS. Continue in dependency order using active authorized tools: finish required prerequisites (for example create a file before executing it), and do not execute a dependent action if its prerequisite failed. When calling a tool with approved_exact_input, copy the displayed arguments unchanged. Do not add fixed protocol metadata such as schema_version; the server restores it before exact authorization checks. Do not unnecessarily repeat inspection, recreate a preview, or request an already active permission, because this can replace the approved ephemeral object reference. If no matching active grant exists, adapt to the recorded decision or explain the blocker. This checkpoint grants no authority; the server authorizer still performs the final match.";
                 let marker_text = if permission_continuation_blocked {
                     let reasons = deps
                         .permission_continuation_exact_tools
@@ -3089,7 +3089,7 @@ async fn run_inner_impl(
                 let marker_id = format!(
                     "runtime-permission-protocol-retry-{turn_id}-{permission_protocol_retries}"
                 );
-                let marker_text = "RUNTIME RECOVERY NOTICE (server authoritative): the previous permission-continuation response violated the tool-call protocol and was discarded before any action was recorded or executed. Return exactly one exposed tool call now, with no prose, no second JSON value, and no trailing characters. Choose the next authorized action in dependency order. If that tool has approved_exact_input, copy it byte-for-byte as the complete arguments; otherwise stay within its active grant scope. This notice grants no authority, and the server will still require the matching active grant and final validation.";
+                let marker_text = "RUNTIME RECOVERY NOTICE (server authoritative): the previous permission-continuation response violated the tool-call protocol and was discarded before any action was recorded or executed. Return exactly one exposed tool call now, with no prose, no second JSON value, and no trailing characters. Choose the next authorized action in dependency order. If that tool has approved_exact_input, copy its displayed arguments unchanged and do not add protocol metadata such as schema_version; otherwise stay within its active grant scope. This notice grants no authority, and the server will still require the matching active grant and final validation.";
                 let parent = child_runtime_label.as_ref().or_else(|| {
                     crate::permission_resume::latest_user_requirement(&session.conversation)
                         .and_then(|message| message.data_envelope.as_ref())
@@ -3180,7 +3180,9 @@ async fn run_inner_impl(
         // history window is selected. All transient blocks are included; only
         // protocol framing uses the reserve. Final wire encoding is rechecked.
         const REQUEST_FRAMING_RESERVE_BYTES: usize = 1024;
-        if session.ui_references.observe(&session.conversation)? {
+        let history_changed = session.ui_references.observe(&session.conversation)?;
+        let runtime_changed = session.ui_references.observe(&messages)?;
+        if history_changed || runtime_changed {
             deps.session_seam.save(session).await?;
         }
         let mut overhead_request = ModelRequest::text_only(

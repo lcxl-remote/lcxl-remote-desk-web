@@ -189,6 +189,14 @@ impl ModelRequest {
 /// [`on_turn_discarded`]: TurnSink::on_turn_discarded
 /// [`on_text_delta`]: TurnSink::on_text_delta
 pub trait TurnSink {
+    /// A final wire-body projection is captured only by the approval observer.
+    fn on_provider_request(&mut self, _body: &serde_json::Value) {}
+    /// Readable final JSON received from a provider that did not stream.
+    fn on_provider_json_response(&mut self, _body: &serde_json::Value) {}
+    /// A typed pre-provider failure, independent of human-readable error text.
+    fn on_request_not_started(&mut self, _reason: crate::model_observability::NotStartedReason) {}
+    /// Readable provider reasoning, independent of opaque replay and display caps.
+    fn on_reasoning_delta(&mut self, _delta: &str) {}
     /// An incremental fragment of the assistant's text for the current turn
     /// (provisional until the turn commits).
     fn on_text_delta(&mut self, delta: &str);

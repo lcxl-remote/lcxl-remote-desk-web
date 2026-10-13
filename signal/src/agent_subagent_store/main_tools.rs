@@ -303,9 +303,11 @@ impl SubAgentStore {
                     && message.tool_calls.iter().any(|reference| {
                         reference.id == call.id
                             && reference.name == call.name
-                            && tools::same_arguments(
+                            && tools::same_arguments_with_references(
+                                &call.name,
                                 &reference.arguments_json,
                                 &call.arguments_json,
+                                Some(&parent.ui_references),
                             )
                     })
             })

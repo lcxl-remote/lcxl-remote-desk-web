@@ -166,6 +166,7 @@ pub fn task_context(
                     reference.id == call.id
                         && reference.name == call.name
                         && super::tools::same_arguments(
+                            &call.name,
                             &reference.arguments_json,
                             &call.arguments_json,
                         )

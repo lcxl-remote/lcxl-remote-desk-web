@@ -248,8 +248,38 @@ fn web_host_grants_reuse_urls_until_expiry_on_both_surfaces() {
 
 #[test]
 fn ai_permission_grant_is_bound_to_review_expiry_without_switch_deadline() {
+    check_ai_permission_grant(false);
+}
+
+#[test]
+fn child_ai_permission_grant_uses_the_root_delegation_and_child_identity() {
+    check_ai_permission_grant(true);
+}
+
+fn check_ai_permission_grant(child: bool) {
     let (mut session, request, decisions) = decision_fixture();
     session.surface = AgentSessionSurface::AiAssistant;
+    let root_conversation_id = session.conversation_id.clone();
+    if child {
+        session.conversation_id = "child".into();
+        session.agent_role = crate::subagent::AgentRole::SubAgent {
+            binding: Box::new(crate::subagent::DelegatedTaskBinding {
+                root_conversation_id: root_conversation_id.clone(),
+                group_id: "group".into(),
+                task_id: "task".into(),
+                source: crate::subagent::DelegationSource::UserInput {
+                    input_revision: session.input_revision,
+                },
+                objective: "Read the original device".into(),
+                acceptance_criteria: vec!["Report facts".into()],
+                input_revision: session.input_revision,
+                control_revision: session.control_revision,
+                source_epoch: 1,
+                deadline_ms: 60_000,
+            }),
+        };
+    }
+
     let registry = crate::ai_assistant::ai_assistant_provider_registry();
     let capability = registry
         .capability_for_tool(&request.items[0].tool_name)
@@ -277,7 +307,7 @@ fn ai_permission_grant_is_bound_to_review_expiry_without_switch_deadline() {
     let original_expiry = grants[0].expires_at_unix_ms;
     let delegation = crate::approval_delegation::ApprovalDelegation::new(
         "delegation-1".into(),
-        session.conversation_id.clone(),
+        root_conversation_id,
         session.actor_id.clone(),
         session.device_id.clone(),
         "owner-open".into(),
@@ -324,6 +354,10 @@ fn ai_permission_grant_is_bound_to_review_expiry_without_switch_deadline() {
         &mut grants,
     )
     .unwrap();
+    assert_eq!(grants[0].run_id, session.conversation_id);
+    if child {
+        assert_ne!(grants[0].run_id, delegation.conversation_id);
+    }
     assert_eq!(grants[0].expires_at_unix_ms, original_expiry.min(6_000));
     assert!(matches!(
         grants[0].issued_by,

@@ -14,6 +14,7 @@ fn raw(config: &GlobalConfig) -> Result<Map<String, Value>, DbErr> {
     Ok(Map::from_iter([
         ("ai_gateway".into(), value(&config.ai_gateway)?),
         ("approval_gateway".into(), value(&config.approval_gateway)?),
+        ("approval_trace".into(), value(&config.approval_trace)?),
         ("web_search".into(), value(&config.web_search)?),
         (
             "context_management".into(),
@@ -78,7 +79,9 @@ fn decode_fields(value: &mut Value, path: &str) -> Result<(), DbErr> {
     }
     for (key, child) in map.iter_mut() {
         let field = format!("{path}.{key}");
-        if (key == "revision" || key.ends_with("_revision")) && path != "model_metrics" {
+        if (key == "revision" || key.ends_with("_revision"))
+            && !matches!(path, "model_metrics" | "approval_trace")
+        {
             let text = child.as_str().ok_or_else(|| invalid(&field))?;
             let number = text.parse::<u64>().map_err(|_| invalid(&field))?;
             if text != number.to_string() {
@@ -156,6 +159,8 @@ impl<'de> Deserialize<'de> for GlobalConfig {
             ai_gateway: decode(take("ai_gateway"), "ai_gateway")
                 .map_err(serde::de::Error::custom)?,
             approval_gateway: decode(take("approval_gateway"), "approval_gateway")
+                .map_err(serde::de::Error::custom)?,
+            approval_trace: decode(take("approval_trace"), "approval_trace")
                 .map_err(serde::de::Error::custom)?,
             web_search: decode(take("web_search"), "web_search")
                 .map_err(serde::de::Error::custom)?,
@@ -293,6 +298,7 @@ pub(super) fn revision(config: &GlobalConfig, key: &str) -> String {
         "goal_budget_policy" => config.goal_budget_policy.revision.to_string(),
         "schedule_budget_policy" => config.schedule_budget_policy.revision.to_string(),
         "model_metrics" => config.model_metrics.revision.clone(),
+        "approval_trace" => config.approval_trace.revision.clone(),
         _ => unreachable!("known versioned section"),
     }
 }
@@ -320,6 +326,13 @@ pub(super) fn advance_revision(
             }
             _ => unreachable!("known gateway revision"),
         }
+    } else if key == "approval_trace" {
+        config.approval_trace.revision = previous
+            .parse::<u64>()
+            .map_err(|_| invalid(key))?
+            .checked_add(1)
+            .ok_or_else(|| invalid(key))?
+            .to_string();
     } else if key == "model_metrics" {
         config.model_metrics.revision = previous
             .parse::<i64>()

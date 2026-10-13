@@ -245,7 +245,8 @@ closed_enum!(ObjectKind {
     Attempt,
     Tool,
     Operation,
-    Runtime
+    Runtime,
+    Approval
 });
 
 impl Default for ObjectKind {
@@ -472,6 +473,7 @@ pub enum ObservationPayload {
     Tool(ToolSnapshot),
     Operation(OperationSnapshot),
     Runtime(RuntimeSnapshot),
+    Approval(crate::approval_observation::ReviewSnapshot),
 }
 
 impl ObservationPayload {
@@ -482,6 +484,7 @@ impl ObservationPayload {
             Self::Tool(_) => ObjectKind::Tool,
             Self::Operation(_) => ObjectKind::Operation,
             Self::Runtime(_) => ObjectKind::Runtime,
+            Self::Approval(_) => ObjectKind::Approval,
         }
     }
 }
@@ -567,6 +570,14 @@ impl ObservationEvent {
                                     .all(|b| b.is_ascii_alphanumeric() || b"_.".contains(&b))
                         })
                 }
+                ObservationPayload::Approval(review) => [
+                    "permission_item",
+                    "concrete_call",
+                    "oss_command",
+                    "manager_command",
+                    "manager_action",
+                ]
+                .contains(&review.source_kind.as_str()),
                 ObservationPayload::Runtime(_) => true,
                 _ => true,
             }

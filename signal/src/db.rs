@@ -12,10 +12,10 @@ use std::time::Duration;
 use tokio::sync::OnceCell;
 
 use crate::entity::{
-    agent_action_item, agent_approval_delegation, agent_approval_review,
-    agent_capability_dispatch_outbox, agent_capability_grant, agent_exec_task,
-    agent_goal_open_request, agent_goal_run, agent_grant_reservation, agent_run_event,
-    agent_session, approval_review_secret, device_code, host_remote_access_state,
+    agent_action_item, agent_approval_delegation, agent_approval_review, agent_approval_trace,
+    agent_approval_trace_part, agent_capability_dispatch_outbox, agent_capability_grant,
+    agent_exec_task, agent_goal_open_request, agent_goal_run, agent_grant_reservation,
+    agent_run_event, agent_session, approval_review_secret, device_code, host_remote_access_state,
     model_egress_receipt, turn_usage,
 };
 use crate::error::DeskSignalError;
@@ -201,6 +201,7 @@ pub async fn init_db(
                     "recovered {uncertain} capability dispatch intent(s) as outcome unknown; automatic retry is forbidden"
                 );
             }
+            tokio::spawn(crate::approval_trace::Store::new(db.clone()).run_maintenance());
             crate::agent_exec_store::start_completion_publisher(db.clone());
             crate::agent_background_task_store::start_completion_publisher(db.clone());
             actix_web::rt::spawn(
@@ -216,7 +217,7 @@ pub async fn init_db(
         .await
 }
 
-const SIGNAL_SCHEMA_VERSION: i32 = 26;
+const SIGNAL_SCHEMA_VERSION: i32 = 27;
 const SCHEMA_LOCK_TABLE: &str = "signal_schema_init_lock";
 
 #[derive(Debug, FromQueryResult)]
@@ -289,6 +290,8 @@ async fn create_latest_schema<C: ConnectionTrait + crate::config::ConfigConnecti
     create_entity(db, &schema, agent_goal_open_request::Entity).await?;
     create_entity(db, &schema, agent_approval_delegation::Entity).await?;
     create_entity(db, &schema, agent_approval_review::Entity).await?;
+    create_entity(db, &schema, agent_approval_trace::Entity).await?;
+    create_entity(db, &schema, agent_approval_trace_part::Entity).await?;
     create_entity(db, &schema, crate::entity::agent_attachment::Entity).await?;
     create_entity(
         db,
@@ -606,6 +609,8 @@ async fn validate_latest_schema<C: ConnectionTrait + crate::config::ConfigConnec
     check_entity!(agent_goal_open_request);
     check_entity!(agent_approval_delegation);
     check_entity!(agent_approval_review);
+    check_entity!(agent_approval_trace);
+    check_entity!(agent_approval_trace_part);
     check_entity!(agent_attachment);
     check_entity!(agent_file_recovery_cleanup);
     check_entity!(agent_file_recovery_scope);
@@ -1027,6 +1032,8 @@ pub(crate) async fn ensure_lifecycle_tables(db: &DatabaseConnection) {
         schema.create_table_from_entity(agent_goal_open_request::Entity),
         schema.create_table_from_entity(agent_approval_delegation::Entity),
         schema.create_table_from_entity(agent_approval_review::Entity),
+        schema.create_table_from_entity(agent_approval_trace::Entity),
+        schema.create_table_from_entity(agent_approval_trace_part::Entity),
         schema.create_table_from_entity(agent_schedule::Entity),
         schema.create_table_from_entity(agent_delegation_group::Entity),
         schema.create_table_from_entity(agent_subagent_run::Entity),

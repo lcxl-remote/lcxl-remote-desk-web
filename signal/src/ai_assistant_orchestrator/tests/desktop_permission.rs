@@ -886,6 +886,7 @@ async fn approve_with_independent_model(
             desk_diagnose_core::approval_review::reviewer_billed_tokens(response.usage),
             1,
             now_ms(),
+            None,
         )
         .await
         .unwrap();

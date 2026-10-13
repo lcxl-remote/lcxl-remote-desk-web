@@ -1,4 +1,4 @@
-//! Session-owned model aliases. Native references and authorization stay intact.
+//! Session-owned model aliases. Native identities and authorization stay intact.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -92,6 +92,16 @@ impl UiReferenceState {
         let Some((prefix, native_id)) = native_reference(value) else {
             return Ok(());
         };
+        self.register_reference(prefix, native_id, value, source)
+    }
+
+    fn register_reference(
+        &mut self,
+        prefix: &str,
+        native_id: String,
+        value: &Value,
+        source: &str,
+    ) -> Result<(), AgentError> {
         let identity = format!("{:x}", Sha256::digest(value.to_string().as_bytes()));
         if let Some(entry) = self
             .entries
@@ -104,7 +114,7 @@ impl UiReferenceState {
         let counter = self.counters.entry(prefix.into()).or_default();
         *counter = counter
             .checked_add(1)
-            .ok_or_else(|| invalid("UI reference sequence exhausted"))?;
+            .ok_or_else(|| invalid("Conversation reference sequence exhausted"))?;
         self.entries.insert(
             format!("{prefix}{counter}"),
             ReferenceEntry {
@@ -118,11 +128,23 @@ impl UiReferenceState {
         Ok(())
     }
 
-    /// Only accepted device observations allocate aliases. Ordering follows the
-    /// persisted result structure, so rebuilding a request never allocates IDs.
+    /// Accepted device observations and server delegation facts allocate aliases.
+    /// Ordering follows the result structure; request projection allocates no IDs.
     pub fn observe(&mut self, history: &[ChatMessage]) -> Result<bool, AgentError> {
         let before = self.clone();
         for message in history {
+            let mut tasks = Vec::new();
+            crate::subagent::model_ids::visit_message_ids(message, history, &mut |id| {
+                tasks.push(id.to_owned());
+            });
+            for task_id in tasks {
+                self.register_reference(
+                    "t",
+                    task_id.clone(),
+                    &serde_json::json!({"task_id": task_id}),
+                    &message.message_id,
+                )?;
+            }
             let source = message.trusted_tool_result();
             let browser = crate::agent_loop::verified_browser_result(source).is_some();
             let native = message.role == ChatRole::Tool
@@ -163,7 +185,9 @@ impl UiReferenceState {
     pub fn retain_sources(&mut self, sources: &BTreeSet<String>, protected: &BTreeSet<String>) {
         self.entries.retain(|id, entry| {
             entry.sources.retain(|source| sources.contains(source));
-            !entry.sources.is_empty() || protected.contains(id)
+            // Delegated tasks remain addressable through durable list/status
+            // reads even after their original receipt has been compacted.
+            entry.prefix == "t" || !entry.sources.is_empty() || protected.contains(id)
         });
     }
 
@@ -297,13 +321,37 @@ impl UiReferenceState {
 
     pub(crate) fn project_message(&self, message: &mut ChatMessage) {
         let source = message.message_id.clone();
+        let delegation = crate::subagent::model_ids::is_runtime(message);
+        if (delegation
+            || (matches!(message.role, ChatRole::Tool | ChatRole::UntrustedOutput)
+                && self
+                    .entries
+                    .values()
+                    .any(|entry| entry.prefix == "t" && entry.sources.contains(&source))))
+            && let Ok(mut value) = crate::image_input::structured_tool_result(&message.text)
+        {
+            let body = if delegation && value.get("runtime_delegation_state").is_some() {
+                value.get_mut("runtime_delegation_state")
+            } else {
+                Some(&mut value)
+            };
+            if let Some(body) = body {
+                crate::subagent::model_ids::visit_result_ids(body, &mut |id| {
+                    if let Some(alias) = id.as_str().and_then(|id| self.alias("t", id, None)) {
+                        *id = Value::String(alias.into());
+                    }
+                });
+                crate::subagent::model_ids::omit_internal_selectors(body);
+            }
+            message.text = value.to_string();
+        }
         if matches!(message.role, ChatRole::Tool | ChatRole::UntrustedOutput)
             && let Ok(mut value) = crate::image_input::structured_tool_result(&message.text)
             && (value.pointer("/ReadContext").is_some()
                 || self
                     .entries
                     .values()
-                    .any(|entry| entry.sources.contains(&source)))
+                    .any(|entry| entry.prefix != "t" && entry.sources.contains(&source)))
         {
             crate::ui_model_output::expand_value(&mut value);
             self.shorten_value(&mut value, Some(&source));
@@ -362,6 +410,9 @@ impl UiReferenceState {
     pub(crate) fn alias_native_arguments(&self, value: &mut Value) {
         let alias = self.projected_alias(value).map(str::to_owned);
         if let Some(alias) = alias {
+            if value.get("task_id").is_some() {
+                return;
+            }
             let key = if value.get("token").is_some() {
                 "token"
             } else if value.get("element_id").is_some() {
@@ -412,6 +463,13 @@ impl UiReferenceState {
         value: &mut Value,
         expected: &mut Vec<Value>,
     ) -> Result<(), AgentError> {
+        crate::subagent::model_ids::visit_argument_ids(tool, value, &mut |id| {
+            let entry = id.as_str().and_then(|id| self.entries.get(id))
+                .filter(|entry| entry.prefix == "t")
+                .ok_or_else(|| invalid("Unknown subagent task ID. Use the short task_id returned by spawn_subagent, list_subagents or get_subagent_status in this conversation."))?;
+            *id = Value::String(entry.native_id.clone());
+            Ok(())
+        })?;
         let native = matches!(
             tool,
             "inspect_desktop_ui"
@@ -482,6 +540,15 @@ impl UiReferenceState {
             }
         }
         Ok(())
+    }
+
+    pub(crate) fn alias_task_arguments(&self, tool: &str, value: &mut Value) {
+        let _ = crate::subagent::model_ids::visit_argument_ids(tool, value, &mut |id| {
+            if let Some(alias) = id.as_str().and_then(|id| self.alias("t", id, None)) {
+                *id = Value::String(alias.into());
+            }
+            Ok(())
+        });
     }
 
     pub(crate) fn validate_resolved(expected: &[Value], call: &ToolCall) -> Result<(), AgentError> {

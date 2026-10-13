@@ -1,0 +1,1 @@
+{"type":"object","required":["kind","count"],"properties":{"count":{"type":"string"},"kind":{"type":"string"}},"x-readme-ref-name":"ApprovalMetricCount"}

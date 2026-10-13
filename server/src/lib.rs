@@ -397,6 +397,12 @@ pub fn configure_api_surface(
             })
             .configure(move |cfg| {
                 if opts.has_signal_db {
+                    cfg.service(desk_signal::controller::approval_trace::list_approval_reviews);
+                    cfg.service(desk_signal::controller::approval_trace::get_approval_review);
+                    cfg.service(desk_signal::controller::approval_trace::get_approval_review_parts);
+                    cfg.service(desk_signal::controller::approval_trace::get_approval_trace_settings);
+                    cfg.service(desk_signal::controller::approval_trace::update_approval_trace_settings);
+                    cfg.service(desk_signal::controller::approval_trace::get_approval_metrics_overview);
                     cfg.service(desk_signal::controller::model_metrics::get_model_metrics_status);
                     cfg.service(desk_signal::controller::model_metrics::get_model_metrics_overview);
                     cfg.service(desk_signal::controller::model_metrics::get_model_metrics_series);

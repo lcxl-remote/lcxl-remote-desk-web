@@ -56,11 +56,7 @@ pub fn bind_ai_permission_grants(
         .validate()
         .map_err(|_| internal("invalid AI permission request"))?;
     delegation
-        .require_current(
-            &session.conversation_id,
-            &session.actor_id,
-            &session.device_id,
-        )
+        .require_current_for_session(session)
         .map_err(|_| internal("AI approval delegation is no longer current"))?;
     if decided.event.run_id != session.conversation_id
         || decided.request_id != request.request_id

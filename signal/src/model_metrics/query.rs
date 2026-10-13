@@ -1038,7 +1038,7 @@ impl Store {
             txn.commit().await?;
             return Ok(None);
         };
-        if row.kind == "unassociated" {
+        if !["call", "attempt", "tool", "operation", "runtime"].contains(&row.kind.as_str()) {
             txn.commit().await?;
             return Ok(None);
         }
@@ -1047,7 +1047,7 @@ impl Store {
         let children = detail::Entity::find()
             .filter(detail::Column::CallId.eq(root))
             .filter(detail::Column::ObjectId.ne(id))
-            .filter(detail::Column::Kind.ne("unassociated"))
+            .filter(detail::Column::Kind.is_in(["call", "attempt", "tool", "operation", "runtime"]))
             .order_by_asc(detail::Column::StartedAtMs)
             .order_by_asc(detail::Column::ObjectId)
             .limit(201)
@@ -1349,6 +1349,331 @@ impl Store {
             usage_source: "observations".into(),
             partial: partial || query.from_ms < rows.available_from,
             available_from: Some(timestamp(rows.available_from)),
+        };
+        txn.commit().await?;
+        Ok(result)
+    }
+}
+
+impl Store {
+    pub async fn approval_overview(
+        &self,
+        filters: &desk_signal_facade::model::approval_trace::ApprovalMetricsQuery,
+        now: i64,
+    ) -> Result<desk_signal_facade::model::approval_trace::ApprovalMetricsOverviewDto, DbErr> {
+        use desk_diagnose_core::model_observability::{
+            ObservationPayload,
+            aggregate::{Count, Histogram},
+        };
+        use desk_signal_facade::{
+            model::approval_trace::*,
+            service::{
+                approval_trace::rates,
+                model_metrics::{latency, tag},
+            },
+        };
+        fn parse_tag<T: serde::de::DeserializeOwned>(value: &str) -> Result<T, DbErr> {
+            serde_json::from_value(serde_json::Value::String(value.into()))
+                .map_err(|_| DbErr::Custom("invalid approval metric filter".into()))
+        }
+        if let Some(source) = &filters.source_kind
+            && ![
+                "permission_item",
+                "concrete_call",
+                "oss_command",
+                "manager_command",
+                "manager_action",
+            ]
+            .contains(&source.as_str())
+        {
+            return Err(DbErr::Custom("invalid approval source".into()));
+        }
+        let kind = filters
+            .session_kind
+            .as_deref()
+            .map(parse_tag::<desk_diagnose_core::approval_observation::SessionKind>)
+            .transpose()?;
+        let reason = filters
+            .reason
+            .as_deref()
+            .map(parse_tag::<desk_diagnose_core::approval_observation::ReviewReason>)
+            .transpose()?;
+        let outcome = filters
+            .outcome
+            .as_deref()
+            .map(parse_tag::<desk_diagnose_core::approval_observation::ReviewOutcome>)
+            .transpose()?;
+        let raw = MetricsQuery {
+            from: filters.from.clone(),
+            to: filters.to.clone(),
+            granularity: filters
+                .granularity
+                .as_deref()
+                .map(parse_tag::<Granularity>)
+                .transpose()?,
+            model_id: filters.model_id.clone(),
+            provider_id: filters.provider_id.clone(),
+            ..Default::default()
+        };
+        let query = ResolvedQuery::resolve(&raw, now).map_err(|e| DbErr::Custom(e.into()))?;
+        let txn = self
+            .db
+            .begin_with_config(
+                Some(IsolationLevel::RepeatableRead),
+                Some(AccessMode::ReadOnly),
+            )
+            .await?;
+        let read = self.read_rows(&txn, &query, "approval").await?;
+        let mut total = Totals::default();
+        let mut boundary_buckets = std::collections::BTreeSet::new();
+        let mut kinds: BTreeMap<String, Totals> = BTreeMap::new();
+        let mut times: BTreeMap<i64, Totals> = BTreeMap::new();
+        let matches = |dims: &Option<super::store::ApprovalDimensions>| {
+            if let Some(v) = dims {
+                filters
+                    .source_kind
+                    .as_ref()
+                    .is_none_or(|s| *s == v.source_kind)
+                    && kind.is_none_or(|k| k == v.session_kind)
+                    && reason.is_none_or(|r| Some(r) == v.reason)
+                    && outcome.is_none_or(|o| o == v.outcome)
+            } else {
+                filters.source_kind.is_none()
+                    && kind.is_none()
+                    && reason.is_none()
+                    && outcome.is_none()
+            }
+        };
+        for (row, dims, values) in &read.rows {
+            if row.bucket_ms < query.requested_from_ms
+                || row.bucket_ms + query.granularity_ms > query.requested_to_ms
+            {
+                boundary_buckets.insert(row.bucket_ms);
+                continue;
+            }
+            if !matches(&dims.approval) {
+                continue;
+            }
+            total
+                .sum(values)
+                .ok_or_else(|| DbErr::Custom("approval arithmetic unavailable".into()))?;
+            let label = dims
+                .approval
+                .as_ref()
+                .map_or("unknown".into(), |v| tag(&v.session_kind));
+            kinds
+                .entry(label)
+                .or_default()
+                .sum(values)
+                .ok_or_else(|| DbErr::Custom("approval arithmetic unavailable".into()))?;
+            times
+                .entry(row.bucket_ms)
+                .or_default()
+                .sum(values)
+                .ok_or_else(|| DbErr::Custom("approval arithmetic unavailable".into()))?;
+        }
+
+        let count_key = [
+            ("pending", Count::ApprovalPending),
+            ("approved", Count::ApprovalApproved),
+            ("denied", Count::ApprovalDenied),
+            ("fault", Count::ApprovalFault),
+            ("policy_blocked", Count::ApprovalPolicyBlocked),
+            ("cancelled", Count::ApprovalCancelled),
+            ("superseded", Count::ApprovalSuperseded),
+            ("expired", Count::ApprovalExpired),
+            ("unknown", Count::ApprovalUnknown),
+        ];
+        let mut pending_age = Histogram::default();
+        let mut after = String::new();
+        let mut pending_partial = false;
+        #[derive(serde::Deserialize)]
+        struct Envelope {
+            event: ObservationEvent,
+        }
+        for _ in 0..100 {
+            let rows = compact::Entity::find()
+                .filter(compact::Column::Kind.eq("approval"))
+                .filter(compact::Column::StartedAtMs.gte(query.requested_from_ms))
+                .filter(compact::Column::StartedAtMs.lt(query.requested_to_ms))
+                .filter(compact::Column::ObjectId.gt(&after))
+                .order_by_asc(compact::Column::ObjectId)
+                .limit(200)
+                .all(&txn)
+                .await?;
+            let more = rows.len() == 200;
+            for row in rows {
+                after = row.object_id.clone();
+                let envelope: Envelope = decode(&row.snapshot_json)?;
+                if let ObservationPayload::Approval(snapshot) = &envelope.event.payload {
+                    let attrs = &envelope.event.attribution;
+                    if filters
+                        .model_id
+                        .as_ref()
+                        .is_some_and(|v| *v != attrs.model_id)
+                        || filters
+                            .provider_id
+                            .as_ref()
+                            .is_some_and(|v| *v != attrs.provider_id)
+                    {
+                        continue;
+                    }
+                    let dims = Some(super::store::ApprovalDimensions {
+                        source_kind: snapshot.source_kind.clone(),
+                        session_kind: snapshot.session_kind,
+                        reason: snapshot.reason,
+                        outcome: snapshot.outcome,
+                    });
+                    let bucket = snapshot.eligible_at_ms.div_euclid(query.granularity_ms)
+                        * query.granularity_ms;
+                    if boundary_buckets.contains(&bucket) && matches(&dims) {
+                        let contribution =
+                            desk_diagnose_core::model_observability::aggregate::contribution(
+                                &envelope.event.payload,
+                                false,
+                            );
+                        total
+                            .change(&Default::default(), &contribution)
+                            .ok_or_else(|| DbErr::Custom("approval boundary unavailable".into()))?;
+                        kinds
+                            .entry(tag(&snapshot.session_kind))
+                            .or_default()
+                            .change(&Default::default(), &contribution)
+                            .ok_or_else(|| DbErr::Custom("approval boundary unavailable".into()))?;
+                        times
+                            .entry(bucket)
+                            .or_default()
+                            .change(&Default::default(), &contribution)
+                            .ok_or_else(|| DbErr::Custom("approval boundary unavailable".into()))?;
+                    }
+                    if snapshot.outcome
+                        == desk_diagnose_core::approval_observation::ReviewOutcome::Pending
+                        && matches(&dims)
+                        && let Some(age) = desk_diagnose_core::approval_observation::duration(
+                            snapshot.eligible_at_ms,
+                            now,
+                        )
+                    {
+                        pending_age
+                            .record(age)
+                            .ok_or_else(|| DbErr::Custom("approval age unavailable".into()))?;
+                    }
+                }
+            }
+            pending_partial = more;
+            if !more {
+                break;
+            }
+        }
+        let count = total
+            .counts
+            .get(&Count::ApprovalReviews)
+            .copied()
+            .unwrap_or(0);
+        let missing = total
+            .counts
+            .get(&Count::ApprovalWaitingUnknown)
+            .copied()
+            .unwrap_or(0);
+        let policy = self.load_settings().await?;
+        let compact_from = now - i64::from(policy.detail_days) * 86_400_000;
+        let boundary_missing = boundary_buckets.iter().any(|v| *v < compact_from);
+        let mut coverage = retained_coverage(
+            &query,
+            now,
+            read.available_from,
+            read.retained_from,
+            read.partial
+                || pending_partial
+                || pending_age.count
+                    != total
+                        .counts
+                        .get(&Count::ApprovalPending)
+                        .copied()
+                        .unwrap_or(0)
+                || missing > 0
+                || boundary_missing
+                || total
+                    .counts
+                    .get(&Count::ApprovalUnknown)
+                    .copied()
+                    .unwrap_or(0)
+                    > 0,
+            self.manager,
+        );
+        coverage.cohort_basis = "approval_first_eligible_queue_time".into();
+        coverage.effective_from = timestamp(
+            query
+                .requested_from_ms
+                .max(read.available_from)
+                .max(read.retained_from)
+                .min(query.requested_to_ms),
+        );
+        coverage.effective_to = timestamp(query.requested_to_ms);
+        if count == 0 && coverage.sample_status == SampleStatus::Complete {
+            coverage.sample_status = SampleStatus::NoSamples;
+        }
+        let result = ApprovalMetricsOverviewDto {
+            rates: rates(&total),
+            counts: count_key
+                .into_iter()
+                .map(|(kind, key)| ApprovalMetricCount {
+                    kind: kind.into(),
+                    count: total.counts.get(&key).copied().unwrap_or(0).to_string(),
+                })
+                .collect(),
+            session_kinds: ["main", "subagent", "unknown"]
+                .into_iter()
+                .map(|key| {
+                    let value = kinds.remove(key).unwrap_or_default();
+                    let n = value
+                        .counts
+                        .get(&Count::ApprovalReviews)
+                        .copied()
+                        .unwrap_or(0);
+                    ApprovalMetricGroup {
+                        key: key.into(),
+                        count: n.to_string(),
+                        share: (count > 0).then(|| n as f64 / count as f64),
+                        rates: rates(&value),
+                        waiting: latency(
+                            value
+                                .other_duration
+                                .get(&desk_diagnose_core::model_observability::ObjectKind::Approval)
+                                .unwrap_or(&Histogram::default()),
+                        ),
+                    }
+                })
+                .collect(),
+            timeseries: times
+                .into_iter()
+                .map(|(bucket, value)| ApprovalMetricPoint {
+                    bucket: timestamp(bucket),
+                    count: value
+                        .counts
+                        .get(&Count::ApprovalReviews)
+                        .copied()
+                        .unwrap_or(0)
+                        .to_string(),
+                    rates: rates(&value),
+                })
+                .collect(),
+            waiting: latency(
+                total
+                    .other_duration
+                    .get(&desk_diagnose_core::model_observability::ObjectKind::Approval)
+                    .unwrap_or(&Histogram::default()),
+            ),
+            before_model: latency(
+                total
+                    .other_first_content
+                    .get(&desk_diagnose_core::model_observability::ObjectKind::Approval)
+                    .unwrap_or(&Histogram::default()),
+            ),
+            pending_age: latency(&pending_age),
+            unknown_waiting: missing.to_string(),
+            as_of_ms: now,
+            coverage,
         };
         txn.commit().await?;
         Ok(result)

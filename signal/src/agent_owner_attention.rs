@@ -65,7 +65,15 @@ pub async fn list_goal_attention(
         if session.surface != AgentSessionSurface::AiAssistant || session.turn_state.is_active() {
             continue;
         }
-        if delegated.contains(&row.conversation_id) && session.allows_delegated_review() {
+        if delegated.contains(session.approval_delegation_conversation_id())
+            && session.allows_delegated_review()
+            && crate::agent_subagent_store::shared_approval_current_on(
+                db,
+                &session,
+                chrono::Utc::now().timestamp_millis(),
+            )
+            .await?
+        {
             continue;
         }
         for request in &session.permission_requests {

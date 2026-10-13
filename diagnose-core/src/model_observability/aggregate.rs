@@ -93,6 +93,17 @@ closed_enum!(Count {
     OutputTokens,
     CacheReadTokens,
     CacheWriteTokens,
+    ApprovalReviews,
+    ApprovalPending,
+    ApprovalApproved,
+    ApprovalDenied,
+    ApprovalFault,
+    ApprovalPolicyBlocked,
+    ApprovalCancelled,
+    ApprovalSuperseded,
+    ApprovalExpired,
+    ApprovalUnknown,
+    ApprovalWaitingUnknown,
     RuntimeEvents,
     RuntimeValue
 });
@@ -464,6 +475,29 @@ pub fn contribution(payload: &ObservationPayload, include_token_totals: bool) ->
                 1,
             );
         }
+        ObservationPayload::Approval(review) => {
+            use crate::approval_observation::ReviewOutcome as O;
+            c.add(Count::ApprovalReviews, 1);
+            c.add(
+                match review.outcome {
+                    O::Pending => Count::ApprovalPending,
+                    O::Approved => Count::ApprovalApproved,
+                    O::Denied => Count::ApprovalDenied,
+                    O::Fault => Count::ApprovalFault,
+                    O::PolicyBlocked => Count::ApprovalPolicyBlocked,
+                    O::Cancelled => Count::ApprovalCancelled,
+                    O::Superseded => Count::ApprovalSuperseded,
+                    O::Expired => Count::ApprovalExpired,
+                    O::Unknown => Count::ApprovalUnknown,
+                },
+                1,
+            );
+            c.duration_ms = review.waiting_ms();
+            c.first_content_ms = review.before_model_ms();
+            if review.terminal() && c.duration_ms.is_none() {
+                c.add(Count::ApprovalWaitingUnknown, 1);
+            }
+        }
         ObservationPayload::Runtime(runtime) => {
             c.add(Count::RuntimeEvents, 1);
             c.add(Count::RuntimeValue, runtime.value);
@@ -686,6 +720,10 @@ pub struct Histogram {
 }
 
 impl Histogram {
+    pub fn record(&mut self, value: u64) -> Option<()> {
+        self.change(None, Some(value))
+    }
+
     fn change(&mut self, old: Option<u64>, new: Option<u64>) -> Option<()> {
         if old == new {
             return Some(());
@@ -769,6 +807,42 @@ pub fn merge(current: &mut ObservationEvent, incoming: &ObservationEvent) -> Mer
 }
 
 fn merge_candidate(current: &mut ObservationEvent, incoming: &ObservationEvent) -> MergeResult {
+    if let (ObservationPayload::Approval(old), ObservationPayload::Approval(new)) =
+        (&mut current.payload, &incoming.payload)
+    {
+        if current.object_id != incoming.object_id
+            || old.source_kind != new.source_kind
+            || old.session_kind != new.session_kind
+        {
+            return MergeResult::Conflict;
+        }
+        if old.terminal() {
+            if !new.terminal() {
+                return MergeResult::Duplicate;
+            }
+            return if old.outcome == new.outcome && old.reason == new.reason {
+                MergeResult::Duplicate
+            } else {
+                MergeResult::Conflict
+            };
+        }
+        if incoming.phase == ObservationPhase::Started {
+            return MergeResult::Duplicate;
+        }
+        let mut next = new.clone();
+        next.eligible_at_ms = old.eligible_at_ms;
+        next.provider_started_at_ms = next.provider_started_at_ms.or(old.provider_started_at_ms);
+        if incoming.attribution.model_identity_known()
+            || !current.attribution.model_identity_known()
+        {
+            current.attribution = incoming.attribution.clone();
+        }
+        *old = next;
+        current.occurred_at_ms = incoming.occurred_at_ms;
+        current.phase = incoming.phase;
+        current.sequence = incoming.sequence;
+        return MergeResult::Applied;
+    }
     if current.object_id != incoming.object_id
         || current.attribution != incoming.attribution
         || current.started_at_ms != incoming.started_at_ms
