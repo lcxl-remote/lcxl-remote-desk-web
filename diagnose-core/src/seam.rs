@@ -46,6 +46,8 @@ pub struct ModelRequest {
     pub context_conversation_id: Option<String>,
     pub pinned_source_context_key: Option<crate::replay::SourceContextKey>,
     pub ui_references: Option<crate::ui_references::UiReferenceState>,
+    /// Derived locators for existing results, not serialized into the wire body.
+    pub result_locators: Vec<crate::result_model_ids::ResultLocator>,
     pub thinking_prefix: Option<crate::thinking_context::ThinkingPrefixState>,
     pub protected_replay_message_ids: std::collections::BTreeSet<String>,
     pub previous_cache_projection: Option<crate::prompt_cache::WireObservation>,
@@ -140,6 +142,7 @@ impl ModelRequest {
     /// A tool-free request (the single-turn diagnose shape): no tools advertised,
     /// the model is free to answer in text.
     pub fn text_only(messages: Vec<ChatMessage>, response_format: ResponseFormatSpec) -> Self {
+        let result_locators = crate::result_model_ids::locators(&messages);
         Self {
             observation: None,
             messages,
@@ -153,6 +156,7 @@ impl ModelRequest {
             context_conversation_id: None,
             pinned_source_context_key: None,
             ui_references: None,
+            result_locators,
             previous_cache_projection: None,
             delegation_call: None,
             caller_output_hard_cap: None,
@@ -1389,6 +1393,7 @@ mod tests {
             context_conversation_id: None,
             pinned_source_context_key: None,
             ui_references: None,
+            result_locators: Default::default(),
             previous_cache_projection: None,
             delegation_call: None,
             caller_output_hard_cap: None,

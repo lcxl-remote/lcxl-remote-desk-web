@@ -55,6 +55,16 @@ pub(crate) fn evidence(tool: &str, id: &str, arguments: Value, result: Value) ->
     ]
 }
 
+fn same_input(tool: &str, original: &str, resolved: &str, history: &[ChatMessage]) -> bool {
+    crate::ui_model_ids::same_call_input_with_references(
+        tool,
+        original,
+        resolved,
+        None,
+        &locators(history),
+    )
+}
+
 fn read_history() -> Vec<ChatMessage> {
     let read = FileContentReadOutput {
         file: ObjectRef {
@@ -99,17 +109,19 @@ fn file_version_recovers_exact_hash_and_approval_input() {
         format!("{:x}", Sha256::digest(b"old"))
     );
     assert_eq!(canonical["file_result_call_id"], "provider-call-long");
-    assert!(crate::ui_model_ids::same_call_input(
+    assert!(same_input(
         &call.name,
         &call.arguments_json,
-        &resolved.arguments_json
+        &resolved.arguments_json,
+        &history,
     ));
     let mut changed = canonical.clone();
     changed["change"]["content_utf8"] = json!("different");
-    assert!(!crate::ui_model_ids::same_call_input(
+    assert!(!same_input(
         &call.name,
         &call.arguments_json,
-        &changed.to_string()
+        &changed.to_string(),
+        &history,
     ));
     let permission = ToolCall {
         id: "permission".into(),
@@ -119,10 +131,11 @@ fn file_version_recovers_exact_hash_and_approval_input() {
                 .to_string(),
     };
     let resolved = crate::ui_model_ids::resolve_call(&permission, &history, 1).unwrap();
-    assert!(crate::ui_model_ids::same_call_input(
+    assert!(same_input(
         &permission.name,
         &permission.arguments_json,
-        &resolved.arguments_json
+        &resolved.arguments_json,
+        &history,
     ));
     let native: Value = serde_json::from_str(&resolved.arguments_json).unwrap();
     assert_eq!(native["items"][0]["item_id"], "item_1");
@@ -132,7 +145,7 @@ fn file_version_recovers_exact_hash_and_approval_input() {
 fn file_references_survive_serialization_but_reject_missing_tampered_expired_and_duplicate_sources()
 {
     let history = read_history();
-    let args = json!({"file_version_id":alias("file","provider-call-long")});
+    let args = json!({"file_version_id":"receipt"});
     let restored: Vec<ChatMessage> =
         serde_json::from_str(&serde_json::to_string(&history).unwrap()).unwrap();
     let mut value = args.clone();
@@ -173,7 +186,7 @@ fn file_references_survive_serialization_but_reject_missing_tampered_expired_and
     assert!(
         resolve(
             "delete_text_file",
-            &mut json!({"file_version_id":alias("draft","provider-call-long")}),
+            &mut json!({"file_version_id":"unobserved"}),
             &history,
             1
         )
@@ -185,19 +198,20 @@ fn file_references_survive_serialization_but_reject_missing_tampered_expired_and
 }
 
 #[test]
-fn result_selectors_roundtrip_and_ambiguous_aliases_fail_closed() {
+fn native_result_selectors_roundtrip_and_ambiguous_sources_fail_closed() {
     let history = read_history();
-    let input = json!({"file_result_call_id":alias("result","provider-call-long")});
+    let input = json!({"file_result_call_id":"receipt"});
     let call = ToolCall {
         id: "read-again".into(),
         name: "read_text_file".into(),
         arguments_json: input.to_string(),
     };
     let resolved = crate::ui_model_ids::resolve_call(&call, &history, 1).unwrap();
-    assert!(crate::ui_model_ids::same_call_input(
+    assert!(same_input(
         &call.name,
         &call.arguments_json,
-        &resolved.arguments_json
+        &resolved.arguments_json,
+        &history,
     ));
     let source = history[1].tool_calls[0].clone();
     assert!(
@@ -247,7 +261,7 @@ fn attachments_restore_entire_artifact_and_freeze_only_matching_lineage() {
     other.text = json!({"status":"pending"}).to_string();
     other.data_envelope.as_mut().unwrap().envelope_id = "other".into();
     history.push(other);
-    let mut value = json!({"draft":{"recipients":[{"address":"a@example.test"}],"subject":"a","body_plain_text":"body"},"attachment":{"artifact_result_id":artifact_id(&artifact),"element":"upload-id"}});
+    let mut value = json!({"draft":{"recipients":[{"address":"a@example.test"}],"subject":"a","body_plain_text":"body"},"attachment":{"artifact_result_id":"receipt","element":"upload-id"}});
     resolve("prepare_gmail_draft", &mut value, &history, 1).unwrap();
     assert_eq!(value["attachment"]["artifact"], json!(artifact));
     assert_eq!(value["draft"]["attachment_labels"], json!(["notes.txt"]));
@@ -263,9 +277,34 @@ fn attachments_restore_entire_artifact_and_freeze_only_matching_lineage() {
                 .clone()
         ]
     );
+    let payload = json!({"kind":"requested_artifact_registry","artifacts":[artifact],"batch_document_artifacts":[]});
+    let text = format!(
+        "CURRENT REQUESTED ARTIFACT REGISTRY (server authoritative metadata; not a grant): {payload}"
+    );
+    let mut registry = ChatMessage::system_event("registry", &text);
+    registry.data_envelope = crate::model_message_labels::internal_tool_result_envelope(
+        history[0].data_envelope.as_ref(),
+        "registry",
+        &text,
+        "requested_artifact_registry_projection",
+    )
+    .unwrap();
+    let source = registry.clone();
+    project_runtime_registry(&mut registry, &locators(&history));
+    assert!(registry.text.contains("artifact_result_id"));
+    assert!(registry.text.contains("notes.txt"));
+    assert!(!registry.text.contains("snapshot_id"));
+    assert!(!registry.text.contains("digest_sha256"));
+    let once = registry.text.clone();
+    project_runtime_registry(&mut registry, &locators(&history));
+    assert_eq!(registry.text, once);
+    assert!(source.text.contains("digest_sha256"));
+    let mut user = ChatMessage::text("user", ChatRole::User, &text);
+    project_runtime_registry(&mut user, &locators(&history));
+    assert_eq!(user.text, text);
     let mut another = artifact.clone();
     another.file.token = "another-file".into();
-    assert_ne!(artifact_id(&artifact), artifact_id(&another));
+    assert_ne!(artifact_key(&artifact), artifact_key(&another));
 }
 
 #[test]
@@ -289,17 +328,17 @@ fn exact_send_restores_original_body_and_rejects_missing_or_conflicting_input() 
             )
         };
         let history = evidence(prepare, "prepare", original.clone(), json!(handoff));
-        let input =
-            json!({"handoff_result_id":alias("draft",&handoff.handoff_id),"page":"new-page"});
+        let input = json!({"handoff_result_id":"receipt","page":"new-page"});
         let mut resolved = input.clone();
         resolve(send, &mut resolved, &history, 1).unwrap();
         assert_eq!(resolved["handoff"], json!(handoff));
         let field = if gmail { "draft" } else { "body_plain_text" };
         assert_eq!(resolved[field], original[field]);
-        assert!(crate::ui_model_ids::same_call_input(
+        assert!(same_input(
             send,
             &input.to_string(),
-            &resolved.to_string()
+            &resolved.to_string(),
+            &history,
         ));
         let mut conflict = input.clone();
         conflict[field] = original[field].clone();
@@ -316,14 +355,15 @@ fn exact_send_restores_original_body_and_rejects_missing_or_conflicting_input() 
 }
 
 #[test]
-fn nested_legacy_exact_evidence_cannot_be_discarded_by_projection() {
+fn nested_exact_evidence_cannot_be_discarded_by_projection() {
     let original = json!({"items":[{"tool_name":"delete_text_file","exact_input":{"file_result_call_id":"read","expected_sha256":"a".repeat(64)}}]});
     let mut changed = original.clone();
     changed["items"][0]["exact_input"]["expected_sha256"] = json!("b".repeat(64));
-    assert!(!crate::ui_model_ids::same_call_input(
+    assert!(!same_input(
         "request_permissions",
         &original.to_string(),
-        &changed.to_string()
+        &changed.to_string(),
+        &[],
     ));
 }
 
@@ -343,13 +383,14 @@ fn search_sources_restore_exact_title_and_url_without_retyping() {
     let mut canonical = input.clone();
     resolve("create_word_report", &mut canonical, &history, 1).unwrap();
     assert_eq!(canonical["web_sources"], json!([source]));
-    assert!(crate::ui_model_ids::same_call_input(
+    assert!(same_input(
         "create_word_report",
         &input.to_string(),
-        &canonical.to_string()
+        &canonical.to_string(),
+        &history,
     ));
     let mut forged = input.clone();
-    forged["web_source_ids"] = json!([alias("source", "invented")]);
+    forged["web_source_ids"] = json!(["999"]);
     assert!(resolve("create_word_report", &mut forged, &history, 1).is_err());
 }
 
@@ -369,7 +410,7 @@ fn short_ids_are_independent_of_process_state_and_context_projection() {
         "2026-01-01T00:00:00Z",
     );
     session.conversation = read_history();
-    let before = alias("file", "provider-call-long");
+    let before = "receipt";
     let mut clone = session.conversation.last().unwrap().clone();
     project_result_message(&mut clone);
     let restored: PersistedAgentSession =
@@ -380,4 +421,152 @@ fn short_ids_are_independent_of_process_state_and_context_projection() {
     let mut again = clone.clone();
     project_result_message(&mut again);
     assert_eq!(again.text, clone.text);
+}
+
+#[test]
+fn terminal_snapshot_metadata_is_hidden_and_business_content_is_preserved() {
+    let business = json!({"snapshot_id":"user-data","digest_sha256":"user-hash"});
+    let history = evidence(
+        "read_terminal_output",
+        "terminal-read",
+        json!({}),
+        json!({
+            "ReadContext":{"TerminalOutputInspect":{"entries":[{
+                "snapshot_id":"internal-snapshot", "content":business,
+                "display_summary":"Terminal", "truncated":true
+            }],"truncated":true}}
+        }),
+    );
+    let original = history.last().unwrap();
+    let mut projected = original.clone();
+    project_result_message(&mut projected);
+    let value: Value = serde_json::from_str(&projected.text).unwrap();
+    let entry = &value["ReadContext"]["TerminalOutputInspect"]["entries"][0];
+    assert!(entry.get("snapshot_id").is_none());
+    assert_eq!(entry["content"], business);
+    assert_eq!(entry["truncated"], true);
+    assert!(original.text.contains("internal-snapshot"));
+}
+
+#[test]
+fn result_locators_require_original_bytes_and_one_accepted_provider_call() {
+    let original = read_history();
+    assert_eq!(locators(&original).len(), 1);
+    let mut altered = original.clone();
+    altered.last_mut().unwrap().text.push(' ');
+    assert!(locators(&altered).is_empty());
+    let mut wrong = original.clone();
+    wrong
+        .last_mut()
+        .unwrap()
+        .data_envelope
+        .as_mut()
+        .unwrap()
+        .provenance
+        .source_provider_id = "another-provider".into();
+    assert!(locators(&wrong).is_empty());
+    let mut duplicate = original.clone();
+    duplicate.push(original[1].clone());
+    assert!(locators(&duplicate).is_empty());
+}
+
+#[test]
+fn web_source_positions_are_stable_for_duplicates_and_filtered_entries() {
+    let first = json!({"title":"One","url":"https://example.test/a"});
+    let third = json!({"title":"Another title","url":"https://example.test/a"});
+    let history = evidence(
+        "search_public_web",
+        "opaque-search",
+        json!({"query":"test"}),
+        json!({"web_search_call_id":"opaque-search","results":[first, first, third, {"title":"","url":"https://example.test/ignored"}]}),
+    );
+    let mut projected = history.last().unwrap().clone();
+    project_result_message(&mut projected);
+    let value: Value = serde_json::from_str(&projected.text).unwrap();
+    assert!(value.get("web_search_call_id").is_none());
+    assert_eq!(value["results"][0]["source_id"], "1");
+    assert_eq!(value["results"][1]["source_id"], "1");
+    assert_eq!(value["results"][2]["source_id"], "3");
+    let mut selection = json!({"web_search_result_id":"receipt","web_source_ids":["1","3"]});
+    resolve("create_word_report", &mut selection, &history, 1).unwrap();
+    assert_eq!(selection["web_sources"], json!([first, third]));
+}
+
+#[test]
+fn cost_preparation_and_wire_use_the_same_native_result_argument_projection() {
+    let mut history = read_history();
+    let args = json!({"file_result_call_id":"read","expected_sha256":format!("{:x}",Sha256::digest(b"old"))});
+    history.push(ChatMessage::assistant_tool_calls(
+        "delete",
+        "",
+        vec![ToolCallRef {
+            id: "opaque-delete".into(),
+            name: "delete_text_file".into(),
+            arguments_json: args.to_string(),
+        }],
+    ));
+    let request =
+        crate::seam::ModelRequest::text_only(history, crate::prompt::ResponseFormatSpec::None);
+    let mut prepared = request.messages.last().unwrap().clone();
+    crate::ui_model_ids::project_model_message(
+        &mut prepared,
+        None,
+        &request.result_locators,
+        crate::model_profile::ModelUseCase::Agent,
+    );
+    let projected = crate::ui_model_ids::project_request(&request);
+    assert_eq!(
+        prepared.tool_calls,
+        projected.messages.last().unwrap().tool_calls
+    );
+    assert_eq!(
+        crate::trim::model_context_cost(&prepared),
+        crate::trim::model_context_cost(projected.messages.last().unwrap())
+    );
+    assert!(
+        !prepared.tool_calls[0]
+            .arguments_json
+            .contains("expected_sha256")
+    );
+    assert!(
+        prepared.tool_calls[0]
+            .arguments_json
+            .contains("file_version_id")
+    );
+}
+
+#[test]
+fn unavailable_result_projection_never_falls_back_to_opaque_identity_or_proof() {
+    let mut value =
+        json!({"file_result_call_id":"opaque-unavailable","expected_sha256":"a".repeat(64)});
+    project_arguments("delete_text_file", &mut value, &[]);
+    assert_eq!(value, json!({"file_version_id":null}));
+    let mut input = json!({"source":{"file_result_call_id":"opaque-unavailable"},"note":{"file_result_call_id":"business-value"}});
+    project_arguments("read_text_file", &mut input, &[]);
+    assert!(input["source"]["file_result_call_id"].is_null());
+    assert_eq!(input["note"]["file_result_call_id"], "business-value");
+}
+
+#[test]
+fn derived_locators_are_frozen_for_repeated_projection() {
+    let mut history = read_history();
+    history.push(ChatMessage::assistant_tool_calls(
+        "read-next",
+        "",
+        vec![ToolCallRef {
+            id: "next".into(),
+            name: "read_text_file".into(),
+            arguments_json: json!({"source":{"file_result_call_id":"read"}}).to_string(),
+        }],
+    ));
+    let mut request =
+        crate::seam::ModelRequest::text_only(history, crate::prompt::ResponseFormatSpec::None);
+    request.result_locators.clear();
+    let projected = crate::ui_model_ids::project_request(&request);
+    assert!(!projected.result_locators.is_empty());
+    assert_eq!(
+        crate::ui_model_ids::project_request(&projected).messages,
+        projected.messages
+    );
+    assert!(request.result_locators.is_empty());
 }

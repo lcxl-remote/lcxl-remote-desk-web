@@ -17,6 +17,15 @@ use serde_json::json;
 
 #[actix_web::test]
 async fn browser_snapshot_stays_inline_while_wait_uses_the_durable_contract() {
+    browser_wire_case().await;
+}
+
+#[inline(never)]
+fn browser_wire_case() -> std::pin::Pin<Box<impl std::future::Future<Output = ()>>> {
+    Box::pin(browser_wire_case_inner())
+}
+
+async fn browser_wire_case_inner() {
     let directory = tempfile::tempdir().unwrap();
     let fixture =
         Fixture::new_for_actor(file_db(&directory.path().join("read-tools.db")).await, "1").await;
@@ -231,7 +240,7 @@ async fn browser_snapshot_stays_inline_while_wait_uses_the_durable_contract() {
             active.state_json = Set(session.encode_json_for_storage().unwrap());
             active.update(&fixture.store.db).await.unwrap();
         }
-        let edge = async {
+        let edge = Box::pin(async {
             let frame = socket.next().await.unwrap().unwrap();
             let awc::ws::Frame::Text(text) = frame else {
                 panic!("expected dispatch");
@@ -363,8 +372,8 @@ async fn browser_snapshot_stays_inline_while_wait_uses_the_durable_contract() {
                     .unwrap();
             }
             output
-        };
-        let invoke = async {
+        });
+        let invoke = Box::pin(async {
             if !mutating {
                 if !background {
                     return tools.run_read(&call).await;
@@ -513,7 +522,7 @@ async fn browser_snapshot_stays_inline_while_wait_uses_the_durable_contract() {
                 }
                 other => panic!("unexpected browser outcome: {other:?}"),
             }
-        };
+        });
         let (result, expected) = tokio::time::timeout(Duration::from_secs(15), async {
             tokio::try_join!(invoke, async {
                 Ok::<_, desk_agent_protocol::AgentError>(edge.await)

@@ -165,8 +165,10 @@ async fn exercise_preclaimed(permission: bool) {
     let mut session = claimed();
     if !permission {
         let original = &session.conversation[0];
-        let mut input =
-            ChatMessage::system_event("scheduled-task-input:scheduled-run", "Send hello now.");
+        let mut input = ChatMessage::system_event(
+            crate::native_ids::scheduled_message("scheduled-run"),
+            "Send hello now.",
+        );
         input.data_envelope = crate::model_message_labels::internal_tool_result_envelope(
             original.data_envelope.as_ref(),
             &input.message_id,

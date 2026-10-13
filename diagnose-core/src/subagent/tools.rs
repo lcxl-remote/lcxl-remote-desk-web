@@ -24,18 +24,8 @@ pub const WAIT: &str = "wait_subagents";
 pub const CANCEL: &str = "cancel_subagent";
 pub const MESSAGE: &str = "send_subagent_message";
 
-/// Apply server-owned schema defaults and optional session reference expansion
-/// before comparing invocation values. The original transcript remains unchanged.
+/// Compare native selectors and server-owned defaults without alias lookup.
 pub fn same_arguments(tool: &str, original: &str, resolved: &str) -> bool {
-    same_arguments_with_references(tool, original, resolved, None)
-}
-
-pub fn same_arguments_with_references(
-    tool: &str,
-    original: &str,
-    resolved: &str,
-    references: Option<&crate::ui_references::UiReferenceState>,
-) -> bool {
     if effect(tool).is_none() {
         return false;
     }
@@ -44,23 +34,6 @@ pub fn same_arguments_with_references(
         serde_json::from_str::<serde_json::Value>(resolved),
     ) {
         (Ok(mut original), Ok(mut resolved)) if original.is_object() && resolved.is_object() => {
-            crate::model_input::fill_versions(tool, &mut original);
-            crate::model_input::fill_versions(tool, &mut resolved);
-            if original == resolved {
-                return true;
-            }
-            if let Some(references) = references {
-                let call = ToolCall {
-                    id: "delegation-input-check".into(),
-                    name: tool.into(),
-                    arguments_json: original.to_string(),
-                };
-                let Ok((expanded, _)) = references.expand_call(&call) else {
-                    return false;
-                };
-                original = serde_json::from_str(&expanded.arguments_json)
-                    .expect("expanded tool arguments are JSON");
-            }
             crate::model_input::fill_versions(tool, &mut original);
             crate::model_input::fill_versions(tool, &mut resolved);
             original == resolved
@@ -173,7 +146,7 @@ pub fn registry() -> Vec<RegisteredTool> {
         }
     }
     let id = json!({"type":"string","minLength":1,"maxLength":256});
-    let task_id = json!({"type":"string","minLength":1,"maxLength":256,"description":"The short task_id (for example t1) observed from spawn_subagent, list_subagents or get_subagent_status in this conversation. Copy it unchanged; never use an internal task or child-session ID."});
+    let task_id = json!({"type":"string","minLength":1,"maxLength":256,"description":"The native task_id returned by spawn_subagent, list_subagents or get_subagent_status in this conversation. Copy it unchanged; do not use a child-session ID."});
     let revision = json!({"type":"integer","minimum":1});
     vec![
         tool(

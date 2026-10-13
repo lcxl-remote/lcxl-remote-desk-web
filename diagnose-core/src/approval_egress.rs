@@ -34,6 +34,7 @@ use desk_agent_protocol::capability_grant::CapabilityRiskTier;
 pub struct AuthorizedApprovalReview {
     /// Read-only copy of the originating session's aliases; never grants authority.
     pub ui_references: crate::ui_references::UiReferenceState,
+    pub result_locators: Vec<crate::result_model_ids::ResultLocator>,
     pub prompt: String,
     pub prompt_envelope: DataEnvelope,
     /// Identities and digests of current evidence authorized for this review.
@@ -61,6 +62,7 @@ impl AuthorizedApprovalReview {
             return Err(ApprovalReviewError::InvalidContext);
         }
         request.ui_references = Some(self.ui_references.clone());
+        request.result_locators = self.result_locators.clone();
         request
             .messages
             .get_mut(1)
@@ -478,6 +480,7 @@ fn authorize_review_sources(
         .audit;
     Ok(AuthorizedApprovalReview {
         ui_references: session.ui_references.clone(),
+        result_locators: crate::result_model_ids::locators(&session.conversation),
         prompt,
         prompt_envelope,
         source_audit,

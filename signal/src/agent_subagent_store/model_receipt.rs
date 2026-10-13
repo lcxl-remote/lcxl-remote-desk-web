@@ -46,7 +46,16 @@ pub(super) async fn provider_usage_on<C: ConnectionTrait + crate::config::Config
 
 /// The caller holds owner/root/child controls. A reserved allocation never
 /// substitutes for the planner lease or current source admission.
-async fn validate_dispatch_on(
+#[inline(never)]
+fn validate_dispatch_on<'a>(
+    txn: &'a crate::config::connection::DatabaseTransaction,
+    reservation: &'a DelegationCallReservation,
+    now_ms: i64,
+) -> std::pin::Pin<Box<impl std::future::Future<Output = Result<(), DbErr>> + 'a>> {
+    Box::pin(validate_dispatch_on_inner(txn, reservation, now_ms))
+}
+
+async fn validate_dispatch_on_inner(
     txn: &crate::config::connection::DatabaseTransaction,
     reservation: &DelegationCallReservation,
     now_ms: i64,

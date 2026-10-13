@@ -33,7 +33,7 @@ use crate::context_attachment::{
 use crate::model_context::{ContextNotice, MAX_CONTEXT_NOTICES, ModelContextState};
 use crate::replay::{ReplayDisposition, ReplayUnavailableReason};
 
-pub const CONVERSATION_SCHEMA_VERSION: u16 = 7;
+pub const CONVERSATION_SCHEMA_VERSION: u16 = 8;
 /// Opaque replay is bounded independently from visible transcript text.
 pub const MAX_REPLAY_ENVELOPE_BYTES: usize = 256 * 1024;
 pub const MAX_SESSION_REPLAY_BYTES: usize = 2 * 1024 * 1024;
@@ -758,7 +758,7 @@ impl PersistedAgentSession {
             .collect();
         let protected = projection
             .ui_references
-            .retained_call_aliases(&projection.conversation);
+            .retained_call_aliases(&projection.conversation, &projection.permission_requests);
         projection
             .ui_references
             .retain_sources(&sources, &protected);
@@ -791,7 +791,10 @@ impl PersistedAgentSession {
         let has_focus_epoch = value.get("focus_epoch").is_some();
         let has_visual_evidence = value.get("visual_evidence").is_some();
         let has_visual_verification = value.get("pending_visual_verification").is_some();
-        let mut session: Self = serde_json::from_value(value)?;
+        drop(value);
+        // Decode the typed session directly from JSON. Deserializing the owned
+        // Value adds large nested visitor frames to approval/execution polls.
+        let mut session: Self = serde_json::from_str(input)?;
         if session.surface == AgentSessionSurface::AiAssistant
             && (version < u64::from(CONVERSATION_SCHEMA_VERSION)
                 || !has_disclosure

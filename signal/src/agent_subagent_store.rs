@@ -177,7 +177,18 @@ fn admission_label(admission: SourceAdmission) -> &'static str {
     }
 }
 
-async fn parent_on<C: ConnectionTrait + crate::config::ConfigConnection>(
+#[inline(never)]
+fn parent_on<'a, C: ConnectionTrait + crate::config::ConfigConnection + 'a>(
+    db: &'a C,
+    root: &'a str,
+    actor: &'a str,
+    device: &'a str,
+) -> std::pin::Pin<Box<impl std::future::Future<Output = Result<PersistedAgentSession, DbErr>> + 'a>>
+{
+    Box::pin(parent_on_inner(db, root, actor, device))
+}
+
+async fn parent_on_inner<C: ConnectionTrait + crate::config::ConfigConnection>(
     db: &C,
     root: &str,
     actor: &str,

@@ -284,19 +284,16 @@ pub fn prepare_delivery(
             }
         };
         let delivered = if external {
-            let attachment_id = format!(
-                "attachment-{}",
-                digest(
-                    &serde_json::to_vec(&(
-                        identity.conversation_id,
-                        identity.actor_id,
-                        identity.device_id,
-                        identity.message_id,
-                        identity.tool_call_id,
-                        &part.name,
-                    ))
-                    .map_err(|_| invalid("Cannot encode attachment identity"))?
-                )
+            let attachment_id = crate::native_ids::stable(
+                crate::native_ids::Kind::Attachment,
+                &(
+                    identity.conversation_id,
+                    identity.actor_id,
+                    identity.device_id,
+                    identity.message_id,
+                    identity.tool_call_id,
+                    &part.name,
+                ),
             );
             let metadata = AttachmentMetadata {
                 attachment_id: attachment_id.clone(),

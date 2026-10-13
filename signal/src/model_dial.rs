@@ -2081,6 +2081,46 @@ mod tests {
             })
             .map(|tool| tool.spec)
             .collect();
+        request.messages.insert(
+            0,
+            ChatMessage::assistant_tool_calls(
+                "read-proposal",
+                "",
+                vec![desk_diagnose_core::chat::ToolCallRef {
+                    id: "read".into(),
+                    name: "inspect_desktop_session".into(),
+                    arguments_json: "{}".into(),
+                }],
+            ),
+        );
+        let task_id = desk_diagnose_core::native_ids::stable(
+            desk_diagnose_core::native_ids::Kind::Task,
+            &"creation",
+        );
+        request.messages.push(ChatMessage::assistant_tool_calls(
+            "status-proposal",
+            "",
+            vec![desk_diagnose_core::chat::ToolCallRef {
+                id: "opaque-provider-call".into(),
+                name: "get_subagent_status".into(),
+                arguments_json: json!({"task_id":task_id}).to_string(),
+            }],
+        ));
+        request.messages.push(ChatMessage::tool_result(
+            "status-receipt",
+            "opaque-provider-call",
+            json!({"task_id":task_id,"state":"completed"}).to_string(),
+        ));
+        let mut references = desk_diagnose_core::ui_references::UiReferenceState::default();
+        references.observe(&request.messages).unwrap();
+        assert!(
+            serde_json::to_value(&references).unwrap()["entries"]
+                .as_object()
+                .unwrap()
+                .values()
+                .all(|entry| entry["prefix"] != "t")
+        );
+        request.ui_references = Some(references);
         for body in [
             build_openai_body("model", &request),
             build_anthropic_body("model", &request),
@@ -2089,11 +2129,15 @@ mod tests {
             assert!(!wire.contains("private-snapshot"));
             assert!(!wire.contains("snapshot_id"));
             assert!(!wire.contains("expires_at"));
-            assert!(wire.contains("calendar-id"));
+            assert!(!wire.contains("calendar-id"));
+            assert!(wire.contains("a1"));
+            assert!(wire.contains(&task_id));
+            assert!(wire.contains("opaque-provider-call"));
+            assert!(!wire.contains("result_locators"));
             assert!(wire.contains("application_id"));
             assert!(wire.contains("element_id"));
         }
-        assert!(request.messages[0].text.contains("private-snapshot"));
+        assert!(request.messages[1].text.contains("private-snapshot"));
     }
 
     use super::*;
@@ -2570,6 +2614,7 @@ mod tests {
             context_conversation_id: None,
             pinned_source_context_key: None,
             ui_references: None,
+            result_locators: Default::default(),
             previous_cache_projection: None,
             delegation_call: None,
             caller_output_hard_cap: None,
@@ -3557,6 +3602,7 @@ mod tests {
                 context_conversation_id: None,
                 pinned_source_context_key: None,
                 ui_references: None,
+                result_locators: Default::default(),
                 previous_cache_projection: None,
                 delegation_call: None,
                 caller_output_hard_cap: Some(1024),
@@ -3972,6 +4018,7 @@ mod tests {
                 context_conversation_id: None,
                 pinned_source_context_key: None,
                 ui_references: None,
+                result_locators: Default::default(),
                 previous_cache_projection: None,
                 delegation_call: None,
                 caller_output_hard_cap: Some(1024),

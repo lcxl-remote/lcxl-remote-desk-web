@@ -246,6 +246,7 @@ mod tests {
                 .message
                 .contains("first request only the prerequisite read permission")
         );
-        assert!(error.message.contains("object_kind"));
+        assert!(error.message.contains("application_id"));
+        assert!(!error.message.contains("snapshot_id"));
     }
 }

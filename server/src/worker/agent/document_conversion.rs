@@ -200,7 +200,10 @@ fn create_preview_with(
             "document preview page exceeds the image limit",
         ));
     }
-    let preview_id = uuid::Uuid::new_v4().to_string();
+    let preview_id = desk_diagnose_core::native_ids::from_bytes(
+        desk_diagnose_core::native_ids::Kind::Preview,
+        uuid::Uuid::new_v4().as_bytes(),
+    );
     let now = Instant::now();
     let output = DocumentPreviewOutput {
         preview_id: preview_id.clone(),
@@ -228,6 +231,13 @@ fn create_preview_with(
         )
     })?;
     guard.prune(now);
+    if guard.entries.contains_key(&preview_id) {
+        return Err(error(
+            AgentErrorKind::Internal,
+            "document preview identity collision",
+        ));
+    }
+
     let same_owner = |entry: &PreviewEntry| {
         entry.actor_id == actor_id
             && entry.device_id == device_id

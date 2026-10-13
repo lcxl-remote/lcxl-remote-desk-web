@@ -149,7 +149,7 @@ impl ScheduleStore {
                 action.created_artifact.as_ref(), action.completed_at,
             ).map_err(|_| ScheduleStoreError::Conflict)?);
         }
-        let input_id = format!("rehearsal:{}:input", source.rehearsal_id);
+        let input_id = desk_diagnose_core::native_ids::rehearsal_message(&source.rehearsal_id);
         let mut calls = Vec::new();
         for message in &session.conversation {
             if message.data_envelope.as_ref().is_some_and(|envelope| {

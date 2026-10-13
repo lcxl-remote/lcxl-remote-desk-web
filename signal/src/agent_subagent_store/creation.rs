@@ -91,8 +91,14 @@ pub(crate) async fn spawn_on(
         "{:x}",
         Sha256::digest(serde_json::to_vec(request).map_err(|_| invalid())?)
     );
-    let child_id = format!("sa-{creation_key}");
-    let task_id = format!("st-{creation_key}");
+    let child_id = desk_diagnose_core::native_ids::stable(
+        desk_diagnose_core::native_ids::Kind::ChildConversation,
+        &creation_key,
+    );
+    let task_id = desk_diagnose_core::native_ids::stable(
+        desk_diagnose_core::native_ids::Kind::Task,
+        &creation_key,
+    );
     let now = chrono::Utc::now();
     let current = parent_planning_on(txn, held, now.timestamp_millis()).await?;
     let original_row = group_row::Entity::find()

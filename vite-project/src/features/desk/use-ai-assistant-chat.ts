@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { agentErrorMessage } from '@/lib/agent-error-i18n';
 import { v4 } from 'uuid';
+import { assistantMessageId } from './assistant-native-ids';
 
 import type { AiProvenance } from '@/components/ai-generated-mark';
 import type {
@@ -1371,7 +1372,7 @@ export function useAiAssistantChat({
         snapshotEpoch.current += 1;
         clearStopping(true);
         ensureConversation();
-        const clientMessageId = rehearsal?.initial_message_id ?? `user-${v4()}`;
+        const clientMessageId = rehearsal?.initial_message_id ?? assistantMessageId();
         if (rehearsal) rehearsalSent.current = true;
         setMessages((current) => [...current, {
             id: clientMessageId,

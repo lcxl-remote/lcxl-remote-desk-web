@@ -150,7 +150,8 @@ impl Fixture {
             object_kind: ObjectKind::BrowserSurface,
             expires_at: expires_at.clone(),
         };
-        let call_id = stable_id("capability-call", &format!("run-1:{turn_id}:{}", call.id));
+        let call_id =
+            desk_diagnose_core::native_ids::background_action("run-1", &turn_id, &call.id);
         let registry = desk_diagnose_core::ai_assistant::ai_assistant_provider_registry();
         let evaluated = BrowserCallPreflight::build(
             &registry,

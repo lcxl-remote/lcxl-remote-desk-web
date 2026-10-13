@@ -117,13 +117,10 @@ async fn fixture(db: DatabaseConnection) -> (ScheduleStore, String, String) {
     permission.expires_at_unix_ms = now + 300000;
     let store = SignalCapabilityGrantStore::new(db.clone());
     store.issue(&permission).await.unwrap();
-    let call_id = stable_id(
-        "capability-call",
-        &format!(
-            "run-1:{}:{}",
-            session.current_turn_id.as_deref().unwrap(),
-            call.id
-        ),
+    let call_id = desk_diagnose_core::native_ids::background_action(
+        "run-1",
+        session.current_turn_id.as_deref().unwrap(),
+        &call.id,
     );
     let request = || {
         let mut input = request(

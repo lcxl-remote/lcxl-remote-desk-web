@@ -47,6 +47,9 @@ fn retain_preview(output: &SpreadsheetMergePreviewOutput) -> Result<(), AgentErr
         .lock()
         .map_err(|_| internal("lock spreadsheet preview store"))?;
     previews.retain(|_, preview| preview.expires_at > now);
+    if previews.contains_key(&output.preview_id) {
+        return Err(internal("spreadsheet preview identity collision"));
+    }
     if previews.len() >= MAX_RETAINED_PREVIEWS {
         let oldest = previews
             .iter()
@@ -299,7 +302,10 @@ pub fn preview_merge(
         truncated = true;
     }
     let output = SpreadsheetMergePreviewOutput {
-        preview_id: format!("spreadsheet-merge-preview-{}", uuid::Uuid::new_v4()),
+        preview_id: desk_diagnose_core::native_ids::from_bytes(
+            desk_diagnose_core::native_ids::Kind::Preview,
+            uuid::Uuid::new_v4().as_bytes(),
+        ),
         input_digests_sha256: projection
             .workbooks
             .iter()
@@ -1953,6 +1959,10 @@ mod tests {
             max_bytes: 64 * 1024,
         })
         .unwrap();
+        assert!(desk_diagnose_core::native_ids::is(
+            desk_diagnose_core::native_ids::Kind::Preview,
+            &output.preview_id
+        ));
         assert_eq!(output.rows.len(), 3);
         assert_eq!(output.lineage.len(), 3);
         assert_eq!(output.duplicate_rows_removed, 1);

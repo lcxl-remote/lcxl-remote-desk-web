@@ -20,7 +20,6 @@ use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DbErr, EntityTrait, QueryFilter, QueryOrder,
     QuerySelect, Set,
 };
-use sha2::{Digest, Sha256};
 
 fn invalid() -> DbErr {
     DbErr::Custom("AI Assistant goal opening request is inconsistent".into())
@@ -423,7 +422,10 @@ pub async fn decide_for_subject(
                     .approve(
                         session.input_revision,
                         &current_model_binding,
-                        format!("goal-{:x}", Sha256::digest(request_id.as_bytes())),
+                        desk_diagnose_core::native_ids::stable(
+                            desk_diagnose_core::native_ids::Kind::Goal,
+                            &request_id,
+                        ),
                         decision_id,
                         now_ms,
                         previous.as_ref(),

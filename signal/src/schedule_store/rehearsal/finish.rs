@@ -64,7 +64,7 @@ impl ScheduleStore {
             return Err(ScheduleStoreError::Conflict);
         }
         let actor = owner.to_string();
-        let input_id = format!("rehearsal:{}:input", original.rehearsal_id);
+        let input_id = desk_diagnose_core::native_ids::rehearsal_message(&original.rehearsal_id);
         let source = RehearsalSource {
             actor: &actor,
             device: &original.target_device_id,

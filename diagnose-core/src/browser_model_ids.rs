@@ -436,12 +436,16 @@ pub(crate) fn project_result_message(message: &mut ChatMessage) {
     } else {
         &mut value
     };
+    if let Some(object) = result.as_object_mut() {
+        object.remove("schema_version");
+    }
     if let Some(page) = result.get_mut("page")
         && let Ok(reference) = serde_json::from_value::<BrowserPageRef>(page.clone())
     {
         *page = page_projection(&reference);
     }
     if let Some(snapshot) = result.get_mut("snapshot").and_then(Value::as_object_mut) {
+        snapshot.remove("schema_version");
         if let Some(page) = snapshot.get_mut("page")
             && let Ok(reference) = serde_json::from_value::<BrowserPageRef>(page.clone())
         {
@@ -462,6 +466,101 @@ pub(crate) fn project_result_message(message: &mut ChatMessage) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn browser_results_hide_versions_without_rewriting_evidence() {
+        use crate::{
+            model_message_labels::{internal_tool_result_envelope, model_bound_user_message},
+            prompt::ResponseFormatSpec,
+            seam::ModelRequest,
+        };
+        use desk_agent_protocol::data_lineage::DestinationIdentity;
+
+        let page = json!({
+            "schema_version": desk_agent_protocol::browser_control::BROWSER_CONTROL_SCHEMA_VERSION,
+            "adapter": {"engine":"chrome_extension","device_id":"device","os_session_id":"session",
+                "browser_major_version":144,"browser_version":"144.0.0.0","adapter_id":"extension",
+                "adapter_version":"1.0","profile_incarnation":"profile","connection_revision":1},
+            "page_id":"page","page_incarnation":"incarnation",
+            "origin":{"kind":"https","host_ascii":"example.com","port":443},
+            "document_revision":1,"url_sha256":"a".repeat(64),"observed_at_unix_ms":1,"account_id":null
+        });
+        let business_value = r#"{"schema_version":17}"#;
+        let result = json!({
+            "schema_version": desk_agent_protocol::browser_control::BROWSER_CONTROL_SCHEMA_VERSION,
+            "call_id":"call","outcome":"snapshot_captured","page":page,
+            "snapshot":{"schema_version":desk_agent_protocol::browser_control::BROWSER_CONTROL_SCHEMA_VERSION,
+                "page":page,"elements":[{"page_id":"page","page_incarnation":"incarnation",
+                    "document_revision":1,"element_id":"element","role":"textbox",
+                    "accessible_name":"Business JSON","value":business_value,"element_revision":1}],
+                "truncated":false,"captured_at_unix_ms":1},
+            "form_readback":[],"send_receipt":null,"completed_at_unix_ms":2
+        });
+        serde_json::from_value::<BrowserActionResult>(result.clone())
+            .unwrap()
+            .validate()
+            .unwrap();
+        let owner = model_bound_user_message(
+            "owner".into(),
+            "Inspect the page".into(),
+            DestinationIdentity::Model {
+                connection_id: "connection".into(),
+                connection_revision: 1,
+                model_id: "model".into(),
+                profile_revision: 1,
+            },
+        )
+        .unwrap();
+        for (wrapped, role) in [
+            (false, ChatRole::Tool),
+            (true, ChatRole::Tool),
+            (true, ChatRole::UntrustedOutput),
+        ] {
+            let payload = if wrapped {
+                json!({"work_id":"work","action_request_id":"action","execution_generation":"generation",
+                    "result":"verified","facts":[],"message":"schema_version is business text",
+                    "output":{"kind":"browser","value":result}})
+            } else {
+                result.clone()
+            };
+            let original_text = payload.to_string();
+            let mut message = ChatMessage::tool_result("receipt", "call", &original_text);
+            message.role = role;
+            message.data_envelope = internal_tool_result_envelope(
+                owner.data_envelope.as_ref(),
+                "call",
+                &original_text,
+                "browser_take_snapshot",
+            )
+            .unwrap();
+            let request = ModelRequest::text_only(vec![message], ResponseFormatSpec::None);
+            let original = serde_json::to_string(&request.messages).unwrap();
+            let projected = crate::ui_model_ids::project_request(&request);
+            let body: Value = serde_json::from_str(&projected.messages[0].text).unwrap();
+            let model_result = if wrapped {
+                &body["output"]["value"]
+            } else {
+                &body
+            };
+            assert!(model_result.get("schema_version").is_none());
+            assert!(model_result["snapshot"].get("schema_version").is_none());
+            assert_eq!(
+                model_result["snapshot"]["elements"][0]["value"],
+                business_value
+            );
+            assert_eq!(model_result["outcome"], "snapshot_captured");
+            assert_eq!(model_result["snapshot"]["captured_at_unix_ms"], 1);
+            if wrapped {
+                assert_eq!(body["message"], "schema_version is business text");
+            }
+            assert_eq!(serde_json::to_string(&request.messages).unwrap(), original);
+            assert_eq!(
+                serde_json::to_string(&crate::ui_model_ids::project_request(&projected).messages)
+                    .unwrap(),
+                serde_json::to_string(&projected.messages).unwrap(),
+            );
+        }
+    }
 
     #[test]
     fn attachment_references_resolve_and_reject_a_changed_document() {

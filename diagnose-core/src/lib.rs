@@ -101,7 +101,7 @@ pub mod reasoning_display;
 pub mod redaction;
 pub mod registry;
 pub mod replay;
-mod result_model_ids;
+pub mod result_model_ids;
 pub mod schedule;
 pub mod seam;
 pub mod selection;
@@ -165,6 +165,7 @@ pub mod ui_model_ids;
 pub mod ui_references;
 
 pub mod model_input;
+pub mod native_ids;
 
 pub mod tool_exposure;
 

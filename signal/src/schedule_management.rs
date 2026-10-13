@@ -776,7 +776,7 @@ async fn rehearsal_view(
         task_revision: row.task_revision,
         target_device_id,
         client_conversation_id: row.client_conversation_id,
-        initial_message_id: format!("rehearsal:{}:input", row.rehearsal_id),
+        initial_message_id: desk_diagnose_core::native_ids::rehearsal_message(&row.rehearsal_id),
         prompt: row.prompt,
         locale: row.locale,
         model_id: row.model_id,

@@ -85,13 +85,11 @@ async fn fixture() -> (
     .unwrap();
     origin.retention.expires_at_unix_ms = Some(context.expires_at_unix_ms);
     origin.command_completion = Some(context);
-    let key = format!(
-        "{}:{}:{}",
-        parent.conversation_id,
+    let call_id = desk_diagnose_core::native_ids::background_action(
+        &parent.conversation_id,
         parent.current_turn_id.as_deref().unwrap(),
-        call.id
+        &call.id,
     );
-    let call_id = format!("capability-call-{:x}", Sha256::digest(key.as_bytes()));
     let grant_id =
         crate::capability_grant_store::task_grant::identity(&parent.conversation_id, &call_id);
     let digest = format!("{:x}", Sha256::digest(canonical.as_bytes()));

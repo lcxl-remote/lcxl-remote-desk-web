@@ -1,7 +1,6 @@
 //! Stable model references to authoritative results. Hashes remain native evidence.
 
 use crate::chat::{ChatMessage, ChatRole, ToolCallRef, ToolSpec};
-use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use desk_agent_protocol::{
     AgentError, AgentErrorKind,
     communication::CommunicationDraftHandoff,
@@ -12,6 +11,63 @@ use desk_agent_protocol::{
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+
+/// Read-only business-record locators, never model aliases or source proof.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResultLocator {
+    pub message_id: String,
+    pub call_id: String,
+    pub artifact_key: Option<String>,
+    pub handoff_id: Option<String>,
+    pub web_source_ordinals: Vec<(String, String)>,
+}
+
+pub fn locators(history: &[ChatMessage]) -> Vec<ResultLocator> {
+    let registry = crate::ai_assistant::ai_assistant_provider_registry();
+    history
+        .iter()
+        .filter_map(|message| {
+            if !matches!(message.role, ChatRole::Tool | ChatRole::UntrustedOutput) {
+                return None;
+            }
+            let source = message.trusted_tool_result();
+            verified_call(history, message, 0, &registry)?;
+            let value = serde_json::from_str::<Value>(&source.text).ok();
+            let web_source_ordinals = value
+                .as_ref()
+                .and_then(|v| v["results"].as_array())
+                .map(|entries| {
+                    entries
+                        .iter()
+                        .filter_map(web_source)
+                        .map(|source| {
+                            (
+                                web_source_key(&source),
+                                web_source_ordinal(entries, &source)
+                                    .expect("source in original result"),
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            Some(ResultLocator {
+                message_id: message.message_id.clone(),
+                call_id: message.tool_call_id.clone()?,
+                artifact_key: value.as_ref().and_then(artifact).map(|v| artifact_key(&v)),
+                handoff_id: value.as_ref().and_then(handoff).map(|v| v.handoff_id),
+                web_source_ordinals,
+            })
+        })
+        .collect()
+}
+
+fn message_id<'a>(locators: &'a [ResultLocator], call: &str) -> Option<&'a str> {
+    let mut matches = locators.iter().filter(|source| source.call_id == call);
+    let first = matches.next()?;
+    matches
+        .all(|source| source.message_id == first.message_id)
+        .then_some(first.message_id.as_str())
+}
 
 fn invalid(detail: &str) -> AgentError {
     AgentError {
@@ -25,18 +81,22 @@ fn invalid(detail: &str) -> AgentError {
     }
 }
 
-/// This alias locates evidence; it is neither a digest check nor an authorization.
-pub(crate) fn alias(kind: &str, identity: &str) -> String {
-    let digest = Sha256::digest(format!("model-result:v1:{kind}:{identity}"));
-    format!("{kind}_{}", URL_SAFE_NO_PAD.encode(&digest[..9]))
+fn artifact_key(artifact: &CreatedFileArtifactOutput) -> String {
+    format!(
+        "{:x}",
+        Sha256::digest(
+            serde_json::to_vec(&(&artifact.file, &artifact.digest_sha256))
+                .expect("artifact locator serialization"),
+        )
+    )
 }
 
-fn artifact_id(artifact: &CreatedFileArtifactOutput) -> String {
-    alias(
-        "artifact",
-        &serde_json::to_string(&(&artifact.file, &artifact.digest_sha256))
-            .expect("artifact identity serialization"),
-    )
+fn selected_call<'a>(locators: &'a [ResultLocator], id: &str) -> Option<&'a str> {
+    let mut matches = locators.iter().filter(|source| source.message_id == id);
+    let first = matches.next()?;
+    matches
+        .all(|source| source.call_id == first.call_id)
+        .then_some(first.call_id.as_str())
 }
 
 fn artifact(value: &Value) -> Option<CreatedFileArtifactOutput> {
@@ -76,31 +136,39 @@ pub(crate) fn verified_results(history: &[ChatMessage], now: u64) -> Vec<(ToolCa
         .iter()
         .filter(|message| matches!(message.role, ChatRole::Tool | ChatRole::UntrustedOutput))
         .filter_map(|message| {
-            let id = message.tool_call_id.as_deref()?;
-            let mut calls = history
-                .iter()
-                .filter(|message| message.role == ChatRole::Assistant)
-                .flat_map(|message| &message.tool_calls)
-                .filter(|call| call.id == id);
-            let call = calls.next()?;
-            if calls.next().is_some() {
-                return None;
-            }
+            let call = verified_call(history, message, now, &registry)?;
             let result = message.trusted_tool_result();
-            let envelope = result.data_envelope.as_ref()?;
-            let capability = registry.capability_for_tool(&call.name)?;
-            let provider = registry.provider_for_capability(&capability.wire.capability_id)?;
-            if envelope.validate().is_err()
-                || crate::model_egress::envelope_expires_by(envelope, now)
-                || envelope.provenance.source_tool_name != call.name
-                || envelope.provenance.source_provider_id != provider.wire.provider_id
-                || envelope.digest_sha256 != format!("{:x}", Sha256::digest(result.text.as_bytes()))
-            {
-                return None;
-            }
             Some((call.clone(), serde_json::from_str(&result.text).ok()?))
         })
         .collect()
+}
+
+fn verified_call<'a>(
+    history: &'a [ChatMessage],
+    message: &ChatMessage,
+    now: u64,
+    registry: &crate::provider_registry::ProviderRegistry,
+) -> Option<&'a ToolCallRef> {
+    let id = message.tool_call_id.as_deref()?;
+    let mut calls = history
+        .iter()
+        .filter(|message| message.role == ChatRole::Assistant)
+        .flat_map(|message| &message.tool_calls)
+        .filter(|call| call.id == id);
+    let call = calls.next()?;
+    if calls.next().is_some() {
+        return None;
+    }
+    let result = message.trusted_tool_result();
+    let envelope = result.data_envelope.as_ref()?;
+    let capability = registry.capability_for_tool(&call.name)?;
+    let provider = registry.provider_for_capability(&capability.wire.capability_id)?;
+    (envelope.validate().is_ok()
+        && !crate::model_egress::envelope_expires_by(envelope, now)
+        && envelope.provenance.source_tool_name == call.name
+        && envelope.provenance.source_provider_id == provider.wire.provider_id
+        && envelope.digest_sha256 == format!("{:x}", Sha256::digest(result.text.as_bytes())))
+    .then_some(call)
 }
 
 fn unique_result(
@@ -195,31 +263,45 @@ pub(crate) fn input_envelope_ids(
     Ok(ids)
 }
 
+fn visit_file_selectors(
+    value: &mut Value,
+    visitor: &mut impl FnMut(&mut Value) -> Result<(), AgentError>,
+) -> Result<(), AgentError> {
+    if let Some(id) = value.get_mut("file_result_call_id") {
+        visitor(id)?;
+    }
+    if let Some(source) = value.get_mut("source")
+        && let Some(id) = source.get_mut("file_result_call_id")
+    {
+        visitor(id)?;
+    }
+    for field in ["sources", "file_sources"] {
+        if let Some(sources) = value.get_mut(field).and_then(Value::as_array_mut) {
+            for source in sources {
+                if let Some(id) = source.get_mut("file_result_call_id") {
+                    visitor(id)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn expand_file_selectors(
     value: &mut Value,
     results: &[(ToolCallRef, Value)],
+    locators: &[ResultLocator],
 ) -> Result<(), AgentError> {
-    match value {
-        Value::Object(object) => {
-            if let Some(id) = object.get("file_result_call_id").and_then(Value::as_str)
-                && id.starts_with("result_")
-            {
-                let (source, _) =
-                    unique_result(results, |call, _| alias("result", &call.id) == id)?;
-                object.insert("file_result_call_id".into(), json!(source.id));
-            }
-            for child in object.values_mut() {
-                expand_file_selectors(child, results)?;
-            }
-        }
-        Value::Array(array) => {
-            for child in array {
-                expand_file_selectors(child, results)?;
-            }
-        }
-        _ => {}
-    }
-    Ok(())
+    visit_file_selectors(value, &mut |id| {
+        let selected = id
+            .as_str()
+            .ok_or_else(|| invalid("result ID must be a string"))?;
+        let call_id =
+            selected_call(locators, selected).ok_or_else(|| invalid("result is unavailable"))?;
+        let (source, _) = unique_result(results, |call, _| call.id == call_id)?;
+        *id = json!(source.id);
+        Ok(())
+    })
 }
 
 pub(crate) fn resolve(
@@ -232,7 +314,8 @@ pub(crate) fn resolve(
         return Ok(());
     }
     let results = verified_results(history, now);
-    expand_file_selectors(value, &results)?;
+    let source_locators = locators(history);
+    expand_file_selectors(value, &results, &source_locators)?;
     let object = value
         .as_object_mut()
         .ok_or_else(|| invalid("arguments must be an object"))?;
@@ -246,7 +329,8 @@ pub(crate) fn resolve(
             .as_str()
             .ok_or_else(|| invalid("web_search_result_id must be a string"))?;
         let (source, result) = unique_result(&results, |call, _| {
-            call.name == "search_public_web" && alias("search", &call.id) == id
+            call.name == "search_public_web"
+                && selected_call(&source_locators, id) == Some(call.id.as_str())
         })?;
         let requested = object
             .remove("web_source_ids")
@@ -265,7 +349,11 @@ pub(crate) fn resolve(
                 .ok_or_else(|| invalid("Web source ID must be a string"))?;
             let matches = observed
                 .iter()
-                .filter_map(|entry| web_source(entry).filter(|source| web_source_id(source) == id))
+                .filter_map(|entry| {
+                    web_source(entry).filter(|source| {
+                        web_source_ordinal(observed, source).as_deref() == Some(id)
+                    })
+                })
                 .collect::<Vec<_>>();
             let source = matches
                 .first()
@@ -287,7 +375,9 @@ pub(crate) fn resolve(
             let id = id
                 .as_str()
                 .ok_or_else(|| invalid("file_version_id must be a string"))?;
-            let (source, _) = unique_result(&results, |call, _| alias("file", &call.id) == id)?;
+            let (source, _) = unique_result(&results, |call, _| {
+                selected_call(&source_locators, id) == Some(call.id.as_str())
+            })?;
             object.insert("file_result_call_id".into(), json!(source.id));
         }
         let id = object
@@ -325,7 +415,8 @@ pub(crate) fn resolve(
                         | "create_word_report"
                         | "convert_document"
                         | "update_text_file"
-                ) && artifact(value).is_some_and(|artifact| artifact_id(&artifact) == id)
+                ) && selected_call(&source_locators, id) == Some(call.id.as_str())
+                    && artifact(value).is_some()
             })?;
             let artifact = artifact(&result).expect("selected typed artifact");
             let expiry = chrono::DateTime::parse_from_rfc3339(&artifact.file.expires_at)
@@ -364,7 +455,8 @@ pub(crate) fn resolve(
         };
         let (source, result) = unique_result(&results, |call, value| {
             call.name == prepare
-                && handoff(value).is_some_and(|handoff| alias("draft", &handoff.handoff_id) == id)
+                && selected_call(&source_locators, id) == Some(call.id.as_str())
+                && handoff(value).is_some()
         })?;
         let handoff = handoff(&result).expect("selected typed handoff");
         let mut original: Value = serde_json::from_str(&source.arguments_json)
@@ -402,7 +494,7 @@ pub(crate) fn resolve(
     Ok(())
 }
 
-pub(crate) fn project_arguments(tool: &str, value: &mut Value) {
+pub(crate) fn project_arguments(tool: &str, value: &mut Value, locators: &[ResultLocator]) {
     if !supports(tool) {
         return;
     }
@@ -410,69 +502,89 @@ pub(crate) fn project_arguments(tool: &str, value: &mut Value) {
         return;
     };
     if tool == "create_word_report"
-        && let Some(id) = object
-            .remove("web_search_call_id")
-            .and_then(|id| id.as_str().map(str::to_owned))
+        && let Some(call) = object.remove("web_search_call_id")
     {
-        object.insert("web_search_result_id".into(), json!(alias("search", &id)));
-        if let Some(sources) = object
-            .remove("web_sources")
-            .and_then(|sources| sources.as_array().cloned())
-        {
-            object.insert(
-                "web_source_ids".into(),
-                json!(sources.iter().map(web_source_id).collect::<Vec<_>>()),
-            );
-        }
+        let source = call.as_str().and_then(|call| {
+            let id = message_id(locators, call)?;
+            locators
+                .iter()
+                .find(|source| source.call_id == call && source.message_id == id)
+        });
+        let selected = object.remove("web_sources").and_then(|sources| {
+            sources
+                .as_array()?
+                .iter()
+                .map(|value| {
+                    let key = web_source_key(value);
+                    source?
+                        .web_source_ordinals
+                        .iter()
+                        .find(|(candidate, _)| candidate == &key)
+                        .map(|(_, ordinal)| ordinal.clone())
+                })
+                .collect::<Option<Vec<_>>>()
+        });
+        object.insert(
+            "web_search_result_id".into(),
+            json!(source.map(|source| &source.message_id)),
+        );
+        object.insert("web_source_ids".into(), json!(selected));
     }
     if matches!(tool, "update_text_file" | "delete_text_file")
-        && let Some(id) = object
-            .remove("file_result_call_id")
-            .and_then(|id| id.as_str().map(str::to_owned))
+        && let Some(call) = object.remove("file_result_call_id")
     {
-        object.insert("file_version_id".into(), json!(alias("file", &id)));
+        let id = call.as_str().and_then(|call| message_id(locators, call));
+        object.insert("file_version_id".into(), json!(id));
         object.remove("expected_sha256");
     }
     if tool == "prepare_gmail_draft"
         && let Some(attachment) = object.get_mut("attachment").and_then(Value::as_object_mut)
-        && let Some(value) = attachment.remove("artifact")
-        && let Ok(artifact) = serde_json::from_value::<CreatedFileArtifactOutput>(value)
+        && let Some(artifact) = attachment.remove("artifact")
     {
-        attachment.insert("artifact_result_id".into(), json!(artifact_id(&artifact)));
+        let id = serde_json::from_value::<CreatedFileArtifactOutput>(artifact)
+            .ok()
+            .and_then(|artifact| {
+                let key = artifact_key(&artifact);
+                let mut sources = locators
+                    .iter()
+                    .filter(|source| source.artifact_key.as_deref() == Some(&key));
+                let first = sources.next()?;
+                sources
+                    .all(|source| source.message_id == first.message_id)
+                    .then_some(first.message_id.as_str())
+            });
+        attachment.insert("artifact_result_id".into(), json!(id));
     }
     if matches!(tool, "send_gmail_message" | "send_slack_message")
-        && let Some(value) = object.remove("handoff")
-        && let Ok(handoff) = serde_json::from_value::<CommunicationDraftHandoff>(value)
+        && let Some(handoff) = object.remove("handoff")
     {
-        object.insert(
-            "handoff_result_id".into(),
-            json!(alias("draft", &handoff.handoff_id)),
-        );
+        let id = serde_json::from_value::<CommunicationDraftHandoff>(handoff)
+            .ok()
+            .and_then(|handoff| {
+                let mut sources = locators
+                    .iter()
+                    .filter(|source| source.handoff_id.as_deref() == Some(&handoff.handoff_id));
+                let first = sources.next()?;
+                sources
+                    .all(|source| source.message_id == first.message_id)
+                    .then_some(first.message_id.as_str())
+            });
         object.remove("draft");
         object.remove("body_plain_text");
+        object.insert("handoff_result_id".into(), json!(id));
     }
-    project_file_selectors(value);
-}
-
-fn project_file_selectors(value: &mut Value) {
-    match value {
-        Value::Object(object) => {
-            if let Some(id) = object.get("file_result_call_id").and_then(Value::as_str)
-                && !id.starts_with("result_")
+    let _ = visit_file_selectors(value, &mut |id| {
+        if let Some(call) = id.as_str() {
+            if let Some(native) = message_id(locators, call) {
+                *id = json!(native);
+            } else if !locators.iter().any(|source| source.message_id == call)
+                && !crate::native_ids::is(crate::native_ids::Kind::Message, call)
             {
-                object.insert("file_result_call_id".into(), json!(alias("result", id)));
-            }
-            for child in object.values_mut() {
-                project_file_selectors(child);
+                *id = Value::Null;
             }
         }
-        Value::Array(array) => {
-            for child in array {
-                project_file_selectors(child);
-            }
-        }
-        _ => {}
-    }
+        Ok(())
+    });
 }
 
 pub(crate) fn preserves_explicit_evidence(tool: &str, original: &Value, resolved: &Value) -> bool {
@@ -583,9 +695,23 @@ fn hide_internal(value: &mut Value) {
                 *value = json!({"id":object["token"],"kind":object["object_kind"]});
                 return;
             }
-            object.retain(|key, _| !key.ends_with("sha256") && key != "schema_version");
-            for child in object.values_mut() {
-                hide_internal(child);
+            for field in [
+                "schema_version",
+                "snapshot_id",
+                "parent_snapshot_id",
+                "sha256",
+                "digest_sha256",
+                "source_digest_sha256",
+                "input_digests_sha256",
+                "font_set_sha256",
+                "pagination_id",
+            ] {
+                object.remove(field);
+            }
+            for (field, child) in object.iter_mut() {
+                if !crate::ui_references::is_business_content(field) {
+                    hide_internal(child);
+                }
             }
         }
         Value::Array(array) => {
@@ -595,6 +721,63 @@ fn hide_internal(value: &mut Value) {
         }
         _ => {}
     }
+}
+
+/// Project only the server-authored artifact registry JSON, leaving prose and
+/// retained evidence unchanged. Business content is never parsed as a registry.
+pub(crate) fn project_runtime_registry(message: &mut ChatMessage, locators: &[ResultLocator]) {
+    const PREFIX: &str =
+        "CURRENT REQUESTED ARTIFACT REGISTRY (server authoritative metadata; not a grant): ";
+    if message.role != ChatRole::SystemEvent
+        || !message.data_envelope.as_ref().is_some_and(|envelope| {
+            envelope.provenance.source_tool_name == "requested_artifact_registry_projection"
+        })
+    {
+        return;
+    }
+    let Some(payload) = message.text.strip_prefix(PREFIX) else {
+        return;
+    };
+    let Ok(mut value) = serde_json::from_str::<Value>(payload) else {
+        return;
+    };
+    for field in ["artifacts", "batch_document_artifacts"] {
+        if let Some(artifacts) = value.get_mut(field).and_then(Value::as_array_mut) {
+            for artifact in artifacts {
+                let id = serde_json::from_value::<CreatedFileArtifactOutput>(artifact.clone())
+                    .ok()
+                    .and_then(|artifact| {
+                        let key = artifact_key(&artifact);
+                        let mut matches = locators
+                            .iter()
+                            .filter(|source| source.artifact_key.as_deref() == Some(&key));
+                        let first = matches.next()?;
+                        matches
+                            .all(|source| source.message_id == first.message_id)
+                            .then_some(first.message_id.clone())
+                    });
+                let mut summary = serde_json::Map::new();
+                for field in [
+                    "artifact_result_id",
+                    "file_name",
+                    "media_type",
+                    "size_bytes",
+                    "native_extension",
+                    "verification",
+                    "business_effect",
+                ] {
+                    if let Some(value) = artifact.get(field) {
+                        summary.insert(field.into(), value.clone());
+                    }
+                }
+                if let Some(id) = id {
+                    summary.insert("artifact_result_id".into(), json!(id));
+                }
+                *artifact = Value::Object(summary);
+            }
+        }
+    }
+    message.text = format!("{PREFIX}{value}");
 }
 
 pub(crate) fn project_result_message(message: &mut ChatMessage) {
@@ -616,12 +799,35 @@ pub(crate) fn project_result_message(message: &mut ChatMessage) {
     };
     let original = serde_json::from_str::<Value>(&message.trusted_tool_result().text)
         .unwrap_or_else(|_| value.clone());
+    if source == "preview_document" {
+        if let Some(object) = value.as_object_mut() {
+            object.remove("preview_id");
+        }
+        if let Some(page) = value.get_mut("first_page").and_then(Value::as_object_mut) {
+            page.remove("preview_id");
+        }
+        hide_internal(&mut value);
+        message.text = value.to_string();
+        return;
+    }
+    if serde_json::from_value::<ComputerActionCompleted>(original.clone()).is_ok()
+        && let Some(object) = value.as_object_mut()
+    {
+        for field in ["work_id", "action_request_id", "execution_generation"] {
+            object.remove(field);
+        }
+    }
     if source == "search_public_web" {
-        value["search_result_id"] = json!(alias("search", call_id));
+        value.as_object_mut().unwrap().remove("web_search_call_id");
+        value["search_result_id"] = json!(message.message_id);
         if let Some(entries) = value["results"].as_array_mut() {
             for entry in entries {
                 if let Some(source) = web_source(entry) {
-                    entry["source_id"] = json!(web_source_id(&source));
+                    entry["source_id"] = json!(
+                        original["results"]
+                            .as_array()
+                            .and_then(|entries| web_source_ordinal(entries, &source))
+                    );
                 }
             }
         }
@@ -629,8 +835,8 @@ pub(crate) fn project_result_message(message: &mut ChatMessage) {
         return;
     }
     let created = artifact(&original);
-    if let Some(artifact) = &created {
-        value["artifact_result_id"] = json!(artifact_id(artifact));
+    if created.is_some() {
+        value["artifact_result_id"] = json!(message.message_id);
     }
     if matches!(
         source.as_str(),
@@ -646,20 +852,32 @@ pub(crate) fn project_result_message(message: &mut ChatMessage) {
                     .is_ok()
             });
         if verified {
-            value["file_version_id"] = json!(alias("file", call_id));
+            value["file_version_id"] = json!(message.message_id);
         }
     }
     if source == "inspect_files" || source == "read_text_file" || created.is_some() {
-        value["file_result_call_id"] = json!(alias("result", call_id));
+        value["file_result_call_id"] = json!(message.message_id);
     }
     if let Some(handoff) = handoff(&original) {
-        value = json!({"handoff_result_id":alias("draft", &handoff.handoff_id),"verification":handoff.verification,"send_authority":handoff.send_authority,"surface":handoff.surface,"compose_id":handoff.compose_id,"business_effect":"draft_prepared","message_sent":false});
+        value = json!({"handoff_result_id":message.message_id,"verification":handoff.verification,"send_authority":handoff.send_authority,"surface":handoff.surface,"business_effect":"draft_prepared","message_sent":false});
     }
     if supports(source)
         || created.is_some()
         || source == "prepare_outlook_draft"
         || source == "prepare_slack_message"
         || source == "inspect_files"
+        || source == "read_terminal_output"
+        || source == "inspect_spreadsheets"
+        || matches!(
+            source.as_str(),
+            "inspect_numbers_file"
+                | "inspect_pages_file"
+                | "inspect_keynote_file"
+                | "inspect_excel_cell"
+                | "inspect_word_file"
+                | "inspect_powerpoint_file"
+        )
+        || source == "preview_spreadsheet_merge"
         || source.starts_with("inspect_live_")
         || source.starts_with("inspect_office_")
     {
@@ -681,12 +899,21 @@ fn web_source(entry: &Value) -> Option<Value> {
     Some(json!({"title":title,"url":url}))
 }
 
-fn web_source_id(source: &Value) -> String {
-    alias(
-        "source",
-        &serde_json::to_string(&(source.get("title"), source.get("url")))
-            .expect("Web source identity serialization"),
+fn web_source_key(source: &Value) -> String {
+    format!(
+        "{:x}",
+        Sha256::digest(
+            serde_json::to_vec(&(source.get("title"), source.get("url")))
+                .expect("source locator serialization")
+        )
     )
+}
+
+pub(crate) fn web_source_ordinal(entries: &[Value], source: &Value) -> Option<String> {
+    entries
+        .iter()
+        .position(|entry| web_source(entry).as_ref() == Some(source))
+        .map(|index| (index + 1).to_string())
 }
 
 #[cfg(test)]

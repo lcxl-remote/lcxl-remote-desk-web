@@ -117,12 +117,10 @@ impl ScheduleStore {
                 })
                 .flat_map(|message| &message.tool_calls)
                 .filter(|call| {
-                    format!(
-                        "capability-call-{}",
-                        digest(&format!(
-                            "{}:{}:{}",
-                            session.conversation_id, work.turn_id, call.id
-                        ))
+                    desk_diagnose_core::native_ids::background_action(
+                        &session.conversation_id,
+                        &work.turn_id,
+                        &call.id,
                     ) == prepared.call_id
                 })
                 .collect();

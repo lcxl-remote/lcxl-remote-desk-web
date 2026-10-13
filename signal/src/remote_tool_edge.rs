@@ -1443,9 +1443,10 @@ impl SignalAiAssistantTools {
         let session = self.authoritative_session().await?;
         let (canonical_input_json, canonical_input_digest_sha256) =
             Self::canonical_call_input(call)?;
-        let server_call_id = format!(
-            "capability-call-{:x}",
-            Sha256::digest(format!("{}:{}:{}", self.run_id, self.turn_id, call.id).as_bytes())
+        let server_call_id = desk_diagnose_core::native_ids::background_action(
+            &self.run_id,
+            &self.turn_id,
+            &call.id,
         );
         let compiled_scope = canonical_compiled_scope(
             &capability.wire.authorization_hint.resources,
@@ -2034,12 +2035,9 @@ impl SignalAiAssistantTools {
             &session,
             &canonical_input_json,
         )?
-        .unwrap_or_else(|| {
-            format!(
-                "capability-call-{:x}",
-                Sha256::digest(format!("{}:{}:{}", self.run_id, self.turn_id, call.id).as_bytes())
-            )
-        });
+        .unwrap_or_else(|| desk_diagnose_core::native_ids::background_action(
+            &self.run_id, &self.turn_id, &call.id,
+        ));
         let call_authority = CapabilityGrantCall {
             actor_id: &self.actor_id,
             run_id: &self.run_id,
@@ -2922,9 +2920,10 @@ impl SignalAiAssistantTools {
             .to_string(),
         ];
         let risk_tier = Self::capability_risk(capability, call)?;
-        let server_call_id = format!(
-            "capability-call-{:x}",
-            Sha256::digest(format!("{}:{}:{}", self.run_id, self.turn_id, call.id).as_bytes())
+        let server_call_id = desk_diagnose_core::native_ids::background_action(
+            &self.run_id,
+            &self.turn_id,
+            &call.id,
         );
         let subject = desk_diagnose_core::provider_preflight::ProviderCallSubject {
             actor_id: &self.actor_id,
@@ -3757,9 +3756,10 @@ impl SignalAiAssistantTools {
                 false,
             )
         })?;
-        let server_call_id = format!(
-            "capability-call-{:x}",
-            Sha256::digest(format!("{}:{}:{}", self.run_id, self.turn_id, call.id).as_bytes())
+        let server_call_id = desk_diagnose_core::native_ids::background_action(
+            &self.run_id,
+            &self.turn_id,
+            &call.id,
         );
         let subject = desk_diagnose_core::provider_preflight::ProviderCallSubject {
             actor_id: &self.actor_id,
@@ -4327,9 +4327,10 @@ impl SignalAiAssistantTools {
                 false,
             )
         })?;
-        let server_call_id = format!(
-            "capability-call-{:x}",
-            Sha256::digest(format!("{}:{}:{}", self.run_id, self.turn_id, call.id).as_bytes())
+        let server_call_id = desk_diagnose_core::native_ids::background_action(
+            &self.run_id,
+            &self.turn_id,
+            &call.id,
         );
         let evaluated = desk_diagnose_core::provider_preflight::BrowserCallPreflight::build(
             &self.provider_registry,
@@ -4921,9 +4922,10 @@ impl SignalAiAssistantTools {
                 false,
             )
         })?;
-        let server_call_id = format!(
-            "capability-call-{:x}",
-            Sha256::digest(format!("{}:{}:{}", self.run_id, self.turn_id, call.id).as_bytes())
+        let server_call_id = desk_diagnose_core::native_ids::background_action(
+            &self.run_id,
+            &self.turn_id,
+            &call.id,
         );
         let evaluated = desk_diagnose_core::provider_preflight::OutlookCallPreflight::build(
             &self.provider_registry,

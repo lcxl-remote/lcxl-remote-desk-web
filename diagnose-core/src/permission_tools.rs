@@ -911,7 +911,7 @@ pub fn build_permission_request(
         ) && (application_scope.is_none() || item.exact_input.is_some())
         {
             return Err(invalid(format!(
-                r#"item_id={} tool_name={}: native UI permission requires application_scope, never exact_input. Required shape: {{"application_scope":{{"application":{{"token":"<observed application token>","snapshot_id":"<observed snapshot>","object_kind":"application","expires_at":"<observed expiry>"}},"actions":["invoke","set_value"]}}}}. Load the tool details first. If no application reference is known, request prerequisite desktop reads and observe the application before requesting actions"#,
+                r#"item_id={} tool_name={}: native UI permission requires application_scope, never exact_input. Required shape: {{"application_scope":{{"application_id":"<observed application ID>","actions":["invoke","set_value"]}}}}. Load the tool details first. If no application ID is known, request prerequisite desktop reads and observe the application before requesting actions"#,
                 item.item_id, item.tool_name
             )));
         }
@@ -2427,6 +2427,9 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.message.contains("requires application_scope"));
+        assert!(error.message.contains("application_id"));
+        assert!(!error.message.contains("snapshot_id"));
+        assert!(!error.message.contains("expires_at"));
 
         let exact = r#"{"items":[{"item_id":"ui","tool_name":"execute_ui_actions","resource_scope":["model:chosen"],"application_scope":{"application":{"token":"app","snapshot_id":"snapshot-1","object_kind":"application","expires_at":"2026-08-28T00:01:00Z"},"actions":["set_value"]},"suggested_ttl_seconds":60,"suggested_max_uses":4,"reason":"Update controls"}]}"#;
         let request = build_permission_request(

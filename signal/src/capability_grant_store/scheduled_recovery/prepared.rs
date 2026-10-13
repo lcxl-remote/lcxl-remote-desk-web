@@ -96,9 +96,10 @@ pub(in crate::capability_grant_store) async fn close_on(
         })
         .flat_map(|message| message.tool_calls.iter().map(move |call| (message, call)))
         .filter(|(_, call)| {
-            stable_id(
-                "capability-call",
-                &format!("{}:{}:{}", session.conversation_id, work.turn_id, call.id),
+            desk_diagnose_core::native_ids::background_action(
+                &session.conversation_id,
+                &work.turn_id,
+                &call.id,
             ) == payload.call_id
         })
         .collect();

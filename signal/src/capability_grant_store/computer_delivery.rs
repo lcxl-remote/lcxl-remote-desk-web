@@ -283,9 +283,10 @@ impl SignalCapabilityGrantStore {
             for row in rows {
                 let matches_open = session.current_turn_id.as_deref() == Some(&row.turn_id)
                     && unclosed.iter().any(|call| {
-                        stable_id(
-                            "capability-call",
-                            &format!("{}:{}:{}", session.conversation_id, row.turn_id, call),
+                        desk_diagnose_core::native_ids::background_action(
+                            &session.conversation_id,
+                            &row.turn_id,
+                            call,
                         ) == row.action_request_id
                     });
                 let matches_current = session.execution_state.tasks().into_iter().any(|action| {

@@ -447,6 +447,8 @@ fn string_example(schema: &Value) -> Value {
     let pattern = schema["pattern"].as_str().unwrap_or("");
     let mut value = if pattern.contains("[0-9a-f]{64}") {
         "0".repeat(64)
+    } else if pattern == "^sc_[A-Za-z0-9_-]{22}$" {
+        crate::native_ids::from_bytes(crate::native_ids::Kind::Schedule, &[0; 16])
     } else if pattern.starts_with("^https://") || pattern.starts_with("^https?://") {
         "https://example.invalid/".into()
     } else if pattern.starts_with("^Merged!") {

@@ -22,7 +22,7 @@ async fn runtime_schema_defaults_preserve_result_and_list_call_authority() {
         (
             "read-default",
             tools::RESULT,
-            serde_json::json!({"task_id": "t1"}),
+            serde_json::json!({"task_id": &task.task_id}),
             "include_task",
             serde_json::json!(false),
         ),
@@ -609,14 +609,14 @@ async fn short_task_ids_keep_query_wait_and_control_call_authority() {
             complete_child(&db, &native).await;
         }
         let arguments = match tool {
-            tools::WAIT => serde_json::json!({"task_ids":["t1"],"mode":"all_terminal"}),
+            tools::WAIT => serde_json::json!({"task_ids":[native],"mode":"all_terminal"}),
             tools::CANCEL => {
-                serde_json::json!({"task_id":"t1","expected_input_revision":1,"expected_control_revision":1})
+                serde_json::json!({"task_id":native,"expected_input_revision":1,"expected_control_revision":1})
             }
             tools::MESSAGE => {
-                serde_json::json!({"task_id":"t1","expected_input_revision":1,"expected_control_revision":1,"message":"Check one additional symptom"})
+                serde_json::json!({"task_id":native,"expected_input_revision":1,"expected_control_revision":1,"message":"Check one additional symptom"})
             }
-            _ => serde_json::json!({"task_id":"t1"}),
+            _ => serde_json::json!({"task_id":native}),
         };
         let original = committed_call(&db, &mut parent, "short-call", tool, arguments).await;
         let resolved =
@@ -657,11 +657,11 @@ async fn short_task_ids_keep_query_wait_and_control_call_authority() {
         let output: serde_json::Value = serde_json::from_str(&output.text).unwrap();
         assert_eq!(
             if tool == tools::WAIT {
-                &output["tasks"][0]["task_id"]
+                output["tasks"][0]["task_id"].as_str()
             } else {
-                &output["task_id"]
+                output["task_id"].as_str()
             },
-            "t1"
+            Some(native.as_str())
         );
         assert_eq!(request.messages, parent.conversation);
         if matches!(tool, tools::STATUS | tools::RESULT | tools::WAIT) {

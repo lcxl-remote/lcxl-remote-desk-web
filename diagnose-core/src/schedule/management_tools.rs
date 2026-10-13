@@ -34,7 +34,7 @@ pub fn specs() -> Vec<ToolSpec> {
     }, ToolSpec {
         name: CANCEL.into(),
         description: "Cancel an AI-created scheduled task in the current conversation without an extra approval dialog. Use the id and revision returned by list_scheduled_tasks. The server forbids cancellation of manual tasks and tasks from other conversations, devices or owners. Stops future scheduling and requests cancellation of any active occurrence; does not undo completed external effects. Report the returned state accurately, including cancellation_requested for a running occurrence.".into(),
-        parameters_schema: json!({"type":"object","additionalProperties":false,"required":["schedule_id","expected_revision"],"properties":{"schedule_id":{"type":"string","minLength":36,"maxLength":36},"expected_revision":{"type":"integer","minimum":1}}}),
+        parameters_schema: json!({"type":"object","additionalProperties":false,"required":["schedule_id","expected_revision"],"properties":{"schedule_id":{"type":"string","minLength":25,"maxLength":25,"pattern":"^sc_[A-Za-z0-9_-]{22}$"},"expected_revision":{"type":"integer","minimum":1}}}),
     }]
 }
 
@@ -114,11 +114,7 @@ pub fn parse(
                 "invalid cancellation"
             })?;
             if input.expected_revision < 1
-                || input.schedule_id.len() != 36
-                || !input
-                    .schedule_id
-                    .bytes()
-                    .all(|c| c.is_ascii_hexdigit() || c == b'-')
+                || !crate::native_ids::is(crate::native_ids::Kind::Schedule, &input.schedule_id)
             {
                 observation.reject(Stage::Preflight, InputIssue::Semantic);
                 return Err("invalid cancellation");

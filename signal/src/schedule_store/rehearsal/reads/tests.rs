@@ -84,7 +84,7 @@ async fn fixture_with_text(
         .unwrap();
     session.conversation.push(
         ChatMessage::text(
-            format!("rehearsal:{}:input", started.rehearsal_id),
+            desk_diagnose_core::native_ids::rehearsal_message(&started.rehearsal_id),
             ChatRole::User,
             &started.prompt,
         )
@@ -180,9 +180,10 @@ async fn fixture_with_text(
     };
     let grants = SignalCapabilityGrantStore::new(store.db.clone());
     grants.issue(&grant).await.unwrap();
-    let server_call_id = format!(
-        "capability-call-{}",
-        digest(&format!("{}:turn-1:{}", started.conversation_id, call.id))
+    let server_call_id = desk_diagnose_core::native_ids::background_action(
+        &started.conversation_id,
+        "turn-1",
+        &call.id,
     );
     let request = || PrepareCapabilityCall {
         grant_id: &grant.grant_id,
@@ -684,7 +685,7 @@ async fn model_sources_fixture(compressed: bool) {
         .unwrap()
         .unwrap();
     let mut session = PersistedAgentSession::decode_json(&row.state_json).unwrap();
-    let input_id = format!("rehearsal:{}:input", rehearsal.rehearsal_id);
+    let input_id = desk_diagnose_core::native_ids::rehearsal_message(&rehearsal.rehearsal_id);
     let destination = DestinationIdentity::Model {
         connection_id: "gateway".into(),
         connection_revision: 1,

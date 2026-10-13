@@ -1090,7 +1090,10 @@ impl ToolSeam for SignalAgentTools {
             })?
             .exec_approval_timeout_secs;
         let approval_timeout = Duration::from_secs(u64::from(approval_timeout_secs));
-        let exec_request_id = ExecRequestId(uuid::Uuid::new_v4().to_string());
+        let exec_request_id = ExecRequestId(desk_diagnose_core::native_ids::from_bytes(
+            desk_diagnose_core::native_ids::Kind::ExecRequest,
+            uuid::Uuid::new_v4().as_bytes(),
+        ));
         let preview = ExecPreview {
             exec_request_id: Some(exec_request_id.clone()),
             shell: match &validation_input.target {

@@ -178,12 +178,10 @@ pub(super) fn validate_binding(
         || origin.turn_fence.input_revision != payload.input_revision
         || origin.provider_id != payload.provider_id
         || origin.tool_name != payload.tool_name
-        || stable_id(
-            "capability-call",
-            &format!(
-                "{}:{}:{}",
-                work.conversation_id, work.turn_id, origin.tool_call_id
-            ),
+        || desk_diagnose_core::native_ids::background_action(
+            &work.conversation_id,
+            &work.turn_id,
+            &origin.tool_call_id,
         ) != payload.call_id
     {
         return Err(invalid());
@@ -238,9 +236,10 @@ impl SignalCapabilityGrantStore {
         let txn = crate::db::begin_write(&self.db, crate::entity::agent_session::Entity).await?;
         let result = async {
             let (outbox, work, payload) = original_on(&txn, &plan.execution_generation).await?;
-            if stable_id(
-                "capability-call",
-                &format!("{}:{}:{}", work.conversation_id, work.turn_id, call.id),
+            if desk_diagnose_core::native_ids::background_action(
+                &work.conversation_id,
+                &work.turn_id,
+                &call.id,
             ) != payload.call_id
                 || desk_diagnose_core::permission_tools::canonical_tool_permission_input_json(
                     &call.name,

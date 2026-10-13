@@ -71,6 +71,7 @@ impl ActionResultOrigin {
                                 &candidate.arguments_json,
                                 &call.arguments_json,
                                 Some(&session.ui_references),
+                                &crate::result_model_ids::locators(&session.conversation),
                             )
                     })
             })
@@ -122,6 +123,7 @@ impl ActionResultOrigin {
                                 &candidate.arguments_json,
                                 &call.arguments_json,
                                 Some(&session.ui_references),
+                                &crate::result_model_ids::locators(&session.conversation),
                             )
                     })
             })

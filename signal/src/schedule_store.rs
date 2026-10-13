@@ -247,7 +247,10 @@ impl ScheduleStore {
         let creation_identity = digest(&json(&(owner, &request.client_create_key))?);
         let payload_hash = digest(&json(&request)?);
         let model = entity::ActiveModel {
-            schedule_id: Set(uuid::Uuid::new_v4().to_string()),
+            schedule_id: Set(desk_diagnose_core::native_ids::from_bytes(
+                desk_diagnose_core::native_ids::Kind::Schedule,
+                uuid::Uuid::new_v4().as_bytes(),
+            )),
             owner_user_id: Set(owner),
             target_device_id: Set(request.target_device_id),
             kind: Set(json(&request.kind)?.trim_matches('"').to_string()),

@@ -117,7 +117,12 @@ mod tests {
             first,
             interactive_exec_request_id("run", "request", "digest")
         );
-        assert!(first.starts_with("exec_pty_"));
+        assert!(crate::native_ids::is(
+            crate::native_ids::Kind::InteractiveExecRequest,
+            &first
+        ));
+        assert!(is_permission_bound_exec_request_id(&first));
+        assert!(!is_permission_bound_exec_request_id("exec_pty_invalid"));
         assert!(first.len() <= desk_agent_protocol::exec_pty::MAX_PTY_STREAM_ID_BYTES);
         for other in [
             interactive_exec_request_id("run2", "request", "digest"),
@@ -333,14 +338,14 @@ impl CommandPolicyContext {
     }
 }
 
-/// Prefix of every permission-derived interactive execution id.
-pub const INTERACTIVE_EXEC_REQUEST_PREFIX: &str = "exec_pty_";
-
 /// Whether an execution id was derived from an owner-approved PTY permission.
 /// Such an execution binds the carrier consumed by that approval, whichever
 /// client connection later runs the approved turn.
 pub fn is_permission_bound_exec_request_id(exec_request_id: &str) -> bool {
-    exec_request_id.starts_with(INTERACTIVE_EXEC_REQUEST_PREFIX)
+    crate::native_ids::is(
+        crate::native_ids::Kind::InteractiveExecRequest,
+        exec_request_id,
+    )
 }
 
 /// Stable execution id of an interactive command, derived from the permission
@@ -352,19 +357,9 @@ pub fn interactive_exec_request_id(
     permission_request_id: &str,
     canonical_input_digest_sha256: &str,
 ) -> String {
-    let digest = Sha256::digest(
-        [
-            "pty-permission",
-            run_id,
-            permission_request_id,
-            canonical_input_digest_sha256,
-        ]
-        .join("\0")
-        .as_bytes(),
-    );
-    format!(
-        "{INTERACTIVE_EXEC_REQUEST_PREFIX}{}",
-        &format!("{digest:x}")[..32]
+    crate::native_ids::stable(
+        crate::native_ids::Kind::InteractiveExecRequest,
+        &(run_id, permission_request_id, canonical_input_digest_sha256),
     )
 }
 

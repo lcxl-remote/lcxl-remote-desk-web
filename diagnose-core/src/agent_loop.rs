@@ -507,7 +507,7 @@ async fn resume_claimed_scheduled(
         .rev()
         .find(|message| {
             message.role == ChatRole::SystemEvent
-                && message.message_id == format!("scheduled-task-input:{scheduled_run_id}")
+                && message.message_id == crate::native_ids::scheduled_message(scheduled_run_id)
         })
         .map(|message| {
             let mut message = message.clone();
@@ -1928,6 +1928,7 @@ async fn prepare_model_context(
                     context_conversation_id: None,
                     pinned_source_context_key: None,
                     ui_references: None,
+                    result_locators: Default::default(),
                     previous_cache_projection: None,
                     delegation_call: None,
                     caller_output_hard_cap: Some(i64::from(plan.policy.summary_max_output_tokens)),
@@ -2277,6 +2278,71 @@ async fn child_source_paused(
 // Keep the growing per-tool state machine on the heap for every entry point,
 // including scheduled and permission continuations on small runtime stacks.
 #[inline(never)]
+fn refresh_reference_sources<'a, 'd: 'a>(
+    deps: &'a LoopDeps<'d>,
+    session: &'a mut PersistedAgentSession,
+) -> std::pin::Pin<Box<impl std::future::Future<Output = Result<(), AgentError>> + 'a>> {
+    Box::pin(refresh_reference_sources_impl(deps, session))
+}
+
+async fn refresh_reference_sources_impl(
+    deps: &LoopDeps<'_>,
+    session: &mut PersistedAgentSession,
+) -> Result<(), AgentError> {
+    let references_before = session.ui_references.clone();
+    let protected_references = session
+        .ui_references
+        .retained_call_aliases(&session.conversation, &session.permission_requests);
+    if session.ui_references.has_attachment_sources() {
+        let mut before = None;
+        let mut positions = std::collections::BTreeSet::new();
+        let mut available = std::collections::BTreeSet::new();
+        loop {
+            let metadata = deps
+                .session_seam
+                .list_attachments(session, before.as_deref())
+                .await?;
+            let Some(last) = metadata.last() else {
+                break;
+            };
+            let next = last.attachment_id.clone();
+            if !positions.insert(next.clone()) {
+                return Err(crate::conversation_attachment::invalid(
+                    "Attachment listing did not advance",
+                ));
+            }
+            available.extend(
+                metadata
+                    .into_iter()
+                    .filter(|part| {
+                        part.availability == crate::conversation_attachment::Availability::Available
+                    })
+                    .map(|part| part.attachment_id),
+            );
+            before = Some(next);
+        }
+        session
+            .ui_references
+            .retain_attachment_sources(&available, &protected_references);
+    }
+    session
+        .ui_references
+        .observe_directories(&session.file_scope, &protected_references)?;
+    let sources = session
+        .conversation
+        .iter()
+        .map(|message| message.message_id.clone())
+        .collect();
+    session
+        .ui_references
+        .retain_sources(&sources, &protected_references);
+    if session.ui_references != references_before {
+        deps.session_seam.save(session).await?;
+    }
+    Ok(())
+}
+
+#[inline(never)]
 fn run_inner<'a, 'd: 'a>(
     deps: &'a LoopDeps<'d>,
     session: &'a mut PersistedAgentSession,
@@ -2295,9 +2361,10 @@ async fn run_inner_impl(
     crate::conversation_attachment::delivery::resolve_session(deps.session_seam, session).await?;
     crate::conversation_attachment::model_read::validate_pending_reads(deps.session_seam, session)
         .await?;
+    refresh_reference_sources(deps, session).await?;
     let mut seq: u32 = 0;
     let mut mint = move || {
-        let id = format!("{turn_id}-{seq}");
+        let id = crate::native_ids::stable(crate::native_ids::Kind::Message, &(turn_id, seq));
         seq += 1;
         id
     };
@@ -3182,7 +3249,16 @@ async fn run_inner_impl(
         const REQUEST_FRAMING_RESERVE_BYTES: usize = 1024;
         let history_changed = session.ui_references.observe(&session.conversation)?;
         let runtime_changed = session.ui_references.observe(&messages)?;
-        if history_changed || runtime_changed {
+        let sources = session
+            .conversation
+            .iter()
+            .map(|message| message.message_id.clone())
+            .collect();
+        let protected = session
+            .ui_references
+            .retained_call_aliases(&session.conversation, &session.permission_requests);
+        let pruned = session.ui_references.retain_sources(&sources, &protected);
+        if history_changed || runtime_changed || pruned {
             deps.session_seam.save(session).await?;
         }
         let mut overhead_request = ModelRequest::text_only(
@@ -3195,6 +3271,7 @@ async fn run_inner_impl(
         );
         overhead_request.tools = specs.clone();
         overhead_request.ui_references = Some(session.ui_references.clone());
+        overhead_request.result_locators = crate::result_model_ids::locators(&session.conversation);
         let overhead_request = crate::ui_model_ids::project_request(&overhead_request);
         let tool_spec_bytes = serde_json::to_vec(&overhead_request.tools)
             .map_err(|_| {
@@ -3244,11 +3321,16 @@ async fn run_inner_impl(
         if session.ui_references.observe(&session.conversation)? {
             deps.session_seam.save(session).await?;
         }
+        let result_locators = crate::result_model_ids::locators(&session.conversation);
         for source in &mut session.conversation {
             let mut projected = source.clone();
             projected.prepared_context_cost.0 = None;
-            crate::ui_model_ids::project_tool_message(&mut projected);
-            session.ui_references.project_message(&mut projected);
+            crate::ui_model_ids::project_model_message(
+                &mut projected,
+                Some(&session.ui_references),
+                &result_locators,
+                crate::model_profile::ModelUseCase::Agent,
+            );
             crate::thinking_context::project_replay(
                 &mut projected,
                 pinned_context.reasoning_contract,
@@ -3476,6 +3558,7 @@ async fn run_inner_impl(
             context_conversation_id: Some(session.conversation_id.clone()),
             pinned_source_context_key: Some(pinned_context.source_context_key.clone()),
             ui_references: Some(session.ui_references.clone()),
+            result_locators: crate::result_model_ids::locators(&session.conversation),
             previous_cache_projection: session.cache_projection.clone(),
             delegation_call: None,
             caller_output_hard_cap: None,
@@ -5149,10 +5232,7 @@ async fn run_inner_impl(
                                             schema_version: crate::dynamic_run::AGENT_RUN_EVENT_SCHEMA_VERSION,
                                             event_id: stable_lineage_id(
                                                 "status-event",
-                                                &format!(
-                                                    "{}:{event_seq}:{}",
-                                                    session.conversation_id, call.id
-                                                ),
+                                                &(&session.conversation_id, event_seq, &call.id),
                                             ),
                                             run_id: session.conversation_id.clone(),
                                             event_seq,
@@ -5262,12 +5342,11 @@ async fn run_inner_impl(
                                     })?;
                                 let request_id = stable_lineage_id(
                                     "goal-open-request",
-                                    &format!(
-                                        "{}:{}:{}:{}",
-                                        session.conversation_id,
+                                    &(
+                                        &session.conversation_id,
                                         session.input_revision,
                                         event_seq,
-                                        call.id,
+                                        &call.id,
                                     ),
                                 );
                                 let mut request = if let Some(goal) = planning_goal.as_ref() {
@@ -5464,10 +5543,7 @@ async fn run_inner_impl(
                             };
                             let request_id = stable_lineage_id(
                                 "directory-proposal",
-                                &format!(
-                                    "{}:{}:{}",
-                                    session.conversation_id, session.input_revision, call.id
-                                ),
+                                &(&session.conversation_id, session.input_revision, &call.id),
                             );
                             // Save the exact held state before the proposal transaction.
                             // Resolution metadata is for the owner's UI, not model egress.
@@ -5576,12 +5652,11 @@ async fn run_inner_impl(
                             let created_at = (deps.clock)();
                             let request_id = stable_lineage_id(
                                 "permission-request",
-                                &format!(
-                                    "{}:{}:{}:{}",
-                                    session.conversation_id,
+                                &(
+                                    &session.conversation_id,
                                     session.input_revision,
                                     session.last_event_seq.saturating_add(1),
-                                    call.id
+                                    &call.id,
                                 ),
                             );
                             let request = deps.provider_registry.ok_or_else(|| AgentError {
@@ -5848,10 +5923,7 @@ async fn run_inner_impl(
                                             schema_version: crate::dynamic_run::AGENT_RUN_EVENT_SCHEMA_VERSION,
                                             event_id: stable_lineage_id(
                                                 "permission-event",
-                                                &format!(
-                                                    "{}:{event_seq}:{}",
-                                                    session.conversation_id, request.request_id
-                                                ),
+                                                &(&session.conversation_id, event_seq, &request.request_id),
                                             ),
                                             run_id: session.conversation_id.clone(),
                                             event_seq,
@@ -6189,8 +6261,16 @@ fn append_unstarted_tool_results<F: FnMut() -> String>(
     Ok(())
 }
 
-fn stable_lineage_id(prefix: &str, value: &str) -> String {
-    format!("{prefix}-{:x}", Sha256::digest(value.as_bytes()))
+fn stable_lineage_id(prefix: &str, value: &impl serde::Serialize) -> String {
+    use crate::native_ids::{Kind, stable};
+    let kind = match prefix {
+        "permission-request" => Kind::PermissionRequest,
+        "directory-proposal" => Kind::DirectoryRequest,
+        "goal-open-request" => Kind::GoalOpenRequest,
+        "status-step" => Kind::StatusStep,
+        _ => Kind::Lineage,
+    };
+    stable(kind, &(prefix, value))
 }
 
 fn current_unix_ms(clock: &dyn Fn() -> String) -> Result<u64, AgentError> {
@@ -6538,13 +6618,18 @@ fn reusable_provider_result_projection(
                         && title.chars().count() <= 240
                         && url.starts_with("https://")
                         && url.len() <= 2_048)
-                        .then(|| serde_json::json!({"title": title, "url": url}))
+                        .then(|| {
+                            let pair = serde_json::json!({"title":title,"url":url});
+                            let ordinal =
+                                crate::result_model_ids::web_source_ordinal(results, &pair);
+                            serde_json::json!({"source_id":ordinal,"title":title,"url":url})
+                        })
                 })
                 .take(MAX_WEB_SOURCES)
                 .collect::<Vec<_>>();
             if !sources.is_empty() {
                 web_search = Some(serde_json::json!({
-                    "web_search_call_id": call_id,
+                    "web_search_result_id": message.message_id,
                     "sources": sources,
                 }));
                 web_envelope = Some(envelope.clone());
@@ -7032,7 +7117,10 @@ fn interactive_user_home_projection(
     }
     let text = text.trim().to_string();
     let expires_at_unix_ms = now_unix_ms.saturating_add(5 * 60 * 1_000);
-    let message_id = format!("runtime-interactive-home-{turn_id}");
+    let message_id = crate::native_ids::stable(
+        crate::native_ids::Kind::Message,
+        &("runtime-interactive-home", turn_id),
+    );
     let digest_sha256 = format!("{:x}", Sha256::digest(text.as_bytes()));
     let mut message = ChatMessage::system_event(&message_id, &text);
     message.data_envelope = Some(DataEnvelope {
@@ -7121,6 +7209,7 @@ fn append_mutating_result(
                             &candidate.arguments_json,
                             &call.arguments_json,
                             Some(&session.ui_references),
+                            &crate::result_model_ids::locators(&session.conversation),
                         )
                 })
         })
@@ -8136,6 +8225,10 @@ async fn read_conversation_attachment(
             observation.reject(Stage::Reference, InputIssue::ReferenceUnavailable);
         })?;
         let source_envelope = envelope.clone();
+        let original_attachment_sha256 = part.metadata.sha256.clone();
+        if session.ui_references.observe_attachment(&part)? {
+            deps.session_seam.save(session).await?;
+        }
         // Keep original authorization/hash separate from the stable model representation.
         if part.metadata.kind == ContentKind::Json {
             let mut projected = ChatMessage::tool_result(
@@ -8160,8 +8253,15 @@ async fn read_conversation_attachment(
             part.metadata.storage_truncated = false;
             part.metadata.source_envelope = None;
         }
-        let (content, mut receipt) =
-            model_read::text_page(&part, &input, &call.id, *remaining_budget, observation)?;
+        let (content, mut receipt) = model_read::text_page_with_references(
+            &part,
+            &input,
+            &call.id,
+            *remaining_budget,
+            observation,
+            &mut session.ui_references,
+        )?;
+        deps.session_seam.save(session).await?;
         let mut message = ChatMessage::tool_result("attachment-page", &call.id, content);
         message.data_envelope = crate::model_message_labels::internal_tool_result_envelope(
             Some(&source_envelope),
@@ -8170,7 +8270,7 @@ async fn read_conversation_attachment(
             crate::conversation_attachment::READ_ATTACHMENT_TOOL,
         )?;
         receipt.original_envelope = message.data_envelope.clone();
-        receipt.source_sha256 = source_envelope.digest_sha256.clone();
+        receipt.source_sha256 = original_attachment_sha256;
         message.attachment_read = Some(Box::new(receipt));
         message
     };

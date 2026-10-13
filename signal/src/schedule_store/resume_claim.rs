@@ -288,7 +288,7 @@ impl ScheduleStore {
         if permission.is_none() {
             // Freeze the approved task text separately from later chat. It is
             // context, not a new user input or a tool permission grant.
-            let id = format!("scheduled-task-input:{}", work.run_id);
+            let id = desk_diagnose_core::native_ids::scheduled_message(&work.run_id);
             let parent = session
                 .conversation
                 .iter()

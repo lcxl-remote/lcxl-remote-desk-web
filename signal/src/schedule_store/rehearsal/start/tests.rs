@@ -115,7 +115,7 @@ async fn changed_requirement_overflow_and_existing_session_reject_without_claim(
 async fn reserved_input_rejects_preemption_and_parameter_changes() {
     let (store, row) = fixture().await;
     let message = desk_diagnose_core::chat::ChatMessage::text(
-        format!("rehearsal:{}:input", row.rehearsal_id),
+        desk_diagnose_core::native_ids::rehearsal_message(&row.rehearsal_id),
         desk_diagnose_core::chat::ChatRole::User,
         &row.prompt,
     );

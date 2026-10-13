@@ -81,7 +81,7 @@ async fn fixture_with_blocker(
         .unwrap();
     session.conversation.push(
         ChatMessage::text(
-            format!("rehearsal:{}:input", started.rehearsal_id),
+            desk_diagnose_core::native_ids::rehearsal_message(&started.rehearsal_id),
             ChatRole::User,
             &started.prompt,
         )

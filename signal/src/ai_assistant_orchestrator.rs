@@ -53,6 +53,7 @@ use desk_diagnose_core::stream::StreamingTurnSink;
 use desk_signal_facade::model::connection::{ConnectionState, SharedConnectionMap};
 use desk_signal_facade::model::signal::{SignalingModel, SignalingType};
 
+#[cfg(test)]
 use sha2::{Digest, Sha256};
 
 use crate::model_dial::SignalModelSeam;
@@ -2444,9 +2445,11 @@ async fn compose_turn_inner(
     let goal_start = if ask.start_goal {
         let model_binding = GoalModelBinding::from_destination(&destination)
             .map_err(|_| transport_error("goal model binding is unavailable"))?;
-        let identity = format!("{}:{}", conversation_id, ask.client_message_id);
         Some(crate::agent_run_event_store::StartUserGoal {
-            goal_id: format!("goal-{:x}", Sha256::digest(identity.as_bytes())),
+            goal_id: desk_diagnose_core::native_ids::stable(
+                desk_diagnose_core::native_ids::Kind::Goal,
+                &(&conversation_id, &ask.client_message_id),
+            ),
             previous_completed_goal_id: ask.previous_completed_goal_id.clone(),
             model_binding,
         })

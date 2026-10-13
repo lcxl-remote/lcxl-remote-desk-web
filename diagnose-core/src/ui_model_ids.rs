@@ -39,7 +39,16 @@ fn references(value: &Value, result: &mut Vec<ObjectRef>) {
     match value {
         Value::Object(object) => {
             if object.contains_key("token") && object.contains_key("snapshot_id") {
-                if let Ok(reference) = serde_json::from_value::<ObjectRef>(value.clone()) {
+                let reference = if value.get("token").is_some()
+                    && value.get("snapshot_id").is_some()
+                    && value.get("object_kind").is_some()
+                    && value.get("expires_at").is_some()
+                {
+                    serde_json::from_value::<ObjectRef>(value.clone()).ok()
+                } else {
+                    None
+                };
+                if let Some(reference) = reference {
                     result.push(reference);
                 }
             } else {
@@ -189,7 +198,9 @@ pub(crate) fn resolve_single_call_with_references(
         .map_err(|_| invalid("Tool arguments must be a JSON object."))?;
     crate::model_actions::resolve(&call.name, &mut value)?;
     crate::result_model_ids::resolve(&call.name, &mut value, history, now_ms)?;
-    crate::document_model_ids::resolve(&call.name, &mut value, history, now_ms)?;
+    crate::document_model_ids::resolve_with_references(
+        &call.name, &mut value, history, now_ms, expected,
+    )?;
     if crate::browser_model_ids::supports(&call.name) {
         crate::browser_model_ids::resolve_with_references(
             call, &mut value, history, now_ms, expected,
@@ -430,10 +441,14 @@ pub(crate) fn resolve_single_call_with_references(
     })
 }
 
-fn project_arguments(tool: &str, value: &mut Value) {
+fn project_arguments(
+    tool: &str,
+    value: &mut Value,
+    locators: &[crate::result_model_ids::ResultLocator],
+) {
     crate::model_actions::project_arguments(tool, value);
     crate::model_input::project_fixed_arguments(tool, value);
-    crate::result_model_ids::project_arguments(tool, value);
+    crate::result_model_ids::project_arguments(tool, value, locators);
     crate::document_model_ids::project_arguments(tool, value);
     if crate::browser_model_ids::supports(tool) {
         crate::browser_model_ids::project_arguments(tool, value);
@@ -461,7 +476,7 @@ fn project_arguments(tool: &str, value: &mut Value) {
         let mut all = vec![first];
         all.extend(rest.as_array().unwrap().iter().cloned());
         for item in &mut all {
-            project_arguments(tool, item);
+            project_arguments(tool, item, locators);
         }
         let mut result = json!({"application_id":all[0]["application_id"],"steps":[]});
         if tool == "send_background_input" {
@@ -518,7 +533,7 @@ fn project_arguments(tool: &str, value: &mut Value) {
                     })
                     && let Some(exact) = item.get_mut("exact_input")
                 {
-                    project_arguments(&tool, exact);
+                    project_arguments(&tool, exact, locators);
                     continue;
                 }
                 if matches!(
@@ -527,7 +542,7 @@ fn project_arguments(tool: &str, value: &mut Value) {
                 ) {
                     let exact_tool = item["tool_name"].as_str().unwrap().to_owned();
                     if let Some(exact) = item.get_mut("exact_input") {
-                        project_arguments(&exact_tool, exact);
+                        project_arguments(&exact_tool, exact, locators);
                     }
                 }
             }
@@ -548,7 +563,7 @@ fn project_scope(value: &mut Value) {
 /// Compare a server-resolved call with the original ID-only model proposal.
 /// All non-reference inputs, including the action, must still match exactly.
 pub fn same_call_input(tool: &str, original: &str, resolved: &str) -> bool {
-    same_call_input_with_references(tool, original, resolved, None)
+    same_call_input_with_references(tool, original, resolved, None, &[])
 }
 
 pub fn same_call_input_with_references(
@@ -556,6 +571,7 @@ pub fn same_call_input_with_references(
     original: &str,
     resolved: &str,
     references: Option<&crate::ui_references::UiReferenceState>,
+    locators: &[crate::result_model_ids::ResultLocator],
 ) -> bool {
     let (Ok(mut left), Ok(mut right)) = (
         serde_json::from_str::<Value>(original),
@@ -571,11 +587,11 @@ pub fn same_call_input_with_references(
     if !crate::result_model_ids::preserves_explicit_evidence(tool, &left, &right) {
         return false;
     }
-    project_arguments(tool, &mut left);
+    project_arguments(tool, &mut left, locators);
     if let Some(references) = references {
         references.alias_native_arguments(&mut right);
     }
-    project_arguments(tool, &mut right);
+    project_arguments(tool, &mut right, locators);
     left == right
 }
 
@@ -593,8 +609,10 @@ fn hide_references(value: &mut Value) {
                 return;
             }
             object.remove("snapshot_id");
-            for value in object.values_mut() {
-                hide_references(value);
+            for (field, value) in object.iter_mut() {
+                if !crate::ui_references::is_business_content(field) {
+                    hide_references(value);
+                }
             }
         }
         Value::Array(values) => {
@@ -699,61 +717,19 @@ pub(crate) fn project_tool_message(message: &mut ChatMessage) {
 /// checks. Durable messages/envelopes remain unchanged and retain exact lineage.
 pub fn project_request(request: &crate::seam::ModelRequest) -> crate::seam::ModelRequest {
     let mut request = request.clone();
+    let locators = if request.result_locators.is_empty() {
+        crate::result_model_ids::locators(&request.messages)
+    } else {
+        request.result_locators.clone()
+    };
+    request.result_locators = locators.clone();
     for message in &mut request.messages {
-        if request.use_case == crate::model_profile::ModelUseCase::Approval {
-            project_review_message(message, request.ui_references.as_ref());
-        }
-        project_tool_message(message);
-        if let Some(references) = &request.ui_references {
-            references.project_message(message);
-        }
-        for call in &mut message.tool_calls {
-            if let Ok(mut value) = serde_json::from_str::<Value>(&call.arguments_json) {
-                if let Some(references) = &request.ui_references {
-                    references.alias_native_arguments(&mut value);
-                    references.alias_task_arguments(&call.name, &mut value);
-                }
-                project_arguments(&call.name, &mut value);
-                crate::model_input::project_protocol_versions(&call.name, &mut value);
-                call.arguments_json = value.to_string();
-            }
-        }
-        if message.role == ChatRole::System || crate::runtime_context::is_runtime(message) {
-            let start_tag = "<capability_authorization>";
-            if let Some(start) = message.text.find(start_tag).map(|i| i + start_tag.len()) {
-                let mut stream = serde_json::Deserializer::from_str(&message.text[start..])
-                    .into_iter::<Vec<Value>>();
-                if let Some(Ok(mut entries)) = stream.next() {
-                    let end = start + stream.byte_offset();
-                    for entry in &mut entries {
-                        if let Some(references) = &request.ui_references {
-                            references.alias_native_arguments(entry);
-                        }
-                        project_scope(entry);
-                        if let Some(object) = entry.as_object_mut() {
-                            object.remove("canonical_input_digest_sha256");
-                        }
-                        if let Some(tool) = entry["tool_name"].as_str().map(str::to_owned)
-                            && let Some(exact) = entry.get_mut("approved_exact_input")
-                        {
-                            if tool == "send_raw_input"
-                                || tool == "execute_wayland_output_input"
-                                || crate::browser_model_ids::supports(&tool)
-                                || crate::result_model_ids::supports(&tool)
-                                || crate::document_model_ids::supports(&tool)
-                                || !fields(&tool).is_empty()
-                            {
-                                project_arguments(&tool, exact);
-                            }
-                            crate::model_input::project_protocol_versions(&tool, exact);
-                        }
-                    }
-                    message
-                        .text
-                        .replace_range(start..end, &serde_json::to_string(&entries).unwrap());
-                }
-            }
-        }
+        project_model_message(
+            message,
+            request.ui_references.as_ref(),
+            &locators,
+            request.use_case,
+        );
     }
     for tool in &mut request.tools {
         project_tool(tool);
@@ -761,9 +737,73 @@ pub fn project_request(request: &crate::seam::ModelRequest) -> crate::seam::Mode
     request
 }
 
+/// The same read-only message projection is used by cost preparation and wire encoding.
+pub(crate) fn project_model_message(
+    message: &mut ChatMessage,
+    references: Option<&crate::ui_references::UiReferenceState>,
+    locators: &[crate::result_model_ids::ResultLocator],
+    use_case: crate::model_profile::ModelUseCase,
+) {
+    if use_case == crate::model_profile::ModelUseCase::Approval {
+        project_review_message(message, references, locators);
+    }
+    project_tool_message(message);
+    if let Some(references) = references {
+        references.project_message(message);
+    }
+    crate::result_model_ids::project_runtime_registry(message, locators);
+    for call in &mut message.tool_calls {
+        if let Ok(mut value) = serde_json::from_str::<Value>(&call.arguments_json) {
+            if let Some(references) = references {
+                references.alias_native_arguments(&mut value);
+            }
+            project_arguments(&call.name, &mut value, locators);
+            crate::model_input::project_protocol_versions(&call.name, &mut value);
+            call.arguments_json = value.to_string();
+        }
+    }
+    if message.role == ChatRole::System || crate::runtime_context::is_runtime(message) {
+        let start_tag = "<capability_authorization>";
+        if let Some(start) = message.text.find(start_tag).map(|i| i + start_tag.len()) {
+            let mut stream = serde_json::Deserializer::from_str(&message.text[start..])
+                .into_iter::<Vec<Value>>();
+            if let Some(Ok(mut entries)) = stream.next() {
+                let end = start + stream.byte_offset();
+                for entry in &mut entries {
+                    if let Some(references) = references {
+                        references.alias_native_arguments(entry);
+                    }
+                    project_scope(entry);
+                    if let Some(object) = entry.as_object_mut() {
+                        object.remove("canonical_input_digest_sha256");
+                    }
+                    if let Some(tool) = entry["tool_name"].as_str().map(str::to_owned)
+                        && let Some(exact) = entry.get_mut("approved_exact_input")
+                    {
+                        if tool == "send_raw_input"
+                            || tool == "execute_wayland_output_input"
+                            || crate::browser_model_ids::supports(&tool)
+                            || crate::result_model_ids::supports(&tool)
+                            || crate::document_model_ids::supports(&tool)
+                            || !fields(&tool).is_empty()
+                        {
+                            project_arguments(&tool, exact, locators);
+                        }
+                        crate::model_input::project_protocol_versions(&tool, exact);
+                    }
+                }
+                message
+                    .text
+                    .replace_range(start..end, &serde_json::to_string(&entries).unwrap());
+            }
+        }
+    }
+}
+
 fn project_review_message(
     message: &mut ChatMessage,
     references: Option<&crate::ui_references::UiReferenceState>,
+    locators: &[crate::result_model_ids::ResultLocator],
 ) {
     let Some(start) = message
         .text
@@ -792,11 +832,11 @@ fn project_review_message(
         }
         project_scope(&mut action);
         if let Some(input) = action.get_mut("exact_input") {
-            project_arguments(&tool, input);
+            project_arguments(&tool, input, locators);
             crate::model_input::project_protocol_versions(&tool, input);
         }
         if candidate["input_kind"] == "concrete_call" {
-            project_arguments(&tool, &mut action);
+            project_arguments(&tool, &mut action, locators);
             crate::model_input::project_protocol_versions(&tool, &mut action);
         }
         if let Some(input) = action["canonical_scope_input"].as_str()
@@ -806,7 +846,7 @@ fn project_review_message(
                 references.alias_native_arguments(&mut input);
             }
             project_scope(&mut input);
-            project_arguments(&tool, &mut input);
+            project_arguments(&tool, &mut input, locators);
             crate::model_input::project_protocol_versions(&tool, &mut input);
             action["canonical_scope_input"] = Value::String(input.to_string());
         }
@@ -915,6 +955,23 @@ pub fn project_tool(tool: &mut crate::chat::ToolSpec) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_tool_contracts_never_require_internal_snapshot_metadata() {
+        let tools = crate::ai_assistant::ai_assistant_tool_registry()
+            .into_iter()
+            .chain(crate::permission_tools::permission_planning_tool_registry());
+        for registration in tools {
+            let mut spec = registration.spec;
+            project_tool(&mut spec);
+            assert!(
+                !spec.parameters_schema.to_string().contains("snapshot_id"),
+                "{}",
+                spec.name
+            );
+            assert!(!spec.description.contains("snapshot_id"), "{}", spec.name);
+        }
+    }
 
     #[test]
     fn protocol_versions_are_hidden_in_grants_and_history_without_changing_authority() {
@@ -1630,7 +1687,7 @@ mod tests {
             json!({"application":{},"remaining_steps":[null]}),
             json!({"application":{},"remaining_steps":[{"remaining_steps":[{}]}]}),
         ] {
-            project_arguments("execute_ui_actions", &mut value);
+            project_arguments("execute_ui_actions", &mut value, &[]);
         }
     }
 }

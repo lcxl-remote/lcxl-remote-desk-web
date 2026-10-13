@@ -89,6 +89,28 @@ pub fn text_page(
     budget: usize,
     observation: &crate::model_observability::tool::ToolObservation,
 ) -> Result<(String, ReadReceipt), AgentError> {
+    text_page_impl(part, input, call_id, budget, observation, None)
+}
+
+pub(crate) fn text_page_with_references(
+    part: &PreparedAttachment,
+    input: &Input,
+    call_id: &str,
+    budget: usize,
+    observation: &crate::model_observability::tool::ToolObservation,
+    references: &mut crate::ui_references::UiReferenceState,
+) -> Result<(String, ReadReceipt), AgentError> {
+    text_page_impl(part, input, call_id, budget, observation, Some(references))
+}
+
+fn text_page_impl(
+    part: &PreparedAttachment,
+    input: &Input,
+    call_id: &str,
+    budget: usize,
+    observation: &crate::model_observability::tool::ToolObservation,
+    mut references: Option<&mut crate::ui_references::UiReferenceState>,
+) -> Result<(String, ReadReceipt), AgentError> {
     if part.metadata.kind == ContentKind::Image {
         return Err(invalid("Use the image read path"));
     }
@@ -100,12 +122,17 @@ pub fn text_page(
     // Reduce only the new read; never discard an earlier read to make it fit.
     loop {
         request.max_bytes = upper;
-        let page = read_page_observed(
+        let mut page = read_page_observed(
             &page_part.metadata,
             &page_part.content,
             &request,
             observation,
         )?;
+        let native_cursor = page.cursor.clone();
+        if let (Some(references), Some(cursor)) = (references.as_deref(), native_cursor.as_deref())
+        {
+            page.cursor = Some(references.attachment_cursor_alias(cursor)?);
+        }
         let content =
             serde_json::to_string(&page).map_err(|_| invalid("Cannot encode attachment page"))?;
         if crate::trim::model_context_cost(&ChatMessage::tool_result(
@@ -114,6 +141,18 @@ pub fn text_page(
             &content,
         )) <= budget
         {
+            if let (Some(references), Some(cursor)) =
+                (references.as_deref_mut(), native_cursor.as_deref())
+            {
+                let registered = references.register_attachment_cursor(
+                    &part.metadata.attachment_id,
+                    &part.metadata.message_id,
+                    cursor,
+                )?;
+                if page.cursor.as_deref() != Some(registered.as_str()) {
+                    return Err(invalid("Attachment cursor changed before page commit"));
+                }
+            }
             let mut selected = input.clone();
             selected.max_bytes = Some(upper);
             return Ok((
@@ -341,6 +380,63 @@ mod tests {
         assert_eq!(again, content);
         assert_eq!(proof.page_sha256, receipt.page_sha256);
     }
+    #[test]
+    fn short_page_cursor_survives_unrelated_registration_and_proves_exact_wire_body() {
+        let (part, mut input) = fixture();
+        input.max_bytes = Some(1024);
+        let mut references = crate::ui_references::UiReferenceState::default();
+        let (first, receipt) = text_page_with_references(
+            &part,
+            &input,
+            "first",
+            100000,
+            &crate::model_observability::tool::ToolObservation::default(),
+            &mut references,
+        )
+        .unwrap();
+        let page: ReadPage = serde_json::from_str(&first).unwrap();
+        let cursor = page.cursor.unwrap();
+        assert_eq!(cursor, "c1");
+        assert_eq!(receipt.page_sha256, digest(first.as_bytes()));
+        references
+            .register_attachment_cursor("other", "other-message", "unrelated-query")
+            .unwrap();
+        let call = crate::chat::ToolCall {
+            id: "next".into(),
+            name: super::super::READ_ATTACHMENT_TOOL.into(),
+            arguments_json:
+                serde_json::json!({"attachment_id":input.attachment_id,"cursor":cursor}).to_string(),
+        };
+        let (expanded, _) = references.expand_call(&call).unwrap();
+        input.cursor = serde_json::from_str::<serde_json::Value>(&expanded.arguments_json).unwrap()
+            ["cursor"]
+            .as_str()
+            .map(str::to_owned);
+        let (second, proof) = text_page_with_references(
+            &part,
+            &input,
+            "second",
+            100000,
+            &crate::model_observability::tool::ToolObservation::default(),
+            &mut references,
+        )
+        .unwrap();
+        let second_page: ReadPage = serde_json::from_str(&second).unwrap();
+        assert_ne!(page.lines[0].line, second_page.lines[0].line);
+        assert_eq!(proof.page_sha256, digest(second.as_bytes()));
+        let mut message = ChatMessage::tool_result("page", "second", &second);
+        message.attachment_read = Some(Box::new(proof));
+        canonical_source(&message).unwrap();
+        let projected =
+            crate::ui_model_ids::project_request(&crate::seam::ModelRequest::text_only(
+                vec![message.clone()],
+                crate::prompt::ResponseFormatSpec::None,
+            ));
+        assert_eq!(projected.messages[0].text, second);
+        message.text.push(' ');
+        assert!(canonical_source(&message).is_err());
+    }
+
     fn fixture() -> (PreparedAttachment, Input) {
         let mut delivery = prepare_delivery(
             &DeliveryIdentity {

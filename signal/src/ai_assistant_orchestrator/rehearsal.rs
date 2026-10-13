@@ -31,7 +31,8 @@ pub async fn run_rehearsal_turn(
     ask.question = original.prompt;
     ask.locale = original.locale;
     ask.conversation_id = Some(original.client_conversation_id);
-    ask.client_message_id = format!("rehearsal:{}:input", original.rehearsal_id);
+    ask.client_message_id =
+        desk_diagnose_core::native_ids::rehearsal_message(&original.rehearsal_id);
     // This is a user-requested run. Scope selection and all per-action approvals
     // remain in compose_turn; reserving a rehearsal never supplies a grant.
     compose_turn(

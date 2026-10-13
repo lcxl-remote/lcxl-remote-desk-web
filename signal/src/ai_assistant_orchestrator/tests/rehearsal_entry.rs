@@ -86,7 +86,9 @@ async fn run_case(failed: bool) {
         question: reserved.prompt.clone(),
         locale: reserved.locale.clone(),
         conversation_id: Some(reserved.client_conversation_id.clone()),
-        client_message_id: format!("rehearsal:{}:input", reserved.rehearsal_id),
+        client_message_id: desk_diagnose_core::native_ids::rehearsal_message(
+            &reserved.rehearsal_id,
+        ),
         ..Default::default()
     };
     let connections = web::Data::new(SharedConnectionMap::new());

@@ -55,20 +55,28 @@ pub(crate) fn copy_tool(tool: &str) -> bool {
 }
 
 fn object_id(reference: &ObjectRef) -> String {
-    crate::result_model_ids::alias(
-        "object",
-        &serde_json::to_string(reference).expect("object identity serialization"),
-    )
+    reference.token.clone()
 }
 
 fn references(value: &Value, found: &mut Vec<ObjectRef>) {
-    if let Ok(reference) = serde_json::from_value::<ObjectRef>(value.clone()) {
+    let reference = if value.get("token").is_some()
+        && value.get("snapshot_id").is_some()
+        && value.get("object_kind").is_some()
+        && value.get("expires_at").is_some()
+    {
+        serde_json::from_value::<ObjectRef>(value.clone()).ok()
+    } else {
+        None
+    };
+    if let Some(reference) = reference {
         found.push(reference);
     } else {
         match value {
             Value::Object(object) => {
-                for child in object.values() {
-                    references(child, found);
+                for (field, child) in object.iter() {
+                    if !crate::ui_references::is_business_content(field) {
+                        references(child, found);
+                    }
                 }
             }
             Value::Array(array) => {
@@ -81,7 +89,24 @@ fn references(value: &Value, found: &mut Vec<ObjectRef>) {
     }
 }
 
-fn resolve_id(id: &str, history: &[ChatMessage], now: u64) -> Result<ObjectRef, AgentError> {
+fn resolve_id(
+    id: &str,
+    history: &[ChatMessage],
+    now: u64,
+    expected: &[Value],
+) -> Result<ObjectRef, AgentError> {
+    let retained: Vec<_> = expected
+        .iter()
+        .filter_map(|value| serde_json::from_value::<ObjectRef>(value.clone()).ok())
+        .filter(|reference| reference.token == id)
+        .collect();
+    if let Some(reference) = retained.first() {
+        if retained.iter().any(|other| other != reference) {
+            return Err(invalid("object ID is ambiguous"));
+        }
+        validate_lifetime(reference, now)?;
+        return Ok(reference.clone());
+    }
     let mut selected = None;
     for (call, mut value) in crate::result_model_ids::verified_results(history, now) {
         if !(call.name.starts_with("inspect_") || call.name == "read_current_screen") {
@@ -100,18 +125,23 @@ fn resolve_id(id: &str, history: &[ChatMessage], now: u64) -> Result<ObjectRef, 
             if selected.as_ref().is_some_and(|prior| prior != &reference) {
                 return Err(invalid("object ID is ambiguous"));
             }
-            if !reference.object_kind.is_lifecycle_bound() {
-                let expiry = chrono::DateTime::parse_from_rfc3339(&reference.expires_at)
-                    .map_err(|_| invalid("object expiry is invalid"))?;
-                if expiry.timestamp_millis() <= now as i64 {
-                    return Err(invalid("object observation expired"));
-                }
-            }
+            validate_lifetime(&reference, now)?;
             selected = Some(reference);
         }
     }
     selected
         .ok_or_else(|| invalid("object ID is unavailable or was not observed in this conversation"))
+}
+
+fn validate_lifetime(reference: &ObjectRef, now: u64) -> Result<(), AgentError> {
+    if !reference.object_kind.is_lifecycle_bound() {
+        let expiry = chrono::DateTime::parse_from_rfc3339(&reference.expires_at)
+            .map_err(|_| invalid("object expiry is invalid"))?;
+        if expiry.timestamp_millis() <= now as i64 {
+            return Err(invalid("object observation expired"));
+        }
+    }
+    Ok(())
 }
 
 fn restore_field(
@@ -120,6 +150,7 @@ fn restore_field(
     model: &str,
     history: &[ChatMessage],
     now: u64,
+    expected: &[Value],
 ) -> Result<(), AgentError> {
     if object.contains_key(native) {
         return Err(invalid(
@@ -135,6 +166,7 @@ fn restore_field(
                     .ok_or_else(|| invalid("object ID must be a string"))?,
                 history,
                 now,
+                expected,
             )?;
             object.insert(native.into(), json!(reference));
         }
@@ -142,11 +174,22 @@ fn restore_field(
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn resolve(
     tool: &str,
     value: &mut Value,
     history: &[ChatMessage],
     now: u64,
+) -> Result<(), AgentError> {
+    resolve_with_references(tool, value, history, now, &[])
+}
+
+pub(crate) fn resolve_with_references(
+    tool: &str,
+    value: &mut Value,
+    history: &[ChatMessage],
+    now: u64,
+    expected: &[Value],
 ) -> Result<(), AgentError> {
     if !supports(tool) {
         return Ok(());
@@ -155,7 +198,7 @@ pub(crate) fn resolve(
         .as_object_mut()
         .ok_or_else(|| invalid("arguments must be an object"))?;
     if let Some((native, model)) = field(tool) {
-        restore_field(object, native, model, history, now)?;
+        restore_field(object, native, model, history, now, expected)?;
         if let Some(reference) = object.get(native).filter(|value| !value.is_null()) {
             let registry = crate::ai_assistant::ai_assistant_provider_registry();
             let schema = &registry
@@ -181,6 +224,7 @@ pub(crate) fn resolve(
                 "target_id",
                 history,
                 now,
+                expected,
             )?;
         }
     }
@@ -321,13 +365,20 @@ pub(crate) fn project_tool(tool: &mut ToolSpec) {
 }
 
 fn project_refs(value: &mut Value) {
-    if let Ok(reference) = serde_json::from_value::<ObjectRef>(value.clone()) {
+    if value.get("token").is_some()
+        && value.get("snapshot_id").is_some()
+        && value.get("object_kind").is_some()
+        && value.get("expires_at").is_some()
+        && let Ok(reference) = serde_json::from_value::<ObjectRef>(value.clone())
+    {
         *value = json!({"id":object_id(&reference),"kind":reference.object_kind});
     } else {
         match value {
             Value::Object(object) => {
-                for child in object.values_mut() {
-                    project_refs(child);
+                for (field, child) in object.iter_mut() {
+                    if !crate::ui_references::is_business_content(field) {
+                        project_refs(child);
+                    }
                 }
             }
             Value::Array(array) => {
@@ -399,13 +450,32 @@ mod tests {
             json!({}),
             json!({"document":reference}),
         );
+        session
+            .ui_references
+            .observe(&session.conversation)
+            .unwrap();
         (session, reference)
+    }
+
+    fn same_input(
+        session: &PersistedAgentSession,
+        tool: &str,
+        original: &str,
+        resolved: &str,
+    ) -> bool {
+        crate::ui_model_ids::same_call_input_with_references(
+            tool,
+            original,
+            resolved,
+            Some(&session.ui_references),
+            &[],
+        )
     }
 
     #[test]
     fn document_id_restores_exact_observation_and_rejects_wrong_kind_expiry_and_other_sessions() {
         let (session, reference) = fixture();
-        let input = json!({"target_id":object_id(&reference),"text":"requested"});
+        let input = json!({"target_id":"doc1","text":"requested"});
         let call = ToolCall {
             id: "replace".into(),
             name: "replace_live_document_body".into(),
@@ -416,17 +486,19 @@ mod tests {
             serde_json::from_str::<Value>(&resolved.arguments_json).unwrap()["target"],
             json!(reference)
         );
-        assert!(crate::ui_model_ids::same_call_input(
+        assert!(same_input(
+            &session,
             &call.name,
             &call.arguments_json,
             &resolved.arguments_json
         ));
-        assert!(resolve_id(&object_id(&reference), &[], 1).is_err());
+        assert!(resolve_id(&object_id(&reference), &[], 1, &[]).is_err());
         assert!(
             resolve_id(
                 &object_id(&reference),
                 &session.conversation,
-                4_100_000_000_000
+                4_100_000_000_000,
+                &[]
             )
             .is_err()
         );
@@ -467,16 +539,28 @@ mod tests {
                 json!({}),
                 json!({"document":next}),
             ));
-        assert_ne!(object_id(&original), object_id(&next));
-        assert_eq!(
-            resolve_id(&object_id(&original), &session.conversation, 1).unwrap(),
-            original
-        );
+        session
+            .ui_references
+            .observe(&session.conversation)
+            .unwrap();
+        assert!(resolve_id(&original.token, &session.conversation, 1, &[]).is_err());
+        for (id, expected) in [("doc1", original), ("doc2", next)] {
+            let call = ToolCall {
+                id: "select".into(),
+                name: "inspect_live_document".into(),
+                arguments_json: json!({"target_id":id}).to_string(),
+            };
+            let resolved = crate::ui_model_ids::resolve_session_call(&call, &session, 1).unwrap();
+            assert_eq!(
+                serde_json::from_str::<Value>(&resolved.arguments_json).unwrap()["target"],
+                json!(expected)
+            );
+        }
     }
 
     #[test]
     fn copy_directory_is_restored_from_owner_consent_before_freezing() {
-        let (mut session, reference) = fixture();
+        let (mut session, _) = fixture();
         let subject = session
             .file_scope_subject("owner", "device", "run")
             .unwrap();
@@ -506,18 +590,20 @@ mod tests {
             .file_scope
             .decide(&subject, 1, "approved-directory", true, 1)
             .unwrap();
-        let call=ToolCall{id:"copy".into(),name:"replace_pages_copy_body".into(),arguments_json:json!({"target_id":object_id(&reference),"output":{"native_file_name":"report.pages","directory_request_id":"approved-directory"},"text":"requested"}).to_string()};
+        let call=ToolCall{id:"copy".into(),name:"replace_pages_copy_body".into(),arguments_json:json!({"target_id":"doc1","output":{"native_file_name":"report.pages","directory_request_id":"approved-directory"},"text":"requested"}).to_string()};
         let resolved = crate::ui_model_ids::resolve_session_call(&call, &session, 1).unwrap();
         let canonical: Value = serde_json::from_str(&resolved.arguments_json).unwrap();
         assert_eq!(canonical["output"]["destination_parent"], json!(directory));
-        assert!(crate::ui_model_ids::same_call_input(
+        assert!(same_input(
+            &session,
             &call.name,
             &call.arguments_json,
             &resolved.arguments_json
         ));
         let mut changed = canonical.clone();
         changed["output"]["directory_request_id"] = json!("other");
-        assert!(!crate::ui_model_ids::same_call_input(
+        assert!(!same_input(
+            &session,
             &call.name,
             &call.arguments_json,
             &changed.to_string()

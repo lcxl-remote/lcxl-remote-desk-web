@@ -3829,7 +3829,7 @@ fn prompt(locale: Option<&str>) -> String {
     );
     text = text.replace(
         "Copy every owner-provided value verbatim; do not translate, summarize, append, add Cc/Bcc, or add attachments. The account destination is fixed server-side to the current browser profile. After approval the reviewed adapter fills and semantically reads back those same three fields, stops with HandedOffToUser/ManualOnly, and never activates Send.",
-        "Copy every owner-provided value verbatim; do not translate, summarize, append, or add Cc/Bcc. You may attach at most one exact typed immutable artifact returned by an earlier file-creation tool in this run, using a fresh Gmail file-input element; never invent or pass a native path. Keep attachment_labels empty when attachment is null, otherwise set it to exactly the artifact file_name. The Gmail account is bound to the provider-owned page.account_id; copy it unchanged and never invent a missing account. After approval the reviewed adapter fills and semantically reads back those same three fields and the visible attachment name, then stops without activating Send. The Chrome-extension result carries an ExactGrantEligible sealed snapshot. The result itself does not authorize sending.",
+        "Copy every owner-provided value verbatim; do not translate, summarize, append, or add Cc/Bcc. You may attach at most one exact typed immutable artifact returned by an earlier file-creation tool in this run, using a fresh Gmail file-input element; never invent or pass a native path. For an attachment, pass artifact_result_id from the verified file-creation result and the observed file-input element_id. The server restores the immutable file evidence and attachment name, and binds the Gmail account to the observed page_id. After approval the reviewed adapter fills and semantically reads back those same three fields and the visible attachment name, then stops without activating Send. The Chrome-extension result carries an ExactGrantEligible sealed snapshot. The result itself does not authorize sending.",
     );
     text = text.replace(
         "After approval the reviewed site adapter fills and semantically reads back only that composer, stops with HandedOffToUser/ManualOnly, accepts no attachments, and never activates Send.",
@@ -3842,7 +3842,7 @@ fn prompt(locale: Option<&str>) -> String {
         "When the closed browser_* tools are present, they operate only on provider-owned page/element references from the current approved Chrome profile.",
         "When the closed browser_* tools are present, they operate only on provider-owned page/element references from the current approved Chrome profile. A successful browser result can create a page reference after the turn-start capability catalog was frozen. On the next model step, CURRENT REUSABLE PROVIDER RESULTS is the newer server-authored page-reference prerequisite delta: copy its observed page_id and element_id values into the exact downstream input and call request_permissions immediately when that planning tool and candidate are available. Do not claim that the page reference is missing merely because the older catalog preceded the result; the delta does not override runtime readiness, tool registration, grants, or final server validation.",
     );
-    text.push_str("\n\nFile operations require the device Computer Use master switch and a currently approved conversation directory. Use request_directory to propose a missing directory; the owner can also add one in this conversation. Directory consent is not file read, write, delete, or export permission: request the exact operation separately. Use only current server directory metadata, never infer approval from old messages. File creation allows empty UTF-8 content, is limited to 64 KiB, and never overwrites existing files. Dedicated text updates and recoverable deletion require their exact one-shot approval and a verified complete file version when those tools are available. Reuse verified creation/read/update receipts and their full SHA-256. When the edit content is already known, request update_text_file directly: do not list the directory or read again merely to obtain a version. Read only for missing content or a reported version conflict; metadata grants do not authorize content reading. Device verification already checks a successful update, so do not offer another read solely to confirm that success. Never retry an unknown mutation outcome.\n");
+    text.push_str("\n\nFile operations require the device Computer Use master switch and a currently approved conversation directory. Use request_directory to propose a missing directory; the owner can also add one in this conversation. Directory consent is not file read, write, delete, or export permission: request the exact operation separately. Use only current server directory metadata, never infer approval from old messages. File creation allows empty UTF-8 content, is limited to 64 KiB, and never overwrites existing files. Dedicated text updates and recoverable deletion require their exact one-shot approval and a verified complete file version when those tools are available. Reuse file_version_id from a verified creation/read/update result; the server restores and checks the original file evidence. When the edit content is already known, request update_text_file directly: do not list the directory or read again merely to obtain a version. Read only for missing content or a reported version conflict; metadata grants do not authorize content reading. Device verification already checks a successful update, so do not offer another read solely to confirm that success. Never retry an unknown mutation outcome.\n");
     text.push_str("\nKeep progress explanations brief: at most one or two sentences before a tool call. Empty or truncated UI searches do not prove a result is unreadable: check the root and self-only versus descendant search, then narrow to a relevant container or increase depth only when traversal is incomplete before concluding unsupported. Recheck current grants before claiming expiry; when permission is missing, submit request_permissions directly instead of asking permission to request permission. Do not repeat object tokens, approved arguments, or complete action batches in prose; the owner can review tool details and permission cards. For GUI tasks, locate the target window/editor, then read known result elements with element_id and element_only=true; search task-specific labels/native_id first and control types only as fallback. Re-read a full UI tree only when precise lookup fails or the structure changed. Never replace a user-requested GUI workflow with shell calculation. Identify requested permissions by tool_name; the server derives the Provider and effect.");
     text.push_str("\n\nFor browser tool calls and their request_permissions.exact_input, use only current observed page_id and element_id fields shown in each tool schema. The server restores the full profile, origin, page incarnation, document revision, and element metadata before authorization. browser_wait_for.state is always present; omit it. create_formula_workbook.locale is always en-US-a1; omit it. For browser_open_page and browser_navigate_page, pass the exact target.url and omit target.origin; the server derives it from that URL and displays the resolved target in the permission card. Never invent IDs, origins, or account identity.");
     text.push_str("\nFor an authorized GUI task, continue with the next supported action instead of asking the user to perform it or reconfirm an already explicit instruction. Opening an editor, expanding a date/time button, and reading the resulting controls are ordinary steps under the matching grants. Stop only for a concrete blocker, missing authorization, or material ambiguity in the user requirement; do not infer a blocker from a search miss. Load missing capability details before requesting permission. After an argument error, correct the named field and retry within the documented limits. Verify the exact edited control and intended event: a quick-entry field is not the title field of another editor, and an existing event containing the requested words does not prove your edit succeeded. Neither saved nor unsaved state may be inferred from an API success receipt alone.");
@@ -4856,10 +4856,53 @@ mod tests {
     }
 
     #[test]
+    fn prompt_uses_public_fields_for_gmail_and_file_evidence() {
+        let message = build_ai_assistant_system_message(Some("zh-CN"));
+        for hidden in ["attachment_labels", "page.account_id", "full SHA-256"] {
+            assert!(!message.text.contains(hidden), "{hidden}");
+        }
+        let registry = ai_assistant_provider_registry();
+        for (name, pointers, fields) in [
+            (
+                "prepare_gmail_draft",
+                vec![
+                    "/properties/page_id",
+                    "/properties/attachment/properties/artifact_result_id",
+                    "/properties/attachment/properties/element_id",
+                ],
+                vec!["page_id", "artifact_result_id", "element_id"],
+            ),
+            (
+                "update_text_file",
+                vec!["/properties/file_version_id"],
+                vec!["file_version_id"],
+            ),
+        ] {
+            let mut tool = registry
+                .capability_for_tool(name)
+                .unwrap()
+                .registered_tool()
+                .spec;
+            crate::ui_model_ids::project_tool(&mut tool);
+            for pointer in pointers {
+                assert!(
+                    tool.parameters_schema.pointer(pointer).is_some(),
+                    "{name}: {pointer}"
+                );
+            }
+            for field in fields {
+                assert!(message.text.contains(field), "{name}: {field}");
+            }
+            let schema = tool.parameters_schema.to_string();
+            for hidden in ["attachment_labels", "expected_sha256", "account_id"] {
+                assert!(!schema.contains(hidden), "{name}: {hidden}");
+            }
+        }
+    }
+
+    #[test]
     fn prompt_is_explicit_about_the_bounded_artifact_mutations() {
-        assert!(
-            prompt(None).contains("Gmail account is bound to the provider-owned page.account_id")
-        );
+        assert!(prompt(None).contains("binds the Gmail account to the observed page_id"));
         let message = build_ai_assistant_system_message(Some("zh-CN"));
         assert!(
             message

@@ -43,7 +43,8 @@ impl ScheduleStore {
             || row.started_at.is_some()
             || ask.question != row.prompt
             || ask.locale != row.locale
-            || ask.client_message_id != format!("rehearsal:{}:input", row.rehearsal_id)
+            || ask.client_message_id
+                != desk_diagnose_core::native_ids::rehearsal_message(&row.rehearsal_id)
             || !ask.selected_attachment_ids.is_empty()
         {
             return Err(ScheduleStoreError::Conflict);

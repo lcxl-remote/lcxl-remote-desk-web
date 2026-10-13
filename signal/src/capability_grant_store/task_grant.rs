@@ -43,8 +43,11 @@ pub(super) async fn issue_on(
         || session.latest_input_seq != request.input_watermark
         || session.current_turn_id.as_deref() != Some(request.turn_id)
         || !session.unclosed_tool_call_ids().iter().any(|id| {
-            let original = format!("{}:{}:{}", session.conversation_id, request.turn_id, id);
-            format!("capability-call-{:x}", Sha256::digest(original.as_bytes())) == request.call_id
+            desk_diagnose_core::native_ids::background_action(
+                &session.conversation_id,
+                request.turn_id,
+                id,
+            ) == request.call_id
         })
     {
         return Err(invalid());
@@ -106,12 +109,11 @@ pub(super) async fn issue_on(
             .iter()
             .flat_map(|message| &message.tool_calls)
             .filter(|tool| {
-                let original = format!(
-                    "{}:{}:{}",
-                    session.conversation_id, request.turn_id, tool.id
-                );
-                format!("capability-call-{:x}", Sha256::digest(original.as_bytes()))
-                    == request.call_id
+                desk_diagnose_core::native_ids::background_action(
+                    &session.conversation_id,
+                    request.turn_id,
+                    &tool.id,
+                ) == request.call_id
             });
         let tool = tools.next().ok_or_else(invalid)?;
         if tools.next().is_some() || tool.name != call.tool_name {
@@ -231,12 +233,11 @@ pub(super) async fn issue_on(
                         .iter()
                         .flat_map(|message| &message.tool_calls)
                         .find(|tool| {
-                            let key = format!(
-                                "{}:{}:{}",
-                                session.conversation_id, request.turn_id, tool.id
-                            );
-                            format!("capability-call-{:x}", Sha256::digest(key.as_bytes()))
-                                == request.call_id
+                            desk_diagnose_core::native_ids::background_action(
+                                &session.conversation_id,
+                                request.turn_id,
+                                &tool.id,
+                            ) == request.call_id
                         })
                         .ok_or_else(invalid)?;
                     let original = desk_diagnose_core::chat::ToolCall {

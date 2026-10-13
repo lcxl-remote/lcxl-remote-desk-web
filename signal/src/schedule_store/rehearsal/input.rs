@@ -24,7 +24,8 @@ pub(crate) async fn validate_rehearsal_input_on(
         || row.target_device_id != device
         || row.conversation_id != conversation
         || derive_conversation_key(actor, device, Some(client), "") != conversation
-        || message.message_id != format!("rehearsal:{}:input", row.rehearsal_id)
+        || message.message_id
+            != desk_diagnose_core::native_ids::rehearsal_message(&row.rehearsal_id)
         || message.text != row.prompt
         || message.image_data_url.is_some()
     {

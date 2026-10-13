@@ -96,9 +96,10 @@ async fn reconcile_inner_on(
                 .flat_map(|message| &message.tool_calls)
                 .any(|call| {
                     open.contains(&call.id)
-                        && stable_id(
-                            "capability-call",
-                            &format!("{}:{}:{}", session.conversation_id, row.turn_id, call.id),
+                        && desk_diagnose_core::native_ids::background_action(
+                            &session.conversation_id,
+                            &row.turn_id,
+                            &call.id,
                         ) == row.tool_call_id
                 });
             let dispatch = agent_capability_dispatch_outbox::Entity::find()

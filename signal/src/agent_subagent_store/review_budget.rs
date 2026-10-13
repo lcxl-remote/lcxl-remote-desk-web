@@ -49,7 +49,16 @@ pub(crate) async fn validate_review_lease_on(
     Ok(())
 }
 
-pub(crate) async fn validate_review_scope_on(
+#[inline(never)]
+pub(crate) fn validate_review_scope_on<'a>(
+    txn: &'a DatabaseTransaction,
+    authority: &'a ReviewCallAuthority,
+    now_ms: i64,
+) -> std::pin::Pin<Box<impl std::future::Future<Output = Result<(), DbErr>> + 'a>> {
+    Box::pin(validate_review_scope_on_inner(txn, authority, now_ms))
+}
+
+async fn validate_review_scope_on_inner(
     txn: &DatabaseTransaction,
     authority: &ReviewCallAuthority,
     now_ms: i64,

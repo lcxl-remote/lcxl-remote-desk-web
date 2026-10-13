@@ -109,7 +109,10 @@ async fn begin_main_tool(
                     .map_err(|_| invalid())?
                 )
             );
-            Some(format!("sa-{key}"))
+            Some(desk_diagnose_core::native_ids::stable(
+                desk_diagnose_core::native_ids::Kind::ChildConversation,
+                &key,
+            ))
         }
         Operation::Cancel { task_id, .. } | Operation::Message { task_id, .. } => Some(
             task_for_parent_observed_on(&txn, held, task_id, input_observation)
@@ -303,11 +306,10 @@ impl SubAgentStore {
                     && message.tool_calls.iter().any(|reference| {
                         reference.id == call.id
                             && reference.name == call.name
-                            && tools::same_arguments_with_references(
+                            && tools::same_arguments(
                                 &call.name,
                                 &reference.arguments_json,
                                 &call.arguments_json,
-                                Some(&parent.ui_references),
                             )
                     })
             })

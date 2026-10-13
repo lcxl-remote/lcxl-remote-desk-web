@@ -565,7 +565,7 @@ async fn directory_loop_binds_only_the_published_proposal_and_never_infers_a_den
         );
         let request_id = stable_lineage_id(
             "directory-proposal",
-            &format!("{run}:1:private-provider-call"),
+            &(&run, 1_u64, "private-provider-call"),
         );
         let alias = ObservationAlias::directory_request(&run, &request_id).unwrap();
         let events = recorder.0.lock().unwrap();

@@ -2369,7 +2369,10 @@ async fn permission_planning_records_request_without_dispatch_or_grant() {
     let LoopOutcome::PermissionRequested { request_id } = outcome else {
         panic!("permission planning must pause the turn");
     };
-    assert!(request_id.starts_with("permission-request-"));
+    assert!(crate::native_ids::is(
+        crate::native_ids::Kind::PermissionRequest,
+        &request_id
+    ));
     assert!(tools.calls.borrow().is_empty());
     let stored = sess.inner.borrow();
     let stored = stored.as_ref().unwrap();
@@ -8486,7 +8489,9 @@ fn permission_resume_projection_restores_only_bounded_reusable_references() {
         .unwrap()
         .unwrap();
     assert!(projection.text.contains("spreadsheet-merge-preview-1"));
-    assert!(projection.text.contains("search-call-1"));
+    assert!(!projection.text.contains("search-call-1"));
+    assert!(projection.text.contains("search-result"));
+    assert!(projection.text.contains("source_id"));
     assert!(projection.text.contains("Public benchmark"));
     assert!(projection.text.contains("https://example.com/benchmark"));
     assert!(projection.text.contains("page-slack-1"));

@@ -620,3 +620,11 @@ Model approval, committed grants and operation outcomes are separate facts. No e
 Recording failures do not change decisions, grants or execution, retry models or enlarge model context. An unexpected JSON reply to a streaming request can be inspected for diagnosis; it does not bypass the original stream and decision checks. API keys, headers, reasoning signatures, encrypted replay and image bodies are excluded.
 
 Approval model settings include recording controls: enabled, 7 days, 256 MiB instance budget and 16 MiB per record by default. Global settings are written to `[approval_trace]` in the active `config.toml`; SQLite holds runtime records. Rebuilding runtime storage does not erase these settings. Desk-server-only installations use the actual approval center for details and statistics.
+
+## Tool identities and references
+
+Tasks, messages, attachments, approval/directory requests, previews and scheduled tasks created by the assistant use compact native IDs. Queries, waits, cancellation and retries reuse the same value without adding a short-ID-to-UUID alias. Identities that must remain unique across conversations retain their full identity strength, usually as a type prefix and 22 encoded characters. Web sources use stable positions within their original search result.
+
+Device-issued UI, browser, file/document references and opaque paging cursors retain their complete original identity. One conversation reference state supplies concise selectors for the model. Copy the IDs actually returned by tools; do not infer them from names, positions or numbers in another conversation. A reference never changes its target. Obtain a fresh reference from the corresponding resource reader when it expires. Business text, paths, URLs, user-supplied business IDs and model-protocol correlation IDs are not globally rewritten.
+
+Inline results, attachment pages, historical arguments, permission requests and AI reviews use the same representation. Summarizing context does not delete attachment contents: references with retained, valid sources remain resolvable, while deleted or evicted contents cannot be restored. Paging binds the original contents, query and relevant projection; unrelated new references do not invalidate the current cursor. Deleting a conversation removes its mappings.
