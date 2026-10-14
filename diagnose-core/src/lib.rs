@@ -81,6 +81,7 @@ mod model_actions;
 pub mod model_capability;
 mod model_constraints;
 pub mod model_context;
+pub mod model_controls;
 pub mod model_egress;
 pub mod model_http_error;
 pub mod model_message_labels;

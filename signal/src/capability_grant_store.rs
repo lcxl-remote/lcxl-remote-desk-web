@@ -1781,7 +1781,7 @@ fn json_error(error: serde_json::Error) -> DbErr {
     DbErr::Custom(format!("capability grant JSON: {error}"))
 }
 
-fn validate_completion(completion: &CapabilityDispatchCompletion) -> Result<(), DbErr> {
+pub(crate) fn validate_completion(completion: &CapabilityDispatchCompletion) -> Result<(), DbErr> {
     if completion.dispatch_id.trim().is_empty()
         || completion.call_id.trim().is_empty()
         || completion.generation == 0

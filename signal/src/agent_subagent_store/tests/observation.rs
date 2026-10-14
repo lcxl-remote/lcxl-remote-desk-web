@@ -147,6 +147,10 @@ pub(super) async fn record_accepted_provider(
         .await
         .unwrap();
     receipts.mark_succeeded(&id, output).await.unwrap();
+    receipts
+        .link_context_dispatch(&id, &parent.conversation_id)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

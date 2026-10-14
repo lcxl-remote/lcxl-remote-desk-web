@@ -103,7 +103,6 @@ async fn run_desktop_case_with_automatic(
     let mut replies = vec![
         tool_reply("describe_tools", serde_json::json!({"tool_names":[read_name]})),
         tool_reply("request_permissions", serde_json::json!({"items":[{
-            "item_id":"read",
             "tool_name":read_name,
             "suggested_ttl_seconds":120, "suggested_max_uses":1, "reason":"Read the desktop session requested by the owner"
         }]})),
@@ -119,7 +118,7 @@ async fn run_desktop_case_with_automatic(
             serde_json::json!({"tool_names":[read_name,"execute_ui_actions"]}),
         );
         replies.insert(3, tool_reply("request_permissions", serde_json::json!({"items":[{
-            "item_id":"ui", "tool_name":"execute_ui_actions", "reason":"Invoke the requested Calendar button",
+            "tool_name":"execute_ui_actions", "reason":"Invoke the requested Calendar button",
             "suggested_ttl_seconds":120, "suggested_max_uses":2,
             "application_scope":{"application_id":"a1", "actions":["invoke"]}
         }]})));
@@ -347,7 +346,7 @@ async fn run_desktop_case_with_automatic(
                 "device",
                 &request.request_id,
                 vec![PermissionDecisionItem {
-                    item_id: "read".into(),
+                    item_id: "item_1".into(),
                     decision: if approve {
                         PermissionItemDecision::Approve {
                             resource_scope: request.items[0].resource_scope.clone(),
@@ -839,7 +838,6 @@ async fn approve_with_independent_model(
             .find(|entry| entry.trust == ApprovalEvidenceTrust::OwnerInstruction)
             .unwrap();
         let decision = serde_json::json!({
-            "candidate_id": candidate.candidate_id,
             "verdict": "approve", "reason_code": "within_scope",
             "reason": "The owner requested this desktop session read",
             "evidence_event_ids": [owner_evidence.event_id],
@@ -1057,19 +1055,16 @@ fn concrete_review_reply(body: &[u8], approve: bool) -> String {
         .split("\n</candidate_json>")
         .next()
         .unwrap();
-    let candidate: desk_diagnose_core::approval_review::ApprovalReviewCandidate =
-        serde_json::from_str(candidate_json).unwrap();
-    let owner = candidate
-        .context
-        .evidence
+    let candidate: serde_json::Value = serde_json::from_str(candidate_json).unwrap();
+    let owner = candidate["context"]["evidence"]
+        .as_array()
+        .unwrap()
         .iter()
-        .find(|e| {
-            e.trust == desk_diagnose_core::approval_review::ApprovalEvidenceTrust::OwnerInstruction
-        })
+        .find(|e| e["trust"] == "owner_instruction")
         .unwrap();
-    let decision = serde_json::json!({"candidate_id":candidate.candidate_id,"verdict":if approve {"approve"}else{"deny"},
+    let decision = serde_json::json!({"verdict":if approve {"approve"}else{"deny"},
         "reason_code":"test_review","reason":"Synthetic review of this exact action",
-        "evidence_event_ids":[owner.event_id]});
+        "evidence_event_ids":[owner["event_id"]]});
     format!(
         "data: {}\n\ndata: {{\"choices\":[{{\"delta\":{{}},\"finish_reason\":\"stop\"}}]}}\n\ndata: {{\"choices\":[],\"usage\":{{\"prompt_tokens\":32,\"completion_tokens\":8}}}}\n\ndata: [DONE]\n\n",
         serde_json::json!({"choices":[{"delta":{"content":decision.to_string()}}]})

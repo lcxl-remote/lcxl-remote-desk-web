@@ -87,8 +87,8 @@ impl SignalAiAssistantTools {
 fn denied() -> AgentError {
     error(
         AgentErrorKind::PermissionDenied,
-        "original object input is unavailable",
+        "The original read context is unavailable for this turn. Refresh the selected context before retrying; no device read was dispatched.",
         false,
-        false,
+        true,
     )
 }

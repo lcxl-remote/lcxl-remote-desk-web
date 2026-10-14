@@ -150,7 +150,6 @@ async fn run_case_with_live_inner(change: Option<&str>, mode: ResumeMode, live: 
     let capability = registry.capability_for_tool(read_name).unwrap();
     let mut replies = vec![
         tool_reply("request_permissions", serde_json::json!({"items":[{
-            "item_id":"read",
             "tool_name":read_name,
             "suggested_ttl_seconds":120, "suggested_max_uses":1, "reason":"Read the selected file metadata"
         }]})),
@@ -442,7 +441,7 @@ async fn run_case_with_live_inner(change: Option<&str>, mode: ResumeMode, live: 
             "device",
             &request.request_id,
             vec![PermissionDecisionItem {
-                item_id: "read".into(),
+                item_id: "item_1".into(),
                 decision: PermissionItemDecision::Approve {
                     resource_scope: request.items[0].resource_scope.clone(),
                     operation_scope: request.items[0].operation_scope.clone(),

@@ -29,12 +29,12 @@ pub enum Action {
 pub fn specs() -> Vec<ToolSpec> {
     vec![ToolSpec {
         name: LIST.into(),
-        description: "Query current server state of scheduled tasks belonging to this conversation. Includes manual tasks (read-only) and AI proposals. Use this before reporting task status or cancelling; historical receipts are not current status. Returns source, can_cancel, actual time, revision and a pagination cursor. No additional approval is required; the server binds owner, device and conversation.".into(),
+        description: "Query current server state of scheduled tasks belonging to this conversation. Includes manual tasks (read-only) and AI proposals. Use this before reporting task status or cancelling; historical receipts are not current status. Returns source, can_cancel, actual time and a pagination cursor. No additional approval is required; the server binds owner, device and conversation.".into(),
         parameters_schema: json!({"type":"object","additionalProperties":false,"properties":{"after":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":20}}}),
     }, ToolSpec {
         name: CANCEL.into(),
-        description: "Cancel an AI-created scheduled task in the current conversation without an extra approval dialog. Use the id and revision returned by list_scheduled_tasks. The server forbids cancellation of manual tasks and tasks from other conversations, devices or owners. Stops future scheduling and requests cancellation of any active occurrence; does not undo completed external effects. Report the returned state accurately, including cancellation_requested for a running occurrence.".into(),
-        parameters_schema: json!({"type":"object","additionalProperties":false,"required":["schedule_id","expected_revision"],"properties":{"schedule_id":{"type":"string","minLength":25,"maxLength":25,"pattern":"^sc_[A-Za-z0-9_-]{22}$"},"expected_revision":{"type":"integer","minimum":1}}}),
+        description: "Cancel an AI-created scheduled task in the current conversation without an extra approval dialog. Use the schedule_id returned by list_scheduled_tasks in the current request; the server binds its observed revision. The server forbids cancellation of manual tasks and tasks from other conversations, devices or owners. Stops future scheduling and requests cancellation of any active occurrence; does not undo completed external effects. Report the returned state accurately, including cancellation_requested for a running occurrence.".into(),
+        parameters_schema: json!({"type":"object","additionalProperties":false,"required":["schedule_id"],"properties":{"schedule_id":{"type":"string","minLength":25,"maxLength":25,"pattern":"^sc_[A-Za-z0-9_-]{22}$"}}}),
     }]
 }
 
@@ -87,7 +87,6 @@ pub fn parse(
     #[serde(deny_unknown_fields)]
     struct Cancel {
         schedule_id: String,
-        expected_revision: i64,
     }
     match call.name.as_str() {
         proposal::REQUEST_SCHEDULE => {
@@ -113,16 +112,15 @@ pub fn parse(
                 observation.reject(Stage::Preflight, InputIssue::Semantic);
                 "invalid cancellation"
             })?;
-            if input.expected_revision < 1
-                || !crate::native_ids::is(crate::native_ids::Kind::Schedule, &input.schedule_id)
-            {
+            if !crate::native_ids::is(crate::native_ids::Kind::Schedule, &input.schedule_id) {
                 observation.reject(Stage::Preflight, InputIssue::Semantic);
                 return Err("invalid cancellation");
             }
             observation.stage(Stage::Preflight, StageOutcome::Attempted);
+            let observed = crate::model_controls::observation(session, call, &input.schedule_id, true).map_err(|_| "The schedule has no current observation in this model request. Call list_scheduled_tasks again; no cancellation was applied.")?;
             Ok(Action::Cancel {
                 schedule_id: input.schedule_id,
-                expected_revision: input.expected_revision,
+                expected_revision: observed.schedule_revision,
             })
         }
         _ => {

@@ -1,5 +1,5 @@
 use super::*;
-use sea_orm::{ActiveModelTrait, TransactionTrait};
+use sea_orm::{ActiveModelTrait, ConnectionTrait, TransactionTrait};
 
 async fn fixture(
     ai: bool,
@@ -206,9 +206,7 @@ async fn tool_turn_commits_cancellation_and_receipt_together_and_rejects_stale_s
         let call = ToolCall {
             id: "cancel-call".into(),
             name: desk_diagnose_core::schedule::management_tools::CANCEL.into(),
-            arguments_json:
-                json!({"schedule_id":task.schedule_id,"expected_revision":task.revision})
-                    .to_string(),
+            arguments_json: json!({"schedule_id":task.schedule_id}).to_string(),
         };
         let mut parent = desk_diagnose_core::model_message_labels::model_bound_user_message(
             "assistant".into(),
@@ -229,6 +227,74 @@ async fn tool_turn_commits_cancellation_and_receipt_together_and_rejects_stale_s
                 name: call.name.clone(),
                 arguments_json: call.arguments_json.clone(),
             });
+        parent.turn_id = session.current_turn_id.clone();
+        let query_text = json!({"ok":true,"tasks":[view(&task)]}).to_string();
+        let mut query = desk_diagnose_core::chat::ChatMessage::tool_result(
+            "schedule-query",
+            "query-call",
+            &query_text,
+        );
+        query.data_envelope =
+            desk_diagnose_core::model_message_labels::internal_tool_result_envelope(
+                parent.data_envelope.as_ref(),
+                "schedule-query",
+                &query_text,
+                "schedule_query",
+            )
+            .unwrap();
+        let input = query.data_envelope.clone().unwrap();
+        let policy = desk_diagnose_core::model_egress::ModelEgressPolicy {
+            destination: input.allowed_destinations[0].clone(),
+            selected_source_tools: Default::default(),
+            export_authorization_id: "schedule-control-test".into(),
+            now_unix_ms: now.timestamp_millis() as u64,
+            byte_cap: 1024 * 1024,
+            permission_resume: false,
+        };
+        let turn = desk_diagnose_core::chat::ModelTurn {
+            text: parent.text.clone(),
+            tool_calls: vec![call.clone()],
+            stop_reason: desk_diagnose_core::chat::StopReason::ToolUse,
+            ..Default::default()
+        };
+        let output = policy
+            .derive_model_output_envelope(&turn, std::slice::from_ref(&input))
+            .unwrap();
+        parent.model_controls = Some(Box::new(
+            desk_diagnose_core::model_controls::FrozenModelControls::capture(&session, &[query]),
+        ));
+        parent.data_envelope = Some(output.clone());
+        let audit = desk_diagnose_core::sink_authorizer::SinkProjectionAudit {
+            destination: policy.destination.clone(),
+            envelope_ids: vec![input.envelope_id.clone()],
+            digests_sha256: vec![input.digest_sha256.clone()],
+            total_bytes: query_text.len(),
+        };
+        let schema = sea_orm::Schema::new(store.db.get_database_backend());
+        store
+            .db
+            .execute(&schema.create_table_from_entity(crate::entity::model_egress_receipt::Entity))
+            .await
+            .unwrap();
+        let egress = crate::model_egress_store::SignalModelEgressStore::new(store.db.clone());
+        egress
+            .record_dispatch_intent(
+                "schedule-test-model".into(),
+                policy.export_authorization_id.clone(),
+                1,
+                &audit,
+                &[input],
+            )
+            .await
+            .unwrap();
+        egress
+            .link_context_dispatch("schedule-test-model", &session.conversation_id)
+            .await
+            .unwrap();
+        egress
+            .mark_succeeded("schedule-test-model", &output)
+            .await
+            .unwrap();
         session.conversation.push(parent);
         let row = agent_session::Entity::find()
             .one(&store.db)

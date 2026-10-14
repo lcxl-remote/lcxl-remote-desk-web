@@ -136,7 +136,10 @@ pub(crate) async fn runtime_facts_on(
             }
         } else {
             if dispatch.computer_binding_json.is_none() {
-                if row.manual_resolved_at.is_some() {
+                if completed_read(&row, dispatch, &payload)? {
+                    // Completion closes the read lifecycle; the retained result
+                    // still determines what the child can claim in its answer.
+                } else if row.manual_resolved_at.is_some() {
                     facts.incomplete(id).map_err(|_| invalid())?;
                 } else {
                     facts
@@ -214,4 +217,77 @@ pub(crate) async fn runtime_facts_on(
         .retained_evidence(session, u64::try_from(now_ms).map_err(|_| invalid())?)
         .map_err(|_| invalid())?;
     Ok(facts)
+}
+
+fn completed_read(
+    work: &work::Model,
+    dispatch: &outbox::Model,
+    payload: &crate::capability_grant_store::CapabilityDispatchPayload,
+) -> Result<bool, DbErr> {
+    use crate::capability_grant_store::*;
+    use sha2::{Digest, Sha256};
+    let prepared: PreparedCapabilityPayload =
+        serde_json::from_str(&work.payload_json).map_err(|_| invalid())?;
+    if prepared.observed_authority != payload.observed_authority
+        || prepared.call_id != payload.call_id
+        || prepared.generation != payload.generation
+        || prepared.grant_id != payload.grant_id
+        || prepared.reservation_id != payload.reservation_id
+        || prepared.input_revision != payload.input_revision
+        || prepared.input_watermark != payload.input_watermark
+        || prepared.canonical_input_json != payload.canonical_input_json
+        || prepared.canonical_input_digest_sha256 != payload.canonical_input_digest_sha256
+        || prepared.provider_id != payload.provider_id
+        || prepared.capability_id != payload.capability_id
+        || prepared.tool_name != payload.tool_name
+        || dispatch.call_id != payload.call_id
+        || u64::try_from(dispatch.generation).ok() != Some(payload.generation)
+        || dispatch.work_id != work.id
+        || dispatch.reservation_id != payload.reservation_id
+        || work.kind != CAPABILITY_WORK_KIND
+        || work.draft_hash != payload.canonical_input_digest_sha256
+        || format!(
+            "{:x}",
+            Sha256::digest(payload.canonical_input_json.as_bytes())
+        ) != payload.canonical_input_digest_sha256
+        || payload.observed_authority.canonical_input_sha256
+            != payload.canonical_input_digest_sha256
+        || payload.observed_authority.provider_id != payload.provider_id
+        || payload.observed_authority.capability_id != payload.capability_id
+        || payload.observed_authority.tool_name != payload.tool_name
+        || payload.observed_authority.effect.is_side_effecting() != work.is_side_effecting
+    {
+        return Err(invalid());
+    }
+    if work.is_side_effecting {
+        return Ok(false);
+    }
+    if dispatch.state != DISPATCH_OUTBOX_COMPLETED {
+        if matches!(
+            work.status.as_str(),
+            CAPABILITY_WORK_SUCCEEDED | CAPABILITY_WORK_FAILED
+        ) {
+            return Err(invalid());
+        }
+        return Ok(false);
+    }
+    if work.result_schema_version != Some(1) {
+        return Err(invalid());
+    }
+    let completion: CapabilityDispatchCompletion =
+        serde_json::from_str(work.result_json.as_deref().ok_or_else(invalid)?)
+            .map_err(|_| invalid())?;
+    validate_completion(&completion)?;
+    let expected = match completion.outcome {
+        CapabilityDispatchOutcome::Succeeded => CAPABILITY_WORK_SUCCEEDED,
+        CapabilityDispatchOutcome::Failed => CAPABILITY_WORK_FAILED,
+    };
+    if completion.dispatch_id != payload.dispatch_id
+        || completion.call_id != payload.call_id
+        || completion.generation != payload.generation
+        || work.status != expected
+    {
+        return Err(invalid());
+    }
+    Ok(true)
 }

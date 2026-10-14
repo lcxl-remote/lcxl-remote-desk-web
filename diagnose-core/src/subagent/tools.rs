@@ -26,7 +26,7 @@ pub const MESSAGE: &str = "send_subagent_message";
 
 /// Compare native selectors and server-owned defaults without alias lookup.
 pub fn same_arguments(tool: &str, original: &str, resolved: &str) -> bool {
-    if effect(tool).is_none() {
+    if effect(tool).is_none() && tool != crate::schedule::management_tools::CANCEL {
         return false;
     }
     match (
@@ -147,7 +147,6 @@ pub fn registry() -> Vec<RegisteredTool> {
     }
     let id = json!({"type":"string","minLength":1,"maxLength":256});
     let task_id = json!({"type":"string","minLength":1,"maxLength":256,"description":"The native task_id returned by spawn_subagent, list_subagents or get_subagent_status in this conversation. Copy it unchanged; do not use a child-session ID."});
-    let revision = json!({"type":"integer","minimum":1});
     vec![
         tool(
             SPAWN,
@@ -169,7 +168,7 @@ pub fn registry() -> Vec<RegisteredTool> {
         ),
         tool(
             STATUS,
-            "Read current status, input revision and control revision of one subagent from this main conversation. State revisions reflect progress and do not authorize controls.",
+            "Read the current status of one subagent from this main conversation. The server binds controls to this request's observed state.",
             json!({"type":"object","additionalProperties":false,"required":["task_id"],"properties":{"task_id":task_id.clone()}}),
         ),
         tool(
@@ -184,13 +183,13 @@ pub fn registry() -> Vec<RegisteredTool> {
         ),
         tool(
             CANCEL,
-            "Explicitly cancel one nonterminal subagent without affecting siblings. Use current input and control revisions from its status. Stops planning and new operations, invalidates outstanding approvals, and preserves partial results and late action facts. This does not undo dispatched actions.",
-            json!({"type":"object","additionalProperties":false,"required":["task_id","expected_input_revision","expected_control_revision"],"properties":{"task_id":task_id.clone(),"expected_input_revision":revision.clone(),"expected_control_revision":revision.clone()}}),
+            "Explicitly cancel one nonterminal subagent without affecting siblings. First observe its current status; the server binds this control to that observation. Stops planning and new operations, invalidates outstanding approvals, and preserves partial results and late action facts. This does not undo dispatched actions.",
+            json!({"type":"object","additionalProperties":false,"required":["task_id"],"properties":{"task_id":task_id.clone()}}),
         ),
         tool(
             MESSAGE,
-            "Explicitly adjust a nonterminal subagent's existing task using current input and control revisions. The server fences prior planning and retains the original budget and deadline. A terminal task cannot be reopened; create a new task for subsequent work.",
-            json!({"type":"object","additionalProperties":false,"required":["task_id","expected_input_revision","expected_control_revision","message"],"properties":{"task_id":task_id,"expected_input_revision":revision.clone(),"expected_control_revision":revision,"message":{"type":"string","minLength":1,"maxLength":super::MAX_DELEGATED_TASK_CHARS}}}),
+            "Explicitly adjust a nonterminal subagent's existing task using its current observed status. The server fences prior planning and retains the original budget and deadline. A terminal task cannot be reopened; create a new task for subsequent work.",
+            json!({"type":"object","additionalProperties":false,"required":["task_id","message"],"properties":{"task_id":task_id,"message":{"type":"string","minLength":1,"maxLength":super::MAX_DELEGATED_TASK_CHARS}}}),
         ),
     ]
 }
@@ -263,8 +262,6 @@ pub fn parse_observed(
     #[serde(deny_unknown_fields)]
     struct Control {
         task_id: String,
-        expected_input_revision: u64,
-        expected_control_revision: u64,
     }
     let result = (|| match call.name.as_str() {
         SPAWN => {
@@ -349,16 +346,15 @@ pub fn parse_observed(
         }
         CANCEL => {
             let control: Control = decode(call)?;
-            if !valid_id(&control.task_id)
-                || control.expected_input_revision == 0
-                || control.expected_control_revision == 0
-            {
+            if !valid_id(&control.task_id) {
                 return Err(invalid("invalid delegated task control"));
             }
+            let observed =
+                crate::model_controls::observation(session, call, &control.task_id, false)?;
             Ok(Operation::Cancel {
                 task_id: control.task_id,
-                input_revision: control.expected_input_revision,
-                control_revision: control.expected_control_revision,
+                input_revision: observed.input_revision,
+                control_revision: observed.control_revision,
             })
         }
         MESSAGE => {
@@ -366,23 +362,21 @@ pub fn parse_observed(
             #[serde(deny_unknown_fields)]
             struct Message {
                 task_id: String,
-                expected_input_revision: u64,
-                expected_control_revision: u64,
                 message: String,
             }
             let message: Message = decode(call)?;
             if !valid_id(&message.task_id)
-                || message.expected_input_revision == 0
-                || message.expected_control_revision == 0
                 || message.message.trim().is_empty()
                 || message.message.chars().count() > super::MAX_DELEGATED_TASK_CHARS
             {
                 return Err(invalid("invalid delegated task adjustment"));
             }
+            let observed =
+                crate::model_controls::observation(session, call, &message.task_id, false)?;
             Ok(Operation::Message {
                 task_id: message.task_id,
-                input_revision: message.expected_input_revision,
-                control_revision: message.expected_control_revision,
+                input_revision: observed.input_revision,
+                control_revision: observed.control_revision,
                 message: message.message,
             })
         }

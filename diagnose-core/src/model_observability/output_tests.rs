@@ -191,7 +191,7 @@ fn approval_probe_requires_the_expected_verdict_even_when_the_decision_json_is_v
             };
             let turn = ModelTurn {
                 text: serde_json::json!({
-                    "candidate_id": probe.candidate.candidate_id,
+
                     "verdict": verdict.as_str(),
                     "reason_code": "fixture_review",
                     "reason": "private probe reason",

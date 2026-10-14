@@ -674,10 +674,12 @@ struct RequestItem {
     tool_name: String,
     #[serde(default)]
     expected_effect: Option<CapabilityEffect>,
-    #[serde(default)]
-    resource_scope: Vec<String>,
-    #[serde(default)]
-    operation_scope: Vec<String>,
+    // Native composed requests may carry scope projections. They never override
+    // the trusted resolver; the model boundary rejects these fields entirely.
+    #[serde(default, rename = "resource_scope")]
+    _resource_scope: Vec<String>,
+    #[serde(default, rename = "operation_scope")]
+    _operation_scope: Vec<String>,
     #[serde(default)]
     export_destinations: Vec<desk_agent_protocol::data_lineage::DestinationIdentity>,
     #[serde(default)]
@@ -1258,10 +1260,11 @@ pub fn build_permission_request(
                 .expect("exact command was prepared")
                 .resource_scope()?
         } else {
-            compiled_scope.as_ref().map_or_else(
-                || normalize_scope(item.resource_scope),
-                |scope| scope.resources.clone(),
-            )
+            compiled_scope
+                .as_ref()
+                .ok_or_else(|| invalid("Provider has no compiled resource-scope resolver"))?
+                .resources
+                .clone()
         };
         if command_confirmation
             .as_ref()
@@ -1292,10 +1295,9 @@ pub fn build_permission_request(
                     })
                     .collect()
             } else {
-                compiled_scope.map_or_else(
-                    || normalize_scope(item.operation_scope),
-                    |scope| scope.operations,
-                )
+                compiled_scope
+                    .ok_or_else(|| invalid("Provider has no compiled operation-scope resolver"))?
+                    .operations
             },
             export_destinations: if exact_external_query {
                 vec![
@@ -1501,17 +1503,6 @@ fn same_permission_action(
         && left.canonical_input_digest_sha256 == right.canonical_input_digest_sha256
         && left.command_confirmation == right.command_confirmation
         && left.launch_confirmation == right.launch_confirmation
-}
-
-fn normalize_scope(values: Vec<String>) -> Vec<String> {
-    let mut values = values
-        .into_iter()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .collect::<Vec<_>>();
-    values.sort();
-    values.dedup();
-    values
 }
 
 /// Deterministic control text only; this is not a grant or current policy snapshot.
@@ -1927,7 +1918,7 @@ mod tests {
         let registry = crate::ai_assistant::ai_assistant_provider_registry();
         let request = build_permission_request(
             &call(
-                r#"{"items":[{"item_id":" inspect ","provider_id":"desktop.session","tool_name":"inspect_desktop_session","expected_effect":"read_device","resource_scope":[" target:device ","target:device"],"suggested_ttl_seconds":999999,"suggested_max_uses":999,"reason":" inspect the selected target "}]}"#,
+                r#"{"items":[{"item_id":" inspect ","provider_id":"desktop.session","tool_name":"inspect_desktop_session","expected_effect":"read_device","suggested_ttl_seconds":999999,"suggested_max_uses":999,"reason":" inspect the selected target "}]}"#,
             ),
             &registry,
             "permission-1".into(),
@@ -2033,7 +2024,7 @@ mod tests {
     #[test]
     fn web_host_permission_requires_valid_url_and_derives_only_its_host() {
         let registry = crate::ai_assistant::ai_assistant_provider_registry();
-        let missing = r#"{"items":[{"item_id":"web","provider_id":"web.research","tool_name":"fetch_public_web_page","expected_effect":"read_external","resource_scope":["model:chosen"],"suggested_ttl_seconds":60,"suggested_max_uses":1,"reason":"Read the cited page"}]}"#;
+        let missing = r#"{"items":[{"item_id":"web","provider_id":"web.research","tool_name":"fetch_public_web_page","expected_effect":"read_external","suggested_ttl_seconds":60,"suggested_max_uses":1,"reason":"Read the cited page"}]}"#;
         assert!(
             build_permission_request(
                 &call(missing),
@@ -2045,7 +2036,7 @@ mod tests {
             .is_err()
         );
 
-        let exact = r#"{"items":[{"item_id":"web","provider_id":"web.research","tool_name":"fetch_public_web_page","expected_effect":"read_external","resource_scope":["model:chosen"],"operation_scope":["anything"],"exact_input":{"url":"https://example.com/report"},"suggested_ttl_seconds":60,"suggested_max_uses":1,"reason":"Read the cited page"}]}"#;
+        let exact = r#"{"items":[{"item_id":"web","provider_id":"web.research","tool_name":"fetch_public_web_page","expected_effect":"read_external","exact_input":{"url":"https://example.com/report"},"suggested_ttl_seconds":60,"suggested_max_uses":1,"reason":"Read the cited page"}]}"#;
         let request = build_permission_request(
             &call(exact),
             &registry,
@@ -2153,7 +2144,7 @@ mod tests {
             .is_err()
         );
 
-        let exact = r#"{"items":[{"item_id":"search","provider_id":"web.search","tool_name":"search_public_web","expected_effect":"export_data","resource_scope":["model:chosen"],"operation_scope":["anything"],"export_destinations":[{"kind":"web_research","connector_id":"model-chosen"}],"exact_input":{"query":"Rust language","max_results":5},"suggested_ttl_seconds":60,"suggested_max_uses":1,"reason":"Search public sources"}]}"#;
+        let exact = r#"{"items":[{"item_id":"search","provider_id":"web.search","tool_name":"search_public_web","expected_effect":"export_data","export_destinations":[{"kind":"web_research","connector_id":"model-chosen"}],"exact_input":{"query":"Rust language","max_results":5},"suggested_ttl_seconds":60,"suggested_max_uses":1,"reason":"Search public sources"}]}"#;
         let request = build_permission_request(
             &call(exact),
             &registry,
@@ -2244,7 +2235,7 @@ mod tests {
             .is_err()
         );
 
-        let exact = r#"{"items":[{"item_id":"command","provider_id":"system.command","tool_name":"exec_command","expected_effect":"execute_command","resource_scope":["model:chosen"],"operation_scope":["anything"],"exact_input":{"schema_version":1,"shell":"powershell","command":"Restart-Service -Name Spooler","timeout_ms":10000},"suggested_ttl_seconds":60,"suggested_max_uses":9,"reason":"Restart the requested service"}]}"#;
+        let exact = r#"{"items":[{"item_id":"command","provider_id":"system.command","tool_name":"exec_command","expected_effect":"execute_command","exact_input":{"schema_version":1,"shell":"powershell","command":"Restart-Service -Name Spooler","timeout_ms":10000},"suggested_ttl_seconds":60,"suggested_max_uses":9,"reason":"Restart the requested service"}]}"#;
         let request = build_permission_request(
             &call(exact),
             &registry,
@@ -2465,7 +2456,7 @@ mod tests {
         assert!(!error.message.contains("snapshot_id"));
         assert!(!error.message.contains("expires_at"));
 
-        let exact = r#"{"items":[{"item_id":"ui","tool_name":"execute_ui_actions","resource_scope":["model:chosen"],"application_scope":{"application":{"token":"app","snapshot_id":"snapshot-1","object_kind":"application","expires_at":"2026-08-28T00:01:00Z"},"actions":["set_value"]},"suggested_ttl_seconds":60,"suggested_max_uses":4,"reason":"Update controls"}]}"#;
+        let exact = r#"{"items":[{"item_id":"ui","tool_name":"execute_ui_actions","application_scope":{"application":{"token":"app","snapshot_id":"snapshot-1","object_kind":"application","expires_at":"2026-08-28T00:01:00Z"},"actions":["set_value"]},"suggested_ttl_seconds":60,"suggested_max_uses":4,"reason":"Update controls"}]}"#;
         let request = build_permission_request(
             &call(exact),
             &registry,
@@ -2537,7 +2528,7 @@ mod tests {
     #[test]
     fn raw_input_permission_is_r3_one_shot_and_binds_application_screen_and_step() {
         let registry = crate::ai_assistant::ai_assistant_provider_registry();
-        let exact = r#"{"items":[{"item_id":"raw","provider_id":"desktop.input.fallback","tool_name":"send_raw_input","expected_effect":"input_fallback","resource_scope":["model:chosen"],"operation_scope":["anything"],"exact_input":{"target":{"token":"application-token","snapshot_id":"snapshot-1","object_kind":"application","expires_at":"2026-08-28T00:01:00Z"},"action":{"screen":{"display":"\\\\.\\DISPLAY1","width":1920,"height":1080,"dpi_x":96,"dpi_y":96},"step":{"kind":"click","params":{"x":100,"y":200,"button":"primary"}}}},"suggested_ttl_seconds":300,"suggested_max_uses":9,"reason":"Last-resort click after semantic controls were unavailable"}]}"#;
+        let exact = r#"{"items":[{"item_id":"raw","provider_id":"desktop.input.fallback","tool_name":"send_raw_input","expected_effect":"input_fallback","exact_input":{"target":{"token":"application-token","snapshot_id":"snapshot-1","object_kind":"application","expires_at":"2026-08-28T00:01:00Z"},"action":{"screen":{"display":"\\\\.\\DISPLAY1","width":1920,"height":1080,"dpi_x":96,"dpi_y":96},"step":{"kind":"click","params":{"x":100,"y":200,"button":"primary"}}}},"suggested_ttl_seconds":300,"suggested_max_uses":9,"reason":"Last-resort click after semantic controls were unavailable"}]}"#;
         let request = build_permission_request(
             &call(exact),
             &registry,
@@ -2582,7 +2573,7 @@ mod tests {
             .contains("requires exact_input")
         );
 
-        let exact = r#"{"items":[{"item_id":"numbers-batch","provider_id":"spreadsheet.live","tool_name":"patch_numbers_copy","expected_effect":"mutate_application","resource_scope":["model:chosen"],"operation_scope":["anything"],"exact_input":{"target":{"token":"cell-token","snapshot_id":"batch-snapshot","object_kind":"range","expires_at":"2026-08-28T00:01:00Z"},"output":{"destination_parent":{"token":"directory-token","snapshot_id":"directory-snapshot","object_kind":"directory","expires_at":"2026-08-28T00:01:00Z"},"native_file_name":"reviewed-copy.numbers"},"action":{"kind":"set_cell_value","params":{"value":"42"}}},"suggested_ttl_seconds":60,"suggested_max_uses":3,"reason":"Create the requested Numbers copy"}]}"#;
+        let exact = r#"{"items":[{"item_id":"numbers-batch","provider_id":"spreadsheet.live","tool_name":"patch_numbers_copy","expected_effect":"mutate_application","exact_input":{"target":{"token":"cell-token","snapshot_id":"batch-snapshot","object_kind":"range","expires_at":"2026-08-28T00:01:00Z"},"output":{"destination_parent":{"token":"directory-token","snapshot_id":"directory-snapshot","object_kind":"directory","expires_at":"2026-08-28T00:01:00Z"},"native_file_name":"reviewed-copy.numbers"},"action":{"kind":"set_cell_value","params":{"value":"42"}}},"suggested_ttl_seconds":60,"suggested_max_uses":3,"reason":"Create the requested Numbers copy"}]}"#;
         let request = build_permission_request(
             &call(exact),
             &registry,
@@ -2661,7 +2652,7 @@ mod tests {
         .unwrap_err();
         assert!(error.message.contains("requires exact_input"));
 
-        let exact = r#"{"items":[{"item_id":"formula","provider_id":"spreadsheet.formula_artifact","tool_name":"create_formula_workbook","expected_effect":"write_artifact","resource_scope":["directory:current"],"operation_scope":["create_new_artifact"],"exact_input":{"preview_id":"preview-1","file_name":"regional-formula.xlsx","target_cell":"Merged!C2","formula":"=B2*1.1","locale":"en-US-a1"},"suggested_ttl_seconds":60,"suggested_max_uses":1,"reason":"Create the requested formula workbook copy"}]}"#;
+        let exact = r#"{"items":[{"item_id":"formula","provider_id":"spreadsheet.formula_artifact","tool_name":"create_formula_workbook","expected_effect":"write_artifact","exact_input":{"preview_id":"preview-1","file_name":"regional-formula.xlsx","target_cell":"Merged!C2","formula":"=B2*1.1","locale":"en-US-a1"},"suggested_ttl_seconds":60,"suggested_max_uses":1,"reason":"Create the requested formula workbook copy"}]}"#;
         let request = build_permission_request(
             &call(exact),
             &registry,
@@ -3179,7 +3170,7 @@ mod tests {
         let registry = crate::ai_assistant::ai_assistant_provider_registry();
         let request = build_permission_request(
             &call(
-                r#"{"items":[{"item_id":"outlook","provider_id":"communication.outlook_new.handoff","tool_name":"prepare_outlook_draft","expected_effect":"write_external_draft","resource_scope":[],"operation_scope":[],"export_destinations":[],"exact_input":{"draft":{"schema_version":4,"recipients":[{"role":"to","address":"review@example.invalid","display_name":null}],"subject":"Review","body_plain_text":"Please review","attachment_labels":[]}},"suggested_ttl_seconds":300,"suggested_max_uses":5,"reason":"Prepare a manual Outlook draft"}]}"#,
+                r#"{"items":[{"item_id":"outlook","provider_id":"communication.outlook_new.handoff","tool_name":"prepare_outlook_draft","expected_effect":"write_external_draft","export_destinations":[],"exact_input":{"draft":{"schema_version":4,"recipients":[{"role":"to","address":"review@example.invalid","display_name":null}],"subject":"Review","body_plain_text":"Please review","attachment_labels":[]}},"suggested_ttl_seconds":300,"suggested_max_uses":5,"reason":"Prepare a manual Outlook draft"}]}"#,
             ),
             &registry,
             "permission-outlook".into(),
@@ -3256,8 +3247,6 @@ mod tests {
                 "provider_id": crate::ai_assistant::SLACK_WEB_HANDOFF_PROVIDER_ID,
                 "tool_name": "prepare_slack_message",
                 "expected_effect": "write_external_draft",
-                "resource_scope": ["model:chosen"],
-                "operation_scope": ["anything"],
                 "export_destinations": [],
                 "exact_input": exact_input,
                 "suggested_ttl_seconds": 300,
@@ -3357,8 +3346,6 @@ mod tests {
                 "provider_id": crate::ai_assistant::GMAIL_WEB_HANDOFF_PROVIDER_ID,
                 "tool_name": "prepare_gmail_draft",
                 "expected_effect": "write_external_draft",
-                "resource_scope": ["model:chosen"],
-                "operation_scope": ["anything"],
                 "export_destinations": [],
                 "exact_input": exact_input,
                 "suggested_ttl_seconds": 300,
@@ -3434,8 +3421,6 @@ mod tests {
                 "provider_id": provider_id,
                 "tool_name": tool_name,
                 "expected_effect": "send_external",
-                "resource_scope": ["forged:resource"],
-                "operation_scope": ["forged_operation"],
                 "export_destinations": [{"kind":"email_account","account_id":"forged"}],
                 "exact_input": input,
                 "suggested_ttl_seconds": 600,

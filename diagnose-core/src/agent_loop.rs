@@ -3725,6 +3725,12 @@ async fn run_inner_impl(
             }
             Err(error) => return Err(error),
         };
+        let mut model_controls =
+            crate::model_controls::FrozenModelControls::capture(session, &request.messages);
+        let control_export_authorization = deps
+            .model
+            .model_egress_policy()?
+            .map(|policy| policy.export_authorization_id);
         let model_tool_definitions = request
             .tools
             .iter()
@@ -3809,6 +3815,11 @@ async fn run_inner_impl(
             continue;
         }
         let turn = dial_result?;
+        model_controls.retain_exported(
+            turn.provider_meta.data_envelope.as_ref(),
+            control_export_authorization.as_deref(),
+        );
+        model_controls.retain_called_targets(&turn.tool_calls);
         let tool_batch = crate::model_observability::tool::ToolBatch::new(
             observation.clone(),
             &turn.tool_calls,
@@ -4194,6 +4205,13 @@ async fn run_inner_impl(
                     .display_reasoning
                     .as_deref()
                     .and_then(crate::reasoning_display::bounded);
+                if turn
+                    .tool_calls
+                    .iter()
+                    .any(|call| crate::model_controls::is_control(&call.name))
+                {
+                    message.model_controls = Some(Box::new(model_controls.clone()));
+                }
                 let response_message_id = message.message_id.clone();
                 session.conversation.push(message);
                 // The model reacted to this request; drop any pending auto-trigger
@@ -4260,6 +4278,13 @@ async fn run_inner_impl(
                     .display_reasoning
                     .as_deref()
                     .and_then(crate::reasoning_display::bounded);
+                if turn
+                    .tool_calls
+                    .iter()
+                    .any(|call| crate::model_controls::is_control(&call.name))
+                {
+                    message.model_controls = Some(Box::new(model_controls.clone()));
+                }
                 let response_message_id = message.message_id.clone();
                 session.conversation.push(message);
                 stage_subagent_observations(

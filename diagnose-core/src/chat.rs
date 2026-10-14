@@ -242,6 +242,9 @@ pub struct ChatMessage {
     /// projector authorizes it and then serializes only the message payload.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_envelope: Option<desk_agent_protocol::data_lineage::DataEnvelope>,
+    /// Server-owned control observations bound to this exact model response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_controls: Option<Box<crate::model_controls::FrozenModelControls>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attachment_read: Option<Box<crate::conversation_attachment::model_read::ReadReceipt>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -276,6 +279,7 @@ impl ChatMessage {
             background_task_id: None,
             replay_disposition: None,
             data_envelope: None,
+            model_controls: None,
             attachment_read: None,
             raw_result: None,
             pending_delivery_format: None,
@@ -330,6 +334,7 @@ impl ChatMessage {
             background_task_id: None,
             replay_disposition: Some(replay_disposition),
             data_envelope: None,
+            model_controls: None,
             attachment_read: None,
             raw_result: None,
             pending_delivery_format: None,
@@ -375,6 +380,7 @@ impl ChatMessage {
             background_task_id: Some(background_task_id.into()),
             replay_disposition: None,
             data_envelope: None,
+            model_controls: None,
             attachment_read: None,
             raw_result: None,
             pending_delivery_format: None,
@@ -403,6 +409,7 @@ impl ChatMessage {
             background_task_id: None,
             replay_disposition: None,
             data_envelope: None,
+            model_controls: None,
             attachment_read: None,
             raw_result: None,
             pending_delivery_format: None,
@@ -435,6 +442,7 @@ impl ChatMessage {
             background_task_id: Some(background_task_id),
             replay_disposition: None,
             data_envelope: None,
+            model_controls: None,
             attachment_read: None,
             raw_result: None,
             pending_delivery_format: None,

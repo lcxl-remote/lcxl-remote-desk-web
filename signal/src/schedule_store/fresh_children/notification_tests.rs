@@ -368,13 +368,10 @@ async fn assert_result_only_authority(
             tools::SPAWN,
             serde_json::json!({"name":"forbidden", "task":"Start new work", "acceptance_criteria":["Return evidence"], "required_for_completion":false}),
         ),
-        (
-            tools::CANCEL,
-            serde_json::json!({"task_id":task_id,"expected_input_revision":1,"expected_control_revision":1}),
-        ),
+        (tools::CANCEL, serde_json::json!({"task_id":task_id})),
         (
             tools::MESSAGE,
-            serde_json::json!({"task_id":task_id,"expected_input_revision":1,"expected_control_revision":1,"message":"Change the task"}),
+            serde_json::json!({"task_id":task_id,"message":"Change the task"}),
         ),
     ] {
         let call = ToolCall {
@@ -386,7 +383,13 @@ async fn assert_result_only_authority(
         let mut forged = recovered.clone();
         forged.subagent_result_only = false;
         forged.ready_subagent_notification = None;
-        let operation = tools::parse(&forged, &call).unwrap();
+        let operation = match tools::parse(&forged, &call) {
+            Ok(operation) => operation,
+            Err(_) => {
+                assert!(desk_diagnose_core::model_controls::is_control(name));
+                continue;
+            }
+        };
         assert!(
             store
                 .execute_main_tool(&mut recovered.clone(), &call, operation, "forbidden-result")

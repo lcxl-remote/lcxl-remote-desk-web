@@ -20,6 +20,42 @@ pub struct SignalModelEgressStore {
 }
 
 impl SignalModelEgressStore {
+    pub(crate) async fn validate_control_on<
+        C: sea_orm::ConnectionTrait + crate::config::ConfigConnection,
+    >(
+        db: &C,
+        session: &desk_diagnose_core::session::PersistedAgentSession,
+        call: &desk_diagnose_core::chat::ToolCall,
+    ) -> Result<(), DbErr> {
+        use sea_orm::QuerySelect;
+        let invalid = || {
+            DbErr::Custom("model control observation is unavailable; query the task again".into())
+        };
+        let caller =
+            desk_diagnose_core::model_controls::caller(session, call).map_err(|_| invalid())?;
+        let output = desk_diagnose_core::model_egress::model_output_message_envelope(caller)
+            .map_err(|_| invalid())?;
+        let rows = model_egress_receipt::Entity::find()
+            .filter(
+                model_egress_receipt::Column::ContextConversationId.eq(&session.conversation_id),
+            )
+            .filter(model_egress_receipt::Column::ModelOutputEnvelopeId.eq(&output.envelope_id))
+            .filter(model_egress_receipt::Column::ModelOutputDigestSha256.eq(&output.digest_sha256))
+            .limit(2)
+            .all(db)
+            .await?;
+        let [row] = rows.as_slice() else {
+            return Err(invalid());
+        };
+        let inputs = completed_output_inputs(row, output)?;
+        caller
+            .model_controls
+            .as_ref()
+            .ok_or_else(invalid)?
+            .validate_audit(call, &inputs)
+            .map_err(|_| invalid())
+    }
+
     pub fn new(db: DatabaseConnection) -> Self {
         Self { db }
     }

@@ -56,6 +56,37 @@ pub fn hide_versions(schema: &mut Value) {
     }
 }
 
+/// Model inputs cannot select server-owned identities or observation metadata.
+pub(crate) fn validate_server_metadata(
+    call: &crate::chat::ToolCall,
+) -> Result<(), desk_agent_protocol::AgentError> {
+    if call.name != "request_permissions" {
+        return Ok(());
+    }
+    let value: Value = serde_json::from_str(&call.arguments_json)
+        .map_err(|_| crate::subagent::invalid("Tool arguments must be a JSON object."))?;
+    if let Some(items) = value["items"].as_array() {
+        for item in items {
+            if ["item_id", "resource_scope", "operation_scope"]
+                .iter()
+                .any(|field| item.get(field).is_some())
+            {
+                return Err(crate::subagent::invalid(
+                    "request_permissions items accept tool_name, business targets/inputs, reason and optional lifetime/use suggestions. Item identities and authorization scopes are compiled by the server; omit internal metadata. No request was created.",
+                ));
+            }
+            if let Some(exact) = item.get("exact_input") {
+                validate_server_metadata(&crate::chat::ToolCall {
+                    id: call.id.clone(),
+                    name: item["tool_name"].as_str().unwrap_or_default().into(),
+                    arguments_json: exact.to_string(),
+                })?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn fill(schema: &Value, input: &mut Value) {
     if let (Some(properties), Some(object)) =
         (schema["properties"].as_object(), input.as_object_mut())
@@ -859,6 +890,52 @@ pub fn describe_error_with_schema(name: &str, schema: &Value, reason: &str) -> S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn final_schemas_hide_derived_fields_and_keep_business_identifiers() {
+        for name in [
+            "request_permissions",
+            "cancel_subagent",
+            "send_subagent_message",
+            "cancel_scheduled_task",
+            "preview_computer_action",
+        ] {
+            let mut tool = tools()[name].clone();
+            crate::ui_model_ids::project_tool(&mut tool);
+            let schema = tool.parameters_schema;
+            for pointer in [
+                "/properties/expected_input_revision",
+                "/properties/expected_control_revision",
+                "/properties/expected_revision",
+                "/properties/adapter",
+                "/properties/items/items/properties/item_id",
+                "/properties/items/items/properties/resource_scope",
+                "/properties/items/items/properties/operation_scope",
+            ] {
+                assert!(schema.pointer(pointer).is_none(), "{name}: {pointer}");
+            }
+        }
+        let mut task = tools()["update_task_status"].clone();
+        crate::ui_model_ids::project_tool(&mut task);
+        assert!(
+            task.parameters_schema
+                .pointer("/properties/items/items/properties/item_id")
+                .is_some()
+        );
+        let input = crate::chat::ToolCall { id: "permission".into(), name: "request_permissions".into(), arguments_json: r#"{"items":[{"tool_name":"read_system_info","reason":"Read the requested machine"}]}"#.into() };
+        validate_server_metadata(&input).unwrap();
+        for field in ["item_id", "resource_scope", "operation_scope"] {
+            let mut value: Value = serde_json::from_str(&input.arguments_json).unwrap();
+            value["items"][0][field] = json!("forged");
+            assert!(
+                validate_server_metadata(&crate::chat::ToolCall {
+                    arguments_json: value.to_string(),
+                    ..input.clone()
+                })
+                .is_err()
+            );
+        }
+    }
     #[test]
     fn reported_errors_expose_schema_paths_without_dynamic_property_values() {
         use crate::model_observability::InputIssue;

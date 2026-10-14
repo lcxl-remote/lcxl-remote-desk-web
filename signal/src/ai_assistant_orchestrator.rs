@@ -2054,12 +2054,10 @@ async fn compose_turn_inner(
     if (resume_conversation_id.is_some()
         || scheduled.is_some()
         || goal_resume.is_some()
-        || delegated.as_ref().is_some_and(|runtime| {
-            matches!(
-                runtime,
-                desk_diagnose_core::subagent::runtime::RuntimeTurn::ParentCompletion { .. }
-            )
-        }))
+        || delegated
+            .as_ref()
+            .and_then(|runtime| runtime.read_context_binding())
+            .is_some())
         && let Some(original) = original_read_context
     {
         let result = async {

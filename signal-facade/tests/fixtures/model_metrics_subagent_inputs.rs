@@ -39,16 +39,22 @@ fn merged_tool(recorder: &Recorder) -> ObservationEvent {
 async fn missing_or_expired_subagent_references_reject_input_without_work_or_business_mutation() {
     for case in ["missing_status","missing_wait_member","stale_control","invalid_cursor"] {
         let db=database().await;
-        let (mut parent,calls)=super::creation::runnable_parent(&db).await;
+        let (mut parent,calls)=super::creation::runnable_parent_with_source(&db,super::creation::destination(),desk_agent_protocol::data_lineage::Sensitivity::Sensitive).await;
         let store=SubAgentStore::new(db.clone());
         let task=store.spawn_for_turn(&parent,&calls[0],&super::creation::spawn_request()).await.unwrap();
         let (name,args,issue)=match case {
             "missing_status"=>(tools::STATUS,serde_json::json!({"task_id":"private-missing-task"}),InputIssue::UnknownReference),
             "missing_wait_member"=>(tools::WAIT,serde_json::json!({"task_ids":[&task.task_id,"private-missing-task"],"mode":"all_terminal"}),InputIssue::UnknownReference),
-            "stale_control"=>(tools::CANCEL,serde_json::json!({"task_id":&task.task_id,"expected_input_revision":1,"expected_control_revision":2}),InputIssue::ReferenceExpired),
+            "stale_control"=>(tools::CANCEL,serde_json::json!({"task_id":&task.task_id}),InputIssue::ReferenceExpired),
             _=>(tools::LIST,serde_json::json!({"cursor":"private-invalid-cursor"}),InputIssue::UnknownReference),
         };
         let call=super::main_tools::committed_call(&db,&mut parent,"private-provider-call",name,args).await;
+        if case == "stale_control" {
+            store.control_for_owner("root", "1", "1", &desk_agent_protocol::ai_assistant::subagent::AiAssistantSubAgentControl {
+                client_request_id: "owner-adjustment".into(), task_id: task.task_id.clone(), expected_input_revision: 1, expected_control_revision: 1,
+                action: desk_agent_protocol::ai_assistant::subagent::SubAgentControlAction::Adjust { message: "Check the additional symptom".into() },
+            }).await.unwrap();
+        }
         let before=parent.clone();
         let task_before=load(&db,&task.task_id).await;
         let recorder=Arc::new(Recorder::default());

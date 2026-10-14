@@ -161,6 +161,7 @@ pub fn resolve_session_call(
     session: &crate::session::PersistedAgentSession,
     now_ms: u64,
 ) -> Result<ToolCall, AgentError> {
+    crate::model_input::validate_server_metadata(call)?;
     let (expanded, expected) = session.ui_references.expand_call(call)?;
     let mut resolved =
         resolve_call_with_references(&expanded, &session.conversation, now_ms, &expected)?;
@@ -747,6 +748,7 @@ pub(crate) fn project_model_message(
     if use_case == crate::model_profile::ModelUseCase::Approval {
         project_review_message(message, references, locators);
     }
+    crate::model_controls::project_message(message);
     project_tool_message(message);
     if let Some(references) = references {
         references.project_message(message);
@@ -913,6 +915,18 @@ pub fn project_tool(tool: &mut crate::chat::ToolSpec) {
                     *field = json!(model);
                 }
             }
+        }
+    }
+    if tool.name == "request_permissions"
+        && let Some(item) = schema.pointer_mut("/properties/items/items")
+    {
+        if let Some(properties) = item["properties"].as_object_mut() {
+            for key in ["item_id", "resource_scope", "operation_scope"] {
+                properties.remove(key);
+            }
+        }
+        if let Some(required) = item["required"].as_array_mut() {
+            required.retain(|key| key != "item_id");
         }
     }
     if tool.name == "request_permissions"

@@ -77,6 +77,13 @@ impl ScheduleStore {
         if parents.len() != 1 || !session.unclosed_tool_call_ids().contains(&call.id) {
             return Err(ScheduleStoreError::Conflict);
         }
+        if desk_diagnose_core::model_controls::is_control(&call.name) {
+            crate::model_egress_store::SignalModelEgressStore::validate_control_on(
+                &txn, session, call,
+            )
+            .await
+            .map_err(|_| ScheduleStoreError::Conflict)?;
+        }
         let parent = parents[0]
             .data_envelope
             .as_ref()

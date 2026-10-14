@@ -144,6 +144,42 @@ fn validate_lifetime(reference: &ObjectRef, now: u64) -> Result<(), AgentError> 
     Ok(())
 }
 
+fn observed_adapter(
+    history: &[ChatMessage],
+    target: &ObjectRef,
+    now: u64,
+) -> Result<desk_agent_protocol::computer_use::ComputerUseAdapterRef, AgentError> {
+    let mut selected = None;
+    for (_, mut value) in crate::result_model_ids::verified_results(history, now) {
+        crate::ui_model_output::expand_value(&mut value);
+        for kind in [
+            "DesktopUiInspect",
+            "OfficeDocumentInspect",
+            "SpreadsheetLiveInspect",
+            "DocumentLiveInspect",
+            "PresentationLiveInspect",
+        ] {
+            let Some(body) = value.pointer(&format!("/ReadContext/{kind}")) else {
+                continue;
+            };
+            let mut found = vec![];
+            references(body, &mut found);
+            if !found.contains(target) {
+                continue;
+            }
+            let adapter: desk_agent_protocol::computer_use::ComputerUseAdapterRef = serde_json::from_value(body["adapter"].clone())
+                .map_err(|_| invalid("The original adapter observation is unavailable. Inspect the target again before previewing."))?;
+            if selected.as_ref().is_some_and(|prior| prior != &adapter) {
+                return Err(invalid(
+                    "The target has conflicting adapter observations. Inspect it again.",
+                ));
+            }
+            selected = Some(adapter);
+        }
+    }
+    selected.ok_or_else(|| invalid("The original UI/Office adapter observation is unavailable. Inspect the target again before previewing."))
+}
+
 fn restore_field(
     object: &mut serde_json::Map<String, Value>,
     native: &str,
@@ -211,6 +247,12 @@ pub(crate) fn resolve_with_references(
         }
     }
     if tool == "preview_computer_action" {
+        if object.contains_key("adapter") {
+            return Err(invalid(
+                "Do not supply adapter metadata. Use targets from one current UI/Office observation.",
+            ));
+        }
+        let mut adapter = None;
         for action in object
             .get_mut("actions")
             .and_then(Value::as_array_mut)
@@ -226,6 +268,15 @@ pub(crate) fn resolve_with_references(
                 now,
                 expected,
             )?;
+            let target: ObjectRef = serde_json::from_value(action["target"].clone())
+                .map_err(|_| invalid("Preview needs an observed target_id."))?;
+            let observed = observed_adapter(history, &target, now)?;
+            if adapter.as_ref().is_some_and(|prior| prior != &observed) {
+                return Err(invalid(
+                    "Targets use different adapters. Split them into separate previews.",
+                ));
+            }
+            adapter = Some(observed);
             if action["action"]["adapter"] == "ui_in_application" {
                 restore_field(
                     action
@@ -242,6 +293,13 @@ pub(crate) fn resolve_with_references(
                 )?;
             }
         }
+        object.insert(
+            "adapter".into(),
+            serde_json::to_value(
+                adapter.ok_or_else(|| invalid("Preview needs observed targets."))?,
+            )
+            .unwrap(),
+        );
     }
     Ok(())
 }
@@ -340,6 +398,9 @@ pub(crate) fn project_arguments(tool: &str, value: &mut Value) {
             }
         }
     }
+    if tool == "preview_computer_action" {
+        object.remove("adapter");
+    }
 }
 
 fn project_schema_field(schema: &mut Value, native: &str, model: &str) {
@@ -365,6 +426,17 @@ fn project_schema_field(schema: &mut Value, native: &str, model: &str) {
 }
 
 pub(crate) fn project_tool(tool: &mut ToolSpec) {
+    if tool.name == "preview_computer_action" {
+        if let Some(properties) = tool.parameters_schema["properties"].as_object_mut() {
+            properties.remove("adapter");
+        }
+        if let Some(required) = tool.parameters_schema["required"].as_array_mut() {
+            required.retain(|key| key != "adapter");
+        }
+        if !tool.description.contains("The server restores the adapter") {
+            tool.description.push_str(" The server restores the adapter from each target's original UI/Office observation. Use targets from one adapter; split different adapters into separate previews. Do not supply adapter metadata.");
+        }
+    }
     if let Some((native, model)) = field(&tool.name) {
         project_schema_field(&mut tool.parameters_schema, native, model);
     }
@@ -451,6 +523,65 @@ mod tests {
     use super::*;
     use crate::file_scope::{DirectoryConsentSource, DirectoryProposal};
     use desk_agent_protocol::{AgentScope, ExecutionMode, computer_use::ObjectKind};
+
+    #[test]
+    fn preview_restores_exact_adapter_and_rejects_missing_or_model_supplied_metadata() {
+        let (mut session, _) = fixture();
+        let app =
+            json!({"token":"app","snapshot_id":"ui","object_kind":"application","expires_at":""});
+        let target =
+            json!({"token":"button","snapshot_id":"ui","object_kind":"ui_element","expires_at":""});
+        let adapter = json!({"kind":"macos_accessibility","version":crate::ai_assistant::MACOS_ACCESSIBILITY_ADAPTER_VERSION});
+        let node = |reference: Value, role: &str| json!({"object_ref":reference,"parent_index":null,"role":role,"name":"Calendar","value":null,"is_protected":false,"enabled":true,"supported_actions":["invoke"],"location":{"status":"unavailable"}});
+        let output = json!({"ReadContext":{"DesktopUiInspect":{"snapshot_id":"ui","adapter":adapter,"nodes":[node(app,"application"),node(target,"button")],"truncated":false}}});
+        session.conversation = crate::result_model_ids::tests::evidence(
+            "inspect_desktop_ui",
+            "ui-read",
+            json!({"queries":["Calendar"]}),
+            output.clone(),
+        );
+        session
+            .ui_references
+            .observe(&session.conversation)
+            .unwrap();
+        let input = json!({"risk":"low","reversible":true,"data_egress":false,"actions":[{"target_id":"e1","action":{"adapter":"ui_in_application","action":{"application_id":"a1","action":{"kind":"invoke"}}},"before_summary":"Button observed","after_intent":"Open requested panel","verification":"Read panel state"}]});
+        let call = ToolCall {
+            id: "preview".into(),
+            name: "preview_computer_action".into(),
+            arguments_json: input.to_string(),
+        };
+        let resolved = crate::ui_model_ids::resolve_session_call(&call, &session, 1).unwrap();
+        let native: Value = serde_json::from_str(&resolved.arguments_json).unwrap();
+        assert_eq!(native["adapter"], adapter);
+        crate::ai_assistant::validate_preview_call(&resolved).unwrap();
+        assert_eq!(call.arguments_json, input.to_string());
+        let mut supplied = input.clone();
+        supplied["adapter"] = adapter;
+        assert!(
+            crate::ui_model_ids::resolve_session_call(
+                &ToolCall {
+                    arguments_json: supplied.to_string(),
+                    ..call.clone()
+                },
+                &session,
+                1
+            )
+            .is_err()
+        );
+        let mut missing = output;
+        missing["ReadContext"]["DesktopUiInspect"]
+            .as_object_mut()
+            .unwrap()
+            .remove("adapter");
+        session.conversation = crate::result_model_ids::tests::evidence(
+            "inspect_desktop_ui",
+            "ui-read",
+            json!({}),
+            missing,
+        );
+        let error = crate::ui_model_ids::resolve_session_call(&call, &session, 1).unwrap_err();
+        assert!(error.message.contains("Inspect the target again"));
+    }
 
     fn fixture() -> (PersistedAgentSession, ObjectRef) {
         let reference = ObjectRef {

@@ -297,6 +297,12 @@ impl SubAgentStore {
         let txn = begin_main_tool(self, held, call, &operation, input_observation).await?;
         let now = chrono::Utc::now();
         let parent = parent_planning_on(&txn, held, now.timestamp_millis()).await?;
+        if desk_diagnose_core::model_controls::is_control(&call.name) {
+            crate::model_egress_store::SignalModelEgressStore::validate_control_on(
+                &txn, &parent, call,
+            )
+            .await?;
+        }
         let caller = parent
             .conversation
             .iter()

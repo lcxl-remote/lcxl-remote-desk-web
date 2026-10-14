@@ -49,6 +49,11 @@ impl RuntimeTurn {
         }
         self.source().child_read_context()
     }
+    /// Bind only the child's own revision and narrowed immutable read selection.
+    pub fn read_context_binding(&self) -> Option<(u64, ReadContextSelection)> {
+        self.read_context()
+            .map(|selection| (self.session().input_revision, selection))
+    }
     pub fn validate(&self) -> Result<(), AgentError> {
         self.source().validate()?;
         let session = self.session();

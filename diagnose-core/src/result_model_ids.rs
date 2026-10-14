@@ -838,6 +838,25 @@ pub(crate) fn project_result_message(message: &mut ChatMessage) {
     if created.is_some() {
         value["artifact_result_id"] = json!(message.message_id);
     }
+    // These are typed artifact metadata paths, never user-authored content JSON.
+    for path in [
+        "/output/value/content",
+        "/output/value/updated_file/content",
+    ] {
+        if (created.is_some()
+            || serde_json::from_value::<ComputerActionCompleted>(original.clone()).is_ok())
+            && original.pointer(path).is_some_and(|content| {
+                serde_json::from_value::<desk_agent_protocol::data_lineage::ContentRef>(
+                    content.clone(),
+                )
+                .is_ok()
+            })
+            && let Some(content) = value.pointer_mut(path).and_then(Value::as_object_mut)
+        {
+            content.remove("artifact_id");
+            content.remove("sha256");
+        }
+    }
     if matches!(
         source.as_str(),
         "read_text_file" | "create_text_file" | "create_local_message_draft" | "update_text_file"

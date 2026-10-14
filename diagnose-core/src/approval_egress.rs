@@ -1225,7 +1225,7 @@ mod tests {
             now_unix_ms,
         )
         .unwrap();
-        assert!(authorized.prompt.contains(&candidate.candidate_id));
+        assert!(!authorized.prompt.contains(&candidate.candidate_id));
         assert_eq!(authorized.source_audit.envelope_ids.len(), 5);
         assert!(!authorized.prompt.contains("original-private-body"));
         assert_eq!(authorized.prompt_audit.envelope_ids.len(), 1);

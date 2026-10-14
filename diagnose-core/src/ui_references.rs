@@ -528,6 +528,7 @@ impl UiReferenceState {
                     | "send_background_input"
                     | "send_raw_input"
                     | "execute_wayland_output_input"
+                    | "preview_computer_action"
             ) || crate::browser_model_ids::supports(tool);
             if ui {
                 if let Some(alias) = value
@@ -997,6 +998,12 @@ impl UiReferenceState {
             {
                 for action in actions {
                     self.expand_arguments(tool, action, expected)?;
+                    if action.pointer("/action/adapter").and_then(Value::as_str)
+                        == Some("ui_in_application")
+                        && let Some(id) = action.pointer_mut("/action/action/application_id")
+                    {
+                        self.expand_id(id, &["a"], expected)?;
+                    }
                 }
             }
         }
@@ -1008,6 +1015,7 @@ impl UiReferenceState {
                 | "send_raw_input"
                 | "execute_wayland_output_input"
                 | "read_current_screen"
+                | "preview_computer_action"
         );
         let browser = crate::browser_model_ids::supports(tool) && tool != "create_formula_workbook";
         if native || browser {

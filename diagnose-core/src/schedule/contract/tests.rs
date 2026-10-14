@@ -2076,7 +2076,7 @@ fn automatic_approval_candidate_keeps_exact_input_scope_and_bounded_lifetime() {
         name: crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME.into(),
         arguments_json: serde_json::json!({"items":[{
             "item_id":"inspect-1", "provider_id":provider.wire.provider_id, "tool_name":tool_name,
-            "expected_effect":capability.wire.effect, "resource_scope":["target:device"],
+            "expected_effect":capability.wire.effect,
             "exact_input":{}, "suggested_ttl_seconds":60, "suggested_max_uses":1, "reason":"Inspect"
         }]})
         .to_string(),

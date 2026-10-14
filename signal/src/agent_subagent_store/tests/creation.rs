@@ -427,3 +427,50 @@ async fn child_locale_is_frozen_when_spawned_and_is_not_a_new_main_preference() 
         claim.session.response_locale
     );
 }
+
+#[tokio::test]
+async fn child_read_binding_is_narrowed_and_parent_completion_has_no_binding() {
+    let db = database().await;
+    let (parent, calls) = runnable_parent(&db).await;
+    let store = SubAgentStore::new(db.clone());
+    let task = store
+        .spawn_for_turn(&parent, &calls[0], &spawn_request())
+        .await
+        .unwrap();
+    let mut runtime = store
+        .child_runtime_candidate(&task.task_id)
+        .await
+        .unwrap()
+        .unwrap();
+    if let desk_diagnose_core::subagent::runtime::RuntimeTurn::Child {
+        creation, session, ..
+    } = &mut runtime
+    {
+        session.input_revision = 7;
+        creation.source.original_read_context = Some(
+            desk_diagnose_core::input_read_context::ReadContextSelection {
+                tool_names: vec!["read_system_info".into()],
+                expires_at: None,
+                object_attachments: vec![],
+                live_targets: vec![],
+            },
+        );
+    } else {
+        panic!("child runtime required")
+    }
+    let (revision, context) = runtime.read_context_binding().unwrap();
+    assert_eq!(revision, 7);
+    assert_eq!(context.tool_names, vec!["read_system_info"]);
+    assert!(context.object_attachments.is_empty() && context.live_targets.is_empty());
+    let source = runtime.source().clone();
+    let completion = desk_diagnose_core::subagent::runtime::RuntimeTurn::ParentCompletion {
+        session: parent,
+        source,
+    };
+    assert!(completion.read_context_binding().is_none());
+    if let desk_diagnose_core::subagent::runtime::RuntimeTurn::Child { creation, .. } = &mut runtime
+    {
+        creation.source.original_read_context = None;
+    }
+    assert!(runtime.read_context_binding().is_none());
+}

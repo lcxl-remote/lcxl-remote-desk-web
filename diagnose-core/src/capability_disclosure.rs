@@ -214,18 +214,24 @@ fn invalid(error: CapabilityDisclosureError) -> AgentError {
             "Invalid describe_tools input: {reason}. Required: tool_names, a non-empty array of exact Provider names. Complete example: {{\"tool_names\":[\"inspect_desktop_ui\"]}}. No permission or focus was changed."
         ),
         CapabilityDisclosureError::UnknownOrOutOfSurface(name) => {
-            if matches!(
-                name.as_str(),
-                "request_permissions"
-                    | "describe_tools"
-                    | "update_task_status"
-                    | "control_goal"
-                    | "load_conversation_history"
-                    | "read_conversation_attachment"
-                    | "request_directory"
-            ) {
+            if crate::subagent::tools::effect(&name).is_some()
+                || crate::schedule::management_tools::specs()
+                    .iter()
+                    .any(|spec| spec.name == name)
+                || name == crate::goal_tools::REQUEST_GOAL_TOOL_NAME
+                || matches!(
+                    name.as_str(),
+                    "request_permissions"
+                        | "describe_tools"
+                        | "update_task_status"
+                        | "control_goal"
+                        | "load_conversation_history"
+                        | "read_conversation_attachment"
+                        | "request_directory"
+                )
+            {
                 format!(
-                    "`{name}` is a built-in conversation tool, not a Provider capability. It does not need capability loading. Use it directly when present in the current tool list. Remove ALL built-in tools from tool_names and retry with Provider names from the capability index only. No working set or permission was changed; no approval card was created."
+                    "`{name}` is a built-in conversation tool, not a Provider capability. It does not need capability loading. Use its definition directly when present in the current tool list. Absence means it is not exposed in this phase, not that the product lacks this feature. Remove ALL built-in tools from tool_names and retry with Provider names from the capability index only. No working set or permission was changed; no approval card was created."
                 )
             } else {
                 format!(

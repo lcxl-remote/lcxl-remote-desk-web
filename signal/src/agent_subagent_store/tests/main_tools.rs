@@ -212,6 +212,48 @@ pub(super) async fn committed_call(
         )
         .unwrap(),
     );
+    if desk_diagnose_core::model_controls::is_control(name) {
+        let projection = SubAgentStore::new(db.clone())
+            .main_projection_for_turn(parent)
+            .await
+            .unwrap();
+        let policy = desk_diagnose_core::model_egress::ModelEgressPolicy {
+            destination: super::creation::destination(),
+            selected_source_tools: Default::default(),
+            export_authorization_id: "control-test-export".into(),
+            now_unix_ms: chrono::Utc::now().timestamp_millis() as u64,
+            byte_cap: 1024 * 1024,
+            permission_resume: false,
+        };
+        let authorized = policy
+            .authorize_request(desk_diagnose_core::seam::ModelRequest::text_only(
+                vec![projection.clone()],
+                desk_diagnose_core::prompt::ResponseFormatSpec::None,
+            ))
+            .unwrap();
+        let turn = desk_diagnose_core::chat::ModelTurn {
+            text: message.text.clone(),
+            tool_calls: vec![call.clone()],
+            stop_reason: desk_diagnose_core::chat::StopReason::ToolUse,
+            ..Default::default()
+        };
+        let output = policy
+            .derive_model_output_envelope(&turn, &authorized.input_envelopes)
+            .unwrap();
+        let mut binding =
+            desk_diagnose_core::model_controls::FrozenModelControls::capture(parent, &[projection]);
+        binding.retain_exported(Some(&output), Some(&policy.export_authorization_id));
+        message.model_controls = Some(Box::new(binding));
+        message.data_envelope = Some(output.clone());
+        super::observation::record_accepted_provider(
+            db,
+            parent,
+            &policy,
+            &authorized.input_envelopes[0],
+            &output,
+        )
+        .await;
+    }
     parent.conversation.push(message);
     save_main_delegation_session(db, parent).await.unwrap();
     call
@@ -589,7 +631,12 @@ async fn short_task_ids_keep_query_wait_and_control_call_authority() {
         tools::MESSAGE,
     ] {
         let db = database().await;
-        let (mut parent, calls) = super::creation::runnable_parent(&db).await;
+        let (mut parent, calls) = super::creation::runnable_parent_with_source(
+            &db,
+            super::creation::destination(),
+            desk_agent_protocol::data_lineage::Sensitivity::Sensitive,
+        )
+        .await;
         let store = SubAgentStore::new(db.clone());
         let receipt = store
             .execute_main_tool(
@@ -611,10 +658,10 @@ async fn short_task_ids_keep_query_wait_and_control_call_authority() {
         let arguments = match tool {
             tools::WAIT => serde_json::json!({"task_ids":[native],"mode":"all_terminal"}),
             tools::CANCEL => {
-                serde_json::json!({"task_id":native,"expected_input_revision":1,"expected_control_revision":1})
+                serde_json::json!({"task_id":native})
             }
             tools::MESSAGE => {
-                serde_json::json!({"task_id":native,"expected_input_revision":1,"expected_control_revision":1,"message":"Check one additional symptom"})
+                serde_json::json!({"task_id":native,"message":"Check one additional symptom"})
             }
             _ => serde_json::json!({"task_id":native}),
         };
@@ -685,6 +732,64 @@ async fn short_task_ids_keep_query_wait_and_control_call_authority() {
                     .is_err()
             );
             assert_eq!(parent, unchanged);
+        }
+    }
+}
+
+#[tokio::test]
+async fn frozen_model_control_survives_session_decode_but_observation_race_keeps_cas() {
+    for changed in [false, true] {
+        let db = database().await;
+        let (mut parent, calls) = super::creation::runnable_parent_with_source(
+            &db,
+            super::creation::destination(),
+            desk_agent_protocol::data_lineage::Sensitivity::Sensitive,
+        )
+        .await;
+        let store = SubAgentStore::new(db.clone());
+        let task = store
+            .spawn_for_turn(&parent, &calls[0], &super::creation::spawn_request())
+            .await
+            .unwrap();
+        let call = committed_call(
+            &db,
+            &mut parent,
+            "frozen-cancel",
+            tools::CANCEL,
+            serde_json::json!({"task_id":task.task_id}),
+        )
+        .await;
+        parent =
+            PersistedAgentSession::decode_json(&parent.encode_json_for_storage().unwrap()).unwrap();
+        if changed {
+            store.control_for_owner("root", "1", "1", &desk_agent_protocol::ai_assistant::subagent::AiAssistantSubAgentControl { client_request_id: "concurrent-owner-adjustment".into(), task_id: task.task_id.clone(), expected_input_revision: 1, expected_control_revision: 1, action: desk_agent_protocol::ai_assistant::subagent::SubAgentControlAction::Adjust { message: "Check the additional symptom".into() } }).await.unwrap();
+        }
+        let before = load(&db, &task.task_id).await;
+        let operation = tools::parse(&parent, &call).unwrap();
+        let result = SubAgentStore::new(db.clone())
+            .execute_main_tool(
+                &mut parent,
+                &call,
+                operation.clone(),
+                "frozen-control-result",
+            )
+            .await;
+        if changed {
+            assert!(result.is_err());
+            assert_eq!(load(&db, &task.task_id).await, before);
+        } else {
+            let result = result.unwrap();
+            assert_eq!(
+                load(&db, &task.task_id).await.state,
+                SubAgentState::Cancelled
+            );
+            let after = load(&db, &task.task_id).await;
+            let repeated = store
+                .execute_main_tool(&mut parent, &call, operation, "unused-repeat")
+                .await
+                .unwrap();
+            assert_eq!(result.result_message_id, repeated.result_message_id);
+            assert_eq!(load(&db, &task.task_id).await, after);
         }
     }
 }

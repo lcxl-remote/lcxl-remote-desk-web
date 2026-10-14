@@ -257,6 +257,18 @@ fn attachments_restore_entire_artifact_and_freeze_only_matching_lineage() {
         json!({"content_utf8":"old"}),
         json!(completed),
     );
+    let raw = history.last().unwrap().clone();
+    let mut model = raw.clone();
+    project_result_message(&mut model);
+    let projected: Value = serde_json::from_str(&model.text).unwrap();
+    assert!(
+        projected
+            .pointer("/output/value/content/artifact_id")
+            .is_none()
+    );
+    assert!(projected.pointer("/output/value/content/sha256").is_none());
+    assert_eq!(projected["output"]["value"]["content"]["size_bytes"], 3);
+    assert_eq!(history.last().unwrap(), &raw);
     let mut other = history.last().unwrap().clone();
     other.text = json!({"status":"pending"}).to_string();
     other.data_envelope.as_mut().unwrap().envelope_id = "other".into();

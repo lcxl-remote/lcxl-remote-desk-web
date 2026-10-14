@@ -2332,7 +2332,7 @@ async fn permission_planning_records_request_without_dispatch_or_grant() {
             [tool_use_args(
                 "permission-call",
                 crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME,
-                r#"{"items":[{"item_id":"inspect","tool_name":"inspect_desktop_session","suggested_ttl_seconds":300,"suggested_max_uses":1,"reason":"Inspect the target requested by the user"}]}"#,
+                r#"{"items":[{"tool_name":"inspect_desktop_session","suggested_ttl_seconds":300,"suggested_max_uses":1,"reason":"Inspect the target requested by the user"}]}"#,
             )]
             .into(),
         ),
@@ -2502,7 +2502,7 @@ async fn permission_planning_accepts_valid_request_without_prior_loading() {
                 tool_use_args(
                     "permission-call",
                     crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME,
-                    r#"{"items":[{"item_id":"inspect","tool_name":"inspect_desktop_session","suggested_ttl_seconds":300,"suggested_max_uses":1,"reason":"Inspect the target requested by the user"}]}"#,
+                    r#"{"items":[{"tool_name":"inspect_desktop_session","suggested_ttl_seconds":300,"suggested_max_uses":1,"reason":"Inspect the target requested by the user"}]}"#,
                 ),
                 answer("I need to load that capability first."),
             ]
@@ -2573,7 +2573,7 @@ async fn permission_planning_reuses_settled_equivalent_request_without_new_pendi
                 tool_use_args(
                     "duplicate-permission-call",
                     crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME,
-                    r#"{"items":[{"item_id":"inspect-b","provider_id":"desktop.session","tool_name":"inspect_desktop_session","expected_effect":"read_device","suggested_ttl_seconds":300,"suggested_max_uses":1,"reason":"reworded duplicate"}]}"#,
+                    r#"{"items":[{"provider_id":"desktop.session","tool_name":"inspect_desktop_session","expected_effect":"read_device","suggested_ttl_seconds":300,"suggested_max_uses":1,"reason":"reworded duplicate"}]}"#,
                 ),
                 answer("I will adapt to the recorded denial."),
             ]
@@ -2672,7 +2672,7 @@ async fn exhausted_permission_renewal_creates_a_new_owner_decision_without_dispa
                 tool_use_args(
                     "duplicate-permission-call",
                     crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME,
-                    r#"{"items":[{"item_id":"inspect-b","provider_id":"desktop.session","tool_name":"inspect_desktop_session","expected_effect":"read_device","suggested_ttl_seconds":300,"suggested_max_uses":1,"reason":"reworded duplicate"}]}"#,
+                    r#"{"items":[{"provider_id":"desktop.session","tool_name":"inspect_desktop_session","expected_effect":"read_device","suggested_ttl_seconds":300,"suggested_max_uses":1,"reason":"reworded duplicate"}]}"#,
                 ),
                 answer("I will adapt to the recorded denial."),
             ]
@@ -9445,7 +9445,7 @@ async fn unknown_outcome_allows_requesting_a_new_authorized_mutation() {
             [tool_use_args(
                 "permission-call",
                 crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME,
-                r#"{"items":[{"item_id":"command","tool_name":"execute_ui_actions","application_scope":{"application_id":"a1","actions":["invoke"]},"suggested_ttl_seconds":120,"suggested_max_uses":1,"reason":"Create event"}]}"#,
+                r#"{"items":[{"tool_name":"execute_ui_actions","application_scope":{"application_id":"a1","actions":["invoke"]},"suggested_ttl_seconds":120,"suggested_max_uses":1,"reason":"Create event"}]}"#,
             ), answer("Please review the unresolved action.")]
             .into(),
         ),
