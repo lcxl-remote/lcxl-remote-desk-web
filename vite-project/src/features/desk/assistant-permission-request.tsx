@@ -36,11 +36,6 @@ type PermissionItemEdit = {
     maxUses?: number;
 };
 
-type PermissionDecisionView = {
-    source: 'owner' | 'ai_approval' | 'review_unavailable';
-    items: { itemId: string; approved: boolean; reasonCode?: string | null; reason?: string | null }[];
-};
-
 export function AssistantPermissionRequest({ request, canDecide, disabled = false, busy = false, waitingForTurn = false, interactive, onDecide }: {
     request: PermissionRequestDto;
     canDecide: boolean;
@@ -53,7 +48,7 @@ export function AssistantPermissionRequest({ request, canDecide, disabled = fals
 }) {
     const interactiveItem = interactiveCommandItem(request);
     const { t } = useTranslation();
-    const decision = (request as PermissionRequestDto & { decision?: PermissionDecisionView | null }).decision;
+    const decision = request.decision;
     const [permissionSelections, setPermissionSelections] = useState<Record<string, string[]>>({});
     const [permissionEdits, setPermissionEdits] = useState<
         Record<string, Record<string, PermissionItemEdit>>
@@ -172,10 +167,10 @@ export function AssistantPermissionRequest({ request, canDecide, disabled = fals
                                 <p className="text-sm font-medium">{reason}</p>
                                 {decidedItem && <div className="mt-2 space-y-1 text-xs">
                                     <p className={decidedItem.approved ? 'text-emerald-700 dark:text-emerald-300' : 'text-red-700 dark:text-red-300'}>
-                                        {t(`pages.aiAssistant.permissionItemDecision.${decidedItem.approved ? 'approved' : 'denied'}`)}
+                                        {t(`pages.aiAssistant.permissionItemOutcome.${decidedItem.outcome}`)} · {t(`pages.aiAssistant.permissionDecisionSource.${decidedItem.source}`)}
                                     </p>
                                     {decidedItem.reason && <p className="whitespace-pre-wrap break-words text-muted-foreground">
-                                        {t('pages.aiAssistant.permissionAiReason')}: {decidedItem.reason}
+                                        {t('pages.aiAssistant.permissionDecisionReason')}: {decidedItem.source === 'system' ? t(`pages.aiAssistant.permissionSystemReason.${decidedItem.reasonCode}`, { defaultValue: decidedItem.reason }) : decidedItem.reason}
                                     </p>}
                                 </div>}
                                 <p className="mt-1 break-all text-xs text-muted-foreground">

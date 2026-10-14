@@ -38,6 +38,43 @@ pub struct DirectoryDecision {
     pub candidate_id: Option<String>,
 }
 
+pub fn preflight_capacity(
+    session: &PersistedAgentSession,
+    proposal: DirectoryProposal,
+    delegation: &ApprovalDelegation,
+    goal: Option<&GoalRun>,
+    configured_bytes: usize,
+    now_unix_ms: u64,
+) -> Result<(), ApprovalReviewError> {
+    let request_id = proposal.request_id.clone();
+    let update = crate::file_scope::transaction::FileScopeUpdate {
+        subject: session
+            .file_scope_subject(
+                &session.actor_id,
+                &session.device_id,
+                &session.conversation_id,
+            )
+            .map_err(|_| ApprovalReviewError::InvalidContext)?,
+        client_conversation_id: session
+            .client_conversation_id
+            .clone()
+            .ok_or(ApprovalReviewError::InvalidContext)?,
+        client_request_id: request_id.clone(),
+        expected_revision: session.file_scope.revision(),
+        mutation: crate::file_scope::transaction::FileScopeMutation::Propose { proposal },
+    };
+    let (pending, _) = crate::file_scope::transaction::prepare(session, &update, now_unix_ms)
+        .map_err(|_| ApprovalReviewError::InvalidContext)?;
+    if pending.file_scope.records().iter().any(|record| {
+        record.proposal.request_id == request_id
+            && record.proposal.source == DirectoryConsentSource::TaskContract
+    }) {
+        return Ok(());
+    }
+    let mut candidate = candidate(&pending, &request_id, delegation, goal, now_unix_ms)?;
+    fit_review_context(&mut candidate, &pending, configured_bytes)
+}
+
 pub fn failure_reason(reason: Option<crate::approval_observation::ReviewReason>) -> &'static str {
     use crate::approval_observation::ReviewReason;
     match reason {
@@ -221,6 +258,58 @@ pub fn deadline(record: &DirectoryConsent) -> Result<u64, ApprovalReviewError> {
         .min(identity_expiry))
 }
 
+fn current_binding<'a>(
+    candidate: &'a ApprovalReviewCandidate,
+    session: &'a PersistedAgentSession,
+    goal: Option<&GoalRun>,
+) -> Result<SourceReviewBinding<'a>, ApprovalReviewError> {
+    let ApprovalSource::DirectoryProposal { request_id } = &candidate.source else {
+        return Err(ApprovalReviewError::InvalidCandidate);
+    };
+    let record = pending(session, request_id)?;
+    let expires = deadline(record)?.min(goal.map_or(u64::MAX, |goal| goal.deadline_unix_ms));
+    if u64::try_from(session.policy_revision).ok() != Some(candidate.policy_revision)
+        || candidate.action_json != action(session, record)
+        || candidate.descriptor_json != descriptor()
+        || candidate.tool_name != crate::directory_tools::REQUEST_DIRECTORY
+        || candidate.risk != CapabilityRiskTier::R1
+        || candidate.input_kind != ApprovalInputKind::ExactCall
+        || candidate.expires_at_unix_ms != expires
+    {
+        return Err(ApprovalReviewError::InvalidContext);
+    }
+    let context = record
+        .review_context
+        .as_ref()
+        .ok_or(ApprovalReviewError::InvalidContext)?;
+    Ok(SourceReviewBinding {
+        source: &candidate.source,
+        tool_call_id: &context.call_id,
+        turn_id: &context.turn_id,
+        lease_token: context.lease_token,
+        tool_name: &candidate.tool_name,
+        action_json: &candidate.action_json,
+        descriptor_json: &candidate.descriptor_json,
+        risk: candidate.risk,
+        input_kind: candidate.input_kind,
+        input_revision: context.input_revision,
+        expires_at_unix_ms: expires,
+    })
+}
+
+pub fn validate_current(
+    candidate: &ApprovalReviewCandidate,
+    session: &PersistedAgentSession,
+    goal: Option<&GoalRun>,
+    delegation: &ApprovalDelegation,
+    now: u64,
+) -> Result<(), ApprovalReviewError> {
+    let binding = current_binding(candidate, session, goal)?;
+    crate::approval_egress::validate_source_review_current(
+        candidate, &binding, session, goal, delegation, now,
+    )
+}
+
 pub fn authorize(
     candidate: &ApprovalReviewCandidate,
     session: &PersistedAgentSession,
@@ -229,33 +318,10 @@ pub fn authorize(
     destination: &DestinationIdentity,
     now: u64,
 ) -> Result<AuthorizedApprovalReview, ApprovalReviewError> {
-    let ApprovalSource::DirectoryProposal { request_id } = &candidate.source else {
-        return Err(ApprovalReviewError::InvalidCandidate);
-    };
-    let record = pending(session, request_id)?;
-    let current = self::candidate(session, request_id, delegation, goal, now)?;
-    if &current != candidate {
-        return Err(ApprovalReviewError::InvalidContext);
-    }
-    let context = record
-        .review_context
-        .as_ref()
-        .ok_or(ApprovalReviewError::InvalidContext)?;
+    let binding = current_binding(candidate, session, goal)?;
     authorize_source_review_egress(
         candidate,
-        &SourceReviewBinding {
-            source: &candidate.source,
-            tool_call_id: &context.call_id,
-            turn_id: &context.turn_id,
-            lease_token: context.lease_token,
-            tool_name: &candidate.tool_name,
-            action_json: &candidate.action_json,
-            descriptor_json: &candidate.descriptor_json,
-            risk: candidate.risk,
-            input_kind: candidate.input_kind,
-            input_revision: context.input_revision,
-            expires_at_unix_ms: candidate.expires_at_unix_ms,
-        },
+        &binding,
         session,
         goal,
         delegation,
@@ -380,6 +446,48 @@ mod tests {
     }
 
     #[test]
+    fn directory_review_selects_configured_capacity_and_does_not_reexport_at_settlement() {
+        let (mut session, delegation, destination, now, id) = fixture();
+        let mut optional = ChatMessage::tool_result("auxiliary", "old-call", "x".repeat(80 * 1024));
+        optional.data_envelope = Some(
+            crate::subagent::projection::envelope(
+                "auxiliary",
+                &optional.text,
+                "test",
+                &[session.conversation[0].data_envelope.clone().unwrap()],
+            )
+            .unwrap(),
+        );
+        session.conversation.push(optional);
+        let mut selected = candidate(&session, &id, &delegation, None, now).unwrap();
+        fit_review_context(&mut selected, &session, 16 * 1024).unwrap();
+        assert_eq!(selected.context.omitted_evidence_count, 1);
+        assert!(authorize(&selected, &session, None, &delegation, &destination, now).is_ok());
+        let parent = session.conversation[0].data_envelope.clone().unwrap();
+        let optional = session.conversation.last_mut().unwrap();
+        optional.text = "brief historical observation".into();
+        optional.data_envelope = Some(
+            crate::subagent::projection::envelope("auxiliary", &optional.text, "test", &[parent])
+                .unwrap(),
+        );
+        session
+            .conversation
+            .last_mut()
+            .unwrap()
+            .data_envelope
+            .as_mut()
+            .unwrap()
+            .retention
+            .expires_at_unix_ms = Some(now + 10);
+        let frozen = candidate(&session, &id, &delegation, None, now).unwrap();
+        assert!(authorize(&frozen, &session, None, &delegation, &destination, now).is_ok());
+        assert!(validate_current(&frozen, &session, None, &delegation, now + 20).is_ok());
+        assert!(authorize(&frozen, &session, None, &delegation, &destination, now + 20).is_err());
+        session.policy_revision += 1;
+        assert!(validate_current(&frozen, &session, None, &delegation, now + 20).is_err());
+    }
+
+    #[test]
     fn active_directory_review_is_exact_and_keeps_native_proofs_out_of_model_input() {
         let (session, delegation, destination, now, id) = fixture();
         let candidate = candidate(&session, &id, &delegation, None, now).unwrap();
@@ -425,7 +533,7 @@ mod tests {
         let (session, delegation, _, now, id) = fixture();
         let candidate = candidate(&session, &id, &delegation, None, now).unwrap();
         let decision = DirectoryDecision {
-            source: crate::dynamic_run::PermissionDecisionSource::ReviewUnavailable {
+            source: crate::dynamic_run::PermissionDecisionSource::SystemDecision {
                 reason_code: "timeout".into(),
                 reason: "Reviewer timed out".into(),
             },

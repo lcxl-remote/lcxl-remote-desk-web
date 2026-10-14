@@ -660,6 +660,12 @@ async fn review_without_planner(
         source_record_id: "original-request:item".into(),
         source_planning_lease_token: None,
         context_hmac_sha256: "a".repeat(64),
+        context_binding: desk_diagnose_core::approval_review::ReviewContextBinding {
+            evidence_ids: vec![],
+            current_authority: vec![],
+            skipped_calls: vec![],
+            omitted_evidence_count: 0,
+        },
         request_sha256: "b".repeat(64),
         model_destination: super::creation::destination(),
         root_conversation_id: "root".into(),

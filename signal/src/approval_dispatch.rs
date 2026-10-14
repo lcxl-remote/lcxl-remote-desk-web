@@ -130,7 +130,7 @@ pub async fn process_pending_permission_review(
         return false;
     };
     let now_unix_ms = u64::try_from(now.timestamp_millis()).unwrap_or(0);
-    let candidates = crate::agent_approval_store::prepare_permission_review_batch(
+    let candidates = match crate::agent_approval_store::prepare_permission_review_batch(
         &db,
         &subject.conversation_id,
         &subject.owner_id,
@@ -143,7 +143,15 @@ pub async fn process_pending_permission_review(
         now_unix_ms,
     )
     .await
-    .unwrap_or_default();
+    {
+        Ok(candidates) => candidates,
+        Err(_) => return false,
+    };
+    if candidates.is_empty() {
+        return true;
+    }
+    let mut unstarted_failures = Vec::new();
+    let mut retry_required = false;
     for candidate in &candidates {
         let lease_owner = format!("oss-review-{}", uuid::Uuid::new_v4());
         let claim = match crate::agent_approval_store::claim_permission_review(
@@ -158,7 +166,29 @@ pub async fn process_pending_permission_review(
         .await
         {
             Ok(claim) => claim,
-            Err(_) => break,
+            Err(crate::agent_approval_store::ReviewStartError::Unavailable(reason)) => {
+                let (reason_code, reason_text) =
+                    desk_diagnose_core::approval_review::system_review_reason(reason);
+                if let desk_diagnose_core::approval_review::ApprovalSource::PermissionItem {
+                    item_id,
+                    ..
+                } = &candidate.source
+                {
+                    unstarted_failures.push(
+                        desk_diagnose_core::dynamic_run::SystemPermissionDecisionEvidence {
+                            item_id: item_id.clone(),
+                            candidate_id: Some(candidate.candidate_id.clone()),
+                            reason_code: reason_code.into(),
+                            reason: reason_text.into(),
+                        },
+                    );
+                }
+                continue;
+            }
+            Err(crate::agent_approval_store::ReviewStartError::Backend(_error)) => {
+                retry_required = true;
+                continue;
+            }
         };
         let Some(claim) = claim else {
             continue;
@@ -193,6 +223,9 @@ pub async fn process_pending_permission_review(
             return false;
         }
     }
+    if retry_required {
+        return false;
+    }
     if subject.directory_request {
         return crate::agent_approval_store::deny_directory_unavailable(
             &db,
@@ -222,6 +255,7 @@ pub async fn process_pending_permission_review(
             },
             &subject.request_id,
             &candidates,
+            &unstarted_failures,
             PermissionGrantIssuanceContext {
                 surface: ProductSurface::OssPersonalOwner,
                 registry: &device.registry,
@@ -235,29 +269,7 @@ pub async fn process_pending_permission_review(
         .await;
     let outcome = match outcome {
         Ok(outcome) => outcome,
-        Err(_) => match store
-            .deny_unavailable_review(
-                PermissionDecisionSubject {
-                    conversation_id: &subject.conversation_id,
-                    actor_id: &subject.owner_id,
-                    device_id: &subject.device_id,
-                },
-                &subject.request_id,
-                PermissionGrantIssuanceContext {
-                    surface: ProductSurface::OssPersonalOwner,
-                    registry: &device.registry,
-                    inventory: &device.inventory,
-                    readiness_revision: device.readiness_revision,
-                    now_unix_ms,
-                    implicit_fresh_object_refs: &device.implicit_fresh_object_refs,
-                },
-                &now.to_rfc3339(),
-            )
-            .await
-        {
-            Ok(outcome) => outcome,
-            Err(_) => return false,
-        },
+        Err(_) => return false,
     };
     if !outcome.newly_recorded {
         return true;

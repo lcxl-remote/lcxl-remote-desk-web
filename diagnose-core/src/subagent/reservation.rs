@@ -167,6 +167,7 @@ pub struct ReviewCallAuthority {
     pub source_record_id: String,
     pub source_planning_lease_token: Option<u64>,
     pub context_hmac_sha256: String,
+    pub context_binding: crate::approval_review::ReviewContextBinding,
     pub request_sha256: String,
     pub model_destination: desk_agent_protocol::data_lineage::DestinationIdentity,
     pub root_conversation_id: String,
@@ -265,6 +266,12 @@ mod tests {
             source_record_id: "request:item".into(),
             source_planning_lease_token: None,
             context_hmac_sha256: "a".repeat(64),
+            context_binding: crate::approval_review::ReviewContextBinding {
+                evidence_ids: vec![],
+                current_authority: vec![],
+                skipped_calls: vec![],
+                omitted_evidence_count: 0,
+            },
             request_sha256: "b".repeat(64),
             model_destination: desk_agent_protocol::data_lineage::DestinationIdentity::Model {
                 connection_id: "review-provider".into(),

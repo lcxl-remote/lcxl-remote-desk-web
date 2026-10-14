@@ -14,6 +14,7 @@ vi.mock('@/services/clients', () => ({
     getModelProvider: h.gateway,
     reuseAiGatewayForApproval: h.reuse,
 }));
+vi.mock('@/features/approval/settings', () => ({ ApprovalTraceSettingsPanel: () => null }));
 import { ApprovalModelSettings } from './approval-model-settings';
 
 let config: ApprovalModelPublic;
@@ -21,7 +22,7 @@ let gateway: ModelProviderPublic;
 beforeEach(() => {
     vi.resetAllMocks();
     config = {
-        enabled: true, api_key_set: true, available: false, unavailable_reason: 'approval_model_not_tested',
+        enabled: true, api_key_set: true, available: true, unavailable_reason: null,
         configuration_revision: 7, connection_revision: 3, profile_revision: 4,
         wire_protocol: 'open_ai_chat_completions', model: 'review-model', base_url: 'https://example.test/v1',
         request_options: {}, output_limit_field: 'max_tokens',
@@ -90,9 +91,9 @@ describe('explicitly reusing the saved AI gateway', () => {
         expect(h.update).not.toHaveBeenCalled();
     });
 
-    it.each(['disabled', 'untested', 'stale', 'identical', 'partial'])('asks before overwriting %s saved approval settings', async state => {
+    it.each(['disabled', 'untested', 'reconfigured', 'identical', 'partial'])('asks before overwriting %s saved approval settings', async state => {
         if (state === 'disabled') config.enabled = false;
-        if (state === 'stale') config.unavailable_reason = 'approval_model_probe_stale';
+        if (state === 'reconfigured') config.configuration_revision += 1;
         if (state === 'identical') config = { ...config, model: gateway.model, request_options: gateway.request_options };
         if (state === 'partial') config = { ...config, wire_protocol: null, model: null, base_url: null, api_key_set: true };
         render(<ApprovalModelSettings />);
@@ -220,7 +221,7 @@ describe('independent OSS approval model configuration', () => {
     });
 
     it('tests a complete saved disabled model without enabling it', async () => {
-        config = { ...config, enabled: false, unavailable_reason: 'approval_model_disabled' };
+        config = { ...config, enabled: false, available: false, unavailable_reason: 'approval_model_disabled' };
         await open();
         const test = screen.getByRole('button', { name: 'Test approval model' });
         expect(test).toBeEnabled();
@@ -275,7 +276,7 @@ describe('independent OSS approval model configuration', () => {
     });
 
     it('directs the owner to conversation approval after enabling an untested model', async () => {
-        config = { ...config, enabled: false, unavailable_reason: 'approval_model_disabled' };
+        config = { ...config, enabled: false, available: false, unavailable_reason: 'approval_model_disabled' };
         h.update.mockImplementation(async (payload: ApprovalModelUpdate) => ({ success: true, data: {
             ...config, enabled: payload.enabled, configuration_revision: config.configuration_revision + 1,
             available: true, unavailable_reason: null,

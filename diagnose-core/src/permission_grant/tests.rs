@@ -331,13 +331,15 @@ fn check_ai_permission_grant(child: bool) {
         request_input_revision: request.input_revision,
         resulting_state: PermissionRequestState::Approved,
         items: decisions,
-        decision_source: crate::dynamic_run::PermissionDecisionSource::AiApproval {
+        decision_source: crate::dynamic_run::PermissionDecisionSource::AutomaticReview {
+            failures: vec![],
             delegation_id: delegation.delegation_id.clone(),
             delegation_revision: delegation.revision,
             reviews: vec![crate::dynamic_run::AiPermissionDecisionEvidence {
                 item_id: request.items[0].item_id.clone(),
                 candidate_id: "candidate-1".into(),
                 candidate_expires_at_unix_ms: 6_000,
+                model_config_revision: 1,
                 reason_code: "within_scope".into(),
                 reason: "Only current device is read".into(),
             }],
@@ -348,7 +350,6 @@ fn check_ai_permission_grant(child: bool) {
         &request,
         &event,
         &delegation,
-        1,
         None,
         2_000,
         &mut grants,
@@ -369,7 +370,6 @@ fn check_ai_permission_grant(child: bool) {
             &request,
             &event,
             &delegation,
-            2,
             None,
             2_000,
             &mut grants,

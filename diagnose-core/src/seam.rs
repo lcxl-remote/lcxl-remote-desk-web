@@ -1265,6 +1265,7 @@ pub trait SessionSeam {
         &self,
         session: &PersistedAgentSession,
         _request: &crate::dynamic_run::PermissionRequest,
+        _registry: &crate::provider_registry::ProviderRegistry,
     ) -> Result<(), AgentError> {
         if session.trigger_origin == crate::session::TriggerOrigin::ScheduledTask {
             return Err(AgentError {

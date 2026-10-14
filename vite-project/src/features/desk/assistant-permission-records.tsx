@@ -23,7 +23,7 @@ export function AssistantPermissionRecords({ requests, children, open, onOpenCha
     const reviewing = pending.filter(request => permissionIsAutomaticallyReviewed(request, automaticApproval));
     const manual = pending.filter(request => !permissionIsAutomaticallyReviewed(request, automaticApproval));
     const latest = requests.at(-1);
-    const reviewFailed = latest?.decision?.source === 'review_unavailable';
+    const reviewFailed = latest?.decision?.items.some(item => item.source === 'system' && item.outcome === 'fault');
     const history = requests.filter(request => !['pending', 'needs_revalidation'].includes(request.state));
     return <>
         {reviewing.length > 0 && <div role="status" data-testid="ai-assistant-automatic-review" className="flex items-center gap-2 px-1 text-xs text-muted-foreground">
@@ -31,7 +31,7 @@ export function AssistantPermissionRecords({ requests, children, open, onOpenCha
             {t('pages.aiAssistant.permissionAutomaticReview')}
         </div>}
         {reviewFailed && <div role="alert" className="space-y-2 rounded-md border border-destructive/40 p-3 text-sm text-destructive">
-            <p>{t('pages.aiAssistant.permissionDecisionSource.review_unavailable')}</p>
+            <p>{t('pages.aiAssistant.permissionReviewFaultSummary')}</p>
             <Button type="button" size="sm" variant="outline" onClick={() => onOpenChange(true)}>
                 {t('pages.aiAssistant.permissionHistory')}
             </Button>

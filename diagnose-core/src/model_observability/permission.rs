@@ -1,10 +1,10 @@
 //! Permission facts from accepted business decisions, without grant authority.
 
+#[cfg(test)]
+use crate::dynamic_run::PermissionDecisionSource;
+
 use super::*;
-use crate::dynamic_run::{
-    PermissionDecidedEvent, PermissionDecisionActor, PermissionDecisionSource,
-    PermissionRequestState,
-};
+use crate::dynamic_run::{PermissionDecidedEvent, PermissionDecisionActor, PermissionRequestState};
 
 pub fn state_outcome(
     state: PermissionRequestState,
@@ -19,7 +19,9 @@ pub fn state_outcome(
         PermissionRequestState::Denied => match actor {
             Some(PermissionDecisionActor::Owner) => PermissionOutcome::Denied,
             Some(PermissionDecisionActor::AiApproval) => PermissionOutcome::PolicyRejected,
-            Some(PermissionDecisionActor::System) | None => PermissionOutcome::Unavailable,
+            Some(PermissionDecisionActor::System | PermissionDecisionActor::Mixed) | None => {
+                PermissionOutcome::Unavailable
+            }
         },
         PermissionRequestState::Replaced => PermissionOutcome::Revoked,
         PermissionRequestState::Withdrawn => PermissionOutcome::Cancelled,
@@ -27,11 +29,7 @@ pub fn state_outcome(
 }
 
 pub fn decision_outcome(event: &PermissionDecidedEvent) -> PermissionOutcome {
-    let actor = match &event.decision_source {
-        PermissionDecisionSource::UserDecision => PermissionDecisionActor::Owner,
-        PermissionDecisionSource::AiApproval { .. } => PermissionDecisionActor::AiApproval,
-        PermissionDecisionSource::ReviewUnavailable { .. } => PermissionDecisionActor::System,
-    };
+    let actor = event.decision_source.actor();
     state_outcome(event.resulting_state, Some(actor))
 }
 
@@ -389,7 +387,7 @@ mod tests {
     #[test]
     fn committed_decision_projection_has_no_content_no_execution_and_is_replay_stable() {
         let owner = decision(PermissionDecisionSource::UserDecision);
-        let fault = decision(PermissionDecisionSource::ReviewUnavailable {
+        let fault = decision(PermissionDecisionSource::SystemDecision {
             reason_code: "approval_ai_fault".into(),
             reason: "private reviewer failure details".into(),
         });

@@ -850,8 +850,8 @@ impl From<desk_diagnose_core::file_scope::SessionFileScope> for FileScopeDto {
                     reference_expires_at: record.proposal.directory.expires_at.clone(),
                     decision_actor: record.decision.as_ref().map(|decision| match decision.source {
                         desk_diagnose_core::dynamic_run::PermissionDecisionSource::UserDecision => "owner",
-                        desk_diagnose_core::dynamic_run::PermissionDecisionSource::AiApproval { .. } => "ai_approval",
-                        desk_diagnose_core::dynamic_run::PermissionDecisionSource::ReviewUnavailable { .. } => "system",
+                        desk_diagnose_core::dynamic_run::PermissionDecisionSource::AutomaticReview { .. } => "ai_approval",
+                        desk_diagnose_core::dynamic_run::PermissionDecisionSource::SystemDecision { .. } => "system",
                     }.into()),
                     decision_reason: record.decision.as_ref().map(|decision| decision.reason.clone()),
                     review_id: record.decision.as_ref().and_then(|decision| decision.candidate_id.clone()),
@@ -1405,24 +1405,29 @@ impl PermissionRequestDto {
         self.decision = event
             .filter(|event| event.request_id == self.request_id)
             .map(|event| {
-                let (source, reviews, system_reason) = match &event.decision_source {
-                    PermissionDecisionSource::UserDecision => {
-                        (PermissionDecisionSourceDto::Owner, None, None)
+                let source = match event.decision_source.actor() {
+                    desk_diagnose_core::dynamic_run::PermissionDecisionActor::Owner => {
+                        PermissionDecisionSourceDto::Owner
                     }
-                    PermissionDecisionSource::AiApproval { reviews, .. } => (
-                        PermissionDecisionSourceDto::AiApproval,
-                        Some(reviews.as_slice()),
-                        None,
-                    ),
-                    PermissionDecisionSource::ReviewUnavailable {
+                    desk_diagnose_core::dynamic_run::PermissionDecisionActor::AiApproval => {
+                        PermissionDecisionSourceDto::AiApproval
+                    }
+                    desk_diagnose_core::dynamic_run::PermissionDecisionActor::System => {
+                        PermissionDecisionSourceDto::System
+                    }
+                    desk_diagnose_core::dynamic_run::PermissionDecisionActor::Mixed => {
+                        PermissionDecisionSourceDto::MixedReview
+                    }
+                };
+                let (reviews, failures, system_reason) = match &event.decision_source {
+                    PermissionDecisionSource::UserDecision => (None, None, None),
+                    PermissionDecisionSource::AutomaticReview {
+                        reviews, failures, ..
+                    } => (Some(reviews.as_slice()), Some(failures.as_slice()), None),
+                    PermissionDecisionSource::SystemDecision {
                         reason_code,
                         reason,
-                        ..
-                    } => (
-                        PermissionDecisionSourceDto::ReviewUnavailable,
-                        None,
-                        Some((reason_code, reason)),
-                    ),
+                    } => (None, None, Some((reason_code, reason))),
                 };
                 PermissionDecisionSummaryDto {
                     source,
@@ -1434,18 +1439,42 @@ impl PermissionRequestDto {
                             let review = reviews.and_then(|reviews| {
                                 reviews.iter().find(|review| review.item_id == item.item_id)
                             });
+                            let failure = failures.and_then(|rows| {
+                                rows.iter().find(|row| row.item_id == item.item_id)
+                            });
+                            let approved =
+                                matches!(&item.decision, PermissionItemDecision::Approve { .. });
+                            let reason_code = review
+                                .map(|r| r.reason_code.clone())
+                                .or_else(|| failure.map(|f| f.reason_code.clone()))
+                                .or_else(|| system_reason.map(|(code, _)| code.to_string()));
                             PermissionItemDecisionSummaryDto {
+                                source: if failure.is_some() || system_reason.is_some() {
+                                    PermissionDecisionSourceDto::System
+                                } else if review.is_some() {
+                                    PermissionDecisionSourceDto::AiApproval
+                                } else {
+                                    PermissionDecisionSourceDto::Owner
+                                },
+                                outcome: if approved {
+                                    "approved"
+                                } else if failure.is_some() || system_reason.is_some() {
+                                    desk_diagnose_core::approval_review::system_review_outcome(
+                                        reason_code.as_deref().unwrap_or("approval_processing"),
+                                    )
+                                } else {
+                                    "denied"
+                                }
+                                .into(),
                                 item_id: item.item_id.clone(),
-                                approved: matches!(
-                                    &item.decision,
-                                    PermissionItemDecision::Approve { .. }
-                                ),
-                                reason_code: review
-                                    .map(|review| review.reason_code.clone())
-                                    .or_else(|| system_reason.map(|(code, _)| code.to_string())),
-                                reason: review.map(|review| review.reason.clone()).or_else(|| {
-                                    system_reason.map(|(_, reason)| reason.to_string())
-                                }),
+                                approved,
+                                reason_code,
+                                reason: review
+                                    .map(|r| r.reason.clone())
+                                    .or_else(|| failure.map(|f| f.reason.clone()))
+                                    .or_else(|| {
+                                        system_reason.map(|(_, reason)| reason.to_string())
+                                    }),
                             }
                         })
                         .collect(),
@@ -1630,12 +1659,15 @@ pub struct PermissionDecisionSummaryDto {
 pub enum PermissionDecisionSourceDto {
     Owner,
     AiApproval,
-    ReviewUnavailable,
+    System,
+    MixedReview,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PermissionItemDecisionSummaryDto {
+    pub source: PermissionDecisionSourceDto,
+    pub outcome: String,
     pub item_id: String,
     pub approved: bool,
     pub reason_code: Option<String>,

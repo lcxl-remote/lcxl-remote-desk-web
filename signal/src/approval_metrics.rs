@@ -55,6 +55,7 @@ pub async fn unavailable_on<C: crate::config::ConfigConnection>(
     db: &C,
     session: &desk_diagnose_core::session::PersistedAgentSession,
     request: &desk_diagnose_core::dynamic_run::PermissionRequest,
+    decision: &desk_diagnose_core::dynamic_run::PermissionDecidedEvent,
     now: i64,
 ) -> Vec<ReviewTracking> {
     use crate::entity::agent_approval_delegation as delegation;
@@ -75,9 +76,15 @@ pub async fn unavailable_on<C: crate::config::ConfigConnection>(
     >(&row.state_json) else {
         return vec![];
     };
-    let reason = unavailable_reason_on(db).await;
     let mut values = Vec::new();
     for item in &request.items {
+        let Some(code) = decision
+            .decision_source
+            .system_reason_for_item(&item.item_id)
+        else {
+            continue;
+        };
+        let reason = desk_diagnose_core::approval_review::system_review_reason_from_code(code);
         let Ok(source) = desk_diagnose_core::approval_review::permission_review_source_id(
             &request.request_id,
             &item.item_id,

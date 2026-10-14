@@ -37,14 +37,14 @@ describe('shared permission review', () => {
             ...request(), state: 'denied',
             decision: {
                 source: 'ai_approval', decidedAt: '2026-09-23T00:00:00Z',
-                items: [{ itemId: 'read', approved: false, reasonCode: 'scope_too_broad',
+                items: [{ itemId: 'read', approved: false, source: 'ai_approval', outcome: 'denied', reasonCode: 'scope_too_broad',
                     reason: 'The request includes unrelated files.' }],
             },
         } as PermissionRequestDto;
         render(<AssistantPermissionRequest request={value} canDecide={false} onDecide={vi.fn()} />);
         fireEvent.click(screen.getByRole('button', { name: /inspect_desktop_session/ }));
         expect(screen.getByText('pages.aiAssistant.permissionDecisionSource.ai_approval')).toBeInTheDocument();
-        expect(screen.getByText('pages.aiAssistant.permissionItemDecision.denied')).toBeInTheDocument();
+        expect(screen.getByText(/pages.aiAssistant.permissionItemOutcome.(denied|fault)/)).toBeInTheDocument();
         expect(screen.getByText(/The request includes unrelated files/)).toBeInTheDocument();
     });
     it('shows a runtime approval-model fault and leaves the action unapproved', () => {
@@ -52,18 +52,32 @@ describe('shared permission review', () => {
         const value = {
             ...request(), state: 'denied',
             decision: {
-                source: 'review_unavailable', decidedAt: '2026-10-09T00:00:00Z',
-                items: [{ itemId: 'read', approved: false, reasonCode: 'approval_ai_fault',
+                source: 'system', decidedAt: '2026-10-09T00:00:00Z',
+                items: [{ itemId: 'read', approved: false, source: 'system', outcome: 'fault', reasonCode: 'approval_timeout',
                     reason: 'Approval AI is unavailable; the requested actions were not executed' }],
             },
         } as PermissionRequestDto;
         render(<AssistantPermissionRequest request={value} canDecide={false} onDecide={onDecide} />);
         fireEvent.click(screen.getByRole('button', { name: /inspect_desktop_session/ }));
-        expect(screen.getByText('pages.aiAssistant.permissionDecisionSource.review_unavailable')).toBeInTheDocument();
-        expect(screen.getByText(/Approval AI is unavailable; the requested actions were not executed/)).toBeInTheDocument();
-        expect(screen.getByText('pages.aiAssistant.permissionItemDecision.denied')).toBeInTheDocument();
+        expect(screen.getByText('pages.aiAssistant.permissionDecisionSource.system')).toBeInTheDocument();
+        expect(screen.getByText(/pages.aiAssistant.permissionSystemReason.approval_timeout/)).toBeInTheDocument();
+        expect(screen.getByText(/pages.aiAssistant.permissionItemOutcome.(denied|fault)/)).toBeInTheDocument();
         expect(screen.queryByRole('button', { name: 'pages.aiAssistant.permissionSubmitSelection' })).not.toBeInTheDocument();
         expect(onDecide).not.toHaveBeenCalled();
+    });
+    it('shows approvals and system faults independently in a mixed result', () => {
+        const value = { ...request([item({ itemId: 'approved' }), item({ itemId: 'blocked' })]),
+            state: 'partially_approved', decision: { source: 'mixed_review', decidedAt: '2026-10-13T00:00:00Z',
+                items: [{ itemId: 'approved', approved: true, source: 'ai_approval', outcome: 'approved' },
+                    { itemId: 'blocked', approved: false, source: 'system', outcome: 'fault', reasonCode: 'approval_provider', reason: 'The provider failed' }],
+            },
+        } as PermissionRequestDto;
+        render(<AssistantPermissionRequest request={value} canDecide={false} onDecide={vi.fn()} />);
+        for (const button of screen.getAllByRole('button', { name: /inspect_desktop_session/ })) fireEvent.click(button);
+        expect(screen.getByText('pages.aiAssistant.permissionDecisionSource.mixed_review')).toBeInTheDocument();
+        expect(screen.getByText(/permissionItemOutcome.approved/)).toBeInTheDocument();
+        expect(screen.getByText(/permissionItemOutcome.fault/)).toBeInTheDocument();
+        expect(screen.getByText(/permissionSystemReason.approval_provider/)).toBeInTheDocument();
     });
     it.each([
         ['execute_ui_actions', 'ui:scroll'],

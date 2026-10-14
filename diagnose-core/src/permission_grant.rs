@@ -38,7 +38,6 @@ pub fn bind_ai_permission_grants(
     request: &crate::dynamic_run::PermissionRequest,
     decided: &crate::dynamic_run::PermissionDecidedEvent,
     delegation: &crate::approval_delegation::ApprovalDelegation,
-    current_model_config_revision: u64,
     current_goal: Option<(&str, u64)>,
     now_unix_ms: u64,
     grants: &mut Vec<CapabilityGrant>,
@@ -68,10 +67,11 @@ pub fn bind_ai_permission_grants(
             "AI permission decision no longer matches its request",
         ));
     }
-    let PermissionDecisionSource::AiApproval {
+    let PermissionDecisionSource::AutomaticReview {
         delegation_id,
         delegation_revision,
         reviews,
+        ..
     } = &decided.decision_source
     else {
         return Err(internal("permission decision is not an AI review"));
@@ -135,7 +135,7 @@ pub fn bind_ai_permission_grants(
         grant.issued_by = CapabilityGrantIssuer::AiApproval(AiApprovalGrantProvenance {
             delegation_id: delegation.delegation_id.clone(),
             delegation_revision: delegation.revision,
-            model_config_revision: current_model_config_revision,
+            model_config_revision: review.model_config_revision,
             candidate_id: review.candidate_id.clone(),
             decision_event_id: decided.event.event_id.clone(),
             goal_id: current_goal.map(|(id, _)| id.to_owned()),

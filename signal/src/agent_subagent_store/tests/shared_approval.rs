@@ -766,6 +766,7 @@ async fn approved_child_review_keeps_its_grant_and_audit_in_the_child_and_usage_
             },
             request_id,
             &candidates,
+            &[],
             crate::agent_session_store::PermissionGrantIssuanceContext {
                 surface: ProductSurface::OssPersonalOwner,
                 registry: &registry,

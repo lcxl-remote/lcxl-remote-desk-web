@@ -43,7 +43,7 @@ pub enum ConcreteReviewResult {
 
 struct PreparedReview {
     candidate: ApprovalReviewCandidate,
-    authorized: AuthorizedApprovalReview,
+    authorized: Option<AuthorizedApprovalReview>,
     destination: desk_agent_protocol::data_lineage::DestinationIdentity,
     model_config_revision: u64,
     max_context_bytes: u64,
@@ -84,6 +84,7 @@ fn prepare_on<'a>(
     subject: &'a ConcreteSubject<'a>,
     registry: &'a ProviderRegistry,
     expires_at: Option<u64>,
+    frozen: Option<&'a ApprovalReviewCandidate>,
     now_unix_ms: u64,
 ) -> Pin<Box<impl Future<Output = Result<Option<PreparedReview>, DbErr>> + 'a>> {
     Box::pin(prepare_on_inner(
@@ -91,6 +92,7 @@ fn prepare_on<'a>(
         subject,
         registry,
         expires_at,
+        frozen,
         now_unix_ms,
     ))
 }
@@ -100,6 +102,7 @@ async fn prepare_on_inner(
     subject: &ConcreteSubject<'_>,
     registry: &ProviderRegistry,
     expires_at: Option<u64>,
+    frozen: Option<&ApprovalReviewCandidate>,
     now_unix_ms: u64,
 ) -> Result<Option<PreparedReview>, DbErr> {
     let row = agent_session::Entity::find()
@@ -246,54 +249,94 @@ async fn prepare_on_inner(
         call_id: subject.server_call_id.to_owned(),
         grant_id: grant.grant_id.clone(),
     };
-    let candidate = source_review_candidate(SourceReviewInput {
-        session: &session,
-        delegation: &delegation,
-        goal: goal.as_ref(),
-        source: source.clone(),
-        tool_name: &subject.call.name,
-        descriptor_json: &descriptor_json,
-        risk,
-        input_kind: ApprovalInputKind::ConcreteCall,
-        action_json: &prepared.canonical_input_json,
-        expires_at_unix_ms: expiry,
-        current_authority: vec![ApprovalAuthorityFact {
+    let mut candidate = if let Some(frozen) = frozen {
+        frozen.clone()
+    } else {
+        source_review_candidate(SourceReviewInput {
+            session: &session,
+            delegation: &delegation,
+            goal: goal.as_ref(),
             source: source.clone(),
-            status: ApprovalAuthorityStatus::ActiveGrant,
-            decision_event_id: Some(parent.decision_event_id.clone()),
-            active_grant_ids: vec![grant.grant_id.clone()],
-            dispatch_ids: vec![],
-        }],
-        now_unix_ms,
-    })
-    .map_err(|_| invalid())?;
+            tool_name: &subject.call.name,
+            descriptor_json: &descriptor_json,
+            risk,
+            input_kind: ApprovalInputKind::ConcreteCall,
+            action_json: &prepared.canonical_input_json,
+            expires_at_unix_ms: expiry,
+            current_authority: vec![ApprovalAuthorityFact {
+                source: source.clone(),
+                status: ApprovalAuthorityStatus::ActiveGrant,
+                decision_event_id: Some(parent.decision_event_id.clone()),
+                active_grant_ids: vec![grant.grant_id.clone()],
+                dispatch_ids: vec![],
+            }],
+            now_unix_ms,
+        })
+        .map_err(|_| invalid())?
+    };
     if candidate.candidate_id != expected.candidate_id
         || candidate.action_sha256 != expected.action_sha256
     {
         return Err(invalid());
     }
-    let authorized = authorize_source_review_egress(
-        &candidate,
-        &SourceReviewBinding {
-            source: &source,
-            tool_call_id: &subject.call.id,
-            turn_id: subject.turn_id,
-            lease_token: session.lease_token,
-            tool_name: &subject.call.name,
-            action_json: &prepared.canonical_input_json,
-            descriptor_json: &descriptor_json,
-            risk,
-            input_kind: ApprovalInputKind::ConcreteCall,
-            input_revision: session.input_revision,
-            expires_at_unix_ms: expiry,
-        },
-        &session,
-        goal.as_ref(),
-        &delegation,
-        &destination,
-        now_unix_ms,
-    )
-    .map_err(|_| invalid())?;
+    if frozen.is_none() {
+        desk_diagnose_core::approval_review::fit_review_context(
+            &mut candidate,
+            &session,
+            usize::try_from(config.gateway.max_context_bytes.ok_or_else(invalid)?)
+                .map_err(|_| invalid())?,
+        )
+        .map_err(|_| invalid())?;
+    }
+    let authorized = if frozen.is_some() {
+        desk_diagnose_core::approval_egress::validate_source_review_current(
+            &candidate,
+            &SourceReviewBinding {
+                source: &source,
+                tool_call_id: &subject.call.id,
+                turn_id: subject.turn_id,
+                lease_token: session.lease_token,
+                tool_name: &subject.call.name,
+                action_json: &prepared.canonical_input_json,
+                descriptor_json: &descriptor_json,
+                risk,
+                input_kind: ApprovalInputKind::ConcreteCall,
+                input_revision: session.input_revision,
+                expires_at_unix_ms: expiry,
+            },
+            &session,
+            goal.as_ref(),
+            &delegation,
+            now_unix_ms,
+        )
+        .map_err(|_| invalid())?;
+        None
+    } else {
+        Some(
+            authorize_source_review_egress(
+                &candidate,
+                &SourceReviewBinding {
+                    source: &source,
+                    tool_call_id: &subject.call.id,
+                    turn_id: subject.turn_id,
+                    lease_token: session.lease_token,
+                    tool_name: &subject.call.name,
+                    action_json: &prepared.canonical_input_json,
+                    descriptor_json: &descriptor_json,
+                    risk,
+                    input_kind: ApprovalInputKind::ConcreteCall,
+                    input_revision: session.input_revision,
+                    expires_at_unix_ms: expiry,
+                },
+                &session,
+                goal.as_ref(),
+                &delegation,
+                &destination,
+                now_unix_ms,
+            )
+            .map_err(|_| invalid())?,
+        )
+    };
     Ok(Some(PreparedReview {
         candidate,
         authorized,
@@ -324,7 +367,7 @@ async fn claim_inner(
 ) -> Result<ClaimState, DbErr> {
     let key = crate::approval_review_secret::load_or_create(db).await?;
     let txn = crate::db::begin_write(db, delegation_row::Entity).await?;
-    let Some(initial) = prepare_on(&txn, subject, registry, None, now_unix_ms).await? else {
+    let Some(initial) = prepare_on(&txn, subject, registry, None, None, now_unix_ms).await? else {
         return Ok(ClaimState::NotRequired);
     };
     let existing = review_row::Entity::find()
@@ -337,6 +380,7 @@ async fn claim_inner(
             subject,
             registry,
             Some(u64::try_from(row.expires_at).map_err(|_| invalid())?),
+            None,
             now_unix_ms,
         )
         .await?
@@ -394,8 +438,9 @@ async fn claim_inner(
         .await?
         .ok_or_else(invalid)?;
     let mut delegation = crate::agent_approval_store::decode(&stored)?;
+    let authorized = prepared.authorized.as_ref().ok_or_else(invalid)?;
     let reserved_tokens = desk_diagnose_core::approval_usage::reviewer_token_reservation(
-        &prepared.authorized.prompt,
+        &authorized.prompt,
         prepared.max_context_bytes,
         prepared.runtime_max_output_tokens,
     )
@@ -456,7 +501,7 @@ async fn claim_inner(
         &txn,
         candidate,
         &prepared.destination,
-        &prepared.authorized,
+        authorized,
         reserved_tokens,
         prepared.runtime_max_output_tokens,
         i64::try_from(now_unix_ms).map_err(|_| invalid())?,
@@ -480,7 +525,7 @@ async fn claim_inner(
             lease_deadline_unix_ms,
             model_destination: prepared.destination,
             model_config_revision: prepared.model_config_revision,
-            authorized: prepared.authorized,
+            authorized: prepared.authorized.ok_or_else(invalid)?,
         },
     ))
 }
@@ -556,6 +601,7 @@ async fn settle_inner(
         subject,
         registry,
         Some(candidate.expires_at_unix_ms),
+        Some(candidate),
         now_unix_ms,
     )
     .await

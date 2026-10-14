@@ -187,8 +187,8 @@ pub fn reviewed_decision_result(
     };
     let authority = match decision.source {
         crate::dynamic_run::PermissionDecisionSource::UserDecision => "owner",
-        crate::dynamic_run::PermissionDecisionSource::AiApproval { .. } => "ai_approval",
-        crate::dynamic_run::PermissionDecisionSource::ReviewUnavailable { .. } => "system",
+        crate::dynamic_run::PermissionDecisionSource::AutomaticReview { .. } => "ai_approval",
+        crate::dynamic_run::PermissionDecisionSource::SystemDecision { .. } => "system",
     };
     json!({"directory_request_id":request_id,"state":if approved {"approved"} else {"rejected"},
     "authority":authority,"reason":decision.reason,"file_operation_authorized":false,

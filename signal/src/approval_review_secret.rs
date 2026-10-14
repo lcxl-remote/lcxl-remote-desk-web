@@ -36,7 +36,7 @@ pub async fn load_or_create(db: &DatabaseConnection) -> Result<[u8; 32], DbErr> 
         .ok_or_else(|| DbErr::Custom("approval review secret vanished".into()))
 }
 
-async fn load(db: &DatabaseConnection) -> Result<Option<[u8; 32]>, DbErr> {
+pub(crate) async fn load<C: sea_orm::ConnectionTrait>(db: &C) -> Result<Option<[u8; 32]>, DbErr> {
     let row = approval_review_secret::Entity::find()
         .filter(approval_review_secret::Column::Id.eq(approval_review_secret::SINGLETON_ID))
         .one(db)

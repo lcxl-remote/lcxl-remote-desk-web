@@ -85,6 +85,98 @@ pub fn authorize_permission_review_egress(
     destination: &DestinationIdentity,
     now_unix_ms: u64,
 ) -> Result<AuthorizedApprovalReview, ApprovalReviewError> {
+    validate_permission_review_current(candidate, session, request, goal, delegation, now_unix_ms)?;
+    let user = session
+        .authorization_requirement()
+        .ok_or(ApprovalReviewError::InvalidContext)?;
+    let action_source = session
+        .conversation
+        .iter()
+        .find(|message| {
+            message.role == ChatRole::Assistant
+                && message.tool_calls.iter().any(|call| {
+                    call.name == "request_permissions"
+                        && session.conversation.iter().any(|result| {
+                            result.tool_call_id.as_deref() == Some(call.id.as_str())
+                                && serde_json::from_str::<serde_json::Value>(&result.text)
+                                    .ok()
+                                    .and_then(|value| {
+                                        value.get("request_id")?.as_str().map(str::to_owned)
+                                    })
+                                    .as_deref()
+                                    == Some(request.request_id.as_str())
+                        })
+                })
+        })
+        .ok_or(ApprovalReviewError::InvalidContext)?;
+
+    let mut source_ids = BTreeSet::new();
+    source_ids.insert(user.message_id.as_str());
+    source_ids.insert(action_source.message_id.as_str());
+    if let Some(goal) = goal {
+        let source = session
+            .conversation
+            .iter()
+            .find(|message| message.message_id == goal.source_message_id)
+            .ok_or(ApprovalReviewError::InvalidContext)?;
+        if source.role != ChatRole::User || !source.text.contains(&goal.goal_text) {
+            return Err(ApprovalReviewError::InvalidContext);
+        }
+        source_ids.insert(source.message_id.as_str());
+    }
+    for evidence in &candidate.context.evidence {
+        let message = crate::approval_review::review_evidence_message(session, &evidence.event_id)
+            .ok_or(ApprovalReviewError::InvalidContext)?;
+        if is_historical_permission_pause_result(message) {
+            return Err(ApprovalReviewError::InvalidContext);
+        }
+        let expected_trust = if message.role == ChatRole::User
+            && !crate::permission_resume::is_resume_control_message(message)
+        {
+            ApprovalEvidenceTrust::OwnerInstruction
+        } else {
+            ApprovalEvidenceTrust::UntrustedContent
+        };
+        if message.text != evidence.text
+            || evidence.trust != expected_trust
+            || (expected_trust == ApprovalEvidenceTrust::UntrustedContent
+                && !matches!(
+                    message.role,
+                    ChatRole::Tool
+                        | ChatRole::UntrustedOutput
+                        | ChatRole::Assistant
+                        | ChatRole::SystemEvent
+                ))
+        {
+            return Err(ApprovalReviewError::InvalidContext);
+        }
+        source_ids.insert(message.message_id.as_str());
+    }
+    if !source_ids.contains(user.message_id.as_str()) {
+        return Err(ApprovalReviewError::InvalidContext);
+    }
+
+    authorize_review_sources(
+        candidate,
+        session,
+        delegation,
+        destination,
+        now_unix_ms,
+        source_ids,
+    )
+}
+
+/// Check the current operation and source without repeating an already completed
+/// model export or depending on today's reviewer connection configuration.
+#[allow(clippy::too_many_arguments)]
+pub fn validate_permission_review_current(
+    candidate: &ApprovalReviewCandidate,
+    session: &PersistedAgentSession,
+    request: &PermissionRequest,
+    goal: Option<&GoalRun>,
+    delegation: &ApprovalDelegation,
+    now_unix_ms: u64,
+) -> Result<(), ApprovalReviewError> {
     candidate.validate()?;
     request
         .validate()
@@ -156,81 +248,7 @@ pub fn authorize_permission_review_egress(
     if candidate.context.current_user_requirement != user.text {
         return Err(ApprovalReviewError::InvalidContext);
     }
-    let action_source = session
-        .conversation
-        .iter()
-        .find(|message| {
-            message.role == ChatRole::Assistant
-                && message.tool_calls.iter().any(|call| {
-                    call.name == "request_permissions"
-                        && session.conversation.iter().any(|result| {
-                            result.tool_call_id.as_deref() == Some(call.id.as_str())
-                                && serde_json::from_str::<serde_json::Value>(&result.text)
-                                    .ok()
-                                    .and_then(|value| {
-                                        value.get("request_id")?.as_str().map(str::to_owned)
-                                    })
-                                    .as_deref()
-                                    == Some(request_id.as_str())
-                        })
-                })
-        })
-        .ok_or(ApprovalReviewError::InvalidContext)?;
-
-    let mut source_ids = BTreeSet::new();
-    source_ids.insert(user.message_id.as_str());
-    source_ids.insert(action_source.message_id.as_str());
-    if let Some(goal) = goal {
-        let source = session
-            .conversation
-            .iter()
-            .find(|message| message.message_id == goal.source_message_id)
-            .ok_or(ApprovalReviewError::InvalidContext)?;
-        if source.role != ChatRole::User || !source.text.contains(&goal.goal_text) {
-            return Err(ApprovalReviewError::InvalidContext);
-        }
-        source_ids.insert(source.message_id.as_str());
-    }
-    for evidence in &candidate.context.evidence {
-        let message = crate::approval_review::review_evidence_message(session, &evidence.event_id)
-            .ok_or(ApprovalReviewError::InvalidContext)?;
-        if is_historical_permission_pause_result(message) {
-            return Err(ApprovalReviewError::InvalidContext);
-        }
-        let expected_trust = if message.role == ChatRole::User
-            && !crate::permission_resume::is_resume_control_message(message)
-        {
-            ApprovalEvidenceTrust::OwnerInstruction
-        } else {
-            ApprovalEvidenceTrust::UntrustedContent
-        };
-        if message.text != evidence.text
-            || evidence.trust != expected_trust
-            || (expected_trust == ApprovalEvidenceTrust::UntrustedContent
-                && !matches!(
-                    message.role,
-                    ChatRole::Tool
-                        | ChatRole::UntrustedOutput
-                        | ChatRole::Assistant
-                        | ChatRole::SystemEvent
-                ))
-        {
-            return Err(ApprovalReviewError::InvalidContext);
-        }
-        source_ids.insert(message.message_id.as_str());
-    }
-    if !source_ids.contains(user.message_id.as_str()) {
-        return Err(ApprovalReviewError::InvalidContext);
-    }
-
-    authorize_review_sources(
-        candidate,
-        session,
-        delegation,
-        destination,
-        now_unix_ms,
-        source_ids,
-    )
+    Ok(())
 }
 
 /// A host-rebuilt source binding. For command work and concrete UI calls the
@@ -259,45 +277,10 @@ pub fn authorize_source_review_egress(
     destination: &DestinationIdentity,
     now_unix_ms: u64,
 ) -> Result<AuthorizedApprovalReview, ApprovalReviewError> {
-    candidate.validate()?;
-    if session.surface != AgentSessionSurface::AiAssistant
-        || !session.turn_state.is_active()
-        || session.current_turn_id.as_deref() != Some(binding.turn_id)
-        || session.lease_token != binding.lease_token
-        || session.input_revision != binding.input_revision
-        || candidate.source != *binding.source
-        || matches!(candidate.source, ApprovalSource::PermissionItem { .. })
-        || candidate.tool_name != binding.tool_name
-        || candidate.action_json != binding.action_json
-        || candidate.descriptor_json != binding.descriptor_json
-        || candidate.risk != binding.risk
-        || candidate.input_kind != binding.input_kind
-        || candidate.input_revision != binding.input_revision
-        || candidate.expires_at_unix_ms != binding.expires_at_unix_ms
-        || candidate.conversation_id != session.conversation_id
-        || candidate.owner_id != session.actor_id
-        || candidate.device_id != session.device_id
-        || candidate.delegation_id != delegation.delegation_id
-        || candidate.delegation_revision != delegation.revision
-        || candidate.expires_at_unix_ms <= now_unix_ms
-    {
-        return Err(ApprovalReviewError::InvalidContext);
-    }
-    delegation
-        .require_current_for_session(session)
-        .map_err(|_| ApprovalReviewError::InvalidContext)?;
-    if candidate.goal_id.as_deref() != goal.map(|goal| goal.goal_id.as_str())
-        || candidate.goal_revision != goal.map(|goal| goal.goal_revision)
-        || candidate.context.goal_text.as_deref() != goal.map(|goal| goal.goal_text.as_str())
-    {
-        return Err(ApprovalReviewError::InvalidContext);
-    }
+    validate_source_review_current(candidate, binding, session, goal, delegation, now_unix_ms)?;
     let user = session
         .authorization_requirement()
         .ok_or(ApprovalReviewError::InvalidContext)?;
-    if candidate.context.current_user_requirement != user.text {
-        return Err(ApprovalReviewError::InvalidContext);
-    }
     let action_source = session
         .conversation
         .iter()
@@ -362,6 +345,68 @@ pub fn authorize_source_review_egress(
     )
 }
 
+pub fn validate_source_review_current(
+    candidate: &ApprovalReviewCandidate,
+    binding: &SourceReviewBinding<'_>,
+    session: &PersistedAgentSession,
+    goal: Option<&GoalRun>,
+    delegation: &ApprovalDelegation,
+    now_unix_ms: u64,
+) -> Result<(), ApprovalReviewError> {
+    candidate.validate()?;
+    if session.surface != AgentSessionSurface::AiAssistant
+        || !session.turn_state.is_active()
+        || session.current_turn_id.as_deref() != Some(binding.turn_id)
+        || session.lease_token != binding.lease_token
+        || session.input_revision != binding.input_revision
+        || candidate.source != *binding.source
+        || matches!(candidate.source, ApprovalSource::PermissionItem { .. })
+        || candidate.tool_name != binding.tool_name
+        || candidate.action_json != binding.action_json
+        || candidate.descriptor_json != binding.descriptor_json
+        || candidate.risk != binding.risk
+        || candidate.input_kind != binding.input_kind
+        || candidate.input_revision != binding.input_revision
+        || candidate.expires_at_unix_ms != binding.expires_at_unix_ms
+        || candidate.conversation_id != session.conversation_id
+        || candidate.owner_id != session.actor_id
+        || candidate.device_id != session.device_id
+        || candidate.delegation_id != delegation.delegation_id
+        || candidate.delegation_revision != delegation.revision
+        || candidate.expires_at_unix_ms <= now_unix_ms
+    {
+        return Err(ApprovalReviewError::InvalidContext);
+    }
+    delegation
+        .require_current_for_session(session)
+        .map_err(|_| ApprovalReviewError::InvalidContext)?;
+    if candidate.goal_id.as_deref() != goal.map(|goal| goal.goal_id.as_str())
+        || candidate.goal_revision != goal.map(|goal| goal.goal_revision)
+        || candidate.context.goal_text.as_deref() != goal.map(|goal| goal.goal_text.as_str())
+    {
+        return Err(ApprovalReviewError::InvalidContext);
+    }
+    let user = session
+        .authorization_requirement()
+        .ok_or(ApprovalReviewError::InvalidContext)?;
+    if candidate.context.current_user_requirement != user.text {
+        return Err(ApprovalReviewError::InvalidContext);
+    }
+    let _action_source = session
+        .conversation
+        .iter()
+        .find(|message| {
+            message.role == ChatRole::Assistant
+                && message.turn_id.as_deref() == Some(binding.turn_id)
+                && message
+                    .tool_calls
+                    .iter()
+                    .any(|call| call.id == binding.tool_call_id && call.name == binding.tool_name)
+        })
+        .ok_or(ApprovalReviewError::InvalidContext)?;
+    Ok(())
+}
+
 fn authorize_review_sources(
     candidate: &ApprovalReviewCandidate,
     session: &PersistedAgentSession,
@@ -409,6 +454,14 @@ fn authorize_review_sources(
         let (mut projection, record) = authorize_export(source, &exported_id, &exact, now_unix_ms)
             .map_err(|_| ApprovalReviewError::InvalidContext)?;
         projection.provenance.source_envelope_ids = record.input_envelope_ids;
+        if is_completed_history_receipt(session, message) {
+            // The current explicit review delegation authorizes recollection of
+            // this verified completion, never reuse of its execution references.
+            projection.retention = RetentionBoundary {
+                expires_at_unix_ms: Some(candidate.expires_at_unix_ms),
+                delete_with_run: true,
+            };
+        }
         retention = retention.most_restrictive(projection.retention);
         if let ContentRef::EphemeralObservation {
             expires_at_unix_ms, ..
@@ -486,6 +539,49 @@ fn authorize_review_sources(
         source_audit,
         prompt_audit,
     })
+}
+
+pub(crate) fn is_completed_history_receipt(
+    session: &PersistedAgentSession,
+    message: &crate::chat::ChatMessage,
+) -> bool {
+    let Some(source) = &message.data_envelope else {
+        return false;
+    };
+    let Some(call_id) = &message.tool_call_id else {
+        return false;
+    };
+    let typed_completion =
+        serde_json::from_str::<desk_agent_protocol::OperationOutput>(&message.text)
+            .ok()
+            .is_some_and(|output| matches!(output, desk_agent_protocol::OperationOutput::Exec(_)))
+            || serde_json::from_str::<crate::conversation_attachment::command::CommandReceipt>(
+                &message.text,
+            )
+            .is_ok();
+    matches!(message.role, ChatRole::Tool | ChatRole::UntrustedOutput)
+        && message.image_data_url.is_none()
+        && message.attachment_read.is_none()
+        && matches!(source.content, ContentRef::ImmutableBlob { .. })
+        && !is_historical_permission_pause_result(message)
+        && matches!(
+            source.provenance.source_tool_name.as_str(),
+            "exec_command" | "wait_for_task"
+        )
+        && ((message.tool_ok.is_some() && message.background_task_id.is_none()) || typed_completion)
+        && !message.background_task_id.as_ref().is_some_and(|id| {
+            session
+                .execution_state
+                .tasks()
+                .iter()
+                .any(|action| action.action_request_id == *id)
+        })
+        && session.conversation.iter().any(|parent| {
+            parent.role == ChatRole::Assistant
+                && parent.tool_calls.iter().any(|call| {
+                    &call.id == call_id && call.name == source.provenance.source_tool_name
+                })
+        })
 }
 
 #[cfg(test)]
@@ -853,6 +949,109 @@ mod tests {
     }
 
     #[test]
+    fn completed_command_receipt_outlives_execution_reference_without_widening_other_content() {
+        let mut session = source_review_session();
+        let mut parent = ChatMessage::assistant_tool_calls(
+            "old-call",
+            "",
+            vec![ToolCallRef {
+                id: "completed-call".into(),
+                name: "exec_command".into(),
+                arguments_json: "{}".into(),
+            }],
+        );
+        parent.data_envelope = Some(envelope_for(&parent, Sensitivity::Sensitive));
+        let mut receipt = ChatMessage::tool_result(
+            "completion",
+            "completed-call",
+            r#"{"exit_code":0,"stdout":"done"}"#,
+        );
+        receipt.tool_ok = Some(true);
+        receipt.data_envelope = Some(envelope_for(&receipt, Sensitivity::Sensitive));
+        receipt
+            .data_envelope
+            .as_mut()
+            .unwrap()
+            .provenance
+            .source_tool_name = "exec_command".into();
+        receipt
+            .data_envelope
+            .as_mut()
+            .unwrap()
+            .retention
+            .expires_at_unix_ms = Some(1);
+        session.conversation.extend([parent, receipt.clone()]);
+        let source = ApprovalSource::ConcreteCall {
+            call_id: "command-call".into(),
+            grant_id: "grant".into(),
+        };
+        assert!(authorize_projected_source(&session, source.clone()).is_ok());
+        session
+            .conversation
+            .last_mut()
+            .unwrap()
+            .text
+            .push_str("tampered");
+        assert!(authorize_projected_source(&session, source.clone()).is_err());
+        *session.conversation.last_mut().unwrap() = receipt.clone();
+        session
+            .conversation
+            .last_mut()
+            .unwrap()
+            .data_envelope
+            .as_mut()
+            .unwrap()
+            .sensitivity = Sensitivity::Secret;
+        assert!(authorize_projected_source(&session, source.clone()).is_err());
+        *session.conversation.last_mut().unwrap() = receipt;
+        session.conversation.last_mut().unwrap().tool_ok = None;
+        assert!(
+            !authorize_projected_source(&session, source.clone())
+                .unwrap()
+                .prompt
+                .contains("stdout")
+        );
+        let message = session.conversation.last_mut().unwrap();
+        message.text =
+            serde_json::to_string(&crate::conversation_attachment::command::CommandReceipt {
+                started: true,
+                exit_code: Some(0),
+                termination_signal: None,
+                failure: None,
+                diagnostics: vec![],
+                duration_ms: 5,
+                redactions_applied: false,
+                streams: vec![],
+            })
+            .unwrap();
+        message.role = ChatRole::UntrustedOutput;
+        message.background_task_id = Some("completed-work".into());
+        message.data_envelope = Some(envelope_for(message, Sensitivity::Sensitive));
+        message
+            .data_envelope
+            .as_mut()
+            .unwrap()
+            .provenance
+            .source_tool_name = "exec_command".into();
+        message
+            .data_envelope
+            .as_mut()
+            .unwrap()
+            .retention
+            .expires_at_unix_ms = Some(1);
+        assert!(authorize_projected_source(&session, source.clone()).is_ok());
+        session.execution_state = crate::session::ExecutionState::Executing {
+            action: crate::session::ActionIdentity::agent_exec(1, "completed-work", "execution"),
+        };
+        assert!(
+            !authorize_projected_source(&session, source)
+                .unwrap()
+                .prompt
+                .contains("redactions_applied")
+        );
+    }
+
+    #[test]
     fn attachment_projections_still_require_exact_current_authorized_labels() {
         for projection in review_projections() {
             let mut session = source_review_session();
@@ -886,6 +1085,17 @@ mod tests {
                     }
                     5 => message.image_data_url = Some("data:image/png;base64,aW1hZ2U=".into()),
                     _ => unreachable!(),
+                }
+                if matches!(invalid, 3 | 5) {
+                    let digest = message
+                        .data_envelope
+                        .as_ref()
+                        .unwrap()
+                        .digest_sha256
+                        .clone();
+                    let authorized = authorize_projected_source(&session, source.clone()).unwrap();
+                    assert!(!authorized.source_audit.digests_sha256.contains(&digest));
+                    continue;
                 }
                 assert!(
                     matches!(

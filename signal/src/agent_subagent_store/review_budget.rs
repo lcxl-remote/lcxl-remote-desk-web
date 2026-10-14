@@ -248,6 +248,9 @@ pub(crate) async fn reserve_review_call_on(
         )
         .then_some(session.lease_token),
         context_hmac_sha256: review.context_hmac_sha256.clone(),
+        context_binding: desk_diagnose_core::approval_review::ReviewContextBinding::from_candidate(
+            candidate,
+        ),
         request_sha256,
         model_destination: destination.clone(),
         root_conversation_id: root.into(),

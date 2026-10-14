@@ -782,6 +782,16 @@ pub struct AiPermissionDecisionEvidence {
     pub item_id: String,
     pub candidate_id: String,
     pub candidate_expires_at_unix_ms: u64,
+    pub model_config_revision: u64,
+    pub reason_code: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SystemPermissionDecisionEvidence {
+    pub item_id: String,
+    pub candidate_id: Option<String>,
     pub reason_code: String,
     pub reason: String,
 }
@@ -790,14 +800,15 @@ pub struct AiPermissionDecisionEvidence {
 #[serde(tag = "source", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PermissionDecisionSource {
     UserDecision,
-    AiApproval {
+    AutomaticReview {
         delegation_id: String,
         delegation_revision: u64,
         reviews: Vec<AiPermissionDecisionEvidence>,
+        failures: Vec<SystemPermissionDecisionEvidence>,
     },
     /// The server could not obtain a trustworthy reviewer verdict. This is a
     /// non-execution decision, never attributed to the reviewer model or owner.
-    ReviewUnavailable {
+    SystemDecision {
         reason_code: String,
         reason: String,
     },
@@ -813,6 +824,45 @@ pub struct PermissionDecidedEvent {
     pub decision_source: PermissionDecisionSource,
 }
 
+impl PermissionDecisionSource {
+    pub fn system_reason_for_item(&self, item_id: &str) -> Option<&str> {
+        match self {
+            Self::SystemDecision { reason_code, .. } => Some(reason_code),
+            Self::AutomaticReview { failures, .. } => failures
+                .iter()
+                .find(|failure| failure.item_id == item_id)
+                .map(|failure| failure.reason_code.as_str()),
+            Self::UserDecision => None,
+        }
+    }
+
+    pub fn item_actor(&self, item_id: &str) -> PermissionDecisionActor {
+        match self {
+            Self::UserDecision => PermissionDecisionActor::Owner,
+            Self::AutomaticReview { reviews, .. }
+                if reviews.iter().any(|review| review.item_id == item_id) =>
+            {
+                PermissionDecisionActor::AiApproval
+            }
+            _ => PermissionDecisionActor::System,
+        }
+    }
+
+    pub fn actor(&self) -> PermissionDecisionActor {
+        match self {
+            Self::UserDecision => PermissionDecisionActor::Owner,
+            Self::SystemDecision { .. } => PermissionDecisionActor::System,
+            Self::AutomaticReview { reviews, .. } if reviews.is_empty() => {
+                PermissionDecisionActor::System
+            }
+            Self::AutomaticReview { failures, .. } if failures.is_empty() => {
+                PermissionDecisionActor::AiApproval
+            }
+            Self::AutomaticReview { .. } => PermissionDecisionActor::Mixed,
+        }
+    }
+}
+
 /// Bounded decision metadata kept with the request projection. The immutable
 /// event remains the source for reviewer rationale and the exact grant terms.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -821,12 +871,14 @@ pub enum PermissionDecisionActor {
     Owner,
     AiApproval,
     System,
+    Mixed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PermissionItemDisposition {
     pub item_id: String,
     pub approved: bool,
+    pub actor: PermissionDecisionActor,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -843,19 +895,14 @@ impl PermissionDecisionProjection {
         Ok(Self {
             request_id: event.request_id.clone(),
             input_revision: event.request_input_revision,
-            actor: match &event.decision_source {
-                PermissionDecisionSource::UserDecision => PermissionDecisionActor::Owner,
-                PermissionDecisionSource::AiApproval { .. } => PermissionDecisionActor::AiApproval,
-                PermissionDecisionSource::ReviewUnavailable { .. } => {
-                    PermissionDecisionActor::System
-                }
-            },
+            actor: event.decision_source.actor(),
             items: event
                 .items
                 .iter()
                 .map(|item| PermissionItemDisposition {
                     item_id: item.item_id.clone(),
                     approved: matches!(&item.decision, PermissionItemDecision::Approve { .. }),
+                    actor: event.decision_source.item_actor(&item.item_id),
                 })
                 .collect(),
         })
@@ -877,7 +924,10 @@ impl PermissionDecisionProjection {
         let mut seen = BTreeSet::new();
         for item in &self.items {
             validate_id("permission_item_id", &item.item_id)?;
-            if !seen.insert(item.item_id.as_str())
+            if item.actor == PermissionDecisionActor::Mixed
+                || (self.actor != PermissionDecisionActor::Mixed && item.actor != self.actor)
+                || (item.actor == PermissionDecisionActor::System && item.approved)
+                || !seen.insert(item.item_id.as_str())
                 || !request
                     .items
                     .iter()
@@ -885,6 +935,22 @@ impl PermissionDecisionProjection {
             {
                 return Err(DynamicRunContractError::PermissionEventMismatch);
             }
+        }
+        if self.actor == PermissionDecisionActor::Mixed
+            && (!self
+                .items
+                .iter()
+                .any(|item| item.actor == PermissionDecisionActor::AiApproval)
+                || !self
+                    .items
+                    .iter()
+                    .any(|item| item.actor == PermissionDecisionActor::System)
+                || self
+                    .items
+                    .iter()
+                    .any(|item| item.actor == PermissionDecisionActor::Owner))
+        {
+            return Err(DynamicRunContractError::PermissionEventMismatch);
         }
         let approvals = self.items.iter().filter(|item| item.approved).count();
         let expected = if approvals == 0 {
@@ -966,7 +1032,7 @@ impl PermissionDecidedEvent {
         if self.resulting_state != expected_state {
             return Err(DynamicRunContractError::PermissionEventMismatch);
         }
-        if let PermissionDecisionSource::ReviewUnavailable {
+        if let PermissionDecisionSource::SystemDecision {
             reason_code,
             reason,
         } = &self.decision_source
@@ -982,14 +1048,15 @@ impl PermissionDecidedEvent {
         {
             return Err(DynamicRunContractError::PermissionEventMismatch);
         }
-        if let PermissionDecisionSource::AiApproval {
+        if let PermissionDecisionSource::AutomaticReview {
             delegation_id,
             delegation_revision,
             reviews,
+            failures,
         } = &self.decision_source
         {
             validate_id("approval_delegation_id", delegation_id)?;
-            if *delegation_revision == 0 || reviews.len() != self.items.len() {
+            if *delegation_revision == 0 || reviews.len() + failures.len() != self.items.len() {
                 return Err(DynamicRunContractError::PermissionEventMismatch);
             }
             let mut reviewed = BTreeSet::new();
@@ -999,6 +1066,7 @@ impl PermissionDecidedEvent {
                 if !reviewed.insert(review.item_id.as_str())
                     || !ids.contains(review.item_id.as_str())
                     || review.candidate_expires_at_unix_ms == 0
+                    || review.model_config_revision == 0
                     || review.reason_code.is_empty()
                     || review.reason_code.len() > 64
                     || !review.reason_code.bytes().all(|byte| {
@@ -1006,6 +1074,29 @@ impl PermissionDecidedEvent {
                     })
                     || review.reason.trim().is_empty()
                     || review.reason.len() > 2_048
+                {
+                    return Err(DynamicRunContractError::PermissionEventMismatch);
+                }
+            }
+            for failure in failures {
+                validate_id("permission_item_id", &failure.item_id)?;
+                if let Some(id) = &failure.candidate_id {
+                    validate_id("approval_candidate_id", id)?;
+                }
+                if !reviewed.insert(failure.item_id.as_str())
+                    || !ids.contains(failure.item_id.as_str())
+                    || !self.items.iter().any(|item| {
+                        item.item_id == failure.item_id
+                            && item.decision == PermissionItemDecision::Deny
+                    })
+                    || failure.reason_code.is_empty()
+                    || failure.reason_code.len() > 64
+                    || !failure
+                        .reason_code
+                        .bytes()
+                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+                    || failure.reason.trim().is_empty()
+                    || failure.reason.len() > 2048
                 {
                     return Err(DynamicRunContractError::PermissionEventMismatch);
                 }
@@ -1413,13 +1504,15 @@ mod tests {
             request_input_revision: request.input_revision,
             resulting_state: request.state,
             items,
-            decision_source: PermissionDecisionSource::AiApproval {
+            decision_source: PermissionDecisionSource::AutomaticReview {
+                failures: vec![],
                 delegation_id: "delegation-1".into(),
                 delegation_revision: 1,
                 reviews: vec![AiPermissionDecisionEvidence {
                     item_id: "write-report".into(),
                     candidate_id: "candidate-1".into(),
                     candidate_expires_at_unix_ms: 10_000,
+                    model_config_revision: 1,
                     reason_code: "scope_too_broad".into(),
                     reason: "The proposed output path includes unrelated files".into(),
                 }],
@@ -1427,7 +1520,7 @@ mod tests {
         };
         event.validate().unwrap();
         let mut unavailable = event.clone();
-        unavailable.decision_source = PermissionDecisionSource::ReviewUnavailable {
+        unavailable.decision_source = PermissionDecisionSource::SystemDecision {
             reason_code: "approval_ai_fault".into(),
             reason: "Approval AI unavailable; nothing was executed".into(),
         };
@@ -1449,7 +1542,9 @@ mod tests {
             wrong_state.validate(),
             Err(DynamicRunContractError::PermissionEventMismatch)
         );
-        if let PermissionDecisionSource::AiApproval { reviews, .. } = &mut event.decision_source {
+        if let PermissionDecisionSource::AutomaticReview { reviews, .. } =
+            &mut event.decision_source
+        {
             reviews[0].item_id = "different-item".into();
         }
         assert_eq!(
@@ -1472,10 +1567,12 @@ mod tests {
                 PermissionItemDisposition {
                     item_id: "write-report".into(),
                     approved: true,
+                    actor: PermissionDecisionActor::AiApproval,
                 },
                 PermissionItemDisposition {
                     item_id: "other-item".into(),
                     approved: false,
+                    actor: PermissionDecisionActor::AiApproval,
                 },
             ],
         };

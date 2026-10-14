@@ -58,9 +58,9 @@ describe('permission request history', () => {
     });
 
     it('keeps the latest reviewer fault visible and opens its durable decision without implying execution', () => {
-        const failed = { ...request('failed-review', 'denied'), decision: { source: 'review_unavailable', items: [] } } as PermissionRequestDto;
+        const failed = { ...request('failed-review', 'denied'), decision: { source: 'system', decidedAt: '2026-10-13T00:00:00Z', items: [{ itemId: 'failed', approved: false, source: 'system', outcome: 'fault' }] } } as PermissionRequestDto;
         const { rerender } = render(<Records requests={[failed]} automaticApproval />);
-        expect(screen.getByRole('alert')).toHaveTextContent('pages.aiAssistant.permissionDecisionSource.review_unavailable');
+        expect(screen.getByRole('alert')).toHaveTextContent('pages.aiAssistant.permissionReviewFaultSummary');
         expect(screen.queryByText('failed-review')).toBeNull();
         fireEvent.click(screen.getAllByRole('button', { name: 'pages.aiAssistant.permissionHistory' })[0]);
         expect(screen.getByText('failed-review')).toBeTruthy();

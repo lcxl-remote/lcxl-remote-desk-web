@@ -52,8 +52,9 @@ enum PermissionDecisionAuthority<'a> {
     Ai {
         candidates: &'a [desk_diagnose_core::approval_review::ApprovalReviewCandidate],
         hmac_key: [u8; 32],
+        unstarted_failures:
+            &'a [desk_diagnose_core::dynamic_run::SystemPermissionDecisionEvidence],
     },
-    ReviewUnavailable,
 }
 
 #[derive(Clone)]
@@ -281,11 +282,13 @@ impl SignalAgentSessionStore {
     /// The independent reviewer supplies immutable candidates, never owner
     /// credentials or a browser approval. Their terminal rows are rechecked in
     /// the same transaction that mints the decision, grants and resume.
+    #[allow(clippy::too_many_arguments)]
     pub async fn decide_permission_request_by_ai(
         &self,
         subject: PermissionDecisionSubject<'_>,
         request_id: &str,
         candidates: &[desk_diagnose_core::approval_review::ApprovalReviewCandidate],
+        unstarted_failures: &[desk_diagnose_core::dynamic_run::SystemPermissionDecisionEvidence],
         grant_context: PermissionGrantIssuanceContext<'_>,
         now: &str,
     ) -> Result<PermissionDecisionOutcome, AgentError> {
@@ -302,26 +305,8 @@ impl SignalAgentSessionStore {
             PermissionDecisionAuthority::Ai {
                 candidates,
                 hmac_key,
+                unstarted_failures,
             },
-        )
-        .await
-    }
-
-    pub async fn deny_unavailable_review(
-        &self,
-        subject: PermissionDecisionSubject<'_>,
-        request_id: &str,
-        grant_context: PermissionGrantIssuanceContext<'_>,
-        now: &str,
-    ) -> Result<PermissionDecisionOutcome, AgentError> {
-        self.decide_permission_request_with_authority(
-            subject,
-            request_id,
-            Vec::new(),
-            grant_context,
-            now,
-            None,
-            PermissionDecisionAuthority::ReviewUnavailable,
         )
         .await
     }
@@ -388,6 +373,9 @@ impl SignalAgentSessionStore {
                     "delegated permission request is no longer current",
                 ));
             }
+            if !matches!(&authority, PermissionDecisionAuthority::Owner) && session.main_stopped {
+                return Err(internal("Automatic review source was stopped"));
+            }
             if session.turn_state.is_active() {
                 txn.rollback().await.ok();
                 return Err(transport(
@@ -414,12 +402,14 @@ impl SignalAgentSessionStore {
                 PermissionDecisionAuthority::Ai {
                     candidates,
                     hmac_key,
+                    unstarted_failures,
                 } => Some(
                     crate::agent_approval_store::reviewed_permission_batch_on(
                         &txn,
                         &session,
                         &requested,
                         candidates,
+                        unstarted_failures,
                         grant_context.registry,
                         grant_context.surface,
                         hmac_key,
@@ -429,20 +419,6 @@ impl SignalAgentSessionStore {
                     .await
                     .map_err(|_| internal("AI permission reviews are no longer current"))?,
                 ),
-                PermissionDecisionAuthority::ReviewUnavailable => {
-                    if crate::agent_approval_store::has_live_permission_review_on(
-                        &txn,
-                        &session,
-                        &requested,
-                        grant_context.now_unix_ms,
-                    )
-                    .await
-                    .map_err(|_| internal("check in-flight AI permission review failed"))?
-                    {
-                        return Err(transport("AI permission review is still in progress"));
-                    }
-                    None
-                }
             };
             let (decision_items, decision_source) = match &authority {
                 PermissionDecisionAuthority::Owner => (
@@ -455,25 +431,6 @@ impl SignalAgentSessionStore {
                         .ok_or_else(|| internal("AI review batch is missing"))?;
                     (batch.decisions.clone(), batch.source.clone())
                 }
-                PermissionDecisionAuthority::ReviewUnavailable => (
-                    requested
-                        .items
-                        .iter()
-                        .map(
-                            |item| desk_diagnose_core::dynamic_run::PermissionDecisionItem {
-                                item_id: item.item_id.clone(),
-                                decision:
-                                    desk_diagnose_core::dynamic_run::PermissionItemDecision::Deny,
-                            },
-                        )
-                        .collect(),
-                    desk_diagnose_core::dynamic_run::PermissionDecisionSource::ReviewUnavailable {
-                        reason_code: "approval_ai_fault".into(),
-                        reason:
-                            "Approval AI is unavailable; the requested actions were not executed"
-                                .into(),
-                    },
-                ),
             };
             let request = &mut session.permission_requests[request_index];
             if request.input_revision != session.input_revision {
@@ -549,7 +506,6 @@ impl SignalAgentSessionStore {
                     &requested,
                     &event,
                     &batch.delegation,
-                    batch.model_config_revision,
                     batch
                         .goal_binding
                         .as_ref()
@@ -580,7 +536,8 @@ impl SignalAgentSessionStore {
             }
             let unclaimed_observations = if matches!(
                 event.decision_source,
-                desk_diagnose_core::dynamic_run::PermissionDecisionSource::ReviewUnavailable { .. }
+                desk_diagnose_core::dynamic_run::PermissionDecisionSource::SystemDecision { .. }
+                    | desk_diagnose_core::dynamic_run::PermissionDecisionSource::AutomaticReview { .. }
             ) {
                 match txn.begin().await {
                     Ok(observer) => {
@@ -588,6 +545,7 @@ impl SignalAgentSessionStore {
                             &observer,
                             &session,
                             &requested,
+                            &event,
                             now_from(now).timestamp_millis(),
                         )
                         .await;
@@ -2135,6 +2093,13 @@ impl SessionSeam for SignalAgentSessionStore {
         proposal: desk_diagnose_core::file_scope::DirectoryProposal,
         now_unix_ms: u64,
     ) -> Result<(), AgentError> {
+        crate::agent_approval_store::validate_directory_capacity(
+            &self.db,
+            session,
+            proposal.clone(),
+            now_unix_ms,
+        )
+        .await?;
         let now = DateTime::<Utc>::from_timestamp_millis(
             i64::try_from(now_unix_ms).map_err(|_| internal("invalid directory clock"))?,
         )
@@ -2238,13 +2203,18 @@ impl SessionSeam for SignalAgentSessionStore {
         &self,
         session: &PersistedAgentSession,
         request: &desk_diagnose_core::dynamic_run::PermissionRequest,
+        registry: &desk_diagnose_core::provider_registry::ProviderRegistry,
     ) -> Result<(), AgentError> {
         crate::schedule_store::ScheduleStore::new(self.db.clone()).validate_task_permission_request(session, request).await
             .map_err(|_| AgentError {
                 kind: desk_agent_protocol::AgentErrorKind::PermissionDenied,
                 message: "Permission request exceeds the current task contract or its authority has expired".into(),
                 retryable: false, safe_for_model: true, error_code: None,
-            })
+            })?;
+        crate::agent_approval_store::validate_permission_capacity(
+            &self.db, session, request, registry,
+        )
+        .await
     }
 
     async fn save_goal_open_request(

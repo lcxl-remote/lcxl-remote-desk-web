@@ -770,7 +770,7 @@ async fn approve_with_independent_model(
     use crate::entity::{agent_approval_review as review_row, agent_session as session_row};
     use desk_agent_protocol::capability_provider::ProductSurface;
     use desk_diagnose_core::approval_review::ApprovalEvidenceTrust;
-    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, TransactionTrait};
 
     let row = session_row::Entity::find()
         .filter(session_row::Column::ConversationId.eq(run_id))
@@ -901,6 +901,33 @@ async fn approve_with_independent_model(
         assert!(row.provider_started_at_ms.is_some());
         assert!(row.provider_receipt_id.is_some());
     }
+    db.config_context()
+        .update::<_, sea_orm::DbErr, _>(|file| {
+            file.approval_gateway.enabled = false;
+            file.approval_gateway.configuration_revision += 1;
+            file.approval_gateway.gateway.max_context_bytes = Some(16 * 1024);
+            Ok(Some(()))
+        })
+        .await
+        .unwrap();
+    let restored = crate::agent_approval_store::prepare_permission_review_batch(
+        db,
+        run_id,
+        "1",
+        "device",
+        request_id,
+        false,
+        registry,
+        ProductSurface::OssPersonalOwner,
+        1,
+        now_ms(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        restored, candidates,
+        "recovery preserves the exact review selection despite configuration changes"
+    );
     sessions
         .decide_permission_request_by_ai(
             crate::agent_session_store::PermissionDecisionSubject {
@@ -910,6 +937,7 @@ async fn approve_with_independent_model(
             },
             request_id,
             &candidates,
+            &[],
             crate::agent_session_store::PermissionGrantIssuanceContext {
                 surface: ProductSurface::OssPersonalOwner,
                 registry,
@@ -920,6 +948,54 @@ async fn approve_with_independent_model(
             },
             &Utc::now().to_rfc3339(),
         )
+        .await
+        .unwrap();
+    let current_row = session_row::Entity::find()
+        .filter(session_row::Column::ConversationId.eq(run_id))
+        .one(db)
+        .await
+        .unwrap()
+        .unwrap();
+    let current = PersistedAgentSession::decode_json(&current_row.state_json).unwrap();
+    let grants = crate::entity::agent_capability_grant::Entity::find()
+        .filter(crate::entity::agent_capability_grant::Column::RunId.eq(run_id))
+        .all(db)
+        .await
+        .unwrap();
+    let txn = db.begin().await.unwrap();
+    let mut checked = 0;
+    for row in grants {
+        let grant: desk_agent_protocol::capability_grant::CapabilityGrant =
+            serde_json::from_str(&row.payload_json).unwrap();
+        let desk_agent_protocol::capability_grant::CapabilityGrantIssuer::AiApproval(original) =
+            &grant.issued_by
+        else {
+            continue;
+        };
+        if !candidates
+            .iter()
+            .any(|candidate| candidate.candidate_id == original.candidate_id)
+        {
+            continue;
+        }
+        let parent =
+            crate::agent_approval_store::current_grant_parent_on(&txn, &current, &grant, now_ms())
+                .await
+                .unwrap();
+        checked += 1;
+        assert_eq!(
+            &parent, original,
+            "completed grants retain their approval version with the reviewer disabled"
+        );
+    }
+    assert!(checked > 0);
+    txn.rollback().await.unwrap();
+    db.config_context()
+        .update::<_, sea_orm::DbErr, _>(|file| {
+            file.approval_gateway.enabled = true;
+            file.approval_gateway.gateway.max_context_bytes = Some(131_072);
+            Ok(Some(()))
+        })
         .await
         .unwrap();
     listener

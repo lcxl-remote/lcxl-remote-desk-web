@@ -1473,6 +1473,17 @@ export type SnapshotMessageDto = {
     turnId?: string | null;
 };
 
+export const permissionDecisionSourceDtoEnum = {
+    owner: "owner",
+    ai_approval: "ai_approval",
+    system: "system",
+    mixed_review: "mixed_review"
+} as const;
+
+export type PermissionDecisionSourceDtoEnumKey = (typeof permissionDecisionSourceDtoEnum)[keyof typeof permissionDecisionSourceDtoEnum];
+
+export type PermissionDecisionSourceDto = PermissionDecisionSourceDtoEnumKey;
+
 export type PermissionItemDecisionSummaryDto = {
     /**
      * @type boolean
@@ -1483,6 +1494,10 @@ export type PermissionItemDecisionSummaryDto = {
     */
     itemId: string;
     /**
+     * @type string
+    */
+    outcome: string;
+    /**
      * @type string,null
     */
     reason?: string | null;
@@ -1490,17 +1505,11 @@ export type PermissionItemDecisionSummaryDto = {
      * @type string,null
     */
     reasonCode?: string | null;
+    /**
+     * @type string
+    */
+    source: PermissionDecisionSourceDto;
 };
-
-export const permissionDecisionSourceDtoEnum = {
-    owner: "owner",
-    ai_approval: "ai_approval",
-    review_unavailable: "review_unavailable"
-} as const;
-
-export type PermissionDecisionSourceDtoEnumKey = (typeof permissionDecisionSourceDtoEnum)[keyof typeof permissionDecisionSourceDtoEnum];
-
-export type PermissionDecisionSourceDto = PermissionDecisionSourceDtoEnumKey;
 
 export type PermissionDecisionSummaryDto = {
     /**

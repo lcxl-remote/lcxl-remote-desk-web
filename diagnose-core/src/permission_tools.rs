@@ -176,15 +176,15 @@ pub(crate) fn unchanged_ai_denied_item<'a>(
         .iter()
         .filter(|request| request.input_revision == proposed.input_revision)
         .find_map(|request| {
-            let decision = decisions.iter().find(|decision| {
-                decision.request_id == request.request_id
-                    && decision.actor == crate::dynamic_run::PermissionDecisionActor::AiApproval
-            })?;
+            let decision = decisions
+                .iter()
+                .find(|decision| decision.request_id == request.request_id)?;
             request.items.iter().find_map(|old| {
-                let denied = decision
-                    .items
-                    .iter()
-                    .any(|item| item.item_id == old.item_id && !item.approved);
+                let denied = decision.items.iter().any(|item| {
+                    item.item_id == old.item_id
+                        && !item.approved
+                        && item.actor == crate::dynamic_run::PermissionDecisionActor::AiApproval
+                });
                 (denied
                     && proposed
                         .items
@@ -358,10 +358,11 @@ pub fn capability_authorization_prompt(
                         "state": "denied_item",
                         "request_id": request.request_id,
                         "item_id": item.item_id,
-                        "decision_actor": match decision.actor {
+                        "decision_actor": match outcome.actor {
                             crate::dynamic_run::PermissionDecisionActor::Owner => "owner",
                             crate::dynamic_run::PermissionDecisionActor::AiApproval => "ai_approval",
-                            crate::dynamic_run::PermissionDecisionActor::System => "system_review_unavailable",
+                            crate::dynamic_run::PermissionDecisionActor::System => "system",
+                            crate::dynamic_run::PermissionDecisionActor::Mixed => "mixed_review",
                         },
                         "input_revision": current_input_revision,
                     }));
@@ -1683,6 +1684,7 @@ mod tests {
                 items: vec![PermissionItemDisposition {
                     item_id: "capture".into(),
                     approved: false,
+                    actor,
                 }],
             };
             decision.validate_for(&request).unwrap();
@@ -1725,7 +1727,15 @@ mod tests {
             mixed_decision.items.push(PermissionItemDisposition {
                 item_id: "approved-capture".into(),
                 approved: true,
+                actor: if actor == PermissionDecisionActor::System {
+                    PermissionDecisionActor::AiApproval
+                } else {
+                    actor
+                },
             });
+            if actor == PermissionDecisionActor::System {
+                mixed_decision.actor = PermissionDecisionActor::Mixed;
+            }
             mixed_decision.validate_for(&mixed).unwrap();
             assert!(
                 latest_tool_request_denial(&[mixed], &[mixed_decision], "read_current_screen", 3)
@@ -1762,10 +1772,12 @@ mod tests {
                 PermissionItemDisposition {
                     item_id: "first".into(),
                     approved: true,
+                    actor: PermissionDecisionActor::AiApproval,
                 },
                 PermissionItemDisposition {
                     item_id: "second".into(),
                     approved: false,
+                    actor: PermissionDecisionActor::AiApproval,
                 },
             ],
         };
@@ -1804,6 +1816,28 @@ mod tests {
                 &retry
             ),
             Some(("permission-partial", "second")),
+        );
+        let mut mixed = decision.clone();
+        mixed.actor = PermissionDecisionActor::Mixed;
+        mixed.items[0].approved = false;
+        mixed.items[0].actor = PermissionDecisionActor::System;
+        assert_eq!(
+            unchanged_ai_denied_item(
+                std::slice::from_ref(&request),
+                std::slice::from_ref(&mixed),
+                &retry
+            ),
+            Some(("permission-partial", "second"))
+        );
+        mixed.items[1].actor = PermissionDecisionActor::System;
+        mixed.actor = PermissionDecisionActor::System;
+        assert!(
+            unchanged_ai_denied_item(
+                std::slice::from_ref(&request),
+                std::slice::from_ref(&mixed),
+                &retry
+            )
+            .is_none()
         );
         retry.items[0].resource_scope = vec!["specific-resource".into()];
         assert_eq!(

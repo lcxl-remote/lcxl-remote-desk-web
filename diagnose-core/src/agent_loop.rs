@@ -5760,7 +5760,18 @@ async fn run_inner_impl(
                             let request = match request {
                                 Ok(request) => deps
                                     .session_seam
-                                    .validate_task_permission_request(session, &request)
+                                    .validate_task_permission_request(
+                                        session,
+                                        &request,
+                                        deps.provider_registry.ok_or_else(|| AgentError {
+                                            kind: AgentErrorKind::InvalidInput,
+                                            message: "Permission provider catalog is unavailable"
+                                                .into(),
+                                            retryable: false,
+                                            safe_for_model: true,
+                                            error_code: None,
+                                        })?,
+                                    )
                                     .await
                                     .map(|()| request),
                                 Err(error) => Err(error),
