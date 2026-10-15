@@ -1415,7 +1415,7 @@ async fn response_locale_survives_serialization_and_missing_resume_preference() 
 }
 
 #[tokio::test]
-async fn capability_discovery_replaces_working_set_without_persisting_schema() {
+async fn capability_discovery_explicitly_replaces_working_set_without_persisting_schema() {
     use desk_agent_protocol::capability_provider::CapabilityBlockedReason;
 
     let providers = crate::ai_assistant::ai_assistant_provider_registry();
@@ -1472,7 +1472,7 @@ async fn capability_discovery_replaces_working_set_without_persisting_schema() {
                 tool_use_args(
                     "load-1",
                     crate::capability_disclosure::LOAD_CAPABILITY_DETAILS_TOOL_NAME,
-                    r#"{"tool_names":["read_system_info"]}"#,
+                    r#"{"tool_names":["read_system_info"],"replace":true}"#,
                 ),
                 answer("ready"),
             ]

@@ -239,7 +239,11 @@ async fn apply_task_control_with_source_on(
         || run.binding.control_revision != request.expected_control_revision
     {
         input_observation.reject(Stage::Reference, InputIssue::ReferenceExpired);
-        return Err(invalid());
+        return Err(if adjustment_source.is_some() {
+            DbErr::Custom(desk_diagnose_core::subagent::CONTROL_OBSERVATION_CHANGED.into())
+        } else {
+            invalid()
+        });
     }
     input_observation.stage(Stage::Reference, StageOutcome::Passed);
     let group_row = group_row::Entity::find()
@@ -281,6 +285,14 @@ async fn apply_task_control_with_source_on(
             changed
         }
         SubAgentControlAction::Adjust { message } => {
+            if adjustment_source.is_some()
+                && (run.state.is_terminal() || run.state == SubAgentState::Cancelling)
+            {
+                input_observation.reject(Stage::Preflight, InputIssue::Precondition);
+                return Err(DbErr::Custom(
+                    desk_diagnose_core::subagent::CONTROL_OBSERVATION_CHANGED.into(),
+                ));
+            }
             if group.source_admission == SourceAdmission::Closed
                 || now_ms >= run.binding.deadline_ms
                 || group.source_epoch != run.binding.source_epoch

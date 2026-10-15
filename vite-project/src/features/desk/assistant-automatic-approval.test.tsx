@@ -63,7 +63,7 @@ describe('automatic approval in a blank conversation', () => {
         sendMessage.mockClear();
         fireEvent.click(screen.getByRole('button', { name: 'Approval settings' }));
         await waitFor(() => expect(sendMessage).toHaveBeenCalledOnce());
-        expect(screen.getByRole('button', { name: 'Enable', exact: true })).toBeDisabled();
+        expect(screen.getByRole('switch', { name: 'AI approval' })).toBeDisabled();
         expect(screen.getByRole('status')).toBeInTheDocument();
         const payload = sendMessage.mock.calls[0][1] as { conversation_id: string; client_request_id: string };
         if (initialConversationId || storedConversationId) expect(payload.conversation_id).toBe(initialConversationId ?? storedConversationId);
@@ -73,10 +73,11 @@ describe('automatic approval in a blank conversation', () => {
         await act(async () => subscriber?.({ request_id: 'initialize-request',
             signaling_type: SIGNALING_TYPE_CODE_AI_ASSISTANT_CONTEXT_UPDATED,
             signaling_data: { changed: false, conversation_id: payload.conversation_id, client_request_id: payload.client_request_id } }));
-        await waitFor(() => expect(screen.getByRole('button', { name: 'Enable', exact: true })).toBeEnabled());
+        await waitFor(() => expect(screen.getByRole('switch', { name: 'AI approval' })).toBeEnabled());
         expect(chat!.messages).toEqual([]);
-        fireEvent.click(screen.getByRole('button', { name: 'Enable', exact: true }));
-        await waitFor(() => expect(screen.getByRole('button', { name: 'Disable', exact: true })).toBeEnabled());
+        fireEvent.click(screen.getByRole('switch', { name: 'AI approval' }));
+        await waitFor(() => expect(screen.getByRole('switch', { name: 'AI approval' })).toBeEnabled());
+        expect(screen.getByRole('switch', { name: 'AI approval' })).toBeChecked();
         const call = fetchMock.mock.calls.find(([url]) => url.endsWith('/approval-delegation/open'));
         expect(JSON.parse(call?.[1]?.body as string)).toMatchObject({ conversation: payload.conversation_id,
             session: 'empty-session', expectedInputRevision: 0 });
@@ -112,7 +113,7 @@ describe('automatic approval in a blank conversation', () => {
         expect(sendMessage).not.toHaveBeenCalled();
         retry = true;
         fireEvent.click(screen.getByRole('button', { name: 'Retry', exact: true }));
-        await waitFor(() => expect(screen.getByRole('button', { name: 'Enable', exact: true })).toBeEnabled());
+        await waitFor(() => expect(screen.getByRole('switch', { name: 'AI approval' })).toBeEnabled());
         expect(chat!.messages).toEqual([expect.objectContaining({ text: 'Existing answer' })]);
         expect(screen.queryByRole('alert')).not.toBeInTheDocument();
         expect(sendMessage).not.toHaveBeenCalled();
@@ -168,8 +169,9 @@ describe('automatic approval in a blank conversation', () => {
         const chat = { ...empty(), conversationId: 'existing', sessionId: 'stored-existing', approvalModelReadiness: { available: true } };
         render(<AssistantAutomaticApproval chat={chat} enabled connected />);
         expect(chat.initializeApprovalConversation).not.toHaveBeenCalled();
-        fireEvent.click(screen.getByRole('button', { name: 'Enable', exact: true }));
+        fireEvent.click(screen.getByRole('switch', { name: 'AI approval' }));
         expect(chat.setAutomaticApproval).toHaveBeenCalledWith(true);
+        expect(screen.getByRole('switch', { name: 'AI approval' })).not.toBeChecked();
     });
 
     it.each([{ enabled: false, connected: true }, { enabled: true, connected: false }])(
@@ -177,15 +179,29 @@ describe('automatic approval in a blank conversation', () => {
             const chat = empty();
             render(<AssistantAutomaticApproval chat={chat} {...props} />);
             expect(chat.initializeApprovalConversation).not.toHaveBeenCalled();
-            expect(screen.getByRole('button', { name: 'Enable', exact: true })).toBeDisabled();
+            expect(screen.getByRole('switch', { name: 'AI approval' })).toBeDisabled();
         });
 
     it('shows initialization failures in the approval panel and prevents duplicate initialization', () => {
         const chat = { ...empty(), conversationId: 'empty', error: 'Could not initialize this conversation' };
         render(<AssistantAutomaticApproval chat={chat} enabled connected />);
         expect(screen.getByRole('alert')).toHaveTextContent(chat.error);
-        expect(screen.getByRole('button', { name: 'Enable', exact: true })).toBeDisabled();
+        expect(screen.getByRole('switch', { name: 'AI approval' })).toBeDisabled();
         expect(chat.initializeApprovalConversation).not.toHaveBeenCalled();
+    });
+
+    it.each([false, true])('keeps server state and disables duplicate changes while saving (active=%s)', active => {
+        const chat = { ...empty(), conversationId: 'existing', sessionId: 'stored-existing', approvalUpdating: true,
+            approvalModelReadiness: { available: true }, approvalDelegation: active ? {
+                delegationId: 'delegation', status: 'active' as const, reviewsUsed: 0, tokensUsed: 0, createdAtUnixMs: 1,
+            } : null };
+        render(<AssistantAutomaticApproval chat={chat} enabled connected />);
+        const toggle = screen.getByRole('switch', { name: 'AI approval' });
+        expect(toggle).toHaveAttribute('aria-checked', String(active));
+        expect(toggle).toBeDisabled();
+        expect(screen.getByRole('status')).toBeInTheDocument();
+        fireEvent.click(toggle);
+        expect(chat.setAutomaticApproval).not.toHaveBeenCalled();
     });
 
     it('still lets the owner close an existing approval while signaling is disconnected', () => {
@@ -193,8 +209,9 @@ describe('automatic approval in a blank conversation', () => {
             delegationId: 'delegation', status: 'active' as const, reviewsUsed: 0, tokensUsed: 0, createdAtUnixMs: 1,
         } };
         render(<AssistantAutomaticApproval chat={chat} enabled connected={false} />);
-        fireEvent.click(screen.getByRole('button', { name: 'Disable', exact: true }));
+        fireEvent.click(screen.getByRole('switch', { name: 'AI approval' }));
         expect(chat.setAutomaticApproval).toHaveBeenCalledWith(false);
+        expect(screen.getByRole('switch', { name: 'AI approval' })).toBeChecked();
         expect(chat.initializeApprovalConversation).not.toHaveBeenCalled();
     });
 });

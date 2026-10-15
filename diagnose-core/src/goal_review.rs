@@ -27,6 +27,15 @@ pub struct GoalReviewDecision {
     pub reason: String,
 }
 
+pub fn failure_reason(reason: crate::approval_observation::ReviewReason) -> String {
+    use crate::approval_observation::ReviewReason;
+    match reason {
+        ReviewReason::Budget => "AI goal approval could not start because the originating task's budget or execution deadline was exhausted. Send a new message to propose the goal again. No goal or device operation was authorized.".into(),
+        ReviewReason::SourceChanged => "AI goal approval could not start because the originating task changed or was stopped. Send a new message to propose the goal again. No goal or device operation was authorized.".into(),
+        _ => format!("AI goal approval is unavailable ({reason:?}). No goal or device operation was authorized."),
+    }
+}
+
 pub fn append_receipt(
     session: &mut PersistedAgentSession,
     request: &GoalOpenRequest,

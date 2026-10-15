@@ -2,6 +2,7 @@
 use super::*;
 use crate::agent_approval_store as approval;
 use crate::config::ConfigConnection;
+use crate::entity::agent_approval_review as review_row;
 use desk_diagnose_core::{
     approval_review::{
         ApprovalReviewCandidate, ApprovalReviewDecision, ApprovalVerdict, PendingRequestKind,
@@ -481,4 +482,140 @@ async fn closing_automatic_approval_returns_the_proposal_to_manual_review() {
             .0
             .is_empty()
     );
+}
+
+#[actix_web::test]
+async fn goal_approval_funding_failure_is_terminal_instead_of_a_storage_retry() {
+    use crate::entity::agent_delegation_group as group;
+    use desk_diagnose_core::approval_observation::ReviewReason;
+    for expired in [true, false] {
+        let (db, session, request, now) = fixture().await;
+        assert!(request.expires_at_unix_ms > now);
+        let row = group::Entity::find()
+            .filter(group::Column::GroupId.eq(session.delegation_group_id.as_ref().unwrap()))
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut state: desk_diagnose_core::subagent::group::DelegationGroup =
+            serde_json::from_str(&row.state_json).unwrap();
+        if expired {
+            state.limits.deadline_ms = now as i64;
+        } else {
+            state.budget.charged.model_calls = state.limits.total.model_calls;
+        }
+        group::Entity::update_many()
+            .col_expr(
+                group::Column::StateJson,
+                Expr::value(serde_json::to_string(&state).unwrap()),
+            )
+            .col_expr(
+                group::Column::DeadlineMs,
+                Expr::value(state.limits.deadline_ms),
+            )
+            .filter(group::Column::Id.eq(row.id))
+            .exec(&db)
+            .await
+            .unwrap();
+        let registry = desk_diagnose_core::ai_assistant::ai_assistant_provider_registry();
+        let surface = desk_agent_protocol::capability_provider::ProductSurface::OssPersonalOwner;
+        let candidate = approval::prepare_permission_review_batch(
+            &db,
+            &session.conversation_id,
+            "1",
+            &session.device_id,
+            &request.request_id,
+            PendingRequestKind::Goal,
+            &registry,
+            surface,
+            0,
+            now,
+        )
+        .await
+        .unwrap()
+        .remove(0);
+        let result = approval::claim_permission_review(
+            &db,
+            &candidate,
+            &registry,
+            surface,
+            "node-funding-test",
+            0,
+            now,
+        )
+        .await;
+        assert!(matches!(
+            result,
+            Err(approval::ReviewStartError::Unavailable(
+                ReviewReason::Budget
+            ))
+        ));
+        assert_eq!(review_row::Entity::find().count(&db).await.unwrap(), 0);
+        let group_after = group::Entity::find_by_id(row.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        let state_after: desk_diagnose_core::subagent::group::DelegationGroup =
+            serde_json::from_str(&group_after.state_json).unwrap();
+        assert_eq!(state_after.budget, state.budget);
+        let connections = actix_web::web::Data::new(
+            desk_signal_facade::model::connection::SharedConnectionMap::from(
+                std::collections::BTreeMap::new(),
+            ),
+        );
+        assert!(
+            crate::approval_dispatch::process_pending_permission_review(
+                db.clone(),
+                connections,
+                approval::PendingPermissionReview {
+                    conversation_id: session.conversation_id.clone(),
+                    owner_id: session.actor_id.clone(),
+                    device_id: session.device_id.clone(),
+                    request_id: request.request_id.clone(),
+                    kind: PendingRequestKind::Goal,
+                },
+            )
+            .await
+        );
+        assert!(
+            !approval::deny_goal_unavailable(
+                &db,
+                &session.conversation_id,
+                &session.actor_id,
+                &session.device_id,
+                &request.request_id,
+                now,
+                ReviewReason::Budget,
+            )
+            .await
+            .unwrap()
+        );
+        assert!(
+            approval::pending_permission_reviews(&db, 0, 64, now)
+                .await
+                .unwrap()
+                .0
+                .is_empty()
+        );
+        assert_eq!(goal_row::Entity::find().count(&db).await.unwrap(), 0);
+        let stored = session_row::Entity::find()
+            .filter(session_row::Column::ConversationId.eq(&session.conversation_id))
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        let stored = PersistedAgentSession::decode_json(&stored.state_json).unwrap();
+        let receipt = stored
+            .conversation
+            .iter()
+            .find(|m| m.text.contains("goal_proposal_decision"))
+            .unwrap();
+        assert!(
+            receipt
+                .text
+                .contains("budget or execution deadline was exhausted")
+        );
+        assert!(receipt.text.contains("Send a new message"));
+    }
 }

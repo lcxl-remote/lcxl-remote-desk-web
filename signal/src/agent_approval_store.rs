@@ -534,6 +534,18 @@ pub async fn claim_permission_review(
         u64::try_from(config.gateway.runtime_max_output_tokens).map_err(|_| invalid())?,
     )
     .ok_or_else(invalid)?;
+    if matches!(
+        candidate.source,
+        desk_diagnose_core::approval_review::ApprovalSource::GoalProposal { .. }
+    ) {
+        crate::agent_subagent_store::check_goal_review_funding_on(
+            &txn,
+            &session,
+            reserved_tokens,
+            as_i64(now_unix_ms)?,
+        )
+        .await?;
+    }
     delegation.reserve_tokens(reserved_tokens).map_err(|_| {
         ReviewStartError::Unavailable(
             desk_diagnose_core::approval_observation::ReviewReason::Budget,
@@ -2523,9 +2535,7 @@ pub async fn deny_goal_unavailable(
         &action_sha256,
     )
     .map_err(|_| invalid())?;
-    let reason = format!(
-        "AI goal approval is unavailable ({reason_category:?}). No goal or device operation was authorized."
-    );
+    let reason = desk_diagnose_core::goal_review::failure_reason(reason_category);
     let decision = desk_diagnose_core::goal_review::GoalReviewDecision {
         candidate_id,
         action_sha256,

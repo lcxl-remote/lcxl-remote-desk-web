@@ -1807,6 +1807,8 @@ export default {
   'pages.aiAssistant.goalPanelTitle': 'Goal',
   'pages.aiAssistant.goalMainTitle': 'Main goal',
   'pages.aiAssistant.goalDetails': 'Details',
+  'pages.aiAssistant.goalExpand': 'Expand goal',
+  'pages.aiAssistant.goalCollapse': 'Collapse goal',
   'pages.aiAssistant.goalLastKnown': 'Last known state · disconnected',
   'pages.aiAssistant.goalReply': 'Reply to question',
   'pages.aiAssistant.goalResume': 'Resume goal',

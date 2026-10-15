@@ -119,7 +119,9 @@ pub fn authorize_permission_review_egress(
             .iter()
             .find(|message| message.message_id == goal.source_message_id)
             .ok_or(ApprovalReviewError::InvalidContext)?;
-        if source.role != ChatRole::User || !source.text.contains(&goal.goal_text) {
+        // The durable approved goal may be an AI-authored restatement of owner intent.
+        // Its identity, revision and text are already bound to the current candidate.
+        if source.role != ChatRole::User {
             return Err(ApprovalReviewError::InvalidContext);
         }
         source_ids.insert(source.message_id.as_str());
@@ -302,12 +304,9 @@ pub fn authorize_source_review_egress(
             .iter()
             .find(|message| message.message_id == goal.source_message_id)
             .ok_or(ApprovalReviewError::InvalidContext)?;
-        // A goal revision reviews the persisted approved goal, whose exact text
-        // may originally have been proposed by the AI rather than typed by the owner.
-        if source.role != ChatRole::User
-            || (!matches!(candidate.source, ApprovalSource::GoalProposal { .. })
-                && !source.text.contains(&goal.goal_text))
-        {
+        // Every review uses the current approved goal, including later operations.
+        // AI-proposed goal text need not be a literal substring of the owner input.
+        if source.role != ChatRole::User {
             return Err(ApprovalReviewError::InvalidContext);
         }
         source_ids.insert(source.message_id.as_str());
@@ -1238,6 +1237,77 @@ mod tests {
         assert_eq!(authorized.source_audit.envelope_ids.len(), 5);
         assert!(!authorized.prompt.contains("original-private-body"));
         assert_eq!(authorized.prompt_audit.envelope_ids.len(), 1);
+
+        let goal = crate::goal::GoalRun::new(
+            "approved-goal".into(),
+            session.conversation_id.clone(),
+            session.actor_id.clone(),
+            session.device_id.clone(),
+            "Finish the report and deliver the updated artifact".into(),
+            "user".into(),
+            crate::goal::GoalOpening::AiRequestApproved {
+                request_id: "goal-proposal".into(),
+                decision_event_id: "goal-decision".into(),
+            },
+            crate::goal::GoalModelBinding::from_destination(&destination).unwrap(),
+            session.input_revision,
+            now_unix_ms - 1000,
+            crate::goal::GoalLimits::default(),
+        )
+        .unwrap();
+        assert!(!session.conversation[0].text.contains(&goal.goal_text));
+        let for_goal = permission_review_candidate(PermissionReviewInput {
+            session: &session,
+            request: &request,
+            item_id: "write",
+            delegation: &delegation,
+            goal: Some(&goal),
+            descriptor_json: &candidate.descriptor_json,
+            risk: candidate.risk,
+            input_kind: candidate.input_kind,
+            current_authority: candidate.context.current_authority.clone(),
+            now_unix_ms,
+        })
+        .unwrap();
+        let reviewed = authorize_permission_review_egress(
+            &for_goal,
+            &session,
+            &request,
+            Some(&goal),
+            &delegation,
+            &destination,
+            now_unix_ms,
+        )
+        .unwrap();
+        assert!(reviewed.prompt.contains(&goal.goal_text));
+        let mut changed = goal.clone();
+        changed.goal_revision += 1;
+        assert!(
+            authorize_permission_review_egress(
+                &for_goal,
+                &session,
+                &request,
+                Some(&changed),
+                &delegation,
+                &destination,
+                now_unix_ms,
+            )
+            .is_err()
+        );
+        let mut unlabeled = session.clone();
+        unlabeled.conversation[0].data_envelope = None;
+        assert!(
+            authorize_permission_review_egress(
+                &for_goal,
+                &unlabeled,
+                &request,
+                Some(&goal),
+                &delegation,
+                &destination,
+                now_unix_ms,
+            )
+            .is_err()
+        );
 
         let old_pause = "not executed: waiting for user permission decision";
         session.conversation.push(ChatMessage::tool_result(

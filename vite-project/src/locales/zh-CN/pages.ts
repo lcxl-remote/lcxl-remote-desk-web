@@ -1805,6 +1805,8 @@ export default {
   'pages.aiAssistant.goalPanelTitle': '当前目标',
   'pages.aiAssistant.goalMainTitle': '主目标',
   'pages.aiAssistant.goalDetails': '详情',
+  'pages.aiAssistant.goalExpand': '展开目标',
+  'pages.aiAssistant.goalCollapse': '收起目标',
   'pages.aiAssistant.goalLastKnown': '已断连 · 上次状态',
   'pages.aiAssistant.goalReply': '回复问题',
   'pages.aiAssistant.goalResume': '继续目标',

@@ -1441,8 +1441,10 @@ impl PersistedAgentSession {
             goal_revision,
             lease_epoch,
         )?;
-        self.capability_disclosure
-            .reset_for_input(self.input_revision);
+        if self.capability_disclosure.focus_input_revision != self.input_revision {
+            self.capability_disclosure
+                .reset_for_input(self.input_revision);
+        }
         self.pending_visual_verification = None;
         Ok(())
     }
@@ -2857,6 +2859,10 @@ mod tests {
             input_tokens: Some(50),
             ..Default::default()
         });
+        value.capability_disclosure.focus_input_revision = 1;
+        value.capability_disclosure.updated_input_revision = 1;
+        value.capability_disclosure.loaded_tool_names = vec!["read_system_info".into()];
+        let disclosure = value.capability_disclosure.clone();
         value.lifetime_steps = 5;
         value.lifetime_tokens.input_tokens = Some(500);
         value
@@ -2870,6 +2876,7 @@ mod tests {
             value.focus_epoch.goal_segment.as_ref().unwrap().segment_seq,
             1
         );
+        assert_eq!(value.capability_disclosure, disclosure);
         assert_eq!(value.lifetime_steps, 5);
         assert_eq!(value.lifetime_tokens.input_tokens, Some(500));
         assert_eq!(

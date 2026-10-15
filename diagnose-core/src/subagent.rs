@@ -34,6 +34,7 @@ pub use role::{AgentRole, DelegatedTaskBinding, DelegationSource};
 /// Absolute structural bound, not the configured admission limit.
 pub const SUBAGENT_ROOT_CAPACITY: usize = policy::MAX_UNFINISHED_PER_ROOT as usize;
 pub const UNFINISHED_SUBAGENT_CAPACITY: &str = "delegation_unfinished_capacity";
+pub const CONTROL_OBSERVATION_CHANGED: &str = "delegation_control_observation_changed";
 /// Transport batch bounds do not limit cumulative child creation.
 pub const MAX_SUBAGENT_WAIT_TASKS: usize = 128;
 pub const MAX_SUBAGENT_NOTIFICATION_EVENTS: usize = 128;
@@ -59,6 +60,13 @@ pub fn capacity_error(message: &str) -> Option<desk_agent_protocol::AgentError> 
         }
         _ => None,
     }
+}
+
+/// Only a host-classified control race is safe to expose; arbitrary DB text is not.
+pub fn control_observation_error(message: &str) -> Option<desk_agent_protocol::AgentError> {
+    (message == CONTROL_OBSERVATION_CHANGED).then(|| invalid(
+        "The task changed or finished after it was observed. Refresh with get_subagent_status; if it is terminal, read its result or create a new task instead of retrying this control. No adjustment was applied.",
+    ))
 }
 
 pub fn valid_id(id: &str) -> bool {

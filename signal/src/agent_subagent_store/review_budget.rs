@@ -170,6 +170,50 @@ async fn validate_review_scope_on_inner(
     Ok(())
 }
 
+/// A goal proposal can outlive the source allocation that funded its turn.
+/// Reject exhausted funding before claim writes so it cannot become a storage retry.
+pub(crate) async fn check_goal_review_funding_on(
+    txn: &DatabaseTransaction,
+    session: &PersistedAgentSession,
+    reserved_tokens: u64,
+    now_ms: i64,
+) -> Result<(), crate::agent_approval_store::ReviewStartError> {
+    use crate::agent_approval_store::ReviewStartError;
+    use desk_diagnose_core::approval_observation::ReviewReason;
+    let Some(group_id) = &session.delegation_group_id else {
+        return Ok(());
+    };
+    let row = group_row::Entity::find()
+        .filter(group_row::Column::GroupId.eq(group_id))
+        .filter(group_row::Column::RootConversationId.eq(&session.conversation_id))
+        .filter(group_row::Column::ActorId.eq(&session.actor_id))
+        .filter(group_row::Column::DeviceId.eq(&session.device_id))
+        .one(txn)
+        .await?
+        .ok_or_else(invalid)?;
+    let group = decode_group(&row)?;
+    if !group.can_interpret(session.input_revision, session.control_revision) {
+        return Err(ReviewStartError::Unavailable(ReviewReason::SourceChanged));
+    }
+    let mut budget = group.budget;
+    if budget
+        .reserve(
+            group.limits,
+            Usage {
+                model_calls: 1,
+                tool_calls: 0,
+                tokens: reserved_tokens,
+            },
+            false,
+            now_ms,
+        )
+        .is_err()
+    {
+        return Err(ReviewStartError::Unavailable(ReviewReason::Budget));
+    }
+    Ok(())
+}
+
 /// Called after inserting the unique review row, before committing its claim.
 /// Failure rolls back review quota, group/goal quota and the claim together.
 #[allow(clippy::too_many_arguments)]

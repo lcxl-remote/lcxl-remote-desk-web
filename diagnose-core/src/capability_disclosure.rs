@@ -544,13 +544,15 @@ pub fn project_capability_disclosure(
 #[serde(deny_unknown_fields)]
 struct LoadCapabilityDetailsInput {
     tool_names: Vec<String>,
+    #[serde(default)]
+    replace: bool,
 }
 
 pub fn capability_discovery_tool_registry() -> Vec<RegisteredTool> {
     vec![RegisteredTool {
         spec: ToolSpec {
             name: LOAD_CAPABILITY_DETAILS_TOOL_NAME.into(),
-            description: "Get missing parameter details for exact Provider tool_names from the capability index, or focus an authorized tool hidden by the byte budget. Active granted tools are provided automatically without loading. Specify the tools needed now; definitions are retained in a bounded working set. Built-in conversation tools are used directly, never loaded. This reveals details on the next model step, grants no permission, creates no approval card and executes nothing.".into(),
+            description: "Get missing parameter details for exact Provider tool_names from the capability index, or focus an authorized tool hidden by the byte budget. Active granted tools are provided automatically without loading. Specify the tools needed now; definitions are added to the current bounded working set. When its byte budget is exhausted, use replace=true to replace the set with only the names needed next; a failed load leaves it unchanged. Built-in conversation tools are used directly, never loaded. This reveals details on the next model step, grants no permission, creates no approval card and executes nothing.".into(),
             parameters_schema: json!({
                 "type": "object",
                 "properties": {
@@ -558,7 +560,9 @@ pub fn capability_discovery_tool_registry() -> Vec<RegisteredTool> {
                         "type": "array",
                         "minItems": 1,
                         "items": {"type": "string", "maxLength": 128}
-                    }
+                    },
+                    "replace": {"type": "boolean", "default": false,
+                        "description": "Replace the loaded working set with tool_names; otherwise keep earlier loaded details. Does not change permissions."}
                 },
                 "required": ["tool_names"],
                 "additionalProperties": false
@@ -598,7 +602,7 @@ fn load_error(
             "current_loaded_tools": current,
             "current_count": current.len(),
             "working_set_changed": false,
-            "recovery": "The requested details exceed the byte budget. Request only the tools needed for the next step; older details are retired automatically. Existing permissions remain valid. Do not repeat the unchanged request."
+            "recovery": "The requested details exceed the byte budget. Request only the tools needed for the next step; earlier details are retained. Use replace=true with only the tools needed next to explicitly replace the working set. Existing permissions remain valid. Do not repeat the unchanged request."
         });
         result.message.push_str("; ");
         result.message.push_str(&recovery.to_string());
@@ -624,7 +628,14 @@ pub fn apply_load_call(
             "tool_names cannot be empty".into(),
         )));
     }
-    let names = canonical_names(input.tool_names, context.registry, context.inventory)
+    let requested = input.tool_names;
+    let mut names = if !input.replace && state.focus_input_revision == input_revision {
+        state.loaded_tool_names.clone()
+    } else {
+        Vec::new()
+    };
+    names.extend(requested);
+    let names = canonical_names(names, context.registry, context.inventory)
         .map_err(|error| load_error(error, state, input_revision))?;
     let mut candidate = CapabilityDisclosureState {
         schema_version: CAPABILITY_DISCLOSURE_SCHEMA_VERSION,
@@ -917,7 +928,7 @@ mod tests {
     }
 
     #[test]
-    fn focus_retires_old_details_without_revoking_callable_tools() {
+    fn loads_accumulate_until_explicit_replacement_or_new_input() {
         let (registry, inventory, callable) = every_capability_ready();
         let context = CapabilityLoadContext {
             registry: &registry,
@@ -940,6 +951,22 @@ mod tests {
             )
             .unwrap();
         }
+        assert_eq!(
+            state.loaded_tool_names,
+            ["inspect_desktop_session", "inspect_desktop_ui"]
+        );
+        apply_load_call(
+            &ToolCall {
+                id: "replace".into(),
+                name: LOAD_CAPABILITY_DETAILS_TOOL_NAME.into(),
+                arguments_json: json!({"tool_names":["inspect_desktop_ui"],"replace":true})
+                    .to_string(),
+            },
+            &mut state,
+            1,
+            &context,
+        )
+        .unwrap();
         assert_eq!(state.loaded_tool_names, ["inspect_desktop_ui"]);
         state.reset_for_input(2);
         assert!(state.loaded_tool_names.is_empty());
@@ -983,12 +1010,60 @@ mod tests {
     }
 
     #[test]
+    fn merged_load_capacity_failure_keeps_the_set_until_explicit_replacement() {
+        let (registry, inventory, tools) = every_capability_ready();
+        let names = ["read_system_info", "read_process_list"];
+        let mut single_bytes = Vec::new();
+        for name in names {
+            let state = CapabilityDisclosureState {
+                loaded_tool_names: vec![name.into()],
+                ..Default::default()
+            };
+            single_bytes.push(
+                project_capability_disclosure(
+                    &registry,
+                    &inventory,
+                    &[],
+                    &tools,
+                    &[],
+                    &state,
+                    1_048_576,
+                )
+                .unwrap()
+                .detail_utf8_bytes,
+            );
+        }
+        let context = CapabilityLoadContext {
+            registry: &registry,
+            inventory: &inventory,
+            callable_tools: &[],
+            permission_candidates: &tools,
+            max_context_bytes: (single_bytes.into_iter().max().unwrap() + 16)
+                * DETAIL_CONTEXT_RATIO_DENOMINATOR,
+        };
+        let mut state = CapabilityDisclosureState::default();
+        let call = |id: &str, name: &str, replace: bool| ToolCall {
+            id: id.into(),
+            name: LOAD_CAPABILITY_DETAILS_TOOL_NAME.into(),
+            arguments_json: json!({"tool_names":[name],"replace":replace}).to_string(),
+        };
+        apply_load_call(&call("first", names[0], false), &mut state, 1, &context).unwrap();
+        let saved = state.clone();
+        let error =
+            apply_load_call(&call("more", names[1], false), &mut state, 1, &context).unwrap_err();
+        assert!(error.message.contains("replace=true"));
+        assert_eq!(state, saved);
+        apply_load_call(&call("replace", names[1], true), &mut state, 1, &context).unwrap();
+        assert_eq!(state.loaded_tool_names, [names[1]]);
+    }
+
+    #[test]
     fn invalid_load_has_complete_example_and_preserves_focus() {
         let (registry, inventory, callable) = every_capability_ready();
         let mut state = CapabilityDisclosureState::default();
         for args in [
             r#"{"tool_names":[]}"#,
-            r#"{"tool_names":["inspect_desktop_ui"],"replace":true}"#,
+            r#"{"tool_names":["inspect_desktop_ui"],"unexpected":true}"#,
         ] {
             let error = apply_load_call(
                 &ToolCall {

@@ -488,6 +488,66 @@ mod tests {
     }
 
     #[test]
+    fn directory_review_under_an_ai_proposed_goal_uses_the_approved_goal_text() {
+        let (session, delegation, destination, now, id) = fixture();
+        let goal = crate::goal::GoalRun::new(
+            "approved-goal".into(),
+            session.conversation_id.clone(),
+            session.actor_id.clone(),
+            session.device_id.clone(),
+            "Complete the report in the approved workspace".into(),
+            "user".into(),
+            crate::goal::GoalOpening::AiRequestApproved {
+                request_id: "goal-proposal".into(),
+                decision_event_id: "goal-decision".into(),
+            },
+            crate::goal::GoalModelBinding::from_destination(&destination).unwrap(),
+            session.input_revision,
+            now - 1000,
+            crate::goal::GoalLimits::default(),
+        )
+        .unwrap();
+        assert!(!session.conversation[0].text.contains(&goal.goal_text));
+        let selected = candidate(&session, &id, &delegation, Some(&goal), now).unwrap();
+        let reviewed = authorize(
+            &selected,
+            &session,
+            Some(&goal),
+            &delegation,
+            &destination,
+            now,
+        )
+        .unwrap();
+        assert!(reviewed.prompt.contains(&goal.goal_text));
+        let mut changed = goal.clone();
+        changed.goal_text.push_str(" with a different scope");
+        assert!(
+            authorize(
+                &selected,
+                &session,
+                Some(&changed),
+                &delegation,
+                &destination,
+                now
+            )
+            .is_err()
+        );
+        let mut unlabeled = session.clone();
+        unlabeled.conversation[0].data_envelope = None;
+        assert!(
+            authorize(
+                &selected,
+                &unlabeled,
+                Some(&goal),
+                &delegation,
+                &destination,
+                now
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn active_directory_review_is_exact_and_keeps_native_proofs_out_of_model_input() {
         let (session, delegation, destination, now, id) = fixture();
         let candidate = candidate(&session, &id, &delegation, None, now).unwrap();

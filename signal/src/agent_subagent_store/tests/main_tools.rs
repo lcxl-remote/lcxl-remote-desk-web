@@ -793,3 +793,46 @@ async fn frozen_model_control_survives_session_decode_but_observation_race_keeps
         }
     }
 }
+
+#[tokio::test]
+async fn a_child_finishing_after_observation_refuses_adjustment_with_an_actionable_race() {
+    let db = database().await;
+    let (mut parent, calls) = super::creation::runnable_parent_with_source(
+        &db,
+        super::creation::destination(),
+        desk_agent_protocol::data_lineage::Sensitivity::Sensitive,
+    )
+    .await;
+    let store = SubAgentStore::new(db.clone());
+    let task = store
+        .spawn_for_turn(&parent, &calls[0], &super::creation::spawn_request())
+        .await
+        .unwrap();
+    let call = committed_call(&db, &mut parent, "late-followup", tools::MESSAGE,
+        serde_json::json!({"task_id":task.task_id,"message":"Please also check the additional symptom"}),
+    ).await;
+    store
+        .control_for_owner(
+            &parent.conversation_id,
+            &parent.actor_id,
+            &parent.device_id,
+            &desk_agent_protocol::ai_assistant::subagent::AiAssistantSubAgentControl {
+                client_request_id: "owner-cancel-before-followup".into(),
+                task_id: task.task_id.clone(),
+                expected_input_revision: 1,
+                expected_control_revision: 1,
+                action: desk_agent_protocol::ai_assistant::subagent::SubAgentControlAction::Cancel,
+            },
+        )
+        .await
+        .unwrap();
+    let before = load(&db, &task.task_id).await;
+    assert_eq!(before.state, SubAgentState::Cancelled);
+    let operation = tools::parse(&parent, &call).unwrap();
+    let result = store
+        .execute_main_tool(&mut parent, &call, operation, "late-followup-result")
+        .await;
+    assert!(matches!(result, Err(DbErr::Custom(ref code))
+        if code == desk_diagnose_core::subagent::CONTROL_OBSERVATION_CHANGED));
+    assert_eq!(load(&db, &task.task_id).await, before);
+}

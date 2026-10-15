@@ -41,7 +41,8 @@ mod runtime_budget;
 mod ui_read;
 pub(crate) use funding::{reserve_call_budget_on, settle_call_budget_on};
 pub(crate) use review_budget::{
-    mark_review_dispatch_on, reserve_review_call_on, settle_review_call_on,
+    check_goal_review_funding_on, mark_review_dispatch_on, reserve_review_call_on,
+    settle_review_call_on,
 };
 mod candidates;
 mod claim;

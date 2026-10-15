@@ -837,7 +837,7 @@ export function AiAssistantWorkspace({
                     </div>
                 </CardHeader>
                 <CardContent className="flex min-h-0 flex-1 flex-col gap-2 px-3 pb-3 pt-0">
-                    {chat.goal && <AssistantGoalPanel goal={chat.goal} connected={isConnected}
+                    {chat.goal && <AssistantGoalPanel key={`${permissionHistoryKey}:${chat.goal.goalId}:${subagents.selected?.task_id ?? 'main'}`} goal={chat.goal} connected={isConnected}
                         main={!subagents.selected} enabled={assistantEnabled && isConnected && !chat.pendingGoalOpenRequest}
                         busy={chat.goalUpdating || chat.turnRunning || !!chat.deliveryState}
                         onDetails={() => setGoalDetailsOpen(true)} onAction={action => void chat.controlGoal(action)}

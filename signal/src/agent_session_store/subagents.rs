@@ -11,8 +11,10 @@ use desk_diagnose_core::{
 
 fn delegation_storage(error: sea_orm::DbErr) -> AgentError {
     if let sea_orm::DbErr::Custom(message) = &error {
-        if let Some(capacity) = desk_diagnose_core::subagent::capacity_error(message) {
-            return capacity;
+        if let Some(refusal) = desk_diagnose_core::subagent::capacity_error(message)
+            .or_else(|| desk_diagnose_core::subagent::control_observation_error(message))
+        {
+            return refusal;
         }
     }
     AgentError {
@@ -38,6 +40,13 @@ mod tests {
         assert!(!capacity.retryable);
         assert!(capacity.message.contains("8 unfinished subagents"));
         assert!(capacity.message.contains("awaiting approval"));
+        let changed = delegation_storage(sea_orm::DbErr::Custom(
+            desk_diagnose_core::subagent::CONTROL_OBSERVATION_CHANGED.into(),
+        ));
+        assert_eq!(changed.kind, AgentErrorKind::InvalidInput);
+        assert!(changed.safe_for_model);
+        assert!(changed.message.contains("get_subagent_status"));
+        assert!(changed.message.contains("No adjustment was applied"));
         let storage = delegation_storage(sea_orm::DbErr::Custom("private storage detail".into()));
         assert_eq!(storage.kind, AgentErrorKind::Internal);
         assert!(!storage.safe_for_model);
