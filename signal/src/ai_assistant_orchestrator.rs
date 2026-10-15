@@ -3048,7 +3048,8 @@ mod tests {
             .unwrap();
         let config = crate::model_provider::load(&db).await.unwrap();
         crate::context_management_config::update(&db, &desk_signal_facade::context_management::UpdateContextManagementRequest {
-            expected_revision: 0, summary_max_output_tokens: 4096, strategy: desk_signal_facade::context_management::ContextManagementStrategyDto::CheckpointSummary,
+            compression_history_target_percent: 50,
+expected_revision: 0, summary_max_output_tokens: 4096, strategy: desk_signal_facade::context_management::ContextManagementStrategyDto::CheckpointSummary,
         }).await.unwrap();
         let model = MeteredModel {
             fresh_task: None,

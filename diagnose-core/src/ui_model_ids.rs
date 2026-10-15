@@ -718,6 +718,23 @@ pub(crate) fn project_tool_message(message: &mut ChatMessage) {
 /// checks. Durable messages/envelopes remain unchanged and retain exact lineage.
 pub fn project_request(request: &crate::seam::ModelRequest) -> crate::seam::ModelRequest {
     let mut request = request.clone();
+    let failed_ids = request
+        .messages
+        .iter()
+        .filter(|message| message.role == ChatRole::Tool && message.tool_ok == Some(false))
+        .filter_map(|message| message.tool_call_id.as_ref())
+        .collect::<std::collections::HashSet<_>>();
+    let failed_permission_calls = request
+        .messages
+        .iter()
+        .flat_map(|message| &message.tool_calls)
+        .filter(|call| {
+            call.name == crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME
+                && failed_ids.contains(&call.id)
+        })
+        .map(|call| (call.id.clone(), call.arguments_json.clone()))
+        .collect::<std::collections::HashMap<_, _>>();
+
     let locators = if request.result_locators.is_empty() {
         crate::result_model_ids::locators(&request.messages)
     } else {
@@ -731,6 +748,13 @@ pub fn project_request(request: &crate::seam::ModelRequest) -> crate::seam::Mode
             &locators,
             request.use_case,
         );
+        // An invalid historical call stays invalid; its failure must not appear
+        // to describe an otherwise valid invocation under today's schema.
+        for call in &mut message.tool_calls {
+            if let Some(original) = failed_permission_calls.get(&call.id) {
+                call.arguments_json = original.clone();
+            }
+        }
     }
     for tool in &mut request.tools {
         project_tool(tool);
@@ -761,6 +785,17 @@ pub(crate) fn project_model_message(
             }
             project_arguments(&call.name, &mut value, locators);
             crate::model_input::project_protocol_versions(&call.name, &mut value);
+            if call.name == crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME
+                && let Some(items) = value.get_mut("items").and_then(Value::as_array_mut)
+            {
+                for item in items {
+                    if let Some(item) = item.as_object_mut() {
+                        for key in ["item_id", "resource_scope", "operation_scope"] {
+                            item.remove(key);
+                        }
+                    }
+                }
+            }
             call.arguments_json = value.to_string();
         }
     }
@@ -969,6 +1004,41 @@ pub fn project_tool(tool: &mut crate::chat::ToolSpec) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn permission_history_hides_internal_bindings_but_preserves_real_failures_and_source() {
+        let original = serde_json::json!({"items":[{"item_id":"internal-item", "tool_name":"read_system_info", "resource_scope":["selected:server_resolved"], "operation_scope":["read"], "reason":"inspect"}]}).to_string();
+        let assistant = ChatMessage::assistant_tool_calls(
+            "assistant",
+            "",
+            vec![crate::chat::ToolCallRef {
+                id: "permission-call".into(),
+                name: crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME.into(),
+                arguments_json: original.clone(),
+            }],
+        );
+        let mut result = ChatMessage::tool_result("result", "permission-call", "accepted");
+        result.tool_ok = Some(true);
+        let request = crate::seam::ModelRequest::text_only(
+            vec![assistant.clone(), result.clone()],
+            crate::prompt::ResponseFormatSpec::None,
+        );
+        let projected = project_request(&request);
+        let value: Value =
+            serde_json::from_str(&projected.messages[0].tool_calls[0].arguments_json).unwrap();
+        assert!(value["items"][0].get("item_id").is_none());
+        assert!(value["items"][0].get("resource_scope").is_none());
+        assert_eq!(request.messages[0].tool_calls[0].arguments_json, original);
+        result.tool_ok = Some(false);
+        result.text = "invalid: item_id is not accepted".into();
+        let failed = crate::seam::ModelRequest::text_only(
+            vec![assistant, result],
+            crate::prompt::ResponseFormatSpec::None,
+        );
+        let projected = project_request(&failed);
+        assert_eq!(projected.messages[0].tool_calls[0].arguments_json, original);
+        assert_eq!(projected.messages[1].tool_ok, Some(false));
+    }
 
     #[test]
     fn model_tool_contracts_never_require_internal_snapshot_metadata() {

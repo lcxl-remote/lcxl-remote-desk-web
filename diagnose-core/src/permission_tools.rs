@@ -1386,6 +1386,38 @@ pub fn build_permission_request(
     Ok(request)
 }
 
+/// Resolve artifact resources before either the owner or the reviewer sees them.
+pub fn bind_artifact_request(
+    request: &mut PermissionRequest,
+    session: &crate::session::PersistedAgentSession,
+    registry: &ProviderRegistry,
+    surface: desk_agent_protocol::capability_provider::ProductSurface,
+    now_unix_ms: u64,
+) -> Result<(), AgentError> {
+    for item in &mut request.items {
+        if !crate::provider_preflight::ArtifactCallPreflight::supports(&item.tool_name) {
+            continue;
+        }
+        let call = ToolCall {
+            id: item.item_id.clone(),
+            name: item.tool_name.clone(),
+            arguments_json: item
+                .canonical_input_json
+                .clone()
+                .ok_or_else(|| invalid("artifact permission requires the complete exact input"))?,
+        };
+        let preflight = crate::provider_preflight::ArtifactCallPreflight::from_session(
+            registry,
+            surface,
+            session,
+            &call,
+            now_unix_ms,
+        )?;
+        item.resource_scope = preflight.resource_scope().to_vec();
+    }
+    request.validate().map_err(invalid)
+}
+
 /// Bundle observation with a desktop action as ordinary, independently reviewable
 /// permission items. This prepares consent only; it never issues implicit grants.
 pub fn include_desktop_action_reads(

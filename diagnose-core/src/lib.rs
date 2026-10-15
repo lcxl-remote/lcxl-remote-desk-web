@@ -86,6 +86,7 @@ pub mod model_egress;
 pub mod model_http_error;
 pub mod model_message_labels;
 pub mod model_observability;
+pub mod model_preparation;
 pub mod model_profile;
 pub mod object_context;
 pub mod observation_policy;

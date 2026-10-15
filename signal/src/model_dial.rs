@@ -210,6 +210,8 @@ pub struct SignalModelSeam {
     cancel: tokio_util::sync::CancellationToken,
     context_db: Option<crate::config::connection::DatabaseConnection>,
     context_policy: tokio::sync::OnceCell<desk_diagnose_core::model_context::PinnedContextPolicy>,
+    planning_options:
+        std::sync::OnceLock<desk_diagnose_core::model_context::ContextPlanningOptions>,
     compression_call_key: std::cell::RefCell<Option<String>>,
     retry_after_unix_ms: std::cell::Cell<Option<u64>>,
     connection_revision: u64,
@@ -279,6 +281,7 @@ impl SignalModelSeam {
             cancel: tokio_util::sync::CancellationToken::new(),
             context_db: None,
             context_policy: tokio::sync::OnceCell::new(),
+            planning_options: std::sync::OnceLock::new(),
             compression_call_key: std::cell::RefCell::new(None),
             retry_after_unix_ms: std::cell::Cell::new(None),
             connection_revision: u64::try_from(config.connection_revision)
@@ -588,6 +591,13 @@ impl SignalModelSeam {
         if let Some(observation) = observation {
             observation.outbound(chrono::Utc::now().timestamp_millis());
         }
+        desk_diagnose_core::model_preparation::ModelRequestPreparation::verify_send(
+            &body,
+            &request,
+            self.profile
+                .max_context_bytes()
+                .map_err(|error| config_error(error.to_string()))?,
+        )?;
         sink.on_provider_request(&body);
         let mut response = http
             .insert_header(("Content-Type", "application/json"))
@@ -807,14 +817,14 @@ impl SignalModelSeam {
         )
         .map_err(|error| config_error(error.to_string()))?;
         let mut body = match self.dialect {
-            Dialect::OpenAiCompatible => build_openai_body_profiled(
+            Dialect::OpenAiCompatible => render_openai_body_profiled(
                 &self.model,
                 request,
                 self.protocol,
                 &self.profile,
                 effective,
             ),
-            Dialect::Anthropic => build_anthropic_body_profiled(
+            Dialect::Anthropic => render_anthropic_body_profiled(
                 &self.model,
                 request,
                 self.protocol,
@@ -829,13 +839,6 @@ impl SignalModelSeam {
             self.api_key.as_bytes(),
             &self.source_context_key,
         );
-        desk_diagnose_core::prompt_cache::validate_wire_budget(
-            &body,
-            self.profile
-                .max_context_bytes()
-                .map_err(|error| config_error(error.to_string()))?,
-        )
-        .map_err(|error| config_error(error.to_string()))?;
         Ok(body)
     }
 
@@ -889,6 +892,27 @@ fn non_empty(value: Option<&str>) -> Option<String> {
 
 #[async_trait(?Send)]
 impl ModelSeam for SignalModelSeam {
+    fn prepare_request(
+        &self,
+        request: &ModelRequest,
+    ) -> Result<Option<desk_diagnose_core::model_preparation::ModelRequestPreparation>, AgentError>
+    {
+        let body = self.build_body(request)?;
+        desk_diagnose_core::model_preparation::ModelRequestPreparation::measure(
+            &body,
+            request,
+            self.profile
+                .max_context_bytes()
+                .map_err(|error| config_error(error.to_string()))?,
+        )
+        .map(Some)
+    }
+    fn context_planning_options(
+        &self,
+    ) -> desk_diagnose_core::model_context::ContextPlanningOptions {
+        self.planning_options.get().copied().unwrap_or_default()
+    }
+
     fn observation_context(
         &self,
         use_case: desk_diagnose_core::model_profile::ModelUseCase,
@@ -924,12 +948,13 @@ impl ModelSeam for SignalModelSeam {
         })
     }
     fn model_output_token_limit(&self, request: &ModelRequest) -> Result<i64, AgentError> {
-        let body = self.build_body(request)?;
-        self.profile
-            .output_limit_field
-            .read_positive(&body)
-            .map(|limit| limit.get())
-            .map_err(|_| config_error("invalid model output limit"))
+        resolve_effective_output_limit(
+            request.use_case,
+            self.profile.runtime_max_output_tokens,
+            request.caller_output_hard_cap,
+        )
+        .map(|limit| limit.get())
+        .map_err(|error| config_error(error.to_string()))
     }
     fn model_input_token_upper_bound(
         &self,
@@ -972,6 +997,7 @@ impl ModelSeam for SignalModelSeam {
                 let config = crate::context_management_config::read(db)
                     .await
                     .map_err(|_| config_error("context configuration could not be loaded"))?;
+                let _ = self.planning_options.set(config.planning_options());
                 config
                     .pin(
                         self.source_context_key.clone(),
@@ -1287,7 +1313,21 @@ fn openai_messages_to_json(messages: &[ChatMessage]) -> Vec<Value> {
 /// Build the streaming `/chat/completions` body, including any tools exposed by
 /// the agent loop. `stream_options.include_usage` asks the gateway to emit a final
 /// usage chunk (omitted by default when streaming).
+#[cfg(test)]
 fn build_openai_body_profiled(
+    model: &str,
+    request: &ModelRequest,
+    protocol: WireProtocol,
+    profile: &ModelRequestProfile,
+    effective_output_limit: PositiveOutputLimit,
+) -> Result<Value, desk_diagnose_core::model_profile::ProfileError> {
+    let body =
+        render_openai_body_profiled(model, request, protocol, profile, effective_output_limit)?;
+    desk_diagnose_core::prompt_cache::validate_wire_budget(&body, profile.max_context_bytes()?)?;
+    Ok(body)
+}
+
+fn render_openai_body_profiled(
     model: &str,
     request: &ModelRequest,
     protocol: WireProtocol,
@@ -1348,7 +1388,6 @@ fn build_openai_body_profiled(
         effective_output_limit,
         &mut body,
     )?;
-    desk_diagnose_core::prompt_cache::validate_wire_budget(&body, profile.max_context_bytes()?)?;
     Ok(body)
 }
 
@@ -1620,7 +1659,21 @@ fn split_data_url(url: &str) -> Option<(String, String)> {
 
 /// Build the streaming `/v1/messages` body. System text is hoisted to the
 /// top-level `system` field; the rest become `messages`.
+#[cfg(test)]
 fn build_anthropic_body_profiled(
+    model: &str,
+    request: &ModelRequest,
+    protocol: WireProtocol,
+    profile: &ModelRequestProfile,
+    effective_output_limit: PositiveOutputLimit,
+) -> Result<Value, desk_diagnose_core::model_profile::ProfileError> {
+    let body =
+        render_anthropic_body_profiled(model, request, protocol, profile, effective_output_limit)?;
+    desk_diagnose_core::prompt_cache::validate_wire_budget(&body, profile.max_context_bytes()?)?;
+    Ok(body)
+}
+
+fn render_anthropic_body_profiled(
     model: &str,
     request: &ModelRequest,
     protocol: WireProtocol,
@@ -1687,7 +1740,6 @@ fn build_anthropic_body_profiled(
         }
     }
     desk_diagnose_core::prompt_cache::apply_anthropic(&mut body, request, &profile.request_options);
-    desk_diagnose_core::prompt_cache::validate_wire_budget(&body, profile.max_context_bytes()?)?;
     Ok(body)
 }
 
@@ -1923,6 +1975,39 @@ fn append_block_string(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn pure_preparation_measures_oversized_protocol_bodies_without_spending_a_call() {
+        for protocol in [
+            WireProtocol::OpenAiChatCompletions,
+            WireProtocol::AnthropicMessages,
+        ] {
+            let config = ModelProviderConfig {
+                base_url: Some("https://example.test".into()),
+                api_key: Some("test-key".into()),
+                model: Some("test-model".into()),
+                wire_protocol: Some(protocol),
+                runtime_max_output_tokens: 65536,
+                max_context_bytes: Some(16384),
+                ..Default::default()
+            };
+            let seam = SignalModelSeam::from_config(&config).unwrap();
+            let maximum = seam.profile.max_context_bytes().unwrap();
+            let request = ModelRequest::text_only(
+                vec![ChatMessage::text(
+                    "oversized-source",
+                    ChatRole::User,
+                    "x".repeat(maximum + 500),
+                )],
+                ResponseFormatSpec::None,
+            );
+            let measured = seam.prepare_request(&request).unwrap().unwrap();
+            assert!(measured.context_bytes > maximum);
+            assert!(measured.require_fit().is_err());
+            assert!(seam.model_output_token_limit(&request).unwrap() > 0);
+            assert!(seam.compression_call_key.borrow().is_none());
+        }
+    }
 
     #[test]
     fn model_wire_hides_fixed_protocol_versions_in_approved_inputs() {
@@ -2441,6 +2526,7 @@ mod tests {
         crate::context_management_config::update(
             &db,
             &desk_signal_facade::context_management::UpdateContextManagementRequest {
+                compression_history_target_percent: 50,
                 expected_revision: 0,
                 summary_max_output_tokens: 4096,
                 strategy:
@@ -2617,6 +2703,8 @@ mod tests {
             result_locators: Default::default(),
             previous_cache_projection: None,
             delegation_call: None,
+            preparation: None,
+            compression_identity: None,
             caller_output_hard_cap: None,
         }
     }
@@ -3605,6 +3693,8 @@ mod tests {
                 result_locators: Default::default(),
                 previous_cache_projection: None,
                 delegation_call: None,
+                preparation: None,
+                compression_identity: None,
                 caller_output_hard_cap: Some(1024),
             };
             let mut sink = desk_diagnose_core::seam::NullTurnSink;
@@ -4021,6 +4111,8 @@ mod tests {
                 result_locators: Default::default(),
                 previous_cache_projection: None,
                 delegation_call: None,
+                preparation: None,
+                compression_identity: None,
                 caller_output_hard_cap: Some(1024),
             };
             let mut sink = desk_diagnose_core::seam::NullTurnSink;

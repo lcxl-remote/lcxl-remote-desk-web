@@ -278,7 +278,7 @@ async fn original_failure_preserves_receipt_reports_failure_and_stops_the_group(
         .iter()
         .find(|m| m.tool_call_id.as_deref() == Some("c2"))
         .unwrap();
-    assert!(skipped.text.contains("prior action in this group failed"));
+    assert!(skipped.text.contains("not executed") && skipped.text.contains("exec_command"));
     assert!(
         events
             .borrow()

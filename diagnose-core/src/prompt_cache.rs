@@ -331,10 +331,7 @@ fn inline_image_bytes(block: &Value) -> usize {
 /// Inline image payloads use the independently enforced image budget. Image-like
 /// strings in text, tool arguments and schemas remain charged as text. Cached
 /// input occupies the same context budget as uncached input.
-pub fn validate_wire_budget(
-    body: &Value,
-    maximum: usize,
-) -> Result<(), crate::model_profile::ProfileError> {
+pub fn wire_context_bytes(body: &Value) -> usize {
     let image_bytes = body["messages"].as_array().map_or(0, |messages| {
         messages
             .iter()
@@ -343,10 +340,17 @@ pub fn validate_wire_budget(
             .map(inline_image_bytes)
             .sum::<usize>()
     });
-    let actual = serde_json::to_vec(body)
+    serde_json::to_vec(body)
         .ok()
         .and_then(|bytes| bytes.len().checked_sub(image_bytes))
-        .unwrap_or(usize::MAX);
+        .unwrap_or(usize::MAX)
+}
+
+pub fn validate_wire_budget(
+    body: &Value,
+    maximum: usize,
+) -> Result<(), crate::model_profile::ProfileError> {
+    let actual = wire_context_bytes(body);
     if actual > maximum {
         return Err(crate::model_profile::ProfileError::InvalidRequestOption(
             format!("encoded model request exceeds context byte budget ({actual} > {maximum})"),

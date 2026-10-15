@@ -5,6 +5,21 @@ import { AssistantContextMeter, contextBudgetShare, contextMeterValues, contextR
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ i18n: { language: 'en' }, t: (key: string, args?: { percent?: number; value?: string }) => `${key}${args?.value ?? args?.percent ?? ''}` }) }));
 
 describe('compression headroom meter', () => {
+    it('separates the prepared wire size, protocol adjustment and later history estimates', async () => {
+        const usage = { usedBytes: 250, limitBytes: 1000, strategy: 'checkpoint_summary',
+            preparedRequestBytes: 1700, preparedContextBytes: 1250, historyIsEstimated: false,
+            breakdown: { messagesBytes: 180, toolsBytes: 60, replayBytes: 0, projectedBytes: 30, protocolBytes: -20 } };
+        const view = render(<AssistantContextMeter usage={usage} draft="" />);
+        fireEvent.click(screen.getByRole('button'));
+        const panel = await screen.findByRole('dialog');
+        expect(within(panel).getByText('pages.aiAssistant.contextMeter.preparedBytes').nextElementSibling).toHaveTextContent('bytes1,700');
+        expect(within(panel).getByText('pages.aiAssistant.contextMeter.preparedContextBytes').nextElementSibling).toHaveTextContent('bytes1,250');
+        expect(within(panel).getByText('pages.aiAssistant.contextMeter.breakdown.protocolBytes').nextElementSibling).toHaveTextContent('bytes-20');
+        expect(within(panel).getByText('pages.aiAssistant.contextMeter.prepared')).toBeInTheDocument();
+        view.rerender(<AssistantContextMeter usage={{ ...usage, historyIsEstimated: true, usedBytes: 300 }} draft="" />);
+        expect(within(panel).getByText('pages.aiAssistant.contextMeter.estimated')).toBeInTheDocument();
+        expect(within(panel).queryByText('pages.aiAssistant.contextMeter.prepared')).toBeNull();
+    });
     it('shows request costs as shares of the full budget without adding them to history usage', async () => {
         render(<AssistantContextMeter usage={{ usedBytes: 360, limitBytes: 720, strategy: 'window',
             requestBudget: { totalBytes: 1000, systemPromptBytes: 80, toolDefinitionsBytes: 160, otherOverheadBytes: 40 },

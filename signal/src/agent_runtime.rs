@@ -81,6 +81,19 @@ struct MeteredSignalModel {
 
 #[async_trait::async_trait(?Send)]
 impl ModelSeam for MeteredSignalModel {
+    fn prepare_request(
+        &self,
+        request: &ModelRequest,
+    ) -> Result<Option<desk_diagnose_core::model_preparation::ModelRequestPreparation>, AgentError>
+    {
+        self.inner.prepare_request(request)
+    }
+    fn context_planning_options(
+        &self,
+    ) -> desk_diagnose_core::model_context::ContextPlanningOptions {
+        self.inner.context_planning_options()
+    }
+
     fn model_output_token_limit(&self, request: &ModelRequest) -> Result<i64, AgentError> {
         self.inner.model_output_token_limit(request)
     }
@@ -174,6 +187,19 @@ struct CompletionModel {
 
 #[async_trait::async_trait(?Send)]
 impl ModelSeam for CompletionModel {
+    fn prepare_request(
+        &self,
+        request: &ModelRequest,
+    ) -> Result<Option<desk_diagnose_core::model_preparation::ModelRequestPreparation>, AgentError>
+    {
+        self.inner.prepare_request(request)
+    }
+    fn context_planning_options(
+        &self,
+    ) -> desk_diagnose_core::model_context::ContextPlanningOptions {
+        self.inner.context_planning_options()
+    }
+
     fn model_output_token_limit(&self, request: &ModelRequest) -> Result<i64, AgentError> {
         self.inner.model_output_token_limit(request)
     }

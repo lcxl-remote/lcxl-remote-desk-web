@@ -42,6 +42,20 @@ fn denied(message: impl Into<String>) -> AgentError {
     }
 }
 
+fn invalid_preview(error: desk_diagnose_core::image_input::ImageInputError) -> AgentError {
+    AgentError {
+        kind: if error == desk_diagnose_core::image_input::ImageInputError::ImageTooLarge {
+            AgentErrorKind::OutputLimitExceeded
+        } else {
+            AgentErrorKind::InvalidInput
+        },
+        message: format!("document preview image/page validation failed: {error}"),
+        retryable: false,
+        safe_for_model: true,
+        error_code: None,
+    }
+}
+
 /// Convert the already-redacted operation result into the only wire shape the
 /// manager may receive. Screenshot bytes are fitted first and then erased from
 /// the structured outcome; the image travels solely as a validated attachment.
@@ -158,20 +172,22 @@ fn sanitize_remote_output(
             pixels_per_point_milli: page.pixels_per_point_milli,
         };
         if let Some(descriptor) = descriptor {
-            document_preview = Some(
-                desk_agent_protocol::document_conversion::DocumentPreviewFrame {
-                    descriptor,
-                    page,
-                    preview_data_url,
-                },
-            );
+            let frame = desk_agent_protocol::document_conversion::DocumentPreviewFrame {
+                descriptor,
+                page,
+                preview_data_url,
+            };
+            desk_diagnose_core::image_input::validate_document_preview_frame(&frame)
+                .map_err(invalid_preview)?;
+            document_preview = Some(frame);
         } else {
-            document_preview_page = Some(
-                desk_agent_protocol::document_conversion::DocumentPreviewPageFrame {
-                    page,
-                    preview_data_url,
-                },
-            );
+            let frame = desk_agent_protocol::document_conversion::DocumentPreviewPageFrame {
+                page,
+                preview_data_url,
+            };
+            desk_diagnose_core::image_input::validate_document_preview_page_frame(&frame)
+                .map_err(invalid_preview)?;
+            document_preview_page = Some(frame);
         }
         None
     } else {
@@ -455,5 +471,102 @@ mod tests {
         assert!(image.decoded_bytes <= desk_diagnose_core::image_input::MAX_IMAGE_DECODED_BYTES);
         let json = serde_json::to_string(&output.outcome).unwrap();
         assert!(!json.contains("137,80,78,71"));
+    }
+}
+
+#[cfg(test)]
+mod preview_tests {
+    use super::*;
+    use desk_agent_protocol::document_conversion::{
+        DocumentPreviewOutput, DocumentPreviewPageOutput,
+    };
+    use desk_agent_protocol::{OperationOutput, ReadContextOutput};
+
+    fn valid_png() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        let mut state = 7u32;
+        let pixels = (0..128 * 128 * 3)
+            .map(|_| {
+                state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+                (state >> 24) as u8
+            })
+            .collect::<Vec<_>>();
+        {
+            let mut encoder = png::Encoder::new(&mut bytes, 128, 128);
+            encoder.set_color(png::ColorType::Rgb);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder
+                .write_header()
+                .unwrap()
+                .write_image_data(&pixels)
+                .unwrap();
+        }
+        bytes
+    }
+
+    fn preview(png: Vec<u8>) -> OperationOutput {
+        OperationOutput::ReadContext(ReadContextOutput::DocumentPreview(DocumentPreviewOutput {
+            preview_id: "pv_fixture".into(),
+            source_digest_sha256: "a".repeat(64),
+            page_count: 1,
+            template_version: "test".into(),
+            font_set_sha256: "b".repeat(64),
+            engine: "test".into(),
+            warnings: vec![],
+            first_page: Some(DocumentPreviewPageOutput {
+                preview_id: "pv_fixture".into(),
+                page: 1,
+                page_count: 1,
+                png,
+                width: 128,
+                height: 128,
+                pixels_per_point_milli: 1000,
+            }),
+        }))
+    }
+
+    #[test]
+    fn large_valid_preview_is_checked_as_metadata_then_delivered_only_to_owner_ui() {
+        let png = valid_png();
+        assert!(png.len() > 32 * 1024);
+        assert!(image::load_from_memory(&png).is_ok());
+        let output = preview(png.clone());
+        desk_diagnose_core::conversation_attachment::source::validate_output(&output).unwrap();
+        let prepared =
+            sanitize_remote_output(Capability::DocumentPreview, AgentOutcome::Ok(output)).unwrap();
+        assert!(prepared.image.is_none());
+        let owner = prepared.document_preview.as_ref().unwrap();
+        assert!(owner.descriptor.first_page.is_none());
+        assert!(!owner.preview_data_url.is_empty());
+        desk_diagnose_core::image_input::validate_document_preview_frame(owner).unwrap();
+        let AgentOutcome::Ok(OperationOutput::ReadContext(ReadContextOutput::DocumentPreview(
+            descriptor,
+        ))) = prepared.outcome
+        else {
+            panic!("a document descriptor is required")
+        };
+        assert!(descriptor.first_page.is_none());
+        assert!(serde_json::to_vec(&descriptor).unwrap().len() < 32 * 1024);
+    }
+
+    #[test]
+    fn independent_image_budget_and_page_metadata_still_reject_invalid_previews() {
+        assert!(
+            sanitize_remote_output(
+                Capability::DocumentPreview,
+                AgentOutcome::Ok(preview(vec![0; 400001]))
+            )
+            .is_err()
+        );
+        let mut output = preview(valid_png());
+        let OperationOutput::ReadContext(ReadContextOutput::DocumentPreview(descriptor)) =
+            &mut output
+        else {
+            unreachable!()
+        };
+        descriptor.first_page.as_mut().unwrap().width = 0;
+        assert!(
+            sanitize_remote_output(Capability::DocumentPreview, AgentOutcome::Ok(output)).is_err()
+        );
     }
 }

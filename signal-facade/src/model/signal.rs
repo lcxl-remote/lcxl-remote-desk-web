@@ -131,6 +131,9 @@ mod remote_access_initialized_data_tests {
                 "audio_encoder": "unsupported"
             },
             "connection_epoch": "epoch-test",
+            "physical_display_mode_supported": false,
+            "physical_display_capabilities": {},
+            "physical_display_external_changes": [],
             "is_admin": false
         }"#;
         let data: RemoteAccessInitializedData = serde_json::from_str(raw).expect("decode");
@@ -198,6 +201,9 @@ mod remote_access_initialized_data_tests {
                 "audio_encoder": "unsupported"
             },
             "connection_epoch": "epoch-test",
+            "physical_display_mode_supported": false,
+            "physical_display_capabilities": {},
+            "physical_display_external_changes": [],
             "is_admin": false,
             "operation_system": "Mac"
         }"#;

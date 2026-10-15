@@ -592,6 +592,7 @@ mod tests {
                 &dispatch_request,
                 "export-task",
                 2,
+                None,
                 &audit,
                 &crate::model_egress_store::test_inputs(&audit),
             )
@@ -623,6 +624,7 @@ mod tests {
             &dispatch_request,
             "export-task",
             2,
+            None,
             &audit,
             &crate::model_egress_store::test_inputs(&audit),
         )
@@ -651,6 +653,7 @@ mod tests {
                 &dispatch_request,
                 "export-task",
                 2,
+                None,
                 &audit,
                 &crate::model_egress_store::test_inputs(&audit),
             )
@@ -676,7 +679,7 @@ mod tests {
         );
         let txn = store.db.begin().await.unwrap();
         assert!(
-            ScheduleStore::settle_fresh_model_dispatch_on(&txn, 1, &work.run_id, 2)
+            ScheduleStore::settle_fresh_model_dispatch_on(&txn, 1, &work.run_id, 2, None)
                 .await
                 .is_err()
         );
@@ -705,7 +708,7 @@ mod tests {
         let mut expected = store.read(1, &task.schedule_id).await.unwrap();
         expected.revision += 1;
         let txn = store.db.begin().await.unwrap();
-        let settled = ScheduleStore::settle_fresh_model_dispatch_on(&txn, 1, &work.run_id, 2)
+        let settled = ScheduleStore::settle_fresh_model_dispatch_on(&txn, 1, &work.run_id, 2, None)
             .await
             .unwrap();
         assert_eq!(settled.charged_units, 14);
@@ -713,7 +716,7 @@ mod tests {
         txn.commit().await.unwrap();
         let txn = store.db.begin().await.unwrap();
         assert_eq!(
-            ScheduleStore::settle_fresh_model_dispatch_on(&txn, 1, &work.run_id, 2)
+            ScheduleStore::settle_fresh_model_dispatch_on(&txn, 1, &work.run_id, 2, None)
                 .await
                 .unwrap(),
             settled

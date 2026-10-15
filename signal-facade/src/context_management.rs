@@ -9,6 +9,8 @@ pub struct ContextManagementDto {
     pub revision: u64,
     pub strategy: ContextManagementStrategyDto,
     pub summary_max_output_tokens: u32,
+    #[schema(minimum = 1, maximum = 99)]
+    pub compression_history_target_percent: u8,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema)]
@@ -42,4 +44,6 @@ pub struct UpdateContextManagementRequest {
     pub expected_revision: u64,
     pub strategy: ContextManagementStrategyDto,
     pub summary_max_output_tokens: u32,
+    #[schema(minimum = 1, maximum = 99)]
+    pub compression_history_target_percent: u8,
 }

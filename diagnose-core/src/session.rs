@@ -1783,12 +1783,29 @@ impl PersistedAgentSession {
     /// planning. A checkpoint source id is never a substitute for one of these
     /// live message/tool ids.
     pub fn context_protection_set(&self) -> crate::model_context::ContextProtectionSet {
-        let mut protection = crate::model_context::ContextProtectionSet {
-            current_turn_id: self.current_turn_id.clone(),
-            ..crate::model_context::ContextProtectionSet::default()
-        };
-        if let Some(segment) = &self.focus_epoch.goal_segment {
-            protection.protect_message(segment.source_message_id.clone());
+        let mut protection = crate::model_context::ContextProtectionSet::default();
+        // The most recent assistant batch has not yet received an accepted model
+        // response to its results. Its entire call/result group must stay intact.
+        if let Some(message) = self
+            .conversation
+            .iter()
+            .rev()
+            .find(|message| message.role == crate::chat::ChatRole::Assistant)
+        {
+            for call in &message.tool_calls {
+                protection.protect_tool_call(call.id.clone());
+            }
+        }
+        for result in &self.observed_subagent_results {
+            if result.parent_input_revision == self.input_revision
+                && result.parent_control_revision == self.control_revision
+                && !self
+                    .accepted_subagent_observations
+                    .iter()
+                    .any(|accepted| accepted.result == *result)
+            {
+                protection.protect_message(result.result_message_id.clone());
+            }
         }
         if let Some(notification) = &self.ready_subagent_notification {
             protection.protect_message(notification.message_id.clone());
@@ -4265,5 +4282,46 @@ mod tests {
             PersistedAgentSession::decode_json(&s.encode_json_for_storage().unwrap()),
             Err(SessionDecodeError::InvalidExecutionState(_))
         ));
+    }
+    #[test]
+    fn context_protects_only_the_unconsumed_batch_within_a_long_business_turn() {
+        use crate::chat::{ChatMessage, ChatRole, ToolCallRef};
+        let mut session = PersistedAgentSession::new(
+            "run",
+            "owner",
+            "device",
+            1,
+            scope(&[], ExecutionMode::ReadOnly),
+            "now",
+        );
+        session.current_turn_id = Some("long-turn".into());
+        session
+            .conversation
+            .push(ChatMessage::text("requirement", ChatRole::User, "task"));
+        for index in 0..2 {
+            let call = format!("call-{index}");
+            let mut assistant = ChatMessage::assistant_tool_calls(
+                format!("assistant-{index}"),
+                "",
+                vec![ToolCallRef {
+                    id: call.clone(),
+                    name: "read".into(),
+                    arguments_json: "{}".into(),
+                }],
+            );
+            assistant.turn_id = session.current_turn_id.clone();
+            session.conversation.push(assistant);
+            session.conversation.push(ChatMessage::tool_result(
+                format!("result-{index}"),
+                &call,
+                "evidence",
+            ));
+        }
+        let protection = session.context_protection_set();
+        assert!(!protection.protected_tool_call_ids.contains("call-0"));
+        assert!(protection.protected_tool_call_ids.contains("call-1"));
+        let replay = crate::thinking_context::protected_replay_ids(&session);
+        assert!(!replay.contains("assistant-0"));
+        assert!(replay.contains("assistant-1"));
     }
 }

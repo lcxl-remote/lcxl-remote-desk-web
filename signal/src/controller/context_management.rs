@@ -24,6 +24,7 @@ fn response(config: desk_diagnose_core::model_context::PlatformContextPolicy) ->
             revision: config.revision,
             strategy: config.strategy.into(),
             summary_max_output_tokens: config.summary_max_output_tokens,
+            compression_history_target_percent: config.compression_history_target_percent,
         }))
 }
 #[utoipa::path(tag = "ContextManagementAdmin", responses((status = 200, body = RestResponse<ContextManagementDto>)))]

@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextUsageBasis {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    wire_snapshot: Option<ContextWireSnapshot>,
     pub limit_bytes: usize,
     pub strategy: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -16,8 +18,18 @@ pub struct ContextUsageBasis {
     observed_tail_id: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ContextWireSnapshot {
+    request_bytes: usize,
+    context_bytes: usize,
+    history_adjustment: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContextUsage {
+    pub prepared_request_bytes: Option<usize>,
+    pub prepared_context_bytes: Option<usize>,
+    pub history_is_estimated: bool,
     pub latest_model_call: Option<crate::thinking_context::ProviderContextObservation>,
     pub used_bytes: usize,
     pub limit_bytes: usize,
@@ -48,6 +60,7 @@ impl ContextRequestBudget {
 /// Costs of the prepared history only; contains no message or replay content.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ContextUsageBreakdown {
+    pub protocol_bytes: i64,
     pub messages_bytes: usize,
     pub tools_bytes: usize,
     pub replay_bytes: usize,
@@ -71,6 +84,7 @@ impl ContextUsageBasis {
         let ids: std::collections::HashSet<_> =
             history.iter().map(|m| m.message_id.as_str()).collect();
         Self {
+            wire_snapshot: None,
             limit_bytes: policy.history_context_bytes(),
             request_budget: None,
             strategy: match policy.strategy {
@@ -119,6 +133,29 @@ impl ContextUsageBasis {
         self
     }
 
+    pub fn with_wire_projection(
+        mut self,
+        preparation: &crate::model_preparation::ModelRequestPreparation,
+        overhead: usize,
+    ) -> Self {
+        let projected = self
+            .retained_costs
+            .iter()
+            .try_fold(self.synthetic_bytes, |total, (_, _, bytes, _)| {
+                total.checked_add(*bytes)
+            });
+        self.wire_snapshot = projected.and_then(|projected| {
+            Some(ContextWireSnapshot {
+                request_bytes: preparation.total_bytes,
+                context_bytes: preparation.context_bytes,
+                history_adjustment: i64::try_from(preparation.context_bytes.checked_sub(overhead)?)
+                    .ok()?
+                    .checked_sub(i64::try_from(projected).ok()?)?,
+            })
+        });
+        self
+    }
+
     /// Include replies, tool results and newly accepted input since observation.
     /// The next step may choose different tools/overhead, so this is not a promise
     /// that the same number of user-entered bytes will fit on the next request.
@@ -140,6 +177,7 @@ impl ContextUsageBasis {
             ..Default::default()
         };
         let mut used_bytes = self.synthetic_bytes;
+        let mut source_changed = false;
         for (_, message) in history
             .iter()
             .enumerate()
@@ -148,6 +186,9 @@ impl ContextUsageBasis {
             let prepared = self.retained_costs.iter().find(|(id, digest, _, _)| {
                 id == &message.message_id && digest == &source_digest(message)
             });
+            if ids.contains(&message.message_id) && prepared.is_none() {
+                source_changed = true;
+            }
             let cost =
                 prepared.map_or_else(|| model_context_cost(message), |(_, _, cost, _)| *cost);
             let replay = prepared.map_or_else(
@@ -164,7 +205,25 @@ impl ContextUsageBasis {
             *category = category.checked_add(cost.checked_sub(replay)?)?;
             used_bytes = used_bytes.checked_add(cost)?;
         }
+        if let Some(snapshot) = &self.wire_snapshot {
+            used_bytes = usize::try_from(
+                i128::try_from(used_bytes).ok()? + i128::from(snapshot.history_adjustment),
+            )
+            .ok()?;
+            breakdown.protocol_bytes = snapshot.history_adjustment;
+        }
         Some(ContextUsage {
+            prepared_request_bytes: self
+                .wire_snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.request_bytes),
+            prepared_context_bytes: self
+                .wire_snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.context_bytes),
+            history_is_estimated: self.wire_snapshot.is_none()
+                || source_changed
+                || history.len() != self.observed_len,
             latest_model_call: None,
             used_bytes,
             limit_bytes: self.limit_bytes,
@@ -198,6 +257,35 @@ mod tests {
         .unwrap()
         .with_request_overhead_bytes(1024)
         .unwrap()
+    }
+
+    #[test]
+    fn actual_preparation_tracks_signed_protocol_adjustments_and_later_estimates() {
+        let history = vec![ChatMessage::text("user", ChatRole::User, "hello")];
+        let mut request = crate::seam::ModelRequest::text_only(
+            history.clone(),
+            crate::prompt::ResponseFormatSpec::None,
+        );
+        let body = serde_json::json!({"messages":[{"role":"user","content":"hello"}]});
+        let measured = crate::model_preparation::ModelRequestPreparation::measure(
+            &body,
+            &request,
+            policy().max_context_bytes,
+        )
+        .unwrap();
+        let basis = ContextUsageBasis::observe(&history, &history, &policy())
+            .with_wire_projection(&measured, 12);
+        let actual = basis.usage(&history).unwrap();
+        assert_eq!(actual.used_bytes, measured.context_bytes - 12);
+        assert_eq!(actual.prepared_request_bytes, Some(measured.context_bytes));
+        assert!(!actual.history_is_estimated);
+        request
+            .messages
+            .push(ChatMessage::text("answer", ChatRole::Assistant, "new text"));
+        let later = basis.usage(&request.messages).unwrap();
+        assert!(later.history_is_estimated);
+        assert!(later.used_bytes > actual.used_bytes);
+        assert_eq!(later.prepared_request_bytes, actual.prepared_request_bytes);
     }
 
     #[test]

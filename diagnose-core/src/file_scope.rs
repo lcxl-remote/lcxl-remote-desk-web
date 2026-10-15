@@ -106,26 +106,27 @@ pub fn validate_artifact_scope(
     resources: &[String],
     now_unix_ms: u64,
 ) -> Result<(), FileScopeError> {
-    let expected_resources =
-        if crate::provider_preflight::ArtifactCallPreflight::supports(tool_name) {
-            1
-        } else if crate::provider_preflight::text_file::TextMutationPreflight::supports(tool_name)
-            || matches!(
-                tool_name,
-                "patch_numbers_copy"
-                    | "replace_pages_copy_body"
-                    | "patch_keynote_copy"
-                    | "patch_powerpoint_copy"
-                    | "replace_word_copy_body"
-                    | "patch_excel_copy"
-            )
-        {
-            // The other exact reference is the selected source file/live target.
-            // Its independent preflight still owns source identity validation.
-            2
-        } else {
-            return Ok(());
-        };
+    let expected_resources = if tool_name == "convert_document" {
+        2
+    } else if crate::provider_preflight::ArtifactCallPreflight::supports(tool_name) {
+        1
+    } else if crate::provider_preflight::text_file::TextMutationPreflight::supports(tool_name)
+        || matches!(
+            tool_name,
+            "patch_numbers_copy"
+                | "replace_pages_copy_body"
+                | "patch_keynote_copy"
+                | "patch_powerpoint_copy"
+                | "replace_word_copy_body"
+                | "patch_excel_copy"
+        )
+    {
+        // The other exact reference is the selected source file/live target.
+        // Its independent preflight still owns source identity validation.
+        2
+    } else {
+        return Ok(());
+    };
     let subject = session.file_scope_subject(
         &session.actor_id,
         &session.device_id,

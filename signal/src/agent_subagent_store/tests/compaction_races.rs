@@ -58,10 +58,7 @@ pub(super) fn plan(session: &PersistedAgentSession) -> (CompressionPlan, Validat
     );
     let mut policy = PinnedContextPolicy::checkpoint_summary(source, 1, 32_768, 0).unwrap();
     policy.preserve_history = true;
-    let protection = ContextProtectionSet {
-        current_turn_id: session.current_turn_id.clone(),
-        ..Default::default()
-    };
+    let protection = session.context_protection_set();
     let ContextBuildPlan::NeedsCompression(plan) = plan_model_context(
         &session.conversation,
         &session.model_context_state,

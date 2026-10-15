@@ -176,12 +176,16 @@ impl MeteredModel {
                     lease_epoch: task.run_epoch,
                     kind: TaskBudgetKind::ModelTokens,
                     rule_id: None,
-                    logical_key: &format!("model-step-{ordinal}"),
+                    logical_key: &ScheduleStore::model_dispatch_budget_key(
+                        ordinal,
+                        authorized.request.compression_identity.as_deref(),
+                    ),
                     input_sha256: &digest,
                     units,
                 },
                 &self.export_authorization_id,
                 ordinal,
+                authorized.request.compression_identity.as_deref(),
                 &authorized.audit,
                 &authorized.input_envelopes,
             )
@@ -206,6 +210,7 @@ impl MeteredModel {
     pub(super) async fn settle_task_dispatch(
         &self,
         ordinal: u64,
+        compression: Option<&str>,
         usage: &desk_diagnose_core::chat::TokenUsage,
         delegated: bool,
     ) -> Result<(), AgentError> {
@@ -227,6 +232,7 @@ impl MeteredModel {
             SINGLE_ACCOUNT_USER_ID,
             &task.run_id,
             u32::try_from(ordinal).map_err(|_| transport_error("invalid task model ordinal"))?,
+            compression,
         )
         .await
         .map_err(|_| transport_error("task accounting unavailable"))?;

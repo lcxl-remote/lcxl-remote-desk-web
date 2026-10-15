@@ -1,8 +1,8 @@
 use super::*;
 
-struct GrantTools {
-    snapshot: RefCell<crate::grant_disclosure::GrantDisclosureSnapshot>,
-    reads: std::cell::Cell<usize>,
+pub(super) struct GrantTools {
+    pub(super) snapshot: RefCell<crate::grant_disclosure::GrantDisclosureSnapshot>,
+    pub(super) reads: std::cell::Cell<usize>,
 }
 
 #[async_trait(?Send)]

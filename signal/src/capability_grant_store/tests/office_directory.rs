@@ -57,6 +57,13 @@ async fn set_directory(db: &DatabaseConnection, directory: &ObjectRef, revoke: b
 async fn office_directory_revocation_blocks_both_dispatch_boundaries_and_restart_keeps_one_claim() {
     for (tool, provider, capability, extension, kind) in [
         (
+            "convert_document",
+            "document.convert",
+            "document.convert.confirmed",
+            "pdf",
+            ObjectKind::File,
+        ),
+        (
             "replace_word_copy_body",
             "office.docx.batch",
             "office.docx.batch.patch",
@@ -89,9 +96,25 @@ async fn office_directory_revocation_blocks_both_dispatch_boundaries_and_restart
                 target.clone(),
                 directory.clone(),
             ]);
-            let operations = vec!["use_selected_object".into()];
+            let operations = vec![
+                if tool == "convert_document" {
+                    "create_new_artifact"
+                } else {
+                    "use_selected_object"
+                }
+                .into(),
+            ];
+            let effect = if tool == "convert_document" {
+                CapabilityEffect::WriteArtifact
+            } else {
+                CapabilityEffect::MutateApplication
+            };
             let mut args = serde_json::json!({"target":target,"output":{"destination_parent":directory,"native_file_name":format!("copy.{extension}")}});
-            if extension == "docx" {
+            if tool == "convert_document" {
+                args = serde_json::json!({"source":{"kind":"artifact_result","file_result_call_id":"source-read"},
+                    "directory_request_id":"output", "output_name":"converted.pdf",
+                    "conversion":{"kind":"markdown_to_pdf"}});
+            } else if extension == "docx" {
                 args["text"] = "approved body".into();
             } else {
                 args["action"] = serde_json::json!({"kind":"replace_slide_title","params":{"text":"approved title"}});
@@ -106,7 +129,7 @@ async fn office_directory_revocation_blocks_both_dispatch_boundaries_and_restart
             permission.provider_id = provider.into();
             permission.capability_id = capability.into();
             permission.tool_name = tool.into();
-            permission.effect = CapabilityEffect::MutateApplication;
+            permission.effect = effect;
             permission.resource_scope = resources.clone();
             permission.operation_scope = operations.clone();
             let store = SignalCapabilityGrantStore::new(db.clone());
@@ -123,7 +146,7 @@ async fn office_directory_revocation_blocks_both_dispatch_boundaries_and_restart
                 value.call.provider_id = provider;
                 value.call.capability_id = capability;
                 value.call.tool_name = tool;
-                value.call.effect = CapabilityEffect::MutateApplication;
+                value.call.effect = effect;
                 value.call.byte_count = canonical.len() as u64;
                 value
             };
@@ -211,6 +234,45 @@ async fn office_directory_revocation_blocks_both_dispatch_boundaries_and_restart
                 .unwrap()
                 .unwrap();
             assert_eq!(permission.remaining_uses, 0);
+            if tool == "convert_document" {
+                let completion = CapabilityDispatchCompletion {
+                    dispatch_id: dispatch_id.clone(),
+                    call_id: "office-call".into(),
+                    generation: 1,
+                    outcome: CapabilityDispatchOutcome::Succeeded,
+                    result_digest_sha256: format!(
+                        "{:x}",
+                        Sha256::digest(b"verified converted PDF")
+                    ),
+                };
+                assert!(
+                    !store
+                        .record_dispatch_completion(&completion, 700)
+                        .await
+                        .unwrap()
+                        .idempotent_replay
+                );
+                assert!(
+                    store
+                        .record_dispatch_completion(&completion, 701)
+                        .await
+                        .unwrap()
+                        .idempotent_replay
+                );
+                assert!(store.claim_dispatch(&dispatch_id, 702).await.is_err());
+                let terminal = agent_capability_dispatch_outbox::Entity::find_by_id(outbox_id)
+                    .one(&reopened)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(terminal.state, DISPATCH_OUTBOX_COMPLETED);
+                let terminal_grant = agent_capability_grant::Entity::find()
+                    .one(&reopened)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(terminal_grant.remaining_uses, 0);
+            }
         }
     }
 }

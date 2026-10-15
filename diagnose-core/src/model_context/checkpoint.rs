@@ -148,7 +148,6 @@ pub struct SummaryFactV1 {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ContextProtectionSet {
-    pub current_turn_id: Option<String>,
     pub protected_message_ids: BTreeSet<String>,
     pub protected_tool_call_ids: BTreeSet<String>,
 }
@@ -233,6 +232,7 @@ pub struct CompressionPlan {
     pub base_session_version: i64,
     pub history_sha256: String,
     pub policy: PinnedContextPolicy,
+    pub planning_options: super::ContextPlanningOptions,
     pub protection: ContextProtectionSet,
     pub policy_key: ContextPolicyKey,
     pub input: CompressionInputV1,
@@ -269,8 +269,33 @@ pub fn plan_model_context(
     protection: &ContextProtectionSet,
     session_version: i64,
 ) -> Result<ContextBuildPlan, ModelContextError> {
-    let mut plan =
-        plan_model_context_inner(conversation, state, policy, protection, session_version)?;
+    plan_model_context_with_options(
+        conversation,
+        state,
+        policy,
+        protection,
+        session_version,
+        Default::default(),
+    )
+}
+
+pub fn plan_model_context_with_options(
+    conversation: &[ChatMessage],
+    state: &ModelContextState,
+    policy: &PinnedContextPolicy,
+    protection: &ContextProtectionSet,
+    session_version: i64,
+    options: super::ContextPlanningOptions,
+) -> Result<ContextBuildPlan, ModelContextError> {
+    options.validate()?;
+    let mut plan = plan_model_context_inner(
+        conversation,
+        state,
+        policy,
+        protection,
+        session_version,
+        options,
+    )?;
     if let ContextBuildPlan::Ready(ready) = &mut plan {
         super::project_portable_replay(&mut ready.view.messages, policy);
     }
@@ -283,6 +308,7 @@ fn plan_model_context_inner(
     policy: &PinnedContextPolicy,
     protection: &ContextProtectionSet,
     session_version: i64,
+    options: super::ContextPlanningOptions,
 ) -> Result<ContextBuildPlan, ModelContextError> {
     validate_state(state)?;
     let retained_checkpoint = policy.preserve_history
@@ -410,24 +436,8 @@ fn plan_model_context_inner(
             high_watermark: history_budget,
         });
     }
-    let summary_reserve = summary_context_cost_limit(history_budget);
-    let low = policy.low_watermark_bytes();
-    let mut recent_start = groups.len();
-    let mut recent_cost = 0usize;
-    for index in (floor..groups.len()).rev() {
-        let next = recent_cost
-            .checked_add(groups[index].cost)
-            .ok_or(ModelContextError::ContextCostOverflow)?;
-        let reserved_next = summary_reserve
-            .checked_add(next)
-            .ok_or(ModelContextError::ContextCostOverflow)?;
-        if index + 1 != groups.len() && reserved_next > low {
-            break;
-        }
-        recent_cost = next;
-        recent_start = index;
-    }
-    let mut suffix_start = protected_start.map_or(recent_start, |index| index.min(recent_start));
+    // Do not fill a recent-history percentage with already consumed groups.
+    let mut suffix_start = protected_start.unwrap_or(groups.len().saturating_sub(1));
     if let Some(last_unsafe) = groups
         .iter()
         .enumerate()
@@ -469,7 +479,7 @@ fn plan_model_context_inner(
             )));
         }
         let one = project_groups(conversation, &groups, index, index + 1);
-        if canonical_json(&one)?.len() > history_budget {
+        if canonical_json(&one)?.len() > policy.max_context_bytes {
             return Ok(ContextBuildPlan::NeedsFloorReconciliation(
                 floor_reconciliation_plan(
                     conversation,
@@ -484,61 +494,100 @@ fn plan_model_context_inner(
         }
     }
 
-    let delta_projection = project_groups(conversation, &groups, floor, suffix_start);
-    let covered_from_message_id = checkpoint.map_or_else(
-        || conversation[groups[floor].start].message_id.clone(),
-        |checkpoint| checkpoint.v1().covered_from_message_id.clone(),
-    );
-    let covered_through_message_id = conversation[groups[suffix_start - 1].end - 1]
-        .message_id
-        .clone();
-    let covered_start = groups
-        .iter()
-        .position(|group| conversation[group.start].message_id == covered_from_message_id)
-        .ok_or_else(|| ModelContextError::InvalidCheckpoint("covered start is missing".into()))?;
-    let full_covered_projection =
-        coverage_projection(conversation, &groups, covered_start, suffix_start)?;
-    let allowed_source_message_ids = conversation
-        [groups[covered_start].start..groups[suffix_start - 1].end]
-        .iter()
-        .map(|message| message.message_id.clone())
-        .collect::<Vec<_>>();
+    // Bound the summary request itself without splitting a tool group. Keeping
+    // a tail here is a request-capacity constraint, not percentage backfilling.
+    let (
+        input,
+        input_canonical_json,
+        compression_request_cost,
+        covered_from_message_id,
+        covered_through_message_id,
+        covered_start,
+        full_covered_projection,
+    ) = loop {
+        let delta_projection = project_groups(conversation, &groups, floor, suffix_start);
+        let covered_from_message_id = checkpoint.map_or_else(
+            || conversation[groups[floor].start].message_id.clone(),
+            |checkpoint| checkpoint.v1().covered_from_message_id.clone(),
+        );
+        let covered_through_message_id = conversation[groups[suffix_start - 1].end - 1]
+            .message_id
+            .clone();
+        let covered_start = groups
+            .iter()
+            .position(|group| conversation[group.start].message_id == covered_from_message_id)
+            .ok_or_else(|| {
+                ModelContextError::InvalidCheckpoint("covered start is missing".into())
+            })?;
+        let full_covered_projection =
+            coverage_projection(conversation, &groups, covered_start, suffix_start)?;
+        let allowed_source_message_ids = conversation
+            [groups[covered_start].start..groups[suffix_start - 1].end]
+            .iter()
+            .map(|message| message.message_id.clone())
+            .collect::<Vec<_>>();
 
-    let mut lens_indices = protected_groups
-        .iter()
-        .copied()
-        .filter(|index| *index >= suffix_start)
-        .collect::<BTreeSet<_>>();
-    if suffix_start < groups.len() {
-        lens_indices.insert(groups.len() - 1);
-    }
-    let continuation_lens = lens_indices
-        .into_iter()
-        .flat_map(|index| project_lens_group(conversation, &groups[index]))
-        .collect();
-    let input = CompressionInputV1 {
-        summarize_prefix: delta_projection,
-        prior_checkpoint: checkpoint.map(|checkpoint| checkpoint.v1().summary.clone()),
-        continuation_lens,
-        summarize_only_range: SummarizeOnlyRangeV1 {
-            from_message_id: covered_from_message_id.clone(),
-            through_message_id: covered_through_message_id.clone(),
-            allowed_source_message_ids,
-        },
+        let mut lens_indices = protected_groups
+            .iter()
+            .copied()
+            .filter(|index| *index >= suffix_start)
+            .collect::<BTreeSet<_>>();
+        if suffix_start < groups.len() {
+            lens_indices.insert(groups.len() - 1);
+        }
+        let continuation_lens = lens_indices
+            .into_iter()
+            .flat_map(|index| project_lens_group(conversation, &groups[index]))
+            .collect();
+        let input = CompressionInputV1 {
+            summarize_prefix: delta_projection,
+            prior_checkpoint: checkpoint.map(|checkpoint| checkpoint.v1().summary.clone()),
+            continuation_lens,
+            summarize_only_range: SummarizeOnlyRangeV1 {
+                from_message_id: covered_from_message_id.clone(),
+                through_message_id: covered_through_message_id.clone(),
+                allowed_source_message_ids,
+            },
+        };
+        let input_canonical_json = canonical_json(&input)?;
+        let compression_request_cost = checked_cost_sum(
+            compression_request_messages_for_json(
+                &input_canonical_json,
+                policy.history_context_bytes().min(
+                    options
+                        .history_target_bytes(policy.history_context_bytes())
+                        .max(1024)
+                        .saturating_mul(8),
+                ),
+            )
+            .iter()
+            .map(model_context_cost),
+        )?;
+        if input_canonical_json.len() > policy.max_context_bytes
+            || compression_request_cost > policy.max_context_bytes
+        {
+            if suffix_start <= floor + 1 {
+                return Err(ModelContextError::CompressionInputTooLarge);
+            }
+            suffix_start -= 1;
+            continue;
+        }
+        break (
+            input,
+            input_canonical_json,
+            compression_request_cost,
+            covered_from_message_id,
+            covered_through_message_id,
+            covered_start,
+            full_covered_projection,
+        );
     };
-    let input_canonical_json = canonical_json(&input)?;
-    let compression_request_cost = checked_cost_sum(
-        compression_request_messages_for_json(
-            &input_canonical_json,
-            policy.history_context_bytes(),
-        )
-        .iter()
-        .map(model_context_cost),
-    )?;
-    if input_canonical_json.len() > policy.max_context_bytes
-        || compression_request_cost > policy.max_context_bytes
-    {
-        return Err(ModelContextError::CompressionInputTooLarge);
+    let retained_cost = checked_cost_sum(groups[suffix_start..].iter().map(|group| group.cost))?;
+    if retained_cost > history_budget {
+        return Err(ModelContextError::ProtectedStateTooLarge {
+            cost: retained_cost,
+            high_watermark: history_budget,
+        });
     }
     let covered_message_count = u32::try_from(
         groups[covered_start..suffix_start]
@@ -563,6 +612,7 @@ fn plan_model_context_inner(
             base_session_version: session_version,
             history_sha256: history_sha256(conversation)?,
             policy: policy.clone(),
+            planning_options: options,
             protection: protection.clone(),
             policy_key,
             input_projection_sha256: sha256_hex(input_canonical_json.as_bytes()),
@@ -631,12 +681,13 @@ pub fn apply_validated_checkpoint(
     // plan's own cached projection fields. This proves that the provider result is
     // being applied to the same protected prefix, continuation lens, policy and
     // cumulative coverage that produced the outbound request.
-    match plan_model_context(
+    match plan_model_context_with_options(
         conversation,
         state,
         &plan.policy,
         &plan.protection,
         session_version,
+        plan.planning_options,
     ) {
         Ok(ContextBuildPlan::NeedsCompression(rebuilt)) if rebuilt.as_ref() == plan => {}
         _ => return Err(ModelContextError::StaleCompressionPlan),
@@ -748,7 +799,12 @@ pub fn apply_floor_reconciliation(
 pub fn compression_request_messages(plan: &CompressionPlan) -> Vec<ChatMessage> {
     compression_request_messages_for_json(
         &plan.input_canonical_json,
-        plan.policy.history_context_bytes(),
+        plan.policy.history_context_bytes().min(
+            plan.planning_options
+                .history_target_bytes(plan.policy.history_context_bytes())
+                .max(1024)
+                .saturating_mul(8),
+        ),
     )
 }
 
@@ -1183,12 +1239,8 @@ fn protected_group_indices(
         let messages = &conversation[group.start..group.end];
         if messages.iter().any(|message| {
             protection
-                .current_turn_id
-                .as_deref()
-                .is_some_and(|turn_id| message.turn_id.as_deref() == Some(turn_id))
-                || protection
-                    .protected_message_ids
-                    .contains(&message.message_id)
+                .protected_message_ids
+                .contains(&message.message_id)
                 || message
                     .tool_call_id
                     .as_ref()
@@ -1477,6 +1529,59 @@ mod tests {
     }
 
     #[test]
+    fn a_small_soft_target_preserves_the_required_group_without_filling_old_history() {
+        let conversation = vec![user("old", 9000), user("required", 8000)];
+        let mut protection = ContextProtectionSet::default();
+        protection.protect_message("required");
+        let options = super::super::ContextPlanningOptions {
+            compression_history_target_percent: 1,
+        };
+        let ContextBuildPlan::NeedsCompression(plan) = plan_model_context_with_options(
+            &conversation,
+            &ModelContextState::default(),
+            &policy(),
+            &protection,
+            7,
+            options,
+        )
+        .unwrap() else {
+            panic!("a closed old prefix should be compressed");
+        };
+        assert_eq!(plan.covered_through_message_id, "old");
+        let summary = parse_validated_context_summary(
+            r#"{"goals":[{"text":"Keep the task","source_message_ids":["old"]}]}"#,
+            &plan,
+            provenance("turn"),
+        )
+        .unwrap();
+        let (_, view) = apply_validated_checkpoint(
+            &plan,
+            summary,
+            &conversation,
+            &ModelContextState::default(),
+            7,
+        )
+        .unwrap();
+        assert_eq!(
+            view.messages
+                .iter()
+                .filter(|message| message.message_id == "required")
+                .count(),
+            1
+        );
+        assert!(
+            !view
+                .messages
+                .iter()
+                .any(|message| message.message_id == "old")
+        );
+        assert!(
+            view.messages.iter().map(model_context_cost).sum::<usize>()
+                > options.history_target_bytes(policy().history_context_bytes())
+        );
+    }
+
+    #[test]
     fn unknown_checkpoint_variants_and_invalid_state_upgrades_fail_closed() {
         assert!(
             serde_json::from_value::<ContextCheckpoint>(serde_json::json!({
@@ -1527,10 +1632,8 @@ mod tests {
             user("pending", 3500),
             user("current", 3500).with_turn_id("turn-7"),
         ];
-        let mut protection = ContextProtectionSet {
-            current_turn_id: Some("turn-7".into()),
-            ..ContextProtectionSet::default()
-        };
+        let mut protection = ContextProtectionSet::default();
+        protection.protect_message("current");
         protection.protect_message("pending");
         let plan = compression_plan(&conversation, &protection);
         assert!(

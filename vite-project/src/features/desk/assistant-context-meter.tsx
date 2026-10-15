@@ -89,10 +89,14 @@ export function AssistantContextMeter({ usage, draft }: { usage: AssistantContex
                 {usage.breakdown && (['messagesBytes', 'toolsBytes', 'replayBytes', 'projectedBytes'] as const).map(key => <div key={key} className="contents">
                     <dt className="pl-2 text-xs text-muted-foreground">{t(`pages.aiAssistant.contextMeter.breakdown.${key}`)}</dt><dd className="text-xs">{bytes(usage.breakdown[key])}</dd>
                 </div>)}
+                {usage.breakdown?.protocolBytes != null && <><dt className="pl-2 text-xs text-muted-foreground">{t('pages.aiAssistant.contextMeter.breakdown.protocolBytes')}</dt><dd className="text-xs">{bytes(usage.breakdown.protocolBytes)}</dd></>}
+                {usage.preparedContextBytes != null && <><dt>{t('pages.aiAssistant.contextMeter.preparedContextBytes')}</dt><dd>{bytes(usage.preparedContextBytes)}</dd></>}
+                {usage.preparedRequestBytes != null && <><dt>{t('pages.aiAssistant.contextMeter.preparedBytes')}</dt><dd>{bytes(usage.preparedRequestBytes)}</dd></>}
                 <dt>{t('pages.aiAssistant.contextMeter.remaining')}</dt><dd>{bytes(values.remaining)}</dd>
                 <dt>{t('pages.aiAssistant.contextMeter.draft')}</dt><dd>{bytes(values.draftBytes)}</dd>
             </dl>
             {values.draftBytes > values.remaining && <p>{t('pages.aiAssistant.contextMeter.exceeds')}</p>}
+            <p className="text-xs text-muted-foreground">{t(usage.historyIsEstimated !== false ? 'pages.aiAssistant.contextMeter.estimated' : 'pages.aiAssistant.contextMeter.prepared')}</p>
             <p className="text-xs leading-relaxed text-muted-foreground">{t('pages.aiAssistant.contextMeter.hint')}</p>
         </> : <p>{t('pages.aiAssistant.contextMeter.unknownHint')}</p>}
     </PopoverContent></Popover>;

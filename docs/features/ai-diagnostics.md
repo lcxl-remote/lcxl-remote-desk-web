@@ -649,3 +649,10 @@ Automatic review handles the same permission request as owner review. A batch ma
 Completed command receipts with verifiable content remain historical evidence after their execution references expire; this never authorizes repeating the command. Expired UI, file or attachment references remain invalid for current actions, and current-target errors are returned before a permission request is submitted. Unrelated old grant expiry or revocation does not invalidate a new request. Later approval-model configuration changes do not revoke completed grants; their own scope, lifetime, usage and revocation still apply.
 
 Legal 16 KiB owner input stays complete. Auxiliary history is selected within the configured approval context capacity, with omission counts included in review input. Current instructions and exact operations are never truncated. Required input above capacity is rejected before submission with advice to split actions or raise approval context capacity. Model tests are diagnostic; complete configuration allows actual reviews without a mandatory passed probe.
+
+
+### Compression and permission recovery
+
+The history budget target after compression defaults to 50% and accepts 1–99. It is a local history byte-budget goal, not the provider token window. The system does not retain unnecessary old history to fill it or discard required results to lower it. Long tasks can compress again after new history is produced. The meter distinguishes the latest prepared request bytes, protocol encoding adjustment and estimates for subsequently added content.
+
+Compression rebuilds only the model working window. Original conversations, approval records and reference mappings remain intact. Pending approval stays paused. Even when recovery needs compression, approved exact arguments and objects come from current durable authorization, without duplicate requests, refreshed expiry or replayed completed operations. Partial approvals, denials, revocations and expiry keep their real meaning. Unread results, running execution and unknown outcomes remain protected.

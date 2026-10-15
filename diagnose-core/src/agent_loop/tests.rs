@@ -1,3 +1,4 @@
+mod context_boundaries;
 mod grant_exposure;
 mod schedule_review;
 mod scheduled_continuation;
@@ -3155,82 +3156,6 @@ async fn checkpoint_survives_main_call_failure_and_is_reused_by_the_next_turn() 
 }
 
 #[tokio::test]
-async fn a_second_compression_need_in_the_same_turn_fails_without_redial() {
-    let sess = MemSession::default();
-    let mut existing = PersistedAgentSession::new(
-        "conv",
-        "actor",
-        "device",
-        1,
-        scope(),
-        "2026-06-19T00:00:00Z",
-    );
-    existing.conversation = vec![
-        ChatMessage::text("old-a", ChatRole::User, "a".repeat(14_000)),
-        ChatMessage::text("middle", ChatRole::User, "m".repeat(5000)),
-    ];
-    *sess.inner.borrow_mut() = Some(existing);
-
-    let source =
-        SourceContextKey::derive(WireProtocol::OpenAiChatCompletions, "test", "test", "test");
-    let compression_turn = ModelTurn {
-        text: serde_json::json!({
-            "goals": [{"text": "old goal", "source_message_ids": ["old-a"]}],
-            "historical_constraints": [], "reported_observations": [],
-            "completed_actions": [], "unresolved_questions": [], "next_steps": [],
-            "important_identifiers": [], "omitted_evidence": []
-        })
-        .to_string(),
-        stop_reason: StopReason::EndTurn,
-        provider_meta: ProviderResponseMeta::without_reasoning(StopReason::EndTurn),
-        ..Default::default()
-    };
-    let requests = Rc::new(RefCell::new(Vec::new()));
-    let audits = Rc::new(RefCell::new(Vec::new()));
-    let model = CompressionScriptModel {
-        turns: RefCell::new([Ok(compression_turn), Ok(tool_use("call-1", "sysinfo"))].into()),
-        requests: requests.clone(),
-        audits: audits.clone(),
-        source,
-        max_context_bytes: crate::MIN_MODEL_CONTEXT_BYTES * 6,
-    };
-    let tools = RecordingTools {
-        calls: Rc::new(RefCell::new(vec![])),
-        reply: "x".repeat(12_000),
-    };
-    let registry = vec![read_tool("sysinfo", Capability::SystemInfo)];
-    let clock = || "2026-06-20T00:00:01Z".to_string();
-    let mut sink = Collector(Rc::new(RefCell::new(String::new())));
-    let error = run_agent_turn(
-        &deps(&sess, &model, &tools, &registry, &clock),
-        claim(),
-        ChatMessage::text("current", ChatRole::User, "c".repeat(4000)),
-        &mut sink,
-    )
-    .await
-    .expect_err("a second compression need must fail closed");
-
-    assert_eq!(
-        error.message,
-        "model context compression failed: attempt_exhausted"
-    );
-    assert_eq!(
-        requests.borrow().len(),
-        2,
-        "only the first compression and main tool call may reach the provider"
-    );
-    assert_eq!(tools.calls.borrow().as_slice(), ["sysinfo"]);
-    assert!(matches!(
-        audits.borrow().last(),
-        Some(crate::seam::ContextCompressionAuditOutcome::Failed {
-            kind: crate::seam::ContextCompressionFailureKind::AttemptExhausted,
-            usage: None,
-            ..
-        })
-    ));
-}
-
-#[tokio::test]
 async fn rejected_compression_summary_records_usage_but_no_checkpoint_or_notice() {
     crate::future::boxed(|| assert_rejected_compression_summary(StopReason::EndTurn)).await;
 }
@@ -4164,7 +4089,7 @@ async fn trims_history_to_budget() {
         budget.tool_definitions_bytes,
         serde_json::to_vec(&reqs[0].tools).unwrap().len()
     );
-    assert_eq!(budget.other_overhead_bytes, 1024);
+    assert_eq!(budget.other_overhead_bytes, 0);
     assert_eq!(budget.total_bytes, TEST_MODEL_CONTEXT_BYTES);
     assert!(budget.matches_history_limit(usage.limit_bytes));
 }
@@ -4395,7 +4320,6 @@ async fn projection_metrics_preserve_history_and_keep_capability_catalog_bounded
                 .filter(|message| message.role != ChatRole::System)
                 .map(|message| crate::trim::model_context_cost(message))
                 .sum::<usize>()
-                + 1024
         );
         assert_eq!(
             request_budget.tool_definitions_bytes,

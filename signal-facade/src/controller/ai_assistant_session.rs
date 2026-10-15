@@ -876,6 +876,9 @@ pub struct ModelContextObservationDto {
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ContextUsageDto {
+    pub prepared_request_bytes: Option<u64>,
+    pub prepared_context_bytes: Option<u64>,
+    pub history_is_estimated: Option<bool>,
     pub latest_model_call: Option<ModelContextObservationDto>,
     pub used_bytes: u64,
     pub limit_bytes: u64,
@@ -896,6 +899,7 @@ pub struct ContextRequestBudgetDto {
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ContextUsageBreakdownDto {
+    pub protocol_bytes: Option<i64>,
     pub messages_bytes: u64,
     pub tools_bytes: u64,
     pub replay_bytes: u64,
@@ -905,6 +909,9 @@ pub struct ContextUsageBreakdownDto {
 impl From<desk_diagnose_core::context_usage::ContextUsage> for ContextUsageDto {
     fn from(value: desk_diagnose_core::context_usage::ContextUsage) -> Self {
         Self {
+            prepared_request_bytes: value.prepared_request_bytes.map(|bytes| bytes as u64),
+            prepared_context_bytes: value.prepared_context_bytes.map(|bytes| bytes as u64),
+            history_is_estimated: Some(value.history_is_estimated),
             latest_model_call: value
                 .latest_model_call
                 .map(|call| ModelContextObservationDto {
@@ -920,6 +927,7 @@ impl From<desk_diagnose_core::context_usage::ContextUsage> for ContextUsageDto {
             limit_bytes: value.limit_bytes as u64,
             strategy: value.strategy,
             breakdown: ContextUsageBreakdownDto {
+                protocol_bytes: Some(value.breakdown.protocol_bytes),
                 messages_bytes: value.breakdown.messages_bytes as u64,
                 tools_bytes: value.breakdown.tools_bytes as u64,
                 replay_bytes: value.breakdown.replay_bytes as u64,
@@ -2132,11 +2140,15 @@ mod tests {
     #[test]
     fn context_usage_exposes_only_budget_metadata() {
         let dto = ContextUsageDto::from(desk_diagnose_core::context_usage::ContextUsage {
+            prepared_request_bytes: None,
+            prepared_context_bytes: None,
+            history_is_estimated: true,
             latest_model_call: None,
             used_bytes: 42,
             limit_bytes: 128,
             strategy: "checkpoint_summary".into(),
             breakdown: desk_diagnose_core::context_usage::ContextUsageBreakdown {
+                protocol_bytes: 0,
                 messages_bytes: 12,
                 tools_bytes: 10,
                 replay_bytes: 20,
@@ -2153,7 +2165,9 @@ mod tests {
             serde_json::to_value(dto).unwrap(),
             serde_json::json!({
                 "usedBytes": 42, "limitBytes": 128, "strategy": "checkpoint_summary",
-                "breakdown": {"messagesBytes": 12, "toolsBytes": 10, "replayBytes": 20, "projectedBytes": 0},
+                "preparedRequestBytes": null, "preparedContextBytes": null,
+                "historyIsEstimated": true, "latestModelCall": null,
+                "breakdown": {"messagesBytes": 12, "toolsBytes": 10, "replayBytes": 20, "projectedBytes": 0, "protocolBytes": 0},
                 "requestBudget": {"totalBytes": 256, "systemPromptBytes": 64, "toolDefinitionsBytes": 32, "otherOverheadBytes": 32}
             })
         );
@@ -2162,6 +2176,9 @@ mod tests {
     #[test]
     fn unmeasured_request_budget_is_null_instead_of_zero() {
         let dto = ContextUsageDto::from(desk_diagnose_core::context_usage::ContextUsage {
+            prepared_request_bytes: None,
+            prepared_context_bytes: None,
+            history_is_estimated: true,
             latest_model_call: None,
             used_bytes: 0,
             limit_bytes: 128,

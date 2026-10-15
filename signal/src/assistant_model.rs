@@ -37,6 +37,25 @@ pub(crate) struct MeteredModel {
 
 #[async_trait::async_trait(?Send)]
 impl ModelSeam for MeteredModel {
+    fn prepare_request(
+        &self,
+        request: &ModelRequest,
+    ) -> Result<Option<desk_diagnose_core::model_preparation::ModelRequestPreparation>, AgentError>
+    {
+        let policy = self
+            .model_egress_policy()?
+            .ok_or_else(|| transport_error("AI assistant model egress policy is unavailable"))?;
+        let authorized = policy
+            .authorize_request(request.clone())
+            .map_err(|error| error.agent_error())?;
+        self.inner.prepare_request(&authorized.request)
+    }
+    fn context_planning_options(
+        &self,
+    ) -> desk_diagnose_core::model_context::ContextPlanningOptions {
+        self.inner.context_planning_options()
+    }
+
     fn observation_context(
         &self,
         use_case: desk_diagnose_core::model_profile::ModelUseCase,
@@ -51,7 +70,14 @@ impl ModelSeam for MeteredModel {
         &self,
         request: &ModelRequest,
     ) -> Result<Option<u64>, AgentError> {
-        self.inner.model_input_token_upper_bound(request)
+        let policy = self
+            .model_egress_policy()?
+            .ok_or_else(|| transport_error("AI assistant model egress policy is unavailable"))?;
+        let authorized = policy
+            .authorize_request(request.clone())
+            .map_err(|error| error.agent_error())?;
+        self.inner
+            .model_input_token_upper_bound(&authorized.request)
     }
     fn context_compression_provenance(
         &self,
@@ -151,12 +177,24 @@ impl ModelSeam for MeteredModel {
             log::warn!("[ai-assistant] model egress denied: {error}");
             error.agent_error()
         })?;
+        if let Some(prepared) = self.inner.prepare_request(&authorized.request)? {
+            prepared.verify_request(&authorized.request)?;
+        }
         let model_call_ordinal = self
             .model_call_ordinal
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             .saturating_add(1);
         let physical_identity = authorized.request.delegation_call.as_ref().map_or_else(
-            || format!("ordinal:{model_call_ordinal}"),
+            || {
+                authorized
+                    .request
+                    .compression_identity
+                    .as_ref()
+                    .map_or_else(
+                        || format!("ordinal:{model_call_ordinal}"),
+                        |identity| format!("compression:{identity}"),
+                    )
+            },
             |reservation| format!("delegation:{}", reservation.reservation_id),
         );
         let ordinary_receipt_id = format!(
@@ -202,6 +240,7 @@ impl ModelSeam for MeteredModel {
             authorized.audit.total_bytes
         );
         let delegated = authorized.request.delegation_call.is_some();
+        let compression_identity = authorized.request.compression_identity.clone();
         let mut turn = match self
             .inner
             .call_admitted(authorized.request, sink, permit)
@@ -228,8 +267,13 @@ impl ModelSeam for MeteredModel {
             )
             .await
             .map_err(|_| transport_error("The AI model usage could not be recorded safely."))?;
-        self.settle_task_dispatch(model_call_ordinal, &turn.usage, delegated)
-            .await?;
+        self.settle_task_dispatch(
+            model_call_ordinal,
+            compression_identity.as_deref(),
+            &turn.usage,
+            delegated,
+        )
+        .await?;
         if turn.text.trim().is_empty() && turn.tool_calls.is_empty() {
             // There is no model output content to label or export. Close this
             // audited provider call as unusable, then let the pure agent loop

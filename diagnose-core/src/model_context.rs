@@ -18,6 +18,39 @@ pub const MODEL_CONTEXT_STATE_SCHEMA_VERSION: u16 = 2;
 pub const CONTEXT_STRATEGY_SCHEMA_VERSION: u16 = 1;
 pub const PLATFORM_CONTEXT_POLICY_SCHEMA_VERSION: u32 = 2;
 pub const DEFAULT_SUMMARY_MAX_OUTPUT_TOKENS: u32 = 16 * 1024;
+pub const DEFAULT_COMPRESSION_HISTORY_TARGET_PERCENT: u8 = 50;
+
+pub const fn default_compression_history_target_percent() -> u8 {
+    DEFAULT_COMPRESSION_HISTORY_TARGET_PERCENT
+}
+
+/// Request-local planning options, deliberately absent from checkpoint provenance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContextPlanningOptions {
+    pub compression_history_target_percent: u8,
+}
+
+impl Default for ContextPlanningOptions {
+    fn default() -> Self {
+        Self {
+            compression_history_target_percent: DEFAULT_COMPRESSION_HISTORY_TARGET_PERCENT,
+        }
+    }
+}
+
+impl ContextPlanningOptions {
+    pub fn validate(self) -> Result<Self, ModelContextError> {
+        if !(1..=99).contains(&self.compression_history_target_percent) {
+            return Err(ModelContextError::InvalidBudget(0));
+        }
+        Ok(self)
+    }
+
+    pub fn history_target_bytes(self, budget: usize) -> usize {
+        budget / 100 * usize::from(self.compression_history_target_percent)
+            + budget % 100 * usize::from(self.compression_history_target_percent) / 100
+    }
+}
 pub const MAX_CONTEXT_POLICY_ENTRIES: usize = 8;
 pub const MAX_CONTEXT_NOTICES: usize = 256;
 
@@ -45,6 +78,8 @@ pub struct PlatformContextPolicy {
     pub revision: u64,
     pub strategy: ContextManagementStrategy,
     pub summary_max_output_tokens: u32,
+    #[serde(default = "default_compression_history_target_percent")]
+    pub compression_history_target_percent: u8,
 }
 
 impl Default for PlatformContextPolicy {
@@ -54,6 +89,7 @@ impl Default for PlatformContextPolicy {
             revision: 0,
             strategy: ContextManagementStrategy::CheckpointSummary,
             summary_max_output_tokens: DEFAULT_SUMMARY_MAX_OUTPUT_TOKENS,
+            compression_history_target_percent: DEFAULT_COMPRESSION_HISTORY_TARGET_PERCENT,
         }
     }
 }
@@ -66,6 +102,9 @@ impl PlatformContextPolicy {
         if self.summary_max_output_tokens == 0 {
             return Err("summary output tokens must be positive");
         }
+        if !(1..=99).contains(&self.compression_history_target_percent) {
+            return Err("compression history target must be between 1 and 99 percent");
+        }
         Ok(())
     }
 
@@ -73,17 +112,27 @@ impl PlatformContextPolicy {
         &self,
         strategy: ContextManagementStrategy,
         summary_max_output_tokens: u32,
+        compression_history_target_percent: u8,
     ) -> Result<Self, &'static str> {
         self.validate()?;
         if summary_max_output_tokens == 0 {
             return Err("summary output tokens must be positive");
         }
-        Ok(Self {
+        let candidate = Self {
             schema_version: PLATFORM_CONTEXT_POLICY_SCHEMA_VERSION,
             revision: self.revision.checked_add(1).ok_or("revision overflow")?,
             strategy,
             summary_max_output_tokens,
-        })
+            compression_history_target_percent,
+        };
+        candidate.validate()?;
+        Ok(candidate)
+    }
+
+    pub fn planning_options(&self) -> ContextPlanningOptions {
+        ContextPlanningOptions {
+            compression_history_target_percent: self.compression_history_target_percent,
+        }
     }
 
     pub fn pin(
@@ -900,6 +949,38 @@ mod tests {
     }
 
     #[test]
+    fn compression_targets_are_global_defaults_and_bounded_without_mutating_checkpoints() {
+        let initial = PlatformContextPolicy::default();
+        assert_eq!(initial.compression_history_target_percent, 50);
+        for target in [0, 100, 255] {
+            assert!(
+                initial
+                    .candidate(ContextManagementStrategy::CheckpointSummary, 16384, target)
+                    .is_err()
+            );
+        }
+        for target in [1, 50, 99] {
+            let saved = initial
+                .candidate(ContextManagementStrategy::CheckpointSummary, 16384, target)
+                .unwrap();
+            assert_eq!(
+                saved.planning_options().compression_history_target_percent,
+                target
+            );
+            assert_eq!(saved.revision, initial.revision + 1);
+        }
+        let mut value = serde_json::to_value(&initial).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("compression_history_target_percent");
+        assert_eq!(
+            serde_json::from_value::<PlatformContextPolicy>(value).unwrap(),
+            initial
+        );
+    }
+
+    #[test]
     fn plain_assistant_replay_obeys_source_shape_role_and_cost_guards() {
         let mut message = ChatMessage::text("answer", ChatRole::Assistant, "done");
         message.replay_disposition = Some(ReplayDisposition::Present {
@@ -1087,7 +1168,7 @@ mod tests {
                 .unwrap();
         assert_ne!(zero.key(), one.key());
         let larger = PlatformContextPolicy::default()
-            .candidate(ContextManagementStrategy::CheckpointSummary, 32768)
+            .candidate(ContextManagementStrategy::CheckpointSummary, 32768, 50)
             .unwrap();
         let frozen = larger
             .pin(source("same"), 1, MIN_MODEL_CONTEXT_BYTES)
@@ -1096,11 +1177,11 @@ mod tests {
         assert_ne!(frozen.key(), one.key());
         assert!(
             larger
-                .candidate(ContextManagementStrategy::Window, 0)
+                .candidate(ContextManagementStrategy::Window, 0, 50)
                 .is_err()
         );
         let window = platform
-            .candidate(ContextManagementStrategy::Window, 4096)
+            .candidate(ContextManagementStrategy::Window, 4096, 50)
             .unwrap();
         assert_eq!(window.revision, 1);
         let pinned = window
@@ -1119,7 +1200,7 @@ mod tests {
         invalid.revision = u64::MAX;
         assert!(
             invalid
-                .candidate(ContextManagementStrategy::Window, 4096)
+                .candidate(ContextManagementStrategy::Window, 4096, 50)
                 .is_err()
         );
     }

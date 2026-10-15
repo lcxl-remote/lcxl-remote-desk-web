@@ -607,3 +607,40 @@ fn task_directory_consent_keeps_distinct_source_and_requires_active_scheduled_ru
     };
     assert!(update.validate().is_err());
 }
+
+#[test]
+fn conversion_directory_boundary_accepts_two_exact_resources_and_still_rejects_wrong_directories() {
+    let mut session = PersistedAgentSession::new(
+        "conversation",
+        "owner",
+        "device",
+        1,
+        AgentScope {
+            granted: vec![],
+            expires_at: None,
+            mode: ExecutionMode::ReadOnly,
+            policy_name: None,
+        },
+        "now",
+    );
+    session.adopt_client_metadata(Some("browser-intent"), AgentSessionSurface::AiAssistant);
+    session.file_scope = approved();
+    let directory = proposal().directory;
+    let mut source = directory.clone();
+    source.object_kind = ObjectKind::File;
+    source.token = "source".into();
+    let resources =
+        crate::capability_grant::fresh_object_resource_scope(&[source.clone(), directory.clone()]);
+    validate_artifact_scope(&session, "convert_document", &resources, 1).unwrap();
+    assert!(validate_artifact_scope(&session, "convert_document", &resources[..1], 1).is_err());
+    assert!(validate_artifact_scope(&session, "create_text_file", &resources, 1).is_err());
+    let mut wrong_directory = directory;
+    wrong_directory.token = "unapproved-directory".into();
+    let wrong = crate::capability_grant::fresh_object_resource_scope(&[source, wrong_directory]);
+    assert!(validate_artifact_scope(&session, "convert_document", &wrong, 1).is_err());
+    session
+        .file_scope
+        .revoke(&subject(), 2, "directory-request")
+        .unwrap();
+    assert!(validate_artifact_scope(&session, "convert_document", &resources, 1).is_err());
+}

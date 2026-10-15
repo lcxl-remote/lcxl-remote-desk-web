@@ -30,7 +30,11 @@ pub async fn update(
             }
             let next = config
                 .context_management
-                .candidate(request.strategy.into(), request.summary_max_output_tokens)
+                .candidate(
+                    request.strategy.into(),
+                    request.summary_max_output_tokens,
+                    request.compression_history_target_percent,
+                )
                 .map_err(|_| WriteError::Invalid)?;
             config.context_management = next.clone();
             Ok(Some(next))

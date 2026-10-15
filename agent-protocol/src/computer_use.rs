@@ -1799,6 +1799,9 @@ fn validate_actions(
                     ComputerUseAdapterKind::FileSystem,
                     ComputerActionKind::File(_)
                 ) | (
+                    ComputerUseAdapterKind::DocumentConversion,
+                    ComputerActionKind::DocumentConversion(_)
+                ) | (
                     ComputerUseAdapterKind::BrowserExtension,
                     ComputerActionKind::Browser(_)
                 ) | (
@@ -1871,6 +1874,10 @@ fn validate_actions(
                     ObjectKind::Slide
                 )
                 | (
+                    ComputerActionKind::DocumentConversion(_),
+                    ObjectKind::Directory
+                )
+                | (
                     ComputerActionKind::File(
                         FilePatchAction::CreateTextArtifact { .. }
                             | FilePatchAction::CreateSpreadsheetArtifact { .. }
@@ -1935,6 +1942,16 @@ fn validate_actions(
         validate_live_document_action(&step.action)?;
         if let ComputerActionKind::File(action) = &step.action {
             action.validate_text_mutation()?;
+        }
+        if let ComputerActionKind::DocumentConversion(action) = &step.action {
+            action
+                .validate()
+                .map_err(ComputerUseValidationError::InvalidContextReference)?;
+            if action.destination_parent != step.target {
+                return Err(ComputerUseValidationError::InvalidContextReference(
+                    "document conversion target must match its destination directory",
+                ));
+            }
         }
         if let Some(output) = batch_document_output(&step.action) {
             if output.destination_parent.object_kind != ObjectKind::Directory {
@@ -2737,6 +2754,49 @@ mod tests {
             verification: "observe application state again".into(),
         }];
         sealed
+    }
+
+    #[test]
+    fn document_conversion_seals_only_with_its_exact_directory_and_valid_action() {
+        use crate::document_conversion::{
+            DOCUMENT_CONVERSION_ADAPTER_VERSION, DocumentConversionKind, DocumentConversionOptions,
+            DocumentConvertAction,
+        };
+        let mut sealed = plan();
+        sealed.adapter = ComputerUseAdapterRef {
+            kind: ComputerUseAdapterKind::DocumentConversion,
+            version: DOCUMENT_CONVERSION_ADAPTER_VERSION.into(),
+        };
+        sealed.actions[0].target.object_kind = ObjectKind::Directory;
+        sealed.actions[0].action = ComputerActionKind::DocumentConversion(DocumentConvertAction {
+            source: ObjectRef {
+                object_kind: ObjectKind::File,
+                ..object("source")
+            },
+            destination_parent: sealed.actions[0].target.clone(),
+            expected_source_sha256: Some("a".repeat(64)),
+            output_name: "converted.pdf".into(),
+            conversion: DocumentConversionOptions {
+                kind: DocumentConversionKind::MarkdownToPdf,
+                pages: vec![],
+                page_markers: None,
+            },
+        });
+        assert!(sealed.validate().is_ok());
+        let mut changed = sealed.clone();
+        changed.adapter.kind = ComputerUseAdapterKind::FileSystem;
+        assert_eq!(
+            changed.validate(),
+            Err(ComputerUseValidationError::IncompatibleActionAdapter)
+        );
+        let mut changed = sealed.clone();
+        changed.actions[0].target.token = "another-directory".into();
+        assert!(changed.validate().is_err());
+        let ComputerActionKind::DocumentConversion(action) = &mut sealed.actions[0].action else {
+            unreachable!();
+        };
+        action.output_name = "../outside.pdf".into();
+        assert!(sealed.validate().is_err());
     }
 
     #[test]

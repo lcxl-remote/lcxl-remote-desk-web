@@ -1107,6 +1107,10 @@ export type ContextUsageBreakdownDto = {
     */
     projectedBytes: number;
     /**
+     * @type integer,null, int64
+    */
+    protocolBytes?: number | null;
+    /**
      * @minLength 0
      * @type integer, int64
     */
@@ -1182,12 +1186,26 @@ export type ContextUsageDto = {
      * @type object
     */
     breakdown: ContextUsageBreakdownDto;
+    /**
+     * @type boolean,null
+    */
+    historyIsEstimated?: boolean | null;
     latestModelCall?: (null | ModelContextObservationDto);
     /**
      * @minLength 0
      * @type integer, int64
     */
     limitBytes: number;
+    /**
+     * @minLength 0
+     * @type integer,null, int64
+    */
+    preparedContextBytes?: number | null;
+    /**
+     * @minLength 0
+     * @type integer,null, int64
+    */
+    preparedRequestBytes?: number | null;
     requestBudget?: (null | ContextRequestBudgetDto);
     /**
      * @type string
@@ -4778,6 +4796,12 @@ export type ContextManagementStrategyDtoEnumKey = (typeof contextManagementStrat
 export type ContextManagementStrategyDto = ContextManagementStrategyDtoEnumKey;
 
 export type ContextManagementDto = {
+    /**
+     * @minLength 1
+     * @maxLength 99
+     * @type integer, int32
+    */
+    compressionHistoryTargetPercent: number;
     /**
      * @minLength 0
      * @type integer, int64
@@ -10614,6 +10638,12 @@ export type RestResponseContextManagementDto = {
     */
     data?: {
         /**
+         * @minLength 1
+         * @maxLength 99
+         * @type integer, int32
+        */
+        compressionHistoryTargetPercent: number;
+        /**
          * @minLength 0
          * @type integer, int64
         */
@@ -15817,6 +15847,12 @@ export type TurnUsageResult = {
 };
 
 export type UpdateContextManagementRequest = {
+    /**
+     * @minLength 1
+     * @maxLength 99
+     * @type integer, int32
+    */
+    compressionHistoryTargetPercent: number;
     /**
      * @minLength 0
      * @type integer, int64

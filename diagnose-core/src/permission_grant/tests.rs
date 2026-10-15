@@ -1433,3 +1433,260 @@ fn background_scope_is_reusable_but_cannot_cross_actions_apps_or_expiry() {
         );
     }
 }
+
+#[test]
+fn conversion_permission_freezes_source_and_directory_for_manual_and_ai_on_both_hosts() {
+    use crate::chat::{ChatMessage, ToolCall, ToolCallRef};
+    use crate::file_scope::{DirectoryConsentSource, DirectoryProposal};
+    use crate::provider_preflight::{ArtifactCallPreflight, ProviderCallSubject};
+    use desk_agent_protocol::computer_use::{FileContentReadOutput, ObjectKind, ObjectRef};
+    use desk_agent_protocol::{OperationOutput, ReadContextOutput};
+    const NOW: u64 = 1_800_000_000_000;
+    let registry = crate::ai_assistant::ai_assistant_provider_registry();
+    for surface in [
+        ProductSurface::OssPersonalOwner,
+        ProductSurface::ManagerPersonalOwner,
+    ] {
+        let (mut session, _, _) = decision_fixture();
+        session.adopt_client_metadata(Some("client"), AgentSessionSurface::AiAssistant);
+        session.policy_revision = crate::assistant_policy::PERSONAL_ASSISTANT_POLICY_REVISION;
+        session.conversation.push(
+            crate::model_message_labels::model_bound_user_message(
+                "owner-requirement".into(),
+                "Convert the selected file".into(),
+                desk_agent_protocol::data_lineage::DestinationIdentity::Model {
+                    connection_id: "test".into(),
+                    connection_revision: 1,
+                    model_id: "test".into(),
+                    profile_revision: 1,
+                },
+            )
+            .unwrap(),
+        );
+        let subject = session
+            .file_scope_subject(
+                &session.actor_id,
+                &session.device_id,
+                &session.conversation_id,
+            )
+            .unwrap();
+        let expires = |milliseconds: u64| {
+            chrono::DateTime::from_timestamp_millis(milliseconds as i64)
+                .unwrap()
+                .to_rfc3339()
+        };
+        let directory = ObjectRef {
+            token: "directory-object".into(),
+            snapshot_id: "directory-snapshot".into(),
+            object_kind: ObjectKind::Directory,
+            expires_at: expires(NOW + 120000),
+        };
+        session
+            .file_scope
+            .propose(
+                &subject,
+                0,
+                DirectoryProposal {
+                    request_id: "directory".into(),
+                    requested_path: "/private/tmp/conversion-test".into(),
+                    canonical_path: "/private/tmp/conversion-test".into(),
+                    purpose: "Save the requested conversion".into(),
+                    source: DirectoryConsentSource::OwnerSelection,
+                    directory,
+                },
+                NOW,
+            )
+            .unwrap();
+        session
+            .file_scope
+            .decide(&subject, 1, "directory", true, NOW)
+            .unwrap();
+        let output = OperationOutput::ReadContext(ReadContextOutput::FileContentRead(
+            FileContentReadOutput {
+                file: ObjectRef {
+                    token: "file-object".into(),
+                    snapshot_id: "file-snapshot".into(),
+                    object_kind: ObjectKind::File,
+                    expires_at: expires(NOW + 30000),
+                },
+                display_name: "notes.md".into(),
+                content_utf8: "text".into(),
+                byte_len: 4,
+                sha256: format!("{:x}", Sha256::digest(b"text")),
+            },
+        ));
+        let text = serde_json::to_string(&output).unwrap();
+        let digest = format!("{:x}", Sha256::digest(text.as_bytes()));
+        let source_descriptor = registry.capability_for_tool("read_text_file").unwrap();
+        let source_provider = registry
+            .provider_for_capability(&source_descriptor.wire.capability_id)
+            .unwrap();
+        let mut receipt = ChatMessage::tool_result("source-receipt", "source-read", &text);
+        receipt.data_envelope = Some(DataEnvelope {
+            schema_version: DATA_ENVELOPE_SCHEMA_VERSION,
+            envelope_id: "source-envelope".into(),
+            content: ContentRef::ImmutableBlob {
+                blob_id: "source-blob".into(),
+                sha256: digest.clone(),
+                size_bytes: text.len() as u64,
+                media_type: "application/json".into(),
+            },
+            provenance: DataProvenance {
+                source_provider_id: source_provider.wire.provider_id.clone(),
+                source_tool_name: "read_text_file".into(),
+                source_object_id: Some("source-read".into()),
+                source_envelope_ids: vec![],
+            },
+            digest_sha256: digest,
+            sensitivity: Sensitivity::Sensitive,
+            allowed_destinations: vec![],
+            retention: RetentionBoundary {
+                expires_at_unix_ms: Some(NOW + 30000),
+                delete_with_run: true,
+            },
+        });
+        session.conversation.push(ChatMessage::assistant_tool_calls(
+            "source-call",
+            "",
+            vec![ToolCallRef {
+                id: "source-read".into(),
+                name: "read_text_file".into(),
+                arguments_json: "{}".into(),
+            }],
+        ));
+        session.conversation.push(receipt);
+        let arguments = serde_json::json!({"directory_request_id":"directory", "source":{"kind":"artifact_result","file_result_call_id":"source-read"}, "output_name":"converted.pdf", "conversion":{"kind":"markdown_to_pdf"}});
+        let operation = ToolCall {
+            id: "convert".into(),
+            name: "convert_document".into(),
+            arguments_json: arguments.to_string(),
+        };
+        let planning = ToolCall { id: "permission-call".into(), name: crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME.into(),
+            arguments_json: serde_json::json!({"items":[{"item_id":"convert", "tool_name":"convert_document", "exact_input":arguments, "reason":"Convert the requested file", "suggested_ttl_seconds":60, "suggested_max_uses":1}]}).to_string() };
+        let mut request = crate::permission_tools::build_permission_request(
+            &planning,
+            &registry,
+            "permission-convert".into(),
+            session.input_revision,
+            expires(NOW),
+        )
+        .unwrap();
+        crate::permission_tools::bind_artifact_request(
+            &mut request,
+            &session,
+            &registry,
+            surface,
+            NOW,
+        )
+        .unwrap();
+        let item = &request.items[0];
+        assert_eq!(item.resource_scope.len(), 2);
+        let decisions = vec![PermissionDecisionItem {
+            item_id: item.item_id.clone(),
+            decision: PermissionItemDecision::Approve {
+                resource_scope: item.resource_scope.clone(),
+                operation_scope: item.operation_scope.clone(),
+                export_destinations: vec![],
+                ttl_seconds: 60,
+                max_uses: 1,
+            },
+        }];
+        let descriptor = registry.capability_for_tool("convert_document").unwrap();
+        let inventory = vec![CapabilityAvailability {
+            provider_id: item.provider_id.clone(),
+            capability_id: descriptor.wire.capability_id.clone(),
+            tool_name: "convert_document".into(),
+            compiled: true,
+            enabled: true,
+            connected: true,
+            ready: true,
+            reason: None,
+        }];
+        let context = PermissionGrantIssuanceContext {
+            surface,
+            registry: &registry,
+            inventory: &inventory,
+            readiness_revision: 1,
+            now_unix_ms: NOW,
+            implicit_fresh_object_refs: &[],
+        };
+        let mut grants =
+            build_permission_grants(&session, &request, &decisions, &context, None).unwrap();
+        assert_eq!(grants[0].expires_at_unix_ms, NOW + 30000);
+        let preflight =
+            ArtifactCallPreflight::from_session(&registry, surface, &session, &operation, NOW)
+                .unwrap();
+        let subject = ProviderCallSubject {
+            actor_id: &session.actor_id,
+            run_id: &session.conversation_id,
+            input_revision: session.input_revision,
+            target_device_id: &session.device_id,
+            policy_revision: session.policy_revision,
+            readiness_revision: 1,
+            now_unix_ms: NOW,
+        };
+        let authority = preflight.grant_call(&subject).unwrap();
+        crate::capability_grant::match_capability_grant(&grants[0], &authority).unwrap();
+        let delegation = crate::approval_delegation::ApprovalDelegation::new(
+            "delegation".into(),
+            session.conversation_id.clone(),
+            session.actor_id.clone(),
+            session.device_id.clone(),
+            "owner-open".into(),
+            NOW,
+        )
+        .unwrap();
+        let event = crate::dynamic_run::PermissionDecidedEvent {
+            event: crate::dynamic_run::AgentRunEvent {
+                schema_version: crate::dynamic_run::AGENT_RUN_EVENT_SCHEMA_VERSION,
+                event_id: "decision".into(),
+                run_id: session.conversation_id.clone(),
+                event_seq: 1,
+                input_revision: session.input_revision,
+                kind: crate::dynamic_run::AgentRunEventKind::PermissionDecided,
+                correlation_id: Some(request.request_id.clone()),
+                source_envelope_ids: vec![],
+                result_envelope_ids: vec![],
+                created_at: expires(NOW),
+            },
+            request_id: request.request_id.clone(),
+            request_input_revision: session.input_revision,
+            resulting_state: PermissionRequestState::Approved,
+            items: decisions,
+            decision_source: crate::dynamic_run::PermissionDecisionSource::AutomaticReview {
+                failures: vec![],
+                delegation_id: delegation.delegation_id.clone(),
+                delegation_revision: delegation.revision,
+                reviews: vec![crate::dynamic_run::AiPermissionDecisionEvidence {
+                    item_id: item.item_id.clone(),
+                    candidate_id: "candidate".into(),
+                    candidate_expires_at_unix_ms: NOW + 25000,
+                    model_config_revision: 1,
+                    reason_code: "within_scope".into(),
+                    reason: "Exact source and destination".into(),
+                }],
+            },
+        };
+        bind_ai_permission_grants(
+            &session,
+            &request,
+            &event,
+            &delegation,
+            None,
+            NOW,
+            &mut grants,
+        )
+        .unwrap();
+        let CapabilityGrantIssuer::AiApproval(parent) = &grants[0].issued_by else {
+            panic!("review provenance is required")
+        };
+        crate::capability_grant::match_ai_capability_grant(&grants[0], &authority, parent).unwrap();
+        assert_eq!(grants[0].expires_at_unix_ms, NOW + 25000);
+        let mut changed = session.clone();
+        changed.conversation.last_mut().unwrap().text.push(' ');
+        assert!(
+            ArtifactCallPreflight::from_session(&registry, surface, &changed, &operation, NOW)
+                .is_err()
+        );
+    }
+}

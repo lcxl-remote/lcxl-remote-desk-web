@@ -269,7 +269,8 @@ async fn rebuilding_runtime_databases_preserves_the_file_and_rebuilding_metadata
     .await
     .unwrap();
     crate::context_management_config::update(&db, &desk_signal_facade::context_management::UpdateContextManagementRequest {
-        expected_revision: 0, summary_max_output_tokens: 128000,
+        compression_history_target_percent: 50,
+expected_revision: 0, summary_max_output_tokens: 128000,
         strategy: desk_signal_facade::context_management::ContextManagementStrategyDto::CheckpointSummary,
     }).await.unwrap();
     let observation = crate::model_provider::ModelProbeObservation {
@@ -377,11 +378,18 @@ async fn rebuilding_runtime_databases_preserves_the_file_and_rebuilding_metadata
 fn auxiliary_output_policies_round_trip_and_manual_edits_advance_revisions() {
     let mut config = GlobalConfig::default();
     config.context_management.summary_max_output_tokens = 32768;
+    config.context_management.compression_history_target_percent = 73;
     config.terminal_completion.max_output_tokens = 128000;
     config.initialize_metadata().unwrap();
     let document = toml::to_string(&config).unwrap();
     let mut reopened: GlobalConfig = toml::from_str(&document).unwrap();
     assert_eq!(reopened.context_management.summary_max_output_tokens, 32768);
+    assert_eq!(
+        reopened
+            .context_management
+            .compression_history_target_percent,
+        73
+    );
     assert_eq!(reopened.terminal_completion.max_output_tokens, 128000);
     assert!(!reopened.initialize_metadata().unwrap());
     let changed = document.replace("max_output_tokens = 128000", "max_output_tokens = 64000");

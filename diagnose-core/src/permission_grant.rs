@@ -300,6 +300,28 @@ pub fn build_permission_grants(
                 .clone()
                 .unwrap_or_else(|| "{}".into()),
         };
+        let artifact =
+            if crate::provider_preflight::ArtifactCallPreflight::supports(&requested.tool_name) {
+                Some(
+                    crate::provider_preflight::ArtifactCallPreflight::from_session(
+                        context.registry,
+                        context.surface,
+                        session,
+                        &result_read_call,
+                        context.now_unix_ms,
+                    )?,
+                )
+            } else {
+                None
+            };
+        if artifact
+            .as_ref()
+            .is_some_and(|plan| plan.resource_scope() != requested.resource_scope.as_slice())
+        {
+            return Err(internal(
+                "approved artifact source or directory changed; prepare a current exact permission before execution",
+            ));
+        }
         let result_read =
             crate::provider_preflight::text_file::uses_session_file_read(&result_read_call)?;
         let original_read = if result_read {
@@ -540,36 +562,24 @@ pub fn build_permission_grants(
         } else if capability.wire.authorization_hint.resources
             == [AuthorizationResourceKind::FreshObjectReference]
         {
-            let exact_requested_scope = requested
-                .canonical_input_json
+            let exact_requested_scope = artifact
                 .as_ref()
-                .filter(|_| {
-                    !requested.resource_scope.is_empty()
-                        && requested
-                            .resource_scope
-                            .iter()
-                            .all(|scope| scope.starts_with("selected:sha256:"))
-                })
-                .map(|_| requested.resource_scope.clone());
+                .map(|plan| plan.resource_scope().to_vec())
+                .or_else(|| {
+                    requested
+                        .canonical_input_json
+                        .as_ref()
+                        .filter(|_| {
+                            !requested.resource_scope.is_empty()
+                                && requested
+                                    .resource_scope
+                                    .iter()
+                                    .all(|scope| scope.starts_with("selected:sha256:"))
+                        })
+                        .map(|_| requested.resource_scope.clone())
+                });
             let object_refs = if exact_requested_scope.is_some() {
                 Vec::new()
-            } else if crate::provider_preflight::ArtifactCallPreflight::supports(
-                &requested.tool_name,
-            ) {
-                let call = crate::chat::ToolCall {
-                    id: requested.item_id.clone(),
-                    name: requested.tool_name.clone(),
-                    arguments_json: requested
-                        .canonical_input_json
-                        .clone()
-                        .unwrap_or_else(|| "{}".into()),
-                };
-                vec![
-                    crate::file_scope::select_output_directory(session, &call, context.now_unix_ms)
-                        .map_err(|_| {
-                            internal("select one current approved conversation directory")
-                        })?,
-                ]
             } else if let Some((references, _)) = &original_read {
                 references.clone()
             } else {
@@ -673,6 +683,9 @@ pub fn build_permission_grants(
             .ok_or_else(|| internal("grant expiry exceeds timestamp range"))?;
         let expires_at_unix_ms = original_read.map_or(expires_at_unix_ms, |(_, expiry)| {
             expires_at_unix_ms.min(expiry)
+        });
+        let expires_at_unix_ms = artifact.as_ref().map_or(expires_at_unix_ms, |plan| {
+            expires_at_unix_ms.min(plan.valid_until_unix_ms())
         });
         let grant_id =
             permission_item_grant_id(&session.conversation_id, request, &requested.item_id);

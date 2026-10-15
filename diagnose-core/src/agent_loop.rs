@@ -1639,14 +1639,87 @@ async fn project_command_completion(
     }
 }
 
+fn assemble_context_request(
+    template: &ModelRequest,
+    view: &crate::model_context::ModelContextView,
+    session: &crate::session::PersistedAgentSession,
+) -> Result<ModelRequest, AgentError> {
+    let mut request = template.clone();
+    request.preparation = None;
+    let mut anchors = std::collections::BTreeSet::new();
+    if session.agent_role.is_main()
+        && view
+            .messages
+            .iter()
+            .any(|message| message.role == ChatRole::ContextSummary)
+    {
+        if let Some(source) = session.authorization_requirement() {
+            anchors.insert(source.message_id.clone());
+        }
+        if let Some(segment) = &session.focus_epoch.goal_segment {
+            anchors.insert(segment.source_message_id.clone());
+        }
+        if let Some(source) = session.conversation.iter().find(|message| {
+            message.role == ChatRole::User
+                && !crate::permission_resume::is_resume_control_message(message)
+        }) {
+            anchors.insert(source.message_id.clone());
+        }
+        for message in &view.messages {
+            if message.role == ChatRole::ContextSummary
+                && let Ok(summary) =
+                    serde_json::from_str::<crate::model_context::ContextSummaryV1>(&message.text)
+            {
+                for fact in summary.goals.iter().chain(&summary.historical_constraints) {
+                    anchors.extend(fact.source_message_ids.iter().cloned());
+                }
+            }
+        }
+    }
+    let mut included = request
+        .messages
+        .iter()
+        .chain(&view.messages)
+        .map(|message| message.message_id.clone())
+        .collect::<HashSet<_>>();
+    let mut history = Vec::new();
+    for source in &session.conversation {
+        if anchors.contains(&source.message_id)
+            && source.role == ChatRole::User
+            && !crate::permission_resume::is_resume_control_message(source)
+            && included.insert(source.message_id.clone())
+        {
+            history.push(source.clone());
+        }
+    }
+    history.extend(view.messages.iter().cloned());
+    crate::schedule::review_result::project(&mut history)?;
+    let at = usize::from(
+        request
+            .messages
+            .first()
+            .is_some_and(|message| message.role == ChatRole::System),
+    );
+    request.messages.splice(at..at, history);
+    Ok(request)
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn prepare_model_context(
     deps: &LoopDeps<'_>,
     session: &mut crate::session::PersistedAgentSession,
     turn_id: &str,
-    pinned_context: &crate::model_context::PinnedContextPolicy,
-    compression_attempted: &mut bool,
+    pinned_context: &mut crate::model_context::PinnedContextPolicy,
+    compression_attempted: &mut HashSet<String>,
+    template: &ModelRequest,
+    authority: Option<&crate::grant_disclosure::GrantDisclosureSnapshot>,
     sink: &mut dyn TurnSink,
 ) -> Result<crate::model_context::ModelContextView, AgentError> {
+    let mut planning_policy = pinned_context.clone();
+    let authority_observed_at = authority.map(|_| current_unix_ms(deps.clock)).transpose()?;
+    let options = deps.model.context_planning_options();
+    let mut last_over_budget: Option<crate::model_preparation::ModelRequestPreparation> = None;
+    let mut planning_snapshots = HashSet::new();
     if let Some(event_id) = deps.model.command_completion_event_id() {
         let projected = project_command_completion(
             deps,
@@ -1665,11 +1738,65 @@ async fn prepare_model_context(
             floor_advanced: false,
         });
     }
+    if let Some(base) = deps.model.prepare_request(template)? {
+        base.require_fit()?;
+        if base.context_bytes == base.maximum_context_bytes
+            && deps.model.command_completion_event_id().is_none()
+        {
+            return Err(AgentError {
+                kind: AgentErrorKind::InvalidInput,
+                message: format!(
+                    "System instructions, tool definitions and required runtime state already consume the entire {} byte request budget. No room remains for the user requirement or protected tool history; no model request was sent.",
+                    base.maximum_context_bytes
+                ),
+                retryable: false,
+                safe_for_model: true,
+                error_code: Some(
+                    desk_utils::error::DeskErrorCode::AI_CONTEXT_ITEM_TOO_LARGE.code(),
+                ),
+            });
+        }
+        planning_policy = planning_policy
+            .with_request_overhead_bytes(base.context_bytes)
+            .map_err(model_context_error)?;
+    }
     if session.repair_recovery_result_labels()? {
         deps.session_seam.save(session).await?;
     }
     loop {
-        if pinned_context.strategy
+        let snapshot = serde_json::to_string(&(
+            planning_policy.key(),
+            planning_policy.request_overhead_bytes,
+            session
+                .model_context_state
+                .entries
+                .iter()
+                .map(|entry| {
+                    (
+                        &entry.policy_key,
+                        &entry.floor_group_head_message_id,
+                        &entry.floor_after_group_head_message_id,
+                        entry.checkpoint.as_ref().map(|checkpoint| {
+                            (
+                                checkpoint.v1().generation,
+                                &checkpoint.v1().covered_projection_sha256,
+                            )
+                        }),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        ))
+        .map_err(|_| crate::subagent::invalid("context planning snapshot cannot be encoded"))?;
+        if !planning_snapshots.insert(snapshot) {
+            return Err(report_context_compression_failure(
+                deps.model,
+                crate::seam::ContextCompressionFailureKind::ProtectedStateTooLarge,
+                None,
+                None,
+            )
+            .await);
+        }
+        if planning_policy.strategy
             == crate::model_context::ContextManagementStrategy::CheckpointSummary
             && !lease_is_current(deps).await
         {
@@ -1682,20 +1809,19 @@ async fn prepare_model_context(
             .await);
         }
         let protection = session.context_protection_set();
-        let configuration_changed = pinned_context.preserve_history
-            && !session.model_context_state.entries.is_empty()
-            && !session
-                .model_context_state
-                .entries
-                .iter()
-                .any(|entry| entry.policy_key == pinned_context.key());
         let compatible_state = crate::model_context::adopt_compatible_checkpoint(
             &session.model_context_state,
             &session.conversation,
-            pinned_context,
+            &planning_policy,
             deps.model.model_egress_policy()?.as_ref(),
         )
         .map_err(model_context_error)?;
+        let configuration_changed = planning_policy.preserve_history
+            && !session.model_context_state.entries.is_empty()
+            && !compatible_state
+                .entries
+                .iter()
+                .any(|entry| entry.policy_key == planning_policy.key());
         let eligibility = deps
             .model
             .model_egress_policy()?
@@ -1704,7 +1830,7 @@ async fn prepare_model_context(
                     &policy,
                     &session.conversation,
                     &compatible_state,
-                    pinned_context,
+                    &planning_policy,
                     &protection,
                     session.version,
                 )
@@ -1714,19 +1840,35 @@ async fn prepare_model_context(
             Ok(Some(Some(plan))) => {
                 Ok(crate::model_context::ContextBuildPlan::NeedsFloorReconciliation(plan))
             }
-            Ok(_) => crate::model_context::plan_model_context(
+            Ok(_) => crate::model_context::plan_model_context_with_options(
                 &session.conversation,
                 &compatible_state,
-                pinned_context,
+                &planning_policy,
                 &protection,
                 session.version,
+                options,
             ),
             Err(error) => Err(error),
         };
         let plan = match planned {
             Ok(plan) => plan,
             Err(error)
-                if pinned_context.strategy
+                if last_over_budget.is_some()
+                    && matches!(
+                        &error,
+                        crate::model_context::ModelContextError::NoCompressiblePrefix
+                            | crate::model_context::ModelContextError::ProtectedStateTooLarge { .. }
+                            | crate::model_context::ModelContextError::ContextItemTooLarge { .. }
+                            | crate::model_context::ModelContextError::InvalidBudget(_)
+                    ) =>
+            {
+                if let Some(prepared) = &last_over_budget {
+                    prepared.require_fit()?;
+                }
+                return Err(model_context_error(error));
+            }
+            Err(error)
+                if planning_policy.strategy
                     == crate::model_context::ContextManagementStrategy::CheckpointSummary
                     && !matches!(
                         error,
@@ -1746,7 +1888,7 @@ async fn prepare_model_context(
             && crate::model_context::authorize_context_checkpoint(
                 &policy,
                 &compatible_state,
-                &pinned_context.key(),
+                &planning_policy.key(),
                 &session.conversation,
             )
             .is_err()
@@ -1762,6 +1904,42 @@ async fn prepare_model_context(
 
         match plan {
             crate::model_context::ContextBuildPlan::Ready(ready) => {
+                let candidate = assemble_context_request(template, &ready.view, session)?;
+                if let Some(prepared) = deps.model.prepare_request(&candidate)?
+                    && prepared.context_bytes > prepared.maximum_context_bytes
+                {
+                    let excess = prepared.context_bytes - prepared.maximum_context_bytes;
+                    let retained_cost = ready
+                        .view
+                        .messages
+                        .iter()
+                        .map(crate::trim::model_context_cost)
+                        .sum::<usize>();
+                    let next_overhead = planning_policy
+                        .request_overhead_bytes
+                        .checked_add(excess)
+                        .ok_or_else(|| {
+                            model_context_error(
+                                crate::model_context::ModelContextError::ContextCostOverflow,
+                            )
+                        })?
+                        .max(
+                            planning_policy
+                                .max_context_bytes
+                                .saturating_sub(retained_cost)
+                                .saturating_add(1),
+                        );
+                    if next_overhead >= planning_policy.max_context_bytes {
+                        prepared.require_fit()?;
+                    }
+                    last_over_budget = Some(prepared);
+                    planning_policy = planning_policy
+                        .clone()
+                        .with_request_overhead_bytes(next_overhead)
+                        .map_err(model_context_error)?;
+                    continue;
+                }
+
                 let changed = session.model_context_state != ready.next_state;
                 let floor_advanced = ready.view.floor_advanced;
                 let previous_state = session.model_context_state.clone();
@@ -1777,7 +1955,7 @@ async fn prepare_model_context(
                     );
                 }
                 if changed || floor_advanced {
-                    if pinned_context.strategy
+                    if planning_policy.strategy
                         == crate::model_context::ContextManagementStrategy::CheckpointSummary
                         && !lease_is_current(deps).await
                     {
@@ -1804,6 +1982,7 @@ async fn prepare_model_context(
                         sink.on_context_adjusted(turn_id, ready.view.notice_kind);
                     }
                 }
+                *pinned_context = planning_policy.clone();
                 return Ok(ready.view);
             }
             crate::model_context::ContextBuildPlan::NeedsFloorReconciliation(plan) => {
@@ -1812,7 +1991,7 @@ async fn prepare_model_context(
                 session.model_context_state = match crate::model_context::apply_floor_reconciliation(
                     &plan,
                     &session.conversation,
-                    &session.model_context_state,
+                    &compatible_state,
                 ) {
                     Ok(state) => state,
                     Err(error) => {
@@ -1823,6 +2002,34 @@ async fn prepare_model_context(
                         .await);
                     }
                 };
+                let policy_key = planning_policy.key();
+                let previous_entry = previous_state
+                    .entries
+                    .iter()
+                    .find(|entry| entry.policy_key == policy_key);
+                let next_entry = session
+                    .model_context_state
+                    .entries
+                    .iter()
+                    .find(|entry| entry.policy_key == policy_key);
+                if previous_entry
+                    .zip(next_entry)
+                    .is_some_and(|(before, after)| {
+                        before.floor_group_head_message_id == after.floor_group_head_message_id
+                            && before.floor_after_group_head_message_id
+                                == after.floor_after_group_head_message_id
+                            && before.checkpoint == after.checkpoint
+                    })
+                {
+                    session.model_context_state = previous_state;
+                    return Err(report_context_compression_failure(
+                        deps.model,
+                        crate::seam::ContextCompressionFailureKind::StaleContext,
+                        None,
+                        None,
+                    )
+                    .await);
+                }
                 session.record_context_notice(
                     crate::model_context::ContextNotice::adjusted(turn_id, plan.notice_kind),
                     (deps.clock)(),
@@ -1854,7 +2061,7 @@ async fn prepare_model_context(
                 // Rebuild protection and re-plan against the new version/floor.
             }
             crate::model_context::ContextBuildPlan::NeedsCompression(plan) => {
-                if pinned_context.anthropic_prefix_binding {
+                if planning_policy.anthropic_prefix_binding {
                     let protected = crate::thinking_context::protected_replay_ids(session);
                     if session.conversation.iter().any(|message| protected.contains(&message.message_id)
                         && matches!(&message.replay_disposition, Some(crate::replay::ReplayDisposition::Present { envelope })
@@ -1873,7 +2080,24 @@ async fn prepare_model_context(
                 use crate::seam::ContextCompressionFailureKind as FailureKind;
 
                 let audit_context = compression_audit_context(&plan, &deps.content_safety);
-                if *compression_attempted {
+                let compression_identity = format!(
+                    "compression-{:x}",
+                    Sha256::digest(
+                        serde_json::to_vec(&(
+                            &session.conversation_id,
+                            session.input_revision,
+                            plan.generation,
+                            &plan.policy.source_context_key,
+                            &plan.covered_from_message_id,
+                            &plan.covered_through_message_id,
+                            &plan.covered_projection_sha256,
+                        ))
+                        .map_err(|_| crate::subagent::invalid(
+                            "compression identity cannot be encoded"
+                        ))?
+                    )
+                );
+                if !compression_attempted.insert(compression_identity.clone()) {
                     return Err(report_context_compression_failure(
                         deps.model,
                         FailureKind::AttemptExhausted,
@@ -1884,7 +2108,7 @@ async fn prepare_model_context(
                 }
                 // The attempt is spent before the durable provider-call path. The
                 // manager seam's call fence is the cross-crash authority.
-                *compression_attempted = true;
+
                 deps.model.on_context_compression_started(
                     plan.generation,
                     plan.covered_message_count,
@@ -1931,12 +2155,19 @@ async fn prepare_model_context(
                     result_locators: Default::default(),
                     previous_cache_projection: None,
                     delegation_call: None,
+                    preparation: None,
+                    compression_identity: None,
                     caller_output_hard_cap: Some(i64::from(plan.policy.summary_max_output_tokens)),
                 };
                 let _observation_preflight = crate::model_observability::PreflightObservation::new(
                     request.observation.clone(),
                 );
-                let identity = format!("compression:{turn_id}:{}", plan.generation);
+                request.compression_identity = Some(compression_identity.clone());
+                if let Some(prepared) = deps.model.prepare_request(&request)? {
+                    prepared.require_fit()?;
+                    request.preparation = Some(Box::new(prepared));
+                }
+                let identity = compression_identity;
                 let budget = call_budget::reserve_model(
                     deps,
                     session,
@@ -2142,7 +2373,7 @@ async fn prepare_model_context(
                     &plan,
                     validated,
                     &session.conversation,
-                    &session.model_context_state,
+                    &compatible_state,
                     session.version,
                 ) {
                     Ok(value) => value,
@@ -2174,6 +2405,57 @@ async fn prepare_model_context(
                         .await);
                     }
                 };
+                let candidate_now = authority
+                    .map(|_| current_unix_ms(deps.clock))
+                    .transpose()?
+                    .unwrap_or(0);
+                let authority_expired = authority.is_some_and(|snapshot| {
+                    snapshot.grants.iter().any(|grant| {
+                        authority_observed_at
+                            .is_some_and(|observed| grant.expires_at_unix_ms > observed)
+                            && grant.expires_at_unix_ms <= candidate_now
+                    })
+                });
+                if input_revision_advanced(deps, session).await?.is_some()
+                    || authority_expired
+                    || if let Some(expected) = authority {
+                        deps.tools.current_grant_disclosure().await?.as_ref() != Some(expected)
+                    } else {
+                        false
+                    }
+                {
+                    return Err(report_context_compression_failure(
+                        deps.model,
+                        FailureKind::StaleContext,
+                        Some(audit_context),
+                        Some(compression_usage),
+                    )
+                    .await);
+                }
+                let candidate_check =
+                    assemble_context_request(template, &view, session).and_then(|request| {
+                        if let Some(prepared) = deps.model.prepare_request(&request)? {
+                            prepared.require_fit()?;
+                        }
+                        Ok(())
+                    });
+                if let Err(error) = candidate_check {
+                    let failure = if error.error_code
+                        == Some(desk_utils::error::DeskErrorCode::AI_CONTEXT_ITEM_TOO_LARGE.code())
+                    {
+                        FailureKind::InputTooLarge
+                    } else {
+                        FailureKind::StaleContext
+                    };
+                    let _ = report_context_compression_failure(
+                        deps.model,
+                        failure,
+                        Some(audit_context),
+                        Some(compression_usage),
+                    )
+                    .await;
+                    return Err(error);
+                }
                 let previous_state = session.model_context_state.clone();
                 let previous_notices = session.context_notices.clone();
                 let previous_observation = session.latest_model_context.clone();
@@ -2230,6 +2512,7 @@ async fn prepare_model_context(
                     )
                     .await;
                 sink.on_context_compacted(turn_id, generation, covered_message_count);
+                *pinned_context = planning_policy.clone();
                 return Ok(view);
             }
         }
@@ -2369,7 +2652,7 @@ async fn run_inner_impl(
         id
     };
     let mut same_tool: HashMap<String, u32> = HashMap::new();
-    let mut compression_attempted = false;
+    let mut compression_attempted = HashSet::new();
     let mut projection_rebuilds = 0u8;
     use crate::model_observability::protocol_correction::{
         PendingProtocolCorrection, ProtocolCorrectionCheck, ProtocolCorrectionReason,
@@ -3246,7 +3529,7 @@ async fn run_inner_impl(
         // Reserve the concrete per-step prompt and API tool bytes before the
         // history window is selected. All transient blocks are included; only
         // protocol framing uses the reserve. Final wire encoding is rechecked.
-        const REQUEST_FRAMING_RESERVE_BYTES: usize = 1024;
+        const REQUEST_FRAMING_RESERVE_BYTES: usize = 0;
         let history_changed = session.ui_references.observe(&session.conversation)?;
         let runtime_changed = session.ui_references.observe(&messages)?;
         let sources = session
@@ -3299,7 +3582,7 @@ async fn run_inner_impl(
             .ok_or_else(|| {
                 model_context_error(crate::model_context::ModelContextError::ContextCostOverflow)
             })?;
-        let history_policy = pinned_context
+        let mut history_policy = pinned_context
             .clone()
             .with_request_overhead_bytes(request_overhead_bytes)
             .map_err(model_context_error)?;
@@ -3351,53 +3634,12 @@ async fn run_inner_impl(
             session,
         )
         .await?;
-        let mut context_view = match crate::future::boxed(|| {
-            prepare_model_context(
-                deps,
-                session,
-                turn_id,
-                &history_policy,
-                &mut compression_attempted,
-                sink,
-            )
-        })
-        .await
-        {
-            Ok(view) => view,
-            Err(error)
-                if call_budget::is_exhausted(&error)
-                    && session.trigger_origin == TriggerOrigin::GoalContinuation =>
-            {
-                return Ok(LoopOutcome::GoalBudgetReached);
-            }
-            Err(error) => return Err(error),
-        };
-        crate::schedule::review_result::project(&mut context_view.messages)?;
-        // Completion-only projections do not replace the regular conversation's
-        // occupancy baseline. New results/replies still count via usage().
-        if deps.model.command_completion_event_id().is_none() {
-            session.context_usage_basis = Some(
-                crate::context_usage::ContextUsageBasis::observe(
-                    &session.conversation,
-                    &context_view.messages,
-                    &history_policy,
-                )
-                .with_request_budget(request_budget),
-            );
-        }
         let runtime_messages = messages;
-        let mut messages =
-            Vec::with_capacity(context_view.messages.len() + runtime_messages.len() + 1);
+        let mut messages = Vec::with_capacity(runtime_messages.len() + 1);
         if split_runtime {
             messages.push(stable_system);
-            messages.extend(context_view.messages);
-            messages.extend(runtime_messages);
-        } else {
-            let mut runtime_messages = runtime_messages.into_iter();
-            messages.extend(runtime_messages.next());
-            messages.extend(context_view.messages);
-            messages.extend(runtime_messages);
         }
+        messages.extend(runtime_messages);
         if session.trigger_origin == TriggerOrigin::GoalContinuation {
             let goal = deps.session_seam.load_claimed_goal(session).await?;
             if goal.goal_revision > 1 {
@@ -3561,6 +3803,8 @@ async fn run_inner_impl(
             result_locators: crate::result_model_ids::locators(&session.conversation),
             previous_cache_projection: session.cache_projection.clone(),
             delegation_call: None,
+            preparation: None,
+            compression_identity: None,
             caller_output_hard_cap: None,
         };
         if session.surface == crate::session::AgentSessionSurface::TerminalAiAssistant
@@ -3575,27 +3819,98 @@ async fn run_inner_impl(
         } else {
             request
         };
-        let request_message_ids: HashSet<String> = request
-            .messages
-            .iter()
-            .map(|m| m.message_id.clone())
-            .collect();
-        let assembled_request_cost = request
-            .messages
-            .iter()
-            .map(crate::trim::model_context_cost)
-            .try_fold(tool_spec_bytes, |total, cost| total.checked_add(cost))
-            .ok_or_else(|| {
-                model_context_error(crate::model_context::ModelContextError::ContextCostOverflow)
-            })?;
-        if assembled_request_cost > pinned_context.max_context_bytes {
-            return Err(model_context_error(
-                crate::model_context::ModelContextError::ProtectedStateTooLarge {
-                    cost: assembled_request_cost,
-                    high_watermark: pinned_context.max_context_bytes,
-                },
-            ));
+        let base_preparation = deps.model.prepare_request(&request)?;
+        let context_view = match crate::future::boxed(|| {
+            prepare_model_context(
+                deps,
+                session,
+                turn_id,
+                &mut history_policy,
+                &mut compression_attempted,
+                &request,
+                authority.as_ref(),
+                sink,
+            )
+        })
+        .await
+        {
+            Ok(view) => view,
+            Err(error)
+                if call_budget::is_exhausted(&error)
+                    && session.trigger_origin == TriggerOrigin::GoalContinuation =>
+            {
+                return Ok(LoopOutcome::GoalBudgetReached);
+            }
+            Err(error) => return Err(error),
+        };
+        if deps.model.command_completion_event_id().is_none() {
+            request = assemble_context_request(&request, &context_view, session)?;
         }
+        let preparation = deps.model.prepare_request(&request)?;
+        if let Some(prepared) = &preparation {
+            prepared.require_fit()?;
+        }
+        let assembled_request_cost = preparation.as_ref().map_or_else(
+            || {
+                request
+                    .messages
+                    .iter()
+                    .map(crate::trim::model_context_cost)
+                    .sum::<usize>()
+                    .saturating_add(history_policy.request_overhead_bytes)
+            },
+            |prepared| prepared.context_bytes,
+        );
+        let request_message_ids: HashSet<String> = preparation.as_ref().map_or_else(
+            || {
+                request
+                    .messages
+                    .iter()
+                    .map(|message| message.message_id.clone())
+                    .collect()
+            },
+            |prepared| prepared.source_message_ids.iter().cloned().collect(),
+        );
+        if deps.model.command_completion_event_id().is_none() {
+            let projected_history = request
+                .messages
+                .iter()
+                .filter(|message| {
+                    request_message_ids.contains(&message.message_id)
+                        && (session
+                            .conversation
+                            .iter()
+                            .any(|source| source.message_id == message.message_id)
+                            || message.role == ChatRole::ContextSummary)
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            let mut basis = crate::context_usage::ContextUsageBasis::observe(
+                &session.conversation,
+                &projected_history,
+                &history_policy,
+            );
+            if let Some(prepared) = &preparation {
+                let overhead = history_policy.request_overhead_bytes;
+                let base = base_preparation.as_ref().unwrap_or(prepared);
+                let system_bytes = base.system_prompt_bytes;
+                let tool_bytes = base.tool_definitions_bytes;
+                basis = basis
+                    .with_wire_projection(prepared, overhead)
+                    .with_request_budget(Some(crate::context_usage::ContextRequestBudget {
+                        total_bytes: pinned_context.max_context_bytes,
+                        system_prompt_bytes: system_bytes,
+                        tool_definitions_bytes: tool_bytes,
+                        other_overhead_bytes: overhead
+                            .saturating_sub(system_bytes)
+                            .saturating_sub(tool_bytes),
+                    }));
+            } else {
+                basis = basis.with_request_budget(request_budget);
+            }
+            session.context_usage_basis = Some(basis);
+        }
+        request.preparation = preparation.map(Box::new);
         let catalog_metrics = deps.capability_catalog_metrics.unwrap_or_default();
         deps.model
             .on_model_request_projected(crate::seam::ModelRequestProjectionMetrics {
@@ -3725,8 +4040,15 @@ async fn run_inner_impl(
             }
             Err(error) => return Err(error),
         };
-        let mut model_controls =
-            crate::model_controls::FrozenModelControls::capture(session, &request.messages);
+        let mut model_controls = crate::model_controls::FrozenModelControls::capture(
+            session,
+            &request
+                .messages
+                .iter()
+                .filter(|message| request_message_ids.contains(&message.message_id))
+                .cloned()
+                .collect::<Vec<_>>(),
+        );
         let control_export_authorization = deps
             .model
             .model_egress_policy()?
@@ -5751,6 +6073,10 @@ async fn run_inner_impl(
                                     .ok()
                                     .and_then(|time| u64::try_from(time.timestamp_millis()).ok())
                                     .unwrap_or(0);
+                                if request.items.iter().any(|item| crate::provider_preflight::ArtifactCallPreflight::supports(&item.tool_name)) {
+                                    let surface = authority.as_ref().ok_or_else(|| crate::subagent::invalid("artifact permission has no current authorization context"))?.surface;
+                                    crate::permission_tools::bind_artifact_request(&mut request, session, providers, surface, now)?;
+                                }
                                 for item in &request.items {
                                     crate::provider_preflight::text_file::validate_mutation_permission_input(
                                         session,
@@ -7724,7 +8050,10 @@ async fn run_mutating<F: FnMut() -> String>(
             } else {
                 finish_tool(session, &call.id, !failed, sink);
                 if failed {
-                    *halted = Some("not executed: a prior action in this group failed".into());
+                    *halted = Some(format!(
+                        "not executed: tool `{}` failed earlier in this group; this tool was not dispatched",
+                        call.name
+                    ));
                 }
             }
         }
@@ -7855,7 +8184,10 @@ async fn run_mutating<F: FnMut() -> String>(
             )?;
             finish_tool(session, &call.id, false, sink);
             if !e.retryable {
-                *halted = Some("not executed: a prior command failed".to_string());
+                *halted = Some(format!(
+                    "not executed: tool `{}` failed earlier in this group; this tool was not dispatched",
+                    call.name
+                ));
             }
         }
         Err(e) => {

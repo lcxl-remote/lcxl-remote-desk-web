@@ -952,7 +952,7 @@ impl UiReferenceState {
         let id = value
             .as_str()
             .ok_or_else(|| invalid("Use an observed short UI ID"))?;
-        let entry = self.entries.get(id).ok_or_else(|| invalid("Unknown or retired object ID. Obtain a fresh ID from the matching object inspection tool; no action was executed."))?;
+        let entry = self.entries.get(id).ok_or_else(|| invalid("Object ID is unavailable in this conversation: it has not been observed or its source was removed. Read the matching object inspection tool and copy an ID from that result; no action was executed."))?;
         if entry.sources.is_empty() {
             return Err(invalid(
                 "Object source is unavailable. Obtain a fresh ID from the matching object inspection tool; no action was executed.",

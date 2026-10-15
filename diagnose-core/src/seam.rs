@@ -27,6 +27,10 @@ use crate::session::{PersistedAgentSession, SubjectMismatch};
 /// wire shape (OpenAI vs Anthropic) is the [`ModelSeam`] implementation's concern.
 #[derive(Debug, Clone)]
 pub struct ModelRequest {
+    /// Pure preparation receipt, never a provider parameter or durable authority.
+    pub preparation: Option<Box<crate::model_preparation::ModelRequestPreparation>>,
+    /// Stable server identity for one compression source range.
+    pub compression_identity: Option<String>,
     /// Host-only observation lineage; never serialized into the provider body.
     pub observation: Option<crate::model_observability::ObservationContext>,
     pub messages: Vec<ChatMessage>,
@@ -145,6 +149,8 @@ impl ModelRequest {
         let result_locators = crate::result_model_ids::locators(&messages);
         Self {
             observation: None,
+            preparation: None,
+            compression_identity: None,
             messages,
             tools: Vec::new(),
             tool_requirements: crate::model_capability::ModelRequirements::TEXT_ONLY,
@@ -399,6 +405,18 @@ pub enum ContextCompressionAuditOutcome {
 /// (text + tool calls + stop reason + usage).
 #[async_trait(?Send)]
 pub trait ModelSeam {
+    /// Uses the same authorization and protocol projection as the actual sender.
+    /// It must not acquire admission, write audit records or make network calls.
+    fn prepare_request(
+        &self,
+        _request: &ModelRequest,
+    ) -> Result<Option<crate::model_preparation::ModelRequestPreparation>, AgentError> {
+        Ok(None)
+    }
+
+    fn context_planning_options(&self) -> crate::model_context::ContextPlanningOptions {
+        Default::default()
+    }
     /// Uses already-resolved host metadata; this must never query storage.
     fn observation_context(
         &self,
@@ -1397,6 +1415,8 @@ mod tests {
             result_locators: Default::default(),
             previous_cache_projection: None,
             delegation_call: None,
+            preparation: None,
+            compression_identity: None,
             caller_output_hard_cap: None,
         };
 

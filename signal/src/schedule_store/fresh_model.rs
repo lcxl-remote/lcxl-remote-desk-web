@@ -88,23 +88,56 @@ pub struct FreshModelDispatch {
 }
 
 impl ScheduleStore {
+    pub(crate) fn model_dispatch_budget_key(ordinal: u64, compression: Option<&str>) -> String {
+        compression.map_or_else(
+            || format!("model-step-{ordinal}"),
+            |identity| format!("model-compression-{}", super::digest(identity)),
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn compression_budget_identity_survives_restarted_ordinals_and_separates_generations() {
+        let key = ScheduleStore::model_dispatch_budget_key(2, Some("first-prefix"));
+        assert_eq!(
+            key,
+            ScheduleStore::model_dispatch_budget_key(1, Some("first-prefix"))
+        );
+        assert_ne!(
+            key,
+            ScheduleStore::model_dispatch_budget_key(2, Some("next-prefix"))
+        );
+        assert_ne!(key, ScheduleStore::model_dispatch_budget_key(2, None));
+        assert_ne!(
+            ScheduleStore::model_dispatch_budget_key(1, None),
+            ScheduleStore::model_dispatch_budget_key(2, None)
+        );
+    }
+}
+
+impl ScheduleStore {
     /// Atomically bind quota, current session and a unique dispatch intent.
     /// The projection must come from the current model egress authorizer; this
     /// routine does not infer authorization from historical labels or receipts.
     /// Any error requires rollback of the caller's entire transaction.
+    #[allow(clippy::too_many_arguments)]
     pub async fn reserve_fresh_model_dispatch_on(
         txn: &DatabaseTransaction,
         held: &PersistedAgentSession,
         request: &TaskBudgetRequest<'_>,
         export_authorization_id: &str,
         ordinal: u64,
+        compression: Option<&str>,
         audit: &desk_diagnose_core::sink_authorizer::SinkProjectionAudit,
         inputs: &[desk_agent_protocol::data_lineage::DataEnvelope],
     ) -> Result<FreshModelDispatch, ScheduleStoreError> {
         super::publication::key(export_authorization_id)?;
         if ordinal == 0
             || ordinal > i32::MAX as u64
-            || request.logical_key != format!("model-step-{ordinal}")
+            || request.logical_key != Self::model_dispatch_budget_key(ordinal, compression)
             || !matches!(
                 audit.destination,
                 desk_agent_protocol::data_lineage::DestinationIdentity::Model { .. }
@@ -141,14 +174,16 @@ impl ScheduleStore {
         owner: i32,
         run_id: &str,
         ordinal: u32,
+        compression: Option<&str>,
     ) -> Result<agent_task_budget_reservation::Model, ScheduleStoreError> {
         let budget = agent_task_budget_reservation::Entity::find()
             .filter(agent_task_budget_reservation::Column::OwnerUserId.eq(owner))
             .filter(agent_task_budget_reservation::Column::RunId.eq(run_id))
             .filter(agent_task_budget_reservation::Column::Kind.eq("model_tokens"))
             .filter(
-                agent_task_budget_reservation::Column::LogicalKeySha256
-                    .eq(super::digest(&format!("model-step-{ordinal}"))),
+                agent_task_budget_reservation::Column::LogicalKeySha256.eq(super::digest(
+                    &Self::model_dispatch_budget_key(u64::from(ordinal), compression),
+                )),
             )
             .one(txn)
             .await?

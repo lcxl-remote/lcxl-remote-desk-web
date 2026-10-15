@@ -196,10 +196,7 @@ pub fn protected_replay_ids(session: &crate::session::PersistedAgentSession) -> 
     }
     for message in &session.conversation {
         if message.role == ChatRole::Assistant
-            && (message
-                .turn_id
-                .as_ref()
-                .is_some_and(|id| Some(id) == protection.current_turn_id.as_ref())
+            && (ids.contains(&message.message_id)
                 || message
                     .tool_calls
                     .iter()

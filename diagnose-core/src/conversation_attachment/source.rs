@@ -3,6 +3,26 @@ use desk_agent_protocol::{AgentError, AgentErrorKind, OperationOutput, ReadConte
 
 use super::MAX_JSON_BYTES;
 
+/// Borrow metadata without serializing or copying the owner-only PNG payload.
+fn preview_metadata(
+    output: &desk_agent_protocol::document_conversion::DocumentPreviewOutput,
+) -> serde_json::Value {
+    serde_json::json!({"ReadContext": {"DocumentPreview": {
+        "preview_id": output.preview_id,
+        "source_digest_sha256": output.source_digest_sha256,
+        "page_count": output.page_count,
+        "template_version": output.template_version,
+        "font_set_sha256": output.font_set_sha256,
+        "engine": output.engine,
+        "warnings": output.warnings,
+        "first_page": output.first_page.as_ref().map(|page| serde_json::json!({
+            "preview_id": page.preview_id, "page": page.page,
+            "page_count": page.page_count, "width": page.width, "height": page.height,
+            "pixels_per_point_milli": page.pixels_per_point_milli,
+        })),
+    }}})
+}
+
 /// Exhaustive by design: every new source must explicitly choose its contract.
 /// A transport JSON envelope does not make an image or text body a JSON result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,7 +72,13 @@ pub fn source_format(output: &OperationOutput) -> SourceFormat {
 pub fn validate_output(output: &OperationOutput) -> Result<(), AgentError> {
     match source_format(output) {
         SourceFormat::Json => {
-            let bytes = serde_json::to_vec(output).map_err(|_| AgentError {
+            let bytes = match output {
+                OperationOutput::ReadContext(ReadContextOutput::DocumentPreview(preview)) => {
+                    serde_json::to_vec(&preview_metadata(preview))
+                }
+                _ => serde_json::to_vec(output),
+            }
+            .map_err(|_| AgentError {
                 kind: AgentErrorKind::Internal,
                 message: "Unable to encode the typed tool result".into(),
                 retryable: false,
@@ -81,6 +107,54 @@ pub fn validate_output(output: &OperationOutput) -> Result<(), AgentError> {
 mod tests {
     use super::*;
     use desk_agent_protocol::{ContainerInspectOutput, ExecOutput, ExecOutputStreams};
+
+    #[test]
+    fn preview_png_is_independent_but_page_and_descriptor_metadata_remain_bounded() {
+        use desk_agent_protocol::document_conversion::{
+            DocumentPreviewOutput, DocumentPreviewPageOutput,
+        };
+        let mut preview = DocumentPreviewOutput {
+            preview_id: "pv".into(),
+            source_digest_sha256: "a".repeat(64),
+            page_count: 1,
+            template_version: "1".into(),
+            font_set_sha256: "b".repeat(64),
+            engine: "test".into(),
+            warnings: vec![],
+            first_page: Some(DocumentPreviewPageOutput {
+                preview_id: "pv".into(),
+                page: 1,
+                page_count: 1,
+                png: vec![255; 100_000],
+                width: 800,
+                height: 600,
+                pixels_per_point_milli: 1000,
+            }),
+        };
+        assert_eq!(
+            preview_metadata(&preview)["ReadContext"]["DocumentPreview"]["first_page"]["width"],
+            800
+        );
+        assert!(
+            serde_json::to_vec(&preview_metadata(&preview))
+                .unwrap()
+                .len()
+                < MAX_JSON_BYTES
+        );
+        validate_output(&OperationOutput::ReadContext(
+            ReadContextOutput::DocumentPreview(preview.clone()),
+        ))
+        .unwrap();
+        preview.engine = "x".repeat(MAX_JSON_BYTES);
+        assert_eq!(
+            validate_output(&OperationOutput::ReadContext(
+                ReadContextOutput::DocumentPreview(preview)
+            ))
+            .unwrap_err()
+            .kind,
+            AgentErrorKind::OutputLimitExceeded
+        );
+    }
 
     #[test]
     fn final_json_boundary_counts_wrappers_and_escaping() {

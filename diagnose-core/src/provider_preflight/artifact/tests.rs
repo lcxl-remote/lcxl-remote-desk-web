@@ -250,3 +250,57 @@ fn formula_policy_digest_is_computed_by_the_shared_validator() {
     };
     assert_eq!(formula_policy_digest_sha256.len(), 64);
 }
+
+#[test]
+fn document_conversion_binds_both_resources_and_the_earliest_expiry_on_both_hosts() {
+    let registry = ai_assistant_provider_registry();
+    let mut source = directory();
+    source.object_kind = ObjectKind::File;
+    source.token = "source-file".into();
+    source.expires_at = chrono::DateTime::from_timestamp_millis((NOW + 30_000) as i64)
+        .unwrap()
+        .to_rfc3339();
+    let action = call(
+        "convert_document",
+        json!({"source":{"kind":"artifact_result", "file_result_call_id":"observed-source"}, "output_name":"converted.pdf", "conversion":{"kind":"markdown_to_pdf"}}),
+    );
+    for surface in [
+        ProductSurface::OssPersonalOwner,
+        ProductSurface::ManagerPersonalOwner,
+    ] {
+        let plan = ArtifactCallPreflight::build_document(
+            &registry,
+            surface,
+            &action,
+            &source,
+            Some("c".repeat(64)),
+            &directory(),
+            NOW,
+        )
+        .unwrap();
+        assert_eq!(plan.resource_scope().len(), 2);
+        assert_eq!(plan.valid_until_unix_ms(), NOW + 30_000);
+        assert_eq!(
+            plan.resource_scope(),
+            fresh_object_resource_scope(&[source.clone(), directory()])
+        );
+        assert!(
+            ArtifactCallPreflight::build_document(
+                &registry, surface, &action, &source, None, &source, NOW
+            )
+            .is_err()
+        );
+        assert!(
+            ArtifactCallPreflight::build_document(
+                &registry,
+                surface,
+                &action,
+                &source,
+                None,
+                &directory(),
+                NOW + 30_001
+            )
+            .is_err()
+        );
+    }
+}
