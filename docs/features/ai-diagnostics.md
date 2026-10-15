@@ -87,6 +87,8 @@ For a manually selected Windows local directory, adding only the `\\?\` prefix t
 
 ## AI Assistant conversations
 
+The bottom conversation tabs in Web, iOS and Android appear only when subtasks exist. Without subtasks, no standalone Main conversation tab appears before, during or after approval.
+
 The conversation header opens session history and a new conversation through **Conversations**. The **+** menu at the bottom left of the composer holds context selection, goal tasks, conversation resources, management and details. Main and subagent conversations both use this entry point. Context selection and task details have icons. Continue working uses distinct off/on toggle icons; select it to change the state. The active AI approval indicator appears to the right of **+**, in the same status area as selected context; select it to open approval settings. Selected context, Continue working and AI approval all have icons. Narrow screens or panels show only these icons, with tooltips and accessible names retaining the full labels and context count. The message area keeps tool activity and screenshots near the related exchange. The input stays at the bottom, with **+**, selected context, context usage and Send/Stop on one row below it. Pending permission and AI-proposed directory decisions appear in the conversation; closing a menu does not decide them. On a narrow screen these controls remain reachable without a permanent side panel.
 
 While the main turn is running, the input row shows Stop. It remains visible but disabled until the current conversation state is available. Stopping shows a pending control; Send returns after stopping completes or the turn ends. Existing child tasks can still have a Stop control while the main input is idle.

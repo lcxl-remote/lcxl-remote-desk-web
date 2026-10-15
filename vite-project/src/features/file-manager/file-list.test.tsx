@@ -79,6 +79,9 @@ describe("FileList manual refresh", () => {
         act(() => initial.resolve({ path: "", file_info_list: [], total_count: 0 }))
         const refreshButton = await screen.findByRole("button", { name: "Refresh" })
         await waitFor(() => expect(refreshButton).toBeEnabled())
+        const goUp = screen.getByRole("button", { name: "Up one directory" })
+        expect(goUp).toHaveAttribute("title", "Up one directory")
+        expect(goUp).toBeDisabled()
         expect(screen.queryByTitle("添加到 AI 助手")).toBeNull()
 
         fireEvent.click(refreshButton)

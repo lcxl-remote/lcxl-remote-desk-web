@@ -372,7 +372,8 @@ function FileListContent({ orgId }: { orgId?: number }) {
                     </Breadcrumb>
                 </div>
                 <div className="flex items-center gap-2">
-                    <Button variant="outline" size="icon" onClick={handleGoUp} disabled={currentPath === ""}>
+                    <Button variant="outline" size="icon" onClick={handleGoUp} disabled={currentPath === ""}
+                        aria-label={t('pages.fileManager.goUp')} title={t('pages.fileManager.goUp')}>
                         <ArrowUp className="h-4 w-4" />
                     </Button>
                     <Button

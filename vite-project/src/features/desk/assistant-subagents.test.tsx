@@ -186,11 +186,21 @@ describe('conversation tabs', () => {
         await waitFor(() => expect(control).toHaveBeenCalledOnce());
         expect(input()).toHaveValue('First draft');
     });
-    it('shows an approving main tab even before any child has been created', () => {
+    it('keeps the conversation tabs hidden before, during and after main approval when there are no children', () => {
         const agents = agentsFor('child-1'); agents.tasks = []; agents.selected = null; agents.detail = null;
-        render(<AssistantConversationTabs agents={agents} mainNeedsApproval />);
-        expect(screen.getByRole('tab', { name: /Main conversation/ })).toBeVisible();
-        expect(screen.getByText('Main conversation')).toHaveClass('assistant-approval-tab-title');
+        const view = render(<AssistantConversationTabs agents={agents} />);
+        expect(screen.queryByRole('tablist')).toBeNull();
+        view.rerender(<AssistantConversationTabs agents={agents} mainNeedsApproval />);
+        expect(screen.queryByRole('tablist')).toBeNull();
+        expect(screen.queryByRole('tab', { name: /Main conversation/ })).toBeNull();
+        view.rerender(<AssistantConversationTabs agents={agents} />);
+        expect(screen.queryByRole('tablist')).toBeNull();
+    });
+    it('keeps earlier child conversations reachable when only pagination remains', () => {
+        const agents = agentsFor('child-1'); agents.tasks = []; agents.selected = null; agents.detail = null; agents.hasMore = true;
+        render(<AssistantConversationTabs agents={agents} />);
+        fireEvent.click(screen.getByRole('button', { name: 'Load earlier subtasks' }));
+        expect(agents.loadMore).toHaveBeenCalledOnce();
     });
     it('uses the matching child snapshot for revalidation attention and ignores terminal tasks', () => {
         const agents = agentsFor('child-1');

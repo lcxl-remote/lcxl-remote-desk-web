@@ -288,7 +288,7 @@ export function AssistantConversationTabs({ agents, attentionTasks = [], mainNee
         const next = element.scrollLeft + element.clientWidth < element.scrollWidth - 1;
         setScroll(current => current.previous === previous && current.next === next ? current : { previous, next });
     }, []);
-    const hasTabs = tasks.length > 0 || agents.hasMore || mainNeedsApproval;
+    const hasTabs = tasks.length > 0 || agents.hasMore;
     const order = tasks.map(task => task.task_id).join('|');
     const layout = tasks.map(task => `${task.task_id}:${task.name}:${task.state}:${needsApproval(task)}`).join('|');
     const selectedId = agents.selected?.task_id;
