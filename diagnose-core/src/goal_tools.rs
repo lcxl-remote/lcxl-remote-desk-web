@@ -59,7 +59,7 @@ pub fn open_registry() -> Vec<RegisteredTool> {
     vec![RegisteredTool {
         spec: ToolSpec {
             name: REQUEST_GOAL_TOOL_NAME.into(),
-            description: "Ask the device owner to approve exact long-running goal text. With no active goal, this requests a new goal. If the owner says a completed goal is unfinished, pass its goal ID as previous_completed_goal_id; the server verifies its completed result and links the new goal to it. When an existing goal is stopped waiting for clarification, and the owner has replied after that stop, this instead requests a revision of that same goal. The request never starts work, increases budgets, or approves a device action. Provide the complete proposed goal text and call this tool alone; the owner must decide before goal work resumes.".into(),
+            description: "Request approval of exact long-running goal text. The owner or the enabled approval AI decides this request. With no active goal, this requests a new goal. If the owner says a completed goal is unfinished, pass its goal ID as previous_completed_goal_id; the server verifies its completed result and links the new goal to it. When an existing goal is stopped waiting for clarification, and the owner has replied after that stop, this instead requests a revision of that same goal. The request never starts work, increases budgets, or approves a device action. Provide the complete proposed goal text and call this tool alone; a valid owner or approval-AI decision is required before goal work resumes.".into(),
             parameters_schema: json!({
                 "type": "object",
                 "properties": {

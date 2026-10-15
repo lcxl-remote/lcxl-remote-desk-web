@@ -316,13 +316,46 @@ pub async fn decide_for_subject(
     approve: bool,
     now: DateTime<Utc>,
 ) -> Result<Option<(GoalOpenRequest, Option<GoalRun>)>, DbErr> {
-    let now_ms = u64::try_from(now.timestamp_millis()).map_err(|_| invalid())?;
     let txn = crate::db::begin_write(db, agent_session::Entity).await?;
+    let result = decide_on(
+        &txn,
+        conversation_id,
+        actor_id,
+        device_id,
+        request_id,
+        approve,
+        now,
+        None,
+    )
+    .await?;
+    txn.commit().await?;
+    if let Some((request, _)) = &result {
+        desk_diagnose_core::model_observability::permission::goal_open_closed(
+            request,
+            now.timestamp_millis(),
+            crate::model_metrics::runtime::submit,
+        );
+    }
+    Ok(result)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn decide_on(
+    txn: &DatabaseTransaction,
+    conversation_id: &str,
+    actor_id: &str,
+    device_id: &str,
+    request_id: &str,
+    approve: bool,
+    now: DateTime<Utc>,
+    review: Option<desk_diagnose_core::goal_review::GoalReviewDecision>,
+) -> Result<Option<(GoalOpenRequest, Option<GoalRun>)>, DbErr> {
+    let now_ms = u64::try_from(now.timestamp_millis()).map_err(|_| invalid())?;
     let Some(session_row) = agent_session::Entity::find()
         .filter(agent_session::Column::ConversationId.eq(conversation_id))
         .filter(agent_session::Column::ActorId.eq(actor_id))
         .filter(agent_session::Column::DeviceId.eq(device_id))
-        .one(&txn)
+        .one(txn)
         .await?
     else {
         return Ok(None);
@@ -344,16 +377,25 @@ pub async fn decide_for_subject(
         .filter(request_row::Column::ConversationId.eq(conversation_id))
         .filter(request_row::Column::ActorId.eq(actor_id))
         .filter(request_row::Column::DeviceId.eq(device_id))
-        .one(&txn)
+        .one(txn)
         .await?
     else {
         return Ok(None);
     };
     let mut request = decode(&request_row)?;
+    let budget_policy = crate::goal_budget_policy::read(txn).await?;
+    if let Some(review) = &review {
+        use sha2::{Digest, Sha256};
+        let action = desk_diagnose_core::goal_review::action(&session, &request, &budget_policy)
+            .map_err(|_| invalid())?;
+        if approve && format!("{:x}", Sha256::digest(action.as_bytes())) != review.action_sha256 {
+            return Ok(None);
+        }
+    }
     let active_goal = goal_row::Entity::find()
         .filter(goal_row::Column::ConversationId.eq(conversation_id))
         .filter(goal_row::Column::Status.is_not_in(["completed", "failed", "cancelled"]))
-        .one(&txn)
+        .one(txn)
         .await?
         .as_ref()
         .map(crate::agent_goal_store::decode)
@@ -384,13 +426,7 @@ pub async fn decide_for_subject(
         GoalOpenRequestEvent::id_for(request_id, state, AgentRunEventKind::GoalOpenDecided)
             .map_err(|_| invalid())?;
     let mut goal = if state == GoalOpenRequestState::Approved {
-        let current_model_binding = GoalModelBinding::from_destination(
-            &crate::model_provider::load(&txn)
-                .await?
-                .destination_identity()
-                .map_err(|_| invalid())?,
-        )
-        .map_err(|_| invalid())?;
+        let current_model_binding = current_model_binding_on(txn, &request).await?;
         if let Some(mut existing) = active_goal.clone() {
             request
                 .approve_revision(
@@ -406,7 +442,7 @@ pub async fn decide_for_subject(
             let previous = if let Some(previous_id) = &request.previous_completed_goal_id {
                 Some(
                     crate::agent_goal_store::load_completed_on(
-                        &txn,
+                        txn,
                         previous_id,
                         conversation_id,
                         actor_id,
@@ -440,17 +476,28 @@ pub async fn decide_for_subject(
         None
     };
     if let Some(goal) = goal.as_mut() {
-        goal.apply_budget_policy(&crate::goal_budget_policy::read(&txn).await?)
+        goal.apply_budget_policy(&budget_policy)
             .map_err(|_| invalid())?;
     }
     session.last_event_seq = session.last_event_seq.checked_add(1).ok_or_else(invalid)?;
-    let decision = GoalOpenRequestEvent::new(
+    let mut decision = GoalOpenRequestEvent::new(
         &request,
         AgentRunEventKind::GoalOpenDecided,
         session.last_event_seq,
         now.to_rfc3339(),
     )
     .map_err(|_| invalid())?;
+    decision.review_decision = review.clone();
+    decision.validate().map_err(|_| invalid())?;
+    if let Some(review) = &review {
+        desk_diagnose_core::goal_review::append_receipt(
+            &mut session,
+            &request,
+            &decision.event.event_id,
+            review,
+        )
+        .map_err(|_| invalid())?;
+    }
     let opened = if let Some(goal) = goal.as_ref() {
         session.last_event_seq = session.last_event_seq.checked_add(1).ok_or_else(invalid)?;
         Some(
@@ -481,15 +528,15 @@ pub async fn decide_for_subject(
         .filter(agent_session::Column::Id.eq(session_row.id))
         .filter(agent_session::Column::Version.eq(session_row.version))
         .filter(agent_session::Column::LeaseToken.eq(session_row.lease_token))
-        .exec(&txn)
+        .exec(txn)
         .await?;
-    if changed.rows_affected != 1 || !replace_pending_on(&txn, &request).await? {
+    if changed.rows_affected != 1 || !replace_pending_on(txn, &request).await? {
         return Err(invalid());
     }
     if let Some(goal) = goal.as_ref() {
         if let Some(previous) = active_goal.as_ref() {
             if !crate::agent_goal_store::replace_on(
-                &txn,
+                txn,
                 goal,
                 previous.state_version,
                 previous.lease_epoch,
@@ -501,7 +548,7 @@ pub async fn decide_for_subject(
                 return Err(invalid());
             }
         } else {
-            crate::agent_goal_store::insert_on(&txn, goal).await?;
+            crate::agent_goal_store::insert_on(txn, goal).await?;
         }
     }
     for (event, payload) in [
@@ -536,15 +583,9 @@ pub async fn decide_for_subject(
             created_at: Set(now),
             ..Default::default()
         }
-        .insert(&txn)
+        .insert(txn)
         .await?;
     }
-    txn.commit().await?;
-    desk_diagnose_core::model_observability::permission::goal_open_closed(
-        &request,
-        now.timestamp_millis(),
-        crate::model_metrics::runtime::submit,
-    );
     Ok(Some((request, goal)))
 }
 
@@ -580,4 +621,18 @@ pub async fn expire_due(
         }
     }
     Ok(())
+}
+
+pub(crate) async fn current_model_binding_on(
+    txn: &DatabaseTransaction,
+    _request: &GoalOpenRequest,
+) -> Result<GoalModelBinding, DbErr> {
+    let current_model_binding = GoalModelBinding::from_destination(
+        &crate::model_provider::load(txn)
+            .await?
+            .destination_identity()
+            .map_err(|_| invalid())?,
+    )
+    .map_err(|_| invalid())?;
+    Ok(current_model_binding)
 }

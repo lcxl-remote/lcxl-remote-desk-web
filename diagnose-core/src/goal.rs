@@ -150,6 +150,7 @@ pub struct GoalOpenRequest {
 pub struct GoalOpenRequestEvent {
     pub event: AgentRunEvent,
     pub request: GoalOpenRequest,
+    pub review_decision: Option<crate::goal_review::GoalReviewDecision>,
 }
 
 impl GoalOpenRequestEvent {
@@ -186,6 +187,7 @@ impl GoalOpenRequestEvent {
             return Err(GoalError::InvalidState);
         }
         let value = Self {
+            review_decision: None,
             event: AgentRunEvent {
                 schema_version: AGENT_RUN_EVENT_SCHEMA_VERSION,
                 event_id: Self::id_for(&request.request_id, request.state, kind)?,
@@ -233,6 +235,29 @@ impl GoalOpenRequestEvent {
             )
         {
             return Err(GoalError::InvalidState);
+        }
+        if let Some(review) = &self.review_decision {
+            use crate::dynamic_run::PermissionDecisionSource;
+            if self.event.kind != AgentRunEventKind::GoalOpenDecided
+                || review.candidate_id.is_empty()
+                || review.action_sha256.len() != 64
+                || review.reason.trim().is_empty()
+            {
+                return Err(GoalError::InvalidState);
+            }
+            match &review.source {
+                PermissionDecisionSource::AutomaticReview {
+                    reviews, failures, ..
+                } if reviews.len() == 1
+                    && failures.is_empty()
+                    && reviews[0].candidate_id == review.candidate_id
+                    && reviews[0].item_id == self.request.request_id
+                    && reviews[0].reason == review.reason => {}
+                PermissionDecisionSource::SystemDecision { reason, .. }
+                    if self.request.state != GoalOpenRequestState::Approved
+                        && reason == &review.reason => {}
+                _ => return Err(GoalError::InvalidState),
+            }
         }
         Ok(())
     }

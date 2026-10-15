@@ -1,3 +1,4 @@
+import { Bot } from 'lucide-react';
 import { Fragment, type ComponentProps } from 'react';
 import { useTranslation } from 'react-i18next';
 import { MarkdownContent } from '@/components/markdown-content';
@@ -35,7 +36,12 @@ export function AssistantTranscript({ sessionId, messages, tools, running, evide
                     : message.role === 'tool_result' ? 'w-full max-w-full border bg-muted/30 sm:max-w-[90%]' : 'w-full max-w-full bg-transparent sm:max-w-[90%]'
             }`}
         >
-            {message.role === 'tool_call' ? <AssistantToolCall tool={tools.find(tool => tool.callId === message.toolCallId)} running={running}
+            {message.role === 'goal_decision' && message.goalDecision ? <div role="status" className="space-y-1 border-l-2 border-muted-foreground/40 pl-3">
+                <p className="flex items-center gap-2 font-medium"><Bot className="h-4 w-4" aria-hidden="true" />
+                    {t(message.goalDecision.reviewer === 'system' ? 'pages.aiAssistant.goalAiReviewFailed'
+                        : message.goalDecision.status === 'approved' ? 'pages.aiAssistant.goalAiReviewApproved' : 'pages.aiAssistant.goalAiReviewDenied')}</p>
+                <p className="whitespace-pre-wrap text-muted-foreground">{message.text}</p>
+            </div> : message.role === 'tool_call' ? <AssistantToolCall tool={tools.find(tool => tool.callId === message.toolCallId)} running={running}
                 displayName={displayNameForCall(message.toolCallId)} /> : message.role === 'tool_result' ? <>
                 {message.permissionReason && <p className="mb-2 text-sm">{t('pages.aiAssistant.permissionReasonLabel', { reason: message.permissionReason })}</p>}
                 {isHistoricalPermissionSkip(message.text) && <p className="mb-2 text-sm text-amber-700 dark:text-amber-300">{t('pages.aiAssistant.historicalPermissionSkip')}</p>}

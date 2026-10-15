@@ -1380,6 +1380,7 @@ impl Store {
             && ![
                 "permission_item",
                 "directory_proposal",
+                "goal_proposal",
                 "concrete_call",
                 "oss_command",
                 "manager_command",

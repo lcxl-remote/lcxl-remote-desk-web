@@ -2781,6 +2781,9 @@ export default {
     "approval.sessionKind.main": "Main conversation",
     "approval.sessionKind.subagent": "Child conversation",
     "approval.sessionKind.unknown": "Unknown attribution",
+    "approval.source.goal_proposal": "Goal creation or revision review",
+    "pages.aiAssistant.goalAiReviewPending": "Waiting for AI review of this goal. Goal approval does not authorize device actions.",
+    "approval.stage.goal_decided": "Goal proposal decision saved",
     "approval.source.directory_proposal": "Directory identity review",
     "pages.aiAssistant.directories.rejected": "Directory request denied",
     "pages.aiAssistant.directories.revoked": "Directory consent revoked",
@@ -2893,4 +2896,7 @@ export default {
     "approval.contentPending": "Response is in progress; this section has no content yet.",
     "approval.storedDecision": "Decision in the final review record",
     "approval.stage.provider_not_started": "Provider call blocked before admission",
+    "pages.aiAssistant.goalAiReviewApproved": "Goal approved by AI",
+    "pages.aiAssistant.goalAiReviewDenied": "Goal denied by AI",
+    "pages.aiAssistant.goalAiReviewFailed": "Goal AI review did not finish",
 };

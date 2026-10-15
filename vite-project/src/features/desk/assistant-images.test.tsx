@@ -270,4 +270,16 @@ describe('assistant activity folding', () => {
         expect(screen.getByText('Unfinished call')).toBeTruthy();
         expect(screen.getByText('Still thinking')).toBeTruthy();
     });
+    it('keeps a committed goal-review reason outside folded tool activity', () => {
+        vi.mocked(listAssistantImages).mockResolvedValue({ data: [], success: true, code: 0 });
+        render(<AssistantImages sessionId="stored-run" evidence={[]} messages={[
+            { id: 'first', role: 'assistant', text: 'Proposing a goal' },
+            { id: 'one', role: 'tool_call', toolCallId: 'one', text: 'One' },
+            { id: 'two', role: 'tool_call', toolCallId: 'two', text: 'Two' },
+            { id: 'decision', role: 'goal_decision', text: 'The goal matches your request', goalDecision: { status: 'approved', reviewer: 'approval_ai' } },
+            { id: 'next', role: 'assistant', text: 'Starting the approved goal' },
+        ]} renderMessage={renderMessage} renderToolGroup={renderToolGroup} />);
+        expect(screen.getByText('The goal matches your request').closest('[data-state="closed"]')).toBeNull();
+    });
+
 });

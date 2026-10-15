@@ -125,6 +125,7 @@ impl<'a> ReviewModelView<'a> {
         let source_kind = match candidate.source {
             ApprovalSource::PermissionItem { .. } => "permission_item",
             ApprovalSource::DirectoryProposal { .. } => "directory_proposal",
+            ApprovalSource::GoalProposal { .. } => "goal_proposal",
             ApprovalSource::OssCommand { .. } | ApprovalSource::ManagerCommand { .. } => "command",
             ApprovalSource::ManagerAction { .. } => "action",
             ApprovalSource::ConcreteCall { .. } => "concrete_call",
@@ -138,6 +139,12 @@ impl<'a> ReviewModelView<'a> {
         let mut action: Value = serde_json::from_str(&candidate.action_json)
             .map_err(|_| ApprovalReviewError::InvalidCandidate)?;
         match candidate.source {
+            ApprovalSource::GoalProposal { .. } => {
+                let proposal = &action["goal_proposal"];
+                action = json!({"operation":if proposal["target_goal_id"].is_null(){"create_goal"}else{"revise_goal"},
+                    "goal_text":proposal["goal_text"],"continues_previous_goal":!proposal["previous_completed_goal_id"].is_null(),
+                    "budget_limits":action["budget_policy"]["limits"],"device_actions_authorized":false});
+            }
             ApprovalSource::PermissionItem { .. } => permission_action(&mut action),
             ApprovalSource::DirectoryProposal { .. } => {
                 let proposal = &action["directory_proposal"];

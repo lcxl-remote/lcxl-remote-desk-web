@@ -302,7 +302,12 @@ pub fn authorize_source_review_egress(
             .iter()
             .find(|message| message.message_id == goal.source_message_id)
             .ok_or(ApprovalReviewError::InvalidContext)?;
-        if source.role != ChatRole::User || !source.text.contains(&goal.goal_text) {
+        // A goal revision reviews the persisted approved goal, whose exact text
+        // may originally have been proposed by the AI rather than typed by the owner.
+        if source.role != ChatRole::User
+            || (!matches!(candidate.source, ApprovalSource::GoalProposal { .. })
+                && !source.text.contains(&goal.goal_text))
+        {
             return Err(ApprovalReviewError::InvalidContext);
         }
         source_ids.insert(source.message_id.as_str());
@@ -355,7 +360,11 @@ pub fn validate_source_review_current(
 ) -> Result<(), ApprovalReviewError> {
     candidate.validate()?;
     if session.surface != AgentSessionSurface::AiAssistant
-        || !session.turn_state.is_active()
+        || if matches!(candidate.source, ApprovalSource::GoalProposal { .. }) {
+            !session.agent_role.is_main() || !session.turn_state.can_claim() || session.main_stopped
+        } else {
+            !session.turn_state.is_active()
+        }
         || session.current_turn_id.as_deref() != Some(binding.turn_id)
         || session.lease_token != binding.lease_token
         || session.input_revision != binding.input_revision

@@ -515,6 +515,27 @@ async fn validate_review_subject_on(
                 return Err(invalid());
             }
         }
+        ApprovalSource::GoalProposal { request_id } => {
+            if session_row
+                .lease_deadline
+                .is_some_and(|deadline| deadline.timestamp_millis() > now_ms)
+            {
+                return Err(invalid());
+            }
+            let row = review_row::Entity::find()
+                .filter(review_row::Column::CandidateId.eq(&authority.candidate_id))
+                .one(txn)
+                .await?
+                .ok_or_else(invalid)?;
+            crate::agent_approval_store::validate_goal_source_on(
+                txn,
+                session,
+                request_id,
+                &row.action_sha256,
+                now_ms as u64,
+            )
+            .await?;
+        }
         ApprovalSource::DirectoryProposal { request_id } => {
             let record = desk_diagnose_core::directory_review::pending(session, request_id)
                 .map_err(|_| invalid())?;

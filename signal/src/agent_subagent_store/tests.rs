@@ -4,6 +4,7 @@ mod commands;
 mod compaction_races;
 mod creation;
 mod funding;
+mod goal_approval;
 mod goal_role_guard;
 mod input_sources;
 mod lifecycle;

@@ -11,6 +11,7 @@ use desk_agent_protocol::computer_use::ObjectKind;
 use desk_diagnose_core::ai_assistant::{
     ai_assistant_provider_registry, provider_readiness_reports,
 };
+use desk_diagnose_core::approval_review::PendingRequestKind;
 use desk_diagnose_core::approval_review::reviewer_billed_tokens;
 use desk_diagnose_core::capability_availability::{
     CapabilityAvailability, project_capability_availability,
@@ -40,6 +41,15 @@ async fn current_device_context(
     subject: &PendingPermissionReview,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Option<ReviewDeviceContext> {
+    if subject.kind == PendingRequestKind::Goal {
+        return Some(ReviewDeviceContext {
+            connection_id: String::new(),
+            registry: ai_assistant_provider_registry(),
+            inventory: vec![],
+            readiness_revision: 0,
+            implicit_fresh_object_refs: vec![],
+        });
+    }
     let connection_id = {
         let map = connections.read().await;
         let mut targets = map.values().filter(|target| {
@@ -114,7 +124,20 @@ pub async fn process_pending_permission_review(
     let now = chrono::Utc::now();
     let Some(device) = current_device_context(&db, connections.as_ref(), &subject, now).await
     else {
-        if subject.directory_request {
+        if subject.kind == PendingRequestKind::Goal {
+            return crate::agent_approval_store::deny_goal_unavailable(
+                &db,
+                &subject.conversation_id,
+                &subject.owner_id,
+                &subject.device_id,
+                &subject.request_id,
+                u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0),
+                desk_diagnose_core::approval_observation::ReviewReason::Policy,
+            )
+            .await
+            .unwrap_or(false);
+        }
+        if subject.kind == PendingRequestKind::Directory {
             return crate::agent_approval_store::deny_directory_unavailable(
                 &db,
                 &subject.conversation_id,
@@ -136,7 +159,7 @@ pub async fn process_pending_permission_review(
         &subject.owner_id,
         &subject.device_id,
         &subject.request_id,
-        subject.directory_request,
+        subject.kind,
         &device.registry,
         ProductSurface::OssPersonalOwner,
         device.readiness_revision,
@@ -145,6 +168,19 @@ pub async fn process_pending_permission_review(
     .await
     {
         Ok(candidates) => candidates,
+        Err(_) if subject.kind == PendingRequestKind::Goal => {
+            return crate::agent_approval_store::deny_goal_unavailable(
+                &db,
+                &subject.conversation_id,
+                &subject.owner_id,
+                &subject.device_id,
+                &subject.request_id,
+                now_unix_ms,
+                desk_diagnose_core::approval_observation::ReviewReason::Processing,
+            )
+            .await
+            .unwrap_or(false);
+        }
         Err(_) => return false,
     };
     if candidates.is_empty() {
@@ -167,6 +203,19 @@ pub async fn process_pending_permission_review(
         {
             Ok(claim) => claim,
             Err(crate::agent_approval_store::ReviewStartError::Unavailable(reason)) => {
+                if subject.kind == PendingRequestKind::Goal {
+                    return crate::agent_approval_store::deny_goal_unavailable(
+                        &db,
+                        &subject.conversation_id,
+                        &subject.owner_id,
+                        &subject.device_id,
+                        &subject.request_id,
+                        u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0),
+                        reason,
+                    )
+                    .await
+                    .unwrap_or(false);
+                }
                 let (reason_code, reason_text) =
                     desk_diagnose_core::approval_review::system_review_reason(reason);
                 if let desk_diagnose_core::approval_review::ApprovalSource::PermissionItem {
@@ -226,7 +275,10 @@ pub async fn process_pending_permission_review(
     if retry_required {
         return false;
     }
-    if subject.directory_request {
+    if subject.kind == PendingRequestKind::Goal {
+        return true;
+    }
+    if subject.kind == PendingRequestKind::Directory {
         return crate::agent_approval_store::deny_directory_unavailable(
             &db,
             &subject.conversation_id,

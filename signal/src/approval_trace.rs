@@ -58,6 +58,7 @@ impl Store {
         let unavailable = settings.is_none();
         let settings = settings.unwrap_or_else(|| ApprovalTraceSettings::defaults(false));
         let (source_kind, source_id) = match &candidate.source {
+            ApprovalSource::GoalProposal { request_id } => ("goal_proposal", request_id.clone()),
             ApprovalSource::PermissionItem {
                 request_id,
                 item_id,
@@ -437,6 +438,52 @@ impl Store {
                     origin: "server".into(),
                     at_ms: item.created_at.timestamp_millis(),
                 });
+            }
+        }
+        if row.source_kind == "goal_proposal" {
+            use crate::entity::agent_run_event as goal_event;
+            use desk_diagnose_core::{
+                dynamic_run::AgentRunEventKind,
+                goal::{GoalOpenRequestEvent, GoalOpenRequestState},
+            };
+            let event_ids = [
+                GoalOpenRequestState::Approved,
+                GoalOpenRequestState::Denied,
+                GoalOpenRequestState::Expired,
+                GoalOpenRequestState::Withdrawn,
+            ]
+            .into_iter()
+            .map(|state| {
+                GoalOpenRequestEvent::id_for(
+                    &row.source_id,
+                    state,
+                    AgentRunEventKind::GoalOpenDecided,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| sea_orm::DbErr::Custom("invalid goal review source".into()))?;
+            if let Some(event) = goal_event::Entity::find()
+                .filter(goal_event::Column::RunId.eq(&row.conversation_id))
+                .filter(goal_event::Column::EventId.is_in(event_ids))
+                .filter(goal_event::Column::Kind.eq("goal_open_decided"))
+                .one(&self.db)
+                .await?
+            {
+                let decision: desk_diagnose_core::goal::GoalOpenRequestEvent =
+                    serde_json::from_str(&event.payload_json).map_err(|_| {
+                        sea_orm::DbErr::Custom("invalid goal decision receipt".into())
+                    })?;
+                if decision
+                    .review_decision
+                    .as_ref()
+                    .is_some_and(|review| review.candidate_id == row.candidate_id)
+                {
+                    timeline.push(ApprovalTraceStageDto {
+                        stage: "goal_decided".into(),
+                        origin: "server".into(),
+                        at_ms: event.created_at.timestamp_millis(),
+                    });
+                }
             }
         }
         if row.source_kind == "directory_proposal" {

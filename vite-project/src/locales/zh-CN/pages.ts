@@ -2769,6 +2769,9 @@ export default {
     "approval.sessionKind.main": "主会话",
     "approval.sessionKind.subagent": "子会话",
     "approval.sessionKind.unknown": "归属未知",
+    "approval.source.goal_proposal": "目标创建或修订审批",
+    "pages.aiAssistant.goalAiReviewPending": "正在等待 AI 审批目标。目标获批不会授予设备操作权限。",
+    "approval.stage.goal_decided": "目标申请决定已写入",
     "approval.source.directory_proposal": "目录身份审批",
     "pages.aiAssistant.directories.rejected": "目录申请已拒绝",
     "pages.aiAssistant.directories.revoked": "目录授权已撤销",
@@ -2881,4 +2884,7 @@ export default {
     "approval.contentPending": "正在接收，暂无该部分内容。",
     "approval.storedDecision": "最终审核记录中的裁决",
     "approval.stage.provider_not_started": "模型调用在准入阶段被阻止",
+    "pages.aiAssistant.goalAiReviewApproved": "AI 已批准目标",
+    "pages.aiAssistant.goalAiReviewDenied": "AI 已拒绝目标",
+    "pages.aiAssistant.goalAiReviewFailed": "目标 AI 审批未完成",
 };

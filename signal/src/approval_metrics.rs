@@ -22,6 +22,25 @@ pub fn committed(db: &DatabaseConnection, candidate: &str) {
                 .as_deref()
                 .and_then(|v| serde_json::from_str::<ReviewTracking>(v).ok())
         {
+            if row.source_kind == "goal_proposal"
+                && tracking.snapshot.terminal()
+                && let Ok(Some(request_row)) =
+                    crate::entity::agent_goal_open_request::Entity::find()
+                        .filter(
+                            crate::entity::agent_goal_open_request::Column::RequestId
+                                .eq(&row.source_id),
+                        )
+                        .one(&db)
+                        .await
+                && let Ok(request) = crate::agent_goal_open_store::decode(&request_row)
+                && request.state != desk_diagnose_core::goal::GoalOpenRequestState::Pending
+            {
+                desk_diagnose_core::model_observability::permission::goal_open_closed(
+                    &request,
+                    row.updated_at,
+                    crate::model_metrics::runtime::submit,
+                );
+            }
             let phase = if tracking.snapshot.terminal() {
                 ObservationPhase::Completed
             } else {

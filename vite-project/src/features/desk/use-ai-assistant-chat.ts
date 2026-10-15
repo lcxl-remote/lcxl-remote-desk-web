@@ -1,3 +1,4 @@
+import { projectGoalReviewReceipt } from './assistant-goal-review-receipt';
 import type { AssistantContextUsage } from './assistant-context-meter';
 import type { AssistantFileScopeView, AssistantDirectoryOperation } from './assistant-file-scope';
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -44,7 +45,8 @@ export type AiAssistantMessage = {
     permissionReason?: string;
     contextBoundaryIds?: string[];
     id: string;
-    role: 'user' | 'assistant' | 'tool_result' | 'tool_call';
+    role: 'user' | 'assistant' | 'tool_result' | 'tool_call' | 'goal_decision';
+    goalDecision?: { status: 'approved' | 'denied' | 'expired'; reviewer: 'approval_ai' | 'system' };
     toolCallId?: string;
     turnId?: string | null;
     text: string;
@@ -289,6 +291,8 @@ export function projectPersistedSnapshot(snapshot: PersistedSnapshot) {
     let tools: AiAssistantToolActivity[] = [];
     let draft: ComputerActionDraftPreview | null = null;
     for (const message of snapshot.messages) {
+        const goalReceipt = projectGoalReviewReceipt(message);
+        if (goalReceipt) messages.push(goalReceipt);
         if ((message.role === 'user' || message.role === 'assistant') && (message.text || (message.role === 'assistant' && message.reasoning))) {
             messages.push({
                 id: message.id,

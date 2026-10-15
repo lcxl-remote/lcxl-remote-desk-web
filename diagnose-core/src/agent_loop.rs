@@ -3725,7 +3725,7 @@ async fn run_inner_impl(
                 "goal_text": goal.goal_text,
                 "state": goal.status_code(),
                 "reply_received": goal.can_propose_revision(session.input_revision).is_ok(),
-                "instruction": "The goal is stopped. Clarify the owner's intent. Do not use device tools. If a later owner reply makes an exact goal revision appropriate, call request_goal with the new complete text; the owner must approve it before work resumes."
+                "instruction": "The goal is stopped. Clarify the owner's intent. Do not use device tools. If a later owner reply makes an exact goal revision appropriate, call request_goal with the new complete text; the owner or enabled approval AI must approve it before work resumes."
             }).to_string();
             let mut marker = ChatMessage::system_event(&marker_id, &marker_text);
             marker.data_envelope = derive_internal_tool_result_envelope(
@@ -5733,7 +5733,7 @@ async fn run_inner_impl(
                                     );
                                     let before = session.clone();
                                     let content = serde_json::json!({
-                                        "status": "pending_user_decision",
+                                        "status": "pending_approval",
                                         "request_id": &event.request.request_id,
                                         "goal_text": &event.request.goal_text,
                                         "previous_completed_goal_id": &event.request.previous_completed_goal_id,

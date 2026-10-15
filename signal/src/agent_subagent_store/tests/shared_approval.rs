@@ -11,7 +11,7 @@ use desk_diagnose_core::{
 };
 use sea_orm::sea_query::Expr;
 
-async fn enable(db: &DatabaseConnection, id: &str) -> ApprovalDelegation {
+pub(super) async fn enable(db: &DatabaseConnection, id: &str) -> ApprovalDelegation {
     let now = chrono::Utc::now().timestamp_millis();
     let value = ApprovalDelegation::new_usage_only(
         id.into(),
@@ -427,7 +427,8 @@ async fn active_child_directory_is_claimed_once_and_fault_ends_only_directory_co
         .await
         .unwrap()
         .0;
-    assert!(pending.iter().any(|review| review.directory_request
+    assert!(pending.iter().any(|review| review.kind
+        == desk_diagnose_core::approval_review::PendingRequestKind::Directory
         && review.request_id == id
         && review.conversation_id == session.conversation_id));
     let registry = desk_diagnose_core::ai_assistant::ai_assistant_provider_registry();
@@ -437,7 +438,7 @@ async fn active_child_directory_is_claimed_once_and_fault_ends_only_directory_co
         "1",
         "1",
         &id,
-        true,
+        desk_diagnose_core::approval_review::PendingRequestKind::Directory,
         &registry,
         ProductSurface::OssPersonalOwner,
         1,
@@ -534,7 +535,7 @@ async fn closed_child_claim_releases_the_root_reservation_without_dialing() {
         "1",
         "1",
         &child.permission_requests[0].request_id,
-        false,
+        desk_diagnose_core::approval_review::PendingRequestKind::Permission,
         &registry,
         ProductSurface::OssPersonalOwner,
         1,
@@ -658,7 +659,7 @@ async fn approved_child_review_keeps_its_grant_and_audit_in_the_child_and_usage_
         "1",
         "1",
         request_id,
-        false,
+        desk_diagnose_core::approval_review::PendingRequestKind::Permission,
         &registry,
         ProductSurface::OssPersonalOwner,
         1,

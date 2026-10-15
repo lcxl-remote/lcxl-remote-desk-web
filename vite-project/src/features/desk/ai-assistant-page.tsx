@@ -1,3 +1,4 @@
+import { AssistantGoalProposalControls } from './assistant-goal-proposal-controls';
 import { ApprovalReviews, useOwnApprovalAccess } from '@/features/approval/reviews';
 import { AssistantGoalPanel, goalPlanningAction } from './assistant-goal-panel';
 import { AssistantTranscript } from './assistant-transcript';
@@ -938,21 +939,11 @@ export function AiAssistantWorkspace({
                             {!offPageReminderAvailable && <p className="mt-1 text-amber-700 dark:text-amber-300">
                                 {t('pages.aiAssistant.goalNoOffPageReminder')}
                             </p>}
-                            <div className="mt-2 flex gap-2">
-                                <Button size="sm" disabled={chat.goalOpenUpdating || chat.turnRunning
-                                    || (!chat.pendingGoalOpenRequest.targetGoalId && !goalBudgetPolicy)
-                                    || chat.pendingGoalOpenRequest.expiresAtUnixMs <= Date.now()}
-                                    onClick={() => void chat.decideGoalOpen(true)}>
-                                    {t(chat.pendingGoalOpenRequest.targetGoalId
-                                        ? 'pages.aiAssistant.goalRevisionApprove'
-                                        : 'pages.aiAssistant.goalProposalApprove')}
-                                </Button>
-                                <Button size="sm" variant="outline" disabled={chat.goalOpenUpdating || chat.turnRunning
-                                    || chat.pendingGoalOpenRequest.expiresAtUnixMs <= Date.now()}
-                                    onClick={() => void chat.decideGoalOpen(false)}>
-                                    {t('pages.aiAssistant.goalProposalDeny')}
-                                </Button>
-                            </div>
+                            <AssistantGoalProposalControls automaticApproval={automaticApproval}
+                                revision={Boolean(chat.pendingGoalOpenRequest.targetGoalId)}
+                                busy={chat.goalOpenUpdating || chat.turnRunning || chat.pendingGoalOpenRequest.expiresAtUnixMs <= Date.now()}
+                                canApprove={Boolean(chat.pendingGoalOpenRequest.targetGoalId || goalBudgetPolicy)}
+                                onDecide={chat.decideGoalOpen} />
                         </div>
                     )}
                     </div>

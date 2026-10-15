@@ -42,7 +42,7 @@ export function ApprovalMetricsPanel({ load, range, identity, enabled, autoRefre
                 setFilters({ ...filters, provider_id: pair?.[0], model_id: pair?.[1] });
             }}><SelectItem value="__empty__">{t('modelMetrics.all')}</SelectItem>{models?.groups.filter(group => group.model_id).map(group => <SelectItem key={group.key} value={JSON.stringify([group.provider_id, group.model_id])}>{group.model_name}</SelectItem>)}</SelectField></Label>
             {([
-                ['source_kind', manager ? ['permission_item', 'directory_proposal', 'concrete_call', 'manager_command'] : ['permission_item', 'directory_proposal', 'concrete_call']],
+                ['source_kind', manager ? ['permission_item', 'directory_proposal', 'goal_proposal', 'concrete_call', 'manager_command'] : ['permission_item', 'directory_proposal', 'goal_proposal', 'concrete_call']],
                 ['session_kind', ['main', 'subagent', 'unknown']],
                 ['reason', ['configuration', 'provider', 'transport', 'timeout', 'stream', 'output_truncated', 'invalid_decision', 'policy', 'budget', 'revoked', 'source_changed', 'candidate_expired', 'lease_expired', 'processing', 'unknown']],
                 ['outcome', ['pending', 'approved', 'denied', 'fault', 'policy_blocked', 'cancelled', 'superseded', 'expired', 'unknown']],

@@ -206,7 +206,7 @@ export function AssistantImages({ sessionId, evidence, messages, renderMessage, 
             } else {
                 timeline.push({ key: message.id,
                     kind: message.role === 'assistant' && message.text.trim() ? 'body'
-                        : message.role === 'user' ? 'boundary' : 'activity',
+                        : message.role === 'user' || message.role === 'goal_decision' ? 'boundary' : 'activity',
                     count: message.role === 'tool_call' ? 1 : 0,
                     hasImages: byMessage.has(index),
                     content: <>{renderMessage(message)}{renderImages(byMessage.get(index) ?? [], true)}</> });

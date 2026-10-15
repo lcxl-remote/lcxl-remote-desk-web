@@ -31,17 +31,6 @@ pub async fn list_goal_attention(
 
     let now = i64::try_from(now_unix_ms)
         .map_err(|_| DbErr::Custom("invalid owner attention clock".into()))?;
-    let open_rows = agent_goal_open_request::Entity::find()
-        .filter(agent_goal_open_request::Column::ActorId.eq(actor_id))
-        .filter(agent_goal_open_request::Column::Status.eq("pending"))
-        .filter(agent_goal_open_request::Column::ExpiresAt.gt(now))
-        .all(db)
-        .await?;
-    for row in open_rows {
-        let request = crate::agent_goal_open_store::decode(&row)?;
-        items.push(AiAssistantAttentionItemDto::from_goal_open(&request));
-    }
-
     let delegated: HashSet<String> = agent_approval_delegation::Entity::find()
         .filter(agent_approval_delegation::Column::ActorId.eq(actor_id))
         .filter(agent_approval_delegation::Column::Status.eq("active"))
@@ -50,6 +39,20 @@ pub async fn list_goal_attention(
         .into_iter()
         .map(|row| row.conversation_id)
         .collect();
+    let open_rows = agent_goal_open_request::Entity::find()
+        .filter(agent_goal_open_request::Column::ActorId.eq(actor_id))
+        .filter(agent_goal_open_request::Column::Status.eq("pending"))
+        .filter(agent_goal_open_request::Column::ExpiresAt.gt(now))
+        .all(db)
+        .await?;
+    for row in open_rows {
+        if delegated.contains(&row.conversation_id) {
+            continue;
+        }
+        let request = crate::agent_goal_open_store::decode(&row)?;
+        items.push(AiAssistantAttentionItemDto::from_goal_open(&request));
+    }
+
     let sessions = agent_session::Entity::find()
         .filter(agent_session::Column::ActorId.eq(actor_id))
         .all(db)
