@@ -29,6 +29,8 @@ fn fields(tool: &str) -> &'static [(&'static str, &'static str)] {
 
 pub fn needs_resolution(tool: &str) -> bool {
     !fields(tool).is_empty()
+        || tool == "inspect_files"
+        || crate::provider_preflight::ArtifactCallPreflight::supports(tool)
         || tool == "request_permissions"
         || crate::browser_model_ids::supports(tool)
         || crate::result_model_ids::supports(tool)
@@ -161,14 +163,33 @@ pub fn resolve_session_call(
     session: &crate::session::PersistedAgentSession,
     now_ms: u64,
 ) -> Result<ToolCall, AgentError> {
+    resolve_session_call_with_context(call, session, now_ms, None)
+}
+
+pub fn resolve_session_call_with_context(
+    call: &ToolCall,
+    session: &crate::session::PersistedAgentSession,
+    now_ms: u64,
+    original: Option<&crate::input_read_context::ReadContextSelection>,
+) -> Result<ToolCall, AgentError> {
     crate::model_input::validate_server_metadata(call)?;
-    let (expanded, expected) = session.ui_references.expand_call(call)?;
+    let mut prepared = call.clone();
+    if call.name == "request_permissions" {
+        let mut value: Value = serde_json::from_str(&call.arguments_json)
+            .map_err(|_| invalid("Tool arguments must be a JSON object."))?;
+        crate::file_model_input::prepare_permissions(&mut value);
+        prepared.arguments_json = value.to_string();
+    }
+    let (expanded, expected) = session.ui_references.expand_call(&prepared)?;
     let mut resolved =
         resolve_call_with_references(&expanded, &session.conversation, now_ms, &expected)?;
     crate::ui_references::UiReferenceState::validate_resolved(&expected, &resolved)?;
     let mut value = serde_json::from_str(&resolved.arguments_json)
         .map_err(|_| invalid("Tool arguments must be a JSON object."))?;
     crate::document_model_ids::resolve_directories(&call.name, &mut value, session, now_ms)?;
+    crate::file_model_input::complete_session_input(
+        &call.name, &mut value, session, original, now_ms,
+    )?;
     resolved.arguments_json = value.to_string();
     Ok(resolved)
 }
@@ -362,7 +383,9 @@ pub(crate) fn resolve_single_call_with_references(
     {
         for item in items {
             if let Some(tool) = item["tool_name"].as_str().map(str::to_owned)
-                && (crate::browser_model_ids::supports(&tool)
+                && (tool == "inspect_files"
+                    || crate::provider_preflight::ArtifactCallPreflight::supports(&tool)
+                    || crate::browser_model_ids::supports(&tool)
                     || crate::result_model_ids::supports(&tool)
                     || crate::document_model_ids::supports(&tool)
                     || !fields(&tool).is_empty())
@@ -593,6 +616,7 @@ pub fn same_call_input_with_references(
         references.alias_native_arguments(&mut right);
     }
     project_arguments(tool, &mut right, locators);
+    crate::file_model_input::complete_comparison(tool, &mut left, &right);
     left == right
 }
 
@@ -929,6 +953,7 @@ pub fn project_tool(tool: &mut crate::chat::ToolSpec) {
     crate::model_input::project_defaults(tool);
     crate::result_model_ids::project_tool(tool);
     crate::document_model_ids::project_tool(tool);
+    crate::file_model_input::project_tool(tool);
     if crate::application_batch::supports(&tool.name)
         && tool
             .parameters_schema

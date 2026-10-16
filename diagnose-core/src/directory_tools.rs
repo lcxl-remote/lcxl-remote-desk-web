@@ -143,7 +143,15 @@ pub fn adopt_review_snapshot(
     expected.last_event_seq = current.last_event_seq;
     expected.version = current.version;
     expected.updated_at = current.updated_at.clone();
-    if expected != current {
+    // Compare the durable boundary: resolved results, request context and live
+    // images deliberately differ from their stored session representation.
+    if expected
+        .encode_json_for_storage()
+        .map_err(|_| unavailable())?
+        != current
+            .encode_json_for_storage()
+            .map_err(|_| unavailable())?
+    {
         return Err(unavailable());
     }
     let decision = match current
@@ -157,7 +165,11 @@ pub fn adopt_review_snapshot(
         Some(DirectoryConsentState::Approved) => Some(true),
         _ => Some(false),
     };
-    *held = current;
+    // Adopt only the validated directory update; keep live evidence and caches.
+    held.file_scope = current.file_scope;
+    held.last_event_seq = current.last_event_seq;
+    held.version = current.version;
+    held.updated_at = current.updated_at;
     Ok(decision)
 }
 
@@ -202,6 +214,187 @@ pub fn reviewed_decision_result(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn waiting_session() -> crate::session::PersistedAgentSession {
+        use crate::{chat::ChatMessage, file_scope::FileScopeSubject, session::*};
+        use desk_agent_protocol::{AgentScope, ExecutionMode, computer_use::*};
+
+        let mut session = PersistedAgentSession::new(
+            "conversation",
+            "owner",
+            "device",
+            1,
+            AgentScope {
+                granted: vec![],
+                mode: ExecutionMode::ReadOnly,
+                expires_at: None,
+                policy_name: None,
+            },
+            "2026-10-15T00:00:00Z",
+        );
+        session.adopt_client_metadata(Some("client"), AgentSessionSurface::AiAssistant);
+        session.turn_state = TurnState::Running;
+        session.current_turn_id = Some("directory-turn".into());
+        session
+            .file_scope
+            .propose(
+                &FileScopeSubject {
+                    actor_id: session.actor_id.clone(),
+                    device_id: session.device_id.clone(),
+                    conversation_id: session.conversation_id.clone(),
+                },
+                0,
+                DirectoryProposal {
+                    request_id: "directory-request".into(),
+                    requested_path: "/tmp/work".into(),
+                    canonical_path: "/tmp/work".into(),
+                    directory: ObjectRef {
+                        token: "directory-reference".into(),
+                        snapshot_id: "directory-generation".into(),
+                        object_kind: ObjectKind::Directory,
+                        expires_at: String::new(),
+                    },
+                    purpose: "Create the requested document".into(),
+                    source: DirectoryConsentSource::ModelProposal,
+                },
+                1,
+            )
+            .unwrap();
+        let mut result = ChatMessage::text(
+            "network-result",
+            crate::chat::ChatRole::Tool,
+            "Read the network ports attachment before interpreting it.",
+        );
+        result.resolved_result = Some(Box::new(ChatMessage::text(
+            "network-result",
+            crate::chat::ChatRole::Tool,
+            "Verified complete network ports result",
+        )));
+        result.runtime_context = Some(Box::new(ChatMessage::text(
+            "runtime-context",
+            crate::chat::ChatRole::System,
+            "Request-only runtime context",
+        )));
+        session.conversation.push(result);
+        session
+    }
+
+    fn stored(
+        session: &crate::session::PersistedAgentSession,
+    ) -> crate::session::PersistedAgentSession {
+        crate::session::PersistedAgentSession::decode_json(
+            &session.encode_json_for_storage().unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn directory_review_preserves_live_results_for_pending_approved_and_rejected_snapshots() {
+        for decision in [None, Some(true), Some(false)] {
+            let mut held = waiting_session();
+            let before = held.clone();
+            let mut current = stored(&held);
+            assert!(current.conversation[0].resolved_result.is_none());
+            assert!(current.conversation[0].runtime_context.is_none());
+            if let Some(approve) = decision {
+                let subject = crate::file_scope::FileScopeSubject {
+                    actor_id: held.actor_id.clone(),
+                    device_id: held.device_id.clone(),
+                    conversation_id: held.conversation_id.clone(),
+                };
+                current
+                    .file_scope
+                    .decide(&subject, 1, "directory-request", approve, 2)
+                    .unwrap();
+                current.version += 1;
+                current.last_event_seq += 1;
+            }
+            let scope = current.file_scope.clone();
+            assert_eq!(
+                adopt_review_snapshot(&mut held, current, "directory-request").unwrap(),
+                decision
+            );
+            assert_eq!(held.file_scope, scope);
+            assert_eq!(held.conversation, before.conversation);
+            assert_eq!(held.scope_snapshot, before.scope_snapshot);
+            assert_eq!(held.version, before.version + i64::from(decision.is_some()));
+            assert_eq!(
+                held.last_event_seq,
+                before.last_event_seq + u64::from(decision.is_some())
+            );
+        }
+    }
+
+    #[test]
+    fn directory_review_keeps_live_screen_pixels_across_the_storage_boundary() {
+        let mut held = waiting_session();
+        held.conversation.push(
+            crate::chat::ChatMessage::text(
+                "screen-result",
+                crate::chat::ChatRole::Tool,
+                "Captured screen",
+            )
+            .with_image("data:image/jpeg;base64,AQID"),
+        );
+        let before = held.clone();
+        let current = stored(&held);
+        assert!(
+            current
+                .conversation
+                .last()
+                .unwrap()
+                .image_data_url
+                .is_none()
+        );
+        assert_eq!(
+            adopt_review_snapshot(&mut held, current, "directory-request").unwrap(),
+            None
+        );
+        assert_eq!(held, before);
+    }
+
+    #[test]
+    fn directory_review_with_live_cache_still_rejects_changed_durable_authority() {
+        for change in [
+            "input",
+            "control",
+            "lease",
+            "policy",
+            "scope",
+            "stopped",
+            "turn",
+            "actor",
+            "device",
+            "transcript",
+            "version",
+            "event",
+        ] {
+            let mut held = waiting_session();
+            let before = held.clone();
+            let mut current = stored(&held);
+            match change {
+                "input" => current.input_revision += 1,
+                "control" => current.control_revision += 1,
+                "lease" => current.lease_token += 1,
+                "policy" => current.policy_revision += 1,
+                "scope" => current.scope_snapshot.granted.push(Capability::SystemInfo),
+                "stopped" => current.main_stopped = true,
+                "turn" => current.current_turn_id = Some("another-turn".into()),
+                "actor" => current.actor_id = "another-owner".into(),
+                "device" => current.device_id = "another-device".into(),
+                "transcript" => current.conversation[0].text = "changed result".into(),
+                "version" => current.version += 1,
+                "event" => current.last_event_seq += 1,
+                _ => unreachable!(),
+            }
+            assert!(
+                adopt_review_snapshot(&mut held, current, "directory-request").is_err(),
+                "{change}"
+            );
+            assert_eq!(held, before, "{change}");
+        }
+    }
+
     #[test]
     fn proposals_are_bounded_and_cannot_supply_confirmation_or_device_references() {
         for input in [

@@ -13,6 +13,8 @@ use crate::agent_approval_store::ClaimedPermissionReview;
 use crate::model_dial::SignalModelSeam;
 
 pub struct ReviewerResponse {
+    pub format_issue: Option<desk_diagnose_core::approval_review::ReviewFormatIssue>,
+    pub response_complete: bool,
     pub decision: Option<ApprovalReviewDecision>,
     pub usage: TokenUsage,
     pub stop_reason: String,
@@ -33,7 +35,79 @@ pub async fn call_claimed_permission_review(
     sink.tracking = Some(claim.statistics.clone());
     sink.publish = Some(std::sync::Arc::new(crate::model_metrics::runtime::submit));
     sink.event("preparation");
-    let result = call_claimed_permission_review_inner(db, candidate, claim, &mut sink).await;
+    let mut current = claim.clone();
+    let mut combined_usage = None;
+    let result = loop {
+        sink.begin_attempt(current.call_authority.attempt.index);
+        let mut response = Box::pin(call_claimed_permission_review_inner(
+            db, candidate, &current, &mut sink,
+        ))
+        .await;
+        if let Ok(value) = &mut response {
+            sink.model_finished();
+            sink.text(
+                "usage",
+                &serde_json::to_string(&value.usage).unwrap_or_default(),
+            );
+            combined_usage = Some(match combined_usage {
+                None => value.usage,
+                Some(previous) => {
+                    desk_diagnose_core::approval_usage::sum_review_usage(previous, value.usage)
+                }
+            });
+            if crate::approval_attempt::record_response(
+                db,
+                &current.call_authority,
+                value.response_complete,
+                value.format_issue,
+            )
+            .await
+            .is_err()
+            {
+                break Err(AgentError {
+                    kind: AgentErrorKind::Internal,
+                    message: "Approval response facts could not be recorded".into(),
+                    ..reviewer_unavailable()
+                });
+            }
+            if value.format_issue.is_some() {
+                value.failure_reason = Some(format!(
+                    "format_retries_exhausted:{}",
+                    current.call_authority.attempt.index
+                ));
+            }
+            if let Some(issue) = value.format_issue
+                && current.call_authority.attempt.next(issue).is_some()
+            {
+                sink.event("format_retry_requested");
+                match Box::pin(crate::approval_retry::advance(
+                    db, candidate, &current, issue,
+                ))
+                .await
+                {
+                    Ok(Some(next)) => {
+                        current = next;
+                        continue;
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        sink.event("format_retry_unavailable");
+                        value.failure_reason = Some(
+                            if error
+                                == sea_orm::DbErr::Custom("approval review budget exhausted".into())
+                            {
+                                "retry_budget"
+                            } else {
+                                "retry_unavailable"
+                            }
+                            .into(),
+                        );
+                    }
+                }
+            }
+        }
+        break response;
+    };
     match &result {
         Ok(response) => {
             sink.model_finished();
@@ -49,7 +123,7 @@ pub async fn call_claimed_permission_review(
             });
             sink.complete(
                 Some(response.stop_reason.clone()),
-                serde_json::to_string(&response.usage).ok(),
+                serde_json::to_string(&combined_usage.unwrap_or(response.usage)).ok(),
                 response.failure_reason.clone(),
             );
         }
@@ -104,7 +178,7 @@ async fn call_claimed_permission_review_inner(
         return Err(reviewer_unavailable());
     }
     // Retry only a pre-dial configuration read. Once provider I/O starts its
-    // outcome may be unknown, so the claimed candidate must never be redialed.
+    // outcome may be unknown. Each correction owns a new, independently fenced attempt.
     sink.event("configuration");
     let config = match crate::approval_model_provider::load(db).await {
         Ok(config) => config,
@@ -127,7 +201,7 @@ async fn call_claimed_permission_review_inner(
     }
     let mut request = claim
         .authorized
-        .model_request(candidate)
+        .model_request_for_attempt(candidate, &claim.call_authority.attempt)
         .map_err(|_| reviewer_unavailable())?;
     request.delegation_call = claim.delegation_call.clone();
     request.validate_delegation_call().inspect_err(|error| {
@@ -166,8 +240,12 @@ async fn call_claimed_permission_review_inner(
     if !settings.enabled {
         return Err(reviewer_unavailable());
     }
-    let receipt_id = format!("approval-call:{}", candidate.candidate_id);
-    let export_id = format!("approval-export:{}", candidate.candidate_id);
+    let call_id = claim
+        .call_authority
+        .attempt
+        .call_id(&candidate.candidate_id);
+    let receipt_id = format!("approval-call:{call_id}");
+    let export_id = format!("approval-export:{call_id}");
     let txn = crate::db::begin_write(db, crate::entity::agent_session::Entity)
         .await
         .map_err(|_| reviewer_unavailable())?;
@@ -269,6 +347,13 @@ async fn call_claimed_permission_review_inner(
         );
     })
     .ok();
+    let mut format_issue =
+        match desk_diagnose_core::approval_review::reviewer_output_diagnosed(candidate, &turn) {
+            Err(desk_diagnose_core::approval_review::ReviewOutputIssue::Format(issue)) => {
+                Some(issue)
+            }
+            _ => None,
+        };
     let output_policy = desk_diagnose_core::model_egress::ModelEgressPolicy {
         destination: claim.model_destination.clone(),
         selected_source_tools: Default::default(),
@@ -297,6 +382,7 @@ async fn call_claimed_permission_review_inner(
                 turn.text.len(),
                 turn.tool_calls.len(),
             );
+            format_issue = None;
             // Preserve an incomplete, empty or malformed answer's classification.
             if let Some(observation) = &observation
                 && decision.is_some()
@@ -314,6 +400,9 @@ async fn call_claimed_permission_review_inner(
         }
     };
     Ok(ReviewerResponse {
+        format_issue,
+        response_complete: turn.stop_reason == desk_diagnose_core::chat::StopReason::EndTurn
+            && turn.tool_calls.is_empty(),
         decision: decision.clone(),
         usage: turn.usage,
         stop_reason: format!("{:?}", turn.stop_reason),

@@ -250,7 +250,7 @@ pub(crate) async fn reserve_budget_with_authority_on(
     }
     if let Some(review) = review_authority {
         super::review_budget::validate_review_lease_on(txn, review, now_ms).await?;
-        if logical_call_id != format!("review:{}", review.candidate_id)
+        if logical_call_id != format!("review:{}", review.attempt.call_id(&review.candidate_id))
             || arguments_sha256 != review.request_sha256
         {
             return Err(invalid());

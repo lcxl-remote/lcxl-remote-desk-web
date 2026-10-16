@@ -1300,11 +1300,19 @@ mod tests {
         for arguments in [
             "",
             "{}",
-            r#"{"sheet_name":"Sheet1","address":"A1"}"#,
             r#"{"sheet_name":"Sheet1","address":"A1","max_bytes":1024,"path":"C:\\private.xlsx"}"#,
         ] {
             assert!(build_read_operation(&call(arguments)).is_err());
         }
+        let (_, default_input) =
+            build_read_operation(&call(r#"{"sheet_name":"Sheet1","address":"A1"}"#)).unwrap();
+        let OperationInput::ReadContext(ReadContextInput {
+            kind: ContextKind::SpreadsheetBatchInspect(defaults),
+        }) = default_input
+        else {
+            panic!("wrong cell read");
+        };
+        assert_eq!(defaults.max_bytes, 32768);
         let (_, input) = build_read_operation(&call(
             r#"{"sheet_name":"Sheet1","address":"A1","max_bytes":1024}"#,
         ))

@@ -4,10 +4,13 @@ export type { GetApprovalReviewQueryKey } from "./aiApprovalController/useGetApp
 export type { GetApprovalReviewPartsQueryKey } from "./aiApprovalController/useGetApprovalReviewParts.ts";
 export type { GetApprovalReviewPartsSuspenseQueryKey } from "./aiApprovalController/useGetApprovalReviewPartsSuspense.ts";
 export type { GetApprovalReviewSuspenseQueryKey } from "./aiApprovalController/useGetApprovalReviewSuspense.ts";
+export type { GetApprovalRuntimeSettingsQueryKey } from "./aiApprovalController/useGetApprovalRuntimeSettings.ts";
+export type { GetApprovalRuntimeSettingsSuspenseQueryKey } from "./aiApprovalController/useGetApprovalRuntimeSettingsSuspense.ts";
 export type { GetApprovalTraceSettingsQueryKey } from "./aiApprovalController/useGetApprovalTraceSettings.ts";
 export type { GetApprovalTraceSettingsSuspenseQueryKey } from "./aiApprovalController/useGetApprovalTraceSettingsSuspense.ts";
 export type { ListApprovalReviewsQueryKey } from "./aiApprovalController/useListApprovalReviews.ts";
 export type { ListApprovalReviewsSuspenseQueryKey } from "./aiApprovalController/useListApprovalReviewsSuspense.ts";
+export type { UpdateApprovalRuntimeSettingsMutationKey } from "./aiApprovalController/useUpdateApprovalRuntimeSettings.ts";
 export type { UpdateApprovalTraceSettingsMutationKey } from "./aiApprovalController/useUpdateApprovalTraceSettings.ts";
 export type { GetMyGoalBudgetPolicyQueryKey } from "./aiAssistantController/useGetMyGoalBudgetPolicy.ts";
 export type { GetMyGoalBudgetPolicySuspenseQueryKey } from "./aiAssistantController/useGetMyGoalBudgetPolicySuspense.ts";
@@ -232,6 +235,12 @@ export { useGetApprovalReviewPartsSuspense } from "./aiApprovalController/useGet
 export { getApprovalReviewSuspenseQueryKey } from "./aiApprovalController/useGetApprovalReviewSuspense.ts";
 export { getApprovalReviewSuspenseQueryOptions } from "./aiApprovalController/useGetApprovalReviewSuspense.ts";
 export { useGetApprovalReviewSuspense } from "./aiApprovalController/useGetApprovalReviewSuspense.ts";
+export { getApprovalRuntimeSettingsQueryKey } from "./aiApprovalController/useGetApprovalRuntimeSettings.ts";
+export { getApprovalRuntimeSettingsQueryOptions } from "./aiApprovalController/useGetApprovalRuntimeSettings.ts";
+export { useGetApprovalRuntimeSettings } from "./aiApprovalController/useGetApprovalRuntimeSettings.ts";
+export { getApprovalRuntimeSettingsSuspenseQueryKey } from "./aiApprovalController/useGetApprovalRuntimeSettingsSuspense.ts";
+export { getApprovalRuntimeSettingsSuspenseQueryOptions } from "./aiApprovalController/useGetApprovalRuntimeSettingsSuspense.ts";
+export { useGetApprovalRuntimeSettingsSuspense } from "./aiApprovalController/useGetApprovalRuntimeSettingsSuspense.ts";
 export { getApprovalTraceSettingsQueryKey } from "./aiApprovalController/useGetApprovalTraceSettings.ts";
 export { getApprovalTraceSettingsQueryOptions } from "./aiApprovalController/useGetApprovalTraceSettings.ts";
 export { useGetApprovalTraceSettings } from "./aiApprovalController/useGetApprovalTraceSettings.ts";
@@ -244,6 +253,9 @@ export { useListApprovalReviews } from "./aiApprovalController/useListApprovalRe
 export { listApprovalReviewsSuspenseQueryKey } from "./aiApprovalController/useListApprovalReviewsSuspense.ts";
 export { listApprovalReviewsSuspenseQueryOptions } from "./aiApprovalController/useListApprovalReviewsSuspense.ts";
 export { useListApprovalReviewsSuspense } from "./aiApprovalController/useListApprovalReviewsSuspense.ts";
+export { updateApprovalRuntimeSettingsMutationKey } from "./aiApprovalController/useUpdateApprovalRuntimeSettings.ts";
+export { updateApprovalRuntimeSettingsMutationOptions } from "./aiApprovalController/useUpdateApprovalRuntimeSettings.ts";
+export { useUpdateApprovalRuntimeSettings } from "./aiApprovalController/useUpdateApprovalRuntimeSettings.ts";
 export { updateApprovalTraceSettingsMutationKey } from "./aiApprovalController/useUpdateApprovalTraceSettings.ts";
 export { updateApprovalTraceSettingsMutationOptions } from "./aiApprovalController/useUpdateApprovalTraceSettings.ts";
 export { useUpdateApprovalTraceSettings } from "./aiApprovalController/useUpdateApprovalTraceSettings.ts";

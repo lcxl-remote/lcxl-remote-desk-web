@@ -217,7 +217,7 @@ pub async fn init_db(
         .await
 }
 
-const SIGNAL_SCHEMA_VERSION: i32 = 27;
+const SIGNAL_SCHEMA_VERSION: i32 = 28;
 const SCHEMA_LOCK_TABLE: &str = "signal_schema_init_lock";
 
 #[derive(Debug, FromQueryResult)]
@@ -290,6 +290,7 @@ async fn create_latest_schema<C: ConnectionTrait + crate::config::ConfigConnecti
     create_entity(db, &schema, agent_goal_open_request::Entity).await?;
     create_entity(db, &schema, agent_approval_delegation::Entity).await?;
     create_entity(db, &schema, agent_approval_review::Entity).await?;
+    create_entity(db, &schema, crate::entity::agent_approval_attempt::Entity).await?;
     create_entity(db, &schema, agent_approval_trace::Entity).await?;
     create_entity(db, &schema, agent_approval_trace_part::Entity).await?;
     create_entity(db, &schema, crate::entity::agent_attachment::Entity).await?;
@@ -609,6 +610,7 @@ async fn validate_latest_schema<C: ConnectionTrait + crate::config::ConfigConnec
     check_entity!(agent_goal_open_request);
     check_entity!(agent_approval_delegation);
     check_entity!(agent_approval_review);
+    check_entity!(agent_approval_attempt);
     check_entity!(agent_approval_trace);
     check_entity!(agent_approval_trace_part);
     check_entity!(agent_attachment);
@@ -1032,6 +1034,7 @@ pub(crate) async fn ensure_lifecycle_tables(db: &DatabaseConnection) {
         schema.create_table_from_entity(agent_goal_open_request::Entity),
         schema.create_table_from_entity(agent_approval_delegation::Entity),
         schema.create_table_from_entity(agent_approval_review::Entity),
+        schema.create_table_from_entity(agent_approval_attempt::Entity),
         schema.create_table_from_entity(agent_approval_trace::Entity),
         schema.create_table_from_entity(agent_approval_trace_part::Entity),
         schema.create_table_from_entity(agent_schedule::Entity),

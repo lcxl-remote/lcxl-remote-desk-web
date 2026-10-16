@@ -619,3 +619,146 @@ async fn goal_approval_funding_failure_is_terminal_instead_of_a_storage_retry() 
         assert!(receipt.text.contains("Send a new message"));
     }
 }
+
+#[actix_web::test]
+async fn format_correction_respects_zero_incomplete_and_changed_source_without_losing_prior_usage()
+{
+    use desk_diagnose_core::approval_review::ReviewFormatIssue;
+    for case in [
+        "zero",
+        "incomplete",
+        "expired",
+        "control_changed",
+        "stopped",
+        "budget",
+    ] {
+        let (db, session, request, now) = fixture().await;
+        if case == "zero" {
+            let mut settings = crate::approval_runtime::load(&db).await.unwrap();
+            settings.format_retry_count = 0;
+            crate::approval_runtime::save(&db, settings)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        let (mut candidate, claim) = claim(&db, &session, &request, now).await;
+        crate::approval_attempt::record_response(
+            &db,
+            &claim.call_authority,
+            case != "incomplete",
+            Some(ReviewFormatIssue::JsonSyntax),
+        )
+        .await
+        .unwrap();
+        if case == "expired" {
+            candidate.expires_at_unix_ms = now - 1;
+        }
+        if case == "control_changed" || case == "stopped" {
+            let mut changed = session.clone();
+            if case == "control_changed" {
+                changed.control_revision += 1;
+            } else {
+                changed.main_stopped = true;
+            }
+            crate::entity::agent_session::Entity::update_many()
+                .col_expr(
+                    crate::entity::agent_session::Column::StateJson,
+                    Expr::value(changed.encode_json_for_storage().unwrap()),
+                )
+                .exec(&db)
+                .await
+                .unwrap();
+        }
+        if case == "budget" {
+            let row = crate::entity::agent_delegation_group::Entity::find()
+                .one(&db)
+                .await
+                .unwrap()
+                .unwrap();
+            let mut group: desk_diagnose_core::subagent::group::DelegationGroup =
+                serde_json::from_str(&row.state_json).unwrap();
+            group.limits.total.model_calls = 1;
+            crate::entity::agent_delegation_group::Entity::update_many()
+                .col_expr(
+                    crate::entity::agent_delegation_group::Column::StateJson,
+                    Expr::value(serde_json::to_string(&group).unwrap()),
+                )
+                .filter(crate::entity::agent_delegation_group::Column::Id.eq(row.id))
+                .exec(&db)
+                .await
+                .unwrap();
+        }
+        let result = Box::pin(crate::approval_retry::advance(
+            &db,
+            &candidate,
+            &claim,
+            ReviewFormatIssue::JsonSyntax,
+        ))
+        .await;
+        if case == "zero" {
+            assert!(result.unwrap().is_none());
+        } else {
+            assert!(result.is_err(), "{case}");
+        }
+        let calls = crate::entity::agent_approval_attempt::Entity::find()
+            .all(&db)
+            .await
+            .unwrap();
+        assert_eq!(calls.len(), 1, "{case}");
+        if !matches!(case, "zero" | "incomplete") {
+            assert_eq!(
+                calls[0].usage_settlement_state.as_deref(),
+                Some("unknown"),
+                "{case}"
+            );
+        }
+    }
+}
+
+#[actix_web::test]
+async fn archived_format_call_reconciles_once_while_the_next_attempt_is_reviewing() {
+    use desk_diagnose_core::approval_review::ReviewFormatIssue;
+    let (db, session, request, now) = fixture().await;
+    let (candidate, claim) = claim(&db, &session, &request, now).await;
+    crate::approval_attempt::record_response(
+        &db,
+        &claim.call_authority,
+        true,
+        Some(ReviewFormatIssue::JsonSyntax),
+    )
+    .await
+    .unwrap();
+    let next = Box::pin(crate::approval_retry::advance(
+        &db,
+        &candidate,
+        &claim,
+        ReviewFormatIssue::JsonSyntax,
+    ))
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(next.call_authority.attempt.index, 1);
+    super::funding::insert_provider_usage(&db, "test-review-call", now as i64, now as i64 + 1)
+        .await;
+    assert_eq!(
+        crate::agent_approval_usage::reconcile_usage(&db, now as i64 + 2, 64)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        crate::agent_approval_usage::reconcile_usage(&db, now as i64 + 3, 64)
+            .await
+            .unwrap(),
+        0
+    );
+    let calls = crate::entity::agent_approval_attempt::Entity::find()
+        .all(&db)
+        .await
+        .unwrap();
+    assert_eq!(calls[0].usage_settlement_state.as_deref(), Some("known"));
+    let current = review_row::Entity::find().one(&db).await.unwrap().unwrap();
+    assert_eq!(current.status, "reviewing");
+    assert!(current.usage_settlement_state.is_none());
+    assert!(current.provider_receipt_id.is_none());
+}

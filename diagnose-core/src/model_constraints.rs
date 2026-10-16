@@ -16,7 +16,7 @@ pub(crate) fn project(tool: &mut ToolSpec) {
             item["properties"]["reason"]["x-maxUtf8Bytes"] =
                 json!(crate::dynamic_run::MAX_PERMISSION_REASON_BYTES);
             item["properties"]["exact_input"]["description"] = json!(
-                "Use the current model-facing target tool input, including observed object/result IDs. The server restores reference metadata, hashes and defaults before approval. Native UI permissions use application_scope instead. Obtain prerequisite reads before requesting a mutation that depends on their results."
+                "Use the current model-facing target tool input, including necessary business choices and observed result IDs. contextual_exact_input file reads may omit bound sources only when the current accepted user input already selected the required files, or inspect_files has a unique approved directory; required worksheet/cell and merge rules remain necessary. The server restores reference metadata, hashes and defaults before approval. Native UI permissions use application_scope instead. Obtain prerequisite reads before requesting a mutation that depends on their results."
             );
         }
         "read_current_screen" => schema["not"] = json!({"required":["display","window_id"]}),

@@ -806,7 +806,7 @@ mod tests {
         );
         assert_eq!(
             modes["permission_input_modes"]["inspect_files"],
-            "optional_exact_input"
+            "contextual_exact_input"
         );
         let details = detail_entries(
             &registry,

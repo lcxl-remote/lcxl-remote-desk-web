@@ -24,7 +24,11 @@ pub(super) const PATCH_READINESS_IDENTITIES: [(&str, &str, &str, &str); 1] = [(
 pub struct InspectArgs {
     pub sheet_name: String,
     pub address: String,
+    #[serde(default = "default_inspect_bytes")]
     pub max_bytes: u32,
+}
+fn default_inspect_bytes() -> u32 {
+    32768
 }
 pub(super) fn inspect_tool() -> RegisteredTool {
     let mut tool = batch_inspect_tool(
@@ -37,9 +41,9 @@ pub(super) fn inspect_tool() -> RegisteredTool {
         "properties": {
             "sheet_name":{"type":"string","minLength":1,"maxLength":31},
             "address":{"type":"string","pattern":"^[A-Z]{1,3}[1-9][0-9]{0,6}$"},
-            "max_bytes":{"type":"integer","minimum":1024,"maximum":65536}
+            "max_bytes":{"type":"integer","minimum":1024,"maximum":32768,"default":32768}
         },
-        "required":["sheet_name","address","max_bytes"]
+        "required":["sheet_name","address"]
     });
     tool
 }

@@ -29,6 +29,7 @@ use sea_orm::{
 
 /// A claimed review is the sole permission to make one external reviewer call.
 /// The raw candidate is never stored a second time in SQLite.
+#[derive(Clone)]
 pub struct ClaimedPermissionReview {
     pub statistics:
         std::sync::Arc<std::sync::Mutex<desk_diagnose_core::approval_observation::ReviewTracking>>,
@@ -830,22 +831,24 @@ pub async fn settle_permission_review(
             _ => APPROVAL_REVIEW_STATUS_UNAVAILABLE,
         }
     };
-    if physical.dispatched {
-        delegation
-            .settle_tokens(row.reserved_tokens as u64, Some(accounted.tokens))
-            .map_err(|_| invalid())?;
-    } else {
-        delegation
-            .release_unstarted_review_tokens(row.reserved_tokens as u64)
-            .map_err(|_| invalid())?;
+    if row.usage_settlement_json.is_none() {
+        if physical.dispatched {
+            delegation
+                .settle_tokens(row.reserved_tokens as u64, Some(accounted.tokens))
+                .map_err(|_| invalid())?;
+        } else {
+            delegation
+                .release_unstarted_review_tokens(row.reserved_tokens as u64)
+                .map_err(|_| invalid())?;
+        }
+        crate::agent_approval_usage::record_usage_on(
+            &txn,
+            &row,
+            accounted,
+            i64::try_from(now_unix_ms).map_err(|_| invalid())?,
+        )
+        .await?;
     }
-    crate::agent_approval_usage::record_usage_on(
-        &txn,
-        &row,
-        accounted,
-        i64::try_from(now_unix_ms).map_err(|_| invalid())?,
-    )
-    .await?;
     let changed = delegation_row::Entity::update_many()
         .col_expr(
             delegation_row::Column::StateJson,
@@ -990,16 +993,18 @@ pub async fn expire_review_leases(
         let physical =
             crate::agent_subagent_store::settle_review_call_on(&txn, &row, None, now).await?;
         let accounted = physical.settlement(row.reserved_tokens)?;
-        if physical.dispatched {
-            delegation
-                .settle_tokens(row.reserved_tokens as u64, Some(accounted.tokens))
-                .map_err(|_| invalid())?;
-        } else {
-            delegation
-                .release_unstarted_review_tokens(row.reserved_tokens as u64)
-                .map_err(|_| invalid())?;
+        if row.usage_settlement_json.is_none() {
+            if physical.dispatched {
+                delegation
+                    .settle_tokens(row.reserved_tokens as u64, Some(accounted.tokens))
+                    .map_err(|_| invalid())?;
+            } else {
+                delegation
+                    .release_unstarted_review_tokens(row.reserved_tokens as u64)
+                    .map_err(|_| invalid())?;
+            }
+            crate::agent_approval_usage::record_usage_on(&txn, &row, accounted, now).await?;
         }
-        crate::agent_approval_usage::record_usage_on(&txn, &row, accounted, now).await?;
         let changed = delegation_row::Entity::update_many()
             .col_expr(
                 delegation_row::Column::StateJson,

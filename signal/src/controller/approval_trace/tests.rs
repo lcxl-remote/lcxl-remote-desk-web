@@ -27,7 +27,9 @@ async fn approval_routes_reject_ordinary_scoped_and_anonymous_before_accessing_s
             .service(get_approval_review_parts)
             .service(get_approval_metrics_overview)
             .service(get_approval_trace_settings)
-            .service(update_approval_trace_settings),
+            .service(update_approval_trace_settings)
+            .service(get_approval_runtime_settings)
+            .service(update_approval_runtime_settings),
     )
     .await;
     for role in [None, Some("guest"), Some("device_user"), Some("scoped")] {
@@ -49,6 +51,7 @@ async fn approval_routes_reject_ordinary_scoped_and_anonymous_before_accessing_s
             "/my/ai-assistant-session/approval-review/parts?session=foreign&id=foreign&kind=input",
             "/model/metrics/approval/overview",
             "/admin/approval-trace-settings",
+            "/admin/approval-runtime-settings",
         ] {
             let mut request = test::TestRequest::get().uri(path);
             if let Some(cookie) = &cookie {

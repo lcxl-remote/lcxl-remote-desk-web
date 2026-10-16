@@ -7,7 +7,7 @@ use desk_diagnose_core::input_read_context::object_read::ObjectReadBinding;
 
 pub(super) struct OriginalInput {
     revision: u64,
-    selection: ReadContextSelection,
+    pub(super) selection: ReadContextSelection,
     destination: DestinationIdentity,
     client_conversation_id: Option<String>,
 }

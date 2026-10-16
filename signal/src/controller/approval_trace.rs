@@ -3,6 +3,7 @@ use crate::approval_trace;
 use crate::error::DeskSignalError;
 use actix_session::Session;
 use actix_web::{HttpResponse, get, put, web};
+use desk_signal_facade::model::approval_runtime::ApprovalRuntimeSettings;
 use desk_signal_facade::model::approval_trace::*;
 use desk_utils::{error::DeskErrorCode, rest::RestResponse};
 
@@ -146,3 +147,49 @@ pub async fn get_approval_metrics_overview(
 
 #[cfg(test)]
 mod tests;
+
+#[utoipa::path(tag=TAG,summary="Get approval execution settings",responses((status=200,body=RestResponse<ApprovalRuntimeSettings>)))]
+#[get("/admin/approval-runtime-settings")]
+pub async fn get_approval_runtime_settings(
+    session: Session,
+) -> Result<HttpResponse, DeskSignalError> {
+    authorize(&session)?;
+    let db = crate::db::get_db().clone();
+    let data = crate::approval_runtime::load(&db)
+        .await
+        .map_err(|_| failure())?;
+    Ok(HttpResponse::Ok()
+        .insert_header(("Cache-Control", "private, no-store"))
+        .json(RestResponse::succeed_with_data(data)))
+}
+#[utoipa::path(tag=TAG,summary="Update approval execution settings",request_body=ApprovalRuntimeSettings,responses((status=200,body=RestResponse<ApprovalRuntimeSettings>)))]
+#[put("/admin/approval-runtime-settings")]
+pub async fn update_approval_runtime_settings(
+    session: Session,
+    body: web::Json<ApprovalRuntimeSettings>,
+) -> Result<HttpResponse, DeskSignalError> {
+    authorize(&session)?;
+    let db = crate::db::get_db().clone();
+    body.validate()
+        .map_err(|e| DeskSignalError::new_custom_error(DeskErrorCode::INVALID_PARAMS, e))?;
+    match crate::approval_runtime::save(&db, body.into_inner())
+        .await
+        .map_err(|_| failure())?
+    {
+        Some(data) => Ok(HttpResponse::Ok()
+            .insert_header(("Cache-Control", "private, no-store"))
+            .json(RestResponse::succeed_with_data(data))),
+        None => {
+            let data = crate::approval_runtime::load(&db)
+                .await
+                .map_err(|_| failure())?;
+            Ok(HttpResponse::Ok()
+                .insert_header(("Cache-Control", "private, no-store"))
+                .json(RestResponse::failed_with_data(
+                    DeskErrorCode::REVISION_CONFLICT,
+                    Some("Approval runtime settings changed; reload before saving".into()),
+                    Some(data),
+                )))
+        }
+    }
+}

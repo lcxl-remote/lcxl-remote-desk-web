@@ -21,6 +21,21 @@ pub fn multiple(name: &str) -> bool {
     matches!(name, "inspect_spreadsheets" | "preview_spreadsheet_merge")
 }
 
+pub fn has_source(call: &ToolCall) -> Result<bool, AgentError> {
+    let value: serde_json::Value =
+        serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?;
+    let fields = value.as_object().ok_or_else(unavailable)?;
+    Ok([
+        "source",
+        "sources",
+        "file_sources",
+        "file_result_call_id",
+        "entry_name",
+    ]
+    .iter()
+    .any(|field| fields.contains_key(*field)))
+}
+
 pub fn selectors(call: &ToolCall) -> Result<Vec<ToolCall>, AgentError> {
     let value: serde_json::Value =
         serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?;
@@ -143,11 +158,15 @@ pub fn add_schema(tool: &mut crate::registry::RegisteredTool) {
     if multiple(&tool.spec.name) {
         schema["properties"]["sources"] =
             serde_json::json!({"type":"array","minItems":1,"maxItems":8,"items":selector});
-        required.push("sources".into());
+        if tool.spec.name == "convert_document" {
+            required.push("sources".into());
+        }
     } else {
         schema["properties"]["source"] = selector;
-        required.push("source".into());
+        if tool.spec.name == "convert_document" {
+            required.push("source".into());
+        }
     }
     schema["required"] = required.into();
-    tool.spec.description.push_str(" Select each file from a recorded result in the approved conversation: use source (or sources for multi-file reads) with kind=directory_entry, file_result_call_id and exact entry_name for an inspect_files child; use kind=artifact_result with file_result_call_id for a verified create/read/update result. These are recorded result IDs, never paths or device tokens. Do not ask the user to attach files in File Manager.");
+    tool.spec.description.push_str(" Select each file from a recorded result in the approved conversation: use source (or sources for multi-file reads) with file_result_call_id and entry_name when selecting a directory child. A verified create/read/update result already identifies one file; the server restores source metadata. These are recorded result IDs, never paths or device tokens. Do not ask the user to attach files in File Manager.");
 }

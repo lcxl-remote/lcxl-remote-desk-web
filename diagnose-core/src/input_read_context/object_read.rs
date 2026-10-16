@@ -42,6 +42,7 @@ pub fn requires_objects(name: &str) -> bool {
             name,
             "inspect_files"
                 | "read_text_file"
+                | "preview_document"
                 | "inspect_spreadsheets"
                 | "preview_spreadsheet_merge"
                 | "read_terminal_output"
@@ -115,6 +116,7 @@ impl ObjectReadBinding<'_> {
         if matches!(
             call.name.as_str(),
             "read_text_file"
+                | "preview_document"
                 | "inspect_numbers_file"
                 | "inspect_pages_file"
                 | "inspect_keynote_file"
@@ -126,6 +128,15 @@ impl ObjectReadBinding<'_> {
             if selected.len() != 1 {
                 return Err(denied());
             }
+        }
+        if matches!(
+            call.name.as_str(),
+            "inspect_spreadsheets" | "preview_spreadsheet_merge"
+        ) && selected
+            .iter()
+            .any(|object| object.kind != ContextAttachmentKind::File)
+        {
+            return Err(denied());
         }
         if window && selected.len() != 1 {
             return Err(denied());
@@ -172,6 +183,12 @@ impl ObjectReadBinding<'_> {
             return Err(denied());
         };
         match (call.name.as_str(), kind) {
+            ("preview_document", ContextKind::DocumentPreview(params)) => {
+                if refs[0].object_kind != ObjectKind::File {
+                    return Err(denied());
+                }
+                params.file = refs[0].clone();
+            }
             ("inspect_excel_cell", ContextKind::SpreadsheetBatchInspect(params)) => {
                 if refs[0].object_kind != ObjectKind::File {
                     return Err(denied());

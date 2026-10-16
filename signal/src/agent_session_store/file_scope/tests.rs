@@ -347,6 +347,13 @@ async fn directory_review_observes_owner_decision_once_and_rejects_changed_turn(
         let mut held = state(&store).await;
         held.turn_state = desk_diagnose_core::session::TurnState::Running;
         let request_id = directory_call(&mut held, "waiting-directory");
+        let mut cached_result = desk_diagnose_core::chat::ChatMessage::text(
+            "attachment-result",
+            desk_diagnose_core::chat::ChatRole::Tool,
+            "Verified attachment result",
+        );
+        cached_result.resolved_result = Some(Box::new(cached_result.clone()));
+        held.conversation.insert(0, cached_result);
         let deadline = now + chrono::Duration::minutes(5);
         agent_session::Entity::update_many()
             .col_expr(
@@ -421,10 +428,15 @@ async fn directory_review_observes_owner_decision_once_and_rejects_changed_turn(
         );
         assert_eq!(held.version, before.version + 1);
         assert_eq!(held.scope_snapshot, before.scope_snapshot);
+        assert_eq!(held.conversation, before.conversation);
         let settled = held.clone();
         // HTTP/signaling retries replay the receipt; there is no second turn.
         store.update_file_scope(&decision, now).await.unwrap();
-        assert_eq!(state(&store).await, settled);
+        assert_eq!(
+            state(&store).await,
+            PersistedAgentSession::decode_json(&settled.encode_json_for_storage().unwrap())
+                .unwrap()
+        );
         let mut stopped = held.clone();
         stopped.turn_state = desk_diagnose_core::session::TurnState::Idle;
         agent_session::Entity::update_many()

@@ -4947,7 +4947,7 @@ async fn run_inner_impl(
                     session
                         .capability_disclosure
                         .record_use(std::slice::from_ref(&call.name));
-                    let resolved_call = match crate::ui_model_ids::resolve_session_call(
+                    let resolved_call = match crate::ui_model_ids::resolve_session_call_with_context(
                         call,
                         session,
                         if crate::ui_model_ids::needs_resolution(&call.name) {
@@ -4955,6 +4955,7 @@ async fn run_inner_impl(
                         } else {
                             0
                         },
+                        deps.tools.original_read_context(),
                     ) {
                         Ok(call) => call,
                         Err(error) => {
@@ -6084,11 +6085,12 @@ async fn run_inner_impl(
                                         item.canonical_input_json.as_deref(),
                                         now,
                                     )?;
-                                    crate::provider_preflight::text_file::validate_read_permission_input(
+                                    crate::provider_preflight::text_file::validate_read_permission_input_with_context(
                                         session,
                                         &item.tool_name,
                                         item.canonical_input_json.as_deref(),
                                         now,
+                                        deps.tools.original_read_context(),
                                     )?;
                                 }
                                 Ok(request)

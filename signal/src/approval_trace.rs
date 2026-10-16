@@ -323,6 +323,7 @@ impl Store {
             grant_states: vec![],
             execution_state: None,
             timeline: vec![ApprovalTraceStageDto {
+                attempt_index: None,
                 stage: "review_failed".into(),
                 origin: "server".into(),
                 at_ms: value
@@ -410,6 +411,7 @@ impl Store {
             && let Some(at) = tracking.snapshot.finished_at_ms
         {
             timeline.push(ApprovalTraceStageDto {
+                attempt_index: None,
                 stage: "business_settled".into(),
                 origin: "server".into(),
                 at_ms: at,
@@ -434,6 +436,7 @@ impl Store {
                 };
                 grant_states.push(status);
                 timeline.push(ApprovalTraceStageDto {
+                    attempt_index: None,
                     stage: "grant_written".into(),
                     origin: "server".into(),
                     at_ms: item.created_at.timestamp_millis(),
@@ -479,6 +482,7 @@ impl Store {
                     .is_some_and(|review| review.candidate_id == row.candidate_id)
                 {
                     timeline.push(ApprovalTraceStageDto {
+                        attempt_index: None,
                         stage: "goal_decided".into(),
                         origin: "server".into(),
                         at_ms: event.created_at.timestamp_millis(),
@@ -514,6 +518,7 @@ impl Store {
                     == Some(row.candidate_id.as_str())
                 {
                     timeline.push(ApprovalTraceStageDto {
+                        attempt_index: None,
                         stage: "directory_written".into(),
                         origin: "server".into(),
                         at_ms: event.created_at.timestamp_millis(),
@@ -538,6 +543,7 @@ impl Store {
                 });
                 if let Some(at) = item.dispatch_intent_at {
                     timeline.push(ApprovalTraceStageDto {
+                        attempt_index: None,
                         stage: "dispatch_recorded".into(),
                         origin: "executor".into(),
                         at_ms: at.timestamp_millis(),
@@ -545,6 +551,7 @@ impl Store {
                 }
                 if item.result_json.is_some() {
                     timeline.push(ApprovalTraceStageDto {
+                        attempt_index: None,
                         stage: "execution_result".into(),
                         origin: "executor".into(),
                         at_ms: item.updated_at.timestamp_millis(),
@@ -584,7 +591,22 @@ impl Store {
             reason: tracking
                 .as_ref()
                 .and_then(|t| t.snapshot.reason)
-                .map(|r| desk_signal_facade::service::model_metrics::tag(&r))
+                .map(|r| {
+                    if r == desk_diagnose_core::approval_observation::ReviewReason::InvalidDecision
+                    {
+                        if let Some(reason) = record
+                            .as_ref()
+                            .and_then(|record| record.failure_reason.as_deref())
+                            .filter(|reason| {
+                                reason.starts_with("format_retries_exhausted:")
+                                    || *reason == "retry_unavailable"
+                            })
+                        {
+                            return reason.to_owned();
+                        }
+                    }
+                    desk_signal_facade::service::model_metrics::tag(&r)
+                })
                 .or_else(|| record.as_ref().and_then(|r| r.failure_reason.clone())),
             model_name: record.as_ref().and_then(|r| r.model_name.clone()),
             protocol: record.as_ref().and_then(|r| r.protocol.clone()),
@@ -658,7 +680,9 @@ impl Store {
         owner: &str,
         query: &ApprovalPartsQuery,
     ) -> Result<ApprovalTracePartsDto, DbErr> {
-        if !["input", "reasoning", "answer", "decision", "event"].contains(&query.kind.as_str()) {
+        if !["input", "reasoning", "answer", "decision", "usage", "event"]
+            .contains(&query.kind.as_str())
+        {
             return Err(invalid());
         }
         let dto = self
@@ -705,13 +729,16 @@ impl Store {
         Ok(ApprovalTracePartsDto {
             parts: rows
                 .into_iter()
-                .map(|r| ApprovalTracePartDto {
-                    sequence: r.sequence as u32,
-                    kind: r.kind,
-                    text: r.text,
-                    at_ms: r.at_ms,
+                .map(|r| {
+                    Ok(ApprovalTracePartDto {
+                        attempt_index: u32::try_from(r.attempt_index).map_err(|_| invalid())?,
+                        sequence: r.sequence as u32,
+                        kind: r.kind,
+                        text: r.text,
+                        at_ms: r.at_ms,
+                    })
                 })
-                .collect(),
+                .collect::<Result<Vec<_>, DbErr>>()?,
             next_after,
             recording_state: dto.recording_state,
         })
@@ -1087,7 +1114,10 @@ impl TraceBackend for Store {
             .await
             .map_err(|_| TraceAppendError::Unavailable)?
         {
-            if stored.kind != value.kind || stored.text != value.text {
+            if stored.kind != value.kind
+                || stored.text != value.text
+                || stored.attempt_index != i64::from(value.attempt_index)
+            {
                 return Err(TraceAppendError::Unavailable);
             }
             return txn
@@ -1110,6 +1140,7 @@ impl TraceBackend for Store {
             id: Set(format!("{}:{}:{}", id.id, id.lease_epoch, value.sequence)),
             trace_id: Set(id.id.clone()),
             sequence: Set(i64::from(value.sequence)),
+            attempt_index: Set(i64::from(value.attempt_index)),
             kind: Set(value.kind),
             text: Set(value.text),
             at_ms: Set(value.at_ms),

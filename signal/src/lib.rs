@@ -72,3 +72,9 @@ pub mod file_recovery_dispatch;
 pub mod approval_trace;
 
 pub mod approval_metrics;
+
+pub mod approval_runtime;
+
+pub mod approval_attempt;
+
+pub mod approval_retry;

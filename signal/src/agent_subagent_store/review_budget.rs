@@ -226,6 +226,36 @@ pub(crate) async fn reserve_review_call_on(
     runtime_max_output_tokens: u64,
     now_ms: i64,
 ) -> Result<(ReviewCallAuthority, Option<DelegationCallReservation>), DbErr> {
+    let settings = crate::approval_runtime::load(txn).await?;
+    let attempt = desk_diagnose_core::approval_review::ReviewAttemptState {
+        retry_count: settings.format_retry_count,
+        runtime_revision: settings.revision,
+        ..Default::default()
+    };
+    Box::pin(reserve_review_attempt_on(
+        txn,
+        candidate,
+        destination,
+        authorized,
+        reserved_tokens,
+        runtime_max_output_tokens,
+        now_ms,
+        attempt,
+    ))
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn reserve_review_attempt_on(
+    txn: &DatabaseTransaction,
+    candidate: &ApprovalReviewCandidate,
+    destination: &desk_agent_protocol::data_lineage::DestinationIdentity,
+    authorized: &desk_diagnose_core::approval_egress::AuthorizedApprovalReview,
+    reserved_tokens: u64,
+    runtime_max_output_tokens: u64,
+    now_ms: i64,
+    attempt: desk_diagnose_core::approval_review::ReviewAttemptState,
+) -> Result<(ReviewCallAuthority, Option<DelegationCallReservation>), DbErr> {
     let review = review_row::Entity::find()
         .filter(review_row::Column::CandidateId.eq(&candidate.candidate_id))
         .one(txn)
@@ -265,10 +295,13 @@ pub(crate) async fn reserve_review_call_on(
     } else {
         None
     };
-    let request = authorized.model_request(candidate).map_err(|_| invalid())?;
+    let request = authorized
+        .model_request_for_attempt(candidate, &attempt)
+        .map_err(|_| invalid())?;
     let request_sha256 = desk_diagnose_core::approval_review::reviewer_request_digest(&request)
         .map_err(|_| invalid())?;
     let authority = ReviewCallAuthority {
+        attempt,
         candidate_id: candidate.candidate_id.clone(),
         lease_epoch: u64::try_from(review.lease_epoch).map_err(|_| invalid())?,
         lease_owner: review.lease_owner.clone().ok_or_else(invalid)?,
@@ -313,14 +346,14 @@ pub(crate) async fn reserve_review_call_on(
     authority.validate().map_err(|_| invalid())?;
     let changed = review_row::Entity::update_many()
         .set(review_row::ActiveModel {
-            statistics_json: Set(Some(
+            statistics_json: Set(review.statistics_json.clone().or(Some(
                 serde_json::to_string(
                     &desk_diagnose_core::approval_observation::ReviewTracking::new(
                         &authority, now_ms,
                     ),
                 )
                 .map_err(|_| invalid())?,
-            )),
+            ))),
             call_authority_json: Set(Some(
                 serde_json::to_string(&authority).map_err(|_| invalid())?,
             )),
@@ -336,6 +369,7 @@ pub(crate) async fn reserve_review_call_on(
     }
     validate_review_scope_on(txn, &authority, now_ms).await?;
     let Some(group) = group else {
+        crate::approval_attempt::sync_current_on(txn, &candidate.candidate_id).await?;
         return Ok((authority, None));
     };
     let digest = authority.request_sha256.clone();
@@ -353,7 +387,10 @@ pub(crate) async fn reserve_review_call_on(
     let admission = funding::reserve_call_with_authority_on(
         txn,
         &session,
-        &format!("review:{}", candidate.candidate_id),
+        &format!(
+            "review:{}",
+            authority.attempt.call_id(&candidate.candidate_id)
+        ),
         DelegationCallKind::ApprovalReview,
         &digest,
         upper,
@@ -362,8 +399,12 @@ pub(crate) async fn reserve_review_call_on(
         now_ms,
     )
     .await?;
-    let BudgetAdmission::Reserved(reservation) = admission else {
-        return Err(invalid());
+    let reservation = match admission {
+        BudgetAdmission::Reserved(value) => value,
+        BudgetAdmission::Exhausted => {
+            return Err(DbErr::Custom("approval review budget exhausted".into()));
+        }
+        _ => return Err(invalid()),
     };
     let changed = review_row::Entity::update_many()
         .set(review_row::ActiveModel {
@@ -378,6 +419,7 @@ pub(crate) async fn reserve_review_call_on(
     if changed.rows_affected != 1 {
         return Err(invalid());
     }
+    crate::approval_attempt::sync_current_on(txn, &candidate.candidate_id).await?;
     Ok((authority, Some(reservation)))
 }
 
@@ -413,6 +455,7 @@ pub(crate) async fn mark_review_dispatch_on(
     if changed.rows_affected != 1 {
         return Err(invalid());
     }
+    crate::approval_attempt::sync_current_on(txn, &authority.candidate_id).await?;
     Ok(())
 }
 

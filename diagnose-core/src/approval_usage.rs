@@ -97,6 +97,22 @@ impl ReviewTokenUsageSettlement {
     }
 }
 
+/// Display totals only; settlement always uses each physical provider receipt.
+pub fn sum_review_usage(
+    a: crate::chat::TokenUsage,
+    b: crate::chat::TokenUsage,
+) -> crate::chat::TokenUsage {
+    fn sum(a: Option<i64>, b: Option<i64>) -> Option<i64> {
+        a.zip(b).and_then(|(a, b)| a.checked_add(b))
+    }
+    crate::chat::TokenUsage {
+        input_tokens: sum(a.input_tokens, b.input_tokens),
+        output_tokens: sum(a.output_tokens, b.output_tokens),
+        cache_read_tokens: sum(a.cache_read_tokens, b.cache_read_tokens),
+        cache_write_tokens: sum(a.cache_write_tokens, b.cache_write_tokens),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

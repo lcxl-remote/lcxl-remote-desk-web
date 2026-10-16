@@ -518,6 +518,7 @@ async fn database_at(url: &str) -> DatabaseConnection {
         schema.create_table_from_entity(crate::entity::agent_subagent_inbox::Entity),
         schema.create_table_from_entity(crate::entity::agent_delegation_reservation::Entity),
         schema.create_table_from_entity(crate::entity::agent_approval_review::Entity),
+        schema.create_table_from_entity(crate::entity::agent_approval_attempt::Entity),
         schema.create_table_from_entity(crate::entity::agent_approval_delegation::Entity),
     ] {
         db.execute(&statement).await.unwrap();

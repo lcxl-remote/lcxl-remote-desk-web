@@ -23,7 +23,12 @@ use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+mod format;
 mod model_view;
+pub use format::{
+    ReviewAttemptState, ReviewFormatIssue, ReviewOutputIssue, apply_format_feedback,
+    parse_decision_diagnosed, reviewer_output_diagnosed,
+};
 pub use model_view::ReviewModelView;
 
 pub const APPROVAL_REVIEW_SCHEMA_VERSION: u16 = 1;
@@ -189,6 +194,7 @@ pub fn reviewer_model_request(
         ResponseFormatSpec::JsonObject,
     );
     request.use_case = ModelUseCase::Approval;
+    apply_format_feedback(&mut request, None);
     Ok(request)
 }
 
@@ -980,6 +986,7 @@ pub fn fit_review_context(
     loop {
         let bytes = serde_json::to_vec(&ReviewModelView::from_candidate(candidate)?).map_err(|_| ApprovalReviewError::InvalidContext)?.len()
             .saturating_add(APPROVAL_REVIEW_SYSTEM_PROMPT.len())
+            .saturating_add(format::format_feedback_overhead_bytes())
             .saturating_add("Review this exact candidate. Return one JSON decision with no extra text.\n<candidate_json>\n\n</candidate_json>".len());
         if bytes <= budget {
             return Ok(());
@@ -1678,17 +1685,7 @@ pub fn parse_review_decision(
     candidate: &ApprovalReviewCandidate,
     response: &str,
 ) -> Result<ApprovalReviewDecision, ApprovalReviewError> {
-    let model: model_view::ModelDecision =
-        serde_json::from_str(response).map_err(|_| ApprovalReviewError::InvalidDecision)?;
-    let decision = ApprovalReviewDecision {
-        candidate_id: candidate.candidate_id.clone(),
-        verdict: model.verdict,
-        reason_code: model.reason_code,
-        reason: model.reason,
-        evidence_event_ids: model.evidence_event_ids,
-    };
-    decision.validate_for(candidate)?;
-    Ok(decision)
+    parse_decision_diagnosed(candidate, response).map_err(|_| ApprovalReviewError::InvalidDecision)
 }
 
 /// Compile terminal per-item review outcomes into one bounded permission
@@ -2416,7 +2413,7 @@ mod tests {
         }
     }
 
-    fn candidate() -> ApprovalReviewCandidate {
+    pub(super) fn candidate() -> ApprovalReviewCandidate {
         let action_json = r#"{"path":"C:\\Users\\owner\\file.txt"}"#.to_owned();
         let action_sha256 = format!("{:x}", Sha256::digest(action_json.as_bytes()));
         ApprovalReviewCandidate {

@@ -34,6 +34,9 @@ pub const MAX_CAPABILITY_CATALOG_PROMPT_BYTES: usize = 16 * 1024;
 /// Describe the input binding the permission planner actually requires. This
 /// hint never grants authority; the planner still validates the full request.
 pub(crate) fn permission_input_mode(capability: &CapabilityDescriptor) -> &'static str {
+    if crate::file_model_input::is_read(&capability.tool_spec.name) {
+        return "contextual_exact_input";
+    }
     if matches!(
         capability.required_capability,
         Capability::DesktopUiActionConfirmed | Capability::DesktopBackgroundInputConfirmed
@@ -48,9 +51,11 @@ pub(crate) fn permission_input_mode(capability: &CapabilityDescriptor) -> &'stat
             | CapabilityEffect::InputFallback
             | CapabilityEffect::ExecuteCommand
             | CapabilityEffect::LaunchApplication
-    ) || crate::provider_preflight::text_file::TextMutationPreflight::supports(
-        &capability.tool_spec.name,
-    ) || capability.required_capability == Capability::SpreadsheetFormulaWorkbookCreateConfirmed
+    ) || crate::provider_preflight::ArtifactCallPreflight::supports(&capability.tool_spec.name)
+        || crate::provider_preflight::text_file::TextMutationPreflight::supports(
+            &capability.tool_spec.name,
+        )
+        || capability.required_capability == Capability::SpreadsheetFormulaWorkbookCreateConfirmed
         || matches!(
             capability.wire.authorization_hint.resources.as_slice(),
             [AuthorizationResourceKind::ExternalWebHost]
@@ -801,7 +806,7 @@ pub fn permission_planning_tool_registry() -> Vec<RegisteredTool> {
     vec![RegisteredTool {
         spec: ToolSpec {
             name: REQUEST_CAPABILITY_GRANTS_TOOL_NAME.into(),
-            description: "Create one bounded approval request by actually calling this tool. The capability index and describe_tools expose each tool's permission_input_mode: application_scope requires an observed application and actions; exact_input requires complete target tool arguments; optional_exact_input permits a scope-only request. Use describe_tools only for missing parameter formats. Loading alone creates no request. Only report an approval card as submitted after a successful result contains request_id and status=pending_user_decision. An error creates no card; correct the input and call again. Never invent a submitted request or tell the user to refresh to find one without a successful receipt. Identify capabilities by tool_name only; the server derives provider_id and effect, so do not supply them. This only creates a pending request: it does not grant, reserve, invoke, or retry any tool. Desktop UI and raw-input action batches automatically include separately reviewable desktop session and UI reads (up to 16 reads each, same requested duration, no screenshots). Leave two slots for these reads: at most 14 action items unless both reads are already included. Prefer one batch for all currently-known inputs, then request another only when intermediate results provide new exact inputs. Never supply an export destination: every destination is derived and fixed by the registered Provider on the server.".into(),
+            description: "Create one bounded approval request by actually calling this tool. The capability index and describe_tools expose each tool's permission_input_mode: application_scope requires an observed application and actions; exact_input requires the necessary target tool business arguments; contextual_exact_input requires file choices unless the current accepted input already binds them (inspect_files may also use a unique approved directory); optional_exact_input permits a scope-only request. The server fills only deterministic metadata and defaults before approval; keep required worksheet/cell or merge rules. Use describe_tools only for missing parameter formats. Loading alone creates no request. Only report an approval card as submitted after a successful result contains request_id and status=pending_user_decision. An error creates no card; correct the input and call again. Never invent a submitted request or tell the user to refresh to find one without a successful receipt. Identify capabilities by tool_name only; the server derives provider_id and effect, so do not supply them. This only creates a pending request: it does not grant, reserve, invoke, or retry any tool. Desktop UI and raw-input action batches automatically include separately reviewable desktop session and UI reads (up to 16 reads each, same requested duration, no screenshots). Leave two slots for these reads: at most 14 action items unless both reads are already included. Prefer one batch for all currently-known inputs, then request another only when intermediate results provide new exact inputs. Never supply an export destination: every destination is derived and fixed by the registered Provider on the server.".into(),
             parameters_schema: json!({
                 "type": "object",
                 "properties": {
@@ -817,7 +822,7 @@ pub fn permission_planning_tool_registry() -> Vec<RegisteredTool> {
                                 "resource_scope": {"type": "array", "maxItems": MAX_PERMISSION_SCOPE_VALUES, "items": {"type": "string", "maxLength": 512}},
                                 "operation_scope": {"type": "array", "maxItems": MAX_PERMISSION_SCOPE_VALUES, "items": {"type": "string", "maxLength": 512}},
                                 "application_scope": {"type":"object","description":"Required for every native UI permission in this conversation. Do not supply exact_input. Copy an observed application reference; approved actions are limited to this application and the owner-selected expiry/use count. The server resolves the application name. Actual calls pass application plus the current target and action.","properties":{"application":{"type":"object","properties":{"token":{"type":"string"},"snapshot_id":{"type":"string"},"object_kind":{"const":"application"},"expires_at":{"type":"string"}},"required":["token","snapshot_id","object_kind","expires_at"],"additionalProperties":false},"actions":{"type":"array","minItems":1,"maxItems":6,"uniqueItems":true,"items":{"type":"string","enum":["invoke","select","focus","toggle","set_value","click","double_click","scroll","type_text","key_press"]}}},"required":["application","actions"],"additionalProperties":false},
-                                "exact_input": {"type": "object", "description": "Use the target tool definition (describe_tools if missing) and copy its complete input shape. Do not supply fixed schema_version fields; the server supplies them. Required for write_external_draft, send_external, input_fallback, execute_command, formula-workbook creation, browser navigation, live/batch iWork semantic mutations, and update_text_file/delete_text_file (one exact use). For iWork mutations, first obtain the fresh target and destination references from the matching read tools, then request the mutation separately with the complete tool arguments as exact_input; never batch that mutation permission with its prerequisite read permission. Omit exact_input for ordinary read_file and write_artifact requests unless that tool description explicitly requires it."},
+                                "exact_input": {"type": "object", "description": "Use the target tool definition (describe_tools if missing) and copy its complete input shape. Do not supply fixed schema_version fields; the server supplies them. Required for write_external_draft, send_external, input_fallback, execute_command, formula-workbook creation, browser navigation, live/batch iWork semantic mutations, and update_text_file/delete_text_file (one exact use). For iWork mutations, first obtain the fresh target and destination references from the matching read tools, then request the mutation separately with the complete tool arguments as exact_input; never batch that mutation permission with its prerequisite read permission. Follow permission_input_mode: contextual_exact_input file reads may omit only choices already bound by the current accepted input (inspect_files also accepts a unique approved directory); keep required worksheet/cell or merge rules. New artifacts require their output name and business content. Metadata and defaults are restored by the server before approval."},
                                 "suggested_ttl_seconds": {"type": "integer", "minimum": 1, "maximum": MAX_REQUEST_TTL_SECONDS, "description":"Optional; server defaults to 300 seconds. The owner can narrow it."},
                                 "suggested_max_uses": {"type": "integer", "minimum": 1, "maximum": MAX_REQUEST_USES, "description":"Optional; server defaults to one use. Exact one-shot actions remain one use regardless of this suggestion."},
                                 "reason": {"type": "string", "maxLength": MAX_PERMISSION_REASON_BYTES}
@@ -1569,9 +1574,10 @@ mod tests {
             ("send_gmail_message", "exact_input"),
             ("browser_open_page", "exact_input"),
             ("create_formula_workbook", "exact_input"),
+            ("create_text_file", "exact_input"),
             ("patch_numbers_copy", "exact_input"),
             ("update_text_file", "exact_input"),
-            ("inspect_files", "optional_exact_input"),
+            ("inspect_files", "contextual_exact_input"),
             ("read_current_screen", "optional_exact_input"),
         ] {
             let capability = registry.capability_for_tool(name).unwrap();
@@ -1603,6 +1609,30 @@ mod tests {
     }
 
     #[test]
+    fn artifact_permission_hints_require_the_complete_input_used_by_preflight() {
+        let registry = crate::ai_assistant::ai_assistant_provider_registry();
+        let mut checked = 0;
+        for capability in registry
+            .providers()
+            .flat_map(|provider| provider.capabilities.iter())
+            .filter(|capability| {
+                crate::provider_preflight::ArtifactCallPreflight::supports(
+                    &capability.tool_spec.name,
+                )
+            })
+        {
+            checked += 1;
+            assert_eq!(
+                permission_input_mode(capability),
+                "exact_input",
+                "{}",
+                capability.tool_spec.name
+            );
+        }
+        assert!(checked > 0);
+    }
+
+    #[test]
     fn every_disclosed_required_input_mode_is_enforced() {
         let registry = crate::ai_assistant::ai_assistant_provider_registry();
         for capability in registry
@@ -1612,7 +1642,7 @@ mod tests {
             let expected = match permission_input_mode(capability) {
                 "application_scope" => "requires application_scope",
                 "exact_input" => "requires exact_input",
-                "optional_exact_input" => continue,
+                "optional_exact_input" | "contextual_exact_input" => continue,
                 mode => panic!("unexpected permission input mode {mode}"),
             };
             let arguments = json!({"items":[{
@@ -2245,7 +2275,7 @@ mod tests {
             item_properties["exact_input"]["description"]
                 .as_str()
                 .unwrap()
-                .contains("Omit exact_input for ordinary read_file and write_artifact")
+                .contains("contextual_exact_input file reads")
         );
     }
 

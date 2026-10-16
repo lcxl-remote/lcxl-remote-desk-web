@@ -1,7 +1,8 @@
 //! Cumulative reviewer accounting; late usage never grants new authority.
 use crate::config::connection::{DatabaseConnection, DatabaseTransaction};
 use crate::entity::{
-    agent_approval_delegation as delegation_row, agent_approval_review as review_row,
+    agent_approval_attempt as attempt_row, agent_approval_delegation as delegation_row,
+    agent_approval_review as review_row,
 };
 use desk_diagnose_core::{
     approval_usage::ReviewTokenUsageSettlement, subagent::reservation::ReviewCallAuthority,
@@ -28,6 +29,15 @@ pub(crate) fn pinned_delegation_ids() -> sea_orm::sea_query::SelectStatement {
         .column(review_row::Column::DelegationId)
         .filter(accounting_pending())
         .into_query()
+        .union(
+            sea_orm::sea_query::UnionType::Distinct,
+            attempt_row::Entity::find()
+                .select_only()
+                .column(attempt_row::Column::DelegationId)
+                .filter(attempt_row::Column::UsageSettlementState.eq("unknown"))
+                .into_query(),
+        )
+        .to_owned()
 }
 
 pub(crate) fn pinned_reservation_ids() -> sea_orm::sea_query::SelectStatement {
@@ -37,6 +47,16 @@ pub(crate) fn pinned_reservation_ids() -> sea_orm::sea_query::SelectStatement {
         .filter(review_row::Column::DelegationReservationId.is_not_null())
         .filter(accounting_pending())
         .into_query()
+        .union(
+            sea_orm::sea_query::UnionType::Distinct,
+            attempt_row::Entity::find()
+                .select_only()
+                .column(attempt_row::Column::DelegationReservationId)
+                .filter(attempt_row::Column::UsageSettlementState.eq("unknown"))
+                .filter(attempt_row::Column::DelegationReservationId.is_not_null())
+                .into_query(),
+        )
+        .to_owned()
 }
 
 pub(crate) async fn record_usage_on(
@@ -65,24 +85,31 @@ pub(crate) async fn record_usage_on(
     if changed.rows_affected != 1 {
         return Err(invalid());
     }
+    let mut projected = row.clone();
+    projected.usage_settlement_json = Some(serde_json::to_string(&usage).map_err(|_| invalid())?);
+    projected.usage_settlement_state = Some(usage.state().into());
+    projected.usage_reconcile_at_ms = Some(now_ms);
+    projected.updated_at = now_ms;
+    crate::approval_attempt::sync_on(txn, &projected).await?;
+
     Ok(())
 }
 
 async fn stamp_attempt(
     db: &DatabaseConnection,
-    snapshot: &review_row::Model,
+    snapshot: &attempt_row::Model,
     now_ms: i64,
 ) -> Result<(), DbErr> {
-    let mut update = review_row::Entity::update_many()
-        .set(review_row::ActiveModel {
+    let mut update = attempt_row::Entity::update_many()
+        .set(attempt_row::ActiveModel {
             usage_reconcile_at_ms: Set(Some(now_ms)),
             ..Default::default()
         })
-        .filter(review_row::Column::Id.eq(snapshot.id))
-        .filter(review_row::Column::UsageSettlementState.eq("unknown"));
+        .filter(attempt_row::Column::Id.eq(snapshot.id))
+        .filter(attempt_row::Column::UsageSettlementState.eq("unknown"));
     update = match snapshot.usage_reconcile_at_ms {
-        Some(previous) => update.filter(review_row::Column::UsageReconcileAtMs.eq(previous)),
-        None => update.filter(review_row::Column::UsageReconcileAtMs.is_null()),
+        Some(previous) => update.filter(attempt_row::Column::UsageReconcileAtMs.eq(previous)),
+        None => update.filter(attempt_row::Column::UsageReconcileAtMs.is_null()),
     };
     update.exec(db).await?;
     Ok(())
@@ -90,27 +117,41 @@ async fn stamp_attempt(
 
 async fn reconcile_one(
     db: &DatabaseConnection,
-    snapshot: &review_row::Model,
+    snapshot: &attempt_row::Model,
     now_ms: i64,
 ) -> Result<bool, DbErr> {
-    let authority: ReviewCallAuthority = serde_json::from_str(
-        snapshot
-            .call_authority_json
-            .as_deref()
-            .ok_or_else(invalid)?,
-    )
-    .map_err(|_| invalid())?;
+    let frozen: review_row::Model =
+        serde_json::from_str(&snapshot.snapshot_json).map_err(|_| invalid())?;
+    let authority: ReviewCallAuthority =
+        serde_json::from_str(frozen.call_authority_json.as_deref().ok_or_else(invalid)?)
+            .map_err(|_| invalid())?;
     authority.validate().map_err(|_| invalid())?;
     let txn = crate::db::begin_write(db, review_row::Entity).await?;
 
-    let Some(row) = review_row::Entity::find_by_id(snapshot.id)
+    let Some(ledger) = attempt_row::Entity::find_by_id(snapshot.id)
+        .lock_exclusive()
         .one(&txn)
         .await?
     else {
         return Ok(false);
     };
-    if row.status == "reviewing" || row.usage_settlement_state.as_deref() != Some("unknown") {
+    if ledger.usage_settlement_state.as_deref() != Some("unknown") {
         return Ok(false);
+    }
+    let mut row: review_row::Model =
+        serde_json::from_str(&ledger.snapshot_json).map_err(|_| invalid())?;
+    let projection = review_row::Entity::find_by_id(row.id)
+        .lock_exclusive()
+        .one(&txn)
+        .await?;
+    let is_current = projection
+        .as_ref()
+        .is_some_and(|r| r.call_authority_json == row.call_authority_json);
+    if is_current && projection.as_ref().is_some_and(|r| r.status == "reviewing") {
+        return Ok(false);
+    }
+    if is_current {
+        row.status = projection.as_ref().ok_or_else(invalid)?.status.clone();
     }
     let current: ReviewCallAuthority =
         serde_json::from_str(row.call_authority_json.as_deref().ok_or_else(invalid)?)
@@ -118,9 +159,9 @@ async fn reconcile_one(
     if current != authority {
         return Err(invalid());
     }
-    let encoded = row.usage_settlement_json.as_deref().ok_or_else(invalid)?;
+    let encoded = row.usage_settlement_json.clone().ok_or_else(invalid)?;
     let previous: ReviewTokenUsageSettlement =
-        serde_json::from_str(encoded).map_err(|_| invalid())?;
+        serde_json::from_str(&encoded).map_err(|_| invalid())?;
     previous
         .validate(u64::try_from(row.reserved_tokens).map_err(|_| invalid())?)
         .ok_or_else(invalid)?;
@@ -162,24 +203,31 @@ async fn reconcile_one(
     if changed.rows_affected != 1 {
         return Err(invalid());
     }
-    let changed = review_row::Entity::update_many()
-        .set(review_row::ActiveModel {
-            usage_settlement_json: Set(Some(
-                serde_json::to_string(&actual).map_err(|_| invalid())?,
-            )),
-            usage_settlement_state: Set(Some("known".into())),
-            usage_reconcile_at_ms: Set(Some(now_ms)),
-            ..Default::default()
-        })
-        .filter(review_row::Column::Id.eq(row.id))
-        .filter(review_row::Column::Status.eq(&row.status))
-        .filter(review_row::Column::UsageSettlementState.eq("unknown"))
-        .filter(review_row::Column::UsageSettlementJson.eq(encoded))
-        .exec(&txn)
-        .await?;
-    if changed.rows_affected != 1 {
-        return Err(invalid());
+    if is_current {
+        let changed = review_row::Entity::update_many()
+            .set(review_row::ActiveModel {
+                usage_settlement_json: Set(Some(
+                    serde_json::to_string(&actual).map_err(|_| invalid())?,
+                )),
+                usage_settlement_state: Set(Some("known".into())),
+                usage_reconcile_at_ms: Set(Some(now_ms)),
+                ..Default::default()
+            })
+            .filter(review_row::Column::Id.eq(row.id))
+            .filter(review_row::Column::Status.eq(&row.status))
+            .filter(review_row::Column::UsageSettlementState.eq("unknown"))
+            .filter(review_row::Column::UsageSettlementJson.eq(encoded))
+            .exec(&txn)
+            .await?;
+        if changed.rows_affected != 1 {
+            return Err(invalid());
+        }
     }
+    row.usage_settlement_json = Some(serde_json::to_string(&actual).map_err(|_| invalid())?);
+    row.usage_settlement_state = Some("known".into());
+    row.usage_reconcile_at_ms = Some(now_ms);
+    row.updated_at = now_ms;
+    crate::approval_attempt::sync_on(&txn, &row).await?;
     txn.commit().await?;
     Ok(true)
 }
@@ -194,11 +242,10 @@ pub async fn reconcile_usage(
     if now_ms <= 0 || !(1..=64).contains(&limit) {
         return Err(invalid());
     }
-    let rows = review_row::Entity::find()
-        .filter(review_row::Column::UsageSettlementState.eq("unknown"))
-        .filter(review_row::Column::Status.ne("reviewing"))
-        .order_by_asc(review_row::Column::UsageReconcileAtMs)
-        .order_by_asc(review_row::Column::Id)
+    let rows = attempt_row::Entity::find()
+        .filter(attempt_row::Column::UsageSettlementState.eq("unknown"))
+        .order_by_asc(attempt_row::Column::UsageReconcileAtMs)
+        .order_by_asc(attempt_row::Column::Id)
         .limit(limit)
         .all(db)
         .await?;

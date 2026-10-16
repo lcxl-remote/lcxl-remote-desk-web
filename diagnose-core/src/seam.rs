@@ -778,6 +778,11 @@ pub struct ExecContext {
 /// approval + real execution via [`confirm_and_exec`](ToolSeam::confirm_and_exec).
 #[async_trait(?Send)]
 pub trait ToolSeam {
+    /// Immutable selection loaded from the accepted input, not available attachments.
+    /// Durable runtimes independently recheck this evidence before dispatch.
+    fn original_read_context(&self) -> Option<&crate::input_read_context::ReadContextSelection> {
+        None
+    }
     /// Nonserialized observation only; implementations must never await storage
     /// here or use this handle as an authorization or execution requirement.
     fn observe_tool_input(

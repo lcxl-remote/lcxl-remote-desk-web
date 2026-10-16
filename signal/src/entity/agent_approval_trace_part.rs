@@ -6,6 +6,7 @@ pub struct Model {
     pub id: String,
     #[sea_orm(indexed)]
     pub trace_id: String,
+    pub attempt_index: i64,
     pub sequence: i64,
     pub kind: String,
     pub text: String,

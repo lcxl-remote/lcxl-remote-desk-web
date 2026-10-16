@@ -15,6 +15,7 @@ vi.mock('@/services/clients', () => ({
     reuseAiGatewayForApproval: h.reuse,
 }));
 vi.mock('@/features/approval/settings', () => ({ ApprovalTraceSettingsPanel: () => null }));
+vi.mock('@/features/approval/runtime-settings', () => ({ ApprovalRuntimeSettingsPanel: () => null }));
 import { ApprovalModelSettings } from './approval-model-settings';
 
 let config: ApprovalModelPublic;
@@ -48,7 +49,7 @@ beforeEach(() => {
         ...config, ...payload, configuration_revision: 8, connection_revision: 5, profile_revision: 6,
         api_key_set: payload.api_key === '' ? false : true,
     } }));
-    h.test.mockResolvedValue({ success: true, data: { saved_as_current: true, latency_ms: 120, validated_capabilities: ['allow', 'deny'] } });
+    h.test.mockResolvedValue({ success: true, data: { saved_as_current: true, attempts: 2, format_retries: 0, latency_ms: 120, validated_capabilities: ['allow', 'deny'] } });
 });
 
 function reuseButton() { return screen.getByRole('button', { name: 'Reuse AI gateway configuration' }); }
@@ -350,7 +351,7 @@ describe('independent OSS approval model configuration', () => {
         config = { ...config, available: true, unavailable_reason: null };
         fireEvent.click(screen.getByRole('button', { name: 'Test approval model' }));
         await screen.findByText('Ready. Automatic approval can be enabled separately in each conversation.');
-        await expectToast('Passed 2 approval checks in 120 ms.');
+        await expectToast('Passed 2 approval checks in 120 ms; 2 calls, 0 format corrections.');
         expect(h.get).toHaveBeenCalledTimes(2);
     });
 

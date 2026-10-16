@@ -1,3 +1,4 @@
+import { ApprovalRuntimeSettingsPanel } from '@/features/approval/runtime-settings';
 import { ApprovalTraceSettingsPanel } from '@/features/approval/settings';
 import { ModelThinkingSettings } from '@/components/model-thinking-settings';
 import { useEffect, useState, type FormEvent } from 'react';
@@ -171,7 +172,7 @@ export function ApprovalModelSettings() {
             const fresh = await getApprovalModelProvider();
             if (!fresh.success || !fresh.data) throw new Error(t('pages.approvalModel.loadFailed'));
             apply(fresh.data);
-            succeed(t('pages.approvalModel.testPassed', { count: result.data.validated_capabilities.length, latency: result.data.latency_ms }));
+            succeed(t('pages.approvalModel.testPassed', { count: result.data.validated_capabilities.length, latency: result.data.latency_ms, attempts: result.data.attempts, retries: result.data.format_retries }));
         } catch (caught) { failure(caught, t('pages.approvalModel.testFailed')); }
         finally { setBusy(false); }
     };
@@ -296,6 +297,7 @@ export function ApprovalModelSettings() {
                 </form>
             </CardContent>
         </Card>}
+        <ApprovalRuntimeSettingsPanel/>
         <ApprovalTraceSettingsPanel/>
         <AlertDialog open={reuseConfirmation !== null} onOpenChange={open => { if (!open) setReuseConfirmation(null); }}>
             <AlertDialogContent>

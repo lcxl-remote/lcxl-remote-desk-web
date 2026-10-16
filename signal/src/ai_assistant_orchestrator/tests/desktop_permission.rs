@@ -42,7 +42,7 @@ async fn ordinary_followup_reuses_approved_desktop_reads_over_transport() {
 }
 
 #[actix_web::test]
-async fn automatic_desktop_approval_uses_runtime_limit_and_resumes_over_transport() {
+async fn automatic_desktop_approval_corrects_extra_field_and_resumes_over_transport() {
     Box::pin(run_desktop_case_with_automatic(
         true,
         "inspect_desktop_session",
@@ -842,13 +842,18 @@ async fn approve_with_independent_model(
             "reason": "The owner requested this desktop session read",
             "evidence_event_ids": [owner_evidence.event_id],
         });
-        let reply = format!(
+        let mut malformed = decision.clone();
+        malformed["type"] = serde_json::json!("json_object");
+        let replies = [malformed, decision].map(|value| format!(
             "data: {}\n\ndata: {{\"choices\":[{{\"delta\":{{}},\"finish_reason\":\"stop\"}}]}}\n\ndata: {{\"choices\":[],\"usage\":{{\"prompt_tokens\":32,\"completion_tokens\":2050}}}}\n\ndata: [DONE]\n\n",
-            serde_json::json!({"choices":[{"delta":{"content":decision.to_string()}}]}),
-        );
+            serde_json::json!({"choices":[{"delta":{"content":value.to_string()}}]}),
+        ));
         let capture_listener = listener.clone();
         let capture = actix_web::rt::spawn(async move {
-            capture_one_openai_request_with_sse(capture_listener, &reply).await
+            let first =
+                capture_one_openai_request_with_sse(capture_listener.clone(), &replies[0]).await;
+            let second = capture_one_openai_request_with_sse(capture_listener, &replies[1]).await;
+            [first, second]
         });
         let claim = crate::agent_approval_store::claim_permission_review(
             db,
@@ -870,8 +875,38 @@ async fn approve_with_independent_model(
         .await
         .unwrap()
         .unwrap();
-        let body: serde_json::Value = serde_json::from_slice(&capture.await.unwrap()).unwrap();
+        let [first, second] = capture.await.unwrap();
+        let first: serde_json::Value = serde_json::from_slice(&first).unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&second).unwrap();
+        assert_eq!(first["max_tokens"], 128_000);
         assert_eq!(body["max_tokens"], 128_000);
+        assert_eq!(first["messages"][1], body["messages"][1]);
+        assert!(
+            !first["messages"][0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("SERVER FORMAT CORRECTION")
+        );
+        assert!(
+            body["messages"][0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("SERVER FORMAT CORRECTION")
+        );
+        let attempts = crate::entity::agent_approval_attempt::Entity::find()
+            .filter(
+                crate::entity::agent_approval_attempt::Column::CandidateId
+                    .eq(&candidate.candidate_id),
+            )
+            .all(db)
+            .await
+            .unwrap();
+        assert_eq!(attempts.len(), 2);
+        assert_ne!(
+            attempts[0].provider_receipt_id,
+            attempts[1].provider_receipt_id
+        );
+        assert_eq!(attempts[0].usage_settlement_state.as_deref(), Some("known"));
         assert!(
             response.decision.is_some(),
             "the complete review must produce a decision"

@@ -3394,6 +3394,16 @@ export type ApprovalModelProbeDto = {
      * @minLength 0
      * @type integer, int64
     */
+    attempts: number;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    format_retries: number;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
     latency_ms: number;
     /**
      * @type boolean
@@ -3641,6 +3651,11 @@ export type ApprovalTraceStageDto = {
     */
     at_ms: number;
     /**
+     * @minLength 0
+     * @type integer,null, int32
+    */
+    attempt_index?: number | null;
+    /**
      * @type string
     */
     origin: string;
@@ -3755,11 +3770,28 @@ export type ApprovalReviewsDto = {
     reviews: ApprovalReviewDto[];
 };
 
+export type ApprovalRuntimeSettings = {
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    format_retry_count: number;
+    /**
+     * @type string
+    */
+    revision: string;
+};
+
 export type ApprovalTracePartDto = {
     /**
      * @type integer, int64
     */
     at_ms: number;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    attempt_index: number;
     /**
      * @type string
     */
@@ -9827,6 +9859,16 @@ export type RestResponseApprovalModelProbeDto = {
          * @minLength 0
          * @type integer, int64
         */
+        attempts: number;
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        format_retries: number;
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
         latency_ms: number;
         /**
          * @type boolean
@@ -10068,6 +10110,35 @@ export type RestResponseApprovalReviewsDto = {
          * @type array
         */
         reviews: ApprovalReviewDto[];
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponseApprovalRuntimeSettings = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @minLength 0
+         * @type integer, int32
+        */
+        format_retry_count: number;
+        /**
+         * @type string
+        */
+        revision: string;
     };
     /**
      * @type string,null
@@ -16034,6 +16105,27 @@ export type VirtualDisplaySettings = {
      * @type integer | undefined, int32
     */
     prompt_ms?: number;
+};
+
+export type GetApprovalRuntimeSettings200 = RestResponseApprovalRuntimeSettings;
+
+export type GetApprovalRuntimeSettingsQueryResponse = GetApprovalRuntimeSettings200;
+
+export type GetApprovalRuntimeSettingsQuery = {
+    Response: GetApprovalRuntimeSettings200;
+    Errors: any;
+};
+
+export type UpdateApprovalRuntimeSettings200 = RestResponseApprovalRuntimeSettings;
+
+export type UpdateApprovalRuntimeSettingsMutationRequest = ApprovalRuntimeSettings;
+
+export type UpdateApprovalRuntimeSettingsMutationResponse = UpdateApprovalRuntimeSettings200;
+
+export type UpdateApprovalRuntimeSettingsMutation = {
+    Response: UpdateApprovalRuntimeSettings200;
+    Request: UpdateApprovalRuntimeSettingsMutationRequest;
+    Errors: any;
 };
 
 export type GetApprovalTraceSettings200 = RestResponseApprovalTraceSettings;

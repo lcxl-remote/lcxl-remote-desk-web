@@ -44,6 +44,20 @@ pub struct AuthorizedApprovalReview {
 }
 
 impl AuthorizedApprovalReview {
+    pub fn model_request_for_attempt(
+        &self,
+        candidate: &ApprovalReviewCandidate,
+        attempt: &crate::approval_review::ReviewAttemptState,
+    ) -> Result<crate::seam::ModelRequest, ApprovalReviewError> {
+        attempt
+            .validate()
+            .map_err(|_| ApprovalReviewError::InvalidContext)?;
+        let mut request = self.model_request(candidate)?;
+        request.messages[0].text = crate::approval_review::APPROVAL_REVIEW_SYSTEM_PROMPT.to_owned();
+        crate::approval_review::apply_format_feedback(&mut request, attempt.feedback);
+        Ok(request)
+    }
+
     pub fn model_request(
         &self,
         candidate: &ApprovalReviewCandidate,
@@ -1234,6 +1248,38 @@ mod tests {
         )
         .unwrap();
         assert!(!authorized.prompt.contains(&candidate.candidate_id));
+
+        let first = crate::approval_review::ReviewAttemptState::default();
+        let second = first
+            .next(crate::approval_review::ReviewFormatIssue::UnexpectedFields)
+            .unwrap();
+        let first_request = authorized
+            .model_request_for_attempt(&candidate, &first)
+            .unwrap();
+        let corrected = authorized
+            .model_request_for_attempt(&candidate, &second)
+            .unwrap();
+        assert_eq!(first_request.messages[1], corrected.messages[1]);
+        assert_eq!(
+            first_request.messages[1].data_envelope,
+            corrected.messages[1].data_envelope
+        );
+        assert_ne!(
+            crate::approval_review::reviewer_request_digest(&first_request).unwrap(),
+            crate::approval_review::reviewer_request_digest(&corrected).unwrap()
+        );
+        assert!(
+            corrected.messages[0]
+                .text
+                .contains("SERVER FORMAT CORRECTION")
+        );
+        let mut changed_candidate = candidate.clone();
+        changed_candidate.action_sha256 = "0".repeat(64);
+        assert!(
+            authorized
+                .model_request_for_attempt(&changed_candidate, &second)
+                .is_err()
+        );
         assert_eq!(authorized.source_audit.envelope_ids.len(), 5);
         assert!(!authorized.prompt.contains("original-private-body"));
         assert_eq!(authorized.prompt_audit.envelope_ids.len(), 1);

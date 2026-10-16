@@ -5929,6 +5929,11 @@ impl SignalAiAssistantTools {
 
 #[async_trait(?Send)]
 impl ToolSeam for SignalAiAssistantTools {
+    fn original_read_context(
+        &self,
+    ) -> Option<&desk_diagnose_core::input_read_context::ReadContextSelection> {
+        self.original_input.get().map(|input| &input.selection)
+    }
     fn observe_tool_input(
         &self,
         call: &ToolCall,
@@ -6499,7 +6504,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn office_batch_preflight_requires_file_without_live_selection() {
+    async fn office_batch_preflight_accepts_original_file_selection_or_result_without_live_selection()
+     {
         let db = crate::config::test_support::Database::connect("sqlite::memory:")
             .await
             .unwrap();
@@ -6552,7 +6558,7 @@ mod tests {
             assert!(
                 tools_for(vec![object_ref("source", ObjectKind::File)])
                     .preflight_selected_context(&call, capability)
-                    .is_err()
+                    .is_ok()
             );
             let mut arguments: serde_json::Value =
                 serde_json::from_str(&call.arguments_json).unwrap();

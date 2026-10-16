@@ -18,7 +18,7 @@ function record(): ApprovalReviewDto {
     return { id: 'candidate', session: 'root', root_session: 'root', session_kind: 'main', session_label: null, task: null, source_kind: 'permission_item', source_id: 'source', status: 'denied', reason: null, model_name: 'approval-model', protocol: 'open_ai_chat_completions', model_revision: '12', output_limit: '65536', created_at_ms: 1000, finished_at_ms: 9000, business_finished_at_ms: 9100, stop_reason: 'end_turn', usage: null, recording_state: 'partial', captured_bytes: '123', decision: { verdict: 'deny' }, grant_states: [], execution_state: null, timeline: [] };
 }
 function api(): ApprovalApi {
-    return { list: vi.fn().mockResolvedValue({ reviews: [record()], next_cursor: null }), detail: vi.fn().mockResolvedValue(record()), parts: vi.fn().mockResolvedValue({ parts: [{ sequence: 0, kind: 'input', text: JSON.stringify({ messages: [{ role: 'user', content: '<img src=x onerror=alert(1)>' }] }), at_ms: 1000 }], next_after: null, recording_state: 'partial' }), settings: vi.fn().mockResolvedValue({ revision: '1', enabled: true, retention_days: 7, storage_budget_bytes: '268435456', max_trace_bytes: 16777216 }), save: vi.fn(), metrics: vi.fn() };
+    return { list: vi.fn().mockResolvedValue({ reviews: [record()], next_cursor: null }), detail: vi.fn().mockResolvedValue(record()), parts: vi.fn().mockResolvedValue({ parts: [{ attempt_index: 0, sequence: 0, kind: 'input', text: JSON.stringify({ messages: [{ role: 'user', content: '<img src=x onerror=alert(1)>' }] }), at_ms: 1000 }], next_after: null, recording_state: 'partial' }), settings: vi.fn().mockResolvedValue({ revision: '1', enabled: true, retention_days: 7, storage_budget_bytes: '268435456', max_trace_bytes: 16777216 }), save: vi.fn(), metrics: vi.fn() };
 }
 function mount(element: React.ReactNode) {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } }); clients.push(client);
@@ -60,5 +60,36 @@ describe('approval details and platform statistics', () => {
         const fields = await screen.findAllByRole('spinbutton'); fireEvent.change(fields[0], { target: { value: '3' } }); fireEvent.click(screen.getByRole('button', { name: 'Save' }));
         await waitFor(() => expect(state.toast).toHaveBeenCalledWith(expect.objectContaining({ variant: 'destructive' })));
         expect(value.settings).toHaveBeenCalledTimes(2);
+    });
+});
+
+describe('format correction runtime policy', () => {
+    it('accepts zero and the representable maximum without accepting fractions or negatives', async () => {
+        const { parseFormatRetryCount } = await import('./runtime-settings');
+        expect(parseFormatRetryCount('0')).toBe(0);
+        expect(parseFormatRetryCount('1')).toBe(1);
+        expect(parseFormatRetryCount('4294967295')).toBe(4294967295);
+        for (const invalid of ['', '-1', '1.5', '4294967296', '1e2']) expect(parseFormatRetryCount(invalid)).toBeNull();
+    });
+    it('keeps the edited retry count while refreshing a stale settings revision', async () => {
+        const { ApprovalRuntimeSettingsPanel } = await import('./runtime-settings');
+        const value = { load: vi.fn().mockResolvedValueOnce({ revision: '1', format_retry_count: 1 }).mockResolvedValue({ revision: '2', format_retry_count: 3 }), save: vi.fn().mockRejectedValueOnce({ code: deskErrorCodeEnum.REVISION_CONFLICT }).mockResolvedValue({ revision: '3', format_retry_count: 2 }) };
+        mount(<ApprovalRuntimeSettingsPanel api={value}/>);
+        fireEvent.change(await screen.findByRole('spinbutton'), { target: { value: '2' } });
+        fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+        await waitFor(() => expect(value.load).toHaveBeenCalledTimes(2));
+        expect((screen.getByRole('spinbutton') as HTMLInputElement).value).toBe('2');
+        await waitFor(() => expect(screen.getByRole('button', { name: 'Save' })).not.toBeDisabled());
+        fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+        await waitFor(() => expect(value.save).toHaveBeenLastCalledWith({ revision: '2', format_retry_count: 2 }));
+    });
+    it('keeps malformed and corrected outputs in different attempt groups', async () => {
+        const { groupApprovalParts } = await import('./reviews');
+        const groups = groupApprovalParts([
+            { attempt_index: 0, sequence: 1, kind: 'answer', text: 'malformed', at_ms: 1 },
+            { attempt_index: 1, sequence: 2, kind: 'answer', text: 'corrected', at_ms: 2 },
+            { attempt_index: 0, sequence: 3, kind: 'usage', text: '7', at_ms: 3 },
+        ]);
+        expect(groups.map(([attempt, parts]) => [attempt, parts.map(p => p.text)])).toEqual([[0, ['malformed', '7']], [1, ['corrected']]]);
     });
 });

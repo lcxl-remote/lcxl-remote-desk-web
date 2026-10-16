@@ -102,6 +102,7 @@ pub struct ApprovalReviewDto {
 }
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ApprovalTraceStageDto {
+    pub attempt_index: Option<u32>,
     pub stage: String,
     pub origin: String,
     pub at_ms: i64,
@@ -113,6 +114,7 @@ pub struct ApprovalReviewsDto {
 }
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct ApprovalTracePartDto {
+    pub attempt_index: u32,
     pub sequence: u32,
     pub kind: String,
     pub text: String,

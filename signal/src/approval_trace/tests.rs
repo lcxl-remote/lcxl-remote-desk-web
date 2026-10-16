@@ -10,6 +10,7 @@ async fn database() -> DatabaseConnection {
         schema.create_table_from_entity(crate::entity::agent_subagent_run::Entity),
         schema.create_table_from_entity(crate::entity::agent_run_event::Entity),
         schema.create_table_from_entity(crate::entity::agent_approval_review::Entity),
+        schema.create_table_from_entity(crate::entity::agent_approval_attempt::Entity),
         schema.create_table_from_entity(crate::entity::agent_approval_trace::Entity),
         schema.create_table_from_entity(crate::entity::agent_approval_trace_part::Entity),
         schema.create_table_from_entity(crate::entity::agent_capability_grant::Entity),
@@ -114,6 +115,7 @@ async fn private_approval_details_enforce_owner_and_delete_fences() {
     let settings = ApprovalTraceSettings::defaults(false);
     store.begin(&id, &settings).await.unwrap();
     let part = ApprovalTracePartDto {
+        attempt_index: 0,
         sequence: 0,
         kind: "reasoning".into(),
         text: "private thought".into(),
@@ -222,6 +224,7 @@ async fn approval_expiry_and_orphan_cleanup_release_quota_without_resurrecting_b
         .append(
             &id,
             ApprovalTracePartDto {
+                attempt_index: 0,
                 sequence: 0,
                 kind: "answer".into(),
                 text: "reply".into(),
@@ -252,6 +255,7 @@ async fn approval_expiry_and_orphan_cleanup_release_quota_without_resurrecting_b
             .append(
                 &id,
                 ApprovalTracePartDto {
+                    attempt_index: 0,
                     sequence: 1,
                     kind: "answer".into(),
                     text: "late".into(),

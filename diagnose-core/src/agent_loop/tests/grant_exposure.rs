@@ -362,6 +362,7 @@ async fn permission_resume_keeps_scoped_prerequisites_and_validates_exact_grants
             initial.permission_requests[0].items[0].canonical_input_json = Some("{}".into());
         }
         if blocked == "mixed" {
+            crate::file_model_input::tests::approve_directory(&mut initial, "test-directory");
             let create = providers.capability_for_tool("create_text_file").unwrap();
             registry.push(create.registered_tool());
             scope.granted.push(create.required_capability);

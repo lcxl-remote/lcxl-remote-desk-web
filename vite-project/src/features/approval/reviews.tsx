@@ -7,7 +7,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Label } from '@/components/ui/label';
 import { useGetCurrentUser } from '@/services/hooks/userController/useGetCurrentUser';
-import type { ApprovalReviewDto } from '@/services/types';
+import type { ApprovalReviewDto, ApprovalTracePartDto } from '@/services/types';
 import { approvalApi, approvalAccessError, type ApprovalApi } from './api';
 
 export function useOwnApprovalAccess() {
@@ -16,6 +16,28 @@ export function useOwnApprovalAccess() {
         identity: `${user?.user_id ?? user?.name ?? ''}:${user?.access ?? ''}:${user?.target_connection_id ?? ''}` };
 }
 function time(value?: number | null) { return value ? new Date(value).toLocaleString() : '—'; }
+export function groupApprovalParts(parts: ApprovalTracePartDto[]): [number, ApprovalTracePartDto[]][] {
+    const groups = new Map<number, ApprovalTracePartDto[]>();
+    for (const part of parts) { const group = groups.get(part.attempt_index) ?? []; group.push(part); groups.set(part.attempt_index, group); }
+    return [...groups.entries()].sort(([left], [right]) => left - right);
+}
+function AttemptParts({ parts, kind, readable, complete }: { parts: ApprovalTracePartDto[]; kind: string; readable: boolean; complete: boolean }) {
+    const { t } = useTranslation();
+    let input: { role?: string; content?: unknown }[] | null = null;
+    if (kind === 'input' && readable && complete && parts.reduce((sum, part) => sum + part.text.length, 0) <= 262144) {
+        try {
+            const body: unknown = JSON.parse(parts.map(part => part.text).join(''));
+            if (body && typeof body === 'object' && 'messages' in body && Array.isArray(body.messages)) {
+                input = body.messages;
+                if ('system' in body) input = [{ role: 'system', content: body.system }, ...input!];
+            }
+        } catch { /* Incomplete protocol chunks remain literal text. */ }
+    }
+    if (input) return <>{input.map((message, index) => <Card key={index}><CardHeader className="py-3"><CardTitle className="text-sm">{t(`approval.role.${message.role ?? 'unknown'}`, { defaultValue: t('approval.unknown') })}</CardTitle></CardHeader><CardContent><pre className="whitespace-pre-wrap break-words text-xs">{typeof message.content === 'string' ? message.content : JSON.stringify(message.content, null, 2)}</pre></CardContent></Card>)}</>;
+    return <>{parts.map(part => <pre key={part.sequence} className="max-w-full whitespace-pre-wrap break-words rounded border bg-muted/30 p-3 text-xs">{kind === 'event' ? part.text.split('\n').filter(Boolean).map(line => {
+        try { const event = JSON.parse(line) as { stage: string; origin?: string; at_ms: number }; return `${time(event.at_ms)} · ${t(`approval.origin.${event.origin ?? 'server'}`)} · ${t(`approval.stage.${event.stage}`, { defaultValue: t('approval.unknown') })}`; } catch { return t('approval.recording.partial'); }
+    }).join('\n') : part.text}</pre>)}</>;
+}
 function ReviewParts({ session, record, identity, api, onAccessLost, kind }: { session: string; record: ApprovalReviewDto; identity: string; api: ApprovalApi; onAccessLost: () => void; kind: string }) {
     const { t } = useTranslation();
     const [readable, setReadable] = useState(true);
@@ -33,16 +55,6 @@ function ReviewParts({ session, record, identity, api, onAccessLost, kind }: { s
     const lastState = useRef(record.recording_state);
     useEffect(() => { if (bodyAvailable && lastState.current === 'collecting' && record.recording_state !== 'collecting') void query.refetch(); lastState.current = record.recording_state; }, [record.recording_state, bodyAvailable]);
     const parts = bodyAvailable ? query.data?.pages.flatMap(page => page.parts) ?? [] : [];
-    let input: { role?: string; content?: unknown }[] | null = null;
-    if (kind === 'input' && readable && !query.hasNextPage && parts.reduce((sum, part) => sum + part.text.length, 0) <= 262144) {
-        try {
-            const body: unknown = JSON.parse(parts.map(part => part.text).join(''));
-            if (body && typeof body === 'object' && 'messages' in body && Array.isArray(body.messages)) {
-                input = body.messages;
-                if ('system' in body) input = [{ role: 'system', content: body.system }, ...input!];
-            }
-        } catch { /* Incomplete protocol chunks remain literal text. */ }
-    }
     if (approvalAccessError(query.error)) return <p role="alert">{t('approval.noAccess')}</p>;
     return <div className="space-y-3">
         {kind === 'input' && <p className="text-xs text-muted-foreground">{t('approval.filteredInput')}</p>}
@@ -51,10 +63,7 @@ function ReviewParts({ session, record, identity, api, onAccessLost, kind }: { s
         {query.isLoading && <p>{t('common.loading')}</p>}
         {query.error && <p role="alert">{t('approval.failed')}</p>}
         {!query.isLoading && !query.error && parts.length === 0 && <p className="text-sm text-muted-foreground">{t(record.recording_state === 'collecting' ? 'approval.contentPending' : kind === 'reasoning' ? 'approval.noReasoning' : 'approval.noContent')}</p>}
-        {input ? input.map((message, index) => <Card key={index}><CardHeader className="py-3"><CardTitle className="text-sm">{t(`approval.role.${message.role ?? 'unknown'}`, { defaultValue: t('approval.unknown') })}</CardTitle></CardHeader><CardContent><pre className="whitespace-pre-wrap break-words text-xs">{typeof message.content === 'string' ? message.content : JSON.stringify(message.content, null, 2)}</pre></CardContent></Card>)
-            : parts.map(part => <pre key={part.sequence} className="max-w-full whitespace-pre-wrap break-words rounded border bg-muted/30 p-3 text-xs">{kind === 'event' ? part.text.split('\n').filter(Boolean).map(line => {
-                try { const event = JSON.parse(line) as { stage: string; origin?: string; at_ms: number }; return `${time(event.at_ms)} · ${t(`approval.origin.${event.origin ?? 'server'}`)} · ${t(`approval.stage.${event.stage}`, { defaultValue: t('approval.unknown') })}`; } catch { return t('approval.recording.partial'); }
-            }).join('\n') : part.text}</pre>)}
+        {groupApprovalParts(parts).map(([attempt, entries]) => <section key={attempt} className="space-y-2"><h5 className="text-sm font-medium">{t('approval.attempt', { count: attempt + 1 })}</h5><AttemptParts parts={entries} kind={kind} readable={readable} complete={!query.hasNextPage}/></section>)}
         {query.hasNextPage && <Button type="button" variant="outline" disabled={query.isFetchingNextPage} onClick={() => void query.fetchNextPage()}>{t('approval.loadMore')}</Button>}
     </div>;
 }
@@ -62,7 +71,7 @@ function ReviewContent(props: { session: string; record: ApprovalReviewDto; iden
     const { t } = useTranslation(); const [tab, setTab] = useState('input');
     return <div className="space-y-3">
         <div role="tablist" aria-label={t('approval.details')} className="flex gap-2 overflow-x-auto">
-            {['input', 'response', 'event'].map(value => <Button type="button" key={value} role="tab" aria-selected={tab === value} variant={tab === value ? 'default' : 'outline'} onClick={() => setTab(value)}>{t(`approval.part.${value}`)}</Button>)}
+            {['input', 'response', 'usage', 'event'].map(value => <Button type="button" key={value} role="tab" aria-selected={tab === value} variant={tab === value ? 'default' : 'outline'} onClick={() => setTab(value)}>{t(`approval.part.${value}`)}</Button>)}
         </div>
         {tab === 'response' ? <><h4 className="text-sm font-medium">{t('approval.part.reasoning')}</h4><ReviewParts key="reasoning" {...props} kind="reasoning"/><h4 className="text-sm font-medium">{t('approval.part.answer')}</h4><ReviewParts key="answer" {...props} kind="answer"/><h4 className="text-sm font-medium">{t('approval.parsedDecision')}</h4><ReviewParts key="decision" {...props} kind="decision"/></> : <ReviewParts key={tab} {...props} kind={tab}/>}
     </div>;
@@ -106,8 +115,8 @@ export function ApprovalReviews({ session, open, api = approvalApi, includeChild
                 {record.decision && <div><h4 className="text-sm font-medium">{t('approval.storedDecision')}</h4><pre className="whitespace-pre-wrap break-words text-xs">{JSON.stringify(record.decision, null, 2)}</pre></div>}
                 <p className="text-xs">{t('approval.grants')}: {record.grant_states.length ? record.grant_states.map(state => t(`approval.grant.${state}`, { defaultValue: t('approval.unknown') })).join(' · ') : t('approval.noGrant')}</p>
                 <p className="text-xs">{t('approval.execution')}: {record.execution_state ? t(`approval.execution.${record.execution_state}`, { defaultValue: t('approval.unknown') }) : t('approval.noExecution')}</p>
-                {record.timeline.length > 0 && <ul className="space-y-1 text-xs">{record.timeline.map((stage, index) => <li key={index}>{time(stage.at_ms)} · {t(`approval.origin.${stage.origin}`)} · {t(`approval.stage.${stage.stage}`)}</li>)}</ul>}
-                {record.reason && <p role="alert" className="text-sm">{t(`approval.reason.${record.reason}`, { defaultValue: t('approval.reason.unknown') })}</p>}
+                {record.timeline.length > 0 && <ul className="space-y-1 text-xs">{record.timeline.map((stage, index) => <li key={index}>{stage.attempt_index != null && <>{t('approval.attempt', { count: stage.attempt_index + 1 })} · </>}{time(stage.at_ms)} · {t(`approval.origin.${stage.origin}`)} · {t(`approval.stage.${stage.stage}`)}</li>)}</ul>}
+                {record.reason && <p role="alert" className="text-sm">{record.reason.startsWith('format_retries_exhausted:') ? t('approval.formatExhausted', { count: Number(record.reason.split(':')[1]) }) : t(`approval.reason.${record.reason}`, { defaultValue: t('approval.reason.unknown') })}</p>}
                 <p className="text-xs text-muted-foreground">{t('approval.approvedNotExecuted')}</p>
                 {record.usage && <pre className="whitespace-pre-wrap break-words rounded bg-muted/30 p-2 text-xs">{JSON.stringify(record.usage, null, 2)}</pre>}
                 <ReviewContent onAccessLost={() => setBlocked(true)} key={record.id} session={session!} record={record} identity={identity} api={api}/>

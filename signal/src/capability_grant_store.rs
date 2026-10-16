@@ -1883,6 +1883,7 @@ mod tests {
             schema.create_table_from_entity(crate::entity::agent_goal_run::Entity),
             schema.create_table_from_entity(crate::entity::agent_goal_open_request::Entity),
             schema.create_table_from_entity(crate::entity::agent_approval_review::Entity),
+            schema.create_table_from_entity(crate::entity::agent_approval_attempt::Entity),
         ] {
             db.execute(&statement).await.unwrap();
         }

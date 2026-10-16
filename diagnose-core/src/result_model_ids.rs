@@ -316,6 +316,7 @@ pub(crate) fn resolve(
     let results = verified_results(history, now);
     let source_locators = locators(history);
     expand_file_selectors(value, &results, &source_locators)?;
+    crate::file_model_input::restore_sources(tool, value, &results)?;
     let object = value
         .as_object_mut()
         .ok_or_else(|| invalid("arguments must be an object"))?;
@@ -495,6 +496,7 @@ pub(crate) fn resolve(
 }
 
 pub(crate) fn project_arguments(tool: &str, value: &mut Value, locators: &[ResultLocator]) {
+    crate::file_model_input::project_arguments(tool, value);
     if !supports(tool) {
         return;
     }

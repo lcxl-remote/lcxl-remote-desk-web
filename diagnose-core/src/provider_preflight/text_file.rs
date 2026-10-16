@@ -440,8 +440,11 @@ pub fn read_result_id(call: &ToolCall) -> Result<Option<String>, AgentError> {
 
 pub fn uses_session_file_read(call: &ToolCall) -> Result<bool, AgentError> {
     if selection::supports(&call.name) {
-        selection::selectors(call)?;
-        return Ok(true);
+        if selection::has_source(call)? {
+            selection::selectors(call)?;
+            return Ok(true);
+        }
+        return Ok(false);
     }
     if read_result_id(call)?.is_some() {
         return Ok(true);
@@ -500,13 +503,23 @@ pub fn validate_read_permission_input(
     exact_input: Option<&str>,
     now: u64,
 ) -> Result<(), AgentError> {
+    validate_read_permission_input_with_context(session, tool_name, exact_input, now, None)
+}
+
+pub fn validate_read_permission_input_with_context(
+    session: &crate::session::PersistedAgentSession,
+    tool_name: &str,
+    exact_input: Option<&str>,
+    now: u64,
+    original: Option<&crate::input_read_context::ReadContextSelection>,
+) -> Result<(), AgentError> {
     if !matches!(tool_name, "inspect_files" | "read_text_file") && !selection::supports(tool_name) {
         return Ok(());
     }
     let invalid = || {
         error(
             AgentErrorKind::InvalidInput,
-            r#"File read permission needs an exact source. For metadata use exact_input={"directory_request_id":"<approved directory ID>"}. For a creation/read/update receipt use exact_input={"file_result_call_id":"<receipt tool call ID>"}, without entry_name. For a directory child use exact_input={"file_result_call_id":"<metadata tool call ID>","entry_name":"<exact child name>"}. This validation failure does not establish expiry. Directory metadata grants do not authorize file-content reading; request read_text_file separately when needed."#,
+            r#"File read needs a recorded source or the file selection saved with the current user input. For inspect_files select directory_request_id (omittable for a single approved directory). For read_text_file use file_result_call_id from a verified file or directory result, plus entry_name when the directory has multiple children. Other file reads use source (sources for multi-file operations) with those fields. Keep required worksheet/cell or merge parameters. Available but unselected attachments are not a source. Directory metadata permission does not authorize reading contents. No approval request was created."#,
             false,
             true,
         )
@@ -516,6 +529,10 @@ pub fn validate_read_permission_input(
         name: tool_name.into(),
         arguments_json: exact_input.unwrap_or("{}").into(),
     };
+    let input: serde_json::Value =
+        serde_json::from_str(&call.arguments_json).map_err(|_| invalid())?;
+    crate::model_input::validate_format(tool_name, &input)
+        .map_err(|message| error(AgentErrorKind::InvalidInput, message, false, true))?;
     validate_read_selector(session, &call)?;
     if uses_session_file_read(&call).map_err(|_| invalid())? {
         let destinations = session
@@ -527,8 +544,31 @@ pub fn validate_read_permission_input(
             return Err(invalid());
         };
         ResultFileRead::build(session, &call, destination, now)?;
-    } else if session.context_attachments.is_empty() {
-        return Err(invalid());
+    } else {
+        let original = original.ok_or_else(invalid)?;
+        original.validate().map_err(|_| invalid())?;
+        let destinations = session
+            .authorization_requirement()
+            .and_then(|message| message.data_envelope.as_ref())
+            .map(|envelope| envelope.allowed_destinations.as_slice())
+            .ok_or_else(invalid)?;
+        let [destination] = destinations else {
+            return Err(invalid());
+        };
+        crate::input_read_context::validate_current_objects(
+            session,
+            &original.object_attachments,
+            destination,
+            now,
+        )
+        .map_err(|_| invalid())?;
+        let binding = crate::input_read_context::object_read::ObjectReadBinding {
+            original,
+            destination,
+            now_unix_ms: now,
+        };
+        let (_, mut input) = crate::read_tools::build_read_operation(&call)?;
+        binding.bind(&call, &mut input).map_err(|_| invalid())?;
     }
     Ok(())
 }
@@ -632,8 +672,6 @@ fn read_evidence(
         name: source_call.name.clone(),
         arguments_json: source_call.arguments_json.clone(),
     };
-    let directory = crate::file_scope::select_output_directory(session, &source_call, now)
-        .map_err(|_| unavailable())?;
     let mut found = None;
     for message in &session.conversation {
         if !matches!(
@@ -665,7 +703,21 @@ fn read_evidence(
         else {
             continue;
         };
-        if output.entries.len() != 1 || output.entries[0].object_ref != directory {
+        let [root] = output.entries.as_slice() else {
+            return Err(unavailable());
+        };
+        let directory = &root.object_ref;
+        if !root.is_directory || directory.object_kind != ObjectKind::Directory {
+            return Err(unavailable());
+        }
+        crate::file_model_input::directory_id(session, directory, now)?;
+        let original: serde_json::Value =
+            serde_json::from_str(&source_call.arguments_json).map_err(|_| unavailable())?;
+        if original.get("directory_request_id").is_some()
+            && crate::file_scope::select_output_directory(session, &source_call, now)
+                .map_err(|_| unavailable())?
+                != *directory
+        {
             return Err(unavailable());
         }
         let mut entries = output.directory_entries.iter().filter(|entry| {

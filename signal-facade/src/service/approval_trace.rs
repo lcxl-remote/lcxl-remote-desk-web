@@ -66,6 +66,8 @@ pub trait TraceBackend: Send + Sync {
     ) -> Result<(), ()>;
 }
 pub struct ApprovalTraceSink {
+    attempt_index: u32,
+    attempt_model_started: bool,
     sender: mpsc::Sender<ApprovalTracePartDto>,
     completion: Arc<Mutex<TraceCompletion>>,
     partial: Arc<AtomicBool>,
@@ -135,6 +137,8 @@ impl ApprovalTraceSink {
             partial,
             recording_reason,
             sequence: 0,
+            attempt_index: 0,
+            attempt_model_started: false,
             remaining: settings.max_trace_bytes as usize,
             enabled: settings.enabled,
             stage: "preparation".into(),
@@ -152,6 +156,7 @@ impl ApprovalTraceSink {
             return;
         }
         let part = ApprovalTracePartDto {
+            attempt_index: self.attempt_index,
             sequence: self.sequence,
             kind: kind.into(),
             text,
@@ -166,13 +171,23 @@ impl ApprovalTraceSink {
         }
     }
     fn flush(&mut self) {
-        for kind in ["input", "reasoning", "answer", "decision", "event"] {
+        for kind in ["input", "reasoning", "answer", "decision", "usage", "event"] {
             self.flush_kind(kind);
         }
         self.last_flush = std::time::Instant::now();
     }
+    pub fn begin_attempt(&mut self, index: u32) {
+        self.flush();
+        self.attempt_index = index;
+        self.attempt_model_started = false;
+        self.first_response = false;
+        self.model_end_recorded = false;
+        self.event("attempt_started");
+    }
     pub fn text(&mut self, kind: &str, mut text: &str) {
-        if !self.enabled || !["input", "reasoning", "answer", "decision", "event"].contains(&kind) {
+        if !self.enabled
+            || !["input", "reasoning", "answer", "decision", "usage", "event"].contains(&kind)
+        {
             return;
         }
         while !text.is_empty() {
@@ -214,7 +229,7 @@ impl ApprovalTraceSink {
         self.stage = stage.into();
         self.text(
             "event",
-            &(serde_json::json!({"stage":stage,"origin":if matches!(stage,"first_response"|"model_finished"|"non_stream_response"){"model"}else{"server"},"at_ms":chrono::Utc::now().timestamp_millis()})
+            &(serde_json::json!({"attempt_index":self.attempt_index,"stage":stage,"origin":if matches!(stage,"first_response"|"model_finished"|"non_stream_response"){"model"}else{"server"},"at_ms":chrono::Utc::now().timestamp_millis()})
                 .to_string()
                 + "\n"),
         );
@@ -227,9 +242,7 @@ impl ApprovalTraceSink {
         }
     }
     pub fn model_started(&self) -> bool {
-        self.completion
-            .try_lock()
-            .is_ok_and(|v| v.model_name.is_some())
+        self.attempt_model_started
     }
     pub fn model_finished(&mut self) {
         if !self.model_end_recorded && self.model_started() {
@@ -256,6 +269,15 @@ impl ApprovalTraceSink {
         {
             tracking.snapshot.reason = tracking.snapshot.reason.or_else(|| {
                 reason.as_ref().and_then(|r| match r.as_str() {
+                    value if value.starts_with("format_retries_exhausted:") => Some(
+                        desk_diagnose_core::approval_observation::ReviewReason::InvalidDecision,
+                    ),
+                    "retry_unavailable" => {
+                        Some(desk_diagnose_core::approval_observation::ReviewReason::Processing)
+                    }
+                    "retry_budget" => {
+                        Some(desk_diagnose_core::approval_observation::ReviewReason::Budget)
+                    }
                     "revalidation" => {
                         Some(desk_diagnose_core::approval_observation::ReviewReason::Revoked)
                     }
@@ -334,6 +356,7 @@ impl TurnSink for ApprovalTraceSink {
     }
 
     fn on_provider_request(&mut self, body: &Value) {
+        self.attempt_model_started = true;
         if let Ok(mut state) = self.completion.try_lock() {
             state.model_name = body["model"].as_str().map(str::to_owned);
             state.output_limit = body["max_tokens"]
@@ -600,5 +623,58 @@ mod tests {
             tracking.lock().unwrap().snapshot.reason,
             Some(ReviewReason::Budget)
         );
+    }
+    #[tokio::test]
+    async fn attempt_boundaries_keep_answers_input_and_usage_separate() {
+        let (send, receive) = tokio::sync::oneshot::channel();
+        let backend = Arc::new(Backend {
+            parts: Mutex::new(vec![]),
+            done: Mutex::new(Some(send)),
+            fail: false,
+        });
+        let mut sink = ApprovalTraceSink::start(
+            backend.clone(),
+            identity(),
+            ApprovalTraceSettings::defaults(false),
+        );
+        let tracking = Arc::new(Mutex::new(
+            desk_diagnose_core::approval_observation::ReviewTracking::queued(
+                "owner",
+                "device",
+                "conversation",
+                "conversation",
+                "delegation",
+                1,
+                "permission_item",
+                "source",
+                1000,
+            ),
+        ));
+        sink.tracking = Some(tracking.clone());
+        sink.begin_attempt(0);
+        sink.text("answer", "malformed");
+        sink.text("usage", "{\"output_tokens\":7}");
+        sink.begin_attempt(1);
+        sink.text("answer", "corrected");
+        sink.text("usage", "{\"output_tokens\":9}");
+        sink.complete(
+            Some("end_turn".into()),
+            None,
+            Some("format_retries_exhausted:1".into()),
+        );
+        assert_eq!(
+            tracking.lock().unwrap().snapshot.reason,
+            Some(desk_diagnose_core::approval_observation::ReviewReason::InvalidDecision)
+        );
+        drop(sink);
+        assert_eq!(receive.await.unwrap(), "complete");
+        let parts = backend.parts.lock().unwrap();
+        let answers: Vec<_> = parts
+            .iter()
+            .filter(|p| p.kind == "answer")
+            .map(|p| (p.attempt_index, p.text.as_str()))
+            .collect();
+        assert_eq!(answers, vec![(0, "malformed"), (1, "corrected")]);
+        assert_eq!(parts.iter().filter(|p| p.kind == "usage").count(), 2);
     }
 }

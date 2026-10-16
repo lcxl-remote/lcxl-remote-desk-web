@@ -155,6 +155,7 @@ impl DelegationCallReservation {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReviewCallAuthority {
+    pub attempt: crate::approval_review::ReviewAttemptState,
     pub candidate_id: String,
     pub lease_epoch: u64,
     pub lease_owner: String,
@@ -183,6 +184,7 @@ pub struct ReviewCallAuthority {
 
 impl ReviewCallAuthority {
     pub fn validate(&self) -> Result<(), &'static str> {
+        self.attempt.validate()?;
         if [
             &self.candidate_id,
             &self.lease_owner,
@@ -251,6 +253,7 @@ mod tests {
     use super::*;
     fn authority() -> ReviewCallAuthority {
         ReviewCallAuthority {
+            attempt: Default::default(),
             candidate_id: "candidate".into(),
             lease_epoch: 1,
             lease_owner: "review-worker".into(),

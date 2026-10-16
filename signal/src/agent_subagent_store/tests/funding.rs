@@ -645,6 +645,7 @@ async fn review_without_planner(
         .await
         .unwrap();
     let authority = desk_diagnose_core::subagent::reservation::ReviewCallAuthority {
+        attempt: Default::default(),
         candidate_id: "source-review".into(),
         lease_epoch: 1,
         lease_owner: "independent-review-worker".into(),
@@ -762,7 +763,7 @@ async fn reserve_review(
     let receipt = match super::super::funding::reserve_call_with_authority_on(
         &txn,
         parent,
-        "review:source-review",
+        "review:source-review:attempt:0",
         DelegationCallKind::ApprovalReview,
         &review.request_sha256,
         Usage {
@@ -1222,7 +1223,7 @@ async fn malformed_review_accounting_rotates_without_hiding_a_later_known_receip
     use sea_orm::IntoActiveModel;
     let db = database().await;
     let (_, _, provider_id, now) = unknown_review_ledger(&db).await;
-    let good = crate::entity::agent_approval_review::Entity::find()
+    let good = crate::entity::agent_approval_attempt::Entity::find()
         .one(&db)
         .await
         .unwrap()
@@ -1230,7 +1231,8 @@ async fn malformed_review_accounting_rotates_without_hiding_a_later_known_receip
     let mut malformed = good.clone().into_active_model();
     malformed.id = sea_orm::ActiveValue::NotSet;
     malformed.candidate_id = Set("malformed-prior-review".into());
-    malformed.call_authority_json = Set(Some("{}".into()));
+    malformed.call_id = Set("malformed-prior-attempt".into());
+    malformed.snapshot_json = Set("{}".into());
     malformed.usage_reconcile_at_ms = Set(Some(now - 100));
     let malformed = malformed.insert(&db).await.unwrap();
     insert_provider_usage(&db, &provider_id, now, now + 4).await;
@@ -1240,17 +1242,14 @@ async fn malformed_review_accounting_rotates_without_hiding_a_later_known_receip
             .unwrap(),
         0
     );
-    let stamped = crate::entity::agent_approval_review::Entity::find_by_id(malformed.id)
+    let stamped = crate::entity::agent_approval_attempt::Entity::find_by_id(malformed.id)
         .one(&db)
         .await
         .unwrap()
         .unwrap();
     assert_eq!(stamped.usage_reconcile_at_ms, Some(now + 5));
     assert_eq!(stamped.updated_at, malformed.updated_at);
-    assert_eq!(
-        stamped.usage_settlement_json,
-        malformed.usage_settlement_json
-    );
+    assert_eq!(stamped.snapshot_json, malformed.snapshot_json);
     assert_eq!(
         crate::agent_approval_usage::reconcile_usage(&db, now + 6, 1)
             .await

@@ -1,0 +1,1 @@
+{"type":"object","required":["revision","format_retry_count"],"properties":{"format_retry_count":{"type":"integer","format":"int32","minimum":0},"revision":{"type":"string"}},"additionalProperties":false,"x-readme-ref-name":"ApprovalRuntimeSettings"}

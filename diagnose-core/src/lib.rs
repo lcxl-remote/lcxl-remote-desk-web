@@ -168,6 +168,7 @@ pub mod thinking_context;
 pub mod ui_model_ids;
 pub mod ui_references;
 
+mod file_model_input;
 pub mod model_input;
 pub mod native_ids;
 

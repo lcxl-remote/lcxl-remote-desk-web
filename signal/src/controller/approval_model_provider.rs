@@ -47,6 +47,8 @@ pub struct ApprovalModelProbeParams {
 
 #[derive(Serialize, ToSchema)]
 pub struct ApprovalModelProbeDto {
+    pub attempts: u64,
+    pub format_retries: u64,
     pub latency_ms: u64,
     pub validated_capabilities: Vec<String>,
     pub reasoning_observed: bool,
@@ -203,6 +205,9 @@ pub async fn test_approval_model_provider(
     let mut capabilities = Vec::new();
     let mut reasoning_observed = false;
     let mut reasoning_tokens = 0_u64;
+    let retry_count = crate::approval_runtime::load(db).await?.format_retry_count;
+    let mut attempts = 0_u64;
+    let mut format_retries = 0_u64;
     for probe in approval_probe_cases() {
         let prompt = review_user_prompt(&probe.candidate)
             .map_err(|error| reject_invalid(format!("invalid approval probe: {error:?}")))?;
@@ -231,24 +236,48 @@ pub async fn test_approval_model_provider(
             context.attribution.configuration_scope =
                 desk_diagnose_core::model_observability::ConfigurationScope::Candidate;
         }
-        let observation = request.observation.clone();
-        let mut sink = NullTurnSink;
-        let turn = seam.call(request, &mut sink).await.map_err(|error| {
-            DeskSignalError::new_custom_error(DeskErrorCode::SYSTEM_ERROR, &error.message)
-        })?;
-        validate_approval_probe_observed(
-            &probe,
-            &turn,
-            observation.as_ref(),
-            chrono::Utc::now().timestamp_millis(),
-        )
-        .map_err(|error| {
-            probe_failure(error, &turn, candidate.gateway.runtime_max_output_tokens)
-        })?;
+        let original = request;
+        let mut feedback = None;
+        let mut retries = 0_u32;
+        loop {
+            let mut request = original.clone();
+            desk_diagnose_core::approval_review::apply_format_feedback(&mut request, feedback);
+            let observation = request.observation.clone();
+            let mut sink = NullTurnSink;
+            let turn = seam.call(request, &mut sink).await.map_err(|error| {
+                DeskSignalError::new_custom_error(DeskErrorCode::SYSTEM_ERROR, &error.message)
+            })?;
+            attempts += 1;
+            reasoning_observed |= turn.provider_meta.reasoning_observed;
+            reasoning_tokens =
+                reasoning_tokens.saturating_add(turn.provider_meta.reasoning_tokens.unwrap_or(0));
+            let validated = validate_approval_probe_observed(
+                &probe,
+                &turn,
+                observation.as_ref(),
+                chrono::Utc::now().timestamp_millis(),
+            );
+            if let Err(desk_diagnose_core::approval_review::ReviewOutputIssue::Format(issue)) =
+                desk_diagnose_core::approval_review::reviewer_output_diagnosed(
+                    &probe.candidate,
+                    &turn,
+                )
+            {
+                if retries < retry_count {
+                    retries = retries
+                        .checked_add(1)
+                        .ok_or_else(|| reject_invalid("approval retry count overflow"))?;
+                    format_retries += 1;
+                    feedback = Some(issue);
+                    continue;
+                }
+            }
+            validated.map_err(|error| {
+                probe_failure(error, &turn, candidate.gateway.runtime_max_output_tokens)
+            })?;
+            break;
+        }
         capabilities.push(probe.key.to_owned());
-        reasoning_observed |= turn.provider_meta.reasoning_observed;
-        reasoning_tokens =
-            reasoning_tokens.saturating_add(turn.provider_meta.reasoning_tokens.unwrap_or(0));
     }
     let observation = ModelProbeObservation {
         connection_revision: candidate.gateway.connection_revision,
@@ -271,6 +300,8 @@ pub async fn test_approval_model_provider(
         approval_model_provider::save_probe_if_current(db, &candidate, observation).await?;
     Ok(
         HttpResponse::Ok().json(RestResponse::succeed_with_data(ApprovalModelProbeDto {
+            attempts,
+            format_retries,
             latency_ms: started.elapsed().as_millis() as u64,
             validated_capabilities: capabilities,
             reasoning_observed,

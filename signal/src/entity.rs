@@ -43,3 +43,5 @@ pub mod agent_delegation_reservation;
 
 pub mod agent_approval_trace;
 pub mod agent_approval_trace_part;
+
+pub mod agent_approval_attempt;
