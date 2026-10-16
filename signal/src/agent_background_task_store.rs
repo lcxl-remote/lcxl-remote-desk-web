@@ -704,7 +704,9 @@ impl SignalBackgroundTaskStore {
                 BACKGROUND_STATUS_CANCELLED,
                 BACKGROUND_STATUS_UNKNOWN,
             ]))
-            .filter(agent_action_item::Column::CompletionDeliveryState.eq("pending"))
+            .filter(
+                agent_action_item::Column::CompletionDeliveryState.is_in(["pending", "published"]),
+            )
             .order_by_asc(agent_action_item::Column::Id)
             .all(&self.db)
             .await
@@ -718,7 +720,9 @@ impl SignalBackgroundTaskStore {
             )
             .filter(agent_action_item::Column::Kind.eq(BACKGROUND_ACTION_KIND))
             .filter(agent_action_item::Column::CompletionEventId.eq(event_id))
-            .filter(agent_action_item::Column::CompletionDeliveryState.eq("pending"))
+            .filter(
+                agent_action_item::Column::CompletionDeliveryState.is_in(["pending", "published"]),
+            )
             .exec(&self.db)
             .await?;
         Ok(())
@@ -728,9 +732,23 @@ impl SignalBackgroundTaskStore {
     /// one bounded, tool-free completion turn. The envelope bytes themselves
     /// remain outside this projection; only server-owned ids/classification are
     /// exposed as untrusted output.
-    async fn publish_once(&self) -> Result<(), DbErr> {
+    pub(crate) async fn publish_once(&self) -> Result<(), DbErr> {
         let sessions = crate::agent_session_store::SignalAgentSessionStore::new(self.db.clone());
         for row in self.pending_deliveries().await? {
+            if row.completion_delivery_state == "published" {
+                if self
+                    .follow_up_completion(
+                        &sessions,
+                        &row,
+                        &Utc::now().to_rfc3339(),
+                        WorkKind::CapabilityProvider,
+                    )
+                    .await?
+                {
+                    self.consume_delivery(&row.completion_event_id).await?;
+                }
+                continue;
+            }
             let record = decode_record(&row)?;
             let execution_id = row.execution_id.as_deref().ok_or_else(|| {
                 DbErr::Custom("background delivery has no execution identity".into())
@@ -773,12 +791,22 @@ impl SignalBackgroundTaskStore {
                 )
                 .await
                 .map_err(agent_error)?;
-            if matches!(outcome, EventAppend::Appended | EventAppend::AlreadyPresent)
-                && self
+            if matches!(outcome, EventAppend::Appended | EventAppend::AlreadyPresent) {
+                agent_action_item::Entity::update_many()
+                    .col_expr(
+                        agent_action_item::Column::CompletionDeliveryState,
+                        Expr::value("published"),
+                    )
+                    .filter(agent_action_item::Column::Id.eq(row.id))
+                    .filter(agent_action_item::Column::CompletionDeliveryState.eq("pending"))
+                    .exec(&self.db)
+                    .await?;
+                if self
                     .follow_up_completion(&sessions, &row, &now, WorkKind::CapabilityProvider)
                     .await?
-            {
-                self.consume_delivery(&row.completion_event_id).await?;
+                {
+                    self.consume_delivery(&row.completion_event_id).await?;
+                }
             }
         }
         Ok(())
@@ -806,26 +834,34 @@ impl SignalBackgroundTaskStore {
         else {
             return Ok(true);
         };
-        if let Some(goal) = crate::agent_goal_store::load_latest_for_subject(
+        let action = desk_diagnose_core::session::ActionIdentity::new(
+            row.id,
+            &row.action_request_id,
+            &pending.execution_id,
+            work_kind,
+        );
+        if let Some(goal) = crate::goal_work::owner_on(&self.db, &session, &action).await? {
+            if !goal.state.is_terminal() {
+                return Ok(false);
+            }
+            return Ok(!matches!(
+                sessions
+                    .prune_auto_trigger(&row.conversation_id, &row.completion_event_id, now)
+                    .await
+                    .map_err(agent_error)?,
+                EventAppend::Busy
+            ));
+        }
+        if crate::agent_goal_store::load_for_subject(
             &self.db,
             &row.conversation_id,
             &session.actor_id,
             &session.device_id,
         )
         .await?
+        .is_some()
         {
-            if !goal.state.is_terminal() {
-                return Ok(false);
-            }
-            if goal.owns_waited_work(&row.action_request_id) {
-                return Ok(!matches!(
-                    sessions
-                        .prune_auto_trigger(&row.conversation_id, &row.completion_event_id, now)
-                        .await
-                        .map_err(agent_error)?,
-                    EventAppend::Busy
-                ));
-            }
+            return Ok(false);
         }
         let expired = session
             .scope_snapshot

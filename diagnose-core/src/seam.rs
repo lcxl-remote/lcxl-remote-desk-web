@@ -1219,6 +1219,15 @@ pub trait SessionSeam {
         })
     }
 
+    /// Bind a native wait to original, server-owned tasks of this goal.
+    async fn prepare_goal_work_wait(
+        &self,
+        _session: &PersistedAgentSession,
+        _call_id: &str,
+    ) -> Result<Option<crate::goal_continuation::GoalWorkWait>, AgentError> {
+        Ok(None)
+    }
+
     /// Read the current fenced goal state before every model request. The
     /// returned text and checkpoint are the fixed context, never a summary
     /// guessed from the mutable conversation tail.

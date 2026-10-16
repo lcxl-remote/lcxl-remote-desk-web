@@ -1849,7 +1849,7 @@ export default {
   'pages.aiAssistant.goalStates.completed': '已完成',
   'pages.aiAssistant.goalStates.failed': '失败',
   'pages.aiAssistant.goalStates.cancelled': '已取消',
-  'pages.aiAssistant.goalReasons.reconcile_interrupted_work': '上一次操作仍在执行或等待结果核对，请先查看任务回执。',
+  'pages.aiAssistant.goalReasons.reconcile_interrupted_work': '上一次操作已中断或结果未知，请先核对任务回执再继续。',
   'pages.aiAssistant.goalReasons.recovered_after_reconciliation': '上一次操作已核对，目标将继续。',
   'pages.aiAssistant.goalReasons.absolute_deadline_reached': '目标的截止时间已到。',
   'pages.aiAssistant.goalReasons.budget_exhausted': '目标预算已用完，可增加预算后继续。',

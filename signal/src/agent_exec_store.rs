@@ -19,6 +19,7 @@ pub const STATUS_RUNNING: &str = "running";
 pub const STATUS_DONE: &str = "done";
 pub const STATUS_UNKNOWN: &str = "unknown";
 pub const DELIVERY_PENDING: &str = "pending";
+pub const DELIVERY_PUBLISHED: &str = "published";
 pub const DELIVERY_CONSUMED: &str = "consumed";
 
 pub(crate) fn output_format(
@@ -373,7 +374,10 @@ impl SignalAgentExecStore {
             )
             .col_expr(agent_exec_task::Column::UpdatedAt, Expr::value(Utc::now()))
             .filter(agent_exec_task::Column::EventId.eq(event_id))
-            .filter(agent_exec_task::Column::DeliveryState.eq(DELIVERY_PENDING))
+            .filter(
+                agent_exec_task::Column::DeliveryState
+                    .is_in([DELIVERY_PENDING, DELIVERY_PUBLISHED]),
+            )
             .exec(&self.db)
             .await
             .map(|_| ())
@@ -382,7 +386,10 @@ impl SignalAgentExecStore {
 
     async fn pending_deliveries(&self) -> Result<Vec<agent_exec_task::Model>, AgentError> {
         agent_exec_task::Entity::find()
-            .filter(agent_exec_task::Column::DeliveryState.eq(DELIVERY_PENDING))
+            .filter(
+                agent_exec_task::Column::DeliveryState
+                    .is_in([DELIVERY_PENDING, DELIVERY_PUBLISHED]),
+            )
             .filter(agent_exec_task::Column::Status.is_in([STATUS_DONE, STATUS_UNKNOWN]))
             .order_by_asc(agent_exec_task::Column::Id)
             .limit(32)
@@ -395,6 +402,14 @@ impl SignalAgentExecStore {
         let sessions = SignalAgentSessionStore::new(self.db.clone());
         for task in self.pending_deliveries().await? {
             let now = Utc::now().to_rfc3339();
+            if task.delivery_state == DELIVERY_PUBLISHED {
+                if task.status == STATUS_UNKNOWN
+                    || self.follow_up_completion(&sessions, &task, &now).await?
+                {
+                    self.consume_event(&task.event_id).await?;
+                }
+                continue;
+            }
             let outcome = if task.status == STATUS_UNKNOWN {
                 sessions
                     .mark_execution_unknown(
@@ -448,11 +463,22 @@ impl SignalAgentExecStore {
                     )
                     .await?
             };
-            if matches!(outcome, EventAppend::Appended | EventAppend::AlreadyPresent)
-                && (task.status == STATUS_UNKNOWN
-                    || self.follow_up_completion(&sessions, &task, &now).await?)
-            {
-                self.consume_event(&task.event_id).await?;
+            if matches!(outcome, EventAppend::Appended | EventAppend::AlreadyPresent) {
+                agent_exec_task::Entity::update_many()
+                    .col_expr(
+                        agent_exec_task::Column::DeliveryState,
+                        Expr::value(DELIVERY_PUBLISHED),
+                    )
+                    .filter(agent_exec_task::Column::Id.eq(task.id))
+                    .filter(agent_exec_task::Column::DeliveryState.eq(DELIVERY_PENDING))
+                    .exec(&self.db)
+                    .await
+                    .map_err(|error| internal(format!("publish execution receipt: {error}")))?;
+                if task.status == STATUS_UNKNOWN
+                    || self.follow_up_completion(&sessions, &task, &now).await?
+                {
+                    self.consume_event(&task.event_id).await?;
+                }
             }
         }
         Ok(())
@@ -508,30 +534,37 @@ impl SignalAgentExecStore {
                 EventAppend::Busy
             ));
         }
-        if let Some(goal) = crate::agent_goal_store::load_latest_for_subject(
+        let action = desk_diagnose_core::session::ActionIdentity::agent_exec(
+            task.id,
+            &task.exec_request_id,
+            &task.execution_generation,
+        );
+        if let Some(goal) = crate::goal_work::owner_on(&self.db, &session, &action)
+            .await
+            .map_err(|error| internal(format!("load completion source: {error}")))?
+        {
+            if !goal.state.is_terminal() {
+                return Ok(false);
+            }
+            return Ok(!matches!(
+                sessions
+                    .prune_auto_trigger(&task.conversation_id, &task.event_id, now)
+                    .await?,
+                EventAppend::Busy
+            ));
+        }
+        // An unrelated result cannot create a second planner alongside a goal.
+        if crate::agent_goal_store::load_for_subject(
             &self.db,
             &task.conversation_id,
             &session.actor_id,
             &session.device_id,
         )
         .await
-        .map_err(|error| internal(format!("load completion goal: {error}")))?
+        .map_err(|error| internal(format!("load active goal: {error}")))?
+        .is_some()
         {
-            if !goal.state.is_terminal() {
-                // The goal scanner will consume this durable completion.
-                return Ok(false);
-            }
-            if goal.owns_waited_work(&task.exec_request_id) {
-                // Cancellation or expiry does not turn a goal-owned result
-                // into a new ordinary automation turn. The receipt stays in
-                // the conversation; only its auto-trigger is consumed.
-                return Ok(!matches!(
-                    sessions
-                        .prune_auto_trigger(&task.conversation_id, &task.event_id, now)
-                        .await?,
-                    EventAppend::Busy
-                ));
-            }
+            return Ok(false);
         }
         if session.agent_role.binding().is_some()
             && !crate::agent_subagent_store::SubAgentStore::new(self.db.clone())

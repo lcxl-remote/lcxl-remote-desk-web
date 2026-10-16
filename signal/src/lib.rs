@@ -33,6 +33,7 @@ pub mod entity;
 pub mod error;
 pub mod exec_pty_carrier;
 pub mod goal_budget_policy;
+pub(crate) mod goal_work;
 pub mod model;
 mod model_admission;
 pub mod model_dial;

@@ -1,4 +1,5 @@
 mod context_boundaries;
+mod goal_continuation;
 mod grant_exposure;
 mod schedule_review;
 mod scheduled_continuation;
@@ -365,9 +366,96 @@ struct MemSession {
     fail_save_with_message_id: Option<&'static str>,
     supersede_on_save_failure: bool,
     latest_completed_goal: Option<crate::goal::GoalRun>,
+    goal: RefCell<Option<crate::goal::GoalRun>>,
+    goal_ends: RefCell<Vec<crate::goal::GoalSegmentEnd>>,
 }
 #[async_trait(?Send)]
 impl SessionSeam for MemSession {
+    async fn load_claimed_goal(
+        &self,
+        _session: &PersistedAgentSession,
+    ) -> Result<crate::goal::GoalRun, AgentError> {
+        self.goal
+            .borrow()
+            .clone()
+            .ok_or_else(|| crate::goal_tools::invalid("no fixture goal"))
+    }
+    async fn prepare_goal_work_wait(
+        &self,
+        session: &PersistedAgentSession,
+        call_id: &str,
+    ) -> Result<Option<crate::goal_continuation::GoalWorkWait>, AgentError> {
+        let members: Vec<_> = session
+            .execution_state
+            .tasks()
+            .into_iter()
+            .cloned()
+            .collect();
+        if members.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(
+            crate::goal_continuation::GoalWorkWait::new(
+                self.goal.borrow().as_ref().unwrap(),
+                session,
+                call_id,
+                members,
+            )
+            .unwrap(),
+        ))
+    }
+    async fn reserve_goal_budget(
+        &self,
+        _session: &PersistedAgentSession,
+        id: &str,
+        upper: crate::goal::GoalUsage,
+        now: &str,
+    ) -> Result<(), AgentError> {
+        self.goal
+            .borrow_mut()
+            .as_mut()
+            .unwrap()
+            .reserve_with_id(
+                id,
+                upper,
+                chrono::DateTime::parse_from_rfc3339(now)
+                    .unwrap()
+                    .timestamp_millis() as u64,
+            )
+            .unwrap();
+        Ok(())
+    }
+    async fn settle_goal_budget(
+        &self,
+        _session: &PersistedAgentSession,
+        id: &str,
+        actual: crate::goal::GoalUsage,
+        now: &str,
+    ) -> Result<(), AgentError> {
+        self.goal
+            .borrow_mut()
+            .as_mut()
+            .unwrap()
+            .settle_with_id(
+                id,
+                actual,
+                chrono::DateTime::parse_from_rfc3339(now)
+                    .unwrap()
+                    .timestamp_millis() as u64,
+            )
+            .unwrap();
+        Ok(())
+    }
+    async fn settle_goal_slice(
+        &self,
+        session: &mut PersistedAgentSession,
+        end: &crate::goal::GoalSegmentEnd,
+        _fingerprints: &[String],
+        _now: &str,
+    ) -> Result<(), AgentError> {
+        self.goal_ends.borrow_mut().push(end.clone());
+        self.save(session).await
+    }
     async fn load_latest_completed_goal(
         &self,
         _session: &PersistedAgentSession,

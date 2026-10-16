@@ -274,6 +274,8 @@ pub enum CircuitBreakReason {
 /// How a turn ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoopOutcome {
+    /// A bounded goal planning segment yielded without a protocol failure.
+    GoalYielded,
     /// The model produced a final text answer.
     Answered(String),
     /// A complete model turn or image was rejected by application policy.
@@ -958,6 +960,7 @@ async fn drive_claimed_inner(
         let result_fingerprints =
             settled_goal_result_fingerprints(&session, deps.registry, &prior_message_ids);
         let end = match &result {
+            Ok(LoopOutcome::GoalYielded) => crate::goal::GoalSegmentEnd::Yield,
             Ok(LoopOutcome::GoalControlled { control, .. }) => {
                 crate::goal::GoalSegmentEnd::Control(control.clone())
             }
@@ -988,7 +991,6 @@ async fn drive_claimed_inner(
             Err(error)
                 if error.kind == AgentErrorKind::ModelUnavailable
                     && session.unclosed_tool_call_ids().is_empty()
-                    && session.execution_state.tasks().is_empty()
                     && !session.execution_state.has_unresolved_outcome() =>
             {
                 crate::goal::GoalSegmentEnd::WaitForModel {
@@ -998,7 +1000,6 @@ async fn drive_claimed_inner(
             Err(error)
                 if error.kind == AgentErrorKind::ModelRejected
                     && session.unclosed_tool_call_ids().is_empty()
-                    && session.execution_state.tasks().is_empty()
                     && !session.execution_state.has_unresolved_outcome() =>
             {
                 crate::goal::GoalSegmentEnd::BlockModel
@@ -1015,6 +1016,7 @@ async fn drive_claimed_inner(
             finish_tool(&mut session, call_id, true, sink);
             let message = match control {
                 crate::goal::GoalControl::Continue { progress, .. } => progress,
+                crate::goal::GoalControl::WaitForWork { message, .. } => message,
                 crate::goal::GoalControl::Wait { reference_id, .. } => reference_id,
                 crate::goal::GoalControl::Complete { summary, .. } => summary,
                 crate::goal::GoalControl::Blocked { reason } => reason,
@@ -1808,7 +1810,15 @@ async fn prepare_model_context(
             )
             .await);
         }
-        let protection = session.context_protection_set();
+        let mut protection = session.context_protection_set();
+        if session.trigger_origin == TriggerOrigin::GoalContinuation {
+            let goal = deps.session_seam.load_claimed_goal(session).await?;
+            if let Some(wait) = goal.work_wait.as_ref().filter(|wait| wait.ready) {
+                for id in &wait.ready_event_ids {
+                    protection.protect_message(id.clone());
+                }
+            }
+        }
         let compatible_state = crate::model_context::adopt_compatible_checkpoint(
             &session.model_context_state,
             &session.conversation,
@@ -2701,12 +2711,19 @@ async fn run_inner_impl(
                 "delegation projection requires a labelled runtime data message",
             ));
         }
-        if session.turn_step_budget_exhausted(deps.max_steps_per_turn) {
-            return Ok(LoopOutcome::CircuitBreak(CircuitBreakReason::StepBudget));
-        }
-        if session.surface == AgentSessionSurface::AiAssistant
-            && session.focus_epoch.step_budget_exhausted()
+        if session.turn_step_budget_exhausted(deps.max_steps_per_turn)
+            || (session.surface == AgentSessionSurface::AiAssistant
+                && session.focus_epoch.step_budget_exhausted())
         {
+            if session.trigger_origin == TriggerOrigin::GoalContinuation
+                && pending_protocol_correction.is_none()
+                && !goal_correction_attempted
+                && !crate::goal_continuation::unresolved_work(session)
+                && !crate::goal_continuation::pending_approval(session)
+                && session.subagent_wait.is_none()
+            {
+                return Ok(LoopOutcome::GoalYielded);
+            }
             return Ok(LoopOutcome::CircuitBreak(CircuitBreakReason::StepBudget));
         }
         if let Some(current_input_revision) = input_revision_advanced(deps, session).await? {
@@ -3760,7 +3777,7 @@ async fn run_inner_impl(
         }
         if goal_correction_attempted {
             let marker_id = format!("goal-control-correction-{turn_id}");
-            let marker_text = "The preceding answer did not end this goal segment. Call control_goal now with a factual continue, ask_user, complete, or blocked decision using exactly decision and message. Do not call a device tool in this response.";
+            let marker_text = "The preceding answer did not end this goal segment. Call control_goal now with a factual continue, wait, ask_user, complete, or blocked decision using exactly decision and message. Do not call a device tool in this response.";
             let parent = crate::permission_resume::latest_user_requirement(&session.conversation)
                 .and_then(|message| message.data_envelope.as_ref());
             let mut marker = ChatMessage::system_event(&marker_id, marker_text);
@@ -5414,6 +5431,19 @@ async fn run_inner_impl(
                                 Ok(proposal) => {
                                     if proposal.decision
                                         == crate::goal_tools::GoalDecision::Complete
+                                        && crate::goal_continuation::completion_pending(
+                                            session, &call.id,
+                                        )
+                                    {
+                                        append_internal_tool_result(session, turn.provider_meta.data_envelope.as_ref(), mint(), &call.id,
+                                            "goal_dependencies_pending: background work, a permission decision, or another tool result is still pending. Use continue for independent work or wait for native background results. Do not claim completion.".into(),
+                                            crate::goal_tools::CONTROL_GOAL_TOOL_NAME)?;
+                                        deps.session_seam.save(session).await?;
+                                        finish_tool(session, &call.id, false, sink);
+                                        continue;
+                                    }
+                                    if proposal.decision
+                                        == crate::goal_tools::GoalDecision::Complete
                                         && let Some(seam) = deps.session_seam.subagents(session)
                                         && !seam.required_children_complete(session).await?
                                     {
@@ -5447,10 +5477,30 @@ async fn run_inner_impl(
                                         } else {
                                             Vec::new()
                                         };
-                                    let control =
+                                    let control = if proposal.decision
+                                        == crate::goal_tools::GoalDecision::Wait
+                                    {
+                                        let Some(wait) = deps
+                                            .session_seam
+                                            .prepare_goal_work_wait(session, &call.id)
+                                            .await?
+                                        else {
+                                            append_internal_tool_result(session, turn.provider_meta.data_envelope.as_ref(), mint(), &call.id,
+                                                "no_goal_background_tasks: no normal background task of this goal is available to wait for. Inspect saved results and choose continue, ask_user, complete, or blocked. Use wait_subagents for child dependencies.".into(),
+                                                crate::goal_tools::CONTROL_GOAL_TOOL_NAME)?;
+                                            deps.session_seam.save(session).await?;
+                                            finish_tool(session, &call.id, false, sink);
+                                            continue;
+                                        };
+                                        crate::goal::GoalControl::WaitForWork {
+                                            wait,
+                                            message: proposal.message,
+                                        }
+                                    } else {
                                         proposal.into_control(sources).inspect_err(|error| {
                                             tool_observation.input_error(error);
-                                        })?;
+                                        })?
+                                    };
                                     tool_observation.stage(
                                         crate::model_observability::Stage::Preflight,
                                         crate::model_observability::StageOutcome::Passed,
@@ -5468,6 +5518,9 @@ async fn run_inner_impl(
                                         crate::goal_tools::CONTROL_GOAL_TOOL_NAME,
                                     )?;
                                     let summary = match &control {
+                                        crate::goal::GoalControl::WaitForWork {
+                                            message, ..
+                                        } => message,
                                         crate::goal::GoalControl::Continue { progress, .. } => {
                                             progress
                                         }

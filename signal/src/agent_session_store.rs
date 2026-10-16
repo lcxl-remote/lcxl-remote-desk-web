@@ -858,12 +858,12 @@ impl SignalAgentSessionStore {
             {
                 return Ok(false);
             }
-            let safe_to_resume = !matches!(
-                &session.execution_state,
-                ExecutionState::OutcomeUnknown { .. }
-            ) && !session.permission_requests.iter().any(|request| {
-                request.state == desk_diagnose_core::dynamic_run::PermissionRequestState::Pending
-            }) && session.pending_schedule_review.is_none();
+            let safe_to_resume = !session.execution_state.has_unresolved_outcome()
+                && !session.permission_requests.iter().any(|request| {
+                    request.state
+                        == desk_diagnose_core::dynamic_run::PermissionRequestState::Pending
+                })
+                && session.pending_schedule_review.is_none();
             let previous = (goal.state_version, goal.lease_epoch);
             goal.recover_interrupted_slice(safe_to_resume, now_ms)
                 .map_err(|_| internal("invalid lapsed goal recovery"))?;
@@ -2008,6 +2008,19 @@ impl SessionSeam for SignalAgentSessionStore {
             .await
             .map_err(|error| internal(format!("settle AI Assistant goal: {error}")))?;
         Ok(())
+    }
+
+    async fn prepare_goal_work_wait(
+        &self,
+        session: &PersistedAgentSession,
+        call_id: &str,
+    ) -> Result<Option<desk_diagnose_core::goal_continuation::GoalWorkWait>, AgentError> {
+        let goal = crate::agent_goal_store::load_claimed(&self.db, session)
+            .await
+            .map_err(|error| internal(format!("prepare goal work wait: {error}")))?;
+        crate::goal_work::prepare_on(&self.db, &goal, session, call_id)
+            .await
+            .map_err(|error| internal(format!("prepare goal work wait: {error}")))
     }
 
     async fn load_claimed_goal(

@@ -354,7 +354,8 @@ impl<S: AgentFrameSink> TurnSink for StreamingTurnSink<S> {
 /// details that could be fed back to a model.
 pub fn terminal_error_for(outcome: &LoopOutcome) -> Option<AgentError> {
     let err = match outcome {
-        LoopOutcome::Answered(_)
+        LoopOutcome::GoalYielded
+        | LoopOutcome::Answered(_)
         | LoopOutcome::GoalControlled { .. }
         | LoopOutcome::Superseded { .. }
         | LoopOutcome::PermissionRequested { .. }

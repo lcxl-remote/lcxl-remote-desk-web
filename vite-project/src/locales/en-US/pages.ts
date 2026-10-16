@@ -1851,7 +1851,7 @@ export default {
   'pages.aiAssistant.goalStates.completed': 'Completed',
   'pages.aiAssistant.goalStates.failed': 'Failed',
   'pages.aiAssistant.goalStates.cancelled': 'Cancelled',
-  'pages.aiAssistant.goalReasons.reconcile_interrupted_work': 'An earlier action is still running or needs reconciliation. Check its receipt first.',
+  'pages.aiAssistant.goalReasons.reconcile_interrupted_work': 'An earlier action was interrupted or its outcome is unknown. Check its receipt before continuing.',
   'pages.aiAssistant.goalReasons.recovered_after_reconciliation': 'The earlier action was reconciled. The goal will continue.',
   'pages.aiAssistant.goalReasons.absolute_deadline_reached': 'The goal deadline has passed.',
   'pages.aiAssistant.goalReasons.budget_exhausted': 'The goal budget is exhausted. Increase it to continue.',

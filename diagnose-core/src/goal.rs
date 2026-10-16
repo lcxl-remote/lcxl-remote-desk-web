@@ -1,6 +1,5 @@
 //! Durable, provider-neutral limits and state transitions for a continued goal.
 
-use crate::chat::ChatRole;
 use crate::dynamic_run::{AGENT_RUN_EVENT_SCHEMA_VERSION, AgentRunEvent, AgentRunEventKind};
 use crate::session::PersistedAgentSession;
 use desk_agent_protocol::ai_assistant::goal_budget::{GoalBudgetLimits, GoalBudgetPolicy};
@@ -8,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const GOAL_SCHEMA_VERSION: u16 = 2;
+pub const GOAL_SCHEMA_VERSION: u16 = 3;
 pub const DEFAULT_ACTIVE_TIME_MS: u64 = 2 * 60 * 60 * 1_000;
 pub const DEFAULT_DEADLINE_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
 pub const DEFAULT_MODEL_TOKENS: u64 = 10_000_000;
@@ -547,6 +546,7 @@ pub struct GoalCheckpoint {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GoalLedgerEvent {
+    pub claim: Option<crate::goal_continuation::GoalClaimBinding>,
     pub event: AgentRunEvent,
     pub goal_id: String,
     pub goal_revision: u64,
@@ -575,6 +575,7 @@ impl GoalLedgerEvent {
         }
         let identity = format!("{}:{}:{}", goal.goal_id, goal.state_version, kind.as_str());
         let event = Self {
+            claim: None,
             event: AgentRunEvent {
                 schema_version: AGENT_RUN_EVENT_SCHEMA_VERSION,
                 event_id: format!("goal-event-{:x}", Sha256::digest(identity.as_bytes())),
@@ -598,8 +599,41 @@ impl GoalLedgerEvent {
         Ok(event)
     }
 
+    pub fn bind_claim(
+        &mut self,
+        goal: &GoalRun,
+        session: &PersistedAgentSession,
+    ) -> Result<(), GoalError> {
+        if self.event.kind != AgentRunEventKind::GoalSliceClaimed
+            || session.conversation_id != goal.conversation_id
+            || session.input_revision != goal.input_revision
+            || session
+                .focus_epoch
+                .goal_segment
+                .as_ref()
+                .is_none_or(|segment| {
+                    segment.goal_id != goal.goal_id
+                        || segment.segment_seq != goal.slice_seq
+                        || segment.goal_revision != goal.goal_revision
+                        || segment.lease_epoch != goal.lease_epoch
+                })
+        {
+            return Err(GoalError::InvalidState);
+        }
+        self.claim = Some(crate::goal_continuation::GoalClaimBinding::from_session(
+            session,
+        )?);
+        self.validate_for(goal)
+    }
+
     pub fn validate_for(&self, goal: &GoalRun) -> Result<(), GoalError> {
         self.event.validate().map_err(|_| GoalError::InvalidState)?;
+        if let Some(claim) = &self.claim {
+            claim.validate()?;
+            if self.event.kind != AgentRunEventKind::GoalSliceClaimed {
+                return Err(GoalError::InvalidState);
+            }
+        }
         if self.event.run_id != goal.conversation_id
             || self.event.input_revision != goal.input_revision
             || self.event.correlation_id.as_deref() != Some(goal.goal_id.as_str())
@@ -841,6 +875,10 @@ pub enum GoalError {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "decision", rename_all = "snake_case", deny_unknown_fields)]
 pub enum GoalControl {
+    WaitForWork {
+        wait: crate::goal_continuation::GoalWorkWait,
+        message: String,
+    },
     Continue {
         progress: String,
         next_step: String,
@@ -862,6 +900,7 @@ pub enum GoalControl {
 /// a fail-closed pause after protocol, budget, or lease-independent failures.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GoalSegmentEnd {
+    Yield,
     Control(GoalControl),
     Pause(GoalPauseReason),
     /// Only the runtime can classify an upstream model failure as transient.
@@ -943,6 +982,7 @@ impl GoalControl {
                 && !evidence_ids.is_empty()
                 && evidence_ids.len() <= 32
                 && evidence_ids.iter().all(|value| bounded(value)) => {}
+            Self::WaitForWork { wait, message } if bounded(message) && wait.validate().is_ok() => {}
             Self::Blocked { reason } if bounded(reason) => {}
             _ => return Err(GoalError::InvalidIdentity),
         }
@@ -1004,6 +1044,7 @@ pub struct GoalRun {
     pub model_wait_attempts: u8,
     pub lease_epoch: u64,
     pub status_reason: Option<String>,
+    pub work_wait: Option<crate::goal_continuation::GoalWorkWait>,
     pub checkpoint: Option<GoalCheckpoint>,
     pub last_progress_event_seq: Option<u64>,
     pub updated_at_unix_ms: u64,
@@ -1073,64 +1114,16 @@ impl GoalCompletionReference {
 }
 
 impl GoalRun {
-    pub fn owns_waited_work(&self, task_id: &str) -> bool {
-        self.checkpoint.as_ref().is_some_and(|checkpoint| {
-            checkpoint.summary.strip_prefix("Waiting for ") == Some(task_id)
-                && checkpoint.evidence_ids.iter().any(|id| id == task_id)
-        })
-    }
-
-    pub fn owned_pending_work_event_ids(&self, session: &PersistedAgentSession) -> Vec<String> {
-        session
-            .pending_auto_triggers
-            .iter()
-            .filter(|pending| {
-                session.conversation.iter().any(|message| {
-                    message.message_id == pending.event_id
-                        && message
-                            .background_task_id
-                            .as_deref()
-                            .is_some_and(|task_id| self.owns_waited_work(task_id))
-                        && message.pending_delivery_format.is_some()
-                })
-            })
-            .map(|pending| pending.event_id.clone())
-            .collect()
-    }
-
-    /// A work wakeup requires the server's settled completion receipt for the
-    /// exact task this goal is waiting on. Model text and an initial dispatch
-    /// placeholder are not completion evidence.
-    pub fn completed_work_event_id<'a>(
-        &self,
-        session: &'a PersistedAgentSession,
-    ) -> Option<&'a str> {
-        if self.state != GoalState::Waiting(GoalWaitReason::Work)
-            || session.input_revision != self.input_revision
-        {
-            return None;
-        }
-        let task_id = self.status_reason.as_deref()?;
-        if session
-            .execution_state
-            .tasks()
-            .iter()
-            .any(|task| task.action_request_id == task_id)
-        {
-            return None;
-        }
-        session
-            .conversation
-            .iter()
-            .find(|message| {
-                message.background_task_id.as_deref() == Some(task_id)
-                    && matches!(message.role, ChatRole::Tool | ChatRole::UntrustedOutput)
-                    && message.pending_delivery_format.is_some()
-            })
-            .map(|message| message.message_id.as_str())
-    }
-
     pub fn validate(&self) -> Result<(), GoalError> {
+        if let Some(wait) = &self.work_wait {
+            wait.validate()?;
+            if wait.goal_id != self.goal_id
+                || wait.input_revision != self.input_revision
+                || wait.goal_revision != self.goal_revision
+            {
+                return Err(GoalError::InvalidState);
+            }
+        }
         if self.schema_version != GOAL_SCHEMA_VERSION
             || self.input_revision == 0
             || self.goal_revision == 0
@@ -1343,6 +1336,7 @@ impl GoalRun {
             model_wait_attempts: 0,
             lease_epoch: 0,
             status_reason: None,
+            work_wait: None,
             checkpoint: None,
             last_progress_event_seq: None,
             updated_at_unix_ms: created_at_unix_ms,
@@ -1747,6 +1741,10 @@ impl GoalRun {
         if matches!(control, GoalControl::Complete { .. }) && !no_pending_work {
             return Err(GoalError::InvalidState);
         }
+        if matches!(control, GoalControl::WaitForWork { wait, .. } if !wait.matches(self, wait.control_revision))
+        {
+            return Err(GoalError::InvalidState);
+        }
         if now_unix_ms < self.updated_at_unix_ms
             || checkpoint_event_seq == 0
             || self
@@ -1757,6 +1755,9 @@ impl GoalRun {
             return Err(GoalError::InvalidState);
         }
         let (summary, evidence_ids) = match control {
+            GoalControl::WaitForWork { wait, message } => {
+                (message.clone(), vec![wait.wait_id.clone()])
+            }
             GoalControl::Continue { progress, .. } => (progress.clone(), Vec::new()),
             GoalControl::Wait { reference_id, .. } => (
                 format!("Waiting for {reference_id}"),
@@ -1805,6 +1806,7 @@ impl GoalRun {
                 GoalState::Paused(GoalPauseReason::Stalled)
             }
             GoalControl::Continue { .. } => GoalState::Queued,
+            GoalControl::WaitForWork { .. } => GoalState::Waiting(GoalWaitReason::Work),
             GoalControl::Wait { reason, .. } => GoalState::Waiting(*reason),
             GoalControl::Complete { .. } => GoalState::Completed,
             GoalControl::Blocked { .. } => GoalState::Blocked,
@@ -1823,6 +1825,7 @@ impl GoalRun {
         }
         self.model_wait_attempts = 0;
         self.status_reason = match control {
+            GoalControl::WaitForWork { wait, .. } => Some(wait.wait_id.clone()),
             GoalControl::Continue { next_step, .. } => Some(next_step.clone()),
             GoalControl::Wait { reference_id, .. } => Some(reference_id.clone()),
             GoalControl::Complete { summary, .. } => Some(summary.clone()),
@@ -1830,6 +1833,9 @@ impl GoalRun {
         };
         if self.state == GoalState::Paused(GoalPauseReason::Budget) {
             self.status_reason = Some("budget_exhausted".into());
+        }
+        if let GoalControl::WaitForWork { wait, .. } = control {
+            self.work_wait = Some(wait.clone());
         }
         self.checkpoint = Some(checkpoint);
         if progressed {
@@ -2083,6 +2089,7 @@ impl GoalRun {
                 .checked_add(1)
                 .ok_or(GoalError::ArithmeticOverflow)?;
         }
+        self.work_wait = None;
         self.input_revision = next_revision;
         self.state_version = state_version;
         self.state = if now_unix_ms >= self.deadline_unix_ms {
@@ -2198,6 +2205,7 @@ impl GoalRun {
         {
             return Err(GoalError::InvalidState);
         }
+        self.work_wait = None;
         self.goal_text = text.to_owned();
         self.source_message_id = source_message_id.to_owned();
         self.goal_revision = self
@@ -3241,11 +3249,6 @@ mod tests {
             1_002,
         )
         .unwrap();
-        assert!(goal.owns_waited_work("task-1"));
-        assert!(!goal.owns_waited_work("task-2"));
-        let mut stopped = goal.clone();
-        stopped.cancel_settled(1_003).unwrap();
-        assert!(stopped.owns_waited_work("task-1"));
         let used = goal.used;
         goal.defer_work_recheck(1_003).unwrap();
         assert_eq!(goal.state, GoalState::Waiting(GoalWaitReason::Work));
@@ -3256,74 +3259,6 @@ mod tests {
         goal.wake_from(GoalWaitReason::Work, 6_003).unwrap();
         assert_eq!(goal.state, GoalState::Queued);
         assert_eq!(goal.claim_slice(6_004), Ok((2, 2)));
-    }
-
-    #[test]
-    fn background_wake_requires_the_matching_server_completion_receipt() {
-        let mut goal = goal();
-        let (_, epoch) = goal.claim_slice(1_001).unwrap();
-        goal.finish_slice(
-            1,
-            1,
-            epoch,
-            &GoalControl::Wait {
-                reason: GoalWaitReason::Work,
-                reference_id: "task-1".into(),
-            },
-            false,
-            false,
-            1,
-            vec![],
-            1_002,
-        )
-        .unwrap();
-        let mut session = PersistedAgentSession::new(
-            "run",
-            "owner",
-            "device",
-            1,
-            desk_agent_protocol::AgentScope {
-                granted: vec![],
-                mode: desk_agent_protocol::ExecutionMode::ReadOnly,
-                expires_at: None,
-                policy_name: None,
-            },
-            "2026-09-23T00:00:00Z",
-        );
-        session.input_revision = 1;
-        let mut wrong = crate::chat::ChatMessage::tool_result("other-event", "call", "done");
-        wrong.background_task_id = Some("task-2".into());
-        wrong.pending_delivery_format = Some(crate::seam::ToolOutputFormat::Text);
-        session.conversation.push(wrong);
-        assert_eq!(goal.completed_work_event_id(&session), None);
-        let mut placeholder =
-            crate::chat::ChatMessage::tool_result("placeholder", "call", "pending");
-        placeholder.background_task_id = Some("task-1".into());
-        session.conversation.push(placeholder);
-        assert_eq!(goal.completed_work_event_id(&session), None);
-        let mut completion = crate::chat::ChatMessage::tool_result("completion", "call", "done");
-        completion.background_task_id = Some("task-1".into());
-        completion.pending_delivery_format = Some(crate::seam::ToolOutputFormat::Text);
-        session.conversation.push(completion);
-        assert_eq!(goal.completed_work_event_id(&session), Some("completion"));
-        session
-            .pending_auto_triggers
-            .push(crate::session::PendingAutoTrigger {
-                work_id: 1,
-                kind: crate::session::WorkKind::AgentExec,
-                execution_id: "execution".into(),
-                tool_call_id: "call".into(),
-                event_id: "completion".into(),
-                chain_id: "chain".into(),
-                resolution_org_id: None,
-                since: "2026-09-23T00:00:00Z".into(),
-            });
-        assert_eq!(
-            goal.owned_pending_work_event_ids(&session),
-            vec!["completion".to_string()]
-        );
-        session.input_revision = 2;
-        assert_eq!(goal.completed_work_event_id(&session), None);
     }
 
     #[test]

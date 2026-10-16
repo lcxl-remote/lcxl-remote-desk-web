@@ -17,6 +17,7 @@ pub const MAX_CONTROL_MESSAGE_CHARS: usize = 512;
 #[serde(rename_all = "snake_case")]
 pub enum GoalDecision {
     Continue,
+    Wait,
     Complete,
     Blocked,
     AskUser,
@@ -32,6 +33,9 @@ pub struct GoalControlProposal {
 impl GoalControlProposal {
     pub fn into_control(self, evidence_ids: Vec<String>) -> Result<GoalControl, AgentError> {
         let control = match self.decision {
+            GoalDecision::Wait => {
+                return Err(invalid("wait requires server-bound background tasks"));
+            }
             GoalDecision::Continue => GoalControl::Continue {
                 progress: self.message.clone(),
                 next_step: self.message,
@@ -105,11 +109,11 @@ pub fn registry() -> Vec<RegisteredTool> {
     vec![RegisteredTool {
         spec: ToolSpec {
             name: CONTROL_GOAL_TOOL_NAME.into(),
-            description: "End the current long-running goal segment using exactly decision and message. Choose continue and describe factual progress and the next step; complete and explain the verified result; blocked and explain the concrete blocker; or ask_user and write the exact question for the owner. The server binds completion sources and handles pending approvals and work automatically. ask_user stops the goal until the owner replies. This changes planning state and grants no device authority. Call it alone after earlier tool results are saved. Example: {\"decision\":\"complete\",\"message\":\"Read 6+8=14 from the calculator.\"}".into(),
+            description: "End the current long-running goal segment using exactly decision and message. Choose continue when independent work remains, even while background tasks run; wait when no independent work remains until a current goal background task finishes (the server binds task identities; supply no task IDs); complete and explain the verified result; blocked and explain the concrete blocker; or ask_user and write the exact question for the owner. The server binds completion sources and handles pending approvals and work automatically. ask_user stops the goal until the owner replies. This changes planning state and grants no device authority. Call it alone after earlier tool results are saved. Example: {\"decision\":\"complete\",\"message\":\"Read 6+8=14 from the calculator.\"}".into(),
             parameters_schema: json!({
                 "type": "object",
                 "properties": {
-                    "decision": {"type": "string", "enum": ["continue", "complete", "blocked", "ask_user"]},
+                    "decision": {"type": "string", "enum": ["continue", "wait", "complete", "blocked", "ask_user"]},
                     "message": {"type": "string", "minLength": 1, "maxLength": MAX_CONTROL_MESSAGE_CHARS}
                 },
                 "required": ["decision", "message"],
@@ -154,6 +158,7 @@ pub fn recorded_decision(call: &ToolCall) -> Result<GoalDecision, AgentError> {
     Ok(match control {
         GoalControl::Continue { .. } => GoalDecision::Continue,
         GoalControl::Complete { .. } => GoalDecision::Complete,
+        GoalControl::WaitForWork { .. } => GoalDecision::Wait,
         GoalControl::Blocked { .. } => GoalDecision::Blocked,
         GoalControl::Wait { .. } => GoalDecision::AskUser,
     })
@@ -196,16 +201,23 @@ mod tests {
         let spec = &registry()[0].spec.parameters_schema;
         assert_eq!(spec["required"], json!(["decision", "message"]));
         assert_eq!(spec["properties"].as_object().unwrap().len(), 2);
-        for decision in ["continue", "complete", "blocked", "ask_user"] {
+        for decision in ["continue", "wait", "complete", "blocked", "ask_user"] {
             let proposal = parse(&call(
                 json!({"decision": decision, "message": "下一步：验证结果"}),
             ))
             .unwrap();
-            proposal
-                .into_control(vec!["server-response".into()])
-                .unwrap()
-                .validate()
-                .unwrap();
+            if decision == "wait" {
+                assert!(
+                    proposal.into_control(vec![]).is_err(),
+                    "the server must bind the wait"
+                );
+            } else {
+                proposal
+                    .into_control(vec!["server-response".into()])
+                    .unwrap()
+                    .validate()
+                    .unwrap();
+            }
             assert!(parse(&call(json!({"decision": decision}))).is_err());
             assert!(parse(&call(json!({"decision": decision, "message": "  "}))).is_err());
             assert!(
@@ -215,7 +227,7 @@ mod tests {
                 .is_err()
             );
         }
-        assert!(parse(&call(json!({"decision": "wait", "message": "why"}))).is_err());
+        assert!(parse(&call(json!({"decision": "unknown", "message": "why"}))).is_err());
     }
 
     #[test]

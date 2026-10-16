@@ -168,7 +168,7 @@ fn binding(
         != desk_diagnose_core::native_ids::capability_completion(&payload.call_id)
         || !matches!(
             work.completion_delivery_state.as_str(),
-            "pending" | "consumed"
+            "pending" | "published" | "consumed"
         )
     {
         return Err(invalid());
@@ -295,8 +295,10 @@ pub(super) fn terminal_result(
 impl SignalCapabilityGrantStore {
     /// Uses the caller's source/control transaction. Reading original facts never
     /// consumes delivery, reserves a grant or opens a nested SQLite writer.
-    pub(crate) async fn computer_facts_on(
-        txn: &DatabaseTransaction,
+    pub(crate) async fn computer_facts_on<
+        C: sea_orm::ConnectionTrait + crate::config::ConfigConnection,
+    >(
+        txn: &C,
         generation: &str,
     ) -> Result<
         (
@@ -653,7 +655,10 @@ impl SignalCapabilityGrantStore {
             }
             agent_action_item::Entity::update_many()
                 .filter(agent_action_item::Column::Id.eq(row.id))
-                .filter(agent_action_item::Column::CompletionDeliveryState.eq("pending"))
+                .filter(
+                    agent_action_item::Column::CompletionDeliveryState
+                        .is_in(["pending", "published"]),
+                )
                 .col_expr(
                     agent_action_item::Column::CompletionDeliveryState,
                     Expr::value("consumed"),

@@ -265,7 +265,7 @@ pub(crate) async fn save_main_delegation_session(
 ) -> Result<(), DbErr> {
     let txn = crate::db::begin_write(db, session_row::Entity).await?;
     let current = parent_on(&txn, &held.conversation_id, &held.actor_id, &held.device_id).await?;
-    if current.version != held.version
+    if !crate::goal_work::rebase_background_events_on(&txn, &current, held).await?
         || current.lease_token != held.lease_token
         || current.input_revision != held.input_revision
         || current.control_revision != held.control_revision

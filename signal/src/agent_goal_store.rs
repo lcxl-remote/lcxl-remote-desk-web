@@ -305,8 +305,8 @@ pub async fn apply_owner_action(
     }
     if action == GoalOwnerAction::Resume
         && goal.state == GoalState::Paused(GoalPauseReason::Recovery)
-        && (session.execution_state != desk_diagnose_core::session::ExecutionState::None
-            || !session.unclosed_tool_call_ids().is_empty()
+        && (desk_diagnose_core::goal_continuation::unresolved_work(&session)
+            || !crate::goal_work::all_tracked_on(&txn, &session).await?
             || session.permission_requests.iter().any(|request| {
                 request.state == desk_diagnose_core::dynamic_run::PermissionRequestState::Pending
             }))
@@ -1001,7 +1001,15 @@ async fn scheduler_transition(
     }
     let previous_state_version = goal.state_version;
     let previous_lease_epoch = goal.lease_epoch;
-    let completed_work_event_id = goal.completed_work_event_id(&session).map(str::to_owned);
+    let native_event_ids = if goal
+        .work_wait
+        .as_ref()
+        .is_some_and(|wait| goal.status_reason.as_deref() == Some(wait.wait_id.as_str()))
+    {
+        crate::goal_work::delivered_event_ids_on(&txn, &goal, &session).await?
+    } else {
+        vec![]
+    };
     let subagent_wait_ready =
         crate::agent_subagent_store::goal_wait_ready_on(&txn, &session, &goal).await?;
     match (goal.state, transition) {
@@ -1038,16 +1046,33 @@ async fn scheduler_transition(
             goal.wake_from(GoalWaitReason::Model, now_ms)
         }
         (GoalState::Waiting(GoalWaitReason::Work), SchedulerTransition::WorkWake)
-            if completed_work_event_id.is_some() || subagent_wait_ready =>
+            if goal.work_wait.as_ref().is_some_and(|wait| {
+                goal.status_reason.as_deref() == Some(wait.wait_id.as_str())
+            }) && crate::goal_work::unresolved_wait_on(&txn, &goal, &session).await? =>
         {
+            goal.pause_settled(GoalPauseReason::Recovery, now_ms)
+                .and_then(|_| {
+                    goal.status_reason = Some("reconcile_interrupted_work".into());
+                    goal.validate()
+                })
+        }
+        (GoalState::Waiting(GoalWaitReason::Work), SchedulerTransition::WorkWake)
+            if subagent_wait_ready || !native_event_ids.is_empty() =>
+        {
+            if !native_event_ids.is_empty()
+                && let Some(wait) = &mut goal.work_wait
+            {
+                wait.ready = true;
+                wait.ready_event_ids = native_event_ids;
+            }
             goal.wake_from(GoalWaitReason::Work, now_ms)
         }
         (GoalState::Waiting(GoalWaitReason::Work), SchedulerTransition::WorkWake) => {
             goal.defer_work_recheck(now_ms)
         }
         (GoalState::Queued, SchedulerTransition::RecoveryPause)
-            if session.execution_state != desk_diagnose_core::session::ExecutionState::None
-                || !session.unclosed_tool_call_ids().is_empty() =>
+            if desk_diagnose_core::goal_continuation::unresolved_work(&session)
+                || !crate::goal_work::all_tracked_on(&txn, &session).await? =>
         {
             goal.pause_for_unresolved_work(now_ms)
         }
@@ -1063,12 +1088,6 @@ async fn scheduler_transition(
         _ => return Ok(None),
     }
     .map_err(|_| invalid())?;
-    if goal.state == GoalState::Queued
-        && matches!(transition, SchedulerTransition::WorkWake)
-        && let Some(event_id) = completed_work_event_id
-    {
-        session.remove_pending_auto_trigger(&event_id);
-    }
     let event_seq = session.last_event_seq.checked_add(1).ok_or_else(invalid)?;
     session.last_event_seq = event_seq;
     session.version = session_row.version.checked_add(1).ok_or_else(invalid)?;
@@ -1314,8 +1333,9 @@ pub async fn claim_slice(
     if !session.agent_role.is_main()
         || session.surface != AgentSessionSurface::AiAssistant
         || !session.turn_state.can_claim()
-        || session.execution_state != desk_diagnose_core::session::ExecutionState::None
-        || !session.unclosed_tool_call_ids().is_empty()
+        || desk_diagnose_core::goal_continuation::unresolved_work(&session)
+        || desk_diagnose_core::goal_continuation::pending_approval(&session)
+        || !crate::goal_work::all_tracked_on(&txn, &session).await?
         || session_row
             .lease_deadline
             .as_ref()
@@ -1388,9 +1408,6 @@ pub async fn claim_slice(
         session.ready_subagent_wait = None;
         session.ready_subagent_notification = None;
     }
-    for event_id in goal.owned_pending_work_event_ids(&session) {
-        session.remove_pending_auto_trigger(&event_id);
-    }
     let (slice_seq, _) = goal.claim_slice(now_ms).map_err(|_| invalid())?;
     session
         .begin_goal_segment(
@@ -1413,13 +1430,14 @@ pub async fn claim_slice(
         .map_err(|_| invalid())?;
     session.adopt_trigger(TriggerOrigin::GoalContinuation, &params.turn_id);
     session.last_event_seq = session.last_event_seq.checked_add(1).ok_or_else(invalid)?;
-    let ledger = GoalLedgerEvent::new(
+    let mut ledger = GoalLedgerEvent::new(
         &goal,
         AgentRunEventKind::GoalSliceClaimed,
         session.last_event_seq,
         params.now.clone(),
     )
     .map_err(|_| invalid())?;
+    ledger.bind_claim(&goal, &session).map_err(|_| invalid())?;
     session.version = session_row.version.checked_add(1).ok_or_else(invalid)?;
     let session_state = session.encode_json_for_storage().map_err(|_| invalid())?;
     let deadline = now + Duration::seconds(90);
@@ -1595,6 +1613,11 @@ fn control_has_required_fact(session: &PersistedAgentSession, control: &GoalCont
                         && wait.validate().is_ok()
                 })
         }
+        GoalControl::WaitForWork { wait, .. } => {
+            wait.control_revision == session.control_revision
+                && wait.input_revision == session.input_revision
+                && wait.validate().is_ok()
+        }
         GoalControl::Complete { .. } => no_pending_work(session) && session.subagent_wait.is_none(),
         _ => true,
     }
@@ -1633,7 +1656,9 @@ pub async fn settle_slice(
     if let Ok(goal) = settled_by_removal(&txn, &segment.goal_id).await {
         return Ok(goal);
     }
-    if session_row.version != session.version
+    let persisted =
+        PersistedAgentSession::decode_json(&session_row.state_json).map_err(|_| invalid())?;
+    if !crate::goal_work::rebase_background_events_on(&txn, &persisted, session).await?
         || session_row.lease_token != as_i64(session.lease_token)?
         || session_row
             .lease_deadline
@@ -1641,8 +1666,6 @@ pub async fn settle_slice(
     {
         return Err(invalid());
     }
-    let persisted =
-        PersistedAgentSession::decode_json(&session_row.state_json).map_err(|_| invalid())?;
     if !persisted.turn_state.is_active()
         || persisted.input_revision != session.input_revision
         || persisted.focus_epoch.goal_segment.as_ref() != Some(&segment)
@@ -1693,8 +1716,29 @@ pub async fn settle_slice(
     let progressed = goal
         .observe_result_fingerprints(result_fingerprints)
         .map_err(|_| invalid())?;
+    if let GoalSegmentEnd::Control(GoalControl::WaitForWork { wait, .. }) = end {
+        crate::goal_work::validate_wait_on(&txn, &goal, session, wait).await?;
+    } else if matches!(end, GoalSegmentEnd::Control(_))
+        && goal.work_wait.as_ref().is_some_and(|wait| wait.ready)
+    {
+        goal.work_wait = None;
+    }
     let event_seq = session.last_event_seq.checked_add(1).ok_or_else(invalid)?;
     match end {
+        GoalSegmentEnd::Yield => goal.finish_slice(
+            session.input_revision,
+            segment.goal_revision,
+            segment.lease_epoch,
+            &GoalControl::Continue {
+                progress: "Planning segment yielded at its step limit".into(),
+                next_step: "Continue the approved goal".into(),
+            },
+            progressed,
+            no_pending_work(session),
+            event_seq,
+            session.focus_epoch.selected_attachment_ids.clone(),
+            now_ms,
+        ),
         GoalSegmentEnd::Control(control) => goal.finish_slice(
             session.input_revision,
             segment.goal_revision,
@@ -1795,6 +1839,7 @@ pub async fn settle_slice(
 
 #[cfg(test)]
 mod lifecycle_tests {
+    mod continuation;
     use super::*;
 
     async fn db() -> DatabaseConnection {

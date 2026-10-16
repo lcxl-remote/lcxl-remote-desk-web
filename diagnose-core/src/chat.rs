@@ -32,7 +32,7 @@ pub fn background_task_running_result(background_task_id: &str) -> String {
         "background_task_id": background_task_id,
         "completion_delivery": "automatic",
         "polling_required": false,
-        "next_step": "Do not repeatedly poll this task. Continue independent work if available; otherwise end this turn with a brief pending-status answer. The system will deliver the original completion result automatically. Ending the turn does not cancel the task or mean it is complete.",
+        "next_step": "Do not repeatedly poll this task. Continue independent work if available. In an approved goal, use control_goal continue for further planning or control_goal wait when native background results are needed; use wait_subagents for child dependencies. Outside a goal, end this turn with a brief pending-status answer when no independent work remains. The system will deliver the original completion result automatically. Ending the turn does not cancel the task or mean it is complete.",
     })
     .to_string()
 }

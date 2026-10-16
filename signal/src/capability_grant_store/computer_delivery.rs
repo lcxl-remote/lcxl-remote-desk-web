@@ -382,7 +382,10 @@ impl SignalCapabilityGrantStore {
                 .filter(agent_action_item::Column::Id.gt(cursor))
                 .filter(agent_action_item::Column::Id.lte(upper))
                 .filter(agent_action_item::Column::Kind.eq(CAPABILITY_WORK_KIND))
-                .filter(agent_action_item::Column::CompletionDeliveryState.eq("pending"))
+                .filter(
+                    agent_action_item::Column::CompletionDeliveryState
+                        .is_in(["pending", "published"]),
+                )
                 .filter(agent_action_item::Column::ResultSchemaVersion.eq(2))
                 .filter(
                     agent_action_item::Column::Status
@@ -417,25 +420,43 @@ impl SignalCapabilityGrantStore {
                             .await
                             .map_err(|_| invalid())?;
                     }
+                    let delivered = if row.completion_delivery_state == "published" {
+                        EventAppend::AlreadyPresent
+                    } else {
+                        self.deliver_computer_result(&outbox.dispatch_id).await?
+                    };
                     if matches!(
-                        self.deliver_computer_result(&outbox.dispatch_id).await?,
+                        delivered,
                         EventAppend::Appended | EventAppend::AlreadyPresent
-                    ) && legacy
-                        .follow_up_completion(
-                            &sessions,
-                            &row,
-                            &Utc::now().to_rfc3339(),
-                            WorkKind::ComputerAction,
-                        )
-                        .await?
-                    {
-                        self.consume_computer_result(
-                            &row.completion_event_id,
-                            &row.conversation_id,
-                            &row.actor_id,
-                            &row.target_device_id,
-                        )
-                        .await?;
+                    ) {
+                        agent_action_item::Entity::update_many()
+                            .col_expr(
+                                agent_action_item::Column::CompletionDeliveryState,
+                                Expr::value("published"),
+                            )
+                            .filter(agent_action_item::Column::Id.eq(row.id))
+                            .filter(
+                                agent_action_item::Column::CompletionDeliveryState.eq("pending"),
+                            )
+                            .exec(&self.db)
+                            .await?;
+                        if legacy
+                            .follow_up_completion(
+                                &sessions,
+                                &row,
+                                &Utc::now().to_rfc3339(),
+                                WorkKind::ComputerAction,
+                            )
+                            .await?
+                        {
+                            self.consume_computer_result(
+                                &row.completion_event_id,
+                                &row.conversation_id,
+                                &row.actor_id,
+                                &row.target_device_id,
+                            )
+                            .await?;
+                        }
                     }
                     Ok::<(), DbErr>(())
                 }
