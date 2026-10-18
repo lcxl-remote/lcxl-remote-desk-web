@@ -25,9 +25,15 @@ impl SubAgentStore {
         control: &AiAssistantStopControl,
     ) -> Result<MainStopOutcome, DbErr> {
         validate(control)?;
-        let txn = crate::db::begin_write(&self.db, session_row::Entity).await?;
+        let txn = desk_diagnose_core::future::boxed(|| async {
+            crate::db::begin_write(&self.db, session_row::Entity).await
+        })
+        .await?;
 
-        let parent = parent_on(&txn, root, actor, device).await?;
+        let parent = desk_diagnose_core::future::boxed(|| async {
+            parent_on(&txn, root, actor, device).await
+        })
+        .await?;
         let key = format!(
             "{:x}",
             Sha256::digest(
@@ -39,10 +45,13 @@ impl SubAgentStore {
             "{:x}",
             Sha256::digest(serde_json::to_vec(control).map_err(|_| invalid())?)
         );
-        if let Some(receipt) = receipt_row::Entity::find()
-            .filter(receipt_row::Column::LogicalKeySha256.eq(&key))
-            .one(&txn)
-            .await?
+        if let Some(receipt) = desk_diagnose_core::future::boxed(|| async {
+            receipt_row::Entity::find()
+                .filter(receipt_row::Column::LogicalKeySha256.eq(&key))
+                .one(&txn)
+                .await
+        })
+        .await?
         {
             if receipt.operation_kind != "main_stop"
                 || receipt.root_conversation_id != root
@@ -52,7 +61,7 @@ impl SubAgentStore {
                 return Err(invalid());
             }
             let outcome = serde_json::from_str(&receipt.reservation_json).map_err(|_| invalid())?;
-            txn.commit().await?;
+            desk_diagnose_core::future::boxed(|| async { txn.commit().await }).await?;
             return Ok(outcome);
         }
         if parent.input_revision != control.expected_input_revision
@@ -60,15 +69,18 @@ impl SubAgentStore {
         {
             return Err(invalid());
         }
-        let children = run_row::Entity::find()
-            .filter(run_row::Column::RootConversationId.eq(root))
-            .filter(run_row::Column::ActorId.eq(actor))
-            .filter(run_row::Column::DeviceId.eq(device))
-            .filter(run_row::Column::State.is_not_in(["completed", "failed", "cancelled"]))
-            .order_by_asc(run_row::Column::ChildConversationId)
-            .limit(desk_diagnose_core::subagent::SUBAGENT_ROOT_CAPACITY as u64 + 1)
-            .all(&txn)
-            .await?;
+        let children = desk_diagnose_core::future::boxed(|| async {
+            run_row::Entity::find()
+                .filter(run_row::Column::RootConversationId.eq(root))
+                .filter(run_row::Column::ActorId.eq(actor))
+                .filter(run_row::Column::DeviceId.eq(device))
+                .filter(run_row::Column::State.is_not_in(["completed", "failed", "cancelled"]))
+                .order_by_asc(run_row::Column::ChildConversationId)
+                .limit(desk_diagnose_core::subagent::SUBAGENT_ROOT_CAPACITY as u64 + 1)
+                .all(&txn)
+                .await
+        })
+        .await?;
         if children.len() > desk_diagnose_core::subagent::SUBAGENT_ROOT_CAPACITY
             || (!children.is_empty() && control.subagent_choice.is_none())
         {
@@ -90,64 +102,101 @@ impl SubAgentStore {
                 desk_diagnose_core::model_observability::PermissionOutcome::Cancelled,
             );
         for group_id in group_ids {
-            let row = group_row::Entity::find()
-                .filter(group_row::Column::GroupId.eq(&group_id))
-                .filter(group_row::Column::RootConversationId.eq(root))
-                .filter(group_row::Column::ActorId.eq(actor))
-                .filter(group_row::Column::DeviceId.eq(device))
-                .one(&txn)
-                .await?
-                .ok_or_else(invalid)?;
+            let row = desk_diagnose_core::future::boxed(|| async {
+                group_row::Entity::find()
+                    .filter(group_row::Column::GroupId.eq(&group_id))
+                    .filter(group_row::Column::RootConversationId.eq(root))
+                    .filter(group_row::Column::ActorId.eq(actor))
+                    .filter(group_row::Column::DeviceId.eq(device))
+                    .one(&txn)
+                    .await
+            })
+            .await?
+            .ok_or_else(invalid)?;
             let mut group = decode_group(&row)?;
             group.stop_parent().map_err(|_| invalid())?;
-            replace_group_on(&txn, &row, &group, now.timestamp_millis()).await?;
+            desk_diagnose_core::future::boxed(|| async {
+                replace_group_on(&txn, &row, &group, now.timestamp_millis()).await
+            })
+            .await?;
             if control.subagent_choice == Some(SubAgentStopChoice::IncludeSubAgents) {
                 for child_row in children.iter().filter(|child| child.group_id == group_id) {
                     let mut run = decode_run(child_row)?;
-                    let row = session_row::Entity::find()
-                        .filter(session_row::Column::ConversationId.eq(&run.child_conversation_id))
-                        .filter(session_row::Column::ActorId.eq(actor))
-                        .filter(session_row::Column::DeviceId.eq(device))
-                        .one(&txn)
-                        .await?
-                        .ok_or_else(invalid)?;
+                    let row = desk_diagnose_core::future::boxed(|| async {
+                        session_row::Entity::find()
+                            .filter(
+                                session_row::Column::ConversationId.eq(&run.child_conversation_id),
+                            )
+                            .filter(session_row::Column::ActorId.eq(actor))
+                            .filter(session_row::Column::DeviceId.eq(device))
+                            .one(&txn)
+                            .await
+                    })
+                    .await?
+                    .ok_or_else(invalid)?;
                     let child = PersistedAgentSession::decode_json(&row.state_json)
                         .map_err(|_| invalid())?;
                     run.validate_session(&child).map_err(|_| invalid())?;
-                    super::native_cancel::cancel_native_actions_on(
-                        &txn,
-                        &child,
-                        &key,
-                        now.timestamp_millis(),
-                    )
+                    desk_diagnose_core::future::boxed(|| async {
+                        super::native_cancel::cancel_native_actions_on(
+                            &txn,
+                            &child,
+                            &key,
+                            now.timestamp_millis(),
+                        )
+                        .await
+                    })
                     .await?;
                     cancel_request_ids.extend(child.current_request_id.iter().cloned());
                     run.request_cancel(run.fence(), &now.to_rfc3339())
                         .map_err(|_| invalid())?;
                     run.settle_cancel(&now.to_rfc3339())
                         .map_err(|_| invalid())?;
-                    replace_run_on(&txn, child_row, &run, now.timestamp_millis()).await?;
+                    desk_diagnose_core::future::boxed(|| async {
+                        replace_run_on(&txn, child_row, &run, now.timestamp_millis()).await
+                    })
+                    .await?;
                     permission_ends.extend(
-                        synchronize_control_on(&txn, &run, now.timestamp_millis(), false).await?,
+                        desk_diagnose_core::future::boxed(|| async {
+                            synchronize_control_on(&txn, &run, now.timestamp_millis(), false).await
+                        })
+                        .await?,
                     );
-                    append_state_event_on(&txn, &group, &run, now.timestamp_millis()).await?;
+                    desk_diagnose_core::future::boxed(|| async {
+                        append_state_event_on(&txn, &group, &run, now.timestamp_millis()).await
+                    })
+                    .await?;
                     stopped_subagents.push(run.summary());
                 }
             }
         }
-        super::native_cancel::cancel_native_actions_on(&txn, &parent, &key, now.timestamp_millis())
-            .await?;
-        stop_main_goals_on(&txn, &parent, now.timestamp_millis()).await?;
+        desk_diagnose_core::future::boxed(|| async {
+            super::native_cancel::cancel_native_actions_on(
+                &txn,
+                &parent,
+                &key,
+                now.timestamp_millis(),
+            )
+            .await
+        })
+        .await?;
+        desk_diagnose_core::future::boxed(|| async {
+            stop_main_goals_on(&txn, &parent, now.timestamp_millis()).await
+        })
+        .await?;
         let mut stopped = parent.clone();
         desk_diagnose_core::subagent::control::stop_main_session(&mut stopped, &now.to_rfc3339())
             .map_err(|_| invalid())?;
-        let row = session_row::Entity::find()
-            .filter(session_row::Column::ConversationId.eq(root))
-            .filter(session_row::Column::ActorId.eq(actor))
-            .filter(session_row::Column::DeviceId.eq(device))
-            .one(&txn)
-            .await?
-            .ok_or_else(invalid)?;
+        let row = desk_diagnose_core::future::boxed(|| async {
+            session_row::Entity::find()
+                .filter(session_row::Column::ConversationId.eq(root))
+                .filter(session_row::Column::ActorId.eq(actor))
+                .filter(session_row::Column::DeviceId.eq(device))
+                .one(&txn)
+                .await
+        })
+        .await?
+        .ok_or_else(invalid)?;
         if row.version != parent.version
             || row.lease_token != i64::try_from(parent.lease_token).map_err(|_| invalid())?
         {
@@ -206,7 +255,7 @@ impl SubAgentStore {
         }
         .insert(&txn)
         .await?;
-        txn.commit().await?;
+        desk_diagnose_core::future::boxed(|| async { txn.commit().await }).await?;
         permission_ends.submit(
             now.timestamp_millis(),
             crate::model_metrics::runtime::submit,

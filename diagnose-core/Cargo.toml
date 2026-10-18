@@ -9,6 +9,8 @@ license.workspace = true
 [features]
 default = []
 content-safety-eval = []
+# Check unboxed phase state in host integration tests as well as core unit tests.
+stack-budget = []
 
 [dependencies]
 desk-agent-protocol = { workspace = true }

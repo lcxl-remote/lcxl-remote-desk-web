@@ -97,6 +97,32 @@ pub(crate) async fn reserve_call_with_authority_on(
     review_authority: Option<&desk_diagnose_core::subagent::reservation::ReviewCallAuthority>,
     now_ms: i64,
 ) -> Result<BudgetAdmission, DbErr> {
+    reserve_call_for_session_on(
+        CallSession::Current { txn, session },
+        logical_id,
+        kind,
+        arguments_sha256,
+        upper,
+        goal_upper,
+        review_authority,
+        now_ms,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn reserve_call_for_session_on(
+    call: CallSession<'_>,
+    logical_id: &str,
+    kind: DelegationCallKind,
+    arguments_sha256: &str,
+    upper: Usage,
+    goal_upper: Option<GoalUsage>,
+    review_authority: Option<&desk_diagnose_core::subagent::reservation::ReviewCallAuthority>,
+    now_ms: i64,
+) -> Result<BudgetAdmission, DbErr> {
+    let txn = call.txn();
+    let session = call.session();
     let group_id = session.delegation_group_id.as_deref().ok_or_else(invalid)?;
     let row = group_row::Entity::find()
         .filter(group_row::Column::GroupId.eq(group_id))
@@ -115,16 +141,17 @@ pub(crate) async fn reserve_call_with_authority_on(
     {
         return Err(invalid());
     }
-    let admitted = budget::reserve_budget_with_authority_on(
-        txn,
-        session,
-        logical_id,
-        kind,
-        arguments_sha256,
-        upper,
-        review_authority,
-        now_ms,
-    )
+    let admitted = desk_diagnose_core::future::send_phase(|| {
+        budget::reserve_budget_for_session_on(
+            call,
+            logical_id,
+            kind,
+            arguments_sha256,
+            upper,
+            review_authority,
+            now_ms,
+        )
+    })
     .await?;
     let (mut reservation, actual) = match &admitted {
         BudgetAdmission::Exhausted => return Ok(BudgetAdmission::Exhausted),
@@ -149,70 +176,73 @@ pub(crate) async fn reserve_call_with_authority_on(
         }
         return Ok(admitted);
     };
-    let old = source_goal_on(txn, &group).await?;
-    let mut goal = crate::agent_goal_store::decode(&old)?;
-    if !matches!(&admitted, BudgetAdmission::Reserved(_)) {
-        if reservation.source_goal_upper != Some(goal_upper) {
+    desk_diagnose_core::future::send_phase(|| async move {
+        let old = source_goal_on(txn, &group).await?;
+        let mut goal = crate::agent_goal_store::decode(&old)?;
+        if !matches!(&admitted, BudgetAdmission::Reserved(_)) {
+            if reservation.source_goal_upper != Some(goal_upper) {
+                return Err(invalid());
+            }
+            match actual {
+                Some(actual) => {
+                    let recorded = goal
+                        .delegation_settlements
+                        .get(&reservation.reservation_id)
+                        .ok_or_else(invalid)?;
+                    if recorded.total_tokens() != Some(actual.tokens)
+                        || u64::from(recorded.model_calls) != actual.model_calls
+                        || u64::from(recorded.tool_calls) != actual.tool_calls
+                    {
+                        return Err(invalid());
+                    }
+                }
+                None if goal
+                    .delegation_reservations
+                    .get(&reservation.reservation_id)
+                    == Some(&goal_upper) => {}
+                None => return Err(invalid()),
+            }
+            return Ok(admitted);
+        }
+        goal.apply_budget_policy(&crate::goal_budget_policy::read(txn).await?)
+            .map_err(|_| invalid())?;
+        let now = u64::try_from(now_ms)
+            .map_err(|_| invalid())?
+            .max(goal.updated_at_unix_ms);
+        match goal.reserve_delegation_with_id(&reservation.reservation_id, goal_upper, now) {
+            Ok(_) => {}
+            Err(
+                desk_diagnose_core::goal::GoalError::BudgetExceeded
+                | desk_diagnose_core::goal::GoalError::DeadlineReached,
+            ) => {
+                // The caller rolls back the allocation reservation already written.
+                return Ok(BudgetAdmission::Exhausted);
+            }
+            Err(_) => return Err(invalid()),
+        }
+        save_source_goal_on(txn, &old, &goal).await?;
+        reservation.source_goal_upper = Some(goal_upper);
+        reservation.validate().map_err(|_| invalid())?;
+        let changed = crate::entity::agent_delegation_reservation::Entity::update_many()
+            .set(crate::entity::agent_delegation_reservation::ActiveModel {
+                reservation_json: Set(serde_json::to_string(&reservation).map_err(|_| invalid())?),
+                version: Set(2),
+                ..Default::default()
+            })
+            .filter(
+                crate::entity::agent_delegation_reservation::Column::ReservationId
+                    .eq(&reservation.reservation_id),
+            )
+            .filter(crate::entity::agent_delegation_reservation::Column::Version.eq(1))
+            .filter(crate::entity::agent_delegation_reservation::Column::State.eq("reserved"))
+            .exec(txn)
+            .await?;
+        if changed.rows_affected != 1 {
             return Err(invalid());
         }
-        match actual {
-            Some(actual) => {
-                let recorded = goal
-                    .delegation_settlements
-                    .get(&reservation.reservation_id)
-                    .ok_or_else(invalid)?;
-                if recorded.total_tokens() != Some(actual.tokens)
-                    || u64::from(recorded.model_calls) != actual.model_calls
-                    || u64::from(recorded.tool_calls) != actual.tool_calls
-                {
-                    return Err(invalid());
-                }
-            }
-            None if goal
-                .delegation_reservations
-                .get(&reservation.reservation_id)
-                == Some(&goal_upper) => {}
-            None => return Err(invalid()),
-        }
-        return Ok(admitted);
-    }
-    goal.apply_budget_policy(&crate::goal_budget_policy::read(txn).await?)
-        .map_err(|_| invalid())?;
-    let now = u64::try_from(now_ms)
-        .map_err(|_| invalid())?
-        .max(goal.updated_at_unix_ms);
-    match goal.reserve_delegation_with_id(&reservation.reservation_id, goal_upper, now) {
-        Ok(_) => {}
-        Err(
-            desk_diagnose_core::goal::GoalError::BudgetExceeded
-            | desk_diagnose_core::goal::GoalError::DeadlineReached,
-        ) => {
-            // The caller rolls back the allocation reservation already written.
-            return Ok(BudgetAdmission::Exhausted);
-        }
-        Err(_) => return Err(invalid()),
-    }
-    save_source_goal_on(txn, &old, &goal).await?;
-    reservation.source_goal_upper = Some(goal_upper);
-    reservation.validate().map_err(|_| invalid())?;
-    let changed = crate::entity::agent_delegation_reservation::Entity::update_many()
-        .set(crate::entity::agent_delegation_reservation::ActiveModel {
-            reservation_json: Set(serde_json::to_string(&reservation).map_err(|_| invalid())?),
-            version: Set(2),
-            ..Default::default()
-        })
-        .filter(
-            crate::entity::agent_delegation_reservation::Column::ReservationId
-                .eq(&reservation.reservation_id),
-        )
-        .filter(crate::entity::agent_delegation_reservation::Column::Version.eq(1))
-        .filter(crate::entity::agent_delegation_reservation::Column::State.eq("reserved"))
-        .exec(txn)
-        .await?;
-    if changed.rows_affected != 1 {
-        return Err(invalid());
-    }
-    Ok(BudgetAdmission::Reserved(reservation))
+        Ok(BudgetAdmission::Reserved(reservation))
+    })
+    .await
 }
 
 /// Settlement needs the original admitted identity, never the current planner

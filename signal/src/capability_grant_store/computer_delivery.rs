@@ -364,37 +364,46 @@ impl SignalCapabilityGrantStore {
     }
 
     pub(crate) async fn publish_computer_results_once(&self) -> Result<(), DbErr> {
-        self.reconcile_computer_backgrounds_once().await?;
+        desk_diagnose_core::future::boxed(|| async {
+            self.reconcile_computer_backgrounds_once().await
+        })
+        .await?;
         // Bound this scan to its starting high-water mark. Invalid or busy rows
         // in one page must not permanently starve all later original receipts.
-        let upper = agent_action_item::Entity::find()
-            .select_only()
-            .column(agent_action_item::Column::Id)
-            .order_by_desc(agent_action_item::Column::Id)
-            .limit(1)
-            .into_tuple::<i64>()
-            .one(&self.db)
-            .await?
-            .unwrap_or(0);
+        let upper = desk_diagnose_core::future::boxed(|| async {
+            agent_action_item::Entity::find()
+                .select_only()
+                .column(agent_action_item::Column::Id)
+                .order_by_desc(agent_action_item::Column::Id)
+                .limit(1)
+                .into_tuple::<i64>()
+                .one(&self.db)
+                .await
+        })
+        .await?
+        .unwrap_or(0);
         let mut cursor = i64::MIN;
         loop {
-            let rows = agent_action_item::Entity::find()
-                .filter(agent_action_item::Column::Id.gt(cursor))
-                .filter(agent_action_item::Column::Id.lte(upper))
-                .filter(agent_action_item::Column::Kind.eq(CAPABILITY_WORK_KIND))
-                .filter(
-                    agent_action_item::Column::CompletionDeliveryState
-                        .is_in(["pending", "published"]),
-                )
-                .filter(agent_action_item::Column::ResultSchemaVersion.eq(2))
-                .filter(
-                    agent_action_item::Column::Status
-                        .is_in([CAPABILITY_WORK_SUCCEEDED, CAPABILITY_WORK_FAILED]),
-                )
-                .order_by_asc(agent_action_item::Column::Id)
-                .limit(128)
-                .all(&self.db)
-                .await?;
+            let rows = desk_diagnose_core::future::boxed(|| async {
+                agent_action_item::Entity::find()
+                    .filter(agent_action_item::Column::Id.gt(cursor))
+                    .filter(agent_action_item::Column::Id.lte(upper))
+                    .filter(agent_action_item::Column::Kind.eq(CAPABILITY_WORK_KIND))
+                    .filter(
+                        agent_action_item::Column::CompletionDeliveryState
+                            .is_in(["pending", "published"]),
+                    )
+                    .filter(agent_action_item::Column::ResultSchemaVersion.eq(2))
+                    .filter(
+                        agent_action_item::Column::Status
+                            .is_in([CAPABILITY_WORK_SUCCEEDED, CAPABILITY_WORK_FAILED]),
+                    )
+                    .order_by_asc(agent_action_item::Column::Id)
+                    .limit(128)
+                    .all(&self.db)
+                    .await
+            })
+            .await?;
             let Some(last) = rows.last() else {
                 break;
             };
@@ -405,56 +414,76 @@ impl SignalCapabilityGrantStore {
                 crate::agent_background_task_store::SignalBackgroundTaskStore::new(self.db.clone());
             for row in rows {
                 let result = async {
-                    let outbox = agent_capability_dispatch_outbox::Entity::find()
-                        .filter(agent_capability_dispatch_outbox::Column::WorkId.eq(row.id))
-                        .one(&self.db)
-                        .await?
-                        .ok_or_else(invalid)?;
-                    if let Some(session) = agent_session::Entity::find()
-                        .filter(agent_session::Column::ConversationId.eq(&row.conversation_id))
-                        .one(&self.db)
-                        .await?
-                    {
-                        sessions
-                            .settle_lapsed_session(&session, Utc::now())
+                    let outbox = desk_diagnose_core::future::boxed(|| async {
+                        agent_capability_dispatch_outbox::Entity::find()
+                            .filter(agent_capability_dispatch_outbox::Column::WorkId.eq(row.id))
+                            .one(&self.db)
                             .await
-                            .map_err(|_| invalid())?;
+                    })
+                    .await?
+                    .ok_or_else(invalid)?;
+                    if let Some(session) = desk_diagnose_core::future::boxed(|| async {
+                        agent_session::Entity::find()
+                            .filter(agent_session::Column::ConversationId.eq(&row.conversation_id))
+                            .one(&self.db)
+                            .await
+                    })
+                    .await?
+                    {
+                        desk_diagnose_core::future::boxed(|| async {
+                            sessions.settle_lapsed_session(&session, Utc::now()).await
+                        })
+                        .await
+                        .map_err(|_| invalid())?;
                     }
                     let delivered = if row.completion_delivery_state == "published" {
                         EventAppend::AlreadyPresent
                     } else {
-                        self.deliver_computer_result(&outbox.dispatch_id).await?
+                        desk_diagnose_core::future::boxed(|| async {
+                            self.deliver_computer_result(&outbox.dispatch_id).await
+                        })
+                        .await?
                     };
                     if matches!(
                         delivered,
                         EventAppend::Appended | EventAppend::AlreadyPresent
                     ) {
-                        agent_action_item::Entity::update_many()
-                            .col_expr(
-                                agent_action_item::Column::CompletionDeliveryState,
-                                Expr::value("published"),
-                            )
-                            .filter(agent_action_item::Column::Id.eq(row.id))
-                            .filter(
-                                agent_action_item::Column::CompletionDeliveryState.eq("pending"),
-                            )
-                            .exec(&self.db)
-                            .await?;
-                        if legacy
-                            .follow_up_completion(
-                                &sessions,
-                                &row,
-                                &Utc::now().to_rfc3339(),
-                                WorkKind::ComputerAction,
-                            )
-                            .await?
+                        desk_diagnose_core::future::boxed(|| async {
+                            agent_action_item::Entity::update_many()
+                                .col_expr(
+                                    agent_action_item::Column::CompletionDeliveryState,
+                                    Expr::value("published"),
+                                )
+                                .filter(agent_action_item::Column::Id.eq(row.id))
+                                .filter(
+                                    agent_action_item::Column::CompletionDeliveryState
+                                        .eq("pending"),
+                                )
+                                .exec(&self.db)
+                                .await
+                        })
+                        .await?;
+                        if desk_diagnose_core::future::boxed(|| async {
+                            legacy
+                                .follow_up_completion(
+                                    &sessions,
+                                    &row,
+                                    &Utc::now().to_rfc3339(),
+                                    WorkKind::ComputerAction,
+                                )
+                                .await
+                        })
+                        .await?
                         {
-                            self.consume_computer_result(
-                                &row.completion_event_id,
-                                &row.conversation_id,
-                                &row.actor_id,
-                                &row.target_device_id,
-                            )
+                            desk_diagnose_core::future::boxed(|| async {
+                                self.consume_computer_result(
+                                    &row.completion_event_id,
+                                    &row.conversation_id,
+                                    &row.actor_id,
+                                    &row.target_device_id,
+                                )
+                                .await
+                            })
                             .await?;
                         }
                     }

@@ -105,13 +105,16 @@ async fn prepare_on_inner(
     frozen: Option<&ApprovalReviewCandidate>,
     now_unix_ms: u64,
 ) -> Result<Option<PreparedReview>, DbErr> {
-    let row = agent_session::Entity::find()
-        .filter(agent_session::Column::ConversationId.eq(subject.conversation_id))
-        .filter(agent_session::Column::ActorId.eq(subject.actor_id))
-        .filter(agent_session::Column::DeviceId.eq(subject.device_id))
-        .one(txn)
-        .await?
-        .ok_or_else(invalid)?;
+    let row = desk_diagnose_core::future::boxed(|| async {
+        agent_session::Entity::find()
+            .filter(agent_session::Column::ConversationId.eq(subject.conversation_id))
+            .filter(agent_session::Column::ActorId.eq(subject.actor_id))
+            .filter(agent_session::Column::DeviceId.eq(subject.device_id))
+            .one(txn)
+            .await
+    })
+    .await?
+    .ok_or_else(invalid)?;
     let mut session = PersistedAgentSession::decode_json(&row.state_json).map_err(|_| invalid())?;
     session.version = row.version;
     if session.surface != AgentSessionSurface::AiAssistant
@@ -124,10 +127,13 @@ async fn prepare_on_inner(
     {
         return Err(invalid());
     }
-    let work = agent_action_item::Entity::find_by_id(subject.work_id)
-        .one(txn)
-        .await?
-        .ok_or_else(invalid)?;
+    let work = desk_diagnose_core::future::boxed(|| async {
+        agent_action_item::Entity::find_by_id(subject.work_id)
+            .one(txn)
+            .await
+    })
+    .await?
+    .ok_or_else(invalid)?;
     if work.kind != CAPABILITY_WORK_KIND
         || work.status != CAPABILITY_WORK_PREPARED
         || work.action_request_id != subject.server_call_id
@@ -155,11 +161,14 @@ async fn prepare_on_inner(
     {
         return Err(invalid());
     }
-    let grant_row = agent_capability_grant::Entity::find()
-        .filter(agent_capability_grant::Column::GrantId.eq(&prepared.grant_id))
-        .one(txn)
-        .await?
-        .ok_or_else(invalid)?;
+    let grant_row = desk_diagnose_core::future::boxed(|| async {
+        agent_capability_grant::Entity::find()
+            .filter(agent_capability_grant::Column::GrantId.eq(&prepared.grant_id))
+            .one(txn)
+            .await
+    })
+    .await?
+    .ok_or_else(invalid)?;
     if grant_row.status != GRANT_STATUS_ACTIVE {
         return Err(invalid());
     }
@@ -180,30 +189,42 @@ async fn prepare_on_inner(
         concrete_call_review_identity(&grant, subject.server_call_id, subject.canonical_input_json)
             .map_err(|_| invalid())?
             .ok_or_else(invalid)?;
-    crate::agent_approval_store::current_grant_parent_on(txn, &session, &grant, now_unix_ms)
-        .await?;
-    let stored = delegation_row::Entity::find()
-        .filter(delegation_row::Column::DelegationId.eq(&parent.delegation_id))
-        .filter(delegation_row::Column::ActorId.eq(subject.actor_id))
-        .filter(delegation_row::Column::DeviceId.eq(subject.device_id))
-        .one(txn)
-        .await?
-        .ok_or_else(invalid)?;
+    desk_diagnose_core::future::boxed(|| async {
+        crate::agent_approval_store::current_grant_parent_on(txn, &session, &grant, now_unix_ms)
+            .await
+    })
+    .await?;
+    let stored = desk_diagnose_core::future::boxed(|| async {
+        delegation_row::Entity::find()
+            .filter(delegation_row::Column::DelegationId.eq(&parent.delegation_id))
+            .filter(delegation_row::Column::ActorId.eq(subject.actor_id))
+            .filter(delegation_row::Column::DeviceId.eq(subject.device_id))
+            .one(txn)
+            .await
+    })
+    .await?
+    .ok_or_else(invalid)?;
     let delegation = crate::agent_approval_store::decode(&stored)?;
-    let config = crate::approval_model_provider::load(txn).await?;
+    let config = desk_diagnose_core::future::boxed(|| async {
+        crate::approval_model_provider::load(txn).await
+    })
+    .await?;
     if config.unavailable_reason().is_some() {
         return Err(invalid());
     }
     let model_config_revision =
         u64::try_from(config.configuration_revision).map_err(|_| invalid())?;
     let destination = config.destination_identity().map_err(|_| invalid())?;
-    let goal_row = agent_goal_run::Entity::find()
-        .filter(agent_goal_run::Column::ConversationId.eq(subject.conversation_id))
-        .filter(agent_goal_run::Column::ActorId.eq(subject.actor_id))
-        .filter(agent_goal_run::Column::DeviceId.eq(subject.device_id))
-        .filter(agent_goal_run::Column::Status.is_not_in(["completed", "failed", "cancelled"]))
-        .one(txn)
-        .await?;
+    let goal_row = desk_diagnose_core::future::boxed(|| async {
+        agent_goal_run::Entity::find()
+            .filter(agent_goal_run::Column::ConversationId.eq(subject.conversation_id))
+            .filter(agent_goal_run::Column::ActorId.eq(subject.actor_id))
+            .filter(agent_goal_run::Column::DeviceId.eq(subject.device_id))
+            .filter(agent_goal_run::Column::Status.is_not_in(["completed", "failed", "cancelled"]))
+            .one(txn)
+            .await
+    })
+    .await?;
     let goal = goal_row
         .as_ref()
         .map(crate::agent_goal_store::decode)
@@ -365,15 +386,28 @@ async fn claim_inner(
     registry: &ProviderRegistry,
     now_unix_ms: u64,
 ) -> Result<ClaimState, DbErr> {
-    let key = crate::approval_review_secret::load_or_create(db).await?;
-    let txn = crate::db::begin_write(db, delegation_row::Entity).await?;
-    let Some(initial) = prepare_on(&txn, subject, registry, None, None, now_unix_ms).await? else {
+    let key = desk_diagnose_core::future::boxed(|| async {
+        crate::approval_review_secret::load_or_create(db).await
+    })
+    .await?;
+    let txn = desk_diagnose_core::future::boxed(|| async {
+        crate::db::begin_write(db, delegation_row::Entity).await
+    })
+    .await?;
+    let Some(initial) = desk_diagnose_core::future::boxed(|| async {
+        prepare_on(&txn, subject, registry, None, None, now_unix_ms).await
+    })
+    .await?
+    else {
         return Ok(ClaimState::NotRequired);
     };
-    let existing = review_row::Entity::find()
-        .filter(review_row::Column::CandidateId.eq(&initial.candidate.candidate_id))
-        .one(&txn)
-        .await?;
+    let existing = desk_diagnose_core::future::boxed(|| async {
+        review_row::Entity::find()
+            .filter(review_row::Column::CandidateId.eq(&initial.candidate.candidate_id))
+            .one(&txn)
+            .await
+    })
+    .await?;
     let prepared = if let Some(row) = &existing {
         prepare_on(
             &txn,
@@ -426,17 +460,20 @@ async fn claim_inner(
             }
             _ => ConcreteReviewResult::Unavailable,
         };
-        txn.commit().await?;
+        desk_diagnose_core::future::boxed(|| async { txn.commit().await }).await?;
         crate::approval_metrics::committed(db, &prepared.candidate.candidate_id);
         return Ok(ClaimState::Existing(result));
     }
-    let stored = delegation_row::Entity::find()
-        .filter(delegation_row::Column::DelegationId.eq(&candidate.delegation_id))
-        .filter(delegation_row::Column::ActorId.eq(&candidate.owner_id))
-        .filter(delegation_row::Column::DeviceId.eq(&candidate.device_id))
-        .one(&txn)
-        .await?
-        .ok_or_else(invalid)?;
+    let stored = desk_diagnose_core::future::boxed(|| async {
+        delegation_row::Entity::find()
+            .filter(delegation_row::Column::DelegationId.eq(&candidate.delegation_id))
+            .filter(delegation_row::Column::ActorId.eq(&candidate.owner_id))
+            .filter(delegation_row::Column::DeviceId.eq(&candidate.device_id))
+            .one(&txn)
+            .await
+    })
+    .await?
+    .ok_or_else(invalid)?;
     let mut delegation = crate::agent_approval_store::decode(&stored)?;
     let authorized = prepared.authorized.as_ref().ok_or_else(invalid)?;
     let reserved_tokens = desk_diagnose_core::approval_usage::reviewer_token_reservation(
@@ -507,7 +544,7 @@ async fn claim_inner(
         i64::try_from(now_unix_ms).map_err(|_| invalid())?,
     )
     .await?;
-    txn.commit().await?;
+    desk_diagnose_core::future::boxed(|| async { txn.commit().await }).await?;
     Ok(ClaimState::Claimed(
         prepared.candidate.clone(),
         ClaimedPermissionReview {
@@ -565,14 +602,23 @@ async fn settle_inner(
     actual_tokens: Option<u64>,
     now_unix_ms: u64,
 ) -> Result<ConcreteReviewResult, DbErr> {
-    let key = crate::approval_review_secret::load_or_create(db).await?;
+    let key = desk_diagnose_core::future::boxed(|| async {
+        crate::approval_review_secret::load_or_create(db).await
+    })
+    .await?;
     let context_hmac = candidate_context_hmac_sha256(&key, candidate).map_err(|_| invalid())?;
-    let txn = crate::db::begin_write(db, delegation_row::Entity).await?;
-    let row = review_row::Entity::find()
-        .filter(review_row::Column::CandidateId.eq(&candidate.candidate_id))
-        .one(&txn)
-        .await?
-        .ok_or_else(invalid)?;
+    let txn = desk_diagnose_core::future::boxed(|| async {
+        crate::db::begin_write(db, delegation_row::Entity).await
+    })
+    .await?;
+    let row = desk_diagnose_core::future::boxed(|| async {
+        review_row::Entity::find()
+            .filter(review_row::Column::CandidateId.eq(&candidate.candidate_id))
+            .one(&txn)
+            .await
+    })
+    .await?
+    .ok_or_else(invalid)?;
     if row.status != APPROVAL_REVIEW_STATUS_REVIEWING
         || row.source_kind != APPROVAL_REVIEW_SOURCE_CONCRETE_CALL
         || row.source_id != subject.server_call_id
@@ -588,22 +634,28 @@ async fn settle_inner(
     {
         return Err(invalid());
     }
-    let stored = delegation_row::Entity::find()
-        .filter(delegation_row::Column::DelegationId.eq(&candidate.delegation_id))
-        .filter(delegation_row::Column::ActorId.eq(subject.actor_id))
-        .filter(delegation_row::Column::DeviceId.eq(subject.device_id))
-        .one(&txn)
-        .await?
-        .ok_or_else(invalid)?;
+    let stored = desk_diagnose_core::future::boxed(|| async {
+        delegation_row::Entity::find()
+            .filter(delegation_row::Column::DelegationId.eq(&candidate.delegation_id))
+            .filter(delegation_row::Column::ActorId.eq(subject.actor_id))
+            .filter(delegation_row::Column::DeviceId.eq(subject.device_id))
+            .one(&txn)
+            .await
+    })
+    .await?
+    .ok_or_else(invalid)?;
     let mut delegation = crate::agent_approval_store::decode(&stored)?;
-    let current = prepare_on(
-        &txn,
-        subject,
-        registry,
-        Some(candidate.expires_at_unix_ms),
-        Some(candidate),
-        now_unix_ms,
-    )
+    let current = desk_diagnose_core::future::boxed(|| async {
+        prepare_on(
+            &txn,
+            subject,
+            registry,
+            Some(candidate.expires_at_unix_ms),
+            Some(candidate),
+            now_unix_ms,
+        )
+        .await
+    })
     .await
     .ok()
     .flatten()
@@ -735,7 +787,7 @@ async fn settle_inner(
     if changed.rows_affected != 1 {
         return Err(invalid());
     }
-    txn.commit().await?;
+    desk_diagnose_core::future::boxed(|| async { txn.commit().await }).await?;
     crate::approval_metrics::committed(db, &candidate.candidate_id);
     Ok(match status {
         APPROVAL_REVIEW_STATUS_APPROVED => ConcreteReviewResult::Approved,

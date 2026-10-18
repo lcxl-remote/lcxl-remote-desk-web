@@ -1,0 +1,46 @@
+name: Agent Stack Budgets
+
+on: [push, pull_request, workflow_dispatch]
+
+jobs:
+  stack:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      AGENT_STACK_BASE_REF: ${{ github.event.pull_request.base.sha || github.event.before }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.90.0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: Swatinem/rust-cache@v2
+      - name: Verify report parser and negative controls
+        run: python -m unittest discover -s scripts/agent-stack -p test_report.py
+      # Only the selected logic/signal crates get LLVM remarks. No capture,
+      # encoder, Tauri or whole-dependency-tree remark build is needed here.
+      - name: Enforce shared debug frames
+        run: python scripts/agent-stack/run.py --package desk-diagnose-core --output target/agent-stack/core-debug.json
+      - name: Enforce OSS debug frames
+        run: python scripts/agent-stack/run.py --package desk-signal --output target/agent-stack/signal-debug.json
+      - name: Shared behavior and unboxed phase layout
+        run: cargo test --locked -p desk-diagnose-core -p desk-signal --lib --features desk-diagnose-core/stack-budget
+      - name: Enforce shared release frames
+        run: python scripts/agent-stack/run.py --package desk-diagnose-core --profile release --output target/agent-stack/core-release.json
+      - name: Enforce OSS release frames
+        run: python scripts/agent-stack/run.py --package desk-signal --profile release --output target/agent-stack/signal-release.json
+      - name: Release history and automatic-review combinations
+        run: cargo test --locked -p desk-signal --lib --release command_history -- --nocapture
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: agent-stack-${{ matrix.os }}
+          path: target/agent-stack/*.json

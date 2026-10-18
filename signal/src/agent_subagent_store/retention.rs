@@ -65,13 +65,16 @@ pub(crate) async fn close_root_on(
     if !parent.agent_role.is_main() {
         return Err(invalid());
     }
-    tombstone_on(
-        db,
-        &parent.conversation_id,
-        &parent.actor_id,
-        &parent.device_id,
-        now_ms,
-    )
+    desk_diagnose_core::future::boxed(|| async {
+        tombstone_on(
+            db,
+            &parent.conversation_id,
+            &parent.actor_id,
+            &parent.device_id,
+            now_ms,
+        )
+        .await
+    })
     .await?;
     // Diagnostic and terminal sessions have no delegation authority or native
     // assistant execution identity; retain their existing lifecycle.
@@ -88,15 +91,18 @@ pub(crate) async fn close_root_on(
         .to_rfc3339();
     let mut after = 0;
     loop {
-        let rows = group_row::Entity::find()
-            .filter(group_row::Column::RootConversationId.eq(&parent.conversation_id))
-            .filter(group_row::Column::ActorId.eq(&parent.actor_id))
-            .filter(group_row::Column::DeviceId.eq(&parent.device_id))
-            .filter(group_row::Column::Id.gt(after))
-            .order_by_asc(group_row::Column::Id)
-            .limit(100)
-            .all(db)
-            .await?;
+        let rows = desk_diagnose_core::future::boxed(|| async {
+            group_row::Entity::find()
+                .filter(group_row::Column::RootConversationId.eq(&parent.conversation_id))
+                .filter(group_row::Column::ActorId.eq(&parent.actor_id))
+                .filter(group_row::Column::DeviceId.eq(&parent.device_id))
+                .filter(group_row::Column::Id.gt(after))
+                .order_by_asc(group_row::Column::Id)
+                .limit(100)
+                .all(db)
+                .await
+        })
+        .await?;
         if rows.is_empty() {
             break;
         }
@@ -109,24 +115,33 @@ pub(crate) async fn close_root_on(
                     .set_source_admission(SourceAdmission::Closed)
                     .map_err(|_| invalid())?;
             }
-            replace_group_on(db, &row, &group, now_ms).await?;
-            let children = run_row::Entity::find()
-                .filter(run_row::Column::GroupId.eq(&group.group_id))
-                .filter(run_row::Column::RootConversationId.eq(&parent.conversation_id))
-                .filter(run_row::Column::ActorId.eq(&parent.actor_id))
-                .filter(run_row::Column::DeviceId.eq(&parent.device_id))
-                .order_by_asc(run_row::Column::Id)
-                .all(db)
-                .await?;
+            desk_diagnose_core::future::boxed(|| async {
+                replace_group_on(db, &row, &group, now_ms).await
+            })
+            .await?;
+            let children = desk_diagnose_core::future::boxed(|| async {
+                run_row::Entity::find()
+                    .filter(run_row::Column::GroupId.eq(&group.group_id))
+                    .filter(run_row::Column::RootConversationId.eq(&parent.conversation_id))
+                    .filter(run_row::Column::ActorId.eq(&parent.actor_id))
+                    .filter(run_row::Column::DeviceId.eq(&parent.device_id))
+                    .order_by_asc(run_row::Column::Id)
+                    .all(db)
+                    .await
+            })
+            .await?;
             for child in children {
                 let mut run = decode_run(&child)?;
-                tombstone_on(
-                    db,
-                    &run.child_conversation_id,
-                    &parent.actor_id,
-                    &parent.device_id,
-                    now_ms,
-                )
+                desk_diagnose_core::future::boxed(|| async {
+                    tombstone_on(
+                        db,
+                        &run.child_conversation_id,
+                        &parent.actor_id,
+                        &parent.device_id,
+                        now_ms,
+                    )
+                    .await
+                })
                 .await?;
                 if run.state.is_terminal() {
                     continue;
@@ -135,14 +150,28 @@ pub(crate) async fn close_root_on(
                     .map_err(|_| invalid())?;
                 run.binding.source_epoch = group.source_epoch;
                 run.settle_cancel(&now).map_err(|_| invalid())?;
-                replace_run_on(db, &child, &run, now_ms).await?;
-                permission_ends.extend(synchronize_control_on(db, &run, now_ms, false).await?);
-                append_state_event_on(db, &group, &run, now_ms).await?;
+                desk_diagnose_core::future::boxed(|| async {
+                    replace_run_on(db, &child, &run, now_ms).await
+                })
+                .await?;
+                permission_ends.extend(
+                    desk_diagnose_core::future::boxed(|| async {
+                        synchronize_control_on(db, &run, now_ms, false).await
+                    })
+                    .await?,
+                );
+                desk_diagnose_core::future::boxed(|| async {
+                    append_state_event_on(db, &group, &run, now_ms).await
+                })
+                .await?;
             }
         }
     }
-    super::native_cancel::cancel_native_actions_on(db, parent, "conversation_removed", now_ms)
-        .await?;
+    desk_diagnose_core::future::boxed(|| async {
+        super::native_cancel::cancel_native_actions_on(db, parent, "conversation_removed", now_ms)
+            .await
+    })
+    .await?;
     Ok(permission_ends)
 }
 

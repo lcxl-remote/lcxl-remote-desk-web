@@ -26,35 +26,43 @@ impl SignalAiAssistantTools {
     ) -> Result<ExecOutcome, AgentError> {
         let _pending_guard = PendingWaitGuard(plan.execution_generation.clone());
         let foreground_timeout = if durable {
-            store
-                .computer_foreground_remaining(&plan.execution_generation)
-                .await
-                .map_err(|_| invalid())?
-                .min(self.timeout)
+            desk_diagnose_core::future::boxed(|| async {
+                store
+                    .computer_foreground_remaining(&plan.execution_generation)
+                    .await
+            })
+            .await
+            .map_err(|_| invalid())?
+            .min(self.timeout)
         } else {
             self.timeout
         };
         let completed = if sent {
-            tokio::time::timeout(foreground_timeout, receiver)
-                .await
-                .ok()
-                .and_then(Result::ok)
-                .and_then(Result::ok)
+            desk_diagnose_core::future::boxed(|| async {
+                tokio::time::timeout(foreground_timeout, receiver).await
+            })
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .and_then(Result::ok)
         } else {
             None
         };
         global_computer_action_pending().cancel(&plan.execution_generation);
         let now_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).map_err(|_| invalid())?;
         if durable {
-            if let Some(original) = store
-                .read_computer_result(
-                    &plan.execution_generation,
-                    &self.run_id,
-                    &self.actor_id,
-                    &self.target_device_id,
-                )
-                .await
-                .map_err(|_| invalid())?
+            if let Some(original) = desk_diagnose_core::future::boxed(|| async {
+                store
+                    .read_computer_result(
+                        &plan.execution_generation,
+                        &self.run_id,
+                        &self.actor_id,
+                        &self.target_device_id,
+                    )
+                    .await
+            })
+            .await
+            .map_err(|_| invalid())?
             {
                 return Ok(original.into_exec());
             }
@@ -67,22 +75,25 @@ impl SignalAiAssistantTools {
             if let Some(projection) =
                 project(plan, &call.name, &self.run_id, &canonical, &completed)?
             {
-                store
-                    .record_dispatch_completion(
-                        &CapabilityDispatchCompletion {
-                            dispatch_id: plan.execution_generation.clone(),
-                            call_id: plan.action_request_id.clone(),
-                            generation: 1,
-                            outcome: projection.outcome,
-                            result_digest_sha256: format!(
-                                "{:x}",
-                                Sha256::digest(projection.content.as_bytes())
-                            ),
-                        },
-                        now_ms,
-                    )
-                    .await
-                    .map_err(|_| invalid())?;
+                desk_diagnose_core::future::boxed(|| async {
+                    store
+                        .record_dispatch_completion(
+                            &CapabilityDispatchCompletion {
+                                dispatch_id: plan.execution_generation.clone(),
+                                call_id: plan.action_request_id.clone(),
+                                generation: 1,
+                                outcome: projection.outcome,
+                                result_digest_sha256: format!(
+                                    "{:x}",
+                                    Sha256::digest(projection.content.as_bytes())
+                                ),
+                            },
+                            now_ms,
+                        )
+                        .await
+                })
+                .await
+                .map_err(|_| invalid())?;
                 let output = ToolRunOutput {
                     format: desk_diagnose_core::seam::ToolOutputFormat::Json,
                     content: projection.content,
@@ -105,15 +116,18 @@ impl SignalAiAssistantTools {
         }
         if durable
             && sent
-            && store
-                .promote_computer_background(
-                    &plan.execution_generation,
-                    &self.run_id,
-                    &self.actor_id,
-                    &self.target_device_id,
-                )
-                .await
-                .map_err(|_| invalid())?
+            && desk_diagnose_core::future::boxed(|| async {
+                store
+                    .promote_computer_background(
+                        &plan.execution_generation,
+                        &self.run_id,
+                        &self.actor_id,
+                        &self.target_device_id,
+                    )
+                    .await
+            })
+            .await
+            .map_err(|_| invalid())?
         {
             return Ok(ExecOutcome::Dispatched(
                 desk_diagnose_core::session::ActionIdentity::new(
@@ -124,26 +138,32 @@ impl SignalAiAssistantTools {
                 ),
             ));
         }
-        store
-            .mark_dispatch_outcome_unknown(
-                &plan.execution_generation,
-                &plan.action_request_id,
-                1,
-                now_ms,
-            )
-            .await
-            .map_err(|_| invalid())?;
-        // A terminal observation can win between the timeout and unknown write.
-        if durable
-            && let Some(original) = store
-                .read_computer_result(
+        desk_diagnose_core::future::boxed(|| async {
+            store
+                .mark_dispatch_outcome_unknown(
                     &plan.execution_generation,
-                    &self.run_id,
-                    &self.actor_id,
-                    &self.target_device_id,
+                    &plan.action_request_id,
+                    1,
+                    now_ms,
                 )
                 .await
-                .map_err(|_| invalid())?
+        })
+        .await
+        .map_err(|_| invalid())?;
+        // A terminal observation can win between the timeout and unknown write.
+        if durable
+            && let Some(original) = desk_diagnose_core::future::boxed(|| async {
+                store
+                    .read_computer_result(
+                        &plan.execution_generation,
+                        &self.run_id,
+                        &self.actor_id,
+                        &self.target_device_id,
+                    )
+                    .await
+            })
+            .await
+            .map_err(|_| invalid())?
         {
             return Ok(original.into_exec());
         }

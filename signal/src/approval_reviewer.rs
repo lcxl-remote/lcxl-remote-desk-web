@@ -180,13 +180,22 @@ async fn call_claimed_permission_review_inner(
     // Retry only a pre-dial configuration read. Once provider I/O starts its
     // outcome may be unknown. Each correction owns a new, independently fenced attempt.
     sink.event("configuration");
-    let config = match crate::approval_model_provider::load(db).await {
+    let config = match desk_diagnose_core::future::boxed(|| async {
+        crate::approval_model_provider::load(db).await
+    })
+    .await
+    {
         Ok(config) => config,
         Err(_) => {
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-            crate::approval_model_provider::load(db)
-                .await
-                .map_err(|_| reviewer_unavailable())?
+            desk_diagnose_core::future::boxed(|| async {
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await
+            })
+            .await;
+            desk_diagnose_core::future::boxed(|| async {
+                crate::approval_model_provider::load(db).await
+            })
+            .await
+            .map_err(|_| reviewer_unavailable())?
         }
     };
     if config.unavailable_reason().is_some()
@@ -230,7 +239,8 @@ async fn call_claimed_permission_review_inner(
             .unwrap_or_default(),
     );
     sink.event("admission");
-    let permit = seam.acquire_admission().await?;
+    let permit =
+        desk_diagnose_core::future::boxed(|| async { seam.acquire_admission().await }).await?;
     let admitted_at = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(u64::MAX);
     if admitted_at >= claim.lease_deadline_unix_ms || admitted_at >= candidate.expires_at_unix_ms {
         return Err(reviewer_unavailable());
@@ -246,49 +256,62 @@ async fn call_claimed_permission_review_inner(
         .call_id(&candidate.candidate_id);
     let receipt_id = format!("approval-call:{call_id}");
     let export_id = format!("approval-export:{call_id}");
-    let txn = crate::db::begin_write(db, crate::entity::agent_session::Entity)
-        .await
-        .map_err(|_| reviewer_unavailable())?;
-    seam.validate_current_on(&txn)
+    let txn = desk_diagnose_core::future::boxed(|| async {
+        crate::db::begin_write(db, crate::entity::agent_session::Entity).await
+    })
+    .await
+    .map_err(|_| reviewer_unavailable())?;
+    desk_diagnose_core::future::boxed(|| async { seam.validate_current_on(&txn).await })
         .await
         .map_err(|_| reviewer_unavailable())?;
     if let Some(reservation) = &claim.delegation_call {
-        crate::agent_subagent_store::SubAgentStore::link_model_receipt_on(
-            &txn,
-            reservation,
-            &receipt_id,
-            chrono::Utc::now().timestamp_millis(),
-        )
+        desk_diagnose_core::future::boxed(|| async {
+            crate::agent_subagent_store::SubAgentStore::link_model_receipt_on(
+                &txn,
+                reservation,
+                &receipt_id,
+                chrono::Utc::now().timestamp_millis(),
+            )
+            .await
+        })
         .await
         .map_err(|_| reviewer_unavailable())?;
     } else {
         if claim.call_authority.group_id.is_some() {
             return Err(reviewer_unavailable());
         }
-        crate::agent_subagent_store::mark_review_dispatch_on(
-            &txn,
-            &claim.call_authority,
-            "oss_model_egress",
-            &receipt_id,
-            chrono::Utc::now().timestamp_millis(),
-        )
+        desk_diagnose_core::future::boxed(|| async {
+            crate::agent_subagent_store::mark_review_dispatch_on(
+                &txn,
+                &claim.call_authority,
+                "oss_model_egress",
+                &receipt_id,
+                chrono::Utc::now().timestamp_millis(),
+            )
+            .await
+        })
         .await
         .map_err(|_| reviewer_unavailable())?;
     }
-    crate::model_egress_store::SignalModelEgressStore::record_dispatch_intent_on(
-        &txn,
-        receipt_id.clone(),
-        export_id.clone(),
-        1,
-        &claim.authorized.prompt_audit,
-        std::slice::from_ref(&claim.authorized.prompt_envelope),
-    )
+    desk_diagnose_core::future::boxed(|| async {
+        crate::model_egress_store::SignalModelEgressStore::record_dispatch_intent_on(
+            &txn,
+            receipt_id.clone(),
+            export_id.clone(),
+            1,
+            &claim.authorized.prompt_audit,
+            std::slice::from_ref(&claim.authorized.prompt_envelope),
+        )
+        .await
+    })
     .await
     .map_err(|_| reviewer_unavailable())?;
     if gate.snapshot() != settings || seam.dispatch_cancelled() {
         return Err(reviewer_unavailable());
     }
-    txn.commit().await.map_err(|_| reviewer_unavailable())?;
+    desk_diagnose_core::future::boxed(|| async { txn.commit().await })
+        .await
+        .map_err(|_| reviewer_unavailable())?;
     let store = crate::model_egress_store::SignalModelEgressStore::new(db.clone());
     request.observation = seam.observation_context(
         request.use_case,
@@ -309,10 +332,17 @@ async fn call_claimed_permission_review_inner(
         tracking.attribution = context.attribution.clone();
     }
     let observation = request.observation.clone();
-    let turn = match seam.call_admitted(request, sink, permit).await {
+    let turn = match desk_diagnose_core::future::boxed(|| async {
+        seam.call_admitted(request, sink, permit).await
+    })
+    .await
+    {
         Ok(turn) => turn,
         Err(error) => {
-            if let Err(audit_error) = store.mark_failed(&receipt_id).await {
+            if let Err(audit_error) =
+                desk_diagnose_core::future::boxed(|| async { store.mark_failed(&receipt_id).await })
+                    .await
+            {
                 log::warn!(
                     "[approval] failed to close reviewer receipt {receipt_id}: {audit_error}"
                 );
@@ -320,14 +350,17 @@ async fn call_claimed_permission_review_inner(
             return Err(error);
         }
     };
-    store
-        .record_terminal_usage(
-            &receipt_id,
-            &turn.usage,
-            turn.provider_meta.context_observation.as_ref(),
-        )
-        .await
-        .map_err(|_| reviewer_unavailable())?;
+    desk_diagnose_core::future::boxed(|| async {
+        store
+            .record_terminal_usage(
+                &receipt_id,
+                &turn.usage,
+                turn.provider_meta.context_observation.as_ref(),
+            )
+            .await
+    })
+    .await
+    .map_err(|_| reviewer_unavailable())?;
     if let Some(observation) = &observation {
         observation.metered(chrono::Utc::now().timestamp_millis());
     }
@@ -368,10 +401,11 @@ async fn call_claimed_permission_review_inner(
         std::slice::from_ref(&claim.authorized.prompt_envelope),
     ) {
         Ok(output) => {
-            store
-                .mark_succeeded(&receipt_id, &output)
-                .await
-                .map_err(|_| reviewer_unavailable())?;
+            desk_diagnose_core::future::boxed(|| async {
+                store.mark_succeeded(&receipt_id, &output).await
+            })
+            .await
+            .map_err(|_| reviewer_unavailable())?;
             decision
         }
         Err(_) => {
@@ -392,8 +426,7 @@ async fn call_claimed_permission_review_inner(
                     chrono::Utc::now().timestamp_millis(),
                 );
             }
-            store
-                .mark_failed(&receipt_id)
+            desk_diagnose_core::future::boxed(|| async { store.mark_failed(&receipt_id).await })
                 .await
                 .map_err(|_| reviewer_unavailable())?;
             None

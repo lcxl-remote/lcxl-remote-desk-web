@@ -318,3 +318,7 @@ AT-SPI event registration binds to the Registry's unique D-Bus owner. Replacing 
 A Mutter Notify reply can precede input processing or acknowledge an early absolute-motion request that was dropped. With that reply alone, Linux output actions retain OutcomeUnknown, publish no changed=true fact, and never replay automatically. IdleMonitor Core watches do not supply input provenance or a processing barrier.
 
 Desktop and AT-SPI monitors share a worker monitor ownership lease. Replacing monitors or rebuilding the worker fences late results and cleanup from retired tasks. Publication and ownership changes are serialized under the same lock.
+
+### AI execution stack budgets
+
+Changes to agent orchestration and approval require independent checks for unboxed future size, debug/release generated stack frames, and real entry combinations on explicit 1 MiB / 2 MiB stacks. See [agent stack checks](scripts/agent-stack/README.md) for commands, baseline review and thread identity checks. Do not pass by enlarging stacks, changing optimization levels or introducing production scheduling boundaries. These engineering checks do not change configuration, storage or user behavior.

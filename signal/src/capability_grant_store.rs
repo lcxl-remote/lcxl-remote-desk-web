@@ -474,42 +474,64 @@ impl SignalCapabilityGrantStore {
         registry: &desk_diagnose_core::provider_registry::ProviderRegistry,
     ) -> Result<CapabilityPreparation, DbErr> {
         validate_prepare(&request)?;
-        let txn = crate::db::begin_write(&self.db, crate::entity::agent_session::Entity).await?;
-        if let Some(existing) = load_prepared(&txn, request.call_id).await? {
+        let txn = desk_diagnose_core::future::boxed(|| async {
+            crate::db::begin_write(&self.db, crate::entity::agent_session::Entity).await
+        })
+        .await?;
+        if let Some(existing) = desk_diagnose_core::future::boxed(|| async {
+            load_prepared(&txn, request.call_id).await
+        })
+        .await?
+        {
             let prepared = validate_replay(&existing, &request)?;
-            txn.rollback().await.ok();
+            desk_diagnose_core::future::boxed(|| async { txn.rollback().await })
+                .await
+                .ok();
             return Ok(CapabilityPreparation::Ready(prepared));
         }
-        if let Some(row) =
-            crate::schedule_store::lock_action_session(&txn, request.call.run_id).await?
+        if let Some(row) = desk_diagnose_core::future::boxed(|| async {
+            crate::schedule_store::lock_action_session(&txn, request.call.run_id).await
+        })
+        .await?
         {
             let session = PersistedAgentSession::decode_json(&row.state_json)
                 .map_err(|error| DbErr::Custom(format!("invalid Provider session: {error:?}")))?;
             if session.trigger_origin == desk_diagnose_core::session::TriggerOrigin::ScheduledTask
-                && let Some(candidate) =
-                    task_grant::issue_on(&txn, &session, &request, registry).await?
+                && let Some(candidate) = desk_diagnose_core::future::boxed(|| async {
+                    task_grant::issue_on(&txn, &session, &request, registry).await
+                })
+                .await?
             {
-                txn.rollback().await?;
+                desk_diagnose_core::future::boxed(|| async { txn.rollback().await }).await?;
                 return Ok(CapabilityPreparation::PermissionRequired(candidate));
             }
         }
-        let grant_row = agent_capability_grant::Entity::find()
-            .filter(agent_capability_grant::Column::GrantId.eq(request.grant_id))
-            .one(&txn)
-            .await?
-            .ok_or_else(|| DbErr::Custom("capability grant was not found".into()))?;
+        let grant_row = desk_diagnose_core::future::boxed(|| async {
+            agent_capability_grant::Entity::find()
+                .filter(agent_capability_grant::Column::GrantId.eq(request.grant_id))
+                .one(&txn)
+                .await
+        })
+        .await?
+        .ok_or_else(|| DbErr::Custom("capability grant was not found".into()))?;
         if grant_row.status != GRANT_STATUS_ACTIVE {
-            txn.rollback().await.ok();
+            desk_diagnose_core::future::boxed(|| async { txn.rollback().await })
+                .await
+                .ok();
             return Err(DbErr::Custom("capability grant is not active".into()));
         }
         let mut grant = decode_grant(&grant_row)?;
-        task_authority::match_current_on(&txn, &grant, &request.call, false)
-            .await
-            .map_err(|reason| {
-                DbErr::Custom(format!("capability grant does not match call: {reason:?}"))
-            })?;
+        desk_diagnose_core::future::boxed(|| async {
+            task_authority::match_current_on(&txn, &grant, &request.call, false).await
+        })
+        .await
+        .map_err(|reason| {
+            DbErr::Custom(format!("capability grant does not match call: {reason:?}"))
+        })?;
         if grant.remaining_uses == 0 || grant_row.remaining_uses <= 0 {
-            txn.rollback().await.ok();
+            desk_diagnose_core::future::boxed(|| async { txn.rollback().await })
+                .await
+                .ok();
             return Err(DbErr::Custom("capability grant is exhausted".into()));
         }
         let reservation_id = stable_id(
@@ -534,88 +556,99 @@ impl SignalCapabilityGrantStore {
             tool_name: request.call.tool_name.to_string(),
         };
         let now = timestamp(request.call.now_unix_ms)?;
-        let work = agent_action_item::ActiveModel {
-            kind: Set(CAPABILITY_WORK_KIND.into()),
-            action_request_id: Set(request.call_id.to_string()),
-            exec_request_id: Set(None),
-            conversation_id: Set(request.call.run_id.to_string()),
-            turn_id: Set(request.turn_id.to_string()),
-            tool_call_id: Set(request.call_id.to_string()),
-            actor_id: Set(request.call.actor_id.to_string()),
-            target_device_id: Set(request.call.target_device_id.to_string()),
-            status: Set(CAPABILITY_WORK_PREPARED.into()),
-            attempt: Set(0),
-            execution_id: Set(Some(format!(
-                "capability:{}:{}",
-                request.call_id, request.generation
-            ))),
-            draft_hash: Set(request.call.canonical_input_digest_sha256.to_string()),
-            policy_revision: Set(request.call.policy_revision),
-            is_side_effecting: Set(request.call.effect.is_side_effecting()),
-            payload_json: Set(serde_json::to_string(&payload).map_err(json_error)?),
-            payload_schema_version: Set(1),
-            completion_event_id: Set(desk_diagnose_core::native_ids::capability_completion(
-                request.call_id,
-            )),
-            completion_delivery_state: Set("pending".into()),
-            created_at: Set(now),
-            updated_at: Set(now),
-            ..Default::default()
-        }
-        .insert(&txn)
+        let work = desk_diagnose_core::future::boxed(|| async {
+            agent_action_item::ActiveModel {
+                kind: Set(CAPABILITY_WORK_KIND.into()),
+                action_request_id: Set(request.call_id.to_string()),
+                exec_request_id: Set(None),
+                conversation_id: Set(request.call.run_id.to_string()),
+                turn_id: Set(request.turn_id.to_string()),
+                tool_call_id: Set(request.call_id.to_string()),
+                actor_id: Set(request.call.actor_id.to_string()),
+                target_device_id: Set(request.call.target_device_id.to_string()),
+                status: Set(CAPABILITY_WORK_PREPARED.into()),
+                attempt: Set(0),
+                execution_id: Set(Some(format!(
+                    "capability:{}:{}",
+                    request.call_id, request.generation
+                ))),
+                draft_hash: Set(request.call.canonical_input_digest_sha256.to_string()),
+                policy_revision: Set(request.call.policy_revision),
+                is_side_effecting: Set(request.call.effect.is_side_effecting()),
+                payload_json: Set(serde_json::to_string(&payload).map_err(json_error)?),
+                payload_schema_version: Set(1),
+                completion_event_id: Set(desk_diagnose_core::native_ids::capability_completion(
+                    request.call_id,
+                )),
+                completion_delivery_state: Set("pending".into()),
+                created_at: Set(now),
+                updated_at: Set(now),
+                ..Default::default()
+            }
+            .insert(&txn)
+            .await
+        })
         .await?;
-        agent_grant_reservation::ActiveModel {
-            reservation_id: Set(reservation_id.clone()),
-            grant_id: Set(request.grant_id.to_string()),
-            run_id: Set(request.call.run_id.to_string()),
-            call_id: Set(request.call_id.to_string()),
-            work_id: Set(work.id),
-            canonical_input_digest_sha256: Set(request
-                .call
-                .canonical_input_digest_sha256
-                .to_string()),
-            state: Set(RESERVATION_STATUS_RESERVED.into()),
-            generation: Set(i64::try_from(request.generation)
-                .map_err(|_| DbErr::Custom("generation exceeds SQLite range".into()))?),
-            created_at: Set(now),
-            updated_at: Set(now),
-            ..Default::default()
-        }
-        .insert(&txn)
+        desk_diagnose_core::future::boxed(|| async {
+            agent_grant_reservation::ActiveModel {
+                reservation_id: Set(reservation_id.clone()),
+                grant_id: Set(request.grant_id.to_string()),
+                run_id: Set(request.call.run_id.to_string()),
+                call_id: Set(request.call_id.to_string()),
+                work_id: Set(work.id),
+                canonical_input_digest_sha256: Set(request
+                    .call
+                    .canonical_input_digest_sha256
+                    .to_string()),
+                state: Set(RESERVATION_STATUS_RESERVED.into()),
+                generation: Set(i64::try_from(request.generation)
+                    .map_err(|_| DbErr::Custom("generation exceeds SQLite range".into()))?),
+                created_at: Set(now),
+                updated_at: Set(now),
+                ..Default::default()
+            }
+            .insert(&txn)
+            .await
+        })
         .await?;
         if grant.use_policy.consumes_uses() {
             grant.remaining_uses -= 1;
         }
         let remaining = i32::try_from(grant.remaining_uses)
             .map_err(|_| DbErr::Custom("grant uses exceed SQLite range".into()))?;
-        let updated = agent_capability_grant::Entity::update_many()
-            .col_expr(
-                agent_capability_grant::Column::RemainingUses,
-                Expr::value(remaining),
-            )
-            .col_expr(
-                agent_capability_grant::Column::PayloadJson,
-                Expr::value(serde_json::to_string(&grant).map_err(json_error)?),
-            )
-            .col_expr(
-                agent_capability_grant::Column::Version,
-                Expr::value(grant_row.version + 1),
-            )
-            .col_expr(agent_capability_grant::Column::UpdatedAt, Expr::value(now))
-            .filter(agent_capability_grant::Column::Id.eq(grant_row.id))
-            .filter(agent_capability_grant::Column::Version.eq(grant_row.version))
-            .filter(agent_capability_grant::Column::RemainingUses.eq(grant_row.remaining_uses))
-            .exec(&txn)
-            .await?;
+        let updated = desk_diagnose_core::future::boxed(|| async {
+            agent_capability_grant::Entity::update_many()
+                .col_expr(
+                    agent_capability_grant::Column::RemainingUses,
+                    Expr::value(remaining),
+                )
+                .col_expr(
+                    agent_capability_grant::Column::PayloadJson,
+                    Expr::value(serde_json::to_string(&grant).map_err(json_error)?),
+                )
+                .col_expr(
+                    agent_capability_grant::Column::Version,
+                    Expr::value(grant_row.version + 1),
+                )
+                .col_expr(agent_capability_grant::Column::UpdatedAt, Expr::value(now))
+                .filter(agent_capability_grant::Column::Id.eq(grant_row.id))
+                .filter(agent_capability_grant::Column::Version.eq(grant_row.version))
+                .filter(agent_capability_grant::Column::RemainingUses.eq(grant_row.remaining_uses))
+                .exec(&txn)
+                .await
+        })
+        .await?;
         if updated.rows_affected != 1 {
-            txn.rollback().await.ok();
+            desk_diagnose_core::future::boxed(|| async { txn.rollback().await })
+                .await
+                .ok();
             return Err(DbErr::Custom(
                 "capability grant reservation conflicted".into(),
             ));
         }
         #[cfg(test)]
         pause_crash_fixture_before_commit("prepare_before_commit");
-        txn.commit().await?;
+        desk_diagnose_core::future::boxed(|| async { txn.commit().await }).await?;
         Ok(CapabilityPreparation::Ready(PreparedCapabilityCall {
             work_id: work.id,
             reservation_id,
@@ -636,17 +669,24 @@ impl SignalCapabilityGrantStore {
         request: PrepareCapabilityCall<'_>,
     ) -> Result<DispatchIntentResult, DbErr> {
         validate_prepare(&request)?;
-        let txn = crate::db::begin_write(&self.db, crate::entity::agent_session::Entity).await?;
-        let existing = load_prepared(&txn, request.call_id)
-            .await?
-            .ok_or_else(|| DbErr::Custom("capability call was not prepared".into()))?;
+        let txn = desk_diagnose_core::future::boxed(|| async {
+            crate::db::begin_write(&self.db, crate::entity::agent_session::Entity).await
+        })
+        .await?;
+        let existing = desk_diagnose_core::future::boxed(|| async {
+            load_prepared(&txn, request.call_id).await
+        })
+        .await?
+        .ok_or_else(|| DbErr::Custom("capability call was not prepared".into()))?;
         validate_replay(&existing, &request)?;
         let (reservation, work) = existing;
 
         if reservation.state == RESERVATION_STATUS_RELEASED
             && work.status == CAPABILITY_WORK_SUPERSEDED
         {
-            txn.rollback().await.ok();
+            desk_diagnose_core::future::boxed(|| async { txn.rollback().await })
+                .await
+                .ok();
             return Ok(DispatchIntentResult::SupersededBeforeIntent {
                 work_id: work.id,
                 idempotent_replay: true,
@@ -655,19 +695,26 @@ impl SignalCapabilityGrantStore {
         if reservation.state == RESERVATION_STATUS_RELEASED
             && work.status == CAPABILITY_WORK_REVOKED
         {
-            txn.rollback().await.ok();
+            desk_diagnose_core::future::boxed(|| async { txn.rollback().await })
+                .await
+                .ok();
             return Ok(DispatchIntentResult::RevokedBeforeIntent {
                 work_id: work.id,
                 idempotent_replay: true,
             });
         }
-        if let Some(outbox) = agent_capability_dispatch_outbox::Entity::find()
-            .filter(agent_capability_dispatch_outbox::Column::CallId.eq(request.call_id))
-            .one(&txn)
-            .await?
+        if let Some(outbox) = desk_diagnose_core::future::boxed(|| async {
+            agent_capability_dispatch_outbox::Entity::find()
+                .filter(agent_capability_dispatch_outbox::Column::CallId.eq(request.call_id))
+                .one(&txn)
+                .await
+        })
+        .await?
         {
             validate_outbox_replay(&outbox, &reservation, &work, &request)?;
-            txn.rollback().await.ok();
+            desk_diagnose_core::future::boxed(|| async { txn.rollback().await })
+                .await
+                .ok();
             return Ok(DispatchIntentResult::Recorded {
                 dispatch_id: outbox.dispatch_id,
                 outbox_id: outbox.id,
@@ -677,15 +724,19 @@ impl SignalCapabilityGrantStore {
         if reservation.state != RESERVATION_STATUS_RESERVED
             || work.status != CAPABILITY_WORK_PREPARED
         {
-            txn.rollback().await.ok();
+            desk_diagnose_core::future::boxed(|| async { txn.rollback().await })
+                .await
+                .ok();
             return Err(DbErr::Custom(
                 "prepared capability call has an invalid pre-intent state".into(),
             ));
         }
 
-        let session_row = crate::schedule_store::lock_action_session(&txn, request.call.run_id)
-            .await?
-            .ok_or_else(|| DbErr::Custom("authoritative agent session was not found".into()))?;
+        let session_row = desk_diagnose_core::future::boxed(|| async {
+            crate::schedule_store::lock_action_session(&txn, request.call.run_id).await
+        })
+        .await?
+        .ok_or_else(|| DbErr::Custom("authoritative agent session was not found".into()))?;
         let session =
             PersistedAgentSession::decode_json(&session_row.state_json).map_err(|error| {
                 DbErr::Custom(format!("invalid authoritative agent session: {error}"))
@@ -695,7 +746,9 @@ impl SignalCapabilityGrantStore {
             || session_row.actor_id != request.call.actor_id
             || session_row.device_id != request.call.target_device_id
         {
-            txn.rollback().await.ok();
+            desk_diagnose_core::future::boxed(|| async { txn.rollback().await })
+                .await
+                .ok();
             return Err(DbErr::Custom(
                 "capability call no longer belongs to the authoritative session subject".into(),
             ));
@@ -704,58 +757,72 @@ impl SignalCapabilityGrantStore {
         if session.input_revision != prepared_payload.input_revision
             || session.latest_input_seq != prepared_payload.input_watermark
         {
-            release_before_intent(
-                &txn,
-                &reservation,
-                &work,
-                request.call.now_unix_ms,
-                CAPABILITY_WORK_SUPERSEDED,
-                "newer_user_input_before_dispatch_intent",
-            )
+            desk_diagnose_core::future::boxed(|| async {
+                release_before_intent(
+                    &txn,
+                    &reservation,
+                    &work,
+                    request.call.now_unix_ms,
+                    CAPABILITY_WORK_SUPERSEDED,
+                    "newer_user_input_before_dispatch_intent",
+                )
+                .await
+            })
             .await?;
-            txn.commit().await?;
+            desk_diagnose_core::future::boxed(|| async { txn.commit().await }).await?;
             return Ok(DispatchIntentResult::SupersededBeforeIntent {
                 work_id: work.id,
                 idempotent_replay: false,
             });
         }
 
-        let grant_row = agent_capability_grant::Entity::find()
-            .filter(agent_capability_grant::Column::GrantId.eq(request.grant_id))
-            .one(&txn)
-            .await?
-            .ok_or_else(|| DbErr::Custom("capability grant was not found".into()))?;
+        let grant_row = desk_diagnose_core::future::boxed(|| async {
+            agent_capability_grant::Entity::find()
+                .filter(agent_capability_grant::Column::GrantId.eq(request.grant_id))
+                .one(&txn)
+                .await
+        })
+        .await?
+        .ok_or_else(|| DbErr::Custom("capability grant was not found".into()))?;
         if grant_row.status != GRANT_STATUS_ACTIVE {
-            release_before_intent(
-                &txn,
-                &reservation,
-                &work,
-                request.call.now_unix_ms,
-                CAPABILITY_WORK_REVOKED,
-                "grant_revoked_before_dispatch_intent",
-            )
+            desk_diagnose_core::future::boxed(|| async {
+                release_before_intent(
+                    &txn,
+                    &reservation,
+                    &work,
+                    request.call.now_unix_ms,
+                    CAPABILITY_WORK_REVOKED,
+                    "grant_revoked_before_dispatch_intent",
+                )
+                .await
+            })
             .await?;
-            txn.commit().await?;
+            desk_diagnose_core::future::boxed(|| async { txn.commit().await }).await?;
             return Ok(DispatchIntentResult::RevokedBeforeIntent {
                 work_id: work.id,
                 idempotent_replay: false,
             });
         }
         let grant = decode_grant(&grant_row)?;
-        task_authority::match_current_on(&txn, &grant, &request.call, true)
+        desk_diagnose_core::future::boxed(|| async {
+            task_authority::match_current_on(&txn, &grant, &request.call, true).await
+        })
+        .await
+        .map_err(|reason| {
+            DbErr::Custom(format!(
+                "reserved capability grant no longer matches call: {reason:?}"
+            ))
+        })?;
+        desk_diagnose_core::future::boxed(|| async {
+            concrete_review::require_approved_on(
+                &txn,
+                &grant,
+                request.call_id,
+                &prepared_payload.canonical_input_json,
+                request.call.now_unix_ms,
+            )
             .await
-            .map_err(|reason| {
-                DbErr::Custom(format!(
-                    "reserved capability grant no longer matches call: {reason:?}"
-                ))
-            })?;
-        concrete_review::require_approved_on(
-            &txn,
-            &grant,
-            request.call_id,
-            &prepared_payload.canonical_input_json,
-            request.call.now_unix_ms,
-        )
+        })
         .await?;
         desk_diagnose_core::file_scope::validate_artifact_scope(
             &session,
@@ -789,56 +856,67 @@ impl SignalCapabilityGrantStore {
             tool_name: prepared_payload.tool_name,
         };
         let now = timestamp(request.call.now_unix_ms)?;
-        let outbox = agent_capability_dispatch_outbox::ActiveModel {
-            dispatch_id: Set(dispatch_id.clone()),
-            call_id: Set(request.call_id.to_string()),
-            work_id: Set(work.id),
-            reservation_id: Set(reservation.reservation_id.clone()),
-            generation: Set(i64::try_from(request.generation)
-                .map_err(|_| DbErr::Custom("generation exceeds SQLite range".into()))?),
-            state: Set(DISPATCH_OUTBOX_PENDING.into()),
-            payload_json: Set(serde_json::to_string(&dispatch_payload).map_err(json_error)?),
-            payload_schema_version: Set(1),
-            created_at: Set(now),
-            updated_at: Set(now),
-            ..Default::default()
-        }
-        .insert(&txn)
+        let outbox = desk_diagnose_core::future::boxed(|| async {
+            agent_capability_dispatch_outbox::ActiveModel {
+                dispatch_id: Set(dispatch_id.clone()),
+                call_id: Set(request.call_id.to_string()),
+                work_id: Set(work.id),
+                reservation_id: Set(reservation.reservation_id.clone()),
+                generation: Set(i64::try_from(request.generation)
+                    .map_err(|_| DbErr::Custom("generation exceeds SQLite range".into()))?),
+                state: Set(DISPATCH_OUTBOX_PENDING.into()),
+                payload_json: Set(serde_json::to_string(&dispatch_payload).map_err(json_error)?),
+                payload_schema_version: Set(1),
+                created_at: Set(now),
+                updated_at: Set(now),
+                ..Default::default()
+            }
+            .insert(&txn)
+            .await
+        })
         .await?;
-        let reserved = agent_grant_reservation::Entity::update_many()
-            .col_expr(
-                agent_grant_reservation::Column::State,
-                Expr::value(RESERVATION_STATUS_COMMITTED),
-            )
-            .col_expr(agent_grant_reservation::Column::UpdatedAt, Expr::value(now))
-            .filter(agent_grant_reservation::Column::Id.eq(reservation.id))
-            .filter(agent_grant_reservation::Column::State.eq(RESERVATION_STATUS_RESERVED))
-            .exec(&txn)
-            .await?;
-        let intended = agent_action_item::Entity::update_many()
-            .col_expr(
-                agent_action_item::Column::Status,
-                Expr::value(CAPABILITY_WORK_INTENT_RECORDED),
-            )
-            .col_expr(agent_action_item::Column::DispatchedAttempt, Expr::value(1))
-            .col_expr(
-                agent_action_item::Column::DispatchIntentAt,
-                Expr::value(now),
-            )
-            .col_expr(agent_action_item::Column::UpdatedAt, Expr::value(now))
-            .filter(agent_action_item::Column::Id.eq(work.id))
-            .filter(agent_action_item::Column::Status.eq(CAPABILITY_WORK_PREPARED))
-            .exec(&txn)
-            .await?;
+        let reserved = desk_diagnose_core::future::boxed(|| async {
+            agent_grant_reservation::Entity::update_many()
+                .col_expr(
+                    agent_grant_reservation::Column::State,
+                    Expr::value(RESERVATION_STATUS_COMMITTED),
+                )
+                .col_expr(agent_grant_reservation::Column::UpdatedAt, Expr::value(now))
+                .filter(agent_grant_reservation::Column::Id.eq(reservation.id))
+                .filter(agent_grant_reservation::Column::State.eq(RESERVATION_STATUS_RESERVED))
+                .exec(&txn)
+                .await
+        })
+        .await?;
+        let intended = desk_diagnose_core::future::boxed(|| async {
+            agent_action_item::Entity::update_many()
+                .col_expr(
+                    agent_action_item::Column::Status,
+                    Expr::value(CAPABILITY_WORK_INTENT_RECORDED),
+                )
+                .col_expr(agent_action_item::Column::DispatchedAttempt, Expr::value(1))
+                .col_expr(
+                    agent_action_item::Column::DispatchIntentAt,
+                    Expr::value(now),
+                )
+                .col_expr(agent_action_item::Column::UpdatedAt, Expr::value(now))
+                .filter(agent_action_item::Column::Id.eq(work.id))
+                .filter(agent_action_item::Column::Status.eq(CAPABILITY_WORK_PREPARED))
+                .exec(&txn)
+                .await
+        })
+        .await?;
         if reserved.rows_affected != 1 || intended.rows_affected != 1 {
-            txn.rollback().await.ok();
+            desk_diagnose_core::future::boxed(|| async { txn.rollback().await })
+                .await
+                .ok();
             return Err(DbErr::Custom(
                 "capability dispatch intent conflicted".into(),
             ));
         }
         #[cfg(test)]
         pause_crash_fixture_before_commit("intent_before_commit");
-        txn.commit().await?;
+        desk_diagnose_core::future::boxed(|| async { txn.commit().await }).await?;
         Ok(DispatchIntentResult::Recorded {
             dispatch_id,
             outbox_id: outbox.id,
@@ -900,20 +978,30 @@ impl SignalCapabilityGrantStore {
             Option<&computer_export::ComputerExportContext>,
         )>,
     ) -> Result<DispatchClaimResult, DbErr> {
-        let txn = crate::db::begin_write(&self.db, crate::entity::agent_session::Entity).await?;
-        let outbox = agent_capability_dispatch_outbox::Entity::find()
-            .filter(agent_capability_dispatch_outbox::Column::DispatchId.eq(dispatch_id))
-            .one(&txn)
-            .await?
-            .ok_or_else(|| DbErr::Custom("capability dispatch was not found".into()))?;
+        let txn = desk_diagnose_core::future::boxed(|| async {
+            crate::db::begin_write(&self.db, crate::entity::agent_session::Entity).await
+        })
+        .await?;
+        let outbox = desk_diagnose_core::future::boxed(|| async {
+            agent_capability_dispatch_outbox::Entity::find()
+                .filter(agent_capability_dispatch_outbox::Column::DispatchId.eq(dispatch_id))
+                .one(&txn)
+                .await
+        })
+        .await?
+        .ok_or_else(|| DbErr::Custom("capability dispatch was not found".into()))?;
         if outbox.state == DISPATCH_OUTBOX_OUTCOME_UNKNOWN {
-            txn.rollback().await.ok();
+            desk_diagnose_core::future::boxed(|| async { txn.rollback().await })
+                .await
+                .ok();
             return Ok(DispatchClaimResult::OutcomeUnknown {
                 dispatch_id: dispatch_id.to_string(),
             });
         }
         if outbox.state != DISPATCH_OUTBOX_PENDING {
-            txn.rollback().await.ok();
+            desk_diagnose_core::future::boxed(|| async { txn.rollback().await })
+                .await
+                .ok();
             return Err(DbErr::Custom(
                 "capability dispatch is already claimed; automatic retry is forbidden".into(),
             ));
@@ -921,32 +1009,45 @@ impl SignalCapabilityGrantStore {
         let mut payload: CapabilityDispatchPayload =
             serde_json::from_str(&outbox.payload_json).map_err(json_error)?;
         if payload.dispatch_id != dispatch_id || payload.work_id != outbox.work_id {
-            txn.rollback().await.ok();
+            desk_diagnose_core::future::boxed(|| async { txn.rollback().await })
+                .await
+                .ok();
             return Err(DbErr::Custom(
                 "capability dispatch outbox payload disagrees with its authority row".into(),
             ));
         }
-        let work = agent_action_item::Entity::find_by_id(outbox.work_id)
-            .one(&txn)
-            .await?
-            .ok_or_else(|| DbErr::Custom("capability dispatch work missing".into()))?;
-        crate::schedule_store::lock_action_session(&txn, &work.conversation_id)
-            .await?
-            .ok_or_else(|| DbErr::Custom("capability dispatch session missing".into()))?;
+        let work = desk_diagnose_core::future::boxed(|| async {
+            agent_action_item::Entity::find_by_id(outbox.work_id)
+                .one(&txn)
+                .await
+        })
+        .await?
+        .ok_or_else(|| DbErr::Custom("capability dispatch work missing".into()))?;
+        desk_diagnose_core::future::boxed(|| async {
+            crate::schedule_store::lock_action_session(&txn, &work.conversation_id).await
+        })
+        .await?
+        .ok_or_else(|| DbErr::Custom("capability dispatch session missing".into()))?;
         if desk_diagnose_core::file_scope::requires_directory_scope(&payload.tool_name) {
-            let grant_row = agent_capability_grant::Entity::find()
-                .filter(agent_capability_grant::Column::GrantId.eq(&payload.grant_id))
-                .one(&txn)
-                .await?
-                .ok_or_else(|| DbErr::Custom("file dispatch grant missing".into()))?;
+            let grant_row = desk_diagnose_core::future::boxed(|| async {
+                agent_capability_grant::Entity::find()
+                    .filter(agent_capability_grant::Column::GrantId.eq(&payload.grant_id))
+                    .one(&txn)
+                    .await
+            })
+            .await?
+            .ok_or_else(|| DbErr::Custom("file dispatch grant missing".into()))?;
             let grant = decode_grant(&grant_row)?;
-            let row = agent_session::Entity::find()
-                .filter(agent_session::Column::ConversationId.eq(&grant.run_id))
-                .filter(agent_session::Column::ActorId.eq(&grant.actor_id))
-                .filter(agent_session::Column::DeviceId.eq(&grant.target_device_id))
-                .one(&txn)
-                .await?
-                .ok_or_else(|| DbErr::Custom("file dispatch session missing".into()))?;
+            let row = desk_diagnose_core::future::boxed(|| async {
+                agent_session::Entity::find()
+                    .filter(agent_session::Column::ConversationId.eq(&grant.run_id))
+                    .filter(agent_session::Column::ActorId.eq(&grant.actor_id))
+                    .filter(agent_session::Column::DeviceId.eq(&grant.target_device_id))
+                    .one(&txn)
+                    .await
+            })
+            .await?
+            .ok_or_else(|| DbErr::Custom("file dispatch session missing".into()))?;
             let session = PersistedAgentSession::decode_json(&row.state_json)
                 .map_err(|_| DbErr::Custom("invalid file dispatch session".into()))?;
             if grant_row.status != GRANT_STATUS_ACTIVE
@@ -966,31 +1067,39 @@ impl SignalCapabilityGrantStore {
             .map_err(|_| DbErr::Custom("conversation directory is no longer approved".into()))?;
         }
         let now = timestamp(now_unix_ms)?;
-        let claimed = agent_capability_dispatch_outbox::Entity::update_many()
-            .col_expr(
-                agent_capability_dispatch_outbox::Column::State,
-                Expr::value(DISPATCH_OUTBOX_SENDING),
-            )
-            .col_expr(
-                agent_capability_dispatch_outbox::Column::UpdatedAt,
-                Expr::value(now),
-            )
-            .filter(agent_capability_dispatch_outbox::Column::Id.eq(outbox.id))
-            .filter(agent_capability_dispatch_outbox::Column::State.eq(DISPATCH_OUTBOX_PENDING))
-            .exec(&txn)
-            .await?;
-        let dispatching = agent_action_item::Entity::update_many()
-            .col_expr(
-                agent_action_item::Column::Status,
-                Expr::value(CAPABILITY_WORK_DISPATCHING),
-            )
-            .col_expr(agent_action_item::Column::UpdatedAt, Expr::value(now))
-            .filter(agent_action_item::Column::Id.eq(outbox.work_id))
-            .filter(agent_action_item::Column::Status.eq(CAPABILITY_WORK_INTENT_RECORDED))
-            .exec(&txn)
-            .await?;
+        let claimed = desk_diagnose_core::future::boxed(|| async {
+            agent_capability_dispatch_outbox::Entity::update_many()
+                .col_expr(
+                    agent_capability_dispatch_outbox::Column::State,
+                    Expr::value(DISPATCH_OUTBOX_SENDING),
+                )
+                .col_expr(
+                    agent_capability_dispatch_outbox::Column::UpdatedAt,
+                    Expr::value(now),
+                )
+                .filter(agent_capability_dispatch_outbox::Column::Id.eq(outbox.id))
+                .filter(agent_capability_dispatch_outbox::Column::State.eq(DISPATCH_OUTBOX_PENDING))
+                .exec(&txn)
+                .await
+        })
+        .await?;
+        let dispatching = desk_diagnose_core::future::boxed(|| async {
+            agent_action_item::Entity::update_many()
+                .col_expr(
+                    agent_action_item::Column::Status,
+                    Expr::value(CAPABILITY_WORK_DISPATCHING),
+                )
+                .col_expr(agent_action_item::Column::UpdatedAt, Expr::value(now))
+                .filter(agent_action_item::Column::Id.eq(outbox.work_id))
+                .filter(agent_action_item::Column::Status.eq(CAPABILITY_WORK_INTENT_RECORDED))
+                .exec(&txn)
+                .await
+        })
+        .await?;
         if claimed.rows_affected != 1 || dispatching.rows_affected != 1 {
-            txn.rollback().await.ok();
+            desk_diagnose_core::future::boxed(|| async { txn.rollback().await })
+                .await
+                .ok();
             return Err(DbErr::Custom("capability dispatch claim conflicted".into()));
         }
         let mut command_task_id = None;
@@ -1000,10 +1109,13 @@ impl SignalCapabilityGrantStore {
                     "command claim requires a command capability".into(),
                 ));
             }
-            let work = agent_action_item::Entity::find_by_id(outbox.work_id)
-                .one(&txn)
-                .await?
-                .ok_or_else(|| DbErr::Custom("command authority work missing".into()))?;
+            let work = desk_diagnose_core::future::boxed(|| async {
+                agent_action_item::Entity::find_by_id(outbox.work_id)
+                    .one(&txn)
+                    .await
+            })
+            .await?
+            .ok_or_else(|| DbErr::Custom("command authority work missing".into()))?;
             if work.conversation_id != conversation
                 || target.is_empty()
                 || call.is_empty()
@@ -1020,35 +1132,41 @@ impl SignalCapabilityGrantStore {
                 return Err(DbErr::Custom("command claim subject mismatch".into()));
             }
             use crate::entity::agent_exec_task;
-            let task = agent_exec_task::ActiveModel {
-                exec_request_id: Set(payload.call_id.clone()),
-                execution_generation: Set(dispatch_id.into()),
-                conversation_id: Set(conversation.into()),
-                tool_call_id: Set(call.into()),
-                target_connection_id: Set(target.into()),
-                status: Set(crate::agent_exec_store::STATUS_DISPATCHING.into()),
-                event_id: Set(format!("signal-exec:{}:done", payload.call_id)),
-                delivery_state: Set(crate::agent_exec_store::DELIVERY_PENDING.into()),
-                deadline: Set(now + chrono::Duration::milliseconds(i64::from(timeout) + 60000)),
-                created_at: Set(now),
-                updated_at: Set(now),
-                ..Default::default()
-            }
-            .insert(&txn)
+            let task = desk_diagnose_core::future::boxed(|| async {
+                agent_exec_task::ActiveModel {
+                    exec_request_id: Set(payload.call_id.clone()),
+                    execution_generation: Set(dispatch_id.into()),
+                    conversation_id: Set(conversation.into()),
+                    tool_call_id: Set(call.into()),
+                    target_connection_id: Set(target.into()),
+                    status: Set(crate::agent_exec_store::STATUS_DISPATCHING.into()),
+                    event_id: Set(format!("signal-exec:{}:done", payload.call_id)),
+                    delivery_state: Set(crate::agent_exec_store::DELIVERY_PENDING.into()),
+                    deadline: Set(now + chrono::Duration::milliseconds(i64::from(timeout) + 60000)),
+                    created_at: Set(now),
+                    updated_at: Set(now),
+                    ..Default::default()
+                }
+                .insert(&txn)
+                .await
+            })
             .await?;
             command_task_id = Some(task.id);
             payload.command_origin = Some(origin.clone());
             payload.command_export = model_export.cloned();
-            agent_capability_dispatch_outbox::Entity::update_many()
-                .col_expr(
-                    agent_capability_dispatch_outbox::Column::PayloadJson,
-                    Expr::value(serde_json::to_string(&payload).map_err(json_error)?),
-                )
-                .filter(agent_capability_dispatch_outbox::Column::Id.eq(outbox.id))
-                .exec(&txn)
-                .await?;
+            desk_diagnose_core::future::boxed(|| async {
+                agent_capability_dispatch_outbox::Entity::update_many()
+                    .col_expr(
+                        agent_capability_dispatch_outbox::Column::PayloadJson,
+                        Expr::value(serde_json::to_string(&payload).map_err(json_error)?),
+                    )
+                    .filter(agent_capability_dispatch_outbox::Column::Id.eq(outbox.id))
+                    .exec(&txn)
+                    .await
+            })
+            .await?;
         }
-        txn.commit().await?;
+        desk_diagnose_core::future::boxed(|| async { txn.commit().await }).await?;
         if let Some(task_id) = command_task_id
             && let Some(source) =
                 desk_diagnose_core::model_observability::ObservationAlias::provider_work(

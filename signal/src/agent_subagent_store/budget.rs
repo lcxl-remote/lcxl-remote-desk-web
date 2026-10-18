@@ -126,6 +126,7 @@ pub(crate) async fn reserve_budget_on(
     .await
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn reserve_budget_with_authority_on(
     txn: &DatabaseTransaction,
@@ -137,6 +138,30 @@ pub(crate) async fn reserve_budget_with_authority_on(
     review_authority: Option<&ReviewCallAuthority>,
     now_ms: i64,
 ) -> Result<BudgetAdmission, DbErr> {
+    reserve_budget_for_session_on(
+        CallSession::Current { txn, session },
+        logical_call_id,
+        kind,
+        arguments_sha256,
+        upper,
+        review_authority,
+        now_ms,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn reserve_budget_for_session_on(
+    call: CallSession<'_>,
+    logical_call_id: &str,
+    kind: DelegationCallKind,
+    arguments_sha256: &str,
+    upper: Usage,
+    review_authority: Option<&ReviewCallAuthority>,
+    now_ms: i64,
+) -> Result<BudgetAdmission, DbErr> {
+    let txn = call.txn();
+    let session = call.session();
     let group_id = session.delegation_group_id.as_deref().ok_or_else(invalid)?;
     let root = session
         .agent_role
@@ -144,14 +169,17 @@ pub(crate) async fn reserve_budget_with_authority_on(
         .map_or(session.conversation_id.as_str(), |binding| {
             binding.root_conversation_id.as_str()
         });
-    let row = group_row::Entity::find()
-        .filter(group_row::Column::GroupId.eq(group_id))
-        .filter(group_row::Column::RootConversationId.eq(root))
-        .filter(group_row::Column::ActorId.eq(&session.actor_id))
-        .filter(group_row::Column::DeviceId.eq(&session.device_id))
-        .one(txn)
-        .await?
-        .ok_or_else(invalid)?;
+    let row = desk_diagnose_core::future::boxed(|| async {
+        group_row::Entity::find()
+            .filter(group_row::Column::GroupId.eq(group_id))
+            .filter(group_row::Column::RootConversationId.eq(root))
+            .filter(group_row::Column::ActorId.eq(&session.actor_id))
+            .filter(group_row::Column::DeviceId.eq(&session.device_id))
+            .one(txn)
+            .await
+    })
+    .await?
+    .ok_or_else(invalid)?;
     let mut group = decode_group(&row)?;
     let child = session.agent_role.binding();
     let logical_key = format!(
@@ -185,10 +213,13 @@ pub(crate) async fn reserve_budget_with_authority_on(
         source_goal_upper: None,
     };
     reservation.validate().map_err(|_| invalid())?;
-    if let Some(old) = reservation_row::Entity::find()
-        .filter(reservation_row::Column::LogicalKeySha256.eq(&logical_key))
-        .one(txn)
-        .await?
+    if let Some(old) = desk_diagnose_core::future::boxed(|| async {
+        reservation_row::Entity::find()
+            .filter(reservation_row::Column::LogicalKeySha256.eq(&logical_key))
+            .one(txn)
+            .await
+    })
+    .await?
     {
         let existing = decode_reservation(&old)?;
         if existing.arguments_sha256 != reservation.arguments_sha256
@@ -221,11 +252,13 @@ pub(crate) async fn reserve_budget_with_authority_on(
     {
         return Err(invalid());
     }
+    #[cfg(test)]
+    crate::stack_probe::observe(&session.conversation_id, "budget");
     let live = session_row::Entity::find()
         .filter(session_row::Column::ConversationId.eq(&session.conversation_id))
         .filter(session_row::Column::ActorId.eq(&session.actor_id))
         .filter(session_row::Column::DeviceId.eq(&session.device_id))
-        .filter(session_row::Column::Version.eq(session.version))
+        .filter(session_row::Column::Version.eq(call.version()))
         .filter(
             session_row::Column::LeaseToken
                 .eq(i64::try_from(session.lease_token).map_err(|_| invalid())?),
@@ -240,7 +273,7 @@ pub(crate) async fn reserve_budget_with_authority_on(
     {
         return Err(invalid());
     }
-    let durable = PersistedAgentSession::decode_json(&live.state_json).map_err(|_| invalid())?;
+    let durable = call.read().decode(&live)?;
     if durable.agent_role != session.agent_role
         || durable.input_revision != session.input_revision
         || durable.control_revision != session.control_revision
@@ -249,7 +282,10 @@ pub(crate) async fn reserve_budget_with_authority_on(
         return Err(invalid());
     }
     if let Some(review) = review_authority {
-        super::review_budget::validate_review_lease_on(txn, review, now_ms).await?;
+        desk_diagnose_core::future::boxed(|| async {
+            super::review_budget::validate_review_lease_on(txn, review, now_ms).await
+        })
+        .await?;
         if logical_call_id != format!("review:{}", review.attempt.call_id(&review.candidate_id))
             || arguments_sha256 != review.request_sha256
         {
@@ -260,14 +296,17 @@ pub(crate) async fn reserve_budget_with_authority_on(
         }
     }
     if let Some(binding) = child {
-        let task_row = run_row::Entity::find()
-            .filter(run_row::Column::TaskId.eq(&binding.task_id))
-            .filter(run_row::Column::RootConversationId.eq(root))
-            .filter(run_row::Column::ActorId.eq(&session.actor_id))
-            .filter(run_row::Column::DeviceId.eq(&session.device_id))
-            .one(txn)
-            .await?
-            .ok_or_else(invalid)?;
+        let task_row = desk_diagnose_core::future::boxed(|| async {
+            run_row::Entity::find()
+                .filter(run_row::Column::TaskId.eq(&binding.task_id))
+                .filter(run_row::Column::RootConversationId.eq(root))
+                .filter(run_row::Column::ActorId.eq(&session.actor_id))
+                .filter(run_row::Column::DeviceId.eq(&session.device_id))
+                .one(txn)
+                .await
+        })
+        .await?
+        .ok_or_else(invalid)?;
         let run = decode_run(&task_row)?;
         run.validate_session(session).map_err(|_| invalid())?;
         run.require_current(run.fence()).map_err(|_| invalid())?;
@@ -288,7 +327,10 @@ pub(crate) async fn reserve_budget_with_authority_on(
         return Ok(BudgetAdmission::Exhausted);
     }
     group.version = group.version.checked_add(1).ok_or_else(invalid)?;
-    replace_group_on(txn, &row, &group, now_ms).await?;
+    desk_diagnose_core::future::boxed(|| async {
+        replace_group_on(txn, &row, &group, now_ms).await
+    })
+    .await?;
     reservation_row::ActiveModel {
         reservation_id: Set(reservation.reservation_id.clone()),
         logical_key_sha256: Set(logical_key),

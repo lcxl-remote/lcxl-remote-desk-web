@@ -197,7 +197,10 @@ pub(crate) async fn acknowledge_results_on(
     if !next.agent_role.is_main() {
         return Err(invalid());
     }
-    super::notification::acknowledge_notification_on(txn, current, next, now_ms).await?;
+    desk_diagnose_core::future::boxed(|| async {
+        super::notification::acknowledge_notification_on(txn, current, next, now_ms).await
+    })
+    .await?;
     if next
         .accepted_subagent_observations
         .iter()
@@ -207,25 +210,34 @@ pub(crate) async fn acknowledge_results_on(
             .iter()
             .any(|value| !current.interpreted_subagent_results.contains(value))
     {
-        super::main_tools::current_group_on(txn, next).await?;
+        desk_diagnose_core::future::boxed(|| async {
+            super::main_tools::current_group_on(txn, next).await
+        })
+        .await?;
     }
     for accepted in &next.accepted_subagent_observations {
         if current.accepted_subagent_observations.contains(accepted) {
             continue;
         }
-        let event = validate_observation_on(txn, next, accepted, false).await?;
+        let event = desk_diagnose_core::future::boxed(|| async {
+            validate_observation_on(txn, next, accepted, false).await
+        })
+        .await?;
         if event.model_observed_at_ms.is_none() {
-            inbox::Entity::update_many()
-                .set(inbox::ActiveModel {
-                    model_observed_at_ms: Set(Some(now_ms)),
-                    observed_tool_call_id: Set(Some(accepted.result.tool_call_id.clone())),
-                    observed_message_id: Set(Some(accepted.result.result_message_id.clone())),
-                    ..Default::default()
-                })
-                .filter(inbox::Column::Id.eq(event.id))
-                .filter(inbox::Column::ModelObservedAtMs.is_null())
-                .exec(txn)
-                .await?;
+            desk_diagnose_core::future::boxed(|| async {
+                inbox::Entity::update_many()
+                    .set(inbox::ActiveModel {
+                        model_observed_at_ms: Set(Some(now_ms)),
+                        observed_tool_call_id: Set(Some(accepted.result.tool_call_id.clone())),
+                        observed_message_id: Set(Some(accepted.result.result_message_id.clone())),
+                        ..Default::default()
+                    })
+                    .filter(inbox::Column::Id.eq(event.id))
+                    .filter(inbox::Column::ModelObservedAtMs.is_null())
+                    .exec(txn)
+                    .await
+            })
+            .await?;
         }
     }
     for accepted in &next.interpreted_subagent_results {
@@ -239,21 +251,27 @@ pub(crate) async fn acknowledge_results_on(
         {
             return Err(invalid());
         }
-        let event = validate_observation_on(txn, next, accepted, true).await?;
+        let event = desk_diagnose_core::future::boxed(|| async {
+            validate_observation_on(txn, next, accepted, true).await
+        })
+        .await?;
         if event.model_observed_at_ms.is_none() {
             return Err(invalid());
         }
         if event.interpreted_at_ms.is_none() {
-            inbox::Entity::update_many()
-                .set(inbox::ActiveModel {
-                    interpreted_at_ms: Set(Some(now_ms)),
-                    interpreted_turn_id: Set(next.current_turn_id.clone()),
-                    ..Default::default()
-                })
-                .filter(inbox::Column::Id.eq(event.id))
-                .filter(inbox::Column::InterpretedAtMs.is_null())
-                .exec(txn)
-                .await?;
+            desk_diagnose_core::future::boxed(|| async {
+                inbox::Entity::update_many()
+                    .set(inbox::ActiveModel {
+                        interpreted_at_ms: Set(Some(now_ms)),
+                        interpreted_turn_id: Set(next.current_turn_id.clone()),
+                        ..Default::default()
+                    })
+                    .filter(inbox::Column::Id.eq(event.id))
+                    .filter(inbox::Column::InterpretedAtMs.is_null())
+                    .exec(txn)
+                    .await
+            })
+            .await?;
         }
     }
     Ok(())
@@ -263,9 +281,18 @@ pub(crate) async fn save_main_delegation_session(
     db: &DatabaseConnection,
     held: &mut PersistedAgentSession,
 ) -> Result<(), DbErr> {
-    let txn = crate::db::begin_write(db, session_row::Entity).await?;
-    let current = parent_on(&txn, &held.conversation_id, &held.actor_id, &held.device_id).await?;
-    if !crate::goal_work::rebase_background_events_on(&txn, &current, held).await?
+    let txn = desk_diagnose_core::future::boxed(|| async {
+        crate::db::begin_write(db, session_row::Entity).await
+    })
+    .await?;
+    let current = desk_diagnose_core::future::boxed(|| async {
+        parent_on(&txn, &held.conversation_id, &held.actor_id, &held.device_id).await
+    })
+    .await?;
+    if !desk_diagnose_core::future::boxed(|| async {
+        crate::goal_work::rebase_background_events_on(&txn, &current, held).await
+    })
+    .await?
         || current.lease_token != held.lease_token
         || current.input_revision != held.input_revision
         || current.control_revision != held.control_revision
@@ -275,9 +302,15 @@ pub(crate) async fn save_main_delegation_session(
         return Err(invalid());
     }
     let now = chrono::Utc::now();
-    acknowledge_results_on(&txn, &current, held, now.timestamp_millis()).await?;
-    let version = write_child_session_on(&txn, held, now).await?;
-    txn.commit().await?;
+    desk_diagnose_core::future::boxed(|| async {
+        acknowledge_results_on(&txn, &current, held, now.timestamp_millis()).await
+    })
+    .await?;
+    let version = desk_diagnose_core::future::boxed(|| async {
+        write_child_session_on(&txn, held, now).await
+    })
+    .await?;
+    desk_diagnose_core::future::boxed(|| async { txn.commit().await }).await?;
     held.version = version;
     Ok(())
 }

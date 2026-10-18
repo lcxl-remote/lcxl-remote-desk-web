@@ -48,16 +48,22 @@ impl SubAgentStore {
         actor: &str,
         device: &str,
     ) -> Result<usize, DbErr> {
-        let txn = crate::db::begin_write(&self.db, session_row::Entity).await?;
-        let rows = group_row::Entity::find()
-            .filter(group_row::Column::RootConversationId.eq(root))
-            .filter(group_row::Column::SourceOccurrenceId.eq(root))
-            .filter(group_row::Column::ActorId.eq(actor))
-            .filter(group_row::Column::DeviceId.eq(device))
-            .order_by_asc(group_row::Column::Id)
-            .limit(2)
-            .all(&txn)
-            .await?;
+        let txn = desk_diagnose_core::future::boxed(|| async {
+            crate::db::begin_write(&self.db, session_row::Entity).await
+        })
+        .await?;
+        let rows = desk_diagnose_core::future::boxed(|| async {
+            group_row::Entity::find()
+                .filter(group_row::Column::RootConversationId.eq(root))
+                .filter(group_row::Column::SourceOccurrenceId.eq(root))
+                .filter(group_row::Column::ActorId.eq(actor))
+                .filter(group_row::Column::DeviceId.eq(device))
+                .order_by_asc(group_row::Column::Id)
+                .limit(2)
+                .all(&txn)
+                .await
+        })
+        .await?;
         // An isolated original occurrence opens one source group, never a new
         // allocation for each continuation or each child.
         if rows.len() > 1 {
@@ -68,7 +74,10 @@ impl SubAgentStore {
         let mut permission_ends =
             desk_diagnose_core::model_observability::permission::PendingEnds::default();
         for row in rows {
-            super::scheduled_budget::lock_historical_on(&txn, &row).await?;
+            desk_diagnose_core::future::boxed(|| async {
+                super::scheduled_budget::lock_historical_on(&txn, &row).await
+            })
+            .await?;
             let group = decode_group(&row)?;
             let work = crate::entity::agent_schedule_run::Entity::find()
                 .filter(crate::entity::agent_schedule_run::Column::RunId.eq(root))
@@ -86,12 +95,14 @@ impl SubAgentStore {
             if !source_withdrawn {
                 return Err(invalid());
             }
-            let (count, prepared) =
-                close_scheduled_group_on(&txn, &row, now.timestamp_millis()).await?;
+            let (count, prepared) = desk_diagnose_core::future::boxed(|| async {
+                close_scheduled_group_on(&txn, &row, now.timestamp_millis()).await
+            })
+            .await?;
             closed += count;
             permission_ends.extend(prepared);
         }
-        txn.commit().await?;
+        desk_diagnose_core::future::boxed(|| async { txn.commit().await }).await?;
         permission_ends.submit(
             now.timestamp_millis(),
             crate::model_metrics::runtime::submit,
@@ -128,9 +139,14 @@ pub(crate) async fn close_scheduled_group_on(
         group
             .set_source_admission(SourceAdmission::Closed)
             .map_err(|_| invalid())?;
-        replace_group_on(txn, row, &group, now_ms).await?;
+        desk_diagnose_core::future::boxed(|| async {
+            replace_group_on(txn, row, &group, now_ms).await
+        })
+        .await?;
     }
-    let children = super::group_children_on(txn, &group).await?;
+    let children =
+        desk_diagnose_core::future::boxed(|| async { super::group_children_on(txn, &group).await })
+            .await?;
     let mut closed = 0;
     let mut permission_ends =
         desk_diagnose_core::model_observability::permission::PendingEnds::default();
@@ -144,9 +160,20 @@ pub(crate) async fn close_scheduled_group_on(
         run.binding.source_epoch = group.source_epoch;
         run.settle_cancel(&now.to_rfc3339())
             .map_err(|_| invalid())?;
-        replace_run_on(txn, &child, &run, now_ms).await?;
-        permission_ends.extend(synchronize_control_on(txn, &run, now_ms, false).await?);
-        append_state_event_on(txn, &group, &run, now_ms).await?;
+        desk_diagnose_core::future::boxed(|| async {
+            replace_run_on(txn, &child, &run, now_ms).await
+        })
+        .await?;
+        permission_ends.extend(
+            desk_diagnose_core::future::boxed(|| async {
+                synchronize_control_on(txn, &run, now_ms, false).await
+            })
+            .await?,
+        );
+        desk_diagnose_core::future::boxed(|| async {
+            append_state_event_on(txn, &group, &run, now_ms).await
+        })
+        .await?;
         closed += 1;
     }
     Ok((closed, permission_ends))

@@ -81,6 +81,37 @@ async fn run_desktop_case_with_automatic(
     approve_concrete: bool,
     verified_native: bool,
 ) {
+    Box::pin(run_desktop_history_case(
+        approve,
+        read_name,
+        ordinary_followup,
+        automatic,
+        concrete,
+        approve_concrete,
+        verified_native,
+        None,
+    ))
+    .await;
+}
+
+#[derive(Clone, Copy)]
+enum HistoryRoute {
+    Permission,
+    Goal,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_desktop_history_case(
+    approve: bool,
+    read_name: &str,
+    ordinary_followup: bool,
+    automatic: bool,
+    concrete: bool,
+    approve_concrete: bool,
+    verified_native: bool,
+    retained_history: Option<HistoryRoute>,
+) {
+    let goal_route = matches!(retained_history, Some(HistoryRoute::Goal));
     let db = crate::config::test_support::Database::connect("sqlite::memory:")
         .await
         .unwrap();
@@ -131,6 +162,12 @@ async fn run_desktop_case_with_automatic(
                     "application_id":"a1", "steps":[{"element_id":"e1", "action":{"kind":"invoke"}}]
                 }),
             ),
+        );
+    }
+    if goal_route {
+        *replies.last_mut().unwrap() = tool_reply(
+            "control_goal",
+            serde_json::json!({"decision":"complete", "message":"object-read-complete"}),
         );
     }
     let capture = actix_web::rt::spawn(async move {
@@ -281,6 +318,7 @@ async fn run_desktop_case_with_automatic(
     let connections = web::Data::from(map.clone());
     let client_id = "desktop-permission";
     let run_id = derive_conversation_key("1", "device", Some(client_id), "unused");
+    let stack_probe = retained_history.map(|_| crate::stack_probe::start(&run_id));
     let sessions = crate::agent_session_store::SignalAgentSessionStore::new(db.clone())
         .with_client_metadata(Some(client_id.into()), AgentSessionSurface::AiAssistant);
     actix_web::rt::spawn(run_turn_inner(
@@ -293,6 +331,7 @@ async fn run_desktop_case_with_automatic(
         "device".into(),
         AiAssistantAsk {
             question: "Inspect the desktop session".into(),
+            start_goal: goal_route,
             client_message_id: "input".into(),
             conversation_id: Some(client_id.into()),
             ..Default::default()
@@ -329,14 +368,14 @@ async fn run_desktop_case_with_automatic(
     )
     .await;
     if automatic {
-        Box::pin(approve_with_independent_model(
+        approve_in_dispatcher_task(
             &db,
             &sessions,
             &run_id,
             &request.request_id,
             &registry,
             &inventory,
-        ))
+        )
         .await;
     } else {
         sessions
@@ -373,48 +412,61 @@ async fn run_desktop_case_with_automatic(
             .await
             .unwrap();
     }
-    let resume = async {
-        if ordinary_followup {
-            run_turn_inner(
-                connections.clone(),
-                db.clone(),
-                "followup".into(),
-                "controller".into(),
-                host.clone(),
-                1,
-                "device".into(),
-                AiAssistantAsk {
-                    question: "Continue inspecting".into(),
-                    client_message_id: "followup".into(),
-                    conversation_id: Some(client_id.into()),
-                    ..Default::default()
-                },
-                None,
-            )
-            .await;
-        } else {
-            resume_after_permission_decision(
-                connections.clone(),
-                db.clone(),
-                "resume".into(),
-                host.clone(),
-                1,
-                "device".into(),
-                run_id.clone(),
-                request.request_id.clone(),
-                AiAssistantAsk {
-                    question: "Inspect the desktop session".into(),
-                    client_message_id: "resume".into(),
-                    conversation_id: Some(client_id.into()),
-                    ..Default::default()
-                },
-            )
-            .await;
-        }
+    // Match the controller's existing resume task boundary; the large synthetic
+    // peer fixture must not remain on the product poll stack.
+    let resume = {
+        let connections = connections.clone();
+        let db = db.clone();
+        let host = host.clone();
+        let run_id = run_id.clone();
+        let permission_id = request.request_id.clone();
+        actix_web::rt::spawn(async move {
+            if ordinary_followup {
+                run_turn_inner(
+                    connections.clone(),
+                    db.clone(),
+                    "followup".into(),
+                    "controller".into(),
+                    host.clone(),
+                    1,
+                    "device".into(),
+                    AiAssistantAsk {
+                        question: "Continue inspecting".into(),
+                        client_message_id: "followup".into(),
+                        conversation_id: Some(client_id.into()),
+                        ..Default::default()
+                    },
+                    None,
+                )
+                .await;
+            } else {
+                resume_after_permission_decision(
+                    connections.clone(),
+                    db.clone(),
+                    "resume".into(),
+                    host.clone(),
+                    1,
+                    "device".into(),
+                    run_id.clone(),
+                    permission_id,
+                    AiAssistantAsk {
+                        question: "Inspect the desktop session".into(),
+                        client_message_id: "resume".into(),
+                        conversation_id: Some(client_id.into()),
+                        ..Default::default()
+                    },
+                )
+                .await;
+                if goal_route {
+                    resume_latest_goal(&connections, &db, &run_id).await;
+                }
+            }
+        })
     };
     if !approve {
         tokio::time::timeout(Duration::from_secs(10), resume)
             .await
+            .unwrap()
             .unwrap();
         assert!(
             tokio::time::timeout(Duration::from_millis(25), socket.next())
@@ -529,6 +581,7 @@ async fn run_desktop_case_with_automatic(
         "desktop resume failed: {:?}",
         sessions.read_snapshot(&run_id).await.unwrap()
     );
+    completed.unwrap().0.unwrap();
     if concrete {
         let snapshot = sessions.read_snapshot(&run_id).await.unwrap().unwrap();
         let ui_request = snapshot.permission_requests.last().unwrap();
@@ -544,14 +597,17 @@ async fn run_desktop_case_with_automatic(
                 .map(|m| &m.text)
                 .collect::<Vec<_>>()
         );
-        let listener = Box::pin(approve_with_independent_model(
+        if retained_history.is_some() {
+            seed_command_history(&db, &run_id).await;
+        }
+        let listener = approve_in_dispatcher_task(
             &db,
             &sessions,
             &run_id,
             &ui_request.request_id,
             &registry,
             &inventory,
-        ))
+        )
         .await;
         let review = actix_web::rt::spawn(async move {
             capture_one_openai_request_with_reply(listener, move |body| {
@@ -559,22 +615,35 @@ async fn run_desktop_case_with_automatic(
             })
             .await
         });
-        let ui_resume = actix_web::rt::spawn(resume_after_permission_decision(
+        let (resume_connections, resume_db, resume_host, resume_run_id) = (
             connections.clone(),
             db.clone(),
-            "concrete-resume".into(),
             host.clone(),
-            1,
-            "device".into(),
             run_id.clone(),
-            ui_request.request_id.clone(),
-            AiAssistantAsk {
-                question: "Inspect the desktop session".into(),
-                client_message_id: "ui-resume".into(),
-                conversation_id: Some(client_id.into()),
-                ..Default::default()
-            },
-        ));
+        );
+        let ui_permission_id = ui_request.request_id.clone();
+        let ui_resume = actix_web::rt::spawn(async move {
+            resume_after_permission_decision(
+                resume_connections.clone(),
+                resume_db.clone(),
+                "concrete-resume".into(),
+                resume_host,
+                1,
+                "device".into(),
+                resume_run_id.clone(),
+                ui_permission_id,
+                AiAssistantAsk {
+                    question: "Inspect the desktop session".into(),
+                    client_message_id: "ui-resume".into(),
+                    conversation_id: Some(client_id.into()),
+                    ..Default::default()
+                },
+            )
+            .await;
+            if goal_route {
+                resume_latest_goal(&resume_connections, &resume_db, &resume_run_id).await;
+            }
+        });
         let native = async {
             if !approve_concrete {
                 return;
@@ -697,7 +766,7 @@ async fn run_desktop_case_with_automatic(
             }
         );
         assert!(reviews[0].provider_started_at_ms.is_some());
-        if verified_native {
+        if verified_native && approve_concrete {
             let snapshot = sessions.read_snapshot(&run_id).await.unwrap().unwrap();
             assert!(
                 snapshot
@@ -747,6 +816,9 @@ async fn run_desktop_case_with_automatic(
             .iter()
             .any(|grant| grant.tool_name == read_name && grant.remaining_uses == 0)
     );
+    if let Some(probe) = stack_probe {
+        probe.assert_points(&["prepare", "tool_execute", "decode", "budget"]);
+    }
     socket.send(awc::ws::Message::Close(None)).await.unwrap();
     drop(socket);
     map.write().await.clear();
@@ -757,6 +829,32 @@ async fn run_desktop_case_with_automatic(
 
 /// Keep the source budget, admission, provider I/O and durable decision in this
 /// transport regression: a prompt-only test would miss a rejected delegation.
+// Match the existing production approval-dispatch task boundary. Fixture futures
+// must not remain on the synchronous stack of the operation being measured.
+async fn approve_in_dispatcher_task(
+    db: &crate::config::connection::DatabaseConnection,
+    sessions: &crate::agent_session_store::SignalAgentSessionStore,
+    run_id: &str,
+    request_id: &str,
+    registry: &desk_diagnose_core::provider_registry::ProviderRegistry,
+    inventory: &[desk_diagnose_core::capability_availability::CapabilityAvailability],
+) -> Arc<TcpListener> {
+    let (db, sessions, run_id, request_id, registry, inventory) = (
+        db.clone(),
+        sessions.clone(),
+        run_id.to_owned(),
+        request_id.to_owned(),
+        registry.clone(),
+        inventory.to_vec(),
+    );
+    actix_web::rt::spawn(async move {
+        approve_with_independent_model(&db, &sessions, &run_id, &request_id, &registry, &inventory)
+            .await
+    })
+    .await
+    .unwrap()
+}
+
 async fn approve_with_independent_model(
     db: &crate::config::connection::DatabaseConnection,
     sessions: &crate::agent_session_store::SignalAgentSessionStore,
@@ -1167,4 +1265,217 @@ fn verified_concrete_ui_completion_fits_production_thread_stack() {
         .unwrap()
         .join()
         .unwrap();
+}
+
+async fn seed_command_history(db: &crate::config::connection::DatabaseConnection, run_id: &str) {
+    use crate::entity::agent_session as row;
+    use desk_diagnose_core::{command_confirmation::CommandPolicyContext, dynamic_run::*};
+    use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set, TransactionTrait};
+    let stored = row::Entity::find()
+        .filter(row::Column::ConversationId.eq(run_id))
+        .one(db)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut session = PersistedAgentSession::decode_json(&stored.state_json).unwrap();
+    let policy = CommandPolicyContext {
+        actor_id: session.actor_id.clone(),
+        target_device_id: session.device_id.clone(),
+        target_session_id: "synthetic-host:session-1".into(),
+        policy_revision: session.policy_revision,
+        admission_policy: desk_agent_protocol::authz::ExecAdmissionPolicy::OwnerInteractive,
+        execution_mode: ExecutionMode::ConfirmEachAction,
+        max_risk: desk_agent_protocol::RiskLevel::Critical,
+        available_shells: vec!["bash".into()],
+        max_runtime_ms: 60_000,
+        operator_templates: vec![],
+        effective_blocklist: desk_agent_protocol::exec_policy::builtin_blocklist().to_vec(),
+        policy_version: "synthetic:1".into(),
+        exec_pty: false,
+        exec_pty_elevation: false,
+    };
+    let registry = ai_assistant_provider_registry().with_command_policy(policy.clone());
+    let capability = registry.capability_for_tool("exec_command").unwrap();
+    let provider = registry
+        .provider_for_capability(&capability.wire.capability_id)
+        .unwrap();
+    let txn = db.begin().await.unwrap();
+    for index in 0..6 {
+        let canonical = desk_diagnose_core::permission_tools::canonical_tool_permission_input_json(
+            "exec_command",
+            serde_json::json!({"shell":"bash", "command":"printf synthetic", "timeout_ms":1000}),
+        )
+        .unwrap();
+        let confirmation = policy.prepare(&canonical, session.input_revision).unwrap();
+        let item = GrantRequestItem {
+            resource_scope: confirmation.resource_scope().unwrap(),
+            command_confirmation: Some(confirmation),
+            launch_confirmation: None,
+            item_id: "command".into(),
+            provider_id: provider.wire.provider_id.clone(),
+            tool_name: "exec_command".into(),
+            expected_effect: capability.wire.effect,
+            operation_scope: vec!["exec_command".into()],
+            export_destinations: vec![],
+            canonical_input_digest_sha256: Some(format!(
+                "{:x}",
+                Sha256::digest(canonical.as_bytes())
+            )),
+            canonical_input_json: Some(canonical),
+            suggested_ttl_seconds: 120,
+            suggested_max_uses: 1,
+            reason: "Synthetic retained command decision; no command is executed".into(),
+        };
+        session.permission_requests.insert(
+            0,
+            PermissionRequest {
+                schema_version: PERMISSION_REQUEST_SCHEMA_VERSION,
+                request_id: format!("historical-command-{index}"),
+                input_revision: session.input_revision,
+                state: PermissionRequestState::Denied,
+                items: vec![item],
+                created_at: Utc::now().to_rfc3339(),
+            },
+        );
+        session.last_event_seq += 1;
+        let event = PermissionDecidedEvent {
+            event: AgentRunEvent {
+                schema_version: AGENT_RUN_EVENT_SCHEMA_VERSION,
+                event_id: format!("historical-command-decision-{index}"),
+                run_id: run_id.into(),
+                event_seq: session.last_event_seq,
+                input_revision: session.input_revision,
+                kind: AgentRunEventKind::PermissionDecided,
+                correlation_id: Some(format!("historical-command-{index}")),
+                source_envelope_ids: vec![],
+                result_envelope_ids: vec![],
+                created_at: Utc::now().to_rfc3339(),
+            },
+            request_id: format!("historical-command-{index}"),
+            request_input_revision: session.input_revision,
+            resulting_state: PermissionRequestState::Denied,
+            items: vec![PermissionDecisionItem {
+                item_id: "command".into(),
+                decision: PermissionItemDecision::Deny,
+            }],
+            decision_source: PermissionDecisionSource::UserDecision,
+        };
+        session.record_permission_decision(&event).unwrap();
+        crate::entity::agent_run_event::ActiveModel {
+            event_id: Set(event.event.event_id.clone()),
+            run_id: Set(run_id.into()),
+            event_seq: Set(event.event.event_seq as i64),
+            input_revision: Set(session.input_revision as i64),
+            kind: Set(AgentRunEventKind::PermissionDecided.as_str().into()),
+            correlation_id: Set(Some(event.request_id.clone())),
+            source_envelope_ids_json: Set("[]".into()),
+            result_envelope_ids_json: Set("[]".into()),
+            payload_json: Set(serde_json::to_string(&event).unwrap()),
+            payload_schema_version: Set(1),
+            created_at: Set(Utc::now()),
+            ..Default::default()
+        }
+        .insert(&txn)
+        .await
+        .unwrap();
+    }
+    session.version = stored.version + 1;
+    let json = session.encode_json_for_storage().unwrap();
+    PersistedAgentSession::decode_json(&json).unwrap();
+    row::Entity::update_many()
+        .set(row::ActiveModel {
+            state_json: Set(json),
+            version: Set(session.version),
+            ..Default::default()
+        })
+        .filter(row::Column::Id.eq(stored.id))
+        .exec(&txn)
+        .await
+        .unwrap();
+    txn.commit().await.unwrap();
+}
+
+async fn resume_latest_goal(
+    connections: &web::Data<SharedConnectionMap>,
+    db: &crate::config::connection::DatabaseConnection,
+    run_id: &str,
+) {
+    let goal = crate::agent_goal_store::load_for_subject(db, run_id, "1", "device")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(goal.state, desk_diagnose_core::goal::GoalState::Queued);
+    let gate = crate::ai_assistant_gate::global_ai_assistant_gate();
+    let outcome = resume_queued_goal(connections.clone(), db.clone(), &gate, goal)
+        .await
+        .unwrap();
+    assert!(!matches!(outcome, LoopOutcome::TurnBusy));
+}
+
+fn isolated_history_stack(test: &str, route: HistoryRoute, approve_concrete: bool) {
+    const CHILD: &str = "DESK_TEST_STACK_BYTES";
+    if let Some(bytes) = std::env::var_os(CHILD) {
+        let bytes: usize = bytes.to_str().unwrap().parse().unwrap();
+        std::thread::Builder::new()
+            .name("history-stack".into())
+            .stack_size(bytes)
+            .spawn(move || {
+                actix_web::rt::System::new().block_on(Box::pin(run_desktop_history_case(
+                    true,
+                    "inspect_desktop_ui",
+                    false,
+                    false,
+                    true,
+                    approve_concrete,
+                    true,
+                    Some(route),
+                )));
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        return;
+    }
+    for bytes in [1024 * 1024, 2 * 1024 * 1024] {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                format!("ai_assistant_orchestrator::tests::desktop_permission::{test}"),
+                "--exact".into(),
+                "--nocapture".into(),
+            ])
+            .env(CHILD, bytes.to_string())
+            .env_remove("RUST_MIN_STACK")
+            .status()
+            .unwrap();
+        assert!(
+            status.success(),
+            "isolated history/UI approval regression failed on {bytes} bytes: {status}"
+        );
+    }
+}
+
+#[test]
+fn command_history_ui_review_fits_stack() {
+    isolated_history_stack(
+        "command_history_ui_review_fits_stack",
+        HistoryRoute::Permission,
+        true,
+    );
+}
+#[test]
+fn goal_command_history_ui_review_fits_stack() {
+    isolated_history_stack(
+        "goal_command_history_ui_review_fits_stack",
+        HistoryRoute::Goal,
+        true,
+    );
+}
+
+#[test]
+fn denied_ui_review_with_command_history_fits_stack() {
+    isolated_history_stack(
+        "denied_ui_review_with_command_history_fits_stack",
+        HistoryRoute::Permission,
+        false,
+    );
 }

@@ -150,7 +150,9 @@ impl SignalCapabilityGrantStore {
         generation: &str,
         parent: Option<&desk_agent_protocol::capability_grant::TaskGrantProvenance>,
     ) -> Result<Option<ObservedProviderAction>, DbErr> {
-        let (outbox, work, payload) = original_on(txn, generation).await?;
+        let (outbox, work, payload) =
+            desk_diagnose_core::future::boxed(|| async { original_on(txn, generation).await })
+                .await?;
         if work.manual_resolved_at.is_some() {
             return Err(invalid());
         }
@@ -164,14 +166,17 @@ impl SignalCapabilityGrantStore {
         if terminal.observation.native.result != ComputerActionResultClass::Verified {
             return Ok(None);
         }
-        let issued = Self::validate_original_authority_on(
-            txn,
-            &work,
-            &outbox,
-            &payload,
-            parent,
-            Some(terminal.receipt.received_at_unix_ms),
-        )
+        let issued = desk_diagnose_core::future::boxed(|| async {
+            Self::validate_original_authority_on(
+                txn,
+                &work,
+                &outbox,
+                &payload,
+                parent,
+                Some(terminal.receipt.received_at_unix_ms),
+            )
+            .await
+        })
         .await?;
         let authority = &payload.observed_authority;
         let sent_message = if authority.effect == CapabilityEffect::SendExternal {

@@ -9,11 +9,16 @@ pub(crate) async fn save_child_session(
     desk_diagnose_core::image_input::retain_latest_session_image(&mut session.conversation)
         .map_err(|_| invalid())?;
     session.agent_role.binding().ok_or_else(invalid)?;
-    let txn = crate::db::begin_write(db, session_row::Entity).await?;
+    let txn = desk_diagnose_core::future::boxed(|| async {
+        crate::db::begin_write(db, session_row::Entity).await
+    })
+    .await?;
 
     let now = chrono::Utc::now();
-    let (row, mut run, group) =
-        super::lifecycle::child_records_on(&txn, session, now.timestamp_millis()).await?;
+    let (row, mut run, group) = desk_diagnose_core::future::boxed(|| async {
+        super::lifecycle::child_records_on(&txn, session, now.timestamp_millis()).await
+    })
+    .await?;
     let previous_revision = run.state_revision;
     if run.report_corrections_used != session.subagent_report_corrections_used {
         run.report_corrections_used = session.subagent_report_corrections_used;
@@ -36,7 +41,10 @@ pub(crate) async fn save_child_session(
             .map_err(|_| invalid())?;
         next.pending_auto_triggers.clear();
     } else {
-        let facts = super::facts::runtime_facts_on(&txn, session, now.timestamp_millis()).await?;
+        let facts = desk_diagnose_core::future::boxed(|| async {
+            super::facts::runtime_facts_on(&txn, session, now.timestamp_millis()).await
+        })
+        .await?;
         run.synchronize_dependencies(
             facts.dependencies,
             session.turn_state.is_active(),
@@ -45,8 +53,14 @@ pub(crate) async fn save_child_session(
         .map_err(|_| invalid())?;
     }
     if run.state_revision != previous_revision {
-        replace_run_on(&txn, &row, &run, now.timestamp_millis()).await?;
-        append_state_event_on(&txn, &group, &run, now.timestamp_millis()).await?;
+        desk_diagnose_core::future::boxed(|| async {
+            replace_run_on(&txn, &row, &run, now.timestamp_millis()).await
+        })
+        .await?;
+        desk_diagnose_core::future::boxed(|| async {
+            append_state_event_on(&txn, &group, &run, now.timestamp_millis()).await
+        })
+        .await?;
     }
     let permission_ends =
         desk_diagnose_core::model_observability::permission::PendingEnds::task_control(
@@ -54,8 +68,11 @@ pub(crate) async fn save_child_session(
             &run,
             deadline_reached,
         );
-    let version = write_child_session_on(&txn, &next, now).await?;
-    txn.commit().await?;
+    let version = desk_diagnose_core::future::boxed(|| async {
+        write_child_session_on(&txn, &next, now).await
+    })
+    .await?;
+    desk_diagnose_core::future::boxed(|| async { txn.commit().await }).await?;
     permission_ends.submit(
         now.timestamp_millis(),
         crate::model_metrics::runtime::submit,

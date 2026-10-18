@@ -263,19 +263,25 @@ impl SubAgentStore {
         if params.trigger_origin != TriggerOrigin::SubAgentCompletion {
             return Err(invalid());
         }
-        let txn = begin_parent_control(
-            self,
-            &params.conversation_id,
-            &params.actor_id,
-            &params.device_id,
-        )
+        let txn = desk_diagnose_core::future::boxed(|| async {
+            begin_parent_control(
+                self,
+                &params.conversation_id,
+                &params.actor_id,
+                &params.device_id,
+            )
+            .await
+        })
         .await?;
-        let mut parent = parent_on(
-            &txn,
-            &params.conversation_id,
-            &params.actor_id,
-            &params.device_id,
-        )
+        let mut parent = desk_diagnose_core::future::boxed(|| async {
+            parent_on(
+                &txn,
+                &params.conversation_id,
+                &params.actor_id,
+                &params.device_id,
+            )
+            .await
+        })
         .await?;
         if !parent.turn_state.can_claim()
             || parent.turn_state == TurnState::Cancelled
@@ -286,7 +292,11 @@ impl SubAgentStore {
         {
             return Ok(None);
         }
-        let Some((group, source)) = ready_parent_source_on(&txn, &parent).await? else {
+        let Some((group, source)) = desk_diagnose_core::future::boxed(|| async {
+            ready_parent_source_on(&txn, &parent).await
+        })
+        .await?
+        else {
             return Ok(None);
         };
         if !matches!(
@@ -323,31 +333,37 @@ impl SubAgentStore {
             )
             .map_err(|_| invalid())?;
         parent.adopt_trigger(TriggerOrigin::SubAgentCompletion, &params.turn_id);
-        super::notification::mark_notification_attempt_on(&txn, &parent).await?;
+        desk_diagnose_core::future::boxed(|| async {
+            super::notification::mark_notification_attempt_on(&txn, &parent).await
+        })
+        .await?;
         let old_lease = parent.lease_token.checked_sub(1).ok_or_else(invalid)?;
         let version = parent.version.checked_add(1).ok_or_else(invalid)?;
         parent.version = version;
-        let changed = session_row::Entity::update_many()
-            .set(session_row::ActiveModel {
-                state_json: Set(parent.encode_json_for_storage().map_err(|_| invalid())?),
-                version: Set(version),
-                lease_token: Set(i64::try_from(parent.lease_token).map_err(|_| invalid())?),
-                lease_deadline: Set(Some(now + chrono::Duration::seconds(90))),
-                updated_at: Set(now),
-                ..Default::default()
-            })
-            .filter(session_row::Column::ConversationId.eq(&params.conversation_id))
-            .filter(session_row::Column::Version.eq(version - 1))
-            .filter(
-                session_row::Column::LeaseToken
-                    .eq(i64::try_from(old_lease).map_err(|_| invalid())?),
-            )
-            .exec(&txn)
-            .await?;
+        let changed = desk_diagnose_core::future::boxed(|| async {
+            session_row::Entity::update_many()
+                .set(session_row::ActiveModel {
+                    state_json: Set(parent.encode_json_for_storage().map_err(|_| invalid())?),
+                    version: Set(version),
+                    lease_token: Set(i64::try_from(parent.lease_token).map_err(|_| invalid())?),
+                    lease_deadline: Set(Some(now + chrono::Duration::seconds(90))),
+                    updated_at: Set(now),
+                    ..Default::default()
+                })
+                .filter(session_row::Column::ConversationId.eq(&params.conversation_id))
+                .filter(session_row::Column::Version.eq(version - 1))
+                .filter(
+                    session_row::Column::LeaseToken
+                        .eq(i64::try_from(old_lease).map_err(|_| invalid())?),
+                )
+                .exec(&txn)
+                .await
+        })
+        .await?;
         if changed.rows_affected != 1 {
             return Err(invalid());
         }
-        txn.commit().await?;
+        desk_diagnose_core::future::boxed(|| async { txn.commit().await }).await?;
         Ok(Some(ClaimedParentCompletion {
             session: parent,
             source,

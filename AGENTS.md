@@ -10,6 +10,10 @@
 
 `server` 二进制文件支持多种运行模式：完整模式 (`default`)、仅信令模式 (`signaling`)、仅被控端模式 (`desk-server`)、系统服务守护进程模式 (`service-daemon`)、会话工作进程模式 (`session-worker`)，以及只读 MCP stdio 模式 (`mcp-stdio`)。
 
+## Agent 执行栈约束
+
+修改 AI 编排、工具、审批、预算或会话 decode 时，必须运行适用的单帧门禁与小栈组合回归，参见 `scripts/agent-stack/README.md`。不得靠扩大线程栈、删历史/校验、优化等级或新增生产任务边界通过。准备、模型、工具和收尾使用有明确所有权的阶段；原始 future、编译单帧和组合峰值分别检查。阶段原始 future 目标 16 KiB，最终单帧 64 KiB；存量/派生预算只降不升且保留来源。事务内解码复用必须保留每次原 SELECT、主体/version/lease 围栏和原始 JSON 比较，不能将同一事务当成同一快照，也不能改变既有 `Send`、取消或锁顺序契约。
+
 ## 构建与运行
 
 ```bash

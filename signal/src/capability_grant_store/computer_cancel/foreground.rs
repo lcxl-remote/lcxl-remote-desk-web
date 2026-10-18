@@ -129,12 +129,15 @@ impl SignalCapabilityGrantStore {
         if !valid_request_id(request_id) || reason.len() > 4096 {
             return Err(invalid());
         }
-        lock_task(txn, task).await?;
-        let Some(work) = agent_action_item::Entity::find()
-            .filter(agent_action_item::Column::ActionRequestId.eq(task))
-            .filter(agent_action_item::Column::Kind.eq(CAPABILITY_WORK_KIND))
-            .one(txn)
-            .await?
+        desk_diagnose_core::future::boxed(|| async { lock_task(txn, task).await }).await?;
+        let Some(work) = desk_diagnose_core::future::boxed(|| async {
+            agent_action_item::Entity::find()
+                .filter(agent_action_item::Column::ActionRequestId.eq(task))
+                .filter(agent_action_item::Column::Kind.eq(CAPABILITY_WORK_KIND))
+                .one(txn)
+                .await
+        })
+        .await?
         else {
             return Ok(false);
         };
@@ -142,12 +145,17 @@ impl SignalCapabilityGrantStore {
         {
             return Err(invalid());
         }
-        let (outbox, work, payload) =
-            original_on(txn, work.execution_id.as_deref().ok_or_else(invalid)?).await?;
+        let (outbox, work, payload) = desk_diagnose_core::future::boxed(|| async {
+            original_on(txn, work.execution_id.as_deref().ok_or_else(invalid)?).await
+        })
+        .await?;
         if outbox.computer_background_json.is_some() {
-            return Self::request_computer_background_cancel_on(
-                txn, task, run, actor, device, request_id, reason,
-            )
+            return desk_diagnose_core::future::boxed(|| async {
+                Self::request_computer_background_cancel_on(
+                    txn, task, run, actor, device, request_id, reason,
+                )
+                .await
+            })
             .await
             .map(|value| value.is_some());
         }
@@ -188,11 +196,11 @@ impl SignalCapabilityGrantStore {
         if !has_result {
             active.updated_at = Set(timestamp(now)?);
         }
-        active.update(txn).await?;
+        desk_diagnose_core::future::boxed(|| async { active.update(txn).await }).await?;
         let mut active: agent_capability_dispatch_outbox::ActiveModel = outbox.into();
         active.computer_cancel_json =
             Set(Some(serde_json::to_string(&value).map_err(|_| invalid())?));
-        active.update(txn).await?;
+        desk_diagnose_core::future::boxed(|| async { active.update(txn).await }).await?;
         Ok(true)
     }
 }

@@ -55,7 +55,10 @@ pub(super) async fn issue_on(
     if session.is_subagent_result_turn() {
         return Err(invalid());
     }
-    let authority = schedule_store::fresh_action_authority_on(txn, session).await?;
+    let authority = desk_diagnose_core::future::boxed(|| async {
+        schedule_store::fresh_action_authority_on(txn, session).await
+    })
+    .await?;
     let contract = authority.contract();
     let rule = contract
         .contract()
@@ -70,11 +73,14 @@ pub(super) async fn issue_on(
     if grant_id != identity(&session.conversation_id, request.call_id) {
         return Err(invalid());
     }
-    let rows = ledger::Entity::find()
-        .filter(ledger::Column::RunId.eq(&session.conversation_id))
-        .filter(ledger::Column::Kind.eq("tool_call"))
-        .all(txn)
-        .await?;
+    let rows = desk_diagnose_core::future::boxed(|| async {
+        ledger::Entity::find()
+            .filter(ledger::Column::RunId.eq(&session.conversation_id))
+            .filter(ledger::Column::Kind.eq("tool_call"))
+            .all(txn)
+            .await
+    })
+    .await?;
     let input = if matches!(
         rule.input,
         desk_agent_protocol::schedule::contract::TaskInputConstraint::GeneratedTextArtifact { .. }
@@ -92,7 +98,9 @@ pub(super) async fn issue_on(
     } else {
         serde_json::from_str(request.canonical_input_json).map_err(|_| invalid())?
     };
-    let steps = steps::states(txn, &authority, &rows).await?;
+    let steps =
+        desk_diagnose_core::future::boxed(|| async { steps::states(txn, &authority, &rows).await })
+            .await?;
     let step_id = contract
         .contract()
         .steps
@@ -142,13 +150,16 @@ pub(super) async fn issue_on(
         desk_agent_protocol::schedule::contract::TaskInputConstraint::GeneratedMessage { .. }
     ) {
         Some(
-            message::bind(
-                txn,
-                session,
-                &authority,
-                original.as_ref().ok_or_else(invalid)?,
-                step_id.ok_or_else(invalid)?,
-            )
+            desk_diagnose_core::future::boxed(|| async {
+                message::bind(
+                    txn,
+                    session,
+                    &authority,
+                    original.as_ref().ok_or_else(invalid)?,
+                    step_id.ok_or_else(invalid)?,
+                )
+                .await
+            })
             .await?,
         )
     } else {
@@ -158,12 +169,15 @@ pub(super) async fn issue_on(
         rule.input,
         desk_agent_protocol::schedule::contract::TaskInputConstraint::GeneratedTextArtifact { .. }
     ) {
-        artifact::sources(
-            txn,
-            session,
-            &authority,
-            &original.as_ref().ok_or_else(invalid)?.id,
-        )
+        desk_diagnose_core::future::boxed(|| async {
+            artifact::sources(
+                txn,
+                session,
+                &authority,
+                &original.as_ref().ok_or_else(invalid)?.id,
+            )
+            .await
+        })
         .await?
     } else {
         Vec::new()
@@ -225,7 +239,11 @@ pub(super) async fn issue_on(
     let exception_grant_id = match decision {
         TaskDecision::Allowed { rule_id } if rule_id == rule.rule_id => None,
         TaskDecision::ApprovalRequired { rule_id } if rule_id == rule.rule_id => {
-            match exception::consume(txn, session, call, authority.verified_at()).await? {
+            match desk_diagnose_core::future::boxed(|| async {
+                exception::consume(txn, session, call, authority.verified_at()).await
+            })
+            .await?
+            {
                 Some(approval) => Some(approval),
                 None => {
                     let original = session
@@ -259,35 +277,41 @@ pub(super) async fn issue_on(
         }
         _ => return Err(invalid()),
     };
-    let allocation = ScheduleStore::reserve_task_budget(
-        txn,
-        &TaskBudgetRequest {
-            owner: authority.run().owner_user_id,
-            device: call.target_device_id,
-            run_id: &session.conversation_id,
-            node: authority.run().lease_owner.as_deref().ok_or_else(invalid)?,
-            lease_epoch: authority.run().lease_epoch,
-            kind: TaskBudgetKind::ToolCall,
-            rule_id: Some(rule.rule_id.as_str()),
-            logical_key: grant_id,
-            input_sha256: call.canonical_input_digest_sha256,
-            units: 1,
-        },
-    )
+    let allocation = desk_diagnose_core::future::boxed(|| async {
+        ScheduleStore::reserve_task_budget(
+            txn,
+            &TaskBudgetRequest {
+                owner: authority.run().owner_user_id,
+                device: call.target_device_id,
+                run_id: &session.conversation_id,
+                node: authority.run().lease_owner.as_deref().ok_or_else(invalid)?,
+                lease_epoch: authority.run().lease_epoch,
+                kind: TaskBudgetKind::ToolCall,
+                rule_id: Some(rule.rule_id.as_str()),
+                logical_key: grant_id,
+                input_sha256: call.canonical_input_digest_sha256,
+                units: 1,
+            },
+        )
+        .await
+    })
     .await
     .map_err(|_| invalid())?;
     if let Some((approval_id, _)) = &exception_grant_id {
         // The original approval, budget allocation and derived task grant commit
         // together. Replayed Provider work returns before reaching this path.
-        let changed = ledger::Entity::update_many()
-            .set(ledger::ActiveModel {
-                exception_grant_id: sea_orm::Set(Some(approval_id.clone())),
-                ..Default::default()
-            })
-            .filter(ledger::Column::Id.eq(allocation.id))
-            .filter(ledger::Column::ExceptionGrantId.is_null())
-            .exec(txn)
-            .await?;
+        let changed = desk_diagnose_core::future::boxed(|| async {
+            ledger::Entity::update_many()
+                .set(ledger::ActiveModel {
+                    exception_grant_id: sea_orm::Set(Some(approval_id.clone())),
+                    ..Default::default()
+                })
+                .filter(ledger::Column::Id.eq(allocation.id))
+                .filter(ledger::Column::ExceptionGrantId.is_null())
+                .exec(txn)
+                .await
+        })
+        .await?;
         if changed.rows_affected != 1 {
             return Err(invalid());
         }
@@ -340,7 +364,10 @@ pub(super) async fn issue_on(
         revoked_at_unix_ms: None,
         revoked_reason: None,
     };
-    SignalCapabilityGrantStore::issue_on(txn, &grant).await?;
+    desk_diagnose_core::future::boxed(|| async {
+        SignalCapabilityGrantStore::issue_on(txn, &grant).await
+    })
+    .await?;
     Ok(None)
 }
 

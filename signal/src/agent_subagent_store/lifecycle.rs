@@ -113,10 +113,19 @@ impl SubAgentStore {
         if !held.turn_state.is_settled() {
             return Err(invalid());
         }
-        let txn = begin_child_control(&self.db, held).await?;
+        let txn = desk_diagnose_core::future::boxed(|| async {
+            begin_child_control(&self.db, held).await
+        })
+        .await?;
         let now = chrono::Utc::now();
-        let (row, mut run, group) = child_records_on(&txn, held, now.timestamp_millis()).await?;
-        let facts = super::facts::runtime_facts_on(&txn, held, now.timestamp_millis()).await?;
+        let (row, mut run, group) = desk_diagnose_core::future::boxed(|| async {
+            child_records_on(&txn, held, now.timestamp_millis()).await
+        })
+        .await?;
+        let facts = desk_diagnose_core::future::boxed(|| async {
+            super::facts::runtime_facts_on(&txn, held, now.timestamp_millis()).await
+        })
+        .await?;
         run.synchronize_dependencies(facts.dependencies, false, &now.to_rfc3339())
             .map_err(|_| invalid())?;
         let resource_wait = failure_reason == Some("delegated_model_unavailable")
@@ -152,7 +161,10 @@ impl SubAgentStore {
             next.pending_auto_triggers.clear();
         }
         run.report_corrections_used = held.subagent_report_corrections_used;
-        replace_run_on(&txn, &row, &run, now.timestamp_millis()).await?;
+        desk_diagnose_core::future::boxed(|| async {
+            replace_run_on(&txn, &row, &run, now.timestamp_millis()).await
+        })
+        .await?;
         if resource_wait && !run.state.is_terminal() {
             run_row::Entity::update_many()
                 .set(run_row::ActiveModel {
@@ -174,9 +186,15 @@ impl SubAgentStore {
                 &run,
                 deadline_reached,
             );
-        let version = write_child_session_on(&txn, &next, now).await?;
-        append_state_event_on(&txn, &group, &run, now.timestamp_millis()).await?;
-        txn.commit().await?;
+        let version = desk_diagnose_core::future::boxed(|| async {
+            write_child_session_on(&txn, &next, now).await
+        })
+        .await?;
+        desk_diagnose_core::future::boxed(|| async {
+            append_state_event_on(&txn, &group, &run, now.timestamp_millis()).await
+        })
+        .await?;
+        desk_diagnose_core::future::boxed(|| async { txn.commit().await }).await?;
         permission_ends.submit(
             now.timestamp_millis(),
             crate::model_metrics::runtime::submit,
@@ -346,15 +364,24 @@ impl SubAgentStore {
         if !held.turn_state.is_settled() {
             return Err(invalid());
         }
-        let txn = begin_child_control(&self.db, held).await?;
+        let txn = desk_diagnose_core::future::boxed(|| async {
+            begin_child_control(&self.db, held).await
+        })
+        .await?;
         let now = chrono::Utc::now();
-        let (row, mut run, group) = child_records_on(&txn, held, now.timestamp_millis()).await?;
+        let (row, mut run, group) = desk_diagnose_core::future::boxed(|| async {
+            child_records_on(&txn, held, now.timestamp_millis()).await
+        })
+        .await?;
         if now.timestamp_millis() >= run.binding.deadline_ms
             || now.timestamp_millis() >= group.limits.deadline_ms
         {
             return Err(invalid());
         }
-        let facts = super::facts::runtime_facts_on(&txn, held, now.timestamp_millis()).await?;
+        let facts = desk_diagnose_core::future::boxed(|| async {
+            super::facts::runtime_facts_on(&txn, held, now.timestamp_millis()).await
+        })
+        .await?;
         run.synchronize_dependencies(facts.dependencies, false, &now.to_rfc3339())
             .map_err(|_| invalid())?;
         let report = match desk_diagnose_core::subagent::report::from_answer(
@@ -364,7 +391,7 @@ impl SubAgentStore {
         ) {
             Ok(report) => report,
             Err(_) => {
-                txn.rollback().await?;
+                desk_diagnose_core::future::boxed(|| async { txn.rollback().await }).await?;
                 return Ok(Err("invalid delegated text result"));
             }
         };
@@ -376,7 +403,7 @@ impl SubAgentStore {
         ) {
             Ok(disposition) => disposition,
             Err(error) => {
-                txn.rollback().await?;
+                desk_diagnose_core::future::boxed(|| async { txn.rollback().await }).await?;
                 return Ok(Err(error));
             }
         };
@@ -416,7 +443,10 @@ impl SubAgentStore {
         )
         .map_err(|_| invalid())?;
         run.report_corrections_used = held.subagent_report_corrections_used;
-        replace_run_on(&txn, &row, &run, now.timestamp_millis()).await?;
+        desk_diagnose_core::future::boxed(|| async {
+            replace_run_on(&txn, &row, &run, now.timestamp_millis()).await
+        })
+        .await?;
         let changed = run_row::Entity::update_many()
             .set(run_row::ActiveModel {
                 result_envelope_json: Set(Some(
@@ -439,9 +469,15 @@ impl SubAgentStore {
             next.pending_auto_triggers.clear();
         }
         next.turn_state = TurnState::Idle;
-        let version = write_child_session_on(&txn, &next, now).await?;
-        append_state_event_on(&txn, &group, &run, now.timestamp_millis()).await?;
-        txn.commit().await?;
+        let version = desk_diagnose_core::future::boxed(|| async {
+            write_child_session_on(&txn, &next, now).await
+        })
+        .await?;
+        desk_diagnose_core::future::boxed(|| async {
+            append_state_event_on(&txn, &group, &run, now.timestamp_millis()).await
+        })
+        .await?;
+        desk_diagnose_core::future::boxed(|| async { txn.commit().await }).await?;
         next.version = version;
         *held = next;
         Ok(Ok(disposition))

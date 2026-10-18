@@ -190,39 +190,60 @@ impl SubAgentStore {
         &self,
         held: &PersistedAgentSession,
     ) -> Result<ChatMessage, DbErr> {
-        let txn = self.db.begin().await?;
-        let parent = parent_planning_on(&txn, held, chrono::Utc::now().timestamp_millis()).await?;
-        let group = current_group_on(&txn, &parent).await?;
-        let policy = crate::subagent_policy::read(&txn).await?;
-        let source = group_row::Entity::find()
-            .filter(group_row::Column::GroupId.eq(&group.group_id))
-            .one(&txn)
-            .await?
-            .ok_or_else(invalid)?;
+        let txn = desk_diagnose_core::future::boxed(|| async { self.db.begin().await }).await?;
+        let parent = desk_diagnose_core::future::boxed(|| async {
+            parent_planning_on(&txn, held, chrono::Utc::now().timestamp_millis()).await
+        })
+        .await?;
+        let group =
+            desk_diagnose_core::future::boxed(|| async { current_group_on(&txn, &parent).await })
+                .await?;
+        let policy = desk_diagnose_core::future::boxed(|| async {
+            crate::subagent_policy::read(&txn).await
+        })
+        .await?;
+        let source = desk_diagnose_core::future::boxed(|| async {
+            group_row::Entity::find()
+                .filter(group_row::Column::GroupId.eq(&group.group_id))
+                .one(&txn)
+                .await
+        })
+        .await?
+        .ok_or_else(invalid)?;
         let mut labels = decode_creation(&source)?
             .input_envelopes()
             .map_err(|_| invalid())?;
         let query = task_query(&parent);
-        let total = query.clone().count(&txn).await?;
+        let total =
+            desk_diagnose_core::future::boxed(|| async { query.clone().count(&txn).await }).await?;
         let unfinished_query = query.clone().filter(run_row::Column::State.is_not_in([
             "completed",
             "failed",
             "cancelled",
         ]));
-        let unfinished = unfinished_query.clone().count(&txn).await?;
-        let mut rows = unfinished_query
-            .order_by_asc(run_row::Column::Id)
-            .limit(desk_diagnose_core::subagent::SUBAGENT_ROOT_CAPACITY as u64 + 1)
-            .all(&txn)
-            .await?;
+        let unfinished = desk_diagnose_core::future::boxed(|| async {
+            unfinished_query.clone().count(&txn).await
+        })
+        .await?;
+        let mut rows = desk_diagnose_core::future::boxed(|| async {
+            unfinished_query
+                .order_by_asc(run_row::Column::Id)
+                .limit(desk_diagnose_core::subagent::SUBAGENT_ROOT_CAPACITY as u64 + 1)
+                .all(&txn)
+                .await
+        })
+        .await?;
         if rows.len() > desk_diagnose_core::subagent::SUBAGENT_ROOT_CAPACITY {
             return Err(invalid());
         }
-        for row in query
-            .order_by_desc(run_row::Column::Id)
-            .limit(10)
-            .all(&txn)
-            .await?
+        for row in desk_diagnose_core::future::boxed(|| async {
+            query
+                .order_by_desc(run_row::Column::Id)
+                .limit(10)
+                .all(&txn)
+                .await
+        })
+        .await?
         {
             if !rows.iter().any(|existing| existing.id == row.id) {
                 rows.push(row);
@@ -259,7 +280,7 @@ impl SubAgentStore {
         if message.text.len() as u64 > group.limits.max_context_bytes {
             return Err(invalid());
         }
-        txn.commit().await?;
+        desk_diagnose_core::future::boxed(|| async { txn.commit().await }).await?;
         Ok(message)
     }
 
@@ -294,13 +315,22 @@ impl SubAgentStore {
         {
             return Err(invalid());
         }
-        let txn = begin_main_tool(self, held, call, &operation, input_observation).await?;
+        let txn = desk_diagnose_core::future::boxed(|| async {
+            begin_main_tool(self, held, call, &operation, input_observation).await
+        })
+        .await?;
         let now = chrono::Utc::now();
-        let parent = parent_planning_on(&txn, held, now.timestamp_millis()).await?;
+        let parent = desk_diagnose_core::future::boxed(|| async {
+            parent_planning_on(&txn, held, now.timestamp_millis()).await
+        })
+        .await?;
         if desk_diagnose_core::model_controls::is_control(&call.name) {
-            crate::model_egress_store::SignalModelEgressStore::validate_control_on(
-                &txn, &parent, call,
-            )
+            desk_diagnose_core::future::boxed(|| async {
+                crate::model_egress_store::SignalModelEgressStore::validate_control_on(
+                    &txn, &parent, call,
+                )
+                .await
+            })
             .await?;
         }
         let caller = parent
@@ -336,10 +366,12 @@ impl SubAgentStore {
                 payload: serde_json::from_str(&result.text).map_err(|_| invalid())?,
                 result_message_id: result.message_id.clone(),
             };
-            txn.commit().await?;
+            desk_diagnose_core::future::boxed(|| async { txn.commit().await }).await?;
             return Ok(receipt);
         }
-        let group = current_group_on(&txn, &parent).await?;
+        let group =
+            desk_diagnose_core::future::boxed(|| async { current_group_on(&txn, &parent).await })
+                .await?;
         let mut labels = vec![caller];
         let mut next = held.clone();
         let mut observation = None;
@@ -347,23 +379,35 @@ impl SubAgentStore {
             desk_diagnose_core::model_observability::permission::PendingEnds::default();
         let payload = match operation {
             Operation::Spawn(request) => {
-                let summary = super::creation::spawn_on(&txn, &parent, call, &request).await?;
+                let summary = desk_diagnose_core::future::boxed(|| async {
+                    super::creation::spawn_on(&txn, &parent, call, &request).await
+                })
+                .await?;
                 labels.extend(task_labels(
-                    &task_for_parent_on(&txn, &parent, &summary.task_id).await?,
+                    &desk_diagnose_core::future::boxed(|| async {
+                        task_for_parent_on(&txn, &parent, &summary.task_id).await
+                    })
+                    .await?,
                 )?);
                 serde_json::to_value(summary).map_err(|_| invalid())?
             }
             Operation::Cancel { .. } | Operation::Message { .. } => {
-                let controlled = super::task_control::apply_task_control_from_turn_on(
-                    &txn,
-                    &parent,
-                    call,
-                    now.timestamp_millis(),
-                    input_observation,
-                )
+                let controlled = desk_diagnose_core::future::boxed(|| async {
+                    super::task_control::apply_task_control_from_turn_on(
+                        &txn,
+                        &parent,
+                        call,
+                        now.timestamp_millis(),
+                        input_observation,
+                    )
+                    .await
+                })
                 .await?;
                 labels.extend(task_labels(
-                    &task_for_parent_on(&txn, &parent, &controlled.outcome.task.task_id).await?,
+                    &desk_diagnose_core::future::boxed(|| async {
+                        task_for_parent_on(&txn, &parent, &controlled.outcome.task.task_id).await
+                    })
+                    .await?,
                 )?);
                 permission_ends = controlled.permission_ends;
                 serde_json::to_value(controlled.outcome.task).map_err(|_| invalid())?
@@ -386,18 +430,30 @@ impl SubAgentStore {
                     input_observation.stage(Stage::Reference, StageOutcome::Passed);
                 }
                 let query = task_query(&parent);
-                let total = query.clone().count(&txn).await?;
-                let unfinished = query
-                    .clone()
-                    .filter(run_row::Column::State.is_not_in(["completed", "failed", "cancelled"]))
-                    .count(&txn)
-                    .await?;
-                let rows = query
-                    .filter(run_row::Column::Id.lt(before))
-                    .order_by_desc(run_row::Column::Id)
-                    .limit(u64::from(limit) + 1)
-                    .all(&txn)
-                    .await?;
+                let total =
+                    desk_diagnose_core::future::boxed(|| async { query.clone().count(&txn).await })
+                        .await?;
+                let unfinished = desk_diagnose_core::future::boxed(|| async {
+                    query
+                        .clone()
+                        .filter(run_row::Column::State.is_not_in([
+                            "completed",
+                            "failed",
+                            "cancelled",
+                        ]))
+                        .count(&txn)
+                        .await
+                })
+                .await?;
+                let rows = desk_diagnose_core::future::boxed(|| async {
+                    query
+                        .filter(run_row::Column::Id.lt(before))
+                        .order_by_desc(run_row::Column::Id)
+                        .limit(u64::from(limit) + 1)
+                        .all(&txn)
+                        .await
+                })
+                .await?;
                 let mut items = Vec::new();
                 for row in rows.iter().take(limit as usize) {
                     labels.extend(task_labels(row)?);
@@ -415,8 +471,10 @@ impl SubAgentStore {
                 .map_err(|_| invalid())?
             }
             Operation::Status { task_id } => {
-                let row =
-                    task_for_parent_observed_on(&txn, &parent, &task_id, input_observation).await?;
+                let row = desk_diagnose_core::future::boxed(|| async {
+                    task_for_parent_observed_on(&txn, &parent, &task_id, input_observation).await
+                })
+                .await?;
                 labels.extend(task_labels(&row)?);
                 serde_json::to_value(decode_run(&row)?.summary()).map_err(|_| invalid())?
             }
@@ -424,8 +482,10 @@ impl SubAgentStore {
                 task_id,
                 include_task,
             } => {
-                let row =
-                    task_for_parent_observed_on(&txn, &parent, &task_id, input_observation).await?;
+                let row = desk_diagnose_core::future::boxed(|| async {
+                    task_for_parent_observed_on(&txn, &parent, &task_id, input_observation).await
+                })
+                .await?;
                 let run = decode_run(&row)?;
                 let result = run.result();
                 labels.extend(task_labels(&row)?);
@@ -471,9 +531,11 @@ impl SubAgentStore {
                 let mut current = Vec::new();
                 let mut summaries = Vec::new();
                 for task_id in task_ids {
-                    let row =
+                    let row = desk_diagnose_core::future::boxed(|| async {
                         task_for_parent_observed_on(&txn, &parent, &task_id, input_observation)
-                            .await?;
+                            .await
+                    })
+                    .await?;
                     let run = decode_run(&row)?;
                     labels.extend(task_labels(&row)?);
                     summaries.push(run.summary());
@@ -560,8 +622,11 @@ impl SubAgentStore {
             }
             next.observed_subagent_results.push(observation);
         }
-        let version = write_child_session_on(&txn, &next, now).await?;
-        txn.commit().await?;
+        let version = desk_diagnose_core::future::boxed(|| async {
+            write_child_session_on(&txn, &next, now).await
+        })
+        .await?;
+        desk_diagnose_core::future::boxed(|| async { txn.commit().await }).await?;
         permission_ends.submit(
             now.timestamp_millis(),
             crate::model_metrics::runtime::submit,

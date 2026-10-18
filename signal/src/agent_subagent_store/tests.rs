@@ -26,6 +26,7 @@ mod role_recovery;
 pub(super) mod scheduled;
 mod shared_approval;
 mod ui_read;
+mod validated_session;
 
 async fn active_parent_for_group(db: &DatabaseConnection, group_id: &str) -> PersistedAgentSession {
     let row = session_row::Entity::find()

@@ -35,6 +35,8 @@ mod budget;
 mod funding;
 mod model_receipt;
 mod review_budget;
+mod validated_session;
+use validated_session::{CallSession, SessionRead, TxnValidatedSession};
 mod shared_approval;
 pub(crate) use shared_approval::shared_approval_current_on;
 mod runtime_budget;
@@ -375,14 +377,17 @@ pub(crate) async fn apply_goal_source_on<C: ConnectionTrait + crate::config::Con
     let now = chrono::DateTime::from_timestamp_millis(now_ms)
         .ok_or_else(invalid)?
         .to_rfc3339();
-    let groups = group_row::Entity::find()
-        .filter(group_row::Column::RootConversationId.eq(root))
-        .filter(group_row::Column::ActorId.eq(actor))
-        .filter(group_row::Column::DeviceId.eq(device))
-        .filter(group_row::Column::SourceGoalId.eq(goal_id))
-        .order_by_asc(group_row::Column::Id)
-        .all(db)
-        .await?;
+    let groups = desk_diagnose_core::future::boxed(|| async {
+        group_row::Entity::find()
+            .filter(group_row::Column::RootConversationId.eq(root))
+            .filter(group_row::Column::ActorId.eq(actor))
+            .filter(group_row::Column::DeviceId.eq(device))
+            .filter(group_row::Column::SourceGoalId.eq(goal_id))
+            .order_by_asc(group_row::Column::Id)
+            .all(db)
+            .await
+    })
+    .await?;
     for row in groups {
         let mut group = decode_group(&row)?;
         if group.source_admission == SourceAdmission::Closed {
@@ -407,14 +412,17 @@ pub(crate) async fn apply_goal_source_on<C: ConnectionTrait + crate::config::Con
         if changed.rows_affected != 1 {
             return Err(invalid());
         }
-        let runs = run_row::Entity::find()
-            .filter(run_row::Column::GroupId.eq(&group.group_id))
-            .filter(run_row::Column::RootConversationId.eq(root))
-            .filter(run_row::Column::ActorId.eq(actor))
-            .filter(run_row::Column::DeviceId.eq(device))
-            .order_by_asc(run_row::Column::Id)
-            .all(db)
-            .await?;
+        let runs = desk_diagnose_core::future::boxed(|| async {
+            run_row::Entity::find()
+                .filter(run_row::Column::GroupId.eq(&group.group_id))
+                .filter(run_row::Column::RootConversationId.eq(root))
+                .filter(run_row::Column::ActorId.eq(actor))
+                .filter(run_row::Column::DeviceId.eq(device))
+                .order_by_asc(run_row::Column::Id)
+                .all(db)
+                .await
+        })
+        .await?;
         for row in runs {
             let mut run = decode_run(&row)?;
             if run.state.is_terminal() || run.state == SubAgentState::Cancelling {
@@ -441,17 +449,26 @@ pub(crate) async fn apply_goal_source_on<C: ConnectionTrait + crate::config::Con
                 }
                 _ => continue,
             }
-            replace_run_on(db, &row, &run, now_ms).await?;
+            desk_diagnose_core::future::boxed(|| async {
+                replace_run_on(db, &row, &run, now_ms).await
+            })
+            .await?;
             permission_ends.extend(
-                synchronize_control_on(
-                    db,
-                    &run,
-                    now_ms,
-                    admission == SourceAdmission::Open && now_ms >= run.binding.deadline_ms,
-                )
+                desk_diagnose_core::future::boxed(|| async {
+                    synchronize_control_on(
+                        db,
+                        &run,
+                        now_ms,
+                        admission == SourceAdmission::Open && now_ms >= run.binding.deadline_ms,
+                    )
+                    .await
+                })
                 .await?,
             );
-            append_state_event_on(db, &group, &run, now_ms).await?;
+            desk_diagnose_core::future::boxed(|| async {
+                append_state_event_on(db, &group, &run, now_ms).await
+            })
+            .await?;
         }
     }
     Ok(permission_ends)

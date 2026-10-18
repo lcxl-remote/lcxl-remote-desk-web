@@ -16,6 +16,7 @@
 //! rebound on reconnect; the **turn routing** fields (connection / request /
 //! turn id) are transient and rebind each turn.
 
+mod envelope_probe;
 mod executions;
 pub use executions::{BackgroundExecution, UnknownExecution};
 
@@ -779,19 +780,18 @@ impl PersistedAgentSession {
     /// Decode the persisted envelope with an explicit legacy-v0 upgrade. Unknown
     /// versions fail closed instead of being partially interpreted by serde.
     pub fn decode_json(input: &str) -> Result<Self, SessionDecodeError> {
-        let value: serde_json::Value = serde_json::from_str(input)?;
-        let version = value
-            .get("conversation_schema_version")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0);
+        let envelope: envelope_probe::EnvelopeProbe = serde_json::from_str(input)?;
+        let version = envelope.version;
         if version > u64::from(CONVERSATION_SCHEMA_VERSION) {
             return Err(SessionDecodeError::UnsupportedVersion(version));
         }
-        let has_disclosure = value.get("capability_disclosure").is_some();
-        let has_focus_epoch = value.get("focus_epoch").is_some();
-        let has_visual_evidence = value.get("visual_evidence").is_some();
-        let has_visual_verification = value.get("pending_visual_verification").is_some();
-        drop(value);
+        let envelope_probe::EnvelopeProbe {
+            has_disclosure,
+            has_focus_epoch,
+            has_visual_evidence,
+            has_visual_verification,
+            ..
+        } = envelope;
         // Decode the typed session directly from JSON. Deserializing the owned
         // Value adds large nested visitor frames to approval/execution polls.
         let mut session: Self = serde_json::from_str(input)?;

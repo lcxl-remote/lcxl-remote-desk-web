@@ -60,12 +60,15 @@ async fn validate_dispatch_on_inner(
     reservation: &DelegationCallReservation,
     now_ms: i64,
 ) -> Result<(), DbErr> {
-    let source = group_row::Entity::find()
-        .filter(group_row::Column::GroupId.eq(&reservation.group_id))
-        .filter(group_row::Column::RootConversationId.eq(&reservation.root_conversation_id))
-        .one(txn)
-        .await?
-        .ok_or_else(invalid)?;
+    let source = desk_diagnose_core::future::boxed(|| async {
+        group_row::Entity::find()
+            .filter(group_row::Column::GroupId.eq(&reservation.group_id))
+            .filter(group_row::Column::RootConversationId.eq(&reservation.root_conversation_id))
+            .one(txn)
+            .await
+    })
+    .await?
+    .ok_or_else(invalid)?;
     let group = decode_group(&source)?;
     if group.source_admission != SourceAdmission::Open
         || group.source_epoch != reservation.source_epoch
@@ -73,21 +76,30 @@ async fn validate_dispatch_on_inner(
     {
         return Err(invalid());
     }
-    super::scheduled_source::current_scheduled_source_on(txn, &source).await?;
-    parent_on(
-        txn,
-        &group.root_conversation_id,
-        &group.actor_id,
-        &group.device_id,
-    )
+    desk_diagnose_core::future::boxed(|| async {
+        super::scheduled_source::current_scheduled_source_on(txn, &source).await
+    })
     .await?;
-    let row = session_row::Entity::find()
-        .filter(session_row::Column::ConversationId.eq(&reservation.conversation_id))
-        .filter(session_row::Column::ActorId.eq(&group.actor_id))
-        .filter(session_row::Column::DeviceId.eq(&group.device_id))
-        .one(txn)
-        .await?
-        .ok_or_else(invalid)?;
+    desk_diagnose_core::future::boxed(|| async {
+        parent_on(
+            txn,
+            &group.root_conversation_id,
+            &group.actor_id,
+            &group.device_id,
+        )
+        .await
+    })
+    .await?;
+    let row = desk_diagnose_core::future::boxed(|| async {
+        session_row::Entity::find()
+            .filter(session_row::Column::ConversationId.eq(&reservation.conversation_id))
+            .filter(session_row::Column::ActorId.eq(&group.actor_id))
+            .filter(session_row::Column::DeviceId.eq(&group.device_id))
+            .one(txn)
+            .await
+    })
+    .await?
+    .ok_or_else(invalid)?;
     let session = PersistedAgentSession::decode_json(&row.state_json).map_err(|_| invalid())?;
     if session.surface != AgentSessionSurface::AiAssistant
         || session.version != row.version
@@ -98,7 +110,10 @@ async fn validate_dispatch_on_inner(
         return Err(invalid());
     }
     if let Some(review) = &reservation.review_authority {
-        super::review_budget::validate_review_scope_on(txn, review, now_ms).await?;
+        desk_diagnose_core::future::boxed(|| async {
+            super::review_budget::validate_review_scope_on(txn, review, now_ms).await
+        })
+        .await?;
     } else {
         let token = reservation.planning_lease_token.ok_or_else(invalid)?;
         if !session.turn_state.is_active()
@@ -112,15 +127,18 @@ async fn validate_dispatch_on_inner(
         }
     }
     if let Some(task_id) = &reservation.task_id {
-        let task = run_row::Entity::find()
-            .filter(run_row::Column::TaskId.eq(task_id))
-            .filter(run_row::Column::GroupId.eq(&group.group_id))
-            .filter(run_row::Column::RootConversationId.eq(&group.root_conversation_id))
-            .filter(run_row::Column::ActorId.eq(&group.actor_id))
-            .filter(run_row::Column::DeviceId.eq(&group.device_id))
-            .one(txn)
-            .await?
-            .ok_or_else(invalid)?;
+        let task = desk_diagnose_core::future::boxed(|| async {
+            run_row::Entity::find()
+                .filter(run_row::Column::TaskId.eq(task_id))
+                .filter(run_row::Column::GroupId.eq(&group.group_id))
+                .filter(run_row::Column::RootConversationId.eq(&group.root_conversation_id))
+                .filter(run_row::Column::ActorId.eq(&group.actor_id))
+                .filter(run_row::Column::DeviceId.eq(&group.device_id))
+                .one(txn)
+                .await
+        })
+        .await?
+        .ok_or_else(invalid)?;
         let run = decode_run(&task)?;
         run.validate_session(&session).map_err(|_| invalid())?;
         run.require_current(run.fence()).map_err(|_| invalid())?;

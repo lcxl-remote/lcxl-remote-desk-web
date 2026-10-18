@@ -542,3 +542,7 @@ AT-SPI 事件订阅绑定 Registry 的唯一 D-Bus owner，服务实例变化会
 Mutter Notify 回复只证明接口回复，可能早于输入任务处理，也可能对应被丢弃的早期绝对坐标请求。Linux 输出动作仅凭该回复必须保留 OutcomeUnknown，不发布 changed=true，不自动重放；IdleMonitor Core watch 不能补出来源或输入完成屏障。
 
 桌面与 AT-SPI 监测共用 worker 监测归属凭据。替换监测器或重建 worker 后，旧任务的晚到结果和退出清理不能覆盖新监测状态；状态发布与归属更替在同一锁内串行化。
+
+### AI 执行栈预算
+
+AI 编排及审批改动须同时检查原始 future 尺寸、debug/release 编译单帧和 1 MiB / 2 MiB 真实入口组合。运行命令、基线评审和线程检查见 [Agent 栈预算检查](scripts/agent-stack/README.md)。不要扩大线程栈、改变优化等级或增加生产调度边界来规避失败。工程约束不改变 config.toml、数据库或用户功能。

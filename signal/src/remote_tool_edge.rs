@@ -625,14 +625,17 @@ impl ComputerActionObserver for SignalComputerActionObserver {
                         desk_signal_facade::service::computer_turn::query_from_host(source, model),
                         source.model.version_info.client_id.as_deref(),
                     ) {
-                        let state = self.store.computer_turn_state(device, &query).await
+                        let state = desk_diagnose_core::future::boxed(|| async { self.store.computer_turn_state(device, &query).await }).await
                             .unwrap_or(desk_agent_protocol::computer_turn::ComputerActionTurnState::Unavailable);
-                        desk_signal_facade::service::computer_turn::reply(
-                            source,
-                            &model.request_id,
-                            query,
-                            state,
-                        )
+                        desk_diagnose_core::future::boxed(|| async {
+                            desk_signal_facade::service::computer_turn::reply(
+                                source,
+                                &model.request_id,
+                                query,
+                                state,
+                            )
+                            .await
+                        })
                         .await;
                     }
                 }
@@ -647,16 +650,18 @@ impl ComputerActionObserver for SignalComputerActionObserver {
                     if let (Some(audience), Ok(state)) = (
                         source.model.version_info.client_id.as_deref(),
                         model.get_data::<ComputerActionStateReport>(),
-                    ) && self
-                        .store
-                        .accept_computer_cancel_state(
-                            source_id,
-                            audience,
-                            &model.request_id,
-                            &state,
-                        )
-                        .await
-                        .is_err()
+                    ) && desk_diagnose_core::future::boxed(|| async {
+                        self.store
+                            .accept_computer_cancel_state(
+                                source_id,
+                                audience,
+                                &model.request_id,
+                                &state,
+                            )
+                            .await
+                    })
+                    .await
+                    .is_err()
                     {
                         log::warn!("[computer-action] rejected inconsistent stop observation");
                     }
@@ -666,16 +671,18 @@ impl ComputerActionObserver for SignalComputerActionObserver {
                         let Some(audience) = source.model.version_info.client_id.as_deref() else {
                             return;
                         };
-                        if self
-                            .store
-                            .accept_computer_started(
-                                source_id,
-                                audience,
-                                &model.request_id,
-                                &started,
-                            )
-                            .await
-                            .is_err()
+                        if desk_diagnose_core::future::boxed(|| async {
+                            self.store
+                                .accept_computer_started(
+                                    source_id,
+                                    audience,
+                                    &model.request_id,
+                                    &started,
+                                )
+                                .await
+                        })
+                        .await
+                        .is_err()
                         {
                             log::warn!(
                                 "[computer-action] rejected inconsistent executor acceptance"
@@ -691,15 +698,17 @@ impl ComputerActionObserver for SignalComputerActionObserver {
                             return;
                         };
                         use crate::capability_grant_store::computer_completion::CompletionObservation;
-                        match self
-                            .store
-                            .accept_computer_completion(
-                                source_id,
-                                audience,
-                                &model.request_id,
-                                &completed,
-                            )
-                            .await
+                        match desk_diagnose_core::future::boxed(|| async {
+                            self.store
+                                .accept_computer_completion(
+                                    source_id,
+                                    audience,
+                                    &model.request_id,
+                                    &completed,
+                                )
+                                .await
+                        })
+                        .await
                         {
                             Ok(
                                 CompletionObservation::Stored
@@ -932,6 +941,20 @@ fn semantic_action_target_kind(action: &ComputerActionKind) -> Option<ObjectKind
         _ => None,
     }
 }
+
+// Own preflight results separately from the borrowed authorization views.
+struct SemanticBindings {
+    launch: Option<Box<desk_agent_protocol::application_launch::LaunchApprovalBinding>>,
+    iwork: Option<Box<desk_diagnose_core::provider_preflight::IworkCallPreflight>>,
+    text: Option<Box<desk_diagnose_core::provider_preflight::text_file::TextMutationPreflight>>,
+    ui: Option<Box<desk_diagnose_core::provider_preflight::UiCallPreflight>>,
+    background: Option<Box<desk_diagnose_core::provider_preflight::BackgroundInputCallPreflight>>,
+    output: Option<Box<desk_diagnose_core::provider_preflight::WaylandOutputInputPreflight>>,
+    raw_input: Option<Box<desk_diagnose_core::provider_preflight::RawInputCallPreflight>>,
+}
+
+type PreparedAction<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<ExecOutcome, AgentError>> + 'a>>;
 
 impl SignalAiAssistantTools {
     #[allow(clippy::too_many_arguments)]
@@ -1429,9 +1452,14 @@ impl SignalAiAssistantTools {
             .provider_for_capability(&capability.wire.capability_id)
             .expect("registered capability has a Provider");
         self.preflight_selected_context(call, capability.required_capability)?;
-        self.verify_current_readiness(capability).await?;
+        desk_diagnose_core::future::boxed(|| async {
+            self.verify_current_readiness(capability).await
+        })
+        .await?;
 
-        let session = self.authoritative_session().await?;
+        let session =
+            desk_diagnose_core::future::boxed(|| async { self.authoritative_session().await })
+                .await?;
         let (canonical_input_json, canonical_input_digest_sha256) =
             Self::canonical_call_input(call)?;
         let server_call_id = desk_diagnose_core::native_ids::background_action(
@@ -1445,7 +1473,10 @@ impl SignalAiAssistantTools {
         );
         let read_preflight =
             if desk_diagnose_core::provider_preflight::text_file::uses_session_file_read(call)? {
-                self.validate_original_objects().await?;
+                desk_diagnose_core::future::boxed(|| async {
+                    self.validate_original_objects().await
+                })
+                .await?;
                 Some(
                 desk_diagnose_core::provider_preflight::read::ReadCallPreflight::build_file_result(
                     &self.provider_registry,
@@ -1456,7 +1487,10 @@ impl SignalAiAssistantTools {
                 ).inspect_err(|error| { self.observed(call).input_error(error); })?,
             )
             } else if capability.wire.execution_locality == ExecutionLocality::Edge {
-                self.validate_original_objects().await?;
+                desk_diagnose_core::future::boxed(|| async {
+                    self.validate_original_objects().await
+                })
+                .await?;
                 Some(
                     desk_diagnose_core::provider_preflight::read::ReadCallPreflight::build(
                         &self.provider_registry,
@@ -1557,19 +1591,24 @@ impl SignalAiAssistantTools {
             now_unix_ms,
         };
         let store = SignalCapabilityGrantStore::new(self.db.clone());
-        let available_grants = store
-            .list_for_subject(&self.run_id, &self.actor_id, &self.target_device_id)
-            .await
-            .map_err(|db_error| {
-                error(
-                    AgentErrorKind::Internal,
-                    format!("failed to load Provider grants: {db_error}"),
-                    false,
-                    false,
-                )
-            })?;
-        let grant_id = if let Some(existing) = store
-            .prepared_grant_id(&server_call_id)
+        let available_grants = desk_diagnose_core::future::boxed(|| async {
+            store
+                .list_for_subject(&self.run_id, &self.actor_id, &self.target_device_id)
+                .await
+        })
+        .await
+        .map_err(|db_error| {
+            error(
+                AgentErrorKind::Internal,
+                format!("failed to load Provider grants: {db_error}"),
+                false,
+                false,
+            )
+        })?;
+        desk_diagnose_core::future::phase(|| async {
+            let grant_id = if let Some(existing) = desk_diagnose_core::future::boxed(|| async {
+                store.prepared_grant_id(&server_call_id).await
+            })
             .await
             .map_err(|db_error| {
                 error(
@@ -1579,82 +1618,85 @@ impl SignalAiAssistantTools {
                     false,
                 )
             })? {
-            existing
-        } else if session.trigger_origin
-            == desk_diagnose_core::session::TriggerOrigin::ScheduledTask
-        {
-            crate::capability_grant_store::task_grant::identity(&self.run_id, &server_call_id)
-        } else if let Some(grant) = available_grants
-            .iter()
-            .find(|grant| is_capability_grant_candidate(grant, &call_authority))
-        {
-            grant.grant_id.clone()
-        } else if risk_tier == CapabilityRiskTier::R0 {
-            let grant_id = format!(
-                "policy-auto-{:x}",
-                Sha256::digest(server_call_id.as_bytes())
-            );
-            let grant = CapabilityGrant {
-                schema_version: CAPABILITY_GRANT_SCHEMA_VERSION,
-                grant_id: grant_id.clone(),
-                actor_id: self.actor_id.clone(),
-                run_id: self.run_id.clone(),
-                input_revision: session.input_revision,
-                surface: ProductSurface::OssPersonalOwner,
-                target_device_id: self.target_device_id.clone(),
-                target_session_id: None,
-                provider_id: provider.wire.provider_id.clone(),
-                capability_id: capability.wire.capability_id.clone(),
-                tool_name: call.name.clone(),
-                tool_schema_version: capability.wire.input_schema_version,
-                effect: capability.wire.effect,
-                risk_tier,
-                resource_scope: resource_scope.clone(),
-                operation_scope: operation_scope.clone(),
-                export_destinations: Vec::new(),
-                allowed_envelope_ids: Vec::new(),
-                allowed_content_digests_sha256: Vec::new(),
-                use_policy: CapabilityGrantUsePolicy::Reusable,
-                canonical_input_digest_sha256: Some(canonical_input_digest_sha256.clone()),
-                issued_by: CapabilityGrantIssuer::PolicyAuto,
-                issued_at_unix_ms: now_unix_ms,
-                expires_at_unix_ms: now_unix_ms.saturating_add(120_000).min(
-                    read_preflight
-                        .as_ref()
-                        .map_or(u64::MAX, |preflight| preflight.valid_until_unix_ms()),
-                ),
-                remaining_uses: 1,
-                limits: CapabilityGrantLimits {
-                    max_bytes_per_call: capability.wire.limits.max_output_bytes,
-                    max_items_per_call: capability.wire.limits.max_objects,
-                    max_calls: 1,
-                },
-                policy_revision: self.policy_revision,
-                readiness_revision: self.readiness_revision,
-                revoked_at_unix_ms: None,
-                revoked_reason: None,
+                existing
+            } else if session.trigger_origin
+                == desk_diagnose_core::session::TriggerOrigin::ScheduledTask
+            {
+                crate::capability_grant_store::task_grant::identity(&self.run_id, &server_call_id)
+            } else if let Some(grant) = available_grants
+                .iter()
+                .find(|grant| is_capability_grant_candidate(grant, &call_authority))
+            {
+                grant.grant_id.clone()
+            } else if risk_tier == CapabilityRiskTier::R0 {
+                let grant_id = format!(
+                    "policy-auto-{:x}",
+                    Sha256::digest(server_call_id.as_bytes())
+                );
+                let grant = CapabilityGrant {
+                    schema_version: CAPABILITY_GRANT_SCHEMA_VERSION,
+                    grant_id: grant_id.clone(),
+                    actor_id: self.actor_id.clone(),
+                    run_id: self.run_id.clone(),
+                    input_revision: session.input_revision,
+                    surface: ProductSurface::OssPersonalOwner,
+                    target_device_id: self.target_device_id.clone(),
+                    target_session_id: None,
+                    provider_id: provider.wire.provider_id.clone(),
+                    capability_id: capability.wire.capability_id.clone(),
+                    tool_name: call.name.clone(),
+                    tool_schema_version: capability.wire.input_schema_version,
+                    effect: capability.wire.effect,
+                    risk_tier,
+                    resource_scope: resource_scope.clone(),
+                    operation_scope: operation_scope.clone(),
+                    export_destinations: Vec::new(),
+                    allowed_envelope_ids: Vec::new(),
+                    allowed_content_digests_sha256: Vec::new(),
+                    use_policy: CapabilityGrantUsePolicy::Reusable,
+                    canonical_input_digest_sha256: Some(canonical_input_digest_sha256.clone()),
+                    issued_by: CapabilityGrantIssuer::PolicyAuto,
+                    issued_at_unix_ms: now_unix_ms,
+                    expires_at_unix_ms: now_unix_ms.saturating_add(120_000).min(
+                        read_preflight
+                            .as_ref()
+                            .map_or(u64::MAX, |preflight| preflight.valid_until_unix_ms()),
+                    ),
+                    remaining_uses: 1,
+                    limits: CapabilityGrantLimits {
+                        max_bytes_per_call: capability.wire.limits.max_output_bytes,
+                        max_items_per_call: capability.wire.limits.max_objects,
+                        max_calls: 1,
+                    },
+                    policy_revision: self.policy_revision,
+                    readiness_revision: self.readiness_revision,
+                    revoked_at_unix_ms: None,
+                    revoked_reason: None,
+                };
+                desk_diagnose_core::future::boxed(|| async { store.issue(&grant).await })
+                    .await
+                    .map_err(|db_error| {
+                        error(
+                            AgentErrorKind::Internal,
+                            format!("failed to issue policy-auto Provider grant: {db_error}"),
+                            false,
+                            false,
+                        )
+                    })?;
+                grant_id
+            } else {
+                return Err(error(
+                    AgentErrorKind::PermissionDenied,
+                    desk_diagnose_core::capability_grant::unavailable_grant_message(
+                        &available_grants,
+                        &call_authority,
+                    ),
+                    false,
+                    true,
+                ));
             };
-            store.issue(&grant).await.map_err(|db_error| {
-                error(
-                    AgentErrorKind::Internal,
-                    format!("failed to issue policy-auto Provider grant: {db_error}"),
-                    false,
-                    false,
-                )
-            })?;
-            grant_id
-        } else {
-            return Err(error(
-                AgentErrorKind::PermissionDenied,
-                desk_diagnose_core::capability_grant::unavailable_grant_message(
-                    &available_grants,
-                    &call_authority,
-                ),
-                false,
-                true,
-            ));
-        };
 
+            desk_diagnose_core::future::phase(|| async {
         let prepare = |now_unix_ms| {
             let mut current = call_authority.clone();
             current.now_unix_ms = now_unix_ms;
@@ -1669,17 +1711,20 @@ impl SignalAiAssistantTools {
                 call: current,
             }
         };
-        let preparation = store
-            .prepare_outcome(prepare(now_unix_ms), &self.provider_registry)
-            .await
-            .map_err(|db_error| {
-                error(
-                    AgentErrorKind::PermissionDenied,
-                    format!("Provider call authorization failed: {db_error}"),
-                    false,
-                    true,
-                )
-            })?;
+        let preparation = desk_diagnose_core::future::boxed(|| async {
+            store
+                .prepare_outcome(prepare(now_unix_ms), &self.provider_registry)
+                .await
+        })
+        .await
+        .map_err(|db_error| {
+            error(
+                AgentErrorKind::PermissionDenied,
+                format!("Provider call authorization failed: {db_error}"),
+                false,
+                true,
+            )
+        })?;
         match preparation {
             crate::capability_grant_store::CapabilityPreparation::PermissionRequired(request) => {
                 self.observed(call).stage(
@@ -1695,17 +1740,18 @@ impl SignalAiAssistantTools {
                 self.observe_ready(call, &session, work.work_id)
             }
         }
-        let dispatch_id = match store
-            .record_dispatch_intent(prepare(now_unix_ms))
-            .await
-            .map_err(|db_error| {
-                error(
-                    AgentErrorKind::PermissionDenied,
-                    format!("Provider dispatch authorization failed: {db_error}"),
-                    false,
-                    true,
-                )
-            })? {
+        let dispatch_id = match desk_diagnose_core::future::boxed(|| async {
+            store.record_dispatch_intent(prepare(now_unix_ms)).await
+        })
+        .await
+        .map_err(|db_error| {
+            error(
+                AgentErrorKind::PermissionDenied,
+                format!("Provider dispatch authorization failed: {db_error}"),
+                false,
+                true,
+            )
+        })? {
             DispatchIntentResult::Recorded { dispatch_id, .. } => dispatch_id,
             DispatchIntentResult::SupersededBeforeIntent { .. } => {
                 return Err(error(
@@ -1724,17 +1770,18 @@ impl SignalAiAssistantTools {
                 ));
             }
         };
-        match store
-            .claim_dispatch(&dispatch_id, now_unix_ms)
-            .await
-            .map_err(|db_error| {
-                error(
-                    AgentErrorKind::Internal,
-                    format!("failed to claim Provider dispatch: {db_error}"),
-                    false,
-                    false,
-                )
-            })? {
+        match desk_diagnose_core::future::boxed(|| async {
+            store.claim_dispatch(&dispatch_id, now_unix_ms).await
+        })
+        .await
+        .map_err(|db_error| {
+            error(
+                AgentErrorKind::Internal,
+                format!("failed to claim Provider dispatch: {db_error}"),
+                false,
+                false,
+            )
+        })? {
             DispatchClaimResult::Claimed(_) => {}
             DispatchClaimResult::OutcomeUnknown { .. } => {
                 return Err(error(
@@ -1756,23 +1803,27 @@ impl SignalAiAssistantTools {
                 )
             })
         };
-        let grant = store
-            .validate_claimed_dispatch(&dispatch_id, prepare(current_time()?))
-            .await
-            .map_err(|db_error| {
-                error(
-                    AgentErrorKind::PermissionDenied,
-                    format!("Provider dispatch authority is unavailable: {db_error}"),
-                    false,
-                    true,
-                )
-            })?;
+        let grant = desk_diagnose_core::future::boxed(|| async {
+            store
+                .validate_claimed_dispatch(&dispatch_id, prepare(current_time()?))
+                .await
+                .map_err(|db_error| {
+                    error(
+                        AgentErrorKind::PermissionDenied,
+                        format!("Provider dispatch authority is unavailable: {db_error}"),
+                        false,
+                        true,
+                    )
+                })
+        })
+        .await?;
         let authority_expiry = grant.expires_at_unix_ms.min(
             read_preflight
                 .as_ref()
                 .map_or(u64::MAX, |preflight| preflight.valid_until_unix_ms()),
         );
 
+        desk_diagnose_core::future::phase(|| async {
         let result: Result<ToolRunOutput, ProviderInvokeError> =
             if call.name == PREVIEW_COMPUTER_ACTION_TOOL {
                 validate_preview_call(call)
@@ -1784,26 +1835,38 @@ impl SignalAiAssistantTools {
                     })
                     .map_err(Into::into)
             } else {
-                self.invoke(call, &grant, authority_expiry).await
+                desk_diagnose_core::future::boxed(|| async {
+                    self.invoke(call, &grant, authority_expiry).await
+                })
+                .await
             };
         match result {
             Ok(output) => {
                 let post_now = current_time()?;
                 let post_authority = async {
-                    let post_grant = store
-                        .validate_claimed_dispatch(&dispatch_id, prepare(post_now))
-                        .await
-                        .map_err(|db_error| {
-                            error(
-                                AgentErrorKind::PermissionDenied,
-                                format!("Provider result authority is unavailable: {db_error}"),
-                                false,
-                                true,
-                            )
-                        })?;
+                    let post_grant = desk_diagnose_core::future::boxed(|| async {
+                        store
+                            .validate_claimed_dispatch(&dispatch_id, prepare(post_now))
+                            .await
+                    })
+                    .await
+                    .map_err(|db_error| {
+                        error(
+                            AgentErrorKind::PermissionDenied,
+                            format!("Provider result authority is unavailable: {db_error}"),
+                            false,
+                            true,
+                        )
+                    })?;
                     if capability.wire.execution_locality == ExecutionLocality::Edge {
-                        self.verify_current_readiness(capability).await?;
-                        self.validate_original_objects().await?;
+                        desk_diagnose_core::future::boxed(|| async {
+                            self.verify_current_readiness(capability).await
+                        })
+                        .await?;
+                        desk_diagnose_core::future::boxed(|| async {
+                            self.validate_original_objects().await
+                        })
+                        .await?;
                     }
                     desk_diagnose_core::provider_preflight::read::limits::validate_output(
                         &self.provider_registry,
@@ -1816,7 +1879,10 @@ impl SignalAiAssistantTools {
                     )? {
                         let binding = self.object_binding()?;
                         desk_diagnose_core::provider_preflight::text_file::ResultFileRead::build(
-                            &self.authoritative_session().await?,
+                            &desk_diagnose_core::future::boxed(|| async {
+                                self.authoritative_session().await
+                            })
+                            .await?,
                             call,
                             binding.destination,
                             post_now,
@@ -1918,25 +1984,34 @@ impl SignalAiAssistantTools {
                     }
                     return Err(provider_error.error);
                 }
-                store
-                    .mark_dispatch_outcome_unknown(
-                        &dispatch_id,
-                        &server_call_id,
-                        1,
-                        current_time()?,
-                    )
-                    .await
-                    .map_err(|db_error| {
-                        error(
-                            AgentErrorKind::Internal,
-                            format!("Provider unknown outcome could not be persisted: {db_error}"),
-                            false,
-                            false,
+                desk_diagnose_core::future::boxed(|| async {
+                    store
+                        .mark_dispatch_outcome_unknown(
+                            &dispatch_id,
+                            &server_call_id,
+                            1,
+                            current_time()?,
                         )
-                    })?;
+                        .await
+                        .map_err(|db_error| {
+                            error(
+                                AgentErrorKind::Internal,
+                                format!(
+                                    "Provider unknown outcome could not be persisted: {db_error}"
+                                ),
+                                false,
+                                false,
+                            )
+                        })
+                })
+                .await?;
                 Err(provider_error.error)
             }
         }
+            }).await
+        }).await
+        })
+        .await
     }
 
     // Keep child execution state on the heap instead of embedding it in each caller.
@@ -1963,7 +2038,9 @@ impl SignalAiAssistantTools {
                 true,
             ));
         }
-        let session = self.authoritative_session().await?;
+        let session =
+            desk_diagnose_core::future::boxed(|| async { self.authoritative_session().await })
+                .await?;
         if session.input_revision == 0 || session.latest_input_seq == 0 {
             return Err(error(
                 AgentErrorKind::Internal,
@@ -1980,12 +2057,15 @@ impl SignalAiAssistantTools {
                 &canonical_input_json,
             )?
             .clone();
-        let policy = crate::command_policy::current(
-            &self.db,
-            self.connections.as_ref(),
-            &self.target_connection_id,
-            &self.actor_id,
-        )
+        let policy = desk_diagnose_core::future::boxed(|| async {
+            crate::command_policy::current(
+                &self.db,
+                self.connections.as_ref(),
+                &self.target_connection_id,
+                &self.actor_id,
+            )
+            .await
+        })
         .await?;
         policy.revalidate(&confirmation, &canonical_input_json, session.input_revision)?;
         let validation_input = confirmation.validation_input.clone();
@@ -2009,7 +2089,10 @@ impl SignalAiAssistantTools {
             .provider_registry
             .provider_for_capability(&capability.wire.capability_id)
             .expect("registered command capability has a Provider");
-        self.verify_current_readiness(capability).await?;
+        desk_diagnose_core::future::boxed(|| async {
+            self.verify_current_readiness(capability).await
+        })
+        .await?;
         let resource_scope = confirmation.resource_scope()?;
         let operation_scope = vec!["exec_command".into()];
         let now_unix_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).map_err(|_| {
@@ -2055,45 +2138,49 @@ impl SignalAiAssistantTools {
             now_unix_ms,
         };
         let store = SignalCapabilityGrantStore::new(self.db.clone());
-        let grant_id = if let Some(existing) = store
-            .prepared_grant_id(&server_call_id)
-            .await
-            .map_err(|db_error| {
-                error(
-                    AgentErrorKind::Internal,
-                    format!("failed to load prepared command authority: {db_error}"),
-                    false,
-                    false,
-                )
-            })? {
+        let grant_id = if let Some(existing) = desk_diagnose_core::future::boxed(|| async {
+            store.prepared_grant_id(&server_call_id).await
+        })
+        .await
+        .map_err(|db_error| {
+            error(
+                AgentErrorKind::Internal,
+                format!("failed to load prepared command authority: {db_error}"),
+                false,
+                false,
+            )
+        })? {
             existing
         } else if session.trigger_origin
             == desk_diagnose_core::session::TriggerOrigin::ScheduledTask
         {
             crate::capability_grant_store::task_grant::identity(&self.run_id, &server_call_id)
         } else {
-            store
-                .list_for_subject(&self.run_id, &self.actor_id, &self.target_device_id)
-                .await
-                .map_err(|db_error| {
-                    error(
-                        AgentErrorKind::Internal,
-                        format!("failed to load command grants: {db_error}"),
-                        false,
-                        false,
-                    )
-                })?
-                .into_iter()
-                .find(|grant| is_capability_grant_candidate(grant, &call_authority))
-                .map(|grant| grant.grant_id)
-                .ok_or_else(|| {
-                    error(
-                        AgentErrorKind::PermissionDenied,
-                        "command execution requires an active one-shot exact grant",
-                        false,
-                        true,
-                    )
-                })?
+            desk_diagnose_core::future::boxed(|| async {
+                store
+                    .list_for_subject(&self.run_id, &self.actor_id, &self.target_device_id)
+                    .await
+            })
+            .await
+            .map_err(|db_error| {
+                error(
+                    AgentErrorKind::Internal,
+                    format!("failed to load command grants: {db_error}"),
+                    false,
+                    false,
+                )
+            })?
+            .into_iter()
+            .find(|grant| is_capability_grant_candidate(grant, &call_authority))
+            .map(|grant| grant.grant_id)
+            .ok_or_else(|| {
+                error(
+                    AgentErrorKind::PermissionDenied,
+                    "command execution requires an active one-shot exact grant",
+                    false,
+                    true,
+                )
+            })?
         };
         let prepare = || PrepareCapabilityCall {
             grant_id: &grant_id,
@@ -2105,17 +2192,20 @@ impl SignalAiAssistantTools {
             canonical_input_json: &canonical_input_json,
             call: call_authority.clone(),
         };
-        let _prepared = store
-            .prepare_outcome(prepare(), &self.provider_registry)
-            .await
-            .map_err(|db_error| {
-                error(
-                    AgentErrorKind::PermissionDenied,
-                    format!("command call authorization failed: {db_error}"),
-                    false,
-                    true,
-                )
-            })?;
+        let _prepared = desk_diagnose_core::future::boxed(|| async {
+            store
+                .prepare_outcome(prepare(), &self.provider_registry)
+                .await
+        })
+        .await
+        .map_err(|db_error| {
+            error(
+                AgentErrorKind::PermissionDenied,
+                format!("command call authorization failed: {db_error}"),
+                false,
+                true,
+            )
+        })?;
         let _prepared = match _prepared {
             crate::capability_grant_store::CapabilityPreparation::Ready(work) => {
                 self.observe_ready(call, &session, work.work_id);
@@ -2132,36 +2222,36 @@ impl SignalAiAssistantTools {
                 return Ok(ExecOutcome::PermissionRequired { request });
             }
         };
-        let dispatch_id =
-            match store
-                .record_dispatch_intent(prepare())
-                .await
-                .map_err(|db_error| {
-                    error(
-                        AgentErrorKind::PermissionDenied,
-                        format!("command dispatch authorization failed: {db_error}"),
-                        false,
-                        true,
-                    )
-                })? {
-                DispatchIntentResult::Recorded { dispatch_id, .. } => dispatch_id,
-                DispatchIntentResult::SupersededBeforeIntent { .. } => {
-                    return Err(error(
-                        AgentErrorKind::PermissionDenied,
-                        "command call was superseded by newer user input",
-                        false,
-                        true,
-                    ));
-                }
-                DispatchIntentResult::RevokedBeforeIntent { .. } => {
-                    return Err(error(
-                        AgentErrorKind::PermissionDenied,
-                        "command grant was revoked before dispatch",
-                        false,
-                        true,
-                    ));
-                }
-            };
+        let dispatch_id = match desk_diagnose_core::future::boxed(|| async {
+            store.record_dispatch_intent(prepare()).await
+        })
+        .await
+        .map_err(|db_error| {
+            error(
+                AgentErrorKind::PermissionDenied,
+                format!("command dispatch authorization failed: {db_error}"),
+                false,
+                true,
+            )
+        })? {
+            DispatchIntentResult::Recorded { dispatch_id, .. } => dispatch_id,
+            DispatchIntentResult::SupersededBeforeIntent { .. } => {
+                return Err(error(
+                    AgentErrorKind::PermissionDenied,
+                    "command call was superseded by newer user input",
+                    false,
+                    true,
+                ));
+            }
+            DispatchIntentResult::RevokedBeforeIntent { .. } => {
+                return Err(error(
+                    AgentErrorKind::PermissionDenied,
+                    "command grant was revoked before dispatch",
+                    false,
+                    true,
+                ));
+            }
+        };
         let origin =
             desk_diagnose_core::action_result::ActionResultOrigin::capture_confirmed_command(
                 &self.provider_registry,
@@ -2185,39 +2275,45 @@ impl SignalAiAssistantTools {
         })
         .transpose()
         .map_err(|_| completion::invalid())?;
-        match store
-            .claim_command_dispatch(
-                &dispatch_id,
-                now_unix_ms,
-                &self.target_connection_id,
-                &ctx.conversation_id,
-                &ctx.tool_call_id,
-                confirmation.plan.timeout_ms,
-                &origin,
-                model_export.as_ref(),
-            )
-            .await
-            .map_err(|db_error| {
-                error(
-                    AgentErrorKind::Internal,
-                    format!("failed to claim command dispatch: {db_error}"),
-                    false,
-                    false,
+        match desk_diagnose_core::future::boxed(|| async {
+            store
+                .claim_command_dispatch(
+                    &dispatch_id,
+                    now_unix_ms,
+                    &self.target_connection_id,
+                    &ctx.conversation_id,
+                    &ctx.tool_call_id,
+                    confirmation.plan.timeout_ms,
+                    &origin,
+                    model_export.as_ref(),
                 )
-            })? {
+                .await
+        })
+        .await
+        .map_err(|db_error| {
+            error(
+                AgentErrorKind::Internal,
+                format!("failed to claim command dispatch: {db_error}"),
+                false,
+                false,
+            )
+        })? {
             DispatchClaimResult::Claimed(_) => {}
             DispatchClaimResult::OutcomeUnknown { .. } => {
-                let task = crate::agent_exec_store::SignalAgentExecStore::new(self.db.clone())
-                    .find(&server_call_id, &dispatch_id)
-                    .await?
-                    .ok_or_else(|| {
-                        error(
-                            AgentErrorKind::Internal,
-                            "command recovery task is missing",
-                            false,
-                            false,
-                        )
-                    })?;
+                let task = desk_diagnose_core::future::boxed(|| async {
+                    crate::agent_exec_store::SignalAgentExecStore::new(self.db.clone())
+                        .find(&server_call_id, &dispatch_id)
+                        .await
+                })
+                .await?
+                .ok_or_else(|| {
+                    error(
+                        AgentErrorKind::Internal,
+                        "command recovery task is missing",
+                        false,
+                        false,
+                    )
+                })?;
                 return Ok(ExecOutcome::Unknown(
                     desk_diagnose_core::session::ActionIdentity::new(
                         task.id,
@@ -2229,31 +2325,37 @@ impl SignalAiAssistantTools {
             }
         }
 
-        let checked = store
-            .validate_claimed_dispatch(&dispatch_id, prepare())
-            .await
-            .map_err(|_| {
-                error(
-                    AgentErrorKind::PermissionDenied,
-                    "command authority changed before send",
-                    false,
-                    true,
-                )
-            });
+        let checked = desk_diagnose_core::future::boxed(|| async {
+            store
+                .validate_claimed_dispatch(&dispatch_id, prepare())
+                .await
+        })
+        .await
+        .map_err(|_| {
+            error(
+                AgentErrorKind::PermissionDenied,
+                "command authority changed before send",
+                false,
+                true,
+            )
+        });
         let result = if let Err(error) = checked {
             Err(error)
         } else {
-            self.exec_tools
-                .execute_preapproved(
-                    validation_input,
-                    &confirmation,
-                    &canonical_input_json,
-                    ctx,
-                    ExecRequestId(server_call_id.clone()),
-                    dispatch_id.clone(),
-                    ApprovalId(grant_id),
-                )
-                .await
+            desk_diagnose_core::future::boxed(|| async {
+                self.exec_tools
+                    .execute_preapproved(
+                        validation_input,
+                        &confirmation,
+                        &canonical_input_json,
+                        ctx,
+                        ExecRequestId(server_call_id.clone()),
+                        dispatch_id.clone(),
+                        ApprovalId(grant_id),
+                    )
+                    .await
+            })
+            .await
         };
         match result {
             Ok(ExecOutcome::Executed {
@@ -2263,14 +2365,16 @@ impl SignalAiAssistantTools {
             }) => {
                 let exec_store =
                     crate::agent_exec_store::SignalAgentExecStore::new(self.db.clone());
-                let task = exec_store
-                    .find(&server_call_id, &dispatch_id)
-                    .await?
-                    .ok_or_else(|| completion::invalid())?;
-                let (durable_output, receipt) = exec_store
-                    .command_result(&task)
-                    .await?
-                    .ok_or_else(|| completion::invalid())?;
+                let task = desk_diagnose_core::future::boxed(|| async {
+                    exec_store.find(&server_call_id, &dispatch_id).await
+                })
+                .await?
+                .ok_or_else(|| completion::invalid())?;
+                let (durable_output, receipt) = desk_diagnose_core::future::boxed(|| async {
+                    exec_store.command_result(&task).await
+                })
+                .await?
+                .ok_or_else(|| completion::invalid())?;
                 if durable_output.content != output.content
                     || durable_output.image_data_url != output.image_data_url
                 {
@@ -2278,26 +2382,29 @@ impl SignalAiAssistantTools {
                 }
                 let data_envelope = Some(receipt.envelope);
                 let (_, result_digest_sha256) = tool_output_fingerprint(&output)?;
-                store
-                    .record_dispatch_completion(
-                        &CapabilityDispatchCompletion {
-                            dispatch_id,
-                            call_id: server_call_id,
-                            generation: 1,
-                            outcome: CapabilityDispatchOutcome::Succeeded,
-                            result_digest_sha256,
-                        },
-                        now_unix_ms,
-                    )
-                    .await
-                    .map_err(|db_error| {
-                        error(
-                            AgentErrorKind::Internal,
-                            format!("failed to persist command completion: {db_error}"),
-                            false,
-                            false,
+                desk_diagnose_core::future::boxed(|| async {
+                    store
+                        .record_dispatch_completion(
+                            &CapabilityDispatchCompletion {
+                                dispatch_id,
+                                call_id: server_call_id,
+                                generation: 1,
+                                outcome: CapabilityDispatchOutcome::Succeeded,
+                                result_digest_sha256,
+                            },
+                            now_unix_ms,
                         )
-                    })?;
+                        .await
+                })
+                .await
+                .map_err(|db_error| {
+                    error(
+                        AgentErrorKind::Internal,
+                        format!("failed to persist command completion: {db_error}"),
+                        false,
+                        false,
+                    )
+                })?;
                 Ok(ExecOutcome::Executed {
                     output,
                     event_id,
@@ -2305,76 +2412,96 @@ impl SignalAiAssistantTools {
                 })
             }
             Ok(ExecOutcome::Rejected { reason }) => {
-                crate::agent_exec_store::SignalAgentExecStore::new(self.db.clone())
-                    .mark_unsent(&dispatch_id)
-                    .await?;
+                desk_diagnose_core::future::boxed(|| async {
+                    crate::agent_exec_store::SignalAgentExecStore::new(self.db.clone())
+                        .mark_unsent(&dispatch_id)
+                        .await
+                })
+                .await?;
                 let digest = format!(
                     "{:x}",
                     Sha256::digest(reason.as_deref().unwrap_or("command rejected").as_bytes())
                 );
-                store
-                    .record_dispatch_completion(
-                        &CapabilityDispatchCompletion {
-                            dispatch_id,
-                            call_id: server_call_id,
-                            generation: 1,
-                            outcome: CapabilityDispatchOutcome::Failed,
-                            result_digest_sha256: digest,
-                        },
-                        now_unix_ms,
-                    )
-                    .await
-                    .map_err(|db_error| {
-                        error(
-                            AgentErrorKind::Internal,
-                            format!("failed to persist command rejection: {db_error}"),
-                            false,
-                            false,
+                desk_diagnose_core::future::boxed(|| async {
+                    store
+                        .record_dispatch_completion(
+                            &CapabilityDispatchCompletion {
+                                dispatch_id,
+                                call_id: server_call_id,
+                                generation: 1,
+                                outcome: CapabilityDispatchOutcome::Failed,
+                                result_digest_sha256: digest,
+                            },
+                            now_unix_ms,
                         )
-                    })?;
+                        .await
+                })
+                .await
+                .map_err(|db_error| {
+                    error(
+                        AgentErrorKind::Internal,
+                        format!("failed to persist command rejection: {db_error}"),
+                        false,
+                        false,
+                    )
+                })?;
                 Ok(ExecOutcome::Rejected { reason })
             }
             Ok(ExecOutcome::Unknown(identity)) => {
-                store
-                    .mark_dispatch_outcome_unknown(&dispatch_id, &server_call_id, 1, now_unix_ms)
-                    .await
-                    .map_err(|db_error| {
-                        error(
-                            AgentErrorKind::Internal,
-                            format!("failed to persist command unknown outcome: {db_error}"),
-                            false,
-                            false,
+                desk_diagnose_core::future::boxed(|| async {
+                    store
+                        .mark_dispatch_outcome_unknown(
+                            &dispatch_id,
+                            &server_call_id,
+                            1,
+                            now_unix_ms,
                         )
-                    })?;
+                        .await
+                })
+                .await
+                .map_err(|db_error| {
+                    error(
+                        AgentErrorKind::Internal,
+                        format!("failed to persist command unknown outcome: {db_error}"),
+                        false,
+                        false,
+                    )
+                })?;
                 Ok(ExecOutcome::Unknown(identity))
             }
             Ok(other @ ExecOutcome::Dispatched(_)) => Ok(other),
             Ok(other) => Ok(other),
             Err(exec_error) => {
-                crate::agent_exec_store::SignalAgentExecStore::new(self.db.clone())
-                    .mark_unsent(&dispatch_id)
-                    .await?;
+                desk_diagnose_core::future::boxed(|| async {
+                    crate::agent_exec_store::SignalAgentExecStore::new(self.db.clone())
+                        .mark_unsent(&dispatch_id)
+                        .await
+                })
+                .await?;
                 let digest = format!("{:x}", Sha256::digest(exec_error.message.as_bytes()));
-                store
-                    .record_dispatch_completion(
-                        &CapabilityDispatchCompletion {
-                            dispatch_id,
-                            call_id: server_call_id,
-                            generation: 1,
-                            outcome: CapabilityDispatchOutcome::Failed,
-                            result_digest_sha256: digest,
-                        },
-                        now_unix_ms,
-                    )
-                    .await
-                    .map_err(|db_error| {
-                        error(
-                            AgentErrorKind::Internal,
-                            format!("failed to persist command failure: {db_error}"),
-                            false,
-                            false,
+                desk_diagnose_core::future::boxed(|| async {
+                    store
+                        .record_dispatch_completion(
+                            &CapabilityDispatchCompletion {
+                                dispatch_id,
+                                call_id: server_call_id,
+                                generation: 1,
+                                outcome: CapabilityDispatchOutcome::Failed,
+                                result_digest_sha256: digest,
+                            },
+                            now_unix_ms,
                         )
-                    })?;
+                        .await
+                })
+                .await
+                .map_err(|db_error| {
+                    error(
+                        AgentErrorKind::Internal,
+                        format!("failed to persist command failure: {db_error}"),
+                        false,
+                        false,
+                    )
+                })?;
                 Err(exec_error)
             }
         }
@@ -2436,6 +2563,184 @@ impl SignalAiAssistantTools {
         call: &ToolCall,
         ctx: &ExecContext,
     ) -> Result<ExecOutcome, AgentError> {
+        #[cfg(test)]
+        crate::stack_probe::observe(&self.run_id, "tool_execute");
+        let execution =
+            desk_diagnose_core::future::boxed(|| self.prepare_semantic_action(call, ctx)).await?;
+        execution.await
+    }
+
+    async fn prepare_semantic_bindings(
+        &self,
+        call: &ToolCall,
+        now_unix_ms: u64,
+    ) -> Result<Box<SemanticBindings>, AgentError> {
+        let shared_launch = desk_diagnose_core::future::phase(|| async {
+            let shared_launch = if call.name == desk_diagnose_core::application_launch::TOOL_NAME {
+                Some(
+                    desk_diagnose_core::application_launch::approved_binding(
+                        &desk_diagnose_core::future::boxed(|| async {
+                            self.authoritative_session().await
+                        })
+                        .await?,
+                        call,
+                        self.readiness_revision,
+                    )
+                    .inspect_err(|error| {
+                        self.observed(call).input_error(error);
+                    })?,
+                )
+            } else {
+                None
+            };
+            Ok::<_, AgentError>(shared_launch.map(Box::new))
+        })
+        .await?;
+        let shared_iwork = desk_diagnose_core::future::phase(|| async {
+            let shared_iwork =
+                if desk_diagnose_core::provider_preflight::IworkCallPreflight::supports(&call.name)
+                {
+                    desk_diagnose_core::future::boxed(|| async {
+                        self.validate_original_objects().await
+                    })
+                    .await?;
+                    let current =
+                        crate::computer_use_readiness::global_computer_use_readiness_cache()
+                            .get_fresh(&self.target_connection_id, chrono::Utc::now())
+                            .filter(|record| record.readiness.revision == self.readiness_revision)
+                            .ok_or_else(|| desk_diagnose_core::directory_tools::unavailable())?;
+                    Some(
+                        desk_diagnose_core::provider_preflight::IworkCallPreflight::from_session(
+                            &self.provider_registry,
+                            ProductSurface::OssPersonalOwner,
+                            call,
+                            self.object_binding()?.original,
+                            &desk_diagnose_core::future::boxed(|| async {
+                                self.authoritative_session().await
+                            })
+                            .await?,
+                            &current.readiness.interactive_session_incarnation,
+                            now_unix_ms,
+                        )
+                        .inspect_err(|error| {
+                            self.observed(call).input_error(error);
+                        })?,
+                    )
+                } else {
+                    None
+                };
+            Ok::<_, AgentError>(shared_iwork.map(Box::new))
+        })
+        .await?;
+        let shared_text = desk_diagnose_core::future::phase(|| async {
+        let shared_text =
+            if desk_diagnose_core::provider_preflight::text_file::TextMutationPreflight::supports(
+                &call.name,
+            ) {
+                Some(desk_diagnose_core::provider_preflight::text_file::TextMutationPreflight::from_session(&desk_diagnose_core::future::boxed(|| async { self.authoritative_session().await }).await?, ProductSurface::OssPersonalOwner, call, now_unix_ms).inspect_err(|error| { self.observed(call).input_error(error); })?)
+            } else {
+                None
+            };
+        Ok::<_, AgentError>(shared_text.map(Box::new))
+        }).await?;
+        let shared_ui = desk_diagnose_core::future::phase(|| async {
+            let shared_ui = if call.name == EXECUTE_CONFIRMED_UI_ACTION_TOOL {
+                Some(
+                    desk_diagnose_core::provider_preflight::UiCallPreflight::build(
+                        &self.provider_registry,
+                        ProductSurface::OssPersonalOwner,
+                        call,
+                        now_unix_ms,
+                    )
+                    .inspect_err(|error| {
+                        self.observed(call).input_error(error);
+                    })?,
+                )
+            } else {
+                None
+            };
+            Ok::<_, AgentError>(shared_ui.map(Box::new))
+        })
+        .await?;
+        let shared_background = desk_diagnose_core::future::phase(|| async {
+            let shared_background = if call.name == EXECUTE_BACKGROUND_INPUT_TOOL {
+                Some(
+                    desk_diagnose_core::provider_preflight::BackgroundInputCallPreflight::build(
+                        &self.provider_registry,
+                        ProductSurface::OssPersonalOwner,
+                        call,
+                        now_unix_ms,
+                    )
+                    .inspect_err(|error| {
+                        self.observed(call).input_error(error);
+                    })?,
+                )
+            } else {
+                None
+            };
+            Ok::<_, AgentError>(shared_background.map(Box::new))
+        })
+        .await?;
+        let shared_output = desk_diagnose_core::future::phase(|| async {
+            let shared_output = if call.name == desk_diagnose_core::ai_assistant::linux::OUTPUT_TOOL
+            {
+                Some(
+                desk_diagnose_core::provider_preflight::WaylandOutputInputPreflight::from_history(
+                    &self.provider_registry,
+                    ProductSurface::OssPersonalOwner,
+                    call,
+                    &desk_diagnose_core::future::boxed(|| async {
+                        self.authoritative_session().await
+                    })
+                    .await?
+                    .conversation,
+                    now_unix_ms,
+                )
+                .inspect_err(|error| {
+                    self.observed(call).input_error(error);
+                })?,
+            )
+            } else {
+                None
+            };
+            Ok::<_, AgentError>(shared_output.map(Box::new))
+        })
+        .await?;
+        let shared_raw_input = desk_diagnose_core::future::phase(|| async {
+            let shared_raw_input = if call.name == EXECUTE_CONFIRMED_RAW_INPUT_TOOL {
+                Some(
+                    desk_diagnose_core::provider_preflight::RawInputCallPreflight::build(
+                        &self.provider_registry,
+                        ProductSurface::OssPersonalOwner,
+                        call,
+                        now_unix_ms,
+                    )
+                    .inspect_err(|error| {
+                        self.observed(call).input_error(error);
+                    })?,
+                )
+            } else {
+                None
+            };
+            Ok::<_, AgentError>(shared_raw_input.map(Box::new))
+        })
+        .await?;
+        Ok(Box::new(SemanticBindings {
+            launch: shared_launch,
+            iwork: shared_iwork,
+            text: shared_text,
+            ui: shared_ui,
+            background: shared_background,
+            output: shared_output,
+            raw_input: shared_raw_input,
+        }))
+    }
+
+    async fn prepare_semantic_action<'a>(
+        &'a self,
+        call: &'a ToolCall,
+        ctx: &'a ExecContext,
+    ) -> Result<PreparedAction<'a>, AgentError> {
         #[derive(serde::Deserialize)]
         #[serde(deny_unknown_fields)]
         struct SpreadsheetActionArgs {
@@ -2492,111 +2797,16 @@ impl SignalAiAssistantTools {
                 false,
             )
         })?;
-        let shared_launch = if call.name == desk_diagnose_core::application_launch::TOOL_NAME {
-            Some(
-                desk_diagnose_core::application_launch::approved_binding(
-                    &self.authoritative_session().await?,
-                    call,
-                    self.readiness_revision,
-                )
-                .inspect_err(|error| {
-                    self.observed(call).input_error(error);
-                })?,
-            )
-        } else {
-            None
-        };
-        let shared_iwork =
-            if desk_diagnose_core::provider_preflight::IworkCallPreflight::supports(&call.name) {
-                self.validate_original_objects().await?;
-                let current = crate::computer_use_readiness::global_computer_use_readiness_cache()
-                    .get_fresh(&self.target_connection_id, chrono::Utc::now())
-                    .filter(|record| record.readiness.revision == self.readiness_revision)
-                    .ok_or_else(|| desk_diagnose_core::directory_tools::unavailable())?;
-                Some(
-                    desk_diagnose_core::provider_preflight::IworkCallPreflight::from_session(
-                        &self.provider_registry,
-                        ProductSurface::OssPersonalOwner,
-                        call,
-                        self.object_binding()?.original,
-                        &self.authoritative_session().await?,
-                        &current.readiness.interactive_session_incarnation,
-                        now_unix_ms,
-                    )
-                    .inspect_err(|error| {
-                        self.observed(call).input_error(error);
-                    })?,
-                )
-            } else {
-                None
-            };
-        let shared_text =
-            if desk_diagnose_core::provider_preflight::text_file::TextMutationPreflight::supports(
-                &call.name,
-            ) {
-                Some(desk_diagnose_core::provider_preflight::text_file::TextMutationPreflight::from_session(&self.authoritative_session().await?, ProductSurface::OssPersonalOwner, call, now_unix_ms).inspect_err(|error| { self.observed(call).input_error(error); })?)
-            } else {
-                None
-            };
-        let shared_ui = if call.name == EXECUTE_CONFIRMED_UI_ACTION_TOOL {
-            Some(
-                desk_diagnose_core::provider_preflight::UiCallPreflight::build(
-                    &self.provider_registry,
-                    ProductSurface::OssPersonalOwner,
-                    call,
-                    now_unix_ms,
-                )
-                .inspect_err(|error| {
-                    self.observed(call).input_error(error);
-                })?,
-            )
-        } else {
-            None
-        };
-        let shared_background = if call.name == EXECUTE_BACKGROUND_INPUT_TOOL {
-            Some(
-                desk_diagnose_core::provider_preflight::BackgroundInputCallPreflight::build(
-                    &self.provider_registry,
-                    ProductSurface::OssPersonalOwner,
-                    call,
-                    now_unix_ms,
-                )
-                .inspect_err(|error| {
-                    self.observed(call).input_error(error);
-                })?,
-            )
-        } else {
-            None
-        };
-        let shared_output =
-            if call.name == desk_diagnose_core::ai_assistant::linux::OUTPUT_TOOL {
-                Some(
-                desk_diagnose_core::provider_preflight::WaylandOutputInputPreflight::from_history(
-                    &self.provider_registry,
-                    ProductSurface::OssPersonalOwner,
-                    call,
-                    &self.authoritative_session().await?.conversation,
-                    now_unix_ms,
-                ).inspect_err(|error| { self.observed(call).input_error(error); })?,
-            )
-            } else {
-                None
-            };
-        let shared_raw_input = if call.name == EXECUTE_CONFIRMED_RAW_INPUT_TOOL {
-            Some(
-                desk_diagnose_core::provider_preflight::RawInputCallPreflight::build(
-                    &self.provider_registry,
-                    ProductSurface::OssPersonalOwner,
-                    call,
-                    now_unix_ms,
-                )
-                .inspect_err(|error| {
-                    self.observed(call).input_error(error);
-                })?,
-            )
-        } else {
-            None
-        };
+        let shared =
+            desk_diagnose_core::future::phase(|| self.prepare_semantic_bindings(call, now_unix_ms))
+                .await?;
+        let shared_launch = &shared.launch;
+        let shared_iwork = &shared.iwork;
+        let shared_text = &shared.text;
+        let shared_ui = &shared.ui;
+        let shared_background = &shared.background;
+        let shared_output = &shared.output;
+        let shared_raw_input = &shared.raw_input;
         let (
             target_ref,
             authority_refs,
@@ -2604,233 +2814,305 @@ impl SignalAiAssistantTools {
             required_capability,
             adapter_kind,
             action_name,
-        ) = match call.name.as_str() {
+        ) = *match call.name.as_str() {
             "launch_application" => {
-                let binding = shared_launch.as_ref().expect("launch preflight");
-                let target = binding.target().expect("approved launch target").clone();
-                (
-                    target.clone(),
-                    vec![target],
-                    ComputerActionKind::LaunchApplication(binding.clone()),
-                    desk_agent_protocol::Capability::ApplicationLaunchConfirmed,
-                    ComputerUseAdapterKind::NativeApplication,
-                    "application launch",
-                )
+                desk_diagnose_core::future::boxed(|| async {
+                    Ok::<_, AgentError>(Box::new({
+                        let binding = shared_launch.as_ref().expect("launch preflight");
+                        let target = binding.target().expect("approved launch target").clone();
+                        (
+                            target.clone(),
+                            vec![target],
+                            ComputerActionKind::LaunchApplication((**binding).clone()),
+                            desk_agent_protocol::Capability::ApplicationLaunchConfirmed,
+                            ComputerUseAdapterKind::NativeApplication,
+                            "application launch",
+                        )
+                    }))
+                })
+                .await?
             }
             "update_text_file" | "delete_text_file" => {
-                let input = shared_text.as_ref().expect("text mutation preflight");
-                let directory = match input.action() {
-                    FilePatchAction::UpdateText { directory, .. }
-                    | FilePatchAction::DeleteText { directory, .. } => directory.clone(),
-                    _ => unreachable!(),
-                };
-                (
-                    input.target().clone(),
-                    vec![directory, input.target().clone()],
-                    ComputerActionKind::File(input.action().clone()),
-                    input.required_capability(),
-                    ComputerUseAdapterKind::FileSystem,
-                    "recoverable text file change",
-                )
+                desk_diagnose_core::future::boxed(|| async {
+                    Ok::<_, AgentError>(Box::new({
+                        let input = shared_text.as_ref().expect("text mutation preflight");
+                        let directory = match input.action() {
+                            FilePatchAction::UpdateText { directory, .. }
+                            | FilePatchAction::DeleteText { directory, .. } => directory.clone(),
+                            _ => unreachable!(),
+                        };
+                        (
+                            input.target().clone(),
+                            vec![directory, input.target().clone()],
+                            ComputerActionKind::File(input.action().clone()),
+                            input.required_capability(),
+                            ComputerUseAdapterKind::FileSystem,
+                            "recoverable text file change",
+                        )
+                    }))
+                })
+                .await?
             }
             EXECUTE_CONFIRMED_UI_ACTION_TOOL => {
-                let (target, action) =
-                    desk_diagnose_core::provider_preflight::ui_action_from_call(call)?;
-                let action_name = match &action {
-                    UiSemanticAction::Invoke => "invoke",
-                    UiSemanticAction::Select => "select",
-                    UiSemanticAction::Focus => "focus",
-                    UiSemanticAction::SetValue { .. } => "set value",
-                    UiSemanticAction::Toggle { .. } => "toggle",
-                    UiSemanticAction::Scroll { .. } => "scroll",
-                };
-                let current = crate::computer_use_readiness::global_computer_use_readiness_cache()
-                    .get_fresh(&self.target_connection_id, chrono::Utc::now())
-                    .filter(|record| record.readiness.revision == self.readiness_revision)
-                    .ok_or_else(|| desk_diagnose_core::directory_tools::unavailable())?;
-                let ui_adapter = current
-                    .readiness
-                    .capabilities
-                    .iter()
-                    .find(|entry| {
-                        entry.capability
-                            == desk_agent_protocol::Capability::DesktopUiActionConfirmed
-                            && entry.supported
-                            && entry.ready
-                    })
-                    .ok_or_else(|| desk_diagnose_core::directory_tools::unavailable())?;
-                if !desk_diagnose_core::ai_assistant::valid_ui_adapter(&ui_adapter.adapter) {
-                    return Err(desk_diagnose_core::directory_tools::unavailable());
-                }
-                let ui_adapter_kind = ui_adapter.adapter.kind;
-                (
-                    target.clone(),
-                    vec![target],
-                    shared_ui.as_ref().expect("UI preflight").computer_action(),
-                    desk_agent_protocol::Capability::DesktopUiActionConfirmed,
-                    ui_adapter_kind,
-                    action_name,
-                )
+                desk_diagnose_core::future::boxed(|| async {
+                    Ok::<_, AgentError>(Box::new({
+                        let (target, action) =
+                            desk_diagnose_core::provider_preflight::ui_action_from_call(call)?;
+                        let action_name = match &action {
+                            UiSemanticAction::Invoke => "invoke",
+                            UiSemanticAction::Select => "select",
+                            UiSemanticAction::Focus => "focus",
+                            UiSemanticAction::SetValue { .. } => "set value",
+                            UiSemanticAction::Toggle { .. } => "toggle",
+                            UiSemanticAction::Scroll { .. } => "scroll",
+                        };
+                        let current =
+                            crate::computer_use_readiness::global_computer_use_readiness_cache()
+                                .get_fresh(&self.target_connection_id, chrono::Utc::now())
+                                .filter(|record| {
+                                    record.readiness.revision == self.readiness_revision
+                                })
+                                .ok_or_else(|| {
+                                    desk_diagnose_core::directory_tools::unavailable()
+                                })?;
+                        let ui_adapter = current
+                            .readiness
+                            .capabilities
+                            .iter()
+                            .find(|entry| {
+                                entry.capability
+                                    == desk_agent_protocol::Capability::DesktopUiActionConfirmed
+                                    && entry.supported
+                                    && entry.ready
+                            })
+                            .ok_or_else(|| desk_diagnose_core::directory_tools::unavailable())?;
+                        if !desk_diagnose_core::ai_assistant::valid_ui_adapter(&ui_adapter.adapter)
+                        {
+                            return Err(desk_diagnose_core::directory_tools::unavailable());
+                        }
+                        let ui_adapter_kind = ui_adapter.adapter.kind;
+                        (
+                            target.clone(),
+                            vec![target],
+                            shared_ui.as_ref().expect("UI preflight").computer_action(),
+                            desk_agent_protocol::Capability::DesktopUiActionConfirmed,
+                            ui_adapter_kind,
+                            action_name,
+                        )
+                    }))
+                })
+                .await?
             }
             EXECUTE_BACKGROUND_INPUT_TOOL => {
-                let input = shared_background
-                    .as_ref()
-                    .expect("background input preflight");
-                (
-                    input.target().clone(),
-                    vec![input.target().clone()],
-                    input.computer_action(),
-                    input.required_capability(),
-                    ComputerUseAdapterKind::MacosBackgroundInput,
-                    "background input dispatch",
-                )
+                desk_diagnose_core::future::boxed(|| async {
+                    Ok::<_, AgentError>(Box::new({
+                        let input = shared_background
+                            .as_ref()
+                            .expect("background input preflight");
+                        (
+                            input.target().clone(),
+                            vec![input.target().clone()],
+                            input.computer_action(),
+                            input.required_capability(),
+                            ComputerUseAdapterKind::MacosBackgroundInput,
+                            "background input dispatch",
+                        )
+                    }))
+                })
+                .await?
             }
             desk_diagnose_core::ai_assistant::linux::OUTPUT_TOOL => {
-                let input = shared_output.as_ref().expect("output input preflight");
-                (
-                    input.target().clone(),
-                    vec![input.target().clone()],
-                    ComputerActionKind::WaylandOutputInput(input.action().clone()),
-                    input.required_capability(),
-                    ComputerUseAdapterKind::LinuxWaylandOutput,
-                    "whole-output input",
-                )
+                desk_diagnose_core::future::boxed(|| async {
+                    Ok::<_, AgentError>(Box::new({
+                        let input = shared_output.as_ref().expect("output input preflight");
+                        (
+                            input.target().clone(),
+                            vec![input.target().clone()],
+                            ComputerActionKind::WaylandOutputInput(input.action().clone()),
+                            input.required_capability(),
+                            ComputerUseAdapterKind::LinuxWaylandOutput,
+                            "whole-output input",
+                        )
+                    }))
+                })
+                .await?
             }
             EXECUTE_CONFIRMED_RAW_INPUT_TOOL => {
-                let input = shared_raw_input.as_ref().expect("raw-input preflight");
-                (
-                    input.target().clone(),
-                    vec![input.target().clone()],
-                    ComputerActionKind::RawInput(input.action().clone()),
-                    input.required_capability(),
-                    ComputerUseAdapterKind::WindowsRawInput,
-                    "single raw-input fallback",
-                )
+                desk_diagnose_core::future::boxed(|| async {
+                    Ok::<_, AgentError>(Box::new({
+                        let input = shared_raw_input.as_ref().expect("raw-input preflight");
+                        (
+                            input.target().clone(),
+                            vec![input.target().clone()],
+                            ComputerActionKind::RawInput(input.action().clone()),
+                            input.required_capability(),
+                            ComputerUseAdapterKind::WindowsRawInput,
+                            "single raw-input fallback",
+                        )
+                    }))
+                })
+                .await?
             }
-            "patch_live_spreadsheet_cell" => {
-                let args: SpreadsheetActionArgs =
-                    serde_json::from_str(&call.arguments_json).map_err(decode)?;
-                if shared_iwork.as_ref().map(|preflight| preflight.target()) != Some(&args.target) {
-                    return Err(error(
-                        AgentErrorKind::PermissionDenied,
-                        "spreadsheet patch requires the exact current Numbers cell reference",
-                        false,
-                        true,
-                    ));
-                }
-                (
-                    args.target.clone(),
-                    vec![args.target],
-                    ComputerActionKind::SpreadsheetLive(args.action),
-                    desk_agent_protocol::Capability::SpreadsheetLivePatchConfirmed,
-                    ComputerUseAdapterKind::IworkNumbers,
-                    "spreadsheet cell patch",
-                )
-            }
-            "replace_live_document_body" => {
-                let args: DocumentActionArgs =
-                    serde_json::from_str(&call.arguments_json).map_err(decode)?;
-                if shared_iwork.as_ref().map(|preflight| preflight.target()) != Some(&args.target) {
-                    return Err(error(
-                        AgentErrorKind::PermissionDenied,
-                        "document patch requires the exact current Pages document reference",
-                        false,
-                        true,
-                    ));
-                }
-                (
-                    args.target.clone(),
-                    vec![args.target],
-                    ComputerActionKind::DocumentLive(DocumentLivePatchAction::ReplaceBodyText {
-                        text: args.text,
-                    }),
-                    desk_agent_protocol::Capability::DocumentLivePatchConfirmed,
-                    ComputerUseAdapterKind::IworkPages,
-                    "document body replacement",
-                )
-            }
-            "patch_live_presentation_slide" => {
-                let args: PresentationActionArgs =
-                    serde_json::from_str(&call.arguments_json).map_err(decode)?;
-                if shared_iwork.as_ref().map(|preflight| preflight.target()) != Some(&args.target) {
-                    return Err(error(
-                        AgentErrorKind::PermissionDenied,
-                        "presentation patch requires the exact current Keynote slide reference",
-                        false,
-                        true,
-                    ));
-                }
-                (
-                    args.target.clone(),
-                    vec![args.target],
-                    ComputerActionKind::PresentationLive(args.action),
-                    desk_agent_protocol::Capability::PresentationLivePatchConfirmed,
-                    ComputerUseAdapterKind::IworkKeynote,
-                    "presentation slide patch",
-                )
-            }
+            "patch_live_spreadsheet_cell" => desk_diagnose_core::future::boxed(|| async {
+                Ok::<_, AgentError>(Box::new({
+                    let args: SpreadsheetActionArgs =
+                        serde_json::from_str(&call.arguments_json).map_err(decode)?;
+                    if shared_iwork.as_ref().map(|preflight| preflight.target())
+                        != Some(&args.target)
+                    {
+                        return Err(error(
+                            AgentErrorKind::PermissionDenied,
+                            "spreadsheet patch requires the exact current Numbers cell reference",
+                            false,
+                            true,
+                        ));
+                    }
+                    (
+                        args.target.clone(),
+                        vec![args.target],
+                        ComputerActionKind::SpreadsheetLive(args.action),
+                        desk_agent_protocol::Capability::SpreadsheetLivePatchConfirmed,
+                        ComputerUseAdapterKind::IworkNumbers,
+                        "spreadsheet cell patch",
+                    )
+                }))
+            })
+            .await?,
+            "replace_live_document_body" => desk_diagnose_core::future::boxed(|| async {
+                Ok::<_, AgentError>(Box::new({
+                    let args: DocumentActionArgs =
+                        serde_json::from_str(&call.arguments_json).map_err(decode)?;
+                    if shared_iwork.as_ref().map(|preflight| preflight.target())
+                        != Some(&args.target)
+                    {
+                        return Err(error(
+                            AgentErrorKind::PermissionDenied,
+                            "document patch requires the exact current Pages document reference",
+                            false,
+                            true,
+                        ));
+                    }
+                    (
+                        args.target.clone(),
+                        vec![args.target],
+                        ComputerActionKind::DocumentLive(
+                            DocumentLivePatchAction::ReplaceBodyText { text: args.text },
+                        ),
+                        desk_agent_protocol::Capability::DocumentLivePatchConfirmed,
+                        ComputerUseAdapterKind::IworkPages,
+                        "document body replacement",
+                    )
+                }))
+            })
+            .await?,
+            "patch_live_presentation_slide" => desk_diagnose_core::future::boxed(|| async {
+                Ok::<_, AgentError>(Box::new({
+                    let args: PresentationActionArgs =
+                        serde_json::from_str(&call.arguments_json).map_err(decode)?;
+                    if shared_iwork.as_ref().map(|preflight| preflight.target())
+                        != Some(&args.target)
+                    {
+                        return Err(error(
+                            AgentErrorKind::PermissionDenied,
+                            "presentation patch requires the exact current Keynote slide reference",
+                            false,
+                            true,
+                        ));
+                    }
+                    (
+                        args.target.clone(),
+                        vec![args.target],
+                        ComputerActionKind::PresentationLive(args.action),
+                        desk_agent_protocol::Capability::PresentationLivePatchConfirmed,
+                        ComputerUseAdapterKind::IworkKeynote,
+                        "presentation slide patch",
+                    )
+                }))
+            })
+            .await?,
             "patch_numbers_copy" | "patch_excel_copy" => {
-                let args: SpreadsheetBatchActionArgs =
-                    serde_json::from_str(&call.arguments_json).map_err(decode)?;
-                let authority_refs =
-                    vec![args.target.clone(), args.output.destination_parent.clone()];
-                (
-                    args.target,
-                    authority_refs,
-                    ComputerActionKind::SpreadsheetLiveBatch(SpreadsheetLiveBatchPatchAction {
-                        output: args.output,
-                        action: args.action,
-                    }),
-                    desk_agent_protocol::Capability::SpreadsheetLivePatchConfirmed,
-                    if call.name == "patch_excel_copy" {
-                        ComputerUseAdapterKind::OfficeExcel
-                    } else {
-                        ComputerUseAdapterKind::IworkNumbers
-                    },
-                    "selected spreadsheet copy patch",
-                )
+                desk_diagnose_core::future::boxed(|| async {
+                    Ok::<_, AgentError>(Box::new({
+                        let args: SpreadsheetBatchActionArgs =
+                            serde_json::from_str(&call.arguments_json).map_err(decode)?;
+                        let authority_refs =
+                            vec![args.target.clone(), args.output.destination_parent.clone()];
+                        (
+                            args.target,
+                            authority_refs,
+                            ComputerActionKind::SpreadsheetLiveBatch(
+                                SpreadsheetLiveBatchPatchAction {
+                                    output: args.output,
+                                    action: args.action,
+                                },
+                            ),
+                            desk_agent_protocol::Capability::SpreadsheetLivePatchConfirmed,
+                            if call.name == "patch_excel_copy" {
+                                ComputerUseAdapterKind::OfficeExcel
+                            } else {
+                                ComputerUseAdapterKind::IworkNumbers
+                            },
+                            "selected spreadsheet copy patch",
+                        )
+                    }))
+                })
+                .await?
             }
             "replace_pages_copy_body" | "replace_word_copy_body" => {
-                let args: DocumentBatchActionArgs =
-                    serde_json::from_str(&call.arguments_json).map_err(decode)?;
-                let authority_refs =
-                    vec![args.target.clone(), args.output.destination_parent.clone()];
-                (
-                    args.target,
-                    authority_refs,
-                    ComputerActionKind::DocumentLiveBatch(DocumentLiveBatchPatchAction {
-                        output: args.output,
-                        action: DocumentLivePatchAction::ReplaceBodyText { text: args.text },
-                    }),
-                    desk_agent_protocol::Capability::DocumentLivePatchConfirmed,
-                    if call.name == "replace_word_copy_body" {
-                        ComputerUseAdapterKind::OfficeWord
-                    } else {
-                        ComputerUseAdapterKind::IworkPages
-                    },
-                    "selected document copy body replacement",
-                )
+                desk_diagnose_core::future::boxed(|| async {
+                    Ok::<_, AgentError>(Box::new({
+                        let args: DocumentBatchActionArgs =
+                            serde_json::from_str(&call.arguments_json).map_err(decode)?;
+                        let authority_refs =
+                            vec![args.target.clone(), args.output.destination_parent.clone()];
+                        (
+                            args.target,
+                            authority_refs,
+                            ComputerActionKind::DocumentLiveBatch(DocumentLiveBatchPatchAction {
+                                output: args.output,
+                                action: DocumentLivePatchAction::ReplaceBodyText {
+                                    text: args.text,
+                                },
+                            }),
+                            desk_agent_protocol::Capability::DocumentLivePatchConfirmed,
+                            if call.name == "replace_word_copy_body" {
+                                ComputerUseAdapterKind::OfficeWord
+                            } else {
+                                ComputerUseAdapterKind::IworkPages
+                            },
+                            "selected document copy body replacement",
+                        )
+                    }))
+                })
+                .await?
             }
             "patch_keynote_copy" | "patch_powerpoint_copy" => {
-                let args: PresentationBatchActionArgs =
-                    serde_json::from_str(&call.arguments_json).map_err(decode)?;
-                let authority_refs =
-                    vec![args.target.clone(), args.output.destination_parent.clone()];
-                (
-                    args.target,
-                    authority_refs,
-                    ComputerActionKind::PresentationLiveBatch(PresentationLiveBatchPatchAction {
-                        output: args.output,
-                        action: args.action,
-                    }),
-                    desk_agent_protocol::Capability::PresentationLivePatchConfirmed,
-                    if call.name == "patch_powerpoint_copy" {
-                        ComputerUseAdapterKind::OfficePowerPoint
-                    } else {
-                        ComputerUseAdapterKind::IworkKeynote
-                    },
-                    "selected presentation copy patch",
-                )
+                desk_diagnose_core::future::boxed(|| async {
+                    Ok::<_, AgentError>(Box::new({
+                        let args: PresentationBatchActionArgs =
+                            serde_json::from_str(&call.arguments_json).map_err(decode)?;
+                        let authority_refs =
+                            vec![args.target.clone(), args.output.destination_parent.clone()];
+                        (
+                            args.target,
+                            authority_refs,
+                            ComputerActionKind::PresentationLiveBatch(
+                                PresentationLiveBatchPatchAction {
+                                    output: args.output,
+                                    action: args.action,
+                                },
+                            ),
+                            desk_agent_protocol::Capability::PresentationLivePatchConfirmed,
+                            if call.name == "patch_powerpoint_copy" {
+                                ComputerUseAdapterKind::OfficePowerPoint
+                            } else {
+                                ComputerUseAdapterKind::IworkKeynote
+                            },
+                            "selected presentation copy patch",
+                        )
+                    }))
+                })
+                .await?
             }
             _ => {
                 return Err(error(
@@ -2886,85 +3168,100 @@ impl SignalAiAssistantTools {
             .provider_registry
             .provider_for_capability(&capability.wire.capability_id)
             .expect("registered semantic UI action capability has a Provider");
-        self.verify_current_readiness(capability).await?;
-        let session = self.authoritative_session().await?;
-        let turn_scope = desk_diagnose_core::action_turn_fence::AssistantTurnFence::computer_action_scope_for_session(
+        desk_diagnose_core::future::boxed(|| async {
+            self.verify_current_readiness(capability).await
+        })
+        .await?;
+        Ok(Box::pin(async move {
+            let shared_launch = &shared.launch;
+            let shared_iwork = &shared.iwork;
+            let shared_text = &shared.text;
+            let shared_ui = &shared.ui;
+            let shared_background = &shared.background;
+            let shared_output = &shared.output;
+
+            let session = Box::new(
+                desk_diagnose_core::future::boxed(|| async { self.authoritative_session().await })
+                    .await?,
+            );
+            let turn_scope = desk_diagnose_core::action_turn_fence::AssistantTurnFence::computer_action_scope_for_session(
             ctx.assistant_turn_fence.as_ref(), &session,
         )?;
-        let (canonical_input_json, canonical_input_digest_sha256) =
-            Self::canonical_call_input(call)?;
-        let resource_scope = shared_launch.as_ref().map_or_else(
-            || {
-                shared_iwork.as_ref().map_or_else(
-                    || fresh_object_resource_scope(&authority_refs),
-                    |preflight| preflight.resource_scope().to_vec(),
-                )
-            },
-            |binding| binding.resource_scope(),
-        );
-        let operation_scope = vec![
-            if shared_launch.is_some() {
-                "launch_application"
-            } else {
-                "use_selected_object"
-            }
-            .to_string(),
-        ];
-        let risk_tier = Self::capability_risk(capability, call)?;
-        let server_call_id = desk_diagnose_core::native_ids::background_action(
-            &self.run_id,
-            &self.turn_id,
-            &call.id,
-        );
-        let subject = desk_diagnose_core::provider_preflight::ProviderCallSubject {
-            actor_id: &self.actor_id,
-            run_id: &self.run_id,
-            input_revision: session.input_revision,
-            target_device_id: &self.target_device_id,
-            policy_revision: self.policy_revision,
-            readiness_revision: self.readiness_revision,
-            now_unix_ms,
-        };
-        let call_authority = if let Some(preflight) = &shared_ui {
-            preflight.grant_call(&subject)?
-        } else if let Some(preflight) = &shared_background {
-            preflight.grant_call(&subject)?
-        } else if let Some(preflight) = &shared_output {
-            preflight.grant_call(&subject)?
-        } else if let Some(preflight) = &shared_text {
-            preflight.grant_call(&subject)?
-        } else if let Some(preflight) = &shared_iwork {
-            preflight.grant_call(&subject)?
-        } else {
-            CapabilityGrantCall {
+            let (canonical_input_json, canonical_input_digest_sha256) =
+                Self::canonical_call_input(call)?;
+            let resource_scope = shared_launch.as_ref().map_or_else(
+                || {
+                    shared_iwork.as_ref().map_or_else(
+                        || fresh_object_resource_scope(&authority_refs),
+                        |preflight| preflight.resource_scope().to_vec(),
+                    )
+                },
+                |binding| binding.resource_scope(),
+            );
+            let operation_scope = vec![
+                if shared_launch.is_some() {
+                    "launch_application"
+                } else {
+                    "use_selected_object"
+                }
+                .to_string(),
+            ];
+            let risk_tier = Self::capability_risk(capability, call)?;
+            let server_call_id = desk_diagnose_core::native_ids::background_action(
+                &self.run_id,
+                &self.turn_id,
+                &call.id,
+            );
+            let subject = desk_diagnose_core::provider_preflight::ProviderCallSubject {
                 actor_id: &self.actor_id,
                 run_id: &self.run_id,
                 input_revision: session.input_revision,
-                surface: ProductSurface::OssPersonalOwner,
                 target_device_id: &self.target_device_id,
-                target_session_id: None,
-                provider_id: &provider.wire.provider_id,
-                capability_id: &capability.wire.capability_id,
-                tool_name: &call.name,
-                tool_schema_version: capability.wire.input_schema_version,
-                effect: capability.wire.effect,
-                risk_tier,
-                resource_scope: &resource_scope,
-                operation_scope: &operation_scope,
-                export_destinations: &[],
-                envelope_ids: &[],
-                content_digests_sha256: &[],
-                canonical_input_digest_sha256: &canonical_input_digest_sha256,
-                byte_count: canonical_input_json.len() as u64,
-                item_count: 1,
                 policy_revision: self.policy_revision,
                 readiness_revision: self.readiness_revision,
                 now_unix_ms,
-            }
-        };
-        let store = SignalCapabilityGrantStore::new(self.db.clone());
-        let grant_id = if let Some(existing) = store
-            .prepared_grant_id(&server_call_id)
+            };
+            let call_authority = if let Some(preflight) = &shared_ui {
+                preflight.grant_call(&subject)?
+            } else if let Some(preflight) = &shared_background {
+                preflight.grant_call(&subject)?
+            } else if let Some(preflight) = &shared_output {
+                preflight.grant_call(&subject)?
+            } else if let Some(preflight) = &shared_text {
+                preflight.grant_call(&subject)?
+            } else if let Some(preflight) = &shared_iwork {
+                preflight.grant_call(&subject)?
+            } else {
+                CapabilityGrantCall {
+                    actor_id: &self.actor_id,
+                    run_id: &self.run_id,
+                    input_revision: session.input_revision,
+                    surface: ProductSurface::OssPersonalOwner,
+                    target_device_id: &self.target_device_id,
+                    target_session_id: None,
+                    provider_id: &provider.wire.provider_id,
+                    capability_id: &capability.wire.capability_id,
+                    tool_name: &call.name,
+                    tool_schema_version: capability.wire.input_schema_version,
+                    effect: capability.wire.effect,
+                    risk_tier,
+                    resource_scope: &resource_scope,
+                    operation_scope: &operation_scope,
+                    export_destinations: &[],
+                    envelope_ids: &[],
+                    content_digests_sha256: &[],
+                    canonical_input_digest_sha256: &canonical_input_digest_sha256,
+                    byte_count: canonical_input_json.len() as u64,
+                    item_count: 1,
+                    policy_revision: self.policy_revision,
+                    readiness_revision: self.readiness_revision,
+                    now_unix_ms,
+                }
+            };
+            let store = SignalCapabilityGrantStore::new(self.db.clone());
+            let grant_id = if let Some(existing) = desk_diagnose_core::future::boxed(|| async {
+                store.prepared_grant_id(&server_call_id).await
+            })
             .await
             .map_err(|db_error| {
                 error(
@@ -2974,15 +3271,15 @@ impl SignalAiAssistantTools {
                     false,
                 )
             })? {
-            existing
-        } else if session.trigger_origin
-            == desk_diagnose_core::session::TriggerOrigin::ScheduledTask
-        {
-            crate::capability_grant_store::task_grant::identity(&self.run_id, &server_call_id)
-        } else {
-            store
+                existing
+            } else if session.trigger_origin
+                == desk_diagnose_core::session::TriggerOrigin::ScheduledTask
+            {
+                crate::capability_grant_store::task_grant::identity(&self.run_id, &server_call_id)
+            } else {
+                desk_diagnose_core::future::boxed(|| async { store
                 .list_for_subject(&self.run_id, &self.actor_id, &self.target_device_id)
-                .await
+                .await }).await
                 .map_err(|db_error| {
                     error(
                         AgentErrorKind::Internal,
@@ -3002,19 +3299,22 @@ impl SignalAiAssistantTools {
                         true,
                     )
                 })?
-        };
-        let prepare = || PrepareCapabilityCall {
-            grant_id: &grant_id,
-            call_id: &server_call_id,
-            turn_id: &self.turn_id,
-            input_revision: session.input_revision,
-            input_watermark: session.latest_input_seq,
-            generation: 1,
-            canonical_input_json: &canonical_input_json,
-            call: call_authority.clone(),
-        };
-        let prepared = store
-            .prepare_outcome(prepare(), &self.provider_registry)
+            };
+            let prepare = || PrepareCapabilityCall {
+                grant_id: &grant_id,
+                call_id: &server_call_id,
+                turn_id: &self.turn_id,
+                input_revision: session.input_revision,
+                input_watermark: session.latest_input_seq,
+                generation: 1,
+                canonical_input_json: &canonical_input_json,
+                call: call_authority.clone(),
+            };
+            let prepared = desk_diagnose_core::future::boxed(|| async {
+                store
+                    .prepare_outcome(prepare(), &self.provider_registry)
+                    .await
+            })
             .await
             .map_err(|db_error| {
                 error(
@@ -3024,27 +3324,32 @@ impl SignalAiAssistantTools {
                     true,
                 )
             })?;
-        let prepared = match prepared {
-            crate::capability_grant_store::CapabilityPreparation::Ready(work) => {
-                self.observe_ready(call, &session, work.work_id);
-                work
-            }
-            crate::capability_grant_store::CapabilityPreparation::PermissionRequired(request) => {
-                self.observed(call).stage(
-                    desk_diagnose_core::model_observability::Stage::Preflight,
-                    desk_diagnose_core::model_observability::StageOutcome::Passed,
-                );
-                self.observed(call).permission(
-                    desk_diagnose_core::model_observability::PermissionOutcome::Waiting,
-                );
-                return Ok(ExecOutcome::PermissionRequired { request });
-            }
-        };
-        if matches!(
-            call.name.as_str(),
-            EXECUTE_CONFIRMED_UI_ACTION_TOOL | EXECUTE_BACKGROUND_INPUT_TOOL
-        ) && !store
-            .prepared_has_dispatch_intent(&server_call_id, prepared.work_id)
+            let prepared = match prepared {
+                crate::capability_grant_store::CapabilityPreparation::Ready(work) => {
+                    self.observe_ready(call, &session, work.work_id);
+                    work
+                }
+                crate::capability_grant_store::CapabilityPreparation::PermissionRequired(
+                    request,
+                ) => {
+                    self.observed(call).stage(
+                        desk_diagnose_core::model_observability::Stage::Preflight,
+                        desk_diagnose_core::model_observability::StageOutcome::Passed,
+                    );
+                    self.observed(call).permission(
+                        desk_diagnose_core::model_observability::PermissionOutcome::Waiting,
+                    );
+                    return Ok(ExecOutcome::PermissionRequired { request });
+                }
+            };
+            if matches!(
+                call.name.as_str(),
+                EXECUTE_CONFIRMED_UI_ACTION_TOOL | EXECUTE_BACKGROUND_INPUT_TOOL
+            ) && !desk_diagnose_core::future::boxed(|| async {
+                store
+                    .prepared_has_dispatch_intent(&server_call_id, prepared.work_id)
+                    .await
+            })
             .await
             .map_err(|_| {
                 error(
@@ -3053,43 +3358,45 @@ impl SignalAiAssistantTools {
                     false,
                     false,
                 )
-            })?
-        {
-            let review = crate::agent_approval_concrete::review_prepared_call(
-                &self.db,
-                &self.provider_registry,
-                &crate::agent_approval_concrete::ConcreteSubject {
-                    work_id: prepared.work_id,
-                    server_call_id: &server_call_id,
-                    turn_id: &self.turn_id,
-                    conversation_id: &self.run_id,
-                    actor_id: &self.actor_id,
-                    device_id: &self.target_device_id,
-                    canonical_input_json: &canonical_input_json,
-                    call,
-                },
-            )
-            .await
-            .unwrap_or_else(|error| {
-                log::warn!(
-                    "[approval] concrete UI review preparation failed for work {}: {error}",
-                    prepared.work_id,
-                );
-                crate::agent_approval_concrete::ConcreteReviewResult::Unavailable
-            });
-            let closure = match &review {
-                crate::agent_approval_concrete::ConcreteReviewResult::NotRequired
-                | crate::agent_approval_concrete::ConcreteReviewResult::Approved => None,
-                crate::agent_approval_concrete::ConcreteReviewResult::Denied(_) => {
-                    Some("ai_review_denied")
-                }
-                crate::agent_approval_concrete::ConcreteReviewResult::Unavailable => {
-                    Some("ai_review_unavailable")
-                }
-            };
-            if let Some(resolution) = closure {
-                let review_now_unix_ms = u64::try_from(chrono::Utc::now().timestamp_millis())
-                    .map_err(|_| {
+            })? {
+                let review = desk_diagnose_core::future::boxed(|| async {
+                    crate::agent_approval_concrete::review_prepared_call(
+                        &self.db,
+                        &self.provider_registry,
+                        &crate::agent_approval_concrete::ConcreteSubject {
+                            work_id: prepared.work_id,
+                            server_call_id: &server_call_id,
+                            turn_id: &self.turn_id,
+                            conversation_id: &self.run_id,
+                            actor_id: &self.actor_id,
+                            device_id: &self.target_device_id,
+                            canonical_input_json: &canonical_input_json,
+                            call,
+                        },
+                    )
+                    .await
+                })
+                .await
+                .unwrap_or_else(|error| {
+                    log::warn!(
+                        "[approval] concrete UI review preparation failed for work {}: {error}",
+                        prepared.work_id,
+                    );
+                    crate::agent_approval_concrete::ConcreteReviewResult::Unavailable
+                });
+                let closure = match &review {
+                    crate::agent_approval_concrete::ConcreteReviewResult::NotRequired
+                    | crate::agent_approval_concrete::ConcreteReviewResult::Approved => None,
+                    crate::agent_approval_concrete::ConcreteReviewResult::Denied(_) => {
+                        Some("ai_review_denied")
+                    }
+                    crate::agent_approval_concrete::ConcreteReviewResult::Unavailable => {
+                        Some("ai_review_unavailable")
+                    }
+                };
+                if let Some(resolution) = closure {
+                    let review_now_unix_ms = u64::try_from(chrono::Utc::now().timestamp_millis())
+                        .map_err(|_| {
                         error(
                             AgentErrorKind::SessionUnavailable,
                             "unable to date the completed UI review",
@@ -3097,13 +3404,16 @@ impl SignalAiAssistantTools {
                             false,
                         )
                     })?;
-                store
-                    .close_prepared_after_review(
-                        &server_call_id,
-                        prepared.work_id,
-                        review_now_unix_ms,
-                        resolution,
-                    )
+                    desk_diagnose_core::future::boxed(|| async {
+                        store
+                            .close_prepared_after_review(
+                                &server_call_id,
+                                prepared.work_id,
+                                review_now_unix_ms,
+                                resolution,
+                            )
+                            .await
+                    })
                     .await
                     .map_err(|_| {
                         error(
@@ -3113,7 +3423,7 @@ impl SignalAiAssistantTools {
                             false,
                         )
                     })?;
-                return Ok(match review {
+                    return Ok(match review {
                     crate::agent_approval_concrete::ConcreteReviewResult::Denied(reason) =>
                         ExecOutcome::Rejected {
                             reason: Some(format!("independent AI review denied this exact UI action: {reason}")),
@@ -3124,20 +3434,20 @@ impl SignalAiAssistantTools {
                         },
                     _ => unreachable!("only denied or unavailable review closes prepared UI work"),
                 });
+                }
             }
-        }
-        let dispatch_id =
-            match store
-                .record_dispatch_intent(prepare())
-                .await
-                .map_err(|db_error| {
-                    error(
-                        AgentErrorKind::PermissionDenied,
-                        format!("semantic UI dispatch authorization failed: {db_error}"),
-                        false,
-                        true,
-                    )
-                })? {
+            let dispatch_id = match desk_diagnose_core::future::boxed(|| async {
+                store.record_dispatch_intent(prepare()).await
+            })
+            .await
+            .map_err(|db_error| {
+                error(
+                    AgentErrorKind::PermissionDenied,
+                    format!("semantic UI dispatch authorization failed: {db_error}"),
+                    false,
+                    true,
+                )
+            })? {
                 DispatchIntentResult::Recorded { dispatch_id, .. } => dispatch_id,
                 DispatchIntentResult::SupersededBeforeIntent { .. } => {
                     return Err(error(
@@ -3156,8 +3466,9 @@ impl SignalAiAssistantTools {
                     ));
                 }
             };
-        let claimed = match store
-            .claim_dispatch(&dispatch_id, now_unix_ms)
+            let claimed = match desk_diagnose_core::future::boxed(|| async {
+                store.claim_dispatch(&dispatch_id, now_unix_ms).await
+            })
             .await
             .map_err(|db_error| {
                 error(
@@ -3167,20 +3478,20 @@ impl SignalAiAssistantTools {
                     false,
                 )
             })? {
-            DispatchClaimResult::Claimed(payload) => payload,
-            DispatchClaimResult::OutcomeUnknown { .. } => {
-                return Ok(ExecOutcome::Unknown(
-                    desk_diagnose_core::session::ActionIdentity::new(
-                        prepared.work_id,
-                        server_call_id,
-                        dispatch_id,
-                        desk_diagnose_core::session::WorkKind::ComputerAction,
-                    ),
-                ));
-            }
-        };
+                DispatchClaimResult::Claimed(payload) => payload,
+                DispatchClaimResult::OutcomeUnknown { .. } => {
+                    return Ok(ExecOutcome::Unknown(
+                        desk_diagnose_core::session::ActionIdentity::new(
+                            prepared.work_id,
+                            server_call_id,
+                            dispatch_id,
+                            desk_diagnose_core::session::WorkKind::ComputerAction,
+                        ),
+                    ));
+                }
+            };
 
-        let dispatch_material = async {
+            let dispatch_material = async {
         let readiness = crate::computer_use_readiness::global_computer_use_readiness_cache()
             .get_fresh(&self.target_connection_id, chrono::Utc::now())
             .ok_or_else(|| {
@@ -3268,7 +3579,7 @@ impl SignalAiAssistantTools {
         if let Some(input) = shared_ui.as_ref() { plan.actions = input.steps().to_vec(); }
         if let Some(input) = shared_background.as_ref() { plan.actions = input.steps().to_vec(); }
         if desk_diagnose_core::application_batch::supports(&call.name) {
-            let grant = store.list_for_subject(&self.run_id,&self.actor_id,&self.target_device_id).await
+            let grant = desk_diagnose_core::future::boxed(|| async { store.list_for_subject(&self.run_id,&self.actor_id,&self.target_device_id).await }).await
                 .map_err(|_|error(AgentErrorKind::Internal,"failed to read batch grant expiry",false,false))?
                 .into_iter().find(|grant|grant.grant_id==grant_id)
                 .ok_or_else(||error(AgentErrorKind::PermissionDenied,"batch application grant is unavailable",false,true))?;
@@ -3287,7 +3598,7 @@ impl SignalAiAssistantTools {
             )
         })?;
         let target = {
-            let map = self.connections.read().await;
+            let map = desk_diagnose_core::future::boxed(|| async { self.connections.read().await }).await;
             map.get(&self.target_connection_id).cloned()
         }
         .ok_or_else(|| {
@@ -3315,7 +3626,7 @@ impl SignalAiAssistantTools {
             ));
         }
         let authz = AuthorizationBlock {
-            file_recovery_registration: self.prepare_file_recovery_registration(&plan).await?,
+            file_recovery_registration: desk_diagnose_core::future::boxed(|| async { self.prepare_file_recovery_registration(&plan).await }).await?,
             version: AUTHORIZATION_BLOCK_VERSION,
             exec_admission_policy: ExecAdmissionPolicy::OwnerInteractive,
             scope: AgentScope {
@@ -3370,51 +3681,65 @@ impl SignalAiAssistantTools {
                 false,
             )
         })?;
-        store.bind_computer_transport(&self.target_connection_id, &plan, &session, call, self.model_egress_policy.as_ref())
-            .await.map_err(|_| error(AgentErrorKind::Internal,
+        desk_diagnose_core::future::boxed(|| async { store.bind_computer_transport(&self.target_connection_id, &plan, &session, call, self.model_egress_policy.as_ref())
+            .await }).await.map_err(|_| error(AgentErrorKind::Internal,
                 "failed to freeze original Computer Action transport", false, false))?;
         Ok::<_, AgentError>((target, generation, text, plan))
     }
     .await;
-        let (target, generation, text, plan) = match dispatch_material {
-            Ok(material) => material,
-            Err(dispatch_error) => {
-                record_computer_action_pre_send_failure(
-                    &store,
-                    &dispatch_id,
-                    &server_call_id,
-                    now_unix_ms,
-                    &dispatch_error,
-                )
+            let (target, generation, text, plan) = match dispatch_material {
+                Ok(material) => material,
+                Err(dispatch_error) => {
+                    desk_diagnose_core::future::boxed(|| async {
+                        record_computer_action_pre_send_failure(
+                            &store,
+                            &dispatch_id,
+                            &server_call_id,
+                            now_unix_ms,
+                            &dispatch_error,
+                        )
+                        .await
+                    })
+                    .await?;
+                    return Err(dispatch_error);
+                }
+            };
+            let (completion_tx, completion_rx) = oneshot::channel();
+            if !global_computer_action_pending().register(
+                generation.clone(),
+                self.target_connection_id.clone(),
+                completion_tx,
+            ) {
+                let dispatch_error = error(
+                    AgentErrorKind::Internal,
+                    "duplicate semantic UI execution generation",
+                    false,
+                    false,
+                );
+                desk_diagnose_core::future::boxed(|| async {
+                    record_computer_action_pre_send_failure(
+                        &store,
+                        &dispatch_id,
+                        &server_call_id,
+                        now_unix_ms,
+                        &dispatch_error,
+                    )
+                    .await
+                })
                 .await?;
                 return Err(dispatch_error);
             }
-        };
-        let (completion_tx, completion_rx) = oneshot::channel();
-        if !global_computer_action_pending().register(
-            generation.clone(),
-            self.target_connection_id.clone(),
-            completion_tx,
-        ) {
-            let dispatch_error = error(
-                AgentErrorKind::Internal,
-                "duplicate semantic UI execution generation",
-                false,
-                false,
-            );
-            record_computer_action_pre_send_failure(
-                &store,
-                &dispatch_id,
-                &server_call_id,
-                now_unix_ms,
-                &dispatch_error,
-            )
-            .await?;
-            return Err(dispatch_error);
-        }
-        let sent = target.session.write().await.text(text).await.is_ok();
-        self.finish_computer_action(&store, call, &plan, completion_rx, sent, true)
+            let sent = desk_diagnose_core::future::boxed(|| async { target.session.write().await })
+                .await
+                .text(text)
+                .await
+                .is_ok();
+            desk_diagnose_core::future::boxed(|| async {
+                self.finish_computer_action(&store, call, &plan, completion_rx, sent, true)
+                    .await
+            })
             .await
+        }))
     }
 
     // Keep child execution state on the heap instead of embedding it in each caller.
@@ -3499,8 +3824,8 @@ impl SignalAiAssistantTools {
         };
         let canonical_call = call;
         let call = &action_call;
-        let (args, required_capability, _operation, orchestrator_grant) = match call.name.as_str() {
-            "create_text_file" => (
+        let (args, required_capability, _operation, orchestrator_grant) = *match call.name.as_str() {
+            "create_text_file" => { desk_diagnose_core::future::boxed(|| async { Ok::<_, AgentError>(Box::new((
                 ArtifactRequest::Text(serde_json::from_str(&call.arguments_json).map_err(
                     |decode_error| {
                         error(
@@ -3514,8 +3839,8 @@ impl SignalAiAssistantTools {
                 desk_agent_protocol::Capability::FileArtifactCreateConfirmed,
                 "create_new_artifact",
                 desk_diagnose_core::ai_assistant::FILE_ARTIFACT_CREATE_CAPABILITY_ID,
-            ),
-            "create_local_message_draft" => {
+            ))) }).await? },
+            "create_local_message_draft" => { desk_diagnose_core::future::boxed(|| async { Ok::<_, AgentError>(Box::new({
                 let args: LocalDraftArgs =
                     serde_json::from_str(&call.arguments_json).map_err(|decode_error| {
                         error(
@@ -3539,8 +3864,8 @@ impl SignalAiAssistantTools {
                 "create_new_artifact",
                 desk_diagnose_core::ai_assistant::LOCAL_COMMUNICATION_DRAFT_CREATE_CAPABILITY_ID,
             )
-            }
-            "create_workbook" => (
+            })) }).await? }
+            "create_workbook" => { desk_diagnose_core::future::boxed(|| async { Ok::<_, AgentError>(Box::new((
                 ArtifactRequest::Spreadsheet(serde_json::from_str(&call.arguments_json).map_err(
                     |decode_error| {
                         error(
@@ -3554,8 +3879,8 @@ impl SignalAiAssistantTools {
                 desk_agent_protocol::Capability::SpreadsheetWorkbookCreateConfirmed,
                 "create_new_artifact",
                 desk_diagnose_core::ai_assistant::SPREADSHEET_WORKBOOK_CREATE_CAPABILITY_ID,
-            ),
-            "create_formula_workbook" => {
+            ))) }).await? },
+            "create_formula_workbook" => { desk_diagnose_core::future::boxed(|| async { Ok::<_, AgentError>(Box::new({
                 let args: SpreadsheetFormulaArgs =
                 serde_json::from_str(&call.arguments_json).map_err(|decode_error| {
                     error(
@@ -3602,8 +3927,8 @@ impl SignalAiAssistantTools {
                 "create_new_artifact",
                 desk_diagnose_core::ai_assistant::SPREADSHEET_FORMULA_WORKBOOK_CREATE_CAPABILITY_ID,
             )
-            }
-            "create_word_report" => {
+            })) }).await? }
+            "create_word_report" => { desk_diagnose_core::future::boxed(|| async { Ok::<_, AgentError>(Box::new({
                 let args: WordArgs =
                     serde_json::from_str(&call.arguments_json).map_err(|decode_error| {
                         error(
@@ -3629,8 +3954,8 @@ impl SignalAiAssistantTools {
                     "create_new_artifact",
                     desk_diagnose_core::ai_assistant::WORD_DOCUMENT_CREATE_CAPABILITY_ID,
                 )
-            }
-            "convert_document" => (
+            })) }).await? }
+            "convert_document" => { desk_diagnose_core::future::boxed(|| async { Ok::<_, AgentError>(Box::new((
                 ArtifactRequest::Document(serde_json::from_str(&call.arguments_json).map_err(
                     |decode_error| {
                         error(
@@ -3644,18 +3969,18 @@ impl SignalAiAssistantTools {
                 desk_agent_protocol::Capability::DocumentConvertConfirmed,
                 "convert_document_create_new",
                 desk_diagnose_core::ai_assistant::DOCUMENT_CONVERT_CAPABILITY_ID,
-            ),
-            _ => {
-                return Err(error(
+            ))) }).await? },
+            _ => { return Err(error(
                     AgentErrorKind::UnsupportedCapability,
                     "artifact Provider is not registered",
                     false,
                     true,
-                ));
-            }
+                )); }
         };
         let call = canonical_call;
-        let current_session = self.authoritative_session().await?;
+        let current_session =
+            desk_diagnose_core::future::boxed(|| async { self.authoritative_session().await })
+                .await?;
         let now_ms = u64::try_from(chrono::Utc::now().timestamp_millis())
             .map_err(|_| desk_diagnose_core::directory_tools::unavailable())?;
         let selected_directories = vec![
@@ -3727,8 +4052,14 @@ impl SignalAiAssistantTools {
                     true,
                 )
             })?;
-        self.verify_current_readiness(capability).await?;
-        let session = self.authoritative_session().await?;
+        desk_diagnose_core::future::boxed(|| async {
+            self.verify_current_readiness(capability).await
+        })
+        .await?;
+        desk_diagnose_core::future::phase(|| async {
+        let session =
+            desk_diagnose_core::future::boxed(|| async { self.authoritative_session().await })
+                .await?;
         let (canonical_input_json, canonical_input_digest_sha256) =
             Self::canonical_call_input(call)?;
         if canonical_input_json != artifact_preflight.canonical_input_json() {
@@ -3771,46 +4102,52 @@ impl SignalAiAssistantTools {
             ));
         }
         let store = SignalCapabilityGrantStore::new(self.db.clone());
-        let grant_id = if let Some(existing) = store
-            .prepared_grant_id(&server_call_id)
-            .await
-            .map_err(|db_error| {
-                error(
-                    AgentErrorKind::Internal,
-                    format!("failed to load prepared artifact authority: {db_error}"),
-                    false,
-                    false,
-                )
-            })? {
+        desk_diagnose_core::future::phase(|| async {
+        let grant_id = if let Some(existing) = desk_diagnose_core::future::boxed(|| async {
+            store.prepared_grant_id(&server_call_id).await
+        })
+        .await
+        .map_err(|db_error| {
+            error(
+                AgentErrorKind::Internal,
+                format!("failed to load prepared artifact authority: {db_error}"),
+                false,
+                false,
+            )
+        })? {
             existing
         } else if session.trigger_origin
             == desk_diagnose_core::session::TriggerOrigin::ScheduledTask
         {
             crate::capability_grant_store::task_grant::identity(&self.run_id, &server_call_id)
         } else {
-            store
-                .list_for_subject(&self.run_id, &self.actor_id, &self.target_device_id)
-                .await
-                .map_err(|db_error| {
-                    error(
-                        AgentErrorKind::Internal,
-                        format!("failed to load artifact grants: {db_error}"),
-                        false,
-                        false,
-                    )
-                })?
-                .into_iter()
-                .find(|grant| is_capability_grant_candidate(grant, &call_authority))
-                .map(|grant| grant.grant_id)
-                .ok_or_else(|| {
-                    error(
-                        AgentErrorKind::PermissionDenied,
-                        "artifact creation requires an active approved capability grant",
-                        false,
-                        true,
-                    )
-                })?
+            desk_diagnose_core::future::boxed(|| async {
+                store
+                    .list_for_subject(&self.run_id, &self.actor_id, &self.target_device_id)
+                    .await
+            })
+            .await
+            .map_err(|db_error| {
+                error(
+                    AgentErrorKind::Internal,
+                    format!("failed to load artifact grants: {db_error}"),
+                    false,
+                    false,
+                )
+            })?
+            .into_iter()
+            .find(|grant| is_capability_grant_candidate(grant, &call_authority))
+            .map(|grant| grant.grant_id)
+            .ok_or_else(|| {
+                error(
+                    AgentErrorKind::PermissionDenied,
+                    "artifact creation requires an active approved capability grant",
+                    false,
+                    true,
+                )
+            })?
         };
+        desk_diagnose_core::future::phase(|| async {
         let prepare = || PrepareCapabilityCall {
             grant_id: &grant_id,
             call_id: &server_call_id,
@@ -3821,17 +4158,20 @@ impl SignalAiAssistantTools {
             canonical_input_json: &canonical_input_json,
             call: call_authority.clone(),
         };
-        let prepared = store
-            .prepare_outcome(prepare(), &self.provider_registry)
-            .await
-            .map_err(|db_error| {
-                error(
-                    AgentErrorKind::PermissionDenied,
-                    format!("artifact call authorization failed: {db_error}"),
-                    false,
-                    true,
-                )
-            })?;
+        let prepared = desk_diagnose_core::future::boxed(|| async {
+            store
+                .prepare_outcome(prepare(), &self.provider_registry)
+                .await
+        })
+        .await
+        .map_err(|db_error| {
+            error(
+                AgentErrorKind::PermissionDenied,
+                format!("artifact call authorization failed: {db_error}"),
+                false,
+                true,
+            )
+        })?;
         let prepared = match prepared {
             crate::capability_grant_store::CapabilityPreparation::Ready(work) => {
                 self.observe_ready(call, &session, work.work_id);
@@ -3848,47 +4188,49 @@ impl SignalAiAssistantTools {
                 return Ok(ExecOutcome::PermissionRequired { request });
             }
         };
-        let dispatch_id =
-            match store
-                .record_dispatch_intent(prepare())
-                .await
-                .map_err(|db_error| {
-                    error(
-                        AgentErrorKind::PermissionDenied,
-                        format!("artifact dispatch authorization failed: {db_error}"),
-                        false,
-                        true,
-                    )
-                })? {
-                DispatchIntentResult::Recorded { dispatch_id, .. } => dispatch_id,
-                DispatchIntentResult::SupersededBeforeIntent { .. } => {
-                    return Err(error(
-                        AgentErrorKind::PermissionDenied,
-                        "artifact call was superseded by newer user input",
-                        false,
-                        true,
-                    ));
-                }
-                DispatchIntentResult::RevokedBeforeIntent { .. } => {
-                    return Err(error(
-                        AgentErrorKind::PermissionDenied,
-                        "artifact grant was revoked before dispatch",
-                        false,
-                        true,
-                    ));
-                }
-            };
-        let claimed = match store
-            .claim_dispatch(&dispatch_id, now_unix_ms)
-            .await
-            .map_err(|db_error| {
-                error(
-                    AgentErrorKind::Internal,
-                    format!("failed to claim artifact dispatch: {db_error}"),
+        let dispatch_id = match desk_diagnose_core::future::boxed(|| async {
+            store.record_dispatch_intent(prepare()).await
+        })
+        .await
+        .map_err(|db_error| {
+            error(
+                AgentErrorKind::PermissionDenied,
+                format!("artifact dispatch authorization failed: {db_error}"),
+                false,
+                true,
+            )
+        })? {
+            DispatchIntentResult::Recorded { dispatch_id, .. } => dispatch_id,
+            DispatchIntentResult::SupersededBeforeIntent { .. } => {
+                return Err(error(
+                    AgentErrorKind::PermissionDenied,
+                    "artifact call was superseded by newer user input",
                     false,
+                    true,
+                ));
+            }
+            DispatchIntentResult::RevokedBeforeIntent { .. } => {
+                return Err(error(
+                    AgentErrorKind::PermissionDenied,
+                    "artifact grant was revoked before dispatch",
                     false,
-                )
-            })? {
+                    true,
+                ));
+            }
+        };
+        desk_diagnose_core::future::phase(|| async {
+        let claimed = match desk_diagnose_core::future::boxed(|| async {
+            store.claim_dispatch(&dispatch_id, now_unix_ms).await
+        })
+        .await
+        .map_err(|db_error| {
+            error(
+                AgentErrorKind::Internal,
+                format!("failed to claim artifact dispatch: {db_error}"),
+                false,
+                false,
+            )
+        })? {
             DispatchClaimResult::Claimed(payload) => payload,
             DispatchClaimResult::OutcomeUnknown { .. } => {
                 return Ok(ExecOutcome::Unknown(
@@ -3907,13 +4249,13 @@ impl SignalAiAssistantTools {
                 match $result {
                     Ok(value) => value,
                     Err(dispatch_error) => {
-                        record_computer_action_pre_send_failure(
+                        desk_diagnose_core::future::boxed(|| record_computer_action_pre_send_failure(
                             &store,
                             &dispatch_id,
                             &server_call_id,
                             now_unix_ms,
                             &dispatch_error,
-                        )
+                        ))
                         .await?;
                         return Err(dispatch_error);
                     }
@@ -4026,13 +4368,16 @@ impl SignalAiAssistantTools {
                 false,
                 false,
             );
-            record_computer_action_pre_send_failure(
-                &store,
-                &dispatch_id,
-                &server_call_id,
-                now_unix_ms,
-                &dispatch_error,
-            )
+            desk_diagnose_core::future::boxed(|| async {
+                record_computer_action_pre_send_failure(
+                    &store,
+                    &dispatch_id,
+                    &server_call_id,
+                    now_unix_ms,
+                    &dispatch_error,
+                )
+                .await
+            })
             .await?;
             return Err(dispatch_error);
         }
@@ -4104,13 +4449,16 @@ impl SignalAiAssistantTools {
                 false,
                 false,
             );
-            record_computer_action_pre_send_failure(
-                &store,
-                &dispatch_id,
-                &server_call_id,
-                now_unix_ms,
-                &dispatch_error,
-            )
+            desk_diagnose_core::future::boxed(|| async {
+                record_computer_action_pre_send_failure(
+                    &store,
+                    &dispatch_id,
+                    &server_call_id,
+                    now_unix_ms,
+                    &dispatch_error,
+                )
+                .await
+            })
             .await?;
             return Err(dispatch_error);
         }
@@ -4204,19 +4552,33 @@ impl SignalAiAssistantTools {
                 false,
                 false,
             );
-            record_computer_action_pre_send_failure(
-                &store,
-                &dispatch_id,
-                &server_call_id,
-                now_unix_ms,
-                &dispatch_error,
-            )
+            desk_diagnose_core::future::boxed(|| async {
+                record_computer_action_pre_send_failure(
+                    &store,
+                    &dispatch_id,
+                    &server_call_id,
+                    now_unix_ms,
+                    &dispatch_error,
+                )
+                .await
+            })
             .await?;
             return Err(dispatch_error);
         }
-        let sent = target.session.write().await.text(text).await.is_ok();
-        self.finish_computer_action(&store, call, &plan, completion_rx, sent, true)
+        let sent = desk_diagnose_core::future::boxed(|| async { target.session.write().await })
             .await
+            .text(text)
+            .await
+            .is_ok();
+        desk_diagnose_core::future::boxed(|| async {
+            self.finish_computer_action(&store, call, &plan, completion_rx, sent, true)
+                .await
+        })
+        .await
+            }).await
+        }).await
+        }).await
+        }).await
     }
 
     #[cfg(test)]
@@ -4260,7 +4622,10 @@ impl SignalAiAssistantTools {
                     true,
                 )
             })?;
-        self.verify_current_readiness(capability).await?;
+        desk_diagnose_core::future::boxed(|| async {
+            self.verify_current_readiness(capability).await
+        })
+        .await?;
         let provider = self
             .provider_registry
             .provider_for_capability(&capability.wire.capability_id)
@@ -4309,7 +4674,9 @@ impl SignalAiAssistantTools {
         } else {
             None
         };
-        let session = self.authoritative_session().await?;
+        let session =
+            desk_diagnose_core::future::boxed(|| async { self.authoritative_session().await })
+                .await?;
         let now_unix_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).map_err(|_| {
             error(
                 AgentErrorKind::Internal,
@@ -4353,8 +4720,10 @@ impl SignalAiAssistantTools {
         let export_destinations = call_authority.export_destinations.to_vec();
         let risk_tier = call_authority.risk_tier;
         let store = SignalCapabilityGrantStore::new(self.db.clone());
-        let grant_id = if let Some(existing) = store
-            .prepared_grant_id(&server_call_id)
+        desk_diagnose_core::future::phase(|| async {
+            let grant_id = if let Some(existing) = desk_diagnose_core::future::boxed(|| async {
+                store.prepared_grant_id(&server_call_id).await
+            })
             .await
             .map_err(|db_error| {
                 error(
@@ -4364,64 +4733,71 @@ impl SignalAiAssistantTools {
                     false,
                 )
             })? {
-            existing
-        } else if session.trigger_origin
-            == desk_diagnose_core::session::TriggerOrigin::ScheduledTask
-        {
-            crate::capability_grant_store::task_grant::identity(&self.run_id, &server_call_id)
-        } else if browser_policy_auto_authorized(risk_tier) {
-            let grant_id = format!(
-                "policy-auto-browser-{:x}",
-                Sha256::digest(format!("{}:{}:{}", self.run_id, self.turn_id, call.id).as_bytes())
-            );
-            let grant = CapabilityGrant {
-                schema_version: CAPABILITY_GRANT_SCHEMA_VERSION,
-                grant_id: grant_id.clone(),
-                actor_id: self.actor_id.clone(),
-                run_id: self.run_id.clone(),
-                input_revision: session.input_revision,
-                surface: ProductSurface::OssPersonalOwner,
-                target_device_id: self.target_device_id.clone(),
-                target_session_id: None,
-                provider_id: provider.wire.provider_id.clone(),
-                capability_id: capability.wire.capability_id.clone(),
-                tool_name: call.name.clone(),
-                tool_schema_version: capability.wire.input_schema_version,
-                effect: capability.wire.effect,
-                risk_tier,
-                resource_scope: resource_scope.clone(),
-                operation_scope: operation_scope.clone(),
-                export_destinations: export_destinations.clone(),
-                allowed_envelope_ids: Vec::new(),
-                allowed_content_digests_sha256: Vec::new(),
-                use_policy: CapabilityGrantUsePolicy::OneShotExact,
-                canonical_input_digest_sha256: Some(canonical_input_digest_sha256.clone()),
-                issued_by: CapabilityGrantIssuer::PolicyAuto,
-                issued_at_unix_ms: now_unix_ms,
-                expires_at_unix_ms: now_unix_ms.saturating_add(60_000),
-                remaining_uses: 1,
-                limits: CapabilityGrantLimits {
-                    max_bytes_per_call: capability.wire.limits.max_output_bytes,
-                    max_items_per_call: capability.wire.limits.max_objects,
-                    max_calls: 1,
-                },
-                policy_revision: self.policy_revision,
-                readiness_revision: self.readiness_revision,
-                revoked_at_unix_ms: None,
-                revoked_reason: None,
-            };
-            store.issue(&grant).await.map_err(|db_error| {
-                error(
-                    AgentErrorKind::Internal,
-                    format!("failed to issue browser policy-auto grant: {db_error}"),
-                    false,
-                    false,
-                )
-            })?;
-            grant_id
-        } else {
-            store
-                .list_for_subject(&self.run_id, &self.actor_id, &self.target_device_id)
+                existing
+            } else if session.trigger_origin
+                == desk_diagnose_core::session::TriggerOrigin::ScheduledTask
+            {
+                crate::capability_grant_store::task_grant::identity(&self.run_id, &server_call_id)
+            } else if browser_policy_auto_authorized(risk_tier) {
+                let grant_id = format!(
+                    "policy-auto-browser-{:x}",
+                    Sha256::digest(
+                        format!("{}:{}:{}", self.run_id, self.turn_id, call.id).as_bytes()
+                    )
+                );
+                let grant = CapabilityGrant {
+                    schema_version: CAPABILITY_GRANT_SCHEMA_VERSION,
+                    grant_id: grant_id.clone(),
+                    actor_id: self.actor_id.clone(),
+                    run_id: self.run_id.clone(),
+                    input_revision: session.input_revision,
+                    surface: ProductSurface::OssPersonalOwner,
+                    target_device_id: self.target_device_id.clone(),
+                    target_session_id: None,
+                    provider_id: provider.wire.provider_id.clone(),
+                    capability_id: capability.wire.capability_id.clone(),
+                    tool_name: call.name.clone(),
+                    tool_schema_version: capability.wire.input_schema_version,
+                    effect: capability.wire.effect,
+                    risk_tier,
+                    resource_scope: resource_scope.clone(),
+                    operation_scope: operation_scope.clone(),
+                    export_destinations: export_destinations.clone(),
+                    allowed_envelope_ids: Vec::new(),
+                    allowed_content_digests_sha256: Vec::new(),
+                    use_policy: CapabilityGrantUsePolicy::OneShotExact,
+                    canonical_input_digest_sha256: Some(canonical_input_digest_sha256.clone()),
+                    issued_by: CapabilityGrantIssuer::PolicyAuto,
+                    issued_at_unix_ms: now_unix_ms,
+                    expires_at_unix_ms: now_unix_ms.saturating_add(60_000),
+                    remaining_uses: 1,
+                    limits: CapabilityGrantLimits {
+                        max_bytes_per_call: capability.wire.limits.max_output_bytes,
+                        max_items_per_call: capability.wire.limits.max_objects,
+                        max_calls: 1,
+                    },
+                    policy_revision: self.policy_revision,
+                    readiness_revision: self.readiness_revision,
+                    revoked_at_unix_ms: None,
+                    revoked_reason: None,
+                };
+                desk_diagnose_core::future::boxed(|| async { store.issue(&grant).await })
+                    .await
+                    .map_err(|db_error| {
+                        error(
+                            AgentErrorKind::Internal,
+                            format!("failed to issue browser policy-auto grant: {db_error}"),
+                            false,
+                            false,
+                        )
+                    })?;
+                grant_id
+            } else {
+                desk_diagnose_core::future::boxed(|| async {
+                    store
+                        .list_for_subject(&self.run_id, &self.actor_id, &self.target_device_id)
+                        .await
+                })
                 .await
                 .map_err(|db_error| {
                     error(
@@ -4442,63 +4818,65 @@ impl SignalAiAssistantTools {
                         true,
                     )
                 })?
-        };
-        if slack_input.is_some() || gmail_input.is_some() {
-            let site = if gmail_input.is_some() {
-                "gmail"
-            } else {
-                "slack"
             };
-            let destination = export_destinations
-                .first()
-                .expect("Web communication handoff has one fixed destination")
-                .clone();
-            let source_envelope_id = format!("{site}-source-{server_call_id}");
-            let source = DataEnvelope {
-                schema_version: DATA_ENVELOPE_SCHEMA_VERSION,
-                envelope_id: source_envelope_id.clone(),
-                content: ContentRef::ImmutableBlob {
-                    blob_id: format!("{site}-input-{server_call_id}"),
-                    sha256: canonical_input_digest_sha256.clone(),
-                    size_bytes: canonical_input_json.len() as u64,
-                    media_type: "application/json".into(),
-                },
-                provenance: DataProvenance {
-                    source_provider_id: provider.wire.provider_id.clone(),
-                    source_tool_name: call.name.clone(),
-                    source_object_id: Some(server_call_id.clone()),
-                    source_envelope_ids: Vec::new(),
-                },
-                digest_sha256: canonical_input_digest_sha256.clone(),
-                sensitivity: Sensitivity::Sensitive,
-                allowed_destinations: Vec::new(),
-                retention: RetentionBoundary {
-                    expires_at_unix_ms: Some(now_unix_ms.saturating_add(60_000)),
-                    delete_with_run: true,
-                },
-            };
-            let (exported, _) = authorize_export(
-                &source,
-                &format!("{site}-export-{server_call_id}"),
-                &ExportDataAuthorization {
-                    authorization_id: grant_id.clone(),
-                    source_envelope_ids: vec![source_envelope_id],
-                    destination: destination.clone(),
-                    max_sensitivity: Sensitivity::Sensitive,
-                    expires_at_unix_ms: now_unix_ms.saturating_add(60_000),
-                    max_bytes: capability.wire.limits.max_input_bytes,
-                },
-                now_unix_ms,
-            )
-            .map_err(|authorization_error| {
-                error(
-                    AgentErrorKind::PermissionDenied,
-                    format!("Web communication sink authorization failed: {authorization_error}"),
-                    false,
-                    true,
+            if slack_input.is_some() || gmail_input.is_some() {
+                let site = if gmail_input.is_some() {
+                    "gmail"
+                } else {
+                    "slack"
+                };
+                let destination = export_destinations
+                    .first()
+                    .expect("Web communication handoff has one fixed destination")
+                    .clone();
+                let source_envelope_id = format!("{site}-source-{server_call_id}");
+                let source = DataEnvelope {
+                    schema_version: DATA_ENVELOPE_SCHEMA_VERSION,
+                    envelope_id: source_envelope_id.clone(),
+                    content: ContentRef::ImmutableBlob {
+                        blob_id: format!("{site}-input-{server_call_id}"),
+                        sha256: canonical_input_digest_sha256.clone(),
+                        size_bytes: canonical_input_json.len() as u64,
+                        media_type: "application/json".into(),
+                    },
+                    provenance: DataProvenance {
+                        source_provider_id: provider.wire.provider_id.clone(),
+                        source_tool_name: call.name.clone(),
+                        source_object_id: Some(server_call_id.clone()),
+                        source_envelope_ids: Vec::new(),
+                    },
+                    digest_sha256: canonical_input_digest_sha256.clone(),
+                    sensitivity: Sensitivity::Sensitive,
+                    allowed_destinations: Vec::new(),
+                    retention: RetentionBoundary {
+                        expires_at_unix_ms: Some(now_unix_ms.saturating_add(60_000)),
+                        delete_with_run: true,
+                    },
+                };
+                let (exported, _) = authorize_export(
+                    &source,
+                    &format!("{site}-export-{server_call_id}"),
+                    &ExportDataAuthorization {
+                        authorization_id: grant_id.clone(),
+                        source_envelope_ids: vec![source_envelope_id],
+                        destination: destination.clone(),
+                        max_sensitivity: Sensitivity::Sensitive,
+                        expires_at_unix_ms: now_unix_ms.saturating_add(60_000),
+                        max_bytes: capability.wire.limits.max_input_bytes,
+                    },
+                    now_unix_ms,
                 )
-            })?;
-            DefaultSinkAuthorizer
+                .map_err(|authorization_error| {
+                    error(
+                        AgentErrorKind::PermissionDenied,
+                        format!(
+                            "Web communication sink authorization failed: {authorization_error}"
+                        ),
+                        false,
+                        true,
+                    )
+                })?;
+                DefaultSinkAuthorizer
                 .authorize(
                     &destination,
                     &[SinkInput {
@@ -4518,47 +4896,53 @@ impl SignalAiAssistantTools {
                         true,
                     )
                 })?;
-        }
-        let prepare = || PrepareCapabilityCall {
-            grant_id: &grant_id,
-            call_id: &server_call_id,
-            turn_id: &self.turn_id,
-            input_revision: session.input_revision,
-            input_watermark: session.latest_input_seq,
-            generation: 1,
-            canonical_input_json: &canonical_input_json,
-            call: call_authority.clone(),
-        };
-        let prepared = store
-            .prepare_outcome(prepare(), &self.provider_registry)
-            .await
-            .map_err(|db_error| {
-                error(
-                    AgentErrorKind::PermissionDenied,
-                    format!("browser call authorization failed: {db_error}"),
-                    false,
-                    true,
-                )
-            })?;
-        let prepared = match prepared {
-            crate::capability_grant_store::CapabilityPreparation::Ready(work) => {
-                self.observe_ready(call, &session, work.work_id);
-                work
             }
-            crate::capability_grant_store::CapabilityPreparation::PermissionRequired(request) => {
-                self.observed(call).stage(
-                    desk_diagnose_core::model_observability::Stage::Preflight,
-                    desk_diagnose_core::model_observability::StageOutcome::Passed,
-                );
-                self.observed(call).permission(
-                    desk_diagnose_core::model_observability::PermissionOutcome::Waiting,
-                );
-                return Ok(ExecOutcome::PermissionRequired { request });
-            }
-        };
-        let dispatch_id =
-            match store
-                .record_dispatch_intent(prepare())
+            desk_diagnose_core::future::phase(|| async {
+                let prepare = || PrepareCapabilityCall {
+                    grant_id: &grant_id,
+                    call_id: &server_call_id,
+                    turn_id: &self.turn_id,
+                    input_revision: session.input_revision,
+                    input_watermark: session.latest_input_seq,
+                    generation: 1,
+                    canonical_input_json: &canonical_input_json,
+                    call: call_authority.clone(),
+                };
+                let prepared = desk_diagnose_core::future::boxed(|| async {
+                    store
+                        .prepare_outcome(prepare(), &self.provider_registry)
+                        .await
+                })
+                .await
+                .map_err(|db_error| {
+                    error(
+                        AgentErrorKind::PermissionDenied,
+                        format!("browser call authorization failed: {db_error}"),
+                        false,
+                        true,
+                    )
+                })?;
+                let prepared = match prepared {
+                    crate::capability_grant_store::CapabilityPreparation::Ready(work) => {
+                        self.observe_ready(call, &session, work.work_id);
+                        work
+                    }
+                    crate::capability_grant_store::CapabilityPreparation::PermissionRequired(
+                        request,
+                    ) => {
+                        self.observed(call).stage(
+                            desk_diagnose_core::model_observability::Stage::Preflight,
+                            desk_diagnose_core::model_observability::StageOutcome::Passed,
+                        );
+                        self.observed(call).permission(
+                            desk_diagnose_core::model_observability::PermissionOutcome::Waiting,
+                        );
+                        return Ok(ExecOutcome::PermissionRequired { request });
+                    }
+                };
+                let dispatch_id = match desk_diagnose_core::future::boxed(|| async {
+                    store.record_dispatch_intent(prepare()).await
+                })
                 .await
                 .map_err(|db_error| {
                     error(
@@ -4568,35 +4952,37 @@ impl SignalAiAssistantTools {
                         true,
                     )
                 })? {
-                DispatchIntentResult::Recorded { dispatch_id, .. } => dispatch_id,
-                DispatchIntentResult::SupersededBeforeIntent { .. } => {
-                    return Err(error(
-                        AgentErrorKind::PermissionDenied,
-                        "browser call was superseded by newer user input",
-                        false,
-                        true,
-                    ));
-                }
-                DispatchIntentResult::RevokedBeforeIntent { .. } => {
-                    return Err(error(
-                        AgentErrorKind::PermissionDenied,
-                        "browser grant was revoked before dispatch",
-                        false,
-                        true,
-                    ));
-                }
-            };
-        let claimed = match store
-            .claim_dispatch(&dispatch_id, now_unix_ms)
-            .await
-            .map_err(|db_error| {
-                error(
-                    AgentErrorKind::Internal,
-                    format!("failed to claim browser dispatch: {db_error}"),
-                    false,
-                    false,
-                )
-            })? {
+                    DispatchIntentResult::Recorded { dispatch_id, .. } => dispatch_id,
+                    DispatchIntentResult::SupersededBeforeIntent { .. } => {
+                        return Err(error(
+                            AgentErrorKind::PermissionDenied,
+                            "browser call was superseded by newer user input",
+                            false,
+                            true,
+                        ));
+                    }
+                    DispatchIntentResult::RevokedBeforeIntent { .. } => {
+                        return Err(error(
+                            AgentErrorKind::PermissionDenied,
+                            "browser grant was revoked before dispatch",
+                            false,
+                            true,
+                        ));
+                    }
+                };
+                desk_diagnose_core::future::phase(|| async {
+        let claimed = match desk_diagnose_core::future::boxed(|| async {
+            store.claim_dispatch(&dispatch_id, now_unix_ms).await
+        })
+        .await
+        .map_err(|db_error| {
+            error(
+                AgentErrorKind::Internal,
+                format!("failed to claim browser dispatch: {db_error}"),
+                false,
+                false,
+            )
+        })? {
             DispatchClaimResult::Claimed(payload) => payload,
             DispatchClaimResult::OutcomeUnknown { .. } => {
                 return Ok(ExecOutcome::Unknown(
@@ -4615,13 +5001,13 @@ impl SignalAiAssistantTools {
                 match $result {
                     Ok(value) => value,
                     Err(dispatch_error) => {
-                        record_computer_action_pre_send_failure(
+                        desk_diagnose_core::future::boxed(|| record_computer_action_pre_send_failure(
                             &store,
                             &dispatch_id,
                             &server_call_id,
                             now_unix_ms,
                             &dispatch_error,
-                        )
+                        ))
                         .await?;
                         return Err(dispatch_error);
                     }
@@ -4716,13 +5102,16 @@ impl SignalAiAssistantTools {
                 false,
                 false,
             );
-            record_computer_action_pre_send_failure(
-                &store,
-                &dispatch_id,
-                &server_call_id,
-                now_unix_ms,
-                &dispatch_error,
-            )
+            desk_diagnose_core::future::boxed(|| async {
+                record_computer_action_pre_send_failure(
+                    &store,
+                    &dispatch_id,
+                    &server_call_id,
+                    now_unix_ms,
+                    &dispatch_error,
+                )
+                .await
+            })
             .await?;
             return Err(dispatch_error);
         }
@@ -4826,19 +5215,34 @@ impl SignalAiAssistantTools {
                 false,
                 false,
             );
-            record_computer_action_pre_send_failure(
-                &store,
-                &dispatch_id,
-                &server_call_id,
-                now_unix_ms,
-                &dispatch_error,
-            )
+            desk_diagnose_core::future::boxed(|| async {
+                record_computer_action_pre_send_failure(
+                    &store,
+                    &dispatch_id,
+                    &server_call_id,
+                    now_unix_ms,
+                    &dispatch_error,
+                )
+                .await
+            })
             .await?;
             return Err(dispatch_error);
         }
-        let sent = target.session.write().await.text(text).await.is_ok();
-        self.finish_computer_action(&store, call, &plan, completion_rx, sent, durable)
+        let sent = desk_diagnose_core::future::boxed(|| async { target.session.write().await })
             .await
+            .text(text)
+            .await
+            .is_ok();
+        desk_diagnose_core::future::boxed(|| async {
+            self.finish_computer_action(&store, call, &plan, completion_rx, sent, durable)
+                .await
+        })
+        .await
+            }).await
+            })
+            .await
+        })
+        .await
     }
 
     // Keep child execution state on the heap instead of embedding it in each caller.
@@ -4874,7 +5278,10 @@ impl SignalAiAssistantTools {
                     true,
                 )
             })?;
-        self.verify_current_readiness(capability).await?;
+        desk_diagnose_core::future::boxed(|| async {
+            self.verify_current_readiness(capability).await
+        })
+        .await?;
         let initial_readiness =
             crate::computer_use_readiness::global_computer_use_readiness_cache()
                 .get_fresh(&self.target_connection_id, chrono::Utc::now())
@@ -4902,7 +5309,9 @@ impl SignalAiAssistantTools {
             .provider_registry
             .provider_for_capability(&capability.wire.capability_id)
             .expect("registered Outlook capability has a Provider");
-        let session = self.authoritative_session().await?;
+        let session =
+            desk_diagnose_core::future::boxed(|| async { self.authoritative_session().await })
+                .await?;
         let (canonical_input_json, canonical_input_digest_sha256) =
             Self::canonical_call_input(call)?;
         let now_unix_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).map_err(|_| {
@@ -4973,45 +5382,49 @@ impl SignalAiAssistantTools {
                 )
             })?;
         let store = SignalCapabilityGrantStore::new(self.db.clone());
-        let grant_id = if let Some(existing) = store
-            .prepared_grant_id(&server_call_id)
-            .await
-            .map_err(|db_error| {
-                error(
-                    AgentErrorKind::Internal,
-                    format!("failed to load prepared Outlook authority: {db_error}"),
-                    false,
-                    false,
-                )
-            })? {
+        let grant_id = if let Some(existing) = desk_diagnose_core::future::boxed(|| async {
+            store.prepared_grant_id(&server_call_id).await
+        })
+        .await
+        .map_err(|db_error| {
+            error(
+                AgentErrorKind::Internal,
+                format!("failed to load prepared Outlook authority: {db_error}"),
+                false,
+                false,
+            )
+        })? {
             existing
         } else if session.trigger_origin
             == desk_diagnose_core::session::TriggerOrigin::ScheduledTask
         {
             crate::capability_grant_store::task_grant::identity(&self.run_id, &server_call_id)
         } else {
-            store
-                .list_for_subject(&self.run_id, &self.actor_id, &self.target_device_id)
-                .await
-                .map_err(|db_error| {
-                    error(
-                        AgentErrorKind::Internal,
-                        format!("failed to load Outlook grants: {db_error}"),
-                        false,
-                        false,
-                    )
-                })?
-                .into_iter()
-                .find(|grant| is_capability_grant_candidate(grant, &call_authority))
-                .map(|grant| grant.grant_id)
-                .ok_or_else(|| {
-                    error(
-                        AgentErrorKind::PermissionDenied,
-                        "Outlook draft handoff requires an active exact WriteExternalDraft grant",
-                        false,
-                        true,
-                    )
-                })?
+            desk_diagnose_core::future::boxed(|| async {
+                store
+                    .list_for_subject(&self.run_id, &self.actor_id, &self.target_device_id)
+                    .await
+            })
+            .await
+            .map_err(|db_error| {
+                error(
+                    AgentErrorKind::Internal,
+                    format!("failed to load Outlook grants: {db_error}"),
+                    false,
+                    false,
+                )
+            })?
+            .into_iter()
+            .find(|grant| is_capability_grant_candidate(grant, &call_authority))
+            .map(|grant| grant.grant_id)
+            .ok_or_else(|| {
+                error(
+                    AgentErrorKind::PermissionDenied,
+                    "Outlook draft handoff requires an active exact WriteExternalDraft grant",
+                    false,
+                    true,
+                )
+            })?
         };
 
         // The exact canonical tool bytes cross into an external, potentially
@@ -5107,7 +5520,8 @@ impl SignalAiAssistantTools {
             ));
         }
         let target = {
-            let map = self.connections.read().await;
+            let map =
+                desk_diagnose_core::future::boxed(|| async { self.connections.read().await }).await;
             map.get(&self.target_connection_id).cloned()
         }
         .ok_or_else(|| {
@@ -5145,17 +5559,20 @@ impl SignalAiAssistantTools {
             canonical_input_json: &canonical_input_json,
             call: call_authority.clone(),
         };
-        let prepared = store
-            .prepare_outcome(prepare(), &self.provider_registry)
-            .await
-            .map_err(|db_error| {
-                error(
-                    AgentErrorKind::PermissionDenied,
-                    format!("Outlook handoff authorization failed: {db_error}"),
-                    false,
-                    true,
-                )
-            })?;
+        let prepared = desk_diagnose_core::future::boxed(|| async {
+            store
+                .prepare_outcome(prepare(), &self.provider_registry)
+                .await
+        })
+        .await
+        .map_err(|db_error| {
+            error(
+                AgentErrorKind::PermissionDenied,
+                format!("Outlook handoff authorization failed: {db_error}"),
+                false,
+                true,
+            )
+        })?;
         let prepared = match prepared {
             crate::capability_grant_store::CapabilityPreparation::Ready(work) => {
                 self.observe_ready(call, &session, work.work_id);
@@ -5172,47 +5589,48 @@ impl SignalAiAssistantTools {
                 return Ok(ExecOutcome::PermissionRequired { request });
             }
         };
-        let dispatch_id =
-            match store
-                .record_dispatch_intent(prepare())
-                .await
-                .map_err(|db_error| {
-                    error(
-                        AgentErrorKind::PermissionDenied,
-                        format!("Outlook dispatch authorization failed: {db_error}"),
-                        false,
-                        true,
-                    )
-                })? {
-                DispatchIntentResult::Recorded { dispatch_id, .. } => dispatch_id,
-                DispatchIntentResult::SupersededBeforeIntent { .. } => {
-                    return Err(error(
-                        AgentErrorKind::PermissionDenied,
-                        "Outlook handoff was superseded by newer user input",
-                        false,
-                        true,
-                    ));
-                }
-                DispatchIntentResult::RevokedBeforeIntent { .. } => {
-                    return Err(error(
-                        AgentErrorKind::PermissionDenied,
-                        "Outlook grant was revoked before dispatch",
-                        false,
-                        true,
-                    ));
-                }
-            };
-        let claimed = match store
-            .claim_dispatch(&dispatch_id, now_unix_ms)
-            .await
-            .map_err(|db_error| {
-                error(
-                    AgentErrorKind::Internal,
-                    format!("failed to claim Outlook dispatch: {db_error}"),
+        let dispatch_id = match desk_diagnose_core::future::boxed(|| async {
+            store.record_dispatch_intent(prepare()).await
+        })
+        .await
+        .map_err(|db_error| {
+            error(
+                AgentErrorKind::PermissionDenied,
+                format!("Outlook dispatch authorization failed: {db_error}"),
+                false,
+                true,
+            )
+        })? {
+            DispatchIntentResult::Recorded { dispatch_id, .. } => dispatch_id,
+            DispatchIntentResult::SupersededBeforeIntent { .. } => {
+                return Err(error(
+                    AgentErrorKind::PermissionDenied,
+                    "Outlook handoff was superseded by newer user input",
                     false,
+                    true,
+                ));
+            }
+            DispatchIntentResult::RevokedBeforeIntent { .. } => {
+                return Err(error(
+                    AgentErrorKind::PermissionDenied,
+                    "Outlook grant was revoked before dispatch",
                     false,
-                )
-            })? {
+                    true,
+                ));
+            }
+        };
+        let claimed = match desk_diagnose_core::future::boxed(|| async {
+            store.claim_dispatch(&dispatch_id, now_unix_ms).await
+        })
+        .await
+        .map_err(|db_error| {
+            error(
+                AgentErrorKind::Internal,
+                format!("failed to claim Outlook dispatch: {db_error}"),
+                false,
+                false,
+            )
+        })? {
             DispatchClaimResult::Claimed(payload) => payload,
             DispatchClaimResult::OutcomeUnknown { .. } => {
                 return Ok(ExecOutcome::Unknown(
@@ -5317,23 +5735,26 @@ impl SignalAiAssistantTools {
                 false,
             )
         })?;
-        store
-            .bind_computer_transport(
-                &self.target_connection_id,
-                &plan,
-                &session,
-                call,
-                self.model_egress_policy.as_ref(),
-            )
-            .await
-            .map_err(|_| {
-                error(
-                    AgentErrorKind::Internal,
-                    "failed to freeze original Computer Action transport",
-                    false,
-                    false,
+        desk_diagnose_core::future::boxed(|| async {
+            store
+                .bind_computer_transport(
+                    &self.target_connection_id,
+                    &plan,
+                    &session,
+                    call,
+                    self.model_egress_policy.as_ref(),
                 )
-            })?;
+                .await
+        })
+        .await
+        .map_err(|_| {
+            error(
+                AgentErrorKind::Internal,
+                "failed to freeze original Computer Action transport",
+                false,
+                false,
+            )
+        })?;
         let (completion_tx, completion_rx) = oneshot::channel();
         if !global_computer_action_pending().register(
             generation.clone(),
@@ -5347,9 +5768,16 @@ impl SignalAiAssistantTools {
                 false,
             ));
         }
-        let sent = target.session.write().await.text(text).await.is_ok();
-        self.finish_computer_action(&store, call, &plan, completion_rx, sent, true)
+        let sent = desk_diagnose_core::future::boxed(|| async { target.session.write().await })
             .await
+            .text(text)
+            .await
+            .is_ok();
+        desk_diagnose_core::future::boxed(|| async {
+            self.finish_computer_action(&store, call, &plan, completion_rx, sent, true)
+                .await
+        })
+        .await
     }
 
     #[inline(never)]
@@ -5372,14 +5800,22 @@ impl SignalAiAssistantTools {
     ) -> Result<ToolRunOutput, ProviderInvokeError> {
         if call.name == WEB_FETCH_TOOL_NAME {
             let validated = validate_fetch_arguments(call)?;
-            return fetch_public_web_page(validated).await.map_err(Into::into);
+            return desk_diagnose_core::future::boxed(|| async {
+                fetch_public_web_page(validated).await
+            })
+            .await
+            .map_err(Into::into);
         }
         if call.name == WEB_SEARCH_TOOL_NAME {
             let validated = validate_search_call(call, &self.current_user_message)?;
-            let config = self.current_search_config().await?;
-            return search_public_web(&config, validated, &call.id)
-                .await
-                .map_err(Into::into);
+            let config =
+                desk_diagnose_core::future::boxed(|| async { self.current_search_config().await })
+                    .await?;
+            return desk_diagnose_core::future::boxed(|| async {
+                search_public_web(&config, validated, &call.id).await
+            })
+            .await
+            .map_err(Into::into);
         }
         let (capability, mut input) = build_read_operation(call)?;
         if capability == desk_agent_protocol::Capability::OfficeDocumentInspect {
@@ -5638,11 +6074,17 @@ impl SignalAiAssistantTools {
         let uses_selected_objects = self.uses_selected_objects(call)?;
         let object_expiry =
             if desk_diagnose_core::provider_preflight::text_file::uses_session_file_read(call)? {
-                self.validate_original_objects().await?;
+                desk_diagnose_core::future::boxed(|| async {
+                    self.validate_original_objects().await
+                })
+                .await?;
                 let binding = self.object_binding()?;
                 let result =
                     desk_diagnose_core::provider_preflight::text_file::ResultFileRead::build(
-                        &self.authoritative_session().await?,
+                        &desk_diagnose_core::future::boxed(|| async {
+                            self.authoritative_session().await
+                        })
+                        .await?,
                         call,
                         binding.destination,
                         binding.now_unix_ms,
@@ -5656,7 +6098,10 @@ impl SignalAiAssistantTools {
                         .to_rfc3339(),
                 )
             } else if uses_selected_objects {
-                self.validate_original_objects().await?;
+                desk_diagnose_core::future::boxed(|| async {
+                    self.validate_original_objects().await
+                })
+                .await?;
                 // Rebind from the model's original bounded request; legacy defaults
                 // above cannot widen either the owner's or model's read limit.
                 let (_, mut bounded) = build_read_operation(call)?;
@@ -5757,7 +6202,8 @@ impl SignalAiAssistantTools {
             envelope,
         };
         let target = {
-            let map = self.connections.read().await;
+            let map =
+                desk_diagnose_core::future::boxed(|| async { self.connections.read().await }).await;
             map.get(&self.target_connection_id).cloned()
         }
         .ok_or_else(|| {
@@ -5799,7 +6245,11 @@ impl SignalAiAssistantTools {
                 true,
             )
         })?;
-        if let Err(e) = target.session.write().await.text(text).await {
+        if let Err(e) = desk_diagnose_core::future::boxed(|| async { target.session.write().await })
+            .await
+            .text(text)
+            .await
+        {
             self.pending.cancel(&request_id);
             return Err(error(
                 AgentErrorKind::TransportError,
@@ -5809,7 +6259,11 @@ impl SignalAiAssistantTools {
             )
             .into());
         }
-        let output = match tokio::time::timeout(self.timeout, rx).await {
+        let output = match desk_diagnose_core::future::boxed(|| async {
+            tokio::time::timeout(self.timeout, rx).await
+        })
+        .await
+        {
             Ok(Ok(result)) => result?,
             Ok(Err(_)) => {
                 self.pending.cancel(&request_id);
@@ -5874,9 +6328,15 @@ impl SignalAiAssistantTools {
             ));
         }
         if uses_selected_objects {
-            self.validate_original_objects().await.map_err(|error| {
-                ProviderInvokeError::known(error, provider_outcome, result_digest_sha256.clone())
-            })?;
+            desk_diagnose_core::future::boxed(|| async { self.validate_original_objects().await })
+                .await
+                .map_err(|error| {
+                    ProviderInvokeError::known(
+                        error,
+                        provider_outcome,
+                        result_digest_sha256.clone(),
+                    )
+                })?;
         }
         match output.outcome {
             AgentOutcome::Ok(value) => {
@@ -6145,38 +6605,46 @@ impl ToolSeam for SignalAiAssistantTools {
         action_request_id: &str,
         execution_id: &str,
     ) -> Result<WaitOutcome, AgentError> {
-        if let Some(outcome) = SignalCapabilityGrantStore::new(self.db.clone())
-            .wait_computer_result(
-                action_request_id,
-                execution_id,
-                &self.run_id,
-                &self.actor_id,
-                &self.target_device_id,
-            )
-            .await
-            .map_err(|_| completion::invalid())?
+        if let Some(outcome) = desk_diagnose_core::future::boxed(|| async {
+            SignalCapabilityGrantStore::new(self.db.clone())
+                .wait_computer_result(
+                    action_request_id,
+                    execution_id,
+                    &self.run_id,
+                    &self.actor_id,
+                    &self.target_device_id,
+                )
+                .await
+        })
+        .await
+        .map_err(|_| completion::invalid())?
         {
             return Ok(outcome);
         }
-        let outcome = <crate::agent_exec::SignalAgentTools as ToolSeam>::wait_for_task(
-            &self.exec_tools,
-            action_request_id,
-            execution_id,
-        )
+        let outcome = desk_diagnose_core::future::boxed(|| async {
+            <crate::agent_exec::SignalAgentTools as ToolSeam>::wait_for_task(
+                &self.exec_tools,
+                action_request_id,
+                execution_id,
+            )
+            .await
+        })
         .await?;
         let outcome = if matches!(&outcome, WaitOutcome::Completed { .. }) {
             let exec_store = crate::agent_exec_store::SignalAgentExecStore::new(self.db.clone());
-            let task = exec_store
-                .find(action_request_id, execution_id)
-                .await?
-                .ok_or_else(completion::invalid)?;
+            let task = desk_diagnose_core::future::boxed(|| async {
+                exec_store.find(action_request_id, execution_id).await
+            })
+            .await?
+            .ok_or_else(completion::invalid)?;
             if task.conversation_id != self.run_id {
                 return Err(completion::invalid());
             }
-            let (output, receipt) = exec_store
-                .command_result(&task)
-                .await?
-                .ok_or_else(completion::invalid)?;
+            let (output, receipt) = desk_diagnose_core::future::boxed(|| async {
+                exec_store.command_result(&task).await
+            })
+            .await?
+            .ok_or_else(completion::invalid)?;
             WaitOutcome::CompletedWithReceipt {
                 action: receipt.action,
                 original_call_id: task.tool_call_id,
@@ -6200,41 +6668,50 @@ impl ToolSeam for SignalAiAssistantTools {
             WaitOutcome::Completed { output, .. }
             | WaitOutcome::CompletedWithReceipt { output, .. } => {
                 let (_, result_digest_sha256) = tool_output_fingerprint(output)?;
-                store
-                    .record_dispatch_completion(
-                        &CapabilityDispatchCompletion {
-                            dispatch_id: execution_id.to_string(),
-                            call_id: action_request_id.to_string(),
-                            generation: 1,
-                            outcome: CapabilityDispatchOutcome::Succeeded,
-                            result_digest_sha256,
-                        },
-                        now_unix_ms,
-                    )
-                    .await
-                    .map_err(|db_error| {
-                        error(
-                            AgentErrorKind::Internal,
-                            format!("failed to persist background command completion: {db_error}"),
-                            false,
-                            false,
+                desk_diagnose_core::future::boxed(|| async {
+                    store
+                        .record_dispatch_completion(
+                            &CapabilityDispatchCompletion {
+                                dispatch_id: execution_id.to_string(),
+                                call_id: action_request_id.to_string(),
+                                generation: 1,
+                                outcome: CapabilityDispatchOutcome::Succeeded,
+                                result_digest_sha256,
+                            },
+                            now_unix_ms,
                         )
-                    })?;
+                        .await
+                })
+                .await
+                .map_err(|db_error| {
+                    error(
+                        AgentErrorKind::Internal,
+                        format!("failed to persist background command completion: {db_error}"),
+                        false,
+                        false,
+                    )
+                })?;
             }
             WaitOutcome::Unknown => {
-                store
-                    .mark_dispatch_outcome_unknown(execution_id, action_request_id, 1, now_unix_ms)
-                    .await
-                    .map_err(|db_error| {
-                        error(
-                            AgentErrorKind::Internal,
-                            format!(
-                                "failed to persist background command unknown outcome: {db_error}"
-                            ),
-                            false,
-                            false,
+                desk_diagnose_core::future::boxed(|| async {
+                    store
+                        .mark_dispatch_outcome_unknown(
+                            execution_id,
+                            action_request_id,
+                            1,
+                            now_unix_ms,
                         )
-                    })?;
+                        .await
+                })
+                .await
+                .map_err(|db_error| {
+                    error(
+                        AgentErrorKind::Internal,
+                        format!("failed to persist background command unknown outcome: {db_error}"),
+                        false,
+                        false,
+                    )
+                })?;
             }
             // A receipt-bearing Provider completion already has its own durable
             // lineage. It must not be recorded as a legacy command completion.

@@ -608,28 +608,35 @@ pub(crate) async fn apply_object_context_update(
             conversation_id: params.run_id.clone(),
         },
     ) {
-        return Ok(store
-            .update_file_scope(&directory_update, chrono::Utc::now())
-            .await?
-            .changed);
+        return Ok(desk_diagnose_core::future::boxed(|| async {
+            store
+                .update_file_scope(&directory_update, chrono::Utc::now())
+                .await
+        })
+        .await?
+        .changed);
     }
-    if let Some(changed) = store.replay_object_context(&params).await? {
+    if let Some(changed) =
+        desk_diagnose_core::future::boxed(|| async { store.replay_object_context(&params).await })
+            .await?
+    {
         return Ok(changed);
     }
     if !matches!(
         update.operation,
         desk_agent_protocol::ai_assistant::AiAssistantObjectContextOperation::Detach { .. }
     ) {
-        let config = crate::model_provider::load(&db)
-            .await
-            .map_err(|_| transport_error("failed to load model provider config"))?;
+        let config =
+            desk_diagnose_core::future::boxed(|| async { crate::model_provider::load(&db).await })
+                .await
+                .map_err(|_| transport_error("failed to load model provider config"))?;
         params.destination = Some(
             config
                 .destination_identity()
                 .map_err(|_| transport_error("failed to resolve model destination"))?,
         );
     }
-    store.update_object_context(&params).await
+    desk_diagnose_core::future::boxed(|| async { store.update_object_context(&params).await }).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -653,16 +660,16 @@ pub async fn update_object_context(
             };
             let store = crate::agent_session_store::SignalAgentSessionStore::new(db.clone())
                 .with_client_metadata(Some(update.conversation_id.clone()), AgentSessionSurface::AiAssistant);
-            if let Some(receipt) = store.read_file_scope_receipt(&subject, &update.conversation_id, &update.client_request_id).await? {
+            if let Some(receipt) = desk_diagnose_core::future::boxed(|| async { store.read_file_scope_receipt(&subject, &update.conversation_id, &update.client_request_id).await }).await? {
                 transaction::match_owner_selection(&receipt, &update, &subject).map_err(|_| transport_error("Directory selection conflicts with its original request"))?;
                 return Ok(receipt.changed);
             }
-            let resolved = crate::remote_tool_edge::directory::resolve_candidate(&connections, &target_connection_id, &subject.actor_id, &subject.device_id, path).await?;
+            let resolved = desk_diagnose_core::future::boxed(|| async { crate::remote_tool_edge::directory::resolve_candidate(&connections, &target_connection_id, &subject.actor_id, &subject.device_id, path).await }).await?;
             let selection = transaction::owner_selection(&update, subject, resolved).map_err(|_| transport_error("Invalid directory selection"))?;
-            Ok(store.update_file_scope(&selection, chrono::Utc::now()).await?.changed)
+            Ok(desk_diagnose_core::future::boxed(|| async { store.update_file_scope(&selection, chrono::Utc::now()).await }).await?.changed)
         }.await
     } else {
-        apply_object_context_update(db, actor_user_id, target_device_id, &update).await
+        desk_diagnose_core::future::boxed(|| async { apply_object_context_update(db, actor_user_id, target_device_id, &update).await }).await
     };
 
     let ack = AiAssistantObjectContextUpdated {
@@ -672,7 +679,7 @@ pub async fn update_object_context(
         error: result.err().map(|error| error.message),
     };
     let browser = {
-        let map = connections.read().await;
+        let map = desk_diagnose_core::future::boxed(|| async { connections.read().await }).await;
         map.get(&browser_connection_id).cloned()
     };
     let Some(browser) = browser else {
@@ -686,7 +693,9 @@ pub async fn update_object_context(
         serde_json::to_value(ack).ok(),
         None,
     );
-    if let Err(error) = send_frame(&browser, &frame).await {
+    if let Err(error) =
+        desk_diagnose_core::future::boxed(|| async { send_frame(&browser, &frame).await }).await
+    {
         log::warn!("[ai-assistant] failed to send object context update: {error}");
     }
 }
@@ -912,24 +921,51 @@ fn compose_turn(
     delegated: Option<desk_diagnose_core::subagent::runtime::RuntimeTurn>,
 ) -> std::pin::Pin<Box<impl std::future::Future<Output = Result<Option<LoopOutcome>, AgentError>>>>
 {
-    Box::pin(compose_turn_inner(
-        connections,
-        db,
-        request_id,
-        browser_connection_id,
-        target_connection_id,
-        actor_user_id,
-        target_device_id,
-        ask,
-        resume_conversation_id,
-        scheduled,
-        goal_resume,
-        delegated,
-    ))
+    let preparation = desk_diagnose_core::future::boxed(|| {
+        prepare_composed_turn(
+            connections,
+            db,
+            request_id,
+            browser_connection_id,
+            target_connection_id,
+            actor_user_id,
+            target_device_id,
+            ask,
+            resume_conversation_id,
+            scheduled,
+            goal_resume,
+            delegated,
+        )
+    });
+    Box::pin(async move {
+        let mut preparation: TurnPreparation = preparation;
+        let prepared = loop {
+            match preparation.await? {
+                PreparationStep::Continue(next) => preparation = next,
+                PreparationStep::Ready(prepared) => break prepared,
+            }
+        };
+        match prepared {
+            Some(prepared) => prepared.await,
+            None => Ok(None),
+        }
+    })
+}
+
+type PreparedTurn =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<Option<LoopOutcome>, AgentError>>>>;
+
+// Each preparation continuation owns its state; completed poll frames are
+// released before the driver starts the next phase. No additional task is used.
+type TurnPreparation =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<PreparationStep, AgentError>>>>;
+enum PreparationStep {
+    Continue(TurnPreparation),
+    Ready(Option<PreparedTurn>),
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn compose_turn_inner(
+async fn prepare_composed_turn(
     connections: web::Data<SharedConnectionMap>,
     db: DatabaseConnection,
     request_id: String,
@@ -939,10 +975,10 @@ async fn compose_turn_inner(
     target_device_id: String,
     ask: AiAssistantAsk,
     resume_conversation_id: Option<PermissionResume>,
-    mut scheduled: Option<scheduled::PreparedResume>,
+    scheduled: Option<scheduled::PreparedResume>,
     goal_resume: Option<desk_diagnose_core::goal::GoalRun>,
     delegated: Option<desk_diagnose_core::subagent::runtime::RuntimeTurn>,
-) -> Result<Option<LoopOutcome>, AgentError> {
+) -> Result<PreparationStep, AgentError> {
     if let Some(runtime) = &delegated {
         runtime.validate()?;
         if resume_conversation_id.is_some()
@@ -959,14 +995,21 @@ async fn compose_turn_inner(
         }
     }
     let cancel_registration = cancellation::register(actor_user_id, &request_id);
-    stream_event(
-        connections.as_ref(),
-        &browser_connection_id,
-        &AgentEvent::status(&request_id, 0, "accepting"),
-    )
+    desk_diagnose_core::future::boxed(|| async {
+        stream_event(
+            connections.as_ref(),
+            &browser_connection_id,
+            &AgentEvent::status(&request_id, 0, "accepting"),
+        )
+        .await
+    })
     .await;
 
-    let config = match crate::model_provider::load(&db).await {
+    let config = match desk_diagnose_core::future::boxed(|| async {
+        crate::model_provider::load(&db).await
+    })
+    .await
+    {
         Ok(config) => config,
         Err(e) => {
             if goal_resume.is_some() || delegated.is_some() {
@@ -978,17 +1021,20 @@ async fn compose_turn_inner(
                     error_code: None,
                 });
             }
-            stream_event(
-                connections.as_ref(),
-                &browser_connection_id,
-                &AgentEvent::error(
-                    &request_id,
-                    1,
-                    transport_error(format!("failed to load model provider config: {e}")),
-                ),
-            )
+            desk_diagnose_core::future::boxed(|| async {
+                stream_event(
+                    connections.as_ref(),
+                    &browser_connection_id,
+                    &AgentEvent::error(
+                        &request_id,
+                        1,
+                        transport_error(format!("failed to load model provider config: {e}")),
+                    ),
+                )
+                .await
+            })
             .await;
-            return Ok(None);
+            return Ok(PreparationStep::Ready(None));
         }
     };
     let model_cancel = (*cancel_registration).clone();
@@ -1000,13 +1046,16 @@ async fn compose_turn_inner(
             if goal_resume.is_some() || delegated.is_some() {
                 return Err(model_rejected(error.message));
             }
-            stream_event(
-                connections.as_ref(),
-                &browser_connection_id,
-                &AgentEvent::error(&request_id, 1, error),
-            )
+            desk_diagnose_core::future::boxed(|| async {
+                stream_event(
+                    connections.as_ref(),
+                    &browser_connection_id,
+                    &AgentEvent::error(&request_id, 1, error),
+                )
+                .await
+            })
             .await;
-            return Ok(None);
+            return Ok(PreparationStep::Ready(None));
         }
     };
     let destination = match config.destination_identity() {
@@ -1017,17 +1066,20 @@ async fn compose_turn_inner(
                     "failed to resolve model destination: {error}"
                 )));
             }
-            stream_event(
-                connections.as_ref(),
-                &browser_connection_id,
-                &AgentEvent::error(
-                    &request_id,
-                    1,
-                    transport_error(format!("failed to resolve model destination: {error}")),
-                ),
-            )
+            desk_diagnose_core::future::boxed(|| async {
+                stream_event(
+                    connections.as_ref(),
+                    &browser_connection_id,
+                    &AgentEvent::error(
+                        &request_id,
+                        1,
+                        transport_error(format!("failed to resolve model destination: {error}")),
+                    ),
+                )
+                .await
+            })
             .await;
-            return Ok(None);
+            return Ok(PreparationStep::Ready(None));
         }
     };
     let actor_id = actor_user_id.to_string();
@@ -1077,29 +1129,45 @@ async fn compose_turn_inner(
             client_conversation_id.clone(),
             AgentSessionSurface::AiAssistant,
         );
-    let snapshot = match session_reader
-        .read_snapshot_for_subject(&conversation_id, &actor_id, &target_device_id)
-        .await
+    #[cfg(test)]
+    crate::stack_probe::observe(&conversation_id, "prepare");
+    let snapshot = match desk_diagnose_core::future::boxed(|| async {
+        session_reader
+            .read_snapshot_for_subject(&conversation_id, &actor_id, &target_device_id)
+            .await
+    })
+    .await
     {
         Ok(snapshot) => snapshot,
         Err(error) => {
-            stream_event(
-                connections.as_ref(),
-                &browser_connection_id,
-                &AgentEvent::error(&request_id, 1, error),
-            )
+            desk_diagnose_core::future::boxed(|| async {
+                stream_event(
+                    connections.as_ref(),
+                    &browser_connection_id,
+                    &AgentEvent::error(&request_id, 1, error),
+                )
+                .await
+            })
             .await;
-            return Ok(None);
+            return Ok(PreparationStep::Ready(None));
         }
     };
     let permission_child_context = if resume_conversation_id.is_some() {
         let snapshot = snapshot
             .as_ref()
             .ok_or_else(|| transport_error("permission session is unavailable"))?;
-        crate::agent_subagent_store::SubAgentStore::new(db.clone())
-            .child_context_for_subject(&conversation_id, &actor_id, &target_device_id, snapshot.seq)
-            .await
-            .map_err(|_| transport_error("delegated permission source changed"))?
+        desk_diagnose_core::future::boxed(|| async {
+            crate::agent_subagent_store::SubAgentStore::new(db.clone())
+                .child_context_for_subject(
+                    &conversation_id,
+                    &actor_id,
+                    &target_device_id,
+                    snapshot.seq,
+                )
+                .await
+        })
+        .await
+        .map_err(|_| transport_error("delegated permission source changed"))?
     } else {
         None
     };
@@ -1110,132 +1178,152 @@ async fn compose_turn_inner(
             "permission continuation changed the delegated model destination",
         ));
     }
-    let event_store = crate::agent_run_event_store::SignalAgentRunEventStore::new(db.clone());
-    let client_conversation_id = if resume_conversation_id.is_some()
-        || scheduled.is_some()
-        || goal_resume.is_some()
-        || delegated.is_some()
-    {
-        snapshot
-            .as_ref()
-            .and_then(|session| session.client_conversation_id.clone())
-    } else {
-        client_conversation_id
-    };
-    let rehearsal_conversation = client_conversation_id
-        .as_deref()
-        .filter(|id| id.starts_with("rehearsal_"))
-        .map(|_| conversation_id.clone());
-    let subject = crate::agent_run_event_store::InputSubject {
-        run_id: &conversation_id,
-        actor_id: &actor_id,
-        device_id: &target_device_id,
-        client_conversation_id: client_conversation_id.as_deref(),
-    };
-    let selection = async {
-        let original = if let Some(runtime) = &delegated {
-            runtime.read_context()
-        } else if let Some(resume) = scheduled.as_ref() {
-            resume.original.clone()
-        } else if goal_resume.is_some() {
-            let session = snapshot
-                .as_ref()
-                .ok_or_else(|| transport_error("goal session is missing"))?;
-            event_store
-                .original_read_context(subject, session.input_revision)
-                .await?
-        } else if let Some(resume) = resume_conversation_id.as_ref() {
-            let session = snapshot
-                .as_ref()
-                .ok_or_else(|| transport_error("original input session is missing"))?;
-            use desk_diagnose_core::dynamic_run::PermissionRequestState;
-            if !session.permission_requests.iter().any(|request| {
-                request.request_id == resume.permission_request_id
-                    && request.input_revision == session.input_revision
-                    && matches!(
-                        request.state,
-                        PermissionRequestState::Approved
-                            | PermissionRequestState::PartiallyApproved
-                            | PermissionRequestState::Denied
-                    )
-            }) {
-                return Err(transport_error(
-                    "permission decision no longer belongs to the current input",
-                ));
-            }
-            event_store
-                .original_read_context(subject, session.input_revision)
-                .await?
-        } else {
-            None
-        };
-        let objects = if resume_conversation_id.is_some()
-            || scheduled.is_some()
-            || goal_resume.is_some()
-            || delegated.is_some()
-        {
-            original
-                .as_ref()
-                .map(|selection| selection.object_attachments.clone())
-                .unwrap_or_default()
-        } else {
-            event_store
-                .select_objects(
-                    subject,
-                    &ask.client_message_id,
-                    &ask.selected_attachment_ids,
-                    now_unix_ms,
-                )
-                .await?
-        };
-        Ok::<_, AgentError>((objects, original))
-    }
-    .await;
-    let (selected_objects, original_read_context) = match selection {
-        Ok(selection) => selection,
-        Err(error) => {
-            stream_event(
-                connections.as_ref(),
-                &browser_connection_id,
-                &AgentEvent::error(&request_id, 1, error),
-            )
-            .await;
-            return Ok(None);
-        }
-    };
-    let mut ask = ask;
-    if resume_conversation_id.is_some()
-        || scheduled.is_some()
-        || goal_resume.is_some()
-        || delegated.is_some()
-    {
-        if let Some((creation, _)) = &permission_child_context {
-            ask.locale = creation.response_locale.clone();
-        }
-        ask.question = permission_child_context
-            .as_ref()
-            .map(|(creation, _)| creation.source.owner_requirement.text.clone())
-            .or_else(|| {
-                delegated
-                    .as_ref()
-                    .map(|runtime| runtime.source().owner_requirement.text.clone())
-            })
-            .or_else(|| {
+    let permission_child_context = permission_child_context.map(Box::new);
+    let snapshot = snapshot.map(Box::new);
+    let mut scheduled = scheduled.map(Box::new);
+    let goal_resume = goal_resume.map(Box::new);
+    let delegated = delegated.map(Box::new);
+    Ok(PreparationStep::Continue(
+        desk_diagnose_core::future::phase(|| async move {
+            let event_store =
+                crate::agent_run_event_store::SignalAgentRunEventStore::new(db.clone());
+            let client_conversation_id = if resume_conversation_id.is_some()
+                || scheduled.is_some()
+                || goal_resume.is_some()
+                || delegated.is_some()
+            {
                 snapshot
                     .as_ref()
-                    .and_then(|session| {
-                        desk_diagnose_core::permission_resume::latest_user_requirement(
-                            &session.messages,
-                        )
+                    .and_then(|session| session.client_conversation_id.clone())
+            } else {
+                client_conversation_id
+            };
+            let rehearsal_conversation = client_conversation_id
+                .as_deref()
+                .filter(|id| id.starts_with("rehearsal_"))
+                .map(|_| conversation_id.clone());
+            let subject = crate::agent_run_event_store::InputSubject {
+                run_id: &conversation_id,
+                actor_id: &actor_id,
+                device_id: &target_device_id,
+                client_conversation_id: client_conversation_id.as_deref(),
+            };
+            let selection = async {
+                let original = if let Some(runtime) = &delegated {
+                    runtime.read_context()
+                } else if let Some(resume) = scheduled.as_ref() {
+                    resume.original.clone()
+                } else if goal_resume.is_some() {
+                    let session = snapshot
+                        .as_ref()
+                        .ok_or_else(|| transport_error("goal session is missing"))?;
+                    desk_diagnose_core::future::boxed(|| async {
+                        event_store
+                            .original_read_context(subject, session.input_revision)
+                            .await
                     })
-                    .map(|message| message.text.clone())
-            })
-            .unwrap_or_default();
-        let providers = ai_assistant_provider_registry();
-        ask.selected_capability_ids = original_read_context
-            .as_ref()
-            .map(|selection| {
-                selection
+                    .await?
+                } else if let Some(resume) = resume_conversation_id.as_ref() {
+                    let session = snapshot
+                        .as_ref()
+                        .ok_or_else(|| transport_error("original input session is missing"))?;
+                    use desk_diagnose_core::dynamic_run::PermissionRequestState;
+                    if !session.permission_requests.iter().any(|request| {
+                        request.request_id == resume.permission_request_id
+                            && request.input_revision == session.input_revision
+                            && matches!(
+                                request.state,
+                                PermissionRequestState::Approved
+                                    | PermissionRequestState::PartiallyApproved
+                                    | PermissionRequestState::Denied
+                            )
+                    }) {
+                        return Err(transport_error(
+                            "permission decision no longer belongs to the current input",
+                        ));
+                    }
+                    desk_diagnose_core::future::boxed(|| async {
+                        event_store
+                            .original_read_context(subject, session.input_revision)
+                            .await
+                    })
+                    .await?
+                } else {
+                    None
+                };
+                let objects = if resume_conversation_id.is_some()
+                    || scheduled.is_some()
+                    || goal_resume.is_some()
+                    || delegated.is_some()
+                {
+                    original
+                        .as_ref()
+                        .map(|selection| selection.object_attachments.clone())
+                        .unwrap_or_default()
+                } else {
+                    desk_diagnose_core::future::boxed(|| async {
+                        event_store
+                            .select_objects(
+                                subject,
+                                &ask.client_message_id,
+                                &ask.selected_attachment_ids,
+                                now_unix_ms,
+                            )
+                            .await
+                    })
+                    .await?
+                };
+                Ok::<_, AgentError>((objects, original))
+            }
+            .await;
+            let (selected_objects, original_read_context) = match selection {
+                Ok(selection) => selection,
+                Err(error) => {
+                    desk_diagnose_core::future::boxed(|| async {
+                        stream_event(
+                            connections.as_ref(),
+                            &browser_connection_id,
+                            &AgentEvent::error(&request_id, 1, error),
+                        )
+                        .await
+                    })
+                    .await;
+                    return Ok(PreparationStep::Ready(None));
+                }
+            };
+            let mut ask = ask;
+            if resume_conversation_id.is_some()
+                || scheduled.is_some()
+                || goal_resume.is_some()
+                || delegated.is_some()
+            {
+                if let Some((creation, _)) = permission_child_context.as_deref() {
+                    ask.locale = creation.response_locale.clone();
+                }
+                ask.question = permission_child_context
+                    .as_deref()
+                    .map(|(creation, _)| creation.source.owner_requirement.text.clone())
+                    .or_else(|| {
+                        delegated
+                            .as_ref()
+                            .map(|runtime| runtime.source().owner_requirement.text.clone())
+                    })
+                    .or_else(|| {
+                        snapshot
+                            .as_ref()
+                            .and_then(|session| {
+                                desk_diagnose_core::permission_resume::latest_user_requirement(
+                                    &session.messages,
+                                )
+                            })
+                            .map(|message| message.text.clone())
+                    })
+                    .unwrap_or_default();
+                let providers = ai_assistant_provider_registry();
+                ask.selected_capability_ids = original_read_context
+                    .as_ref()
+                    .map(|selection| {
+                        selection
                     .tool_names
                     .iter()
                     .filter_map(|name| providers.capability_for_tool(name))
@@ -1246,117 +1334,136 @@ async fn compose_turn_inner(
                     .collect::<std::collections::BTreeSet<_>>()
                     .into_iter()
                     .collect()
-            })
-            .unwrap_or_default();
-        ask.selected_attachment_ids = selected_objects
-            .iter()
-            .map(|object| object.attachment_id.clone())
-            .collect();
-    }
-    let mut selected_file_roots = Vec::new();
-    let mut selected_spreadsheet_roots = Vec::new();
-    let mut selected_terminal_roots = Vec::new();
-    let mut selected_window_roots = Vec::new();
-    for attachment in &selected_objects {
-        let reference = match serde_json::from_str::<desk_agent_protocol::computer_use::ObjectRef>(
-            &attachment.object_ref.opaque_token,
-        ) {
-            Ok(reference) => reference,
-            Err(_) => {
-                stream_event(
-                    connections.as_ref(),
-                    &browser_connection_id,
-                    &AgentEvent::error(
-                        &request_id,
-                        1,
-                        transport_error("original object reference is invalid"),
-                    ),
-                )
-                .await;
-                return Ok(None);
+                    })
+                    .unwrap_or_default();
+                ask.selected_attachment_ids = selected_objects
+                    .iter()
+                    .map(|object| object.attachment_id.clone())
+                    .collect();
             }
-        };
-        if attachment.kind == ContextAttachmentKind::TerminalSessionRef {
-            selected_terminal_roots.push(reference);
-        } else if attachment.kind == ContextAttachmentKind::WindowSelection {
-            selected_window_roots.push(reference);
-        } else {
-            // Display labels do not determine file type or grant read authority.
-            // The original device validates the selected object and its format.
-            selected_spreadsheet_roots.push(reference.clone());
-            selected_file_roots.push(reference);
-        }
-    }
-    let model_name = config.model.clone().unwrap_or_default();
-    let (provider_registry, inventory, _, readiness) = current_capability_projection(
-        &db,
-        connections.as_ref(),
-        &target_connection_id,
-        ModelCapabilities {
-            image_input: config.supports_image_input,
-        },
-    )
-    .await;
-    let readiness_revision = readiness
-        .as_ref()
-        .map(|readiness| readiness.revision)
-        .unwrap_or(1);
-    let provider_registry = match crate::command_policy::current(
-        &db,
-        connections.as_ref(),
-        &target_connection_id,
-        &actor_id,
-    )
-    .await
-    {
-        Ok(policy) => provider_registry.with_command_policy(policy),
-        Err(_) => provider_registry,
-    };
-    let office_selected = ask.selected_capability_ids.iter().any(|capability_id| {
-        capability_id == desk_diagnose_core::ai_assistant::OFFICE_DOCUMENT_CAPABILITY_ID
-    });
-    let live_targets = match prepare_live_targets(
-        &provider_registry,
-        &ask.selected_capability_ids,
-        original_read_context.as_ref(),
-        readiness.as_ref(),
-        now_unix_ms,
-    ) {
-        Ok(targets) => targets,
-        Err(error) => {
-            stream_event(
-                connections.as_ref(),
-                &browser_connection_id,
-                &AgentEvent::error(&request_id, 1, error),
-            )
-            .await;
-            return Ok(None);
-        }
-    };
-    let live_ref = |name: &str| {
-        live_targets
-            .iter()
-            .find(|target| target.tool_name == name)
-            .map(|target| target.object_ref.clone())
-    };
-    let selected_office_document = live_ref("inspect_office_selection");
-    let selected_live_spreadsheet = live_ref("inspect_live_spreadsheet");
-    let selected_live_document = live_ref("inspect_live_document");
-    let selected_live_presentation = live_ref("inspect_live_presentation");
-    let selected_browser_surface =
-        desk_diagnose_core::ai_assistant::browser_surface_context(readiness.as_ref());
-    let selected_outlook_surface = readiness.as_ref().and_then(|readiness| {
-        readiness
-            .context_references
-            .iter()
-            .find(|reference| {
-                reference.capability
+            let mut selected_file_roots = Vec::new();
+            let mut selected_spreadsheet_roots = Vec::new();
+            let mut selected_terminal_roots = Vec::new();
+            let mut selected_window_roots = Vec::new();
+            for attachment in &selected_objects {
+                let reference = match serde_json::from_str::<
+                    desk_agent_protocol::computer_use::ObjectRef,
+                >(&attachment.object_ref.opaque_token)
+                {
+                    Ok(reference) => reference,
+                    Err(_) => {
+                        desk_diagnose_core::future::boxed(|| async {
+                            stream_event(
+                                connections.as_ref(),
+                                &browser_connection_id,
+                                &AgentEvent::error(
+                                    &request_id,
+                                    1,
+                                    transport_error("original object reference is invalid"),
+                                ),
+                            )
+                            .await
+                        })
+                        .await;
+                        return Ok(PreparationStep::Ready(None));
+                    }
+                };
+                if attachment.kind == ContextAttachmentKind::TerminalSessionRef {
+                    selected_terminal_roots.push(reference);
+                } else if attachment.kind == ContextAttachmentKind::WindowSelection {
+                    selected_window_roots.push(reference);
+                } else {
+                    // Display labels do not determine file type or grant read authority.
+                    // The original device validates the selected object and its format.
+                    selected_spreadsheet_roots.push(reference.clone());
+                    selected_file_roots.push(reference);
+                }
+            }
+            Ok(PreparationStep::Continue(
+                desk_diagnose_core::future::phase(|| async move {
+                    let model_name = config.model.clone().unwrap_or_default();
+                    let (provider_registry, inventory, _, readiness) =
+                        desk_diagnose_core::future::boxed(|| async {
+                            current_capability_projection(
+                                &db,
+                                connections.as_ref(),
+                                &target_connection_id,
+                                ModelCapabilities {
+                                    image_input: config.supports_image_input,
+                                },
+                            )
+                            .await
+                        })
+                        .await;
+                    let readiness_revision = readiness
+                        .as_ref()
+                        .map(|readiness| readiness.revision)
+                        .unwrap_or(1);
+                    let provider_registry = match desk_diagnose_core::future::boxed(|| async {
+                        crate::command_policy::current(
+                            &db,
+                            connections.as_ref(),
+                            &target_connection_id,
+                            &actor_id,
+                        )
+                        .await
+                    })
+                    .await
+                    {
+                        Ok(policy) => provider_registry.with_command_policy(policy),
+                        Err(_) => provider_registry,
+                    };
+                    let office_selected = ask.selected_capability_ids.iter().any(|capability_id| {
+                        capability_id
+                            == desk_diagnose_core::ai_assistant::OFFICE_DOCUMENT_CAPABILITY_ID
+                    });
+                    let live_targets = match prepare_live_targets(
+                        &provider_registry,
+                        &ask.selected_capability_ids,
+                        original_read_context.as_ref(),
+                        readiness.as_ref(),
+                        now_unix_ms,
+                    ) {
+                        Ok(targets) => targets,
+                        Err(error) => {
+                            desk_diagnose_core::future::boxed(|| async {
+                                stream_event(
+                                    connections.as_ref(),
+                                    &browser_connection_id,
+                                    &AgentEvent::error(&request_id, 1, error),
+                                )
+                                .await
+                            })
+                            .await;
+                            return Ok(PreparationStep::Ready(None));
+                        }
+                    };
+                    let live_ref = |name: &str| {
+                        live_targets
+                            .iter()
+                            .find(|target| target.tool_name == name)
+                            .map(|target| target.object_ref.clone())
+                    };
+                    let selected_office_document = live_ref("inspect_office_selection");
+                    let selected_live_spreadsheet = live_ref("inspect_live_spreadsheet");
+                    let selected_live_document = live_ref("inspect_live_document");
+                    let selected_live_presentation = live_ref("inspect_live_presentation");
+                    let selected_browser_surface =
+                        desk_diagnose_core::ai_assistant::browser_surface_context(
+                            readiness.as_ref(),
+                        );
+                    let selected_outlook_surface = readiness.as_ref().and_then(|readiness| {
+                        readiness
+                            .context_references
+                            .iter()
+                            .find(|reference| {
+                                reference.capability
                     == desk_agent_protocol::Capability::CommunicationOutlookNewHandoffConfirmed
-            })
-            .map(|reference| reference.object_ref.clone())
-    });
-    if office_selected && selected_office_document.is_none() {
-        stream_event(
+                            })
+                            .map(|reference| reference.object_ref.clone())
+                    });
+                    if office_selected && selected_office_document.is_none() {
+                        desk_diagnose_core::future::boxed(|| async { stream_event(
         connections.as_ref(),
         &browser_connection_id,
         &AgentEvent::error(
@@ -1367,325 +1474,365 @@ async fn compose_turn_inner(
             ),
         ),
     )
-    .await;
-        return Ok(None);
-    }
-    let capability_grants =
-        match crate::capability_grant_store::SignalCapabilityGrantStore::new(db.clone())
-            .list_for_subject(&conversation_id, &actor_id, &target_device_id)
-            .await
-        {
-            Ok(grants) => grants,
-            Err(error) => {
-                stream_event(
-                    connections.as_ref(),
-                    &browser_connection_id,
-                    &AgentEvent::error(
-                        &request_id,
-                        1,
-                        transport_error(format!("failed to load capability grants: {error}")),
-                    ),
-                )
-                .await;
-                return Ok(None);
-            }
-        };
-    let permission_decision_resume = resume_conversation_id.is_some()
-        || scheduled
-            .as_ref()
-            .is_some_and(|resume| resume.permission_request_id.is_some());
-    let current_desktop_grants = capability_grants
-        .iter()
-        .filter(|grant| {
-            grant.surface
+    .await }).await;
+                        return Ok(PreparationStep::Ready(None));
+                    }
+                    let capability_grants = match desk_diagnose_core::future::boxed(|| async {
+                        crate::capability_grant_store::SignalCapabilityGrantStore::new(db.clone())
+                            .list_for_subject(&conversation_id, &actor_id, &target_device_id)
+                            .await
+                    })
+                    .await
+                    {
+                        Ok(grants) => grants,
+                        Err(error) => {
+                            desk_diagnose_core::future::boxed(|| async {
+                                stream_event(
+                                    connections.as_ref(),
+                                    &browser_connection_id,
+                                    &AgentEvent::error(
+                                        &request_id,
+                                        1,
+                                        transport_error(format!(
+                                            "failed to load capability grants: {error}"
+                                        )),
+                                    ),
+                                )
+                                .await
+                            })
+                            .await;
+                            return Ok(PreparationStep::Ready(None));
+                        }
+                    };
+                    let permission_decision_resume = resume_conversation_id.is_some()
+                        || scheduled
+                            .as_ref()
+                            .is_some_and(|resume| resume.permission_request_id.is_some());
+                    let current_desktop_grants = capability_grants
+                        .iter()
+                        .filter(|grant| {
+                            grant.surface
                 == desk_agent_protocol::capability_provider::ProductSurface::OssPersonalOwner
                 && grant.actor_id == actor_id
                 && grant.run_id == conversation_id
                 && grant.target_device_id == target_device_id
                 && grant.policy_revision == PERSONAL_ASSISTANT_POLICY_REVISION
                 && grant.readiness_revision == readiness_revision
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    let resumed_desktop_reads = provider_registry
-        .registered_tools()
-        .into_iter()
-        .filter(|tool| {
-            provider_registry
-                .capability_for_tool(tool.name())
-                .is_some_and(|descriptor| {
-                    descriptor.exposure
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    let resumed_desktop_reads = provider_registry
+                        .registered_tools()
+                        .into_iter()
+                        .filter(|tool| {
+                            provider_registry
+                                .capability_for_tool(tool.name())
+                                .is_some_and(|descriptor| {
+                                    descriptor.exposure
                         == desk_diagnose_core::tool_exposure::ExposureRequirement::DesktopRead
-                })
-        })
-        .filter(|tool| {
-            has_active_resume_desktop_read_grant(&current_desktop_grants, tool.name(), now_unix_ms)
-        })
-        .map(|tool| tool.spec.name)
-        .collect::<Vec<_>>();
-    let mut selected_source_tools = ask
-        .selected_capability_ids
-        .iter()
-        .filter_map(|capability_id| provider_registry.capability(capability_id))
-        .map(|capability| capability.wire.tool_name.clone())
-        .collect::<std::collections::BTreeSet<_>>();
-    // Only owner-selected or currently approved desktop sources are eligible
-    // for read-back. Device invocation and model egress remain separate checks.
-    selected_source_tools.extend(resumed_desktop_reads.iter().map(|name| (*name).to_string()));
-    if !selected_file_roots.is_empty() {
-        selected_source_tools.insert("inspect_files".into());
-        let selected_file_count = selected_file_roots
-            .iter()
-            .filter(|object_ref| {
-                object_ref.object_kind == desk_agent_protocol::computer_use::ObjectKind::File
-            })
-            .count();
-        let has_output_directory = selected_file_roots.iter().any(|object_ref| {
-            object_ref.object_kind == desk_agent_protocol::computer_use::ObjectKind::Directory
-        });
-        if selected_file_count > 0 {
-            selected_source_tools.insert("read_text_file".into());
-        }
-        if selected_file_count == 1 {
-            selected_source_tools.extend(
-                [
-                    "inspect_numbers_file",
-                    "inspect_pages_file",
-                    "inspect_keynote_file",
-                    "inspect_powerpoint_file",
-                    "inspect_word_file",
-                    "inspect_excel_cell",
-                ]
-                .into_iter()
-                .map(str::to_string),
-            );
-            if has_output_directory {
-                selected_source_tools.extend(
-                    [
-                        "patch_numbers_copy",
-                        "replace_pages_copy_body",
-                        "patch_keynote_copy",
-                        "patch_powerpoint_copy",
-                        "replace_word_copy_body",
-                        "patch_excel_copy",
-                    ]
-                    .into_iter()
-                    .map(str::to_string),
-                );
-            }
-        }
-        if has_output_directory {
-            selected_source_tools.insert("create_text_file".into());
-            selected_source_tools.insert("create_local_message_draft".into());
-        }
-    }
-    if !selected_spreadsheet_roots.is_empty() {
-        selected_source_tools.insert("inspect_spreadsheets".into());
-        selected_source_tools.insert("preview_spreadsheet_merge".into());
-        if selected_file_roots.iter().any(|object_ref| {
-            object_ref.object_kind == desk_agent_protocol::computer_use::ObjectKind::Directory
-        }) {
-            selected_source_tools.insert("create_workbook".into());
-            selected_source_tools.insert("create_formula_workbook".into());
-            selected_source_tools.insert("create_word_report".into());
-        }
-    }
-    if !selected_terminal_roots.is_empty() {
-        selected_source_tools.insert("read_terminal_output".into());
-    }
-    if selected_browser_surface.is_some() {
-        selected_source_tools.extend(
-            desk_diagnose_core::ai_assistant::BROWSER_CONTEXT_CAPABILITY_IDS
-                .into_iter()
-                .filter_map(|capability_id| provider_registry.capability(capability_id))
-                .map(|capability| capability.wire.tool_name.clone()),
-        );
-    }
-    if selected_outlook_surface.is_some() {
-        selected_source_tools.insert("prepare_outlook_draft".into());
-    }
-    if selected_live_spreadsheet.is_some() {
-        selected_source_tools.insert("inspect_live_spreadsheet".into());
-        selected_source_tools.insert("patch_live_spreadsheet_cell".into());
-    }
-    if selected_live_document.is_some() {
-        selected_source_tools.insert("inspect_live_document".into());
-        selected_source_tools.insert("replace_live_document_body".into());
-    }
-    if selected_live_presentation.is_some() {
-        selected_source_tools.insert("inspect_live_presentation".into());
-        selected_source_tools.insert("patch_live_presentation_slide".into());
-    }
-    selected_source_tools
-        .insert(desk_diagnose_core::ai_assistant::PREVIEW_COMPUTER_ACTION_TOOL.to_string());
-    selected_source_tools.insert(crate::web_research::WEB_FETCH_TOOL_NAME.to_string());
-    selected_source_tools.insert(crate::web_research::WEB_SEARCH_TOOL_NAME.to_string());
-    selected_source_tools.extend(
-        desk_diagnose_core::ai_assistant::SYSTEM_DIAGNOSTIC_TOOL_NAMES
-            .into_iter()
-            .map(str::to_string),
-    );
-    selected_source_tools.insert("exec_command".into());
-    // Candidates only. Directory consent and every read/write grant remain
-    // independently checked against the authoritative conversation.
-    selected_source_tools.extend(
-        [
-            "create_text_file",
-            "create_local_message_draft",
-            "read_text_file",
-            "inspect_files",
-            "update_text_file",
-            "delete_text_file",
-        ]
-        .into_iter()
-        .map(str::to_string),
-    );
-    selected_source_tools
-        .insert(desk_diagnose_core::ai_assistant::EXECUTE_CONFIRMED_UI_ACTION_TOOL.into());
-    selected_source_tools
-        .insert(desk_diagnose_core::ai_assistant::EXECUTE_CONFIRMED_RAW_INPUT_TOOL.into());
-    selected_source_tools
-        .insert(desk_diagnose_core::ai_assistant::EXECUTE_BACKGROUND_INPUT_TOOL.into());
-    let turn_id = scheduled
-        .as_ref()
-        .map(|resume| resume.claimed.run.turn_id.clone())
-        .or_else(|| {
-            goal_resume.as_ref().map(|goal| {
-                format!(
-                    "goal:{}:slice:{}",
-                    goal.goal_id,
-                    goal.slice_seq.saturating_add(1)
-                )
-            })
-        })
-        .unwrap_or_else(|| {
-            resume_conversation_id.as_ref().map_or_else(
-                || uuid::Uuid::new_v4().to_string(),
-                |resume| {
-                    crate::agent_session_store::permission_resume::turn_id(
+                                })
+                        })
+                        .filter(|tool| {
+                            has_active_resume_desktop_read_grant(
+                                &current_desktop_grants,
+                                tool.name(),
+                                now_unix_ms,
+                            )
+                        })
+                        .map(|tool| tool.spec.name)
+                        .collect::<Vec<_>>();
+                    let mut selected_source_tools = ask
+                        .selected_capability_ids
+                        .iter()
+                        .filter_map(|capability_id| provider_registry.capability(capability_id))
+                        .map(|capability| capability.wire.tool_name.clone())
+                        .collect::<std::collections::BTreeSet<_>>();
+                    // Only owner-selected or currently approved desktop sources are eligible
+                    // for read-back. Device invocation and model egress remain separate checks.
+                    selected_source_tools
+                        .extend(resumed_desktop_reads.iter().map(|name| (*name).to_string()));
+                    if !selected_file_roots.is_empty() {
+                        selected_source_tools.insert("inspect_files".into());
+                        let selected_file_count = selected_file_roots
+                            .iter()
+                            .filter(|object_ref| {
+                                object_ref.object_kind
+                                    == desk_agent_protocol::computer_use::ObjectKind::File
+                            })
+                            .count();
+                        let has_output_directory = selected_file_roots.iter().any(|object_ref| {
+                            object_ref.object_kind
+                                == desk_agent_protocol::computer_use::ObjectKind::Directory
+                        });
+                        if selected_file_count > 0 {
+                            selected_source_tools.insert("read_text_file".into());
+                        }
+                        if selected_file_count == 1 {
+                            selected_source_tools.extend(
+                                [
+                                    "inspect_numbers_file",
+                                    "inspect_pages_file",
+                                    "inspect_keynote_file",
+                                    "inspect_powerpoint_file",
+                                    "inspect_word_file",
+                                    "inspect_excel_cell",
+                                ]
+                                .into_iter()
+                                .map(str::to_string),
+                            );
+                            if has_output_directory {
+                                selected_source_tools.extend(
+                                    [
+                                        "patch_numbers_copy",
+                                        "replace_pages_copy_body",
+                                        "patch_keynote_copy",
+                                        "patch_powerpoint_copy",
+                                        "replace_word_copy_body",
+                                        "patch_excel_copy",
+                                    ]
+                                    .into_iter()
+                                    .map(str::to_string),
+                                );
+                            }
+                        }
+                        if has_output_directory {
+                            selected_source_tools.insert("create_text_file".into());
+                            selected_source_tools.insert("create_local_message_draft".into());
+                        }
+                    }
+                    if !selected_spreadsheet_roots.is_empty() {
+                        selected_source_tools.insert("inspect_spreadsheets".into());
+                        selected_source_tools.insert("preview_spreadsheet_merge".into());
+                        if selected_file_roots.iter().any(|object_ref| {
+                            object_ref.object_kind
+                                == desk_agent_protocol::computer_use::ObjectKind::Directory
+                        }) {
+                            selected_source_tools.insert("create_workbook".into());
+                            selected_source_tools.insert("create_formula_workbook".into());
+                            selected_source_tools.insert("create_word_report".into());
+                        }
+                    }
+                    if !selected_terminal_roots.is_empty() {
+                        selected_source_tools.insert("read_terminal_output".into());
+                    }
+                    if selected_browser_surface.is_some() {
+                        selected_source_tools.extend(
+                            desk_diagnose_core::ai_assistant::BROWSER_CONTEXT_CAPABILITY_IDS
+                                .into_iter()
+                                .filter_map(|capability_id| {
+                                    provider_registry.capability(capability_id)
+                                })
+                                .map(|capability| capability.wire.tool_name.clone()),
+                        );
+                    }
+                    if selected_outlook_surface.is_some() {
+                        selected_source_tools.insert("prepare_outlook_draft".into());
+                    }
+                    if selected_live_spreadsheet.is_some() {
+                        selected_source_tools.insert("inspect_live_spreadsheet".into());
+                        selected_source_tools.insert("patch_live_spreadsheet_cell".into());
+                    }
+                    if selected_live_document.is_some() {
+                        selected_source_tools.insert("inspect_live_document".into());
+                        selected_source_tools.insert("replace_live_document_body".into());
+                    }
+                    if selected_live_presentation.is_some() {
+                        selected_source_tools.insert("inspect_live_presentation".into());
+                        selected_source_tools.insert("patch_live_presentation_slide".into());
+                    }
+                    selected_source_tools.insert(
+                        desk_diagnose_core::ai_assistant::PREVIEW_COMPUTER_ACTION_TOOL.to_string(),
+                    );
+                    selected_source_tools
+                        .insert(crate::web_research::WEB_FETCH_TOOL_NAME.to_string());
+                    selected_source_tools
+                        .insert(crate::web_research::WEB_SEARCH_TOOL_NAME.to_string());
+                    selected_source_tools.extend(
+                        desk_diagnose_core::ai_assistant::SYSTEM_DIAGNOSTIC_TOOL_NAMES
+                            .into_iter()
+                            .map(str::to_string),
+                    );
+                    selected_source_tools.insert("exec_command".into());
+                    // Candidates only. Directory consent and every read/write grant remain
+                    // independently checked against the authoritative conversation.
+                    selected_source_tools.extend(
+                        [
+                            "create_text_file",
+                            "create_local_message_draft",
+                            "read_text_file",
+                            "inspect_files",
+                            "update_text_file",
+                            "delete_text_file",
+                        ]
+                        .into_iter()
+                        .map(str::to_string),
+                    );
+                    selected_source_tools.insert(
+                        desk_diagnose_core::ai_assistant::EXECUTE_CONFIRMED_UI_ACTION_TOOL.into(),
+                    );
+                    selected_source_tools.insert(
+                        desk_diagnose_core::ai_assistant::EXECUTE_CONFIRMED_RAW_INPUT_TOOL.into(),
+                    );
+                    selected_source_tools.insert(
+                        desk_diagnose_core::ai_assistant::EXECUTE_BACKGROUND_INPUT_TOOL.into(),
+                    );
+                    let turn_id = scheduled
+                        .as_ref()
+                        .map(|resume| resume.claimed.run.turn_id.clone())
+                        .or_else(|| {
+                            goal_resume.as_ref().map(|goal| {
+                                format!(
+                                    "goal:{}:slice:{}",
+                                    goal.goal_id,
+                                    goal.slice_seq.saturating_add(1)
+                                )
+                            })
+                        })
+                        .unwrap_or_else(|| {
+                            resume_conversation_id.as_ref().map_or_else(
+                                || uuid::Uuid::new_v4().to_string(),
+                                |resume| {
+                                    crate::agent_session_store::permission_resume::turn_id(
+                                        &conversation_id,
+                                        &resume.permission_request_id,
+                                    )
+                                },
+                            )
+                        });
+                    let export_source = if resume_conversation_id.is_some()
+                        || scheduled.is_some()
+                        || goal_resume.is_some()
+                        || delegated.is_some()
+                    {
+                        crate::assistant_model::ModelExportSource::Turn(&turn_id)
+                    } else {
+                        crate::assistant_model::ModelExportSource::Input(&ask.client_message_id)
+                    };
+                    let export_authorization_id = crate::assistant_model::model_export_id(
+                        &actor_id,
+                        &target_device_id,
                         &conversation_id,
-                        &resume.permission_request_id,
-                    )
-                },
-            )
-        });
-    let export_source = if resume_conversation_id.is_some()
-        || scheduled.is_some()
-        || goal_resume.is_some()
-        || delegated.is_some()
-    {
-        crate::assistant_model::ModelExportSource::Turn(&turn_id)
-    } else {
-        crate::assistant_model::ModelExportSource::Input(&ask.client_message_id)
-    };
-    let export_authorization_id = crate::assistant_model::model_export_id(
-        &actor_id,
-        &target_device_id,
-        &conversation_id,
-        export_source,
-    );
-    if let Some(fresh) = scheduled.as_ref().and_then(|resume| resume.fresh.as_ref()) {
-        selected_source_tools.extend(
-            fresh
-                .contract
-                .contract()
-                .permissions
-                .iter()
-                .map(|rule| rule.tool_name.clone()),
-        );
-    }
-    if let Some(resume) = scheduled.as_mut()
-        && let Some(fresh) = resume.fresh.as_mut()
-    {
-        let store = crate::agent_subagent_store::SubAgentStore::new(db.clone());
-        let lease_owner = resume
-            .claimed
-            .run
-            .lease_owner
-            .as_deref()
-            .ok_or_else(|| transport_error("task executor missing"))?;
-        let (session, creation) = desk_diagnose_core::future::boxed(|| {
-            store.initialize_scheduled_source(
-                &resume.claimed.session,
-                lease_owner,
-                resume.claimed.run.lease_epoch,
-                &destination,
-            )
-        })
-        .await
-        .map_err(|_| transport_error("published task source changed"))?;
-        resume.claimed.session = session;
-        fresh.creation = Some(creation);
-    }
-    let model = MeteredModel {
-        fresh_task: scheduled.as_ref().and_then(|resume| {
-            resume
-                .fresh
-                .as_ref()
-                .map(|fresh| crate::assistant_model::FreshTaskModelContext {
-                    run_id: resume.claimed.run.run_id.clone(),
-                    device_id: target_device_id.clone(),
-                    node_id: resume.claimed.run.lease_owner.clone().unwrap_or_default(),
-                    run_epoch: resume.claimed.run.lease_epoch,
-                    session_token: resume.claimed.session.lease_token,
-                    target_connection_id: target_connection_id.clone(),
-                    connections: connections.clone(),
-                    gate: fresh.gate.clone(),
-                })
-        }),
-        inner: seam,
-        db: db.clone(),
-        destination: destination.clone(),
-        selected_source_tools,
-        export_authorization_id,
-        permission_resume: resume_conversation_id.is_some() || scheduled.is_some(),
-        completed_compression_receipt: std::cell::RefCell::new(None),
-        model_call_ordinal: std::sync::atomic::AtomicU64::new(0),
-    };
-    let callable = callable_tools(&provider_registry, &inventory)
+                        export_source,
+                    );
+                    if let Some(fresh) = scheduled.as_ref().and_then(|resume| resume.fresh.as_ref())
+                    {
+                        selected_source_tools.extend(
+                            fresh
+                                .contract
+                                .contract()
+                                .permissions
+                                .iter()
+                                .map(|rule| rule.tool_name.clone()),
+                        );
+                    }
+                    if let Some(resume) = scheduled.as_mut()
+                        && let Some(fresh) = resume.fresh.as_mut()
+                    {
+                        let store = crate::agent_subagent_store::SubAgentStore::new(db.clone());
+                        let lease_owner = resume
+                            .claimed
+                            .run
+                            .lease_owner
+                            .as_deref()
+                            .ok_or_else(|| transport_error("task executor missing"))?;
+                        let (session, creation) = desk_diagnose_core::future::boxed(|| {
+                            store.initialize_scheduled_source(
+                                &resume.claimed.session,
+                                lease_owner,
+                                resume.claimed.run.lease_epoch,
+                                &destination,
+                            )
+                        })
+                        .await
+                        .map_err(|_| transport_error("published task source changed"))?;
+                        resume.claimed.session = session;
+                        fresh.creation = Some(creation);
+                    }
+                    let model = MeteredModel {
+                        fresh_task: scheduled.as_ref().and_then(|resume| {
+                            resume.fresh.as_ref().map(|fresh| {
+                                crate::assistant_model::FreshTaskModelContext {
+                                    run_id: resume.claimed.run.run_id.clone(),
+                                    device_id: target_device_id.clone(),
+                                    node_id: resume
+                                        .claimed
+                                        .run
+                                        .lease_owner
+                                        .clone()
+                                        .unwrap_or_default(),
+                                    run_epoch: resume.claimed.run.lease_epoch,
+                                    session_token: resume.claimed.session.lease_token,
+                                    target_connection_id: target_connection_id.clone(),
+                                    connections: connections.clone(),
+                                    gate: fresh.gate.clone(),
+                                }
+                            })
+                        }),
+                        inner: seam,
+                        db: db.clone(),
+                        destination: destination.clone(),
+                        selected_source_tools,
+                        export_authorization_id,
+                        permission_resume: resume_conversation_id.is_some() || scheduled.is_some(),
+                        completed_compression_receipt: std::cell::RefCell::new(None),
+                        model_call_ordinal: std::sync::atomic::AtomicU64::new(0),
+                    };
+                    Ok(PreparationStep::Continue(
+                        desk_diagnose_core::future::phase(|| async move {
+                            let callable = callable_tools(&provider_registry, &inventory)
         .expect("static Provider registry must produce complete capability availability");
-    let mut registry = filter_model_compatible_tools(
-        &callable,
-        ModelCapabilities {
-            image_input: config.supports_image_input,
-        },
-    );
-    let mut selected_tool_capability_ids = ask.selected_capability_ids.clone();
-    if !selected_window_roots.is_empty() {
-        selected_tool_capability_ids
-            .push(desk_diagnose_core::ai_assistant::CURRENT_SCREEN_CAPABILITY_ID.to_string());
-    }
-    selected_tool_capability_ids
-        .push(desk_diagnose_core::ai_assistant::WEB_RESEARCH_FETCH_CAPABILITY_ID.into());
-    selected_tool_capability_ids.extend(
-        desk_diagnose_core::ai_assistant::SYSTEM_DIAGNOSTIC_CAPABILITY_IDS
-            .into_iter()
-            .map(str::to_string),
-    );
-    selected_tool_capability_ids
-        .push(desk_diagnose_core::ai_assistant::SYSTEM_COMMAND_CAPABILITY_ID.into());
-    selected_tool_capability_ids.extend([
+                            let mut registry = filter_model_compatible_tools(
+                                &callable,
+                                ModelCapabilities {
+                                    image_input: config.supports_image_input,
+                                },
+                            );
+                            let mut selected_tool_capability_ids =
+                                ask.selected_capability_ids.clone();
+                            if !selected_window_roots.is_empty() {
+                                selected_tool_capability_ids.push(
+                                    desk_diagnose_core::ai_assistant::CURRENT_SCREEN_CAPABILITY_ID
+                                        .to_string(),
+                                );
+                            }
+                            selected_tool_capability_ids.push(
+                                desk_diagnose_core::ai_assistant::WEB_RESEARCH_FETCH_CAPABILITY_ID
+                                    .into(),
+                            );
+                            selected_tool_capability_ids.extend(
+                                desk_diagnose_core::ai_assistant::SYSTEM_DIAGNOSTIC_CAPABILITY_IDS
+                                    .into_iter()
+                                    .map(str::to_string),
+                            );
+                            selected_tool_capability_ids.push(
+                                desk_diagnose_core::ai_assistant::SYSTEM_COMMAND_CAPABILITY_ID
+                                    .into(),
+                            );
+                            selected_tool_capability_ids.extend([
         desk_diagnose_core::ai_assistant::FILE_ARTIFACT_CREATE_CAPABILITY_ID.into(),
         desk_diagnose_core::ai_assistant::LOCAL_COMMUNICATION_DRAFT_CREATE_CAPABILITY_ID.into(),
     ]);
-    if !selected_file_roots.is_empty() {
-        selected_tool_capability_ids
-            .push(desk_diagnose_core::ai_assistant::FILE_METADATA_CAPABILITY_ID.into());
-        let selected_file_count = selected_file_roots
-            .iter()
-            .filter(|object_ref| {
-                object_ref.object_kind == desk_agent_protocol::computer_use::ObjectKind::File
-            })
-            .count();
-        let has_output_directory = selected_file_roots.iter().any(|object_ref| {
+                            if !selected_file_roots.is_empty() {
+                                selected_tool_capability_ids.push(
+                                    desk_diagnose_core::ai_assistant::FILE_METADATA_CAPABILITY_ID
+                                        .into(),
+                                );
+                                let selected_file_count = selected_file_roots
+                                    .iter()
+                                    .filter(|object_ref| {
+                                        object_ref.object_kind
+                                            == desk_agent_protocol::computer_use::ObjectKind::File
+                                    })
+                                    .count();
+                                let has_output_directory = selected_file_roots.iter().any(|object_ref| {
             object_ref.object_kind == desk_agent_protocol::computer_use::ObjectKind::Directory
         });
-        if selected_file_count > 0 {
-            selected_tool_capability_ids
+                                if selected_file_count > 0 {
+                                    selected_tool_capability_ids
                 .push(desk_diagnose_core::ai_assistant::FILE_CONTENT_CAPABILITY_ID.into());
-        }
-        if selected_file_count == 1 {
-            selected_tool_capability_ids.extend(
+                                }
+                                if selected_file_count == 1 {
+                                    selected_tool_capability_ids.extend(
                 [
                     desk_diagnose_core::ai_assistant::SPREADSHEET_BATCH_INSPECT_CAPABILITY_ID,
                     desk_diagnose_core::ai_assistant::DOCUMENT_BATCH_INSPECT_CAPABILITY_ID,
@@ -1697,8 +1844,8 @@ async fn compose_turn_inner(
                 .into_iter()
                 .map(str::to_string),
             );
-            if has_output_directory {
-                selected_tool_capability_ids.extend(
+                                    if has_output_directory {
+                                        selected_tool_capability_ids.extend(
                     [
                         desk_diagnose_core::ai_assistant::SPREADSHEET_BATCH_PATCH_CAPABILITY_ID,
                         desk_diagnose_core::ai_assistant::DOCUMENT_BATCH_PATCH_CAPABILITY_ID,
@@ -1710,23 +1857,23 @@ async fn compose_turn_inner(
                     .into_iter()
                     .map(str::to_string),
                 );
-            }
-        }
-        if has_output_directory {
-            selected_tool_capability_ids
+                                    }
+                                }
+                                if has_output_directory {
+                                    selected_tool_capability_ids
                 .push(desk_diagnose_core::ai_assistant::FILE_ARTIFACT_CREATE_CAPABILITY_ID.into());
-            selected_tool_capability_ids.push(
+                                    selected_tool_capability_ids.push(
                 desk_diagnose_core::ai_assistant::LOCAL_COMMUNICATION_DRAFT_CREATE_CAPABILITY_ID
                     .into(),
             );
-        }
-    }
-    if !selected_spreadsheet_roots.is_empty() {
-        selected_tool_capability_ids
+                                }
+                            }
+                            if !selected_spreadsheet_roots.is_empty() {
+                                selected_tool_capability_ids
             .push(desk_diagnose_core::ai_assistant::SPREADSHEET_FILE_CAPABILITY_ID.into());
-        selected_tool_capability_ids
+                                selected_tool_capability_ids
             .push(desk_diagnose_core::ai_assistant::SPREADSHEET_MERGE_CAPABILITY_ID.into());
-        if selected_file_roots.iter().any(|object_ref| {
+                                if selected_file_roots.iter().any(|object_ref| {
             object_ref.object_kind == desk_agent_protocol::computer_use::ObjectKind::Directory
         }) {
             selected_tool_capability_ids.push(
@@ -1739,22 +1886,24 @@ async fn compose_turn_inner(
             selected_tool_capability_ids
                 .push(desk_diagnose_core::ai_assistant::WORD_DOCUMENT_CREATE_CAPABILITY_ID.into());
         }
-    }
-    if !selected_terminal_roots.is_empty() {
-        selected_tool_capability_ids
-            .push(desk_diagnose_core::ai_assistant::TERMINAL_OUTPUT_CAPABILITY_ID.into());
-    }
-    if selected_browser_surface.is_some() {
-        desk_diagnose_core::ai_assistant::extend_browser_context_capability_ids(
+                            }
+                            if !selected_terminal_roots.is_empty() {
+                                selected_tool_capability_ids.push(
+                                    desk_diagnose_core::ai_assistant::TERMINAL_OUTPUT_CAPABILITY_ID
+                                        .into(),
+                                );
+                            }
+                            if selected_browser_surface.is_some() {
+                                desk_diagnose_core::ai_assistant::extend_browser_context_capability_ids(
             &mut selected_tool_capability_ids,
         );
-    }
-    if selected_outlook_surface.is_some() {
-        selected_tool_capability_ids
+                            }
+                            if selected_outlook_surface.is_some() {
+                                selected_tool_capability_ids
             .push(desk_diagnose_core::ai_assistant::OUTLOOK_NEW_HANDOFF_CAPABILITY_ID.into());
-    }
-    if selected_live_spreadsheet.is_some() {
-        selected_tool_capability_ids.extend(
+                            }
+                            if selected_live_spreadsheet.is_some() {
+                                selected_tool_capability_ids.extend(
             [
                 desk_diagnose_core::ai_assistant::SPREADSHEET_LIVE_INSPECT_CAPABILITY_ID,
                 desk_diagnose_core::ai_assistant::SPREADSHEET_LIVE_PATCH_CAPABILITY_ID,
@@ -1762,9 +1911,9 @@ async fn compose_turn_inner(
             .into_iter()
             .map(str::to_string),
         );
-    }
-    if selected_live_document.is_some() {
-        selected_tool_capability_ids.extend(
+                            }
+                            if selected_live_document.is_some() {
+                                selected_tool_capability_ids.extend(
             [
                 desk_diagnose_core::ai_assistant::DOCUMENT_LIVE_INSPECT_CAPABILITY_ID,
                 desk_diagnose_core::ai_assistant::DOCUMENT_LIVE_PATCH_CAPABILITY_ID,
@@ -1772,9 +1921,9 @@ async fn compose_turn_inner(
             .into_iter()
             .map(str::to_string),
         );
-    }
-    if selected_live_presentation.is_some() {
-        selected_tool_capability_ids.extend(
+                            }
+                            if selected_live_presentation.is_some() {
+                                selected_tool_capability_ids.extend(
             [
                 desk_diagnose_core::ai_assistant::PRESENTATION_LIVE_INSPECT_CAPABILITY_ID,
                 desk_diagnose_core::ai_assistant::PRESENTATION_LIVE_PATCH_CAPABILITY_ID,
@@ -1782,16 +1931,16 @@ async fn compose_turn_inner(
             .into_iter()
             .map(str::to_string),
         );
-    }
-    desk_diagnose_core::ai_assistant::retain_selected_context_tools(
-        &provider_registry,
-        &mut registry,
-        &selected_tool_capability_ids,
-    );
-    if let Some(original) = original_read_context.as_ref() {
-        // Object reads retain the original selection. Desktop reads remain planning
-        // candidates; only a current owner grant can restore their scope.
-        registry.retain(|tool| {
+                            }
+                            desk_diagnose_core::ai_assistant::retain_selected_context_tools(
+                                &provider_registry,
+                                &mut registry,
+                                &selected_tool_capability_ids,
+                            );
+                            if let Some(original) = original_read_context.as_ref() {
+                                // Object reads retain the original selection. Desktop reads remain planning
+                                // candidates; only a current owner grant can restore their scope.
+                                registry.retain(|tool| {
             tool.effect != desk_diagnose_core::registry::ToolEffect::ReadOnly
                 || desk_diagnose_core::ai_assistant::is_requestable_desktop_read(tool.name())
                 || provider_registry
@@ -1802,33 +1951,40 @@ async fn compose_turn_inner(
                     })
                 || original.tool_names.iter().any(|name| name == tool.name())
         });
-    }
-    if let Some(fresh) = scheduled.as_ref().and_then(|resume| resume.fresh.as_ref()) {
-        registry = filter_model_compatible_tools(
-            &callable,
-            ModelCapabilities {
-                image_input: config.supports_image_input,
-            },
-        );
-        registry
-            .retain(|tool| fresh::contains_tool(&fresh.contract, &provider_registry, tool.name()));
-    }
-    let capability_catalog_metrics =
-        desk_diagnose_core::permission_tools::capability_catalog_metrics(
-            &provider_registry,
-            &inventory,
-            &registry,
-            &[],
-        );
-    let permission_requests = snapshot
-        .as_ref()
-        .map(|snapshot| snapshot.permission_requests.as_slice())
-        .unwrap_or_default();
-    let permission_decisions = snapshot
-        .as_ref()
-        .map(|snapshot| snapshot.permission_decisions.as_slice())
-        .unwrap_or_default();
-    let capability_authorization =
+                            }
+                            if let Some(fresh) =
+                                scheduled.as_ref().and_then(|resume| resume.fresh.as_ref())
+                            {
+                                registry = filter_model_compatible_tools(
+                                    &callable,
+                                    ModelCapabilities {
+                                        image_input: config.supports_image_input,
+                                    },
+                                );
+                                registry.retain(|tool| {
+                                    fresh::contains_tool(
+                                        &fresh.contract,
+                                        &provider_registry,
+                                        tool.name(),
+                                    )
+                                });
+                            }
+                            let capability_catalog_metrics =
+                                desk_diagnose_core::permission_tools::capability_catalog_metrics(
+                                    &provider_registry,
+                                    &inventory,
+                                    &registry,
+                                    &[],
+                                );
+                            let permission_requests = snapshot
+                                .as_ref()
+                                .map(|snapshot| snapshot.permission_requests.as_slice())
+                                .unwrap_or_default();
+                            let permission_decisions = snapshot
+                                .as_ref()
+                                .map(|snapshot| snapshot.permission_decisions.as_slice())
+                                .unwrap_or_default();
+                            let capability_authorization =
         desk_diagnose_core::permission_tools::capability_authorization_prompt(
             &capability_grants,
             permission_requests,
@@ -1839,7 +1995,7 @@ async fn compose_turn_inner(
                 .map_or(0, |session| session.input_revision),
             readiness_revision,
         );
-    let permission_continuation_exact_tools =
+                            let permission_continuation_exact_tools =
         desk_diagnose_core::permission_tools::active_exact_authorized_tool_names(
             &capability_grants,
             permission_requests,
@@ -1849,170 +2005,194 @@ async fn compose_turn_inner(
                 .map_or(0, |session| session.input_revision),
             readiness_revision,
         );
-    // Internal run projection is not a Provider capability and grants no device
-    // authority. It is always callable so the model can keep the user-visible
-    // task assessment current even when no device context was selected.
-    registry.extend(desk_diagnose_core::task_status_tools::task_status_tool_registry());
-    registry.extend(desk_diagnose_core::subagent::tools::registry());
-    registry.extend(desk_diagnose_core::goal_tools::registry());
-    registry.extend(desk_diagnose_core::goal_tools::open_registry());
-    registry.extend(desk_diagnose_core::directory_tools::registry());
-    registry.extend(desk_diagnose_core::schedule::proposal::registry());
-    // Permission planning is also internal run control. It can only create a
-    // normalized pending request; it never widens this callable registry.
-    registry.extend(desk_diagnose_core::permission_tools::permission_planning_tool_registry());
-    registry
+                            // Internal run projection is not a Provider capability and grants no device
+                            // authority. It is always callable so the model can keep the user-visible
+                            // task assessment current even when no device context was selected.
+                            registry.extend(
+                                desk_diagnose_core::task_status_tools::task_status_tool_registry(),
+                            );
+                            registry.extend(desk_diagnose_core::subagent::tools::registry());
+                            registry.extend(desk_diagnose_core::goal_tools::registry());
+                            registry.extend(desk_diagnose_core::goal_tools::open_registry());
+                            registry.extend(desk_diagnose_core::directory_tools::registry());
+                            registry.extend(desk_diagnose_core::schedule::proposal::registry());
+                            // Permission planning is also internal run control. It can only create a
+                            // normalized pending request; it never widens this callable registry.
+                            registry.extend(desk_diagnose_core::permission_tools::permission_planning_tool_registry());
+                            registry
         .extend(desk_diagnose_core::capability_disclosure::capability_discovery_tool_registry());
-    registry.extend(desk_diagnose_core::conversation_history::conversation_history_tool_registry());
-    registry.extend(desk_diagnose_core::wait_tools::wait_tool_registry());
-    let context_selection = match context_selection_claim(
-        &provider_registry,
-        &inventory,
-        readiness.as_ref(),
-        &ask.selected_capability_ids,
-        &request_id,
-        &actor_id,
-        &target_device_id,
-        &destination,
-        now_unix_ms,
-    ) {
-        Ok(selection) => selection,
-        Err(error) => {
-            stream_event(
-                connections.as_ref(),
-                &browser_connection_id,
-                &AgentEvent::error(&request_id, 1, error),
-            )
-            .await;
-            return Ok(None);
-        }
-    };
-    let sessions = crate::agent_session_store::SignalAgentSessionStore::new(db.clone())
-        .with_client_metadata(
-            client_conversation_id.clone(),
-            AgentSessionSurface::AiAssistant,
-        )
-        .with_context_selection(context_selection);
-    let sessions = if let Some(resume) = &resume_conversation_id {
-        let snapshot = snapshot.as_ref().expect("validated resume snapshot");
-        sessions
-            .with_expected_input_revision(snapshot.input_revision)
-            .with_permission_resume(
-                resume.permission_request_id.clone(),
-                snapshot.seq,
-                capability_grants.clone(),
-            )
-    } else {
-        sessions
-    };
-    let heartbeat: Box<dyn LeaseHeartbeat> = match scheduled.as_ref() {
-        Some(resume) if resume.fresh.is_some() => Box::new(
-            crate::schedule_store::ScheduleHeartbeat::new_fresh(
-                crate::schedule_store::ScheduleStore::new(db.clone()),
-                crate::schedule_store::FreshTaskLease {
-                    owner: actor_user_id,
-                    run_id: &resume.claimed.run.run_id,
-                    node_id: resume
-                        .claimed
-                        .run
-                        .lease_owner
-                        .as_deref()
-                        .ok_or_else(|| transport_error("task node missing"))?,
-                    run_epoch: resume.claimed.run.lease_epoch,
-                    session_token: resume.claimed.session.lease_token,
-                },
-                resume.lease_seconds,
-                model_cancel,
-            )
-            .await
-            .map_err(|_| transport_error("task leases changed"))?,
-        ),
-        Some(resume) => Box::new(
-            crate::schedule_store::ScheduleHeartbeat::new(
-                crate::schedule_store::ScheduleStore::new(db.clone()),
-                &resume.claimed,
-                resume
-                    .claimed
-                    .run
-                    .lease_owner
-                    .clone()
-                    .ok_or_else(|| transport_error("scheduled node missing"))?,
-                resume.lease_seconds,
-                model_cancel,
-            )
-            .await
-            .map_err(|_| transport_error("scheduled leases changed"))?,
-        ),
-        None => Box::new(SignalStoreHeartbeat {
-            cancel: model_cancel.clone(),
-            store: sessions.clone(),
-        }),
-    };
-    let mut granted = Vec::new();
-    desk_diagnose_core::tool_exposure::extend_candidate_scope(
-        &provider_registry,
-        &registry,
-        &selected_tool_capability_ids,
-        &resumed_desktop_reads,
-        &mut granted,
-    );
-    // The sealed command classifier can dispatch the read-only protocol variant.
-    if granted.contains(&desk_agent_protocol::Capability::ShellExecConfirmed) {
-        granted.push(desk_agent_protocol::Capability::ShellExecReadonly);
-    }
-    let mutation_enabled =
-        desk_diagnose_core::tool_exposure::scope_has_mutation(&provider_registry, &granted);
-    let scope = AgentScope {
-        granted,
-        // Even a provider configured for confirmed exec is hard-clamped here.
-        mode: if mutation_enabled {
-            config
-                .execution_mode
-                .restrict_to(ExecutionMode::ConfirmEachAction)
-        } else {
-            ExecutionMode::ReadOnly
-        },
-        expires_at: original_read_context
-            .as_ref()
-            .and_then(|selection| selection.expires_at.clone()),
-        policy_name: Some("oss-ai-assistant-provider".into()),
-    };
-    let scope = scheduled
-        .as_ref()
-        .filter(|resume| resume.fresh.is_some())
-        .map_or(scope, |resume| {
-            resume.claimed.session.scope_snapshot.clone()
-        });
-    if let Some(resume) = scheduled.as_mut().filter(|resume| resume.fresh.is_none()) {
-        resume.claimed.session.scope_snapshot = desk_diagnose_core::session::narrow_scope(
-            &resume.claimed.session.scope_snapshot,
-            &scope,
-        );
-    }
-    let read_context =
-        match crate::agent_run_event_store::ReadContextSelection::capture(&registry, &scope) {
-            Ok(mut selection) => {
-                selection.object_attachments = selected_objects;
-                selection.live_targets = live_targets;
-                selection
-            }
-            Err(error) => {
-                stream_event(
-                    connections.as_ref(),
-                    &browser_connection_id,
-                    &AgentEvent::error(&request_id, 1, error),
-                )
-                .await;
-                return Ok(None);
-            }
-        };
-    let clock = || chrono::Utc::now().to_rfc3339();
-    let (available_exec_shells, max_command_runtime_ms) = {
-        let connections = connections.read().await;
-        connections
-            .get(&target_connection_id)
-            .map(|target| {
-                (
+                            registry.extend(desk_diagnose_core::conversation_history::conversation_history_tool_registry());
+                            registry.extend(desk_diagnose_core::wait_tools::wait_tool_registry());
+                            let context_selection = match context_selection_claim(
+                                &provider_registry,
+                                &inventory,
+                                readiness.as_ref(),
+                                &ask.selected_capability_ids,
+                                &request_id,
+                                &actor_id,
+                                &target_device_id,
+                                &destination,
+                                now_unix_ms,
+                            ) {
+                                Ok(selection) => selection,
+                                Err(error) => {
+                                    desk_diagnose_core::future::boxed(|| async {
+                                        stream_event(
+                                            connections.as_ref(),
+                                            &browser_connection_id,
+                                            &AgentEvent::error(&request_id, 1, error),
+                                        )
+                                        .await
+                                    })
+                                    .await;
+                                    return Ok(PreparationStep::Ready(None));
+                                }
+                            };
+                            let sessions =
+                                crate::agent_session_store::SignalAgentSessionStore::new(
+                                    db.clone(),
+                                )
+                                .with_client_metadata(
+                                    client_conversation_id.clone(),
+                                    AgentSessionSurface::AiAssistant,
+                                )
+                                .with_context_selection(context_selection);
+                            let sessions = if let Some(resume) = &resume_conversation_id {
+                                let snapshot =
+                                    snapshot.as_ref().expect("validated resume snapshot");
+                                sessions
+                                    .with_expected_input_revision(snapshot.input_revision)
+                                    .with_permission_resume(
+                                        resume.permission_request_id.clone(),
+                                        snapshot.seq,
+                                        capability_grants.clone(),
+                                    )
+                            } else {
+                                sessions
+                            };
+                            let heartbeat: Box<dyn LeaseHeartbeat> = match scheduled.as_ref() {
+                                Some(resume) if resume.fresh.is_some() => Box::new(
+                                    crate::schedule_store::ScheduleHeartbeat::new_fresh(
+                                        crate::schedule_store::ScheduleStore::new(db.clone()),
+                                        crate::schedule_store::FreshTaskLease {
+                                            owner: actor_user_id,
+                                            run_id: &resume.claimed.run.run_id,
+                                            node_id: resume
+                                                .claimed
+                                                .run
+                                                .lease_owner
+                                                .as_deref()
+                                                .ok_or_else(|| {
+                                                    transport_error("task node missing")
+                                                })?,
+                                            run_epoch: resume.claimed.run.lease_epoch,
+                                            session_token: resume.claimed.session.lease_token,
+                                        },
+                                        resume.lease_seconds,
+                                        model_cancel,
+                                    )
+                                    .await
+                                    .map_err(|_| transport_error("task leases changed"))?,
+                                ),
+                                Some(resume) => Box::new(
+                                    crate::schedule_store::ScheduleHeartbeat::new(
+                                        crate::schedule_store::ScheduleStore::new(db.clone()),
+                                        &resume.claimed,
+                                        resume.claimed.run.lease_owner.clone().ok_or_else(
+                                            || transport_error("scheduled node missing"),
+                                        )?,
+                                        resume.lease_seconds,
+                                        model_cancel,
+                                    )
+                                    .await
+                                    .map_err(|_| transport_error("scheduled leases changed"))?,
+                                ),
+                                None => Box::new(SignalStoreHeartbeat {
+                                    cancel: model_cancel.clone(),
+                                    store: sessions.clone(),
+                                }),
+                            };
+                            let mut granted = Vec::new();
+                            desk_diagnose_core::tool_exposure::extend_candidate_scope(
+                                &provider_registry,
+                                &registry,
+                                &selected_tool_capability_ids,
+                                &resumed_desktop_reads,
+                                &mut granted,
+                            );
+                            // The sealed command classifier can dispatch the read-only protocol variant.
+                            if granted
+                                .contains(&desk_agent_protocol::Capability::ShellExecConfirmed)
+                            {
+                                granted.push(desk_agent_protocol::Capability::ShellExecReadonly);
+                            }
+                            let mutation_enabled =
+                                desk_diagnose_core::tool_exposure::scope_has_mutation(
+                                    &provider_registry,
+                                    &granted,
+                                );
+                            let scope = AgentScope {
+                                granted,
+                                // Even a provider configured for confirmed exec is hard-clamped here.
+                                mode: if mutation_enabled {
+                                    config
+                                        .execution_mode
+                                        .restrict_to(ExecutionMode::ConfirmEachAction)
+                                } else {
+                                    ExecutionMode::ReadOnly
+                                },
+                                expires_at: original_read_context
+                                    .as_ref()
+                                    .and_then(|selection| selection.expires_at.clone()),
+                                policy_name: Some("oss-ai-assistant-provider".into()),
+                            };
+                            let scope = scheduled
+                                .as_ref()
+                                .filter(|resume| resume.fresh.is_some())
+                                .map_or(scope, |resume| {
+                                    resume.claimed.session.scope_snapshot.clone()
+                                });
+                            if let Some(resume) =
+                                scheduled.as_mut().filter(|resume| resume.fresh.is_none())
+                            {
+                                resume.claimed.session.scope_snapshot =
+                                    desk_diagnose_core::session::narrow_scope(
+                                        &resume.claimed.session.scope_snapshot,
+                                        &scope,
+                                    );
+                            }
+                            let read_context =
+                                match crate::agent_run_event_store::ReadContextSelection::capture(
+                                    &registry, &scope,
+                                ) {
+                                    Ok(mut selection) => {
+                                        selection.object_attachments = selected_objects;
+                                        selection.live_targets = live_targets;
+                                        selection
+                                    }
+                                    Err(error) => {
+                                        desk_diagnose_core::future::boxed(|| async {
+                                            stream_event(
+                                                connections.as_ref(),
+                                                &browser_connection_id,
+                                                &AgentEvent::error(&request_id, 1, error),
+                                            )
+                                            .await
+                                        })
+                                        .await;
+                                        return Ok(PreparationStep::Ready(None));
+                                    }
+                                };
+                            let clock = || chrono::Utc::now().to_rfc3339();
+                            let (available_exec_shells, max_command_runtime_ms) = {
+                                let connections = desk_diagnose_core::future::boxed(|| async {
+                                    connections.read().await
+                                })
+                                .await;
+                                connections
+                                    .get(&target_connection_id)
+                                    .map(|target| {
+                                        (
                     target.model.version_info.available_exec_shell_list(),
                     target
                         .model
@@ -2020,114 +2200,138 @@ async fn compose_turn_inner(
                         .max_ai_command_runtime_ms
                         .unwrap_or(desk_agent_protocol::exec_policy::DEFAULT_TIMEOUT_MS),
                 )
-            })
-            .unwrap_or_default()
-    };
-    let tools = crate::remote_tool_edge::SignalAiAssistantTools::new(
-        db.clone(),
-        provider_registry.clone(),
-        connections.clone().into_inner(),
-        crate::remote_tool_edge::global_remote_tool_pending(),
-        target_connection_id,
-        target_device_id.clone(),
-        actor_id.clone(),
-        config.wire_protocol.map(|value| format!("{value:?}")),
-        Some(model_name.clone()),
-        selected_office_document,
-        selected_live_spreadsheet,
-        selected_live_document,
-        selected_live_presentation,
-        selected_file_roots,
-        selected_spreadsheet_roots,
-        selected_terminal_roots,
-        selected_browser_surface,
-        selected_outlook_surface,
-        ask.question.clone(),
-        conversation_id.clone(),
-        turn_id.clone(),
-        PERSONAL_ASSISTANT_POLICY_REVISION,
-        readiness_revision,
-        available_exec_shells,
-        max_command_runtime_ms,
-    )
-    .with_model_egress_policy(model.model_egress_policy().expect("validated model policy"));
-    if (resume_conversation_id.is_some()
-        || scheduled.is_some()
-        || goal_resume.is_some()
-        || delegated
-            .as_ref()
-            .and_then(|runtime| runtime.read_context_binding())
-            .is_some())
-        && let Some(original) = original_read_context
-    {
-        let result = async {
-            tools.bind_original_input(
-                snapshot
-                    .as_ref()
-                    .expect("validated resume snapshot")
-                    .input_revision,
-                original.clone(),
-                destination.clone(),
-                client_conversation_id.clone(),
-            )?;
-            if !original.object_attachments.is_empty() || !original.live_targets.is_empty() {
-                tools.validate_original_objects().await?;
-            }
-            Ok::<_, AgentError>(())
-        }
-        .await;
-        if let Err(error) = result {
-            stream_event(
-                connections.as_ref(),
-                &browser_connection_id,
-                &AgentEvent::error(&request_id, 1, error),
-            )
-            .await;
-            return Ok(None);
-        }
-    }
-    let mut system_prompt = build_ai_assistant_system_message_with_catalog(
-        ask.locale.as_deref(),
-        &capability_authorization.text,
-    );
-    if scheduled
-        .as_ref()
-        .is_some_and(|resume| resume.fresh.is_some())
-    {
-        desk_diagnose_core::runtime_context::append_instruction(
+                                    })
+                                    .unwrap_or_default()
+                            };
+                            Ok(PreparationStep::Continue(
+                                desk_diagnose_core::future::phase(|| async move {
+                                    let tools =
+                                        crate::remote_tool_edge::SignalAiAssistantTools::new(
+                                            db.clone(),
+                                            provider_registry.clone(),
+                                            connections.clone().into_inner(),
+                                            crate::remote_tool_edge::global_remote_tool_pending(),
+                                            target_connection_id,
+                                            target_device_id.clone(),
+                                            actor_id.clone(),
+                                            config.wire_protocol.map(|value| format!("{value:?}")),
+                                            Some(model_name.clone()),
+                                            selected_office_document,
+                                            selected_live_spreadsheet,
+                                            selected_live_document,
+                                            selected_live_presentation,
+                                            selected_file_roots,
+                                            selected_spreadsheet_roots,
+                                            selected_terminal_roots,
+                                            selected_browser_surface,
+                                            selected_outlook_surface,
+                                            ask.question.clone(),
+                                            conversation_id.clone(),
+                                            turn_id.clone(),
+                                            PERSONAL_ASSISTANT_POLICY_REVISION,
+                                            readiness_revision,
+                                            available_exec_shells,
+                                            max_command_runtime_ms,
+                                        )
+                                        .with_model_egress_policy(
+                                            model
+                                                .model_egress_policy()
+                                                .expect("validated model policy"),
+                                        );
+                                    if (resume_conversation_id.is_some()
+                                        || scheduled.is_some()
+                                        || goal_resume.is_some()
+                                        || delegated
+                                            .as_ref()
+                                            .and_then(|runtime| runtime.read_context_binding())
+                                            .is_some())
+                                        && let Some(original) = original_read_context
+                                    {
+                                        let result = async {
+                                            tools.bind_original_input(
+                                                snapshot
+                                                    .as_ref()
+                                                    .expect("validated resume snapshot")
+                                                    .input_revision,
+                                                original.clone(),
+                                                destination.clone(),
+                                                client_conversation_id.clone(),
+                                            )?;
+                                            if !original.object_attachments.is_empty()
+                                                || !original.live_targets.is_empty()
+                                            {
+                                                desk_diagnose_core::future::boxed(|| async {
+                                                    tools.validate_original_objects().await
+                                                })
+                                                .await?;
+                                            }
+                                            Ok::<_, AgentError>(())
+                                        }
+                                        .await;
+                                        if let Err(error) = result {
+                                            desk_diagnose_core::future::boxed(|| async {
+                                                stream_event(
+                                                    connections.as_ref(),
+                                                    &browser_connection_id,
+                                                    &AgentEvent::error(&request_id, 1, error),
+                                                )
+                                                .await
+                                            })
+                                            .await;
+                                            return Ok(PreparationStep::Ready(None));
+                                        }
+                                    }
+                                    let mut system_prompt =
+                                        build_ai_assistant_system_message_with_catalog(
+                                            ask.locale.as_deref(),
+                                            &capability_authorization.text,
+                                        );
+                                    if scheduled
+                                        .as_ref()
+                                        .is_some_and(|resume| resume.fresh.is_some())
+                                    {
+                                        desk_diagnose_core::runtime_context::append_instruction(
             &mut system_prompt,
             desk_diagnose_core::schedule::task_prompt::FRESH_TASK_INSTRUCTIONS,
         );
-    }
-    let goal_approval_request_id = goal_resume
-        .as_ref()
-        .and_then(|goal| goal.checkpoint.as_ref())
-        .and_then(|checkpoint| {
-            checkpoint.evidence_ids.iter().find(|reference| {
-                checkpoint.summary.strip_prefix("Waiting for ") == Some(reference.as_str())
-                    && snapshot.as_ref().is_some_and(|session| {
-                        session
-                            .permission_decisions
-                            .iter()
-                            .any(|decision| decision.request_id == reference.as_str())
-                    })
-            })
-        })
-        .map(String::as_str);
-    if permission_decision_resume || goal_approval_request_id.is_some() {
-        desk_diagnose_core::runtime_context::append_instruction(
-            &mut system_prompt,
-            "\n\nPERMISSION DECISION RESUME (server authoritative): a decision was recorded for the pending permission request. Re-read CURRENT AUTHORIZED GRANTS above. Do not request or ask for the same permission again. If a matching active grant exists, continue the existing user requirement now and call the authorized tool. If the item was denied or narrowed so the call no longer matches, adapt the plan or explain the remaining blocker. This trigger adds no new user requirement and does not change the original tool inputs.",
-        );
-    }
-    let mut projection_expiry = capability_authorization.approved_exact_input_expires_at_unix_ms;
-    let decision_request_id = resume_conversation_id
-        .as_ref()
-        .map(|resume| resume.permission_request_id.as_str())
-        .or_else(|| scheduled.as_ref()?.permission_request_id.as_deref())
-        .or(goal_approval_request_id);
-    if let Some(decision_request_id) = decision_request_id {
-        let decision = crate::agent_session_store::SignalAgentSessionStore::new(db.clone())
+                                    }
+                                    let goal_approval_request_id = goal_resume
+                                        .as_ref()
+                                        .and_then(|goal| goal.checkpoint.as_ref())
+                                        .and_then(|checkpoint| {
+                                            checkpoint.evidence_ids.iter().find(|reference| {
+                                                checkpoint.summary.strip_prefix("Waiting for ")
+                                                    == Some(reference.as_str())
+                                                    && snapshot.as_ref().is_some_and(|session| {
+                                                        session.permission_decisions.iter().any(
+                                                            |decision| {
+                                                                decision.request_id
+                                                                    == reference.as_str()
+                                                            },
+                                                        )
+                                                    })
+                                            })
+                                        })
+                                        .map(String::as_str);
+                                    if permission_decision_resume
+                                        || goal_approval_request_id.is_some()
+                                    {
+                                        desk_diagnose_core::runtime_context::append_instruction(
+                                            &mut system_prompt,
+                                            "\n\nPERMISSION DECISION RESUME (server authoritative): a decision was recorded for the pending permission request. Re-read CURRENT AUTHORIZED GRANTS above. Do not request or ask for the same permission again. If a matching active grant exists, continue the existing user requirement now and call the authorized tool. If the item was denied or narrowed so the call no longer matches, adapt the plan or explain the remaining blocker. This trigger adds no new user requirement and does not change the original tool inputs.",
+                                        );
+                                    }
+                                    let mut projection_expiry = capability_authorization
+                                        .approved_exact_input_expires_at_unix_ms;
+                                    let decision_request_id = resume_conversation_id
+                                        .as_ref()
+                                        .map(|resume| resume.permission_request_id.as_str())
+                                        .or_else(|| {
+                                            scheduled.as_ref()?.permission_request_id.as_deref()
+                                        })
+                                        .or(goal_approval_request_id);
+                                    if let Some(decision_request_id) = decision_request_id {
+                                        let decision = desk_diagnose_core::future::boxed(|| async { crate::agent_session_store::SignalAgentSessionStore::new(db.clone())
             .permission_decision_event(
                 crate::agent_session_store::PermissionDecisionSubject {
                     conversation_id: &conversation_id,
@@ -2136,9 +2340,9 @@ async fn compose_turn_inner(
                 },
                 decision_request_id,
             )
-            .await?
+            .await }).await?
             .ok_or_else(|| transport_error("permission decision receipt is unavailable"))?;
-        if let Some(notice) =
+                                        if let Some(notice) =
             desk_diagnose_core::approval_review::ai_review_denial_notice(&decision)
                 .map_err(|_| transport_error("AI approval denial receipt is invalid"))?
         {
@@ -2152,61 +2356,461 @@ async fn compose_turn_inner(
                 }),
             );
         }
-    }
-    if let Some(expires_at_unix_ms) = projection_expiry {
-        system_prompt = match bind_exact_authorization_system_message(
+                                    }
+                                    if let Some(expires_at_unix_ms) = projection_expiry {
+                                        system_prompt =
+                                            match bind_exact_authorization_system_message(
+                                                system_prompt,
+                                                destination.clone(),
+                                                expires_at_unix_ms,
+                                            ) {
+                                                Ok(system_prompt) => system_prompt,
+                                                Err(error) => {
+                                                    desk_diagnose_core::future::boxed(|| async {
+                                                        stream_event(
+                                                            connections.as_ref(),
+                                                            &browser_connection_id,
+                                                            &AgentEvent::error(
+                                                                &request_id,
+                                                                1,
+                                                                error,
+                                                            ),
+                                                        )
+                                                        .await
+                                                    })
+                                                    .await;
+                                                    return Ok(PreparationStep::Ready(None));
+                                                }
+                                            };
+                                    }
+                                    Ok(PreparationStep::Ready(Some(Box::pin(async move {
+                                        let _cancel_registration = cancel_registration;
+                                        let deps = LoopDeps {
+            session_seam: &sessions,
+            model: &model,
+            tools: &tools,
+            content_safety: desk_diagnose_core::content_safety::ContentSafetyMode::Disabled,
+            registry: &registry,
+            provider_registry: Some(&provider_registry),
+            capability_inventory: Some(&inventory),
+            capability_permission_candidates: &[],
+            capability_catalog_metrics: Some(capability_catalog_metrics),
+            permission_continuation_exact_tools: &permission_continuation_exact_tools,
+            response_format: ResponseFormatSpec::None,
             system_prompt,
+            max_steps_per_turn: config.max_steps_per_turn,
+            response_locale: ask.locale.clone(),
+            interactive_user_home: scheduled
+                .is_none()
+                .then(|| {
+                    readiness
+                        .as_ref()
+                        .and_then(|state| state.interactive_user_home.as_deref())
+                })
+                .flatten(),
+            interactive_user_home_incarnation: scheduled
+                .is_none()
+                .then(|| {
+                    readiness
+                        .as_ref()
+                        .map(|state| state.interactive_session_incarnation.as_str())
+                })
+                .flatten(),
+            max_same_tool_per_turn: config.max_same_tool_calls_per_turn,
+            clock: &clock,
+            heartbeat: Some(heartbeat.as_ref()),
+        };
+                                        if let Some(runtime) = delegated {
+                                            return desk_diagnose_core::future::phase(|| async move {
+                let claim = ClaimTurnParams {
+                    conversation_id,
+                    actor_id,
+                    device_id: target_device_id,
+                    policy_revision: PERSONAL_ASSISTANT_POLICY_REVISION,
+                    current_pdp_scope: scope,
+                    turn_id: turn_id.clone(),
+                    request_id: Some(request_id.clone()),
+                    connection_id: None,
+                    trigger_origin: runtime.origin(),
+                    now: clock(),
+                };
+                let store = crate::agent_subagent_store::SubAgentStore::new(db.clone());
+                let mut sink =
+                    StreamingTurnSink::starting_at(|_event: AiAssistantEvent| {}, request_id, 0);
+                sink.set_provenance(AiProvenance::stamp(config.model, Some(clock())));
+                sink.turn_started(&turn_id);
+                let outcome = match *runtime {
+                    desk_diagnose_core::subagent::runtime::RuntimeTurn::Child { run, .. } => {
+                        match desk_diagnose_core::future::boxed(|| {
+                            store.claim_child(
+                                &claim,
+                                &run.binding.task_id,
+                                run.fence(),
+                                &destination,
+                            )
+                        })
+                        .await
+                        .map_err(|error| {
+                            transport_error(format!("claim delegated task: {error}"))
+                        })? {
+                            crate::agent_subagent_store::SubAgentClaimOutcome::Claimed(claimed) => {
+                                desk_diagnose_core::future::boxed(|| {
+                                    desk_diagnose_core::agent_loop::run_preclaimed_subagent_turn(
+                                        &deps,
+                                        claimed.session,
+                                        &mut sink,
+                                    )
+                                })
+                                .await?
+                            }
+                            crate::agent_subagent_store::SubAgentClaimOutcome::Blocked(_) => {
+                                LoopOutcome::TurnBusy
+                            }
+                        }
+                    }
+                    desk_diagnose_core::subagent::runtime::RuntimeTurn::ParentCompletion {
+                        ..
+                    } => {
+                        match desk_diagnose_core::future::boxed(|| {
+                            store.claim_parent_completion(&claim, &destination)
+                        })
+                        .await
+                        .map_err(|error| {
+                            transport_error(format!(
+                                "claim delegated result interpretation: {error}"
+                            ))
+                        })? {
+                            Some(claimed) => desk_diagnose_core::future::boxed(|| {
+                                desk_diagnose_core::agent_loop::run_preclaimed_subagent_completion(
+                                    &deps,
+                                    claimed.session,
+                                    &mut sink,
+                                )
+                            })
+                            .await?,
+                            None => LoopOutcome::TurnBusy,
+                        }
+                    }
+                };
+                sink.finish_outcome(&outcome);
+                Ok(Some(outcome))
+            })
+            .await;
+                                        }
+                                        if let Some(goal) = goal_resume {
+                                            return desk_diagnose_core::future::phase(|| async move {
+                let bound = GoalModelBinding::from_destination(&destination)
+                    .map_err(|_| model_rejected("goal model binding is unavailable"))?;
+                if bound != goal.model_binding
+                    || goal.conversation_id != conversation_id
+                    || goal.owner_id != actor_id
+                    || goal.device_id != target_device_id
+                    || snapshot
+                        .as_ref()
+                        .is_none_or(|session| session.input_revision != goal.input_revision)
+                {
+                    return Err(model_rejected(
+                        "goal continuation is stale or its model changed",
+                    ));
+                }
+                let claim = ClaimTurnParams {
+                    conversation_id,
+                    actor_id,
+                    device_id: target_device_id,
+                    policy_revision: PERSONAL_ASSISTANT_POLICY_REVISION,
+                    current_pdp_scope: scope,
+                    turn_id: turn_id.clone(),
+                    request_id: None,
+                    connection_id: None,
+                    trigger_origin: TriggerOrigin::GoalContinuation,
+                    now: clock(),
+                };
+                let claimed = desk_diagnose_core::future::boxed(|| async { crate::agent_goal_store::claim_slice(
+                    &db,
+                    &claim,
+                    &goal.goal_id,
+                    Some(goal.state_version),
+                    &turn_id,
+                )
+                .await }).await
+                .map_err(|error| transport_error(format!("claim AI Assistant goal: {error}")))?;
+                let Some(claimed) = claimed else {
+                    return Ok(Some(LoopOutcome::TurnBusy));
+                };
+                let mut sink =
+                    StreamingTurnSink::starting_at(|_event: AiAssistantEvent| {}, request_id, 0);
+                sink.set_provenance(AiProvenance::stamp(config.model, Some(clock())));
+                sink.turn_started(&turn_id);
+                let outcome = desk_diagnose_core::future::boxed(|| {
+                    run_preclaimed_goal_slice(&deps, claimed.session, &mut sink)
+                })
+                .await?;
+                sink.finish_outcome(&outcome);
+                Ok(Some(outcome))
+            })
+            .await;
+                                        }
+                                        if let Some(resume) = scheduled {
+                                            return desk_diagnose_core::future::phase(
+                                                || async move {
+                                                    let resume = *resume;
+                                                    let mut sink = StreamingTurnSink::starting_at(
+                                                        |_event: AiAssistantEvent| {},
+                                                        request_id,
+                                                        0,
+                                                    );
+                                                    sink.set_provenance(AiProvenance::stamp(
+                                                        config.model,
+                                                        Some(clock()),
+                                                    ));
+                                                    sink.turn_started(&turn_id);
+                                                    let outcome =
+                                                        desk_diagnose_core::future::boxed(
+                                                            || async {
+                                                                scheduled_dispatch::drive(
+                                                                    &deps,
+                                                                    resume.claimed.session,
+                                                                    &resume.claimed.run.run_id,
+                                                                    resume
+                                                                        .permission_request_id
+                                                                        .as_deref(),
+                                                                    resume.fresh.as_ref(),
+                                                                    &mut sink,
+                                                                )
+                                                                .await
+                                                            },
+                                                        )
+                                                        .await?;
+                                                    sink.finish_outcome(&outcome);
+                                                    Ok(Some(outcome))
+                                                },
+                                            )
+                                            .await;
+                                        }
+                                        let accepted_at = clock();
+                                        if resume_conversation_id.is_some() {
+                                            let model = &model;
+                                            return desk_diagnose_core::future::phase(|| async move {
+
+            let decision_message = match (|| {
+                let policy = model
+                    .model_egress_policy()?
+                    .ok_or_else(|| transport_error("permission model policy is unavailable"))?;
+                if let Some((creation, child)) = permission_child_context.as_deref() {
+                    return desk_diagnose_core::permission_resume::authorized_child_permission_resume_message(
+                    format!("{request_id}-decision"), &policy, creation,
+                    child.agent_role.binding().ok_or_else(|| transport_error("delegated permission role is unavailable"))?,
+                );
+                }
+                let original = snapshot
+                    .as_ref()
+                    .and_then(|session| {
+                        desk_diagnose_core::permission_resume::latest_user_requirement(
+                            &session.messages,
+                        )
+                    })
+                    .ok_or_else(|| transport_error("original permission input is unavailable"))?;
+                authorized_permission_resume_message(
+                    format!("{request_id}-decision"),
+                    &policy,
+                    original,
+                )
+            })() {
+                Ok(message) => message,
+                Err(error) => {
+                    log::warn!("[ai-assistant] failed to bind permission resume event: {error:?}");
+                    return Ok(None);
+                }
+            };
+            let claim = ClaimTurnParams {
+                conversation_id,
+                actor_id,
+                device_id: target_device_id,
+                policy_revision: PERSONAL_ASSISTANT_POLICY_REVISION,
+                current_pdp_scope: scope,
+                turn_id: turn_id.clone(),
+                request_id: None,
+                connection_id: None,
+                trigger_origin: TriggerOrigin::PermissionDecision,
+                now: accepted_at,
+            };
+            let mut sink =
+                StreamingTurnSink::starting_at(|_event: AiAssistantEvent| {}, request_id, 0);
+            sink.set_provenance(AiProvenance::stamp(
+                config.model,
+                Some(chrono::Utc::now().to_rfc3339()),
+            ));
+            sink.turn_started(&turn_id);
+            match desk_diagnose_core::future::boxed(|| {
+                resume_agent_turn_after_permission(&deps, claim, decision_message, &mut sink)
+            })
+            .await
+            {
+                Ok(LoopOutcome::TurnBusy) => {
+                    // A newer owner follow-up won the claim. Its input supersedes
+                    // this grant-triggered resume, so no retry is appropriate.
+                }
+                Ok(outcome) => {
+                    desk_diagnose_core::future::boxed(|| async { rehearsal::finish_answer(
+                        &db,
+                        actor_user_id,
+                        rehearsal_conversation.as_deref(),
+                        &outcome,
+                    )
+                    .await }).await?;
+                    sink.finish_outcome(&outcome);
+                }
+                Err(error) => {
+                    log::warn!(
+                        "[ai-assistant] permission-resumed turn failed: kind={:?}, retryable={}, message={}",
+                        error.kind,
+                        error.retryable,
+                        error.message
+                    );
+                    desk_diagnose_core::future::boxed(|| async { rehearsal::finish_error(&db, actor_user_id, rehearsal_conversation.as_deref())
+                        .await }).await;
+                    sink.error(error);
+                }
+            }
+            Ok(None)
+
+}).await;
+                                        }
+                                        let tools = &tools;
+                                        let sessions = &sessions;
+                                        desk_diagnose_core::future::phase(|| async move {
+        let user = match model_bound_user_message(
+            ask.client_message_id.clone(),
+            ask.question,
             destination.clone(),
-            expires_at_unix_ms,
         ) {
-            Ok(system_prompt) => system_prompt,
+            Ok(user) => user,
             Err(error) => {
-                stream_event(
+                desk_diagnose_core::future::boxed(|| async { stream_event(
                     connections.as_ref(),
                     &browser_connection_id,
                     &AgentEvent::error(&request_id, 1, error),
                 )
-                .await;
+                .await }).await;
                 return Ok(None);
             }
         };
-    }
-    let deps = LoopDeps {
-        session_seam: &sessions,
-        model: &model,
-        tools: &tools,
-        content_safety: desk_diagnose_core::content_safety::ContentSafetyMode::Disabled,
-        registry: &registry,
-        provider_registry: Some(&provider_registry),
-        capability_inventory: Some(&inventory),
-        capability_permission_candidates: &[],
-        capability_catalog_metrics: Some(capability_catalog_metrics),
-        permission_continuation_exact_tools: &permission_continuation_exact_tools,
-        response_format: ResponseFormatSpec::None,
-        system_prompt,
-        max_steps_per_turn: config.max_steps_per_turn,
-        response_locale: ask.locale.clone(),
-        interactive_user_home: scheduled
-            .is_none()
-            .then(|| {
-                readiness
-                    .as_ref()
-                    .and_then(|state| state.interactive_user_home.as_deref())
+        let user = Box::new(user);
+        if !ask.start_goal && ask.previous_completed_goal_id.is_some() {
+            return Err(transport_error(
+                "previous completed goal requires start_goal",
+            ));
+        }
+        let goal_start = if ask.start_goal {
+            let model_binding = GoalModelBinding::from_destination(&destination)
+                .map_err(|_| transport_error("goal model binding is unavailable"))?;
+            Some(crate::agent_run_event_store::StartUserGoal {
+                goal_id: desk_diagnose_core::native_ids::stable(
+                    desk_diagnose_core::native_ids::Kind::Goal,
+                    &(&conversation_id, &ask.client_message_id),
+                ),
+                previous_completed_goal_id: ask.previous_completed_goal_id.clone(),
+                model_binding,
             })
-            .flatten(),
-        interactive_user_home_incarnation: scheduled
-            .is_none()
-            .then(|| {
-                readiness
-                    .as_ref()
-                    .map(|state| state.interactive_session_incarnation.as_str())
-            })
-            .flatten(),
-        max_same_tool_per_turn: config.max_same_tool_calls_per_turn,
-        clock: &clock,
-        heartbeat: Some(heartbeat.as_ref()),
-    };
-    if let Some(runtime) = delegated {
+        } else {
+            None
+        };
+        let goal_id = goal_start.as_ref().map(|goal| goal.goal_id.clone());
+        let input = crate::agent_run_event_store::AppendUserFollowupParams {
+            event_id: ask.client_message_id,
+            run_id: conversation_id.clone(),
+            client_conversation_id: client_conversation_id.clone(),
+            actor_id: actor_id.clone(),
+            device_id: target_device_id.clone(),
+            surface: AgentSessionSurface::AiAssistant,
+            policy_revision: PERSONAL_ASSISTANT_POLICY_REVISION,
+            current_scope: scope.clone(),
+            read_context: Some(read_context.clone()),
+            message: (*user).clone(),
+            created_at: accepted_at.clone(),
+        };
+        let event_store = crate::agent_run_event_store::SignalAgentRunEventStore::new(db.clone());
+        let append_result = match goal_start {
+            Some(goal) => {
+                desk_diagnose_core::future::boxed(|| event_store.append_user_goal(input, goal))
+                    .await
+            }
+            None => {
+                desk_diagnose_core::future::boxed(|| event_store.append_user_followup(input)).await
+            }
+        };
+        let ack = match append_result {
+            Ok(ack) => ack,
+            Err(error) => {
+                desk_diagnose_core::future::boxed(|| async { stream_event(
+                    connections.as_ref(),
+                    &browser_connection_id,
+                    &AgentEvent::error(&request_id, 1, error),
+                )
+                .await }).await;
+                return Ok(None);
+            }
+        };
+        log::info!(
+            "[assistant-input] accepted request_id={} message_id={} conversation_id={} input_seq={} already_handled={}",
+            request_id,
+            user.message_id,
+            conversation_id,
+            ack.input_seq,
+            ack.already_handled
+        );
+        desk_diagnose_core::future::boxed(|| async { stream_event(
+            connections.as_ref(),
+            &browser_connection_id,
+            &AgentEvent::status(&request_id, 1, "accepted"),
+        )
+        .await }).await;
+        if let Err(error) = tools.bind_original_input(
+            ack.input_revision,
+            read_context,
+            destination,
+            client_conversation_id.clone(),
+        ) {
+            desk_diagnose_core::future::boxed(|| async { stream_event(
+                connections.as_ref(),
+                &browser_connection_id,
+                &AgentEvent::error(&request_id, 2, error),
+            )
+            .await }).await;
+            return Ok(None);
+        }
+        let input_sessions = sessions
+            .clone()
+            .with_expected_input_revision(ack.input_revision);
+        let deps = LoopDeps {
+            session_seam: &input_sessions,
+            ..deps
+        };
+        if ack.already_handled {
+            match desk_diagnose_core::future::boxed(|| async { sessions.read_snapshot(&conversation_id).await }).await {
+                Ok(Some(snapshot)) if snapshot.handled_input_seq >= ack.input_seq => {
+                    if let Some(answer) = latest_committed_answer(&snapshot) {
+                        desk_diagnose_core::future::boxed(|| async { stream_event(
+                            connections.as_ref(),
+                            &browser_connection_id,
+                            &AgentEvent::answer(&request_id, 2, answer),
+                        )
+                        .await }).await;
+                        return Ok(None);
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    desk_diagnose_core::future::boxed(|| async { stream_event(
+                        connections.as_ref(),
+                        &browser_connection_id,
+                        &AgentEvent::error(&request_id, 2, error),
+                    )
+                    .await }).await;
+                    return Ok(None);
+                }
+            }
+        }
         let claim = ClaimTurnParams {
             conversation_id,
             actor_id,
@@ -2215,464 +2819,128 @@ async fn compose_turn_inner(
             current_pdp_scope: scope,
             turn_id: turn_id.clone(),
             request_id: Some(request_id.clone()),
-            connection_id: None,
-            trigger_origin: runtime.origin(),
-            now: clock(),
-        };
-        let store = crate::agent_subagent_store::SubAgentStore::new(db.clone());
-        let mut sink = StreamingTurnSink::starting_at(|_event: AiAssistantEvent| {}, request_id, 0);
-        sink.set_provenance(AiProvenance::stamp(config.model, Some(clock())));
-        sink.turn_started(&turn_id);
-        let outcome = match runtime {
-            desk_diagnose_core::subagent::runtime::RuntimeTurn::Child { run, .. } => {
-                match desk_diagnose_core::future::boxed(|| {
-                    store.claim_child(&claim, &run.binding.task_id, run.fence(), &destination)
-                })
-                .await
-                .map_err(|error| transport_error(format!("claim delegated task: {error}")))?
-                {
-                    crate::agent_subagent_store::SubAgentClaimOutcome::Claimed(claimed) => {
-                        desk_diagnose_core::future::boxed(|| {
-                            desk_diagnose_core::agent_loop::run_preclaimed_subagent_turn(
-                                &deps,
-                                claimed.session,
-                                &mut sink,
-                            )
-                        })
-                        .await?
-                    }
-                    crate::agent_subagent_store::SubAgentClaimOutcome::Blocked(_) => {
-                        LoopOutcome::TurnBusy
-                    }
-                }
-            }
-            desk_diagnose_core::subagent::runtime::RuntimeTurn::ParentCompletion { .. } => {
-                match desk_diagnose_core::future::boxed(|| {
-                    store.claim_parent_completion(&claim, &destination)
-                })
-                .await
-                .map_err(|error| {
-                    transport_error(format!("claim delegated result interpretation: {error}"))
-                })? {
-                    Some(claimed) => {
-                        desk_diagnose_core::future::boxed(|| {
-                            desk_diagnose_core::agent_loop::run_preclaimed_subagent_completion(
-                                &deps,
-                                claimed.session,
-                                &mut sink,
-                            )
-                        })
-                        .await?
-                    }
-                    None => LoopOutcome::TurnBusy,
-                }
-            }
-        };
-        sink.finish_outcome(&outcome);
-        return Ok(Some(outcome));
-    }
-    if let Some(goal) = goal_resume {
-        let bound = GoalModelBinding::from_destination(&destination)
-            .map_err(|_| model_rejected("goal model binding is unavailable"))?;
-        if bound != goal.model_binding
-            || goal.conversation_id != conversation_id
-            || goal.owner_id != actor_id
-            || goal.device_id != target_device_id
-            || snapshot
-                .as_ref()
-                .is_none_or(|session| session.input_revision != goal.input_revision)
-        {
-            return Err(model_rejected(
-                "goal continuation is stale or its model changed",
-            ));
-        }
-        let claim = ClaimTurnParams {
-            conversation_id,
-            actor_id,
-            device_id: target_device_id,
-            policy_revision: PERSONAL_ASSISTANT_POLICY_REVISION,
-            current_pdp_scope: scope,
-            turn_id: turn_id.clone(),
-            request_id: None,
-            connection_id: None,
-            trigger_origin: TriggerOrigin::GoalContinuation,
-            now: clock(),
-        };
-        let claimed = crate::agent_goal_store::claim_slice(
-            &db,
-            &claim,
-            &goal.goal_id,
-            Some(goal.state_version),
-            &turn_id,
-        )
-        .await
-        .map_err(|error| transport_error(format!("claim AI Assistant goal: {error}")))?;
-        let Some(claimed) = claimed else {
-            return Ok(Some(LoopOutcome::TurnBusy));
-        };
-        let mut sink = StreamingTurnSink::starting_at(|_event: AiAssistantEvent| {}, request_id, 0);
-        sink.set_provenance(AiProvenance::stamp(config.model, Some(clock())));
-        sink.turn_started(&turn_id);
-        let outcome = desk_diagnose_core::future::boxed(|| {
-            run_preclaimed_goal_slice(&deps, claimed.session, &mut sink)
-        })
-        .await?;
-        sink.finish_outcome(&outcome);
-        return Ok(Some(outcome));
-    }
-    if let Some(resume) = scheduled {
-        let mut sink = StreamingTurnSink::starting_at(|_event: AiAssistantEvent| {}, request_id, 0);
-        sink.set_provenance(AiProvenance::stamp(config.model, Some(clock())));
-        sink.turn_started(&turn_id);
-        let outcome = scheduled_dispatch::drive(
-            &deps,
-            resume.claimed.session,
-            &resume.claimed.run.run_id,
-            resume.permission_request_id.as_deref(),
-            resume.fresh.as_ref(),
-            &mut sink,
-        )
-        .await?;
-        sink.finish_outcome(&outcome);
-        return Ok(Some(outcome));
-    }
-    let accepted_at = clock();
-    if resume_conversation_id.is_some() {
-        let decision_message = match (|| {
-            let policy = model
-                .model_egress_policy()?
-                .ok_or_else(|| transport_error("permission model policy is unavailable"))?;
-            if let Some((creation, child)) = &permission_child_context {
-                return desk_diagnose_core::permission_resume::authorized_child_permission_resume_message(
-                    format!("{request_id}-decision"), &policy, creation,
-                    child.agent_role.binding().ok_or_else(|| transport_error("delegated permission role is unavailable"))?,
-                );
-            }
-            let original = snapshot
-                .as_ref()
-                .and_then(|session| {
-                    desk_diagnose_core::permission_resume::latest_user_requirement(
-                        &session.messages,
-                    )
-                })
-                .ok_or_else(|| transport_error("original permission input is unavailable"))?;
-            authorized_permission_resume_message(
-                format!("{request_id}-decision"),
-                &policy,
-                original,
-            )
-        })() {
-            Ok(message) => message,
-            Err(error) => {
-                log::warn!("[ai-assistant] failed to bind permission resume event: {error:?}");
-                return Ok(None);
-            }
-        };
-        let claim = ClaimTurnParams {
-            conversation_id,
-            actor_id,
-            device_id: target_device_id,
-            policy_revision: PERSONAL_ASSISTANT_POLICY_REVISION,
-            current_pdp_scope: scope,
-            turn_id: turn_id.clone(),
-            request_id: None,
-            connection_id: None,
-            trigger_origin: TriggerOrigin::PermissionDecision,
+            connection_id: Some(browser_connection_id.clone()),
+            trigger_origin: if ask.start_goal {
+                TriggerOrigin::GoalContinuation
+            } else {
+                TriggerOrigin::User
+            },
             now: accepted_at,
         };
-        let mut sink = StreamingTurnSink::starting_at(|_event: AiAssistantEvent| {}, request_id, 0);
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AiAssistantEvent>();
+        let forward_connections = connections.clone();
+        let forward_browser = browser_connection_id.clone();
+        let forwarder = actix_web::rt::spawn(async move {
+            while let Some(event) = desk_diagnose_core::future::boxed(|| async { rx.recv().await }).await {
+                desk_diagnose_core::future::boxed(|| async { stream_event(forward_connections.as_ref(), &forward_browser, &event).await }).await;
+            }
+        });
+        let mut sink = StreamingTurnSink::starting_at(
+            move |event: AiAssistantEvent| {
+                let _ = tx.send(event);
+            },
+            request_id,
+            2,
+        );
         sink.set_provenance(AiProvenance::stamp(
             config.model,
             Some(chrono::Utc::now().to_rfc3339()),
         ));
         sink.turn_started(&turn_id);
-        match desk_diagnose_core::future::boxed(|| {
-            resume_agent_turn_after_permission(&deps, claim, decision_message, &mut sink)
-        })
-        .await
-        {
-            Ok(LoopOutcome::TurnBusy) => {
-                // A newer owner follow-up won the claim. Its input supersedes
-                // this grant-triggered resume, so no retry is appropriate.
+        if ask.start_goal {
+            let goal_id = goal_id.as_deref().ok_or_else(|| transport_error("goal id is unavailable"))?;
+            let claimed = desk_diagnose_core::future::boxed(|| crate::agent_goal_store::claim_slice(
+                &db, &claim, goal_id, None, &turn_id,
+            )).await
+            .map_err(|error| transport_error(format!("claim AI Assistant goal: {error}")))?;
+            match claimed {
+                Some(claimed) => {
+                    match desk_diagnose_core::future::boxed(|| {
+                        run_preclaimed_goal_slice(&deps, claimed.session, &mut sink)
+                    })
+                    .await
+                    {
+                        Ok(outcome) => sink.finish_outcome(&outcome),
+                        Err(error) => sink.error(error),
+                    }
+                }
+                None => sink.on_answer_committed(
+                    "The goal was queued and will resume when the session is available.",
+                ),
             }
-            Ok(outcome) => {
-                rehearsal::finish_answer(
-                    &db,
-                    actor_user_id,
-                    rehearsal_conversation.as_deref(),
-                    &outcome,
-                )
-                .await?;
-                sink.finish_outcome(&outcome);
-            }
-            Err(error) => {
-                log::warn!(
-                    "[ai-assistant] permission-resumed turn failed: kind={:?}, retryable={}, message={}",
-                    error.kind,
-                    error.retryable,
-                    error.message
-                );
-                rehearsal::finish_error(&db, actor_user_id, rehearsal_conversation.as_deref())
-                    .await;
-                sink.error(error);
-            }
-        }
-        return Ok(None);
-    }
-    let user = match model_bound_user_message(
-        ask.client_message_id.clone(),
-        ask.question,
-        destination.clone(),
-    ) {
-        Ok(user) => user,
-        Err(error) => {
-            stream_event(
-                connections.as_ref(),
-                &browser_connection_id,
-                &AgentEvent::error(&request_id, 1, error),
-            )
-            .await;
+            drop(sink);
+            let _ = forwarder.await;
             return Ok(None);
         }
-    };
-    if !ask.start_goal && ask.previous_completed_goal_id.is_some() {
-        return Err(transport_error(
-            "previous completed goal requires start_goal",
-        ));
-    }
-    let goal_start = if ask.start_goal {
-        let model_binding = GoalModelBinding::from_destination(&destination)
-            .map_err(|_| transport_error("goal model binding is unavailable"))?;
-        Some(crate::agent_run_event_store::StartUserGoal {
-            goal_id: desk_diagnose_core::native_ids::stable(
-                desk_diagnose_core::native_ids::Kind::Goal,
-                &(&conversation_id, &ask.client_message_id),
-            ),
-            previous_completed_goal_id: ask.previous_completed_goal_id.clone(),
-            model_binding,
-        })
-    } else {
-        None
-    };
-    let goal_id = goal_start.as_ref().map(|goal| goal.goal_id.clone());
-    let input = crate::agent_run_event_store::AppendUserFollowupParams {
-        event_id: ask.client_message_id,
-        run_id: conversation_id.clone(),
-        client_conversation_id: client_conversation_id.clone(),
-        actor_id: actor_id.clone(),
-        device_id: target_device_id.clone(),
-        surface: AgentSessionSurface::AiAssistant,
-        policy_revision: PERSONAL_ASSISTANT_POLICY_REVISION,
-        current_scope: scope.clone(),
-        read_context: Some(read_context.clone()),
-        message: user.clone(),
-        created_at: accepted_at.clone(),
-    };
-    let event_store = crate::agent_run_event_store::SignalAgentRunEventStore::new(db.clone());
-    let append_result = match goal_start {
-        Some(goal) => {
-            desk_diagnose_core::future::boxed(|| event_store.append_user_goal(input, goal)).await
-        }
-        None => desk_diagnose_core::future::boxed(|| event_store.append_user_followup(input)).await,
-    };
-    let ack = match append_result {
-        Ok(ack) => ack,
-        Err(error) => {
-            stream_event(
-                connections.as_ref(),
-                &browser_connection_id,
-                &AgentEvent::error(&request_id, 1, error),
-            )
-            .await;
-            return Ok(None);
-        }
-    };
-    log::info!(
-        "[assistant-input] accepted request_id={} message_id={} conversation_id={} input_seq={} already_handled={}",
-        request_id,
-        user.message_id,
-        conversation_id,
-        ack.input_seq,
-        ack.already_handled
-    );
-    stream_event(
-        connections.as_ref(),
-        &browser_connection_id,
-        &AgentEvent::status(&request_id, 1, "accepted"),
-    )
-    .await;
-    if let Err(error) = tools.bind_original_input(
-        ack.input_revision,
-        read_context,
-        destination,
-        client_conversation_id.clone(),
-    ) {
-        stream_event(
-            connections.as_ref(),
-            &browser_connection_id,
-            &AgentEvent::error(&request_id, 2, error),
-        )
-        .await;
-        return Ok(None);
-    }
-    let input_sessions = sessions
-        .clone()
-        .with_expected_input_revision(ack.input_revision);
-    let deps = LoopDeps {
-        session_seam: &input_sessions,
-        ..deps
-    };
-    if ack.already_handled {
-        match sessions.read_snapshot(&conversation_id).await {
-            Ok(Some(snapshot)) if snapshot.handled_input_seq >= ack.input_seq => {
-                if let Some(answer) = latest_committed_answer(&snapshot) {
-                    stream_event(
-                        connections.as_ref(),
-                        &browser_connection_id,
-                        &AgentEvent::answer(&request_id, 2, answer),
+        loop {
+            match desk_diagnose_core::future::boxed(|| {
+                run_agent_turn(&deps, claim.clone(), (*user).clone(), &mut sink)
+            })
+            .await
+            {
+                Ok(LoopOutcome::TurnBusy) => {
+                    match desk_diagnose_core::future::boxed(|| async { sessions.read_snapshot(&claim.conversation_id).await }).await {
+                        Ok(Some(snapshot)) if snapshot.handled_input_seq >= ack.input_seq => {
+                            if let Some(answer) = latest_committed_answer(&snapshot) {
+                                sink.on_answer_committed(&answer);
+                            } else {
+                                sink.error(transport_error(
+                            "the accepted AI Assistant input settled without an answer; send a follow-up to retry",
+                        ));
+                            }
+                            break;
+                        }
+                        Ok(_) => {
+                            // Another request owns the run. The durable follow-up is
+                            // already ACKed, so wait until that owner either handles it
+                            // or is superseded, then race to claim the newest revision.
+                            desk_diagnose_core::future::boxed(|| async { tokio::time::sleep(BUSY_FOLLOWUP_RETRY_INTERVAL).await }).await;
+                        }
+                        Err(error) => {
+                            sink.error(error);
+                            break;
+                        }
+                    }
+                }
+                Ok(outcome) => {
+                    desk_diagnose_core::future::boxed(|| async { rehearsal::finish_answer(
+                        &db,
+                        actor_user_id,
+                        rehearsal_conversation.as_deref(),
+                        &outcome,
                     )
-                    .await;
-                    return Ok(None);
+                    .await }).await?;
+                    sink.finish_outcome(&outcome);
+                    break;
+                }
+                Err(error) => {
+                    log::warn!(
+                        "[ai-assistant] owner turn failed: kind={:?}, retryable={}, message={}",
+                        error.kind,
+                        error.retryable,
+                        error.message
+                    );
+                    desk_diagnose_core::future::boxed(|| async { rehearsal::finish_error(&db, actor_user_id, rehearsal_conversation.as_deref())
+                        .await }).await;
+                    sink.error(error);
+                    break;
                 }
             }
-            Ok(_) => {}
-            Err(error) => {
-                stream_event(
-                    connections.as_ref(),
-                    &browser_connection_id,
-                    &AgentEvent::error(&request_id, 2, error),
-                )
-                .await;
-                return Ok(None);
-            }
-        }
-    }
-    let claim = ClaimTurnParams {
-        conversation_id,
-        actor_id,
-        device_id: target_device_id,
-        policy_revision: PERSONAL_ASSISTANT_POLICY_REVISION,
-        current_pdp_scope: scope,
-        turn_id: turn_id.clone(),
-        request_id: Some(request_id.clone()),
-        connection_id: Some(browser_connection_id.clone()),
-        trigger_origin: if ask.start_goal {
-            TriggerOrigin::GoalContinuation
-        } else {
-            TriggerOrigin::User
-        },
-        now: accepted_at,
-    };
-
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AiAssistantEvent>();
-    let forward_connections = connections.clone();
-    let forward_browser = browser_connection_id.clone();
-    let forwarder = actix_web::rt::spawn(async move {
-        while let Some(event) = rx.recv().await {
-            stream_event(forward_connections.as_ref(), &forward_browser, &event).await;
-        }
-    });
-    let mut sink = StreamingTurnSink::starting_at(
-        move |event: AiAssistantEvent| {
-            let _ = tx.send(event);
-        },
-        request_id,
-        2,
-    );
-    sink.set_provenance(AiProvenance::stamp(
-        config.model,
-        Some(chrono::Utc::now().to_rfc3339()),
-    ));
-    sink.turn_started(&turn_id);
-    if ask.start_goal {
-        let claimed = crate::agent_goal_store::claim_slice(
-            &db,
-            &claim,
-            goal_id
-                .as_deref()
-                .ok_or_else(|| transport_error("goal id is unavailable"))?,
-            None,
-            &turn_id,
-        )
-        .await
-        .map_err(|error| transport_error(format!("claim AI Assistant goal: {error}")))?;
-        match claimed {
-            Some(claimed) => {
-                match desk_diagnose_core::future::boxed(|| {
-                    run_preclaimed_goal_slice(&deps, claimed.session, &mut sink)
-                })
-                .await
-                {
-                    Ok(outcome) => sink.finish_outcome(&outcome),
-                    Err(error) => sink.error(error),
-                }
-            }
-            None => sink.on_answer_committed(
-                "The goal was queued and will resume when the session is available.",
-            ),
         }
         drop(sink);
         let _ = forwarder.await;
-        return Ok(None);
-    }
-    loop {
-        match desk_diagnose_core::future::boxed(|| {
-            run_agent_turn(&deps, claim.clone(), user.clone(), &mut sink)
-        })
-        .await
-        {
-            Ok(LoopOutcome::TurnBusy) => {
-                match sessions.read_snapshot(&claim.conversation_id).await {
-                    Ok(Some(snapshot)) if snapshot.handled_input_seq >= ack.input_seq => {
-                        if let Some(answer) = latest_committed_answer(&snapshot) {
-                            sink.on_answer_committed(&answer);
-                        } else {
-                            sink.error(transport_error(
-                            "the accepted AI Assistant input settled without an answer; send a follow-up to retry",
-                        ));
-                        }
-                        break;
-                    }
-                    Ok(_) => {
-                        // Another request owns the run. The durable follow-up is
-                        // already ACKed, so wait until that owner either handles it
-                        // or is superseded, then race to claim the newest revision.
-                        tokio::time::sleep(BUSY_FOLLOWUP_RETRY_INTERVAL).await;
-                    }
-                    Err(error) => {
-                        sink.error(error);
-                        break;
-                    }
-                }
-            }
-            Ok(outcome) => {
-                rehearsal::finish_answer(
-                    &db,
-                    actor_user_id,
-                    rehearsal_conversation.as_deref(),
-                    &outcome,
-                )
-                .await?;
-                sink.finish_outcome(&outcome);
-                break;
-            }
-            Err(error) => {
-                log::warn!(
-                    "[ai-assistant] owner turn failed: kind={:?}, retryable={}, message={}",
-                    error.kind,
-                    error.retryable,
-                    error.message
-                );
-                rehearsal::finish_error(&db, actor_user_id, rehearsal_conversation.as_deref())
-                    .await;
-                sink.error(error);
-                break;
-            }
-        }
-    }
-    drop(sink);
-    let _ = forwarder.await;
-    Ok(None)
+        Ok(None)
+}).await
+                                    }))))
+                                }),
+                            ))
+                        }),
+                    ))
+                }),
+            ))
+        }),
+    ))
 }
 
 #[cfg(test)]

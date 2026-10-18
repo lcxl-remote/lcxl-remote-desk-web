@@ -11,13 +11,16 @@ pub(crate) async fn synchronize_control_on<C: ConnectionTrait + crate::config::C
     now_ms: i64,
     deadline_reached: bool,
 ) -> Result<desk_diagnose_core::model_observability::permission::PendingEnds, DbErr> {
-    let row = session_row::Entity::find()
-        .filter(session_row::Column::ConversationId.eq(&run.child_conversation_id))
-        .filter(session_row::Column::ActorId.eq(&run.actor_id))
-        .filter(session_row::Column::DeviceId.eq(&run.device_id))
-        .one(db)
-        .await?
-        .ok_or_else(invalid)?;
+    let row = desk_diagnose_core::future::boxed(|| async {
+        session_row::Entity::find()
+            .filter(session_row::Column::ConversationId.eq(&run.child_conversation_id))
+            .filter(session_row::Column::ActorId.eq(&run.actor_id))
+            .filter(session_row::Column::DeviceId.eq(&run.device_id))
+            .one(db)
+            .await
+    })
+    .await?
+    .ok_or_else(invalid)?;
     let mut session = PersistedAgentSession::decode_json(&row.state_json).map_err(|_| invalid())?;
     if session.version != row.version
         || i64::try_from(session.lease_token).ok() != Some(row.lease_token)
@@ -33,7 +36,10 @@ pub(crate) async fn synchronize_control_on<C: ConnectionTrait + crate::config::C
             "terminal:{}:{}",
             run.binding.task_id, run.binding.control_revision
         );
-        super::native_cancel::cancel_native_actions_on(db, &session, &operation, now_ms).await?;
+        desk_diagnose_core::future::boxed(|| async {
+            super::native_cancel::cancel_native_actions_on(db, &session, &operation, now_ms).await
+        })
+        .await?;
     }
     let permission_ends =
         desk_diagnose_core::model_observability::permission::PendingEnds::task_control(
@@ -44,12 +50,15 @@ pub(crate) async fn synchronize_control_on<C: ConnectionTrait + crate::config::C
     let input_changed = session.input_revision != run.binding.input_revision;
     synchronize_session(&mut session, run, &now.to_rfc3339()).map_err(|_| invalid())?;
     if input_changed {
-        let task = run_row::Entity::find()
-            .filter(run_row::Column::TaskId.eq(&run.binding.task_id))
-            .filter(run_row::Column::ChildConversationId.eq(&run.child_conversation_id))
-            .one(db)
-            .await?
-            .ok_or_else(invalid)?;
+        let task = desk_diagnose_core::future::boxed(|| async {
+            run_row::Entity::find()
+                .filter(run_row::Column::TaskId.eq(&run.binding.task_id))
+                .filter(run_row::Column::ChildConversationId.eq(&run.child_conversation_id))
+                .one(db)
+                .await
+        })
+        .await?
+        .ok_or_else(invalid)?;
         let context: desk_diagnose_core::subagent::creation::TaskCreationEnvelope =
             serde_json::from_str(&task.creation_envelope_json).map_err(|_| invalid())?;
         context.validate_task(&run.binding).map_err(|_| invalid())?;

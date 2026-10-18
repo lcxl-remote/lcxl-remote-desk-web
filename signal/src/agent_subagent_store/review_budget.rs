@@ -55,14 +55,19 @@ pub(crate) fn validate_review_scope_on<'a>(
     authority: &'a ReviewCallAuthority,
     now_ms: i64,
 ) -> std::pin::Pin<Box<impl std::future::Future<Output = Result<(), DbErr>> + 'a>> {
-    Box::pin(validate_review_scope_on_inner(txn, authority, now_ms))
+    Box::pin(validate_review_scope_on_inner(
+        SessionRead::Load(txn),
+        authority,
+        now_ms,
+    ))
 }
 
 async fn validate_review_scope_on_inner(
-    txn: &DatabaseTransaction,
+    read: SessionRead<'_>,
     authority: &ReviewCallAuthority,
     now_ms: i64,
 ) -> Result<(), DbErr> {
+    let txn = read.txn();
     validate_review_lease_on(txn, authority, now_ms).await?;
     let configured = crate::approval_model_provider::load(txn).await?;
     if configured.unavailable_reason().is_some()
@@ -72,14 +77,39 @@ async fn validate_review_scope_on_inner(
     {
         return Err(invalid());
     }
-    let row = session_row::Entity::find()
-        .filter(session_row::Column::ConversationId.eq(&authority.conversation_id))
-        .filter(session_row::Column::ActorId.eq(&authority.actor_id))
-        .filter(session_row::Column::DeviceId.eq(&authority.device_id))
-        .one(txn)
-        .await?
-        .ok_or_else(invalid)?;
-    let session = PersistedAgentSession::decode_json(&row.state_json).map_err(|_| invalid())?;
+    let row = match read {
+        SessionRead::Load(_) => session_row::Entity::find()
+            .filter(session_row::Column::ConversationId.eq(&authority.conversation_id))
+            .filter(session_row::Column::ActorId.eq(&authority.actor_id))
+            .filter(session_row::Column::DeviceId.eq(&authority.device_id))
+            .one(txn)
+            .await?
+            .ok_or_else(invalid)?,
+        SessionRead::Reuse(proof) => {
+            proof
+                .recheck_subject(
+                    &authority.conversation_id,
+                    &authority.actor_id,
+                    &authority.device_id,
+                )
+                .await?
+        }
+    };
+    let session = read.decode(&row)?;
+    desk_diagnose_core::future::send_phase(|| {
+        validate_review_session_on(read, authority, &row, &session, now_ms)
+    })
+    .await
+}
+
+async fn validate_review_session_on(
+    read: SessionRead<'_>,
+    authority: &ReviewCallAuthority,
+    row: &session_row::Model,
+    session: &PersistedAgentSession,
+    now_ms: i64,
+) -> Result<(), DbErr> {
+    let txn = read.txn();
     if session.surface != AgentSessionSurface::AiAssistant
         || session.main_stopped
         || session.input_revision != authority.input_revision
@@ -92,7 +122,7 @@ async fn validate_review_scope_on_inner(
     {
         return Err(invalid());
     }
-    if !shared_approval_current_on(txn, &session, now_ms).await? {
+    if !shared_approval_current_on(txn, session, now_ms).await? {
         return Err(invalid());
     }
     let delegated = crate::entity::agent_approval_delegation::Entity::find()
@@ -111,12 +141,25 @@ async fn validate_review_scope_on_inner(
         .ok_or_else(invalid)?;
     let delegated = crate::agent_approval_store::decode(&delegated)?;
     delegated
-        .require_current_for_session(&session)
+        .require_current_for_session(session)
         .map_err(|_| invalid())?;
     if delegated.revision != authority.delegation_revision {
         return Err(invalid());
     }
-    validate_review_subject_on(txn, authority, &row, &session, now_ms).await?;
+    validate_review_subject_on(txn, authority, row, session, now_ms).await?;
+    desk_diagnose_core::future::send_phase(|| {
+        validate_review_source_on(read, authority, session, now_ms)
+    })
+    .await
+}
+
+async fn validate_review_source_on(
+    read: SessionRead<'_>,
+    authority: &ReviewCallAuthority,
+    session: &PersistedAgentSession,
+    now_ms: i64,
+) -> Result<(), DbErr> {
+    let txn = read.txn();
     let Some(group_id) = &authority.group_id else {
         return if session.agent_role.is_main() {
             Ok(())
@@ -139,13 +182,19 @@ async fn validate_review_scope_on_inner(
     {
         return Err(invalid());
     }
-    parent_on(
-        txn,
-        &group.root_conversation_id,
-        &group.actor_id,
-        &group.device_id,
-    )
-    .await?;
+    if let SessionRead::Reuse(proof) = read
+        && group.root_conversation_id == proof.session().conversation_id
+    {
+        proof.validate_parent().await?;
+    } else {
+        parent_on(
+            txn,
+            &group.root_conversation_id,
+            &group.actor_id,
+            &group.device_id,
+        )
+        .await?;
+    }
     if let Some(task_id) = &authority.task_id {
         let task = run_row::Entity::find()
             .filter(run_row::Column::TaskId.eq(task_id))
@@ -156,7 +205,7 @@ async fn validate_review_scope_on_inner(
             .await?
             .ok_or_else(invalid)?;
         let run = decode_run(&task)?;
-        run.validate_session(&session).map_err(|_| invalid())?;
+        run.validate_session(session).map_err(|_| invalid())?;
         run.require_current(run.fence()).map_err(|_| invalid())?;
         if run.binding.source_epoch != group.source_epoch
             || run.binding.source != group.source
@@ -256,23 +305,29 @@ pub(crate) async fn reserve_review_attempt_on(
     now_ms: i64,
     attempt: desk_diagnose_core::approval_review::ReviewAttemptState,
 ) -> Result<(ReviewCallAuthority, Option<DelegationCallReservation>), DbErr> {
-    let review = review_row::Entity::find()
-        .filter(review_row::Column::CandidateId.eq(&candidate.candidate_id))
-        .one(txn)
-        .await?
-        .ok_or_else(invalid)?;
+    let review = desk_diagnose_core::future::boxed(|| async {
+        review_row::Entity::find()
+            .filter(review_row::Column::CandidateId.eq(&candidate.candidate_id))
+            .one(txn)
+            .await
+    })
+    .await?
+    .ok_or_else(invalid)?;
     if review.call_authority_json.is_some() || review.delegation_reservation_id.is_some() {
         return Err(invalid());
     }
-    let row = session_row::Entity::find()
-        .filter(session_row::Column::ConversationId.eq(&candidate.conversation_id))
-        .filter(session_row::Column::ActorId.eq(&candidate.owner_id))
-        .filter(session_row::Column::DeviceId.eq(&candidate.device_id))
-        .one(txn)
-        .await?
-        .ok_or_else(invalid)?;
-    let mut session = PersistedAgentSession::decode_json(&row.state_json).map_err(|_| invalid())?;
-    session.version = row.version;
+    let row = desk_diagnose_core::future::boxed(|| async {
+        session_row::Entity::find()
+            .filter(session_row::Column::ConversationId.eq(&candidate.conversation_id))
+            .filter(session_row::Column::ActorId.eq(&candidate.owner_id))
+            .filter(session_row::Column::DeviceId.eq(&candidate.device_id))
+            .one(txn)
+            .await
+    })
+    .await?
+    .ok_or_else(invalid)?;
+    let proof = TxnValidatedSession::from_row(txn, row)?;
+    let session = proof.session();
     if session.input_revision != candidate.input_revision {
         return Err(invalid());
     }
@@ -283,14 +338,17 @@ pub(crate) async fn reserve_review_attempt_on(
             binding.root_conversation_id.as_str()
         });
     let group = if let Some(group_id) = &session.delegation_group_id {
-        let row = group_row::Entity::find()
-            .filter(group_row::Column::GroupId.eq(group_id))
-            .filter(group_row::Column::RootConversationId.eq(root))
-            .filter(group_row::Column::ActorId.eq(&candidate.owner_id))
-            .filter(group_row::Column::DeviceId.eq(&candidate.device_id))
-            .one(txn)
-            .await?
-            .ok_or_else(invalid)?;
+        let row = desk_diagnose_core::future::boxed(|| async {
+            group_row::Entity::find()
+                .filter(group_row::Column::GroupId.eq(group_id))
+                .filter(group_row::Column::RootConversationId.eq(root))
+                .filter(group_row::Column::ActorId.eq(&candidate.owner_id))
+                .filter(group_row::Column::DeviceId.eq(&candidate.device_id))
+                .one(txn)
+                .await
+        })
+        .await?
+        .ok_or_else(invalid)?;
         Some(decode_group(&row)?)
     } else {
         None
@@ -367,9 +425,15 @@ pub(crate) async fn reserve_review_attempt_on(
     if changed.rows_affected != 1 {
         return Err(invalid());
     }
-    validate_review_scope_on(txn, &authority, now_ms).await?;
+    desk_diagnose_core::future::boxed(|| {
+        validate_review_scope_on_inner(SessionRead::Reuse(&proof), &authority, now_ms)
+    })
+    .await?;
     let Some(group) = group else {
-        crate::approval_attempt::sync_current_on(txn, &candidate.candidate_id).await?;
+        desk_diagnose_core::future::boxed(|| async {
+            crate::approval_attempt::sync_current_on(txn, &candidate.candidate_id).await
+        })
+        .await?;
         return Ok((authority, None));
     };
     let digest = authority.request_sha256.clone();
@@ -384,20 +448,25 @@ pub(crate) async fn reserve_review_attempt_on(
         authority.lease_deadline_ms.saturating_sub(now_ms as u64),
     )
     .ok_or_else(invalid)?;
-    let admission = funding::reserve_call_with_authority_on(
-        txn,
-        &session,
-        &format!(
-            "review:{}",
-            authority.attempt.call_id(&candidate.candidate_id)
-        ),
-        DelegationCallKind::ApprovalReview,
-        &digest,
-        upper,
-        group.source.goal_id().map(|_| goal_upper),
-        Some(&authority),
-        now_ms,
-    )
+    let admission = desk_diagnose_core::future::send_phase(|| async {
+        desk_diagnose_core::future::boxed(|| async {
+            funding::reserve_call_for_session_on(
+                CallSession::Validated(&proof),
+                &format!(
+                    "review:{}",
+                    authority.attempt.call_id(&candidate.candidate_id)
+                ),
+                DelegationCallKind::ApprovalReview,
+                &digest,
+                upper,
+                group.source.goal_id().map(|_| goal_upper),
+                Some(&authority),
+                now_ms,
+            )
+            .await
+        })
+        .await
+    })
     .await?;
     let reservation = match admission {
         BudgetAdmission::Reserved(value) => value,
@@ -406,20 +475,26 @@ pub(crate) async fn reserve_review_attempt_on(
         }
         _ => return Err(invalid()),
     };
-    let changed = review_row::Entity::update_many()
-        .set(review_row::ActiveModel {
-            delegation_reservation_id: Set(Some(reservation.reservation_id.clone())),
-            ..Default::default()
-        })
-        .filter(review_row::Column::Id.eq(review.id))
-        .filter(review_row::Column::DelegationReservationId.is_null())
-        .filter(review_row::Column::ProviderReceiptId.is_null())
-        .exec(txn)
-        .await?;
+    let changed = desk_diagnose_core::future::boxed(|| async {
+        review_row::Entity::update_many()
+            .set(review_row::ActiveModel {
+                delegation_reservation_id: Set(Some(reservation.reservation_id.clone())),
+                ..Default::default()
+            })
+            .filter(review_row::Column::Id.eq(review.id))
+            .filter(review_row::Column::DelegationReservationId.is_null())
+            .filter(review_row::Column::ProviderReceiptId.is_null())
+            .exec(txn)
+            .await
+    })
+    .await?;
     if changed.rows_affected != 1 {
         return Err(invalid());
     }
-    crate::approval_attempt::sync_current_on(txn, &candidate.candidate_id).await?;
+    desk_diagnose_core::future::boxed(|| async {
+        crate::approval_attempt::sync_current_on(txn, &candidate.candidate_id).await
+    })
+    .await?;
     Ok((authority, Some(reservation)))
 }
 

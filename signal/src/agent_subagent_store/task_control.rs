@@ -35,12 +35,21 @@ impl SubAgentStore {
         request: &AiAssistantSubAgentControl,
     ) -> Result<SubAgentControlOutcome, DbErr> {
         validate_control(request)?;
-        let txn = crate::db::begin_write(&self.db, session_row::Entity).await?;
+        let txn = desk_diagnose_core::future::boxed(|| async {
+            crate::db::begin_write(&self.db, session_row::Entity).await
+        })
+        .await?;
 
-        let parent = parent_on(&txn, root, actor, device).await?;
+        let parent = desk_diagnose_core::future::boxed(|| async {
+            parent_on(&txn, root, actor, device).await
+        })
+        .await?;
         let now_ms = chrono::Utc::now().timestamp_millis();
-        let prepared = prepare_owner_control_on(&txn, &parent, request, now_ms).await?;
-        txn.commit().await?;
+        let prepared = desk_diagnose_core::future::boxed(|| async {
+            prepare_owner_control_on(&txn, &parent, request, now_ms).await
+        })
+        .await?;
+        desk_diagnose_core::future::boxed(|| async { txn.commit().await }).await?;
         prepared
             .permission_ends
             .submit(now_ms, crate::model_metrics::runtime::submit);
@@ -205,10 +214,13 @@ async fn apply_task_control_with_source_on(
         "{:x}",
         Sha256::digest(serde_json::to_vec(&(request, &adjustment_source)).map_err(|_| invalid())?)
     );
-    if let Some(receipt) = receipt_row::Entity::find()
-        .filter(receipt_row::Column::LogicalKeySha256.eq(&operation_key))
-        .one(txn)
-        .await?
+    if let Some(receipt) = desk_diagnose_core::future::boxed(|| async {
+        receipt_row::Entity::find()
+            .filter(receipt_row::Column::LogicalKeySha256.eq(&operation_key))
+            .one(txn)
+            .await
+    })
+    .await?
     {
         if receipt.root_conversation_id != parent.conversation_id
             || receipt.operation_kind != "subagent_control"
@@ -223,17 +235,20 @@ async fn apply_task_control_with_source_on(
             permission_ends: Default::default(),
         });
     }
-    let row = run_row::Entity::find()
-        .filter(run_row::Column::TaskId.eq(&request.task_id))
-        .filter(run_row::Column::RootConversationId.eq(&parent.conversation_id))
-        .filter(run_row::Column::ActorId.eq(&parent.actor_id))
-        .filter(run_row::Column::DeviceId.eq(&parent.device_id))
-        .one(txn)
-        .await?
-        .ok_or_else(|| {
-            input_observation.reject(Stage::Reference, InputIssue::UnknownReference);
-            invalid()
-        })?;
+    let row = desk_diagnose_core::future::boxed(|| async {
+        run_row::Entity::find()
+            .filter(run_row::Column::TaskId.eq(&request.task_id))
+            .filter(run_row::Column::RootConversationId.eq(&parent.conversation_id))
+            .filter(run_row::Column::ActorId.eq(&parent.actor_id))
+            .filter(run_row::Column::DeviceId.eq(&parent.device_id))
+            .one(txn)
+            .await
+    })
+    .await?
+    .ok_or_else(|| {
+        input_observation.reject(Stage::Reference, InputIssue::UnknownReference);
+        invalid()
+    })?;
     let mut run = decode_run(&row)?;
     if run.binding.input_revision != request.expected_input_revision
         || run.binding.control_revision != request.expected_control_revision
@@ -246,147 +261,176 @@ async fn apply_task_control_with_source_on(
         });
     }
     input_observation.stage(Stage::Reference, StageOutcome::Passed);
-    let group_row = group_row::Entity::find()
-        .filter(group_row::Column::GroupId.eq(&run.binding.group_id))
-        .filter(group_row::Column::RootConversationId.eq(&parent.conversation_id))
-        .filter(group_row::Column::ActorId.eq(&parent.actor_id))
-        .filter(group_row::Column::DeviceId.eq(&parent.device_id))
-        .one(txn)
+    desk_diagnose_core::future::send_phase(|| async {
+        let group_row = desk_diagnose_core::future::boxed(|| async {
+            group_row::Entity::find()
+                .filter(group_row::Column::GroupId.eq(&run.binding.group_id))
+                .filter(group_row::Column::RootConversationId.eq(&parent.conversation_id))
+                .filter(group_row::Column::ActorId.eq(&parent.actor_id))
+                .filter(group_row::Column::DeviceId.eq(&parent.device_id))
+                .one(txn)
+                .await
+        })
         .await?
         .ok_or_else(invalid)?;
-    let group = decode_group(&group_row)?;
-    if group.source != run.binding.source {
-        return Err(invalid());
-    }
-    let child_row = session_row::Entity::find()
-        .filter(session_row::Column::ConversationId.eq(&run.child_conversation_id))
-        .filter(session_row::Column::ActorId.eq(&parent.actor_id))
-        .filter(session_row::Column::DeviceId.eq(&parent.device_id))
-        .one(txn)
+        let group = decode_group(&group_row)?;
+        if group.source != run.binding.source {
+            return Err(invalid());
+        }
+        let child_row = desk_diagnose_core::future::boxed(|| async {
+            session_row::Entity::find()
+                .filter(session_row::Column::ConversationId.eq(&run.child_conversation_id))
+                .filter(session_row::Column::ActorId.eq(&parent.actor_id))
+                .filter(session_row::Column::DeviceId.eq(&parent.device_id))
+                .one(txn)
+                .await
+        })
         .await?
         .ok_or_else(invalid)?;
-    let child = PersistedAgentSession::decode_json(&child_row.state_json).map_err(|_| invalid())?;
-    run.validate_session(&child).map_err(|_| invalid())?;
-    let now = chrono::DateTime::from_timestamp_millis(now_ms)
-        .ok_or_else(invalid)?
-        .to_rfc3339();
-    let mut cancellation = None;
-    let changed = match &request.action {
-        SubAgentControlAction::Cancel => {
-            let changed = run
-                .request_cancel(run.fence(), &now)
-                .map_err(|_| invalid())?;
-            if changed {
-                super::native_cancel::cancel_native_actions_on(txn, &child, &operation_key, now_ms)
+        let child =
+            PersistedAgentSession::decode_json(&child_row.state_json).map_err(|_| invalid())?;
+        run.validate_session(&child).map_err(|_| invalid())?;
+        let now = chrono::DateTime::from_timestamp_millis(now_ms)
+            .ok_or_else(invalid)?
+            .to_rfc3339();
+        let mut cancellation = None;
+        let changed = match &request.action {
+            SubAgentControlAction::Cancel => {
+                let changed = run
+                    .request_cancel(run.fence(), &now)
+                    .map_err(|_| invalid())?;
+                if changed {
+                    desk_diagnose_core::future::boxed(|| async {
+                        super::native_cancel::cancel_native_actions_on(
+                            txn,
+                            &child,
+                            &operation_key,
+                            now_ms,
+                        )
+                        .await
+                    })
                     .await?;
-                cancellation = child.current_request_id.clone();
-                run.settle_cancel(&now).map_err(|_| invalid())?;
-            }
-            changed
-        }
-        SubAgentControlAction::Adjust { message } => {
-            if adjustment_source.is_some()
-                && (run.state.is_terminal() || run.state == SubAgentState::Cancelling)
-            {
-                input_observation.reject(Stage::Preflight, InputIssue::Precondition);
-                return Err(DbErr::Custom(
-                    desk_diagnose_core::subagent::CONTROL_OBSERVATION_CHANGED.into(),
-                ));
-            }
-            if group.source_admission == SourceAdmission::Closed
-                || now_ms >= run.binding.deadline_ms
-                || group.source_epoch != run.binding.source_epoch
-                || group.source != run.binding.source
-            {
-                input_observation.permission(PermissionOutcome::PolicyRejected);
-                return Err(invalid());
-            }
-            let criteria = run.binding.acceptance_criteria.clone();
-            run.adjust(run.fence(), message.clone(), criteria, &now)
-                .map_err(|_| {
-                    input_observation.reject(Stage::Preflight, InputIssue::Precondition);
-                    invalid()
-                })?;
-            let creation: desk_diagnose_core::subagent::creation::TaskCreationEnvelope =
-                serde_json::from_str(&row.creation_envelope_json).map_err(|_| invalid())?;
-            let label = match &adjustment_source {
-                Some(label) => {
-                    label.validate().map_err(|_| invalid())?;
-                    if !label
-                        .allowed_destinations
-                        .contains(&creation.source.model_destination)
-                    {
-                        return Err(invalid());
-                    }
-                    label.clone()
+                    cancellation = child.current_request_id.clone();
+                    run.settle_cancel(&now).map_err(|_| invalid())?;
                 }
-                None => desk_diagnose_core::model_message_labels::model_bound_user_message(
-                    format!("owner-adjustment-{operation_key}"),
-                    message.clone(),
-                    creation.source.model_destination.clone(),
-                )
-                .map_err(|_| invalid())?
-                .data_envelope
-                .ok_or_else(invalid)?,
-            };
-            let adjusted = creation
-                .adjusted(&run.binding, label, &run.child_conversation_id)
-                .map_err(|_| invalid())?;
-            let changed = run_row::Entity::update_many()
-                .set(run_row::ActiveModel {
-                    creation_envelope_json: Set(
-                        serde_json::to_string(&adjusted).map_err(|_| invalid())?
-                    ),
-                    result_envelope_json: Set(None),
-                    ..Default::default()
-                })
-                .filter(run_row::Column::Id.eq(row.id))
-                .filter(run_row::Column::StateRevision.eq(row.state_revision))
-                .exec(txn)
-                .await?;
-            if changed.rows_affected != 1 {
-                return Err(invalid());
+                changed
             }
-            cancellation = child.current_request_id.clone();
-            true
+            SubAgentControlAction::Adjust { message } => {
+                if adjustment_source.is_some()
+                    && (run.state.is_terminal() || run.state == SubAgentState::Cancelling)
+                {
+                    input_observation.reject(Stage::Preflight, InputIssue::Precondition);
+                    return Err(DbErr::Custom(
+                        desk_diagnose_core::subagent::CONTROL_OBSERVATION_CHANGED.into(),
+                    ));
+                }
+                if group.source_admission == SourceAdmission::Closed
+                    || now_ms >= run.binding.deadline_ms
+                    || group.source_epoch != run.binding.source_epoch
+                    || group.source != run.binding.source
+                {
+                    input_observation.permission(PermissionOutcome::PolicyRejected);
+                    return Err(invalid());
+                }
+                let criteria = run.binding.acceptance_criteria.clone();
+                run.adjust(run.fence(), message.clone(), criteria, &now)
+                    .map_err(|_| {
+                        input_observation.reject(Stage::Preflight, InputIssue::Precondition);
+                        invalid()
+                    })?;
+                let creation: desk_diagnose_core::subagent::creation::TaskCreationEnvelope =
+                    serde_json::from_str(&row.creation_envelope_json).map_err(|_| invalid())?;
+                let label = match &adjustment_source {
+                    Some(label) => {
+                        label.validate().map_err(|_| invalid())?;
+                        if !label
+                            .allowed_destinations
+                            .contains(&creation.source.model_destination)
+                        {
+                            return Err(invalid());
+                        }
+                        label.clone()
+                    }
+                    None => desk_diagnose_core::model_message_labels::model_bound_user_message(
+                        format!("owner-adjustment-{operation_key}"),
+                        message.clone(),
+                        creation.source.model_destination.clone(),
+                    )
+                    .map_err(|_| invalid())?
+                    .data_envelope
+                    .ok_or_else(invalid)?,
+                };
+                let adjusted = creation
+                    .adjusted(&run.binding, label, &run.child_conversation_id)
+                    .map_err(|_| invalid())?;
+                let changed = run_row::Entity::update_many()
+                    .set(run_row::ActiveModel {
+                        creation_envelope_json: Set(
+                            serde_json::to_string(&adjusted).map_err(|_| invalid())?
+                        ),
+                        result_envelope_json: Set(None),
+                        ..Default::default()
+                    })
+                    .filter(run_row::Column::Id.eq(row.id))
+                    .filter(run_row::Column::StateRevision.eq(row.state_revision))
+                    .exec(txn)
+                    .await?;
+                if changed.rows_affected != 1 {
+                    return Err(invalid());
+                }
+                cancellation = child.current_request_id.clone();
+                true
+            }
+        };
+        let permission_ends = if changed {
+            desk_diagnose_core::future::boxed(|| async {
+                replace_run_on(txn, &row, &run, now_ms).await
+            })
+            .await?;
+            let prepared = desk_diagnose_core::future::boxed(|| async {
+                synchronize_control_on(txn, &run, now_ms, false).await
+            })
+            .await?;
+            desk_diagnose_core::future::boxed(|| async {
+                append_state_event_on(txn, &group, &run, now_ms).await
+            })
+            .await?;
+            prepared
+        } else {
+            Default::default()
+        };
+        let result = SubAgentControlOutcome {
+            task: run.summary(),
+            cancel_request_id: cancellation,
+        };
+        receipt_row::ActiveModel {
+            reservation_id: Set(format!("subagent-control-{operation_key}")),
+            logical_key_sha256: Set(operation_key),
+            root_conversation_id: Set(parent.conversation_id.clone()),
+            group_id: Set(group.group_id.clone()),
+            conversation_id: Set(parent.conversation_id.clone()),
+            task_id: Set(Some(run.binding.task_id.clone())),
+            operation_kind: Set("subagent_control".into()),
+            arguments_sha256: Set(arguments),
+            source_epoch: Set(i64::try_from(run.binding.source_epoch).map_err(|_| invalid())?),
+            input_revision: Set(i64::try_from(run.binding.input_revision).map_err(|_| invalid())?),
+            control_revision: Set(
+                i64::try_from(run.binding.control_revision).map_err(|_| invalid())?
+            ),
+            reservation_json: Set(serde_json::to_string(&result).map_err(|_| invalid())?),
+            actual_json: Set(None),
+            state: Set("control_committed".into()),
+            version: Set(1),
+            created_at: Set(now_ms),
+            settled_at: Set(Some(now_ms)),
+            ..Default::default()
         }
-    };
-    let permission_ends = if changed {
-        replace_run_on(txn, &row, &run, now_ms).await?;
-        let prepared = synchronize_control_on(txn, &run, now_ms, false).await?;
-        append_state_event_on(txn, &group, &run, now_ms).await?;
-        prepared
-    } else {
-        Default::default()
-    };
-    let result = SubAgentControlOutcome {
-        task: run.summary(),
-        cancel_request_id: cancellation,
-    };
-    receipt_row::ActiveModel {
-        reservation_id: Set(format!("subagent-control-{operation_key}")),
-        logical_key_sha256: Set(operation_key),
-        root_conversation_id: Set(parent.conversation_id.clone()),
-        group_id: Set(group.group_id.clone()),
-        conversation_id: Set(parent.conversation_id.clone()),
-        task_id: Set(Some(run.binding.task_id.clone())),
-        operation_kind: Set("subagent_control".into()),
-        arguments_sha256: Set(arguments),
-        source_epoch: Set(i64::try_from(run.binding.source_epoch).map_err(|_| invalid())?),
-        input_revision: Set(i64::try_from(run.binding.input_revision).map_err(|_| invalid())?),
-        control_revision: Set(i64::try_from(run.binding.control_revision).map_err(|_| invalid())?),
-        reservation_json: Set(serde_json::to_string(&result).map_err(|_| invalid())?),
-        actual_json: Set(None),
-        state: Set("control_committed".into()),
-        version: Set(1),
-        created_at: Set(now_ms),
-        settled_at: Set(Some(now_ms)),
-        ..Default::default()
-    }
-    .insert(txn)
-    .await?;
-    Ok(PreparedControl {
-        outcome: result,
-        permission_ends,
+        .insert(txn)
+        .await?;
+        Ok(PreparedControl {
+            outcome: result,
+            permission_ends,
+        })
     })
+    .await
 }

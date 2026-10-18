@@ -79,3 +79,6 @@ pub mod approval_runtime;
 pub mod approval_attempt;
 
 pub mod approval_retry;
+
+#[cfg(test)]
+mod stack_probe;

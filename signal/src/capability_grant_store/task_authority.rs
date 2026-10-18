@@ -19,13 +19,16 @@ pub(super) async fn match_current_on(
     reserved: bool,
 ) -> Result<(), DbErr> {
     let invalid = || DbErr::Custom("capability grant is not authorized by the current run".into());
-    let row = agent_session::Entity::find()
-        .filter(agent_session::Column::ConversationId.eq(call.run_id))
-        .one(txn)
-        .await?;
+    let row = desk_diagnose_core::future::boxed(|| async {
+        agent_session::Entity::find()
+            .filter(agent_session::Column::ConversationId.eq(call.run_id))
+            .one(txn)
+            .await
+    })
+    .await?;
     let session = row
         .as_ref()
-        .map(|row| PersistedAgentSession::decode_json(&row.state_json))
+        .map(|row| PersistedAgentSession::decode_json(&row.state_json).map(Box::new))
         .transpose()
         .map_err(|_| invalid())?;
     if let Some(session) = &session
@@ -37,7 +40,10 @@ pub(super) async fn match_current_on(
         {
             return Err(invalid());
         }
-        crate::agent_subagent_store::lock_child_source_on(txn, session).await?;
+        desk_diagnose_core::future::boxed(|| async {
+            crate::agent_subagent_store::lock_child_source_on(txn, session).await
+        })
+        .await?;
         let fence =
             desk_diagnose_core::action_turn_fence::AssistantTurnFence::from_session(session)
                 .map_err(|_| invalid())?
@@ -45,60 +51,75 @@ pub(super) async fn match_current_on(
         let now_ms = i64::try_from(call.now_unix_ms)
             .map_err(|_| invalid())?
             .max(chrono::Utc::now().timestamp_millis());
-        if !crate::agent_subagent_store::check_child_action_on(txn, session, &fence, now_ms).await?
+        if !desk_diagnose_core::future::boxed(|| async {
+            crate::agent_subagent_store::check_child_action_on(txn, session, &fence, now_ms).await
+        })
+        .await?
         {
             return Err(invalid());
         }
     }
-    let fresh = session
-        .as_ref()
-        .is_some_and(|session| session.trigger_origin == TriggerOrigin::ScheduledTask);
-    let task_grant = matches!(grant.issued_by, CapabilityGrantIssuer::TaskAuthorization(_));
-    if fresh || task_grant {
-        if !fresh || !task_grant {
-            return Err(invalid());
-        }
-        // Prepare/intent callers acquire task -> session locks before work/grant
-        // locks. Rechecking those same held locks here observes revocation and
-        // expiry without trusting provenance supplied by the grant as authority.
-        let row = crate::schedule_store::lock_action_session(txn, call.run_id)
+    desk_diagnose_core::future::send_phase(|| async move {
+        let fresh = session
+            .as_ref()
+            .is_some_and(|session| session.trigger_origin == TriggerOrigin::ScheduledTask);
+        let task_grant = matches!(grant.issued_by, CapabilityGrantIssuer::TaskAuthorization(_));
+        if fresh || task_grant {
+            if !fresh || !task_grant {
+                return Err(invalid());
+            }
+            // Prepare/intent callers acquire task -> session locks before work/grant
+            // locks. Rechecking those same held locks here observes revocation and
+            // expiry without trusting provenance supplied by the grant as authority.
+            let row = desk_diagnose_core::future::boxed(|| async {
+                crate::schedule_store::lock_action_session(txn, call.run_id).await
+            })
             .await?
             .ok_or_else(invalid)?;
-        let session = PersistedAgentSession::decode_json(&row.state_json).map_err(|_| invalid())?;
-        if session.actor_id != call.actor_id || session.device_id != call.target_device_id {
-            return Err(invalid());
-        }
-        let current = crate::schedule_store::fresh_action_authority_on(txn, &session).await?;
-        if reserved {
-            match_reserved_task_capability_grant(grant, call, current.provenance())
+            let session =
+                PersistedAgentSession::decode_json(&row.state_json).map_err(|_| invalid())?;
+            if session.actor_id != call.actor_id || session.device_id != call.target_device_id {
+                return Err(invalid());
+            }
+            let current = desk_diagnose_core::future::boxed(|| async {
+                crate::schedule_store::fresh_action_authority_on(txn, &session).await
+            })
+            .await?;
+            if reserved {
+                match_reserved_task_capability_grant(grant, call, current.provenance())
+            } else {
+                match_task_capability_grant(grant, call, current.provenance())
+            }
+            .map_err(|_| invalid())
+        } else if matches!(grant.issued_by, CapabilityGrantIssuer::AiApproval(_)) {
+            let session = session.ok_or_else(invalid)?;
+            if session.actor_id != call.actor_id || session.device_id != call.target_device_id {
+                return Err(invalid());
+            }
+            let current = desk_diagnose_core::future::boxed(|| async {
+                crate::agent_approval_store::current_grant_parent_on(
+                    txn,
+                    &session,
+                    grant,
+                    call.now_unix_ms,
+                )
+                .await
+            })
+            .await?;
+            if reserved {
+                match_reserved_ai_capability_grant(grant, call, &current)
+            } else {
+                match_ai_capability_grant(grant, call, &current)
+            }
+            .map_err(|_| invalid())
         } else {
-            match_task_capability_grant(grant, call, current.provenance())
+            if reserved {
+                match_reserved_capability_grant(grant, call)
+            } else {
+                match_capability_grant(grant, call)
+            }
+            .map_err(|_| invalid())
         }
-        .map_err(|_| invalid())
-    } else if matches!(grant.issued_by, CapabilityGrantIssuer::AiApproval(_)) {
-        let session = session.ok_or_else(invalid)?;
-        if session.actor_id != call.actor_id || session.device_id != call.target_device_id {
-            return Err(invalid());
-        }
-        let current = crate::agent_approval_store::current_grant_parent_on(
-            txn,
-            &session,
-            grant,
-            call.now_unix_ms,
-        )
-        .await?;
-        if reserved {
-            match_reserved_ai_capability_grant(grant, call, &current)
-        } else {
-            match_ai_capability_grant(grant, call, &current)
-        }
-        .map_err(|_| invalid())
-    } else {
-        if reserved {
-            match_reserved_capability_grant(grant, call)
-        } else {
-            match_capability_grant(grant, call)
-        }
-        .map_err(|_| invalid())
-    }
+    })
+    .await
 }

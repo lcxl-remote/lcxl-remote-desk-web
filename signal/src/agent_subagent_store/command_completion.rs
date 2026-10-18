@@ -26,15 +26,21 @@ impl SubAgentStore {
         let now = chrono::DateTime::parse_from_rfc3339(&params.now)
             .map_err(|_| invalid())?
             .with_timezone(&chrono::Utc);
-        let txn = crate::db::begin_write(&self.db, session_row::Entity).await?;
+        let txn = desk_diagnose_core::future::boxed(|| async {
+            crate::db::begin_write(&self.db, session_row::Entity).await
+        })
+        .await?;
 
-        let row = session_row::Entity::find()
-            .filter(session_row::Column::ConversationId.eq(&params.conversation_id))
-            .filter(session_row::Column::ActorId.eq(&params.actor_id))
-            .filter(session_row::Column::DeviceId.eq(&params.device_id))
-            .one(&txn)
-            .await?
-            .ok_or_else(invalid)?;
+        let row = desk_diagnose_core::future::boxed(|| async {
+            session_row::Entity::find()
+                .filter(session_row::Column::ConversationId.eq(&params.conversation_id))
+                .filter(session_row::Column::ActorId.eq(&params.actor_id))
+                .filter(session_row::Column::DeviceId.eq(&params.device_id))
+                .one(&txn)
+                .await
+        })
+        .await?
+        .ok_or_else(invalid)?;
         let mut session =
             PersistedAgentSession::decode_json(&row.state_json).map_err(|_| invalid())?;
         if session.agent_role.binding().is_none()
@@ -43,67 +49,86 @@ impl SubAgentStore {
             || session.lease_token as i64 != row.lease_token
             || session.scope_snapshot != params.current_pdp_scope
             || session.automation_turns_used >= 3
-            || !child_resume_admitted_on(&txn, &session, now.timestamp_millis()).await?
-        {
-            return Ok(None);
-        }
-        let (creation, _) = task_context_on(&txn, &session).await?.ok_or_else(invalid)?;
-        let binding = session.agent_role.binding().ok_or_else(invalid)?;
-        parent_on(
-            &txn,
-            &binding.root_conversation_id,
-            &session.actor_id,
-            &session.device_id,
-        )
-        .await?;
-        if creation.source.model_destination != *destination
-            || !session.pending_auto_triggers.iter().any(|pending| {
-                pending.event_id == event_id
-                    && pending.kind == WorkKind::AgentExec
-                    && pending.chain_id == session.chain_id
-                    && pending.resolution_org_id.is_none()
+            || !desk_diagnose_core::future::boxed(|| async {
+                child_resume_admitted_on(&txn, &session, now.timestamp_millis()).await
             })
+            .await?
         {
             return Ok(None);
         }
-        desk_diagnose_core::assistant_policy::validate_claim(
-            session.surface,
-            Some(session.policy_revision),
-            params,
-        )
-        .map_err(|_| invalid())?;
-        session
-            .begin_turn(
-                &params.turn_id,
-                params.request_id.clone(),
-                None,
-                params.policy_revision,
-                params.current_pdp_scope.clone(),
-                &params.now,
+        desk_diagnose_core::future::send_phase(|| async {
+            let (creation, _) = desk_diagnose_core::future::boxed(|| async {
+                task_context_on(&txn, &session).await
+            })
+            .await?
+            .ok_or_else(invalid)?;
+            let binding = session.agent_role.binding().ok_or_else(invalid)?;
+            desk_diagnose_core::future::boxed(|| async {
+                parent_on(
+                    &txn,
+                    &binding.root_conversation_id,
+                    &session.actor_id,
+                    &session.device_id,
+                )
+                .await
+            })
+            .await?;
+            if creation.source.model_destination != *destination
+                || !session.pending_auto_triggers.iter().any(|pending| {
+                    pending.event_id == event_id
+                        && pending.kind == WorkKind::AgentExec
+                        && pending.chain_id == session.chain_id
+                        && pending.resolution_org_id.is_none()
+                })
+            {
+                return Ok(None);
+            }
+            desk_diagnose_core::assistant_policy::validate_claim(
+                session.surface,
+                Some(session.policy_revision),
+                params,
             )
             .map_err(|_| invalid())?;
-        session.adopt_trigger(params.trigger_origin, &params.turn_id);
-        record_child_resume_on(&txn, &session, now.timestamp_millis()).await?;
-        session.version = row.version.checked_add(1).ok_or_else(invalid)?;
-        let changed = session_row::Entity::update_many()
-            .set(session_row::ActiveModel {
-                state_json: Set(session.encode_json_for_storage().map_err(|_| invalid())?),
-                version: Set(session.version),
-                lease_token: Set(i64::try_from(session.lease_token).map_err(|_| invalid())?),
-                lease_deadline: Set(Some(now + chrono::Duration::seconds(90))),
-                updated_at: Set(now),
-
-                ..Default::default()
+            session
+                .begin_turn(
+                    &params.turn_id,
+                    params.request_id.clone(),
+                    None,
+                    params.policy_revision,
+                    params.current_pdp_scope.clone(),
+                    &params.now,
+                )
+                .map_err(|_| invalid())?;
+            session.adopt_trigger(params.trigger_origin, &params.turn_id);
+            desk_diagnose_core::future::boxed(|| async {
+                record_child_resume_on(&txn, &session, now.timestamp_millis()).await
             })
-            .filter(session_row::Column::Id.eq(row.id))
-            .filter(session_row::Column::Version.eq(row.version))
-            .filter(session_row::Column::LeaseToken.eq(row.lease_token))
-            .exec(&txn)
             .await?;
-        if changed.rows_affected != 1 {
-            return Err(invalid());
-        }
-        txn.commit().await?;
-        Ok(Some(session))
+            session.version = row.version.checked_add(1).ok_or_else(invalid)?;
+            let changed = desk_diagnose_core::future::boxed(|| async {
+                session_row::Entity::update_many()
+                .set(session_row::ActiveModel {
+                    state_json: Set(session.encode_json_for_storage().map_err(|_| invalid())?),
+                    version: Set(session.version),
+                    lease_token: Set(i64::try_from(session.lease_token).map_err(|_| invalid())?),
+                    lease_deadline: Set(Some(now + chrono::Duration::seconds(90))),
+                    updated_at: Set(now),
+
+                    ..Default::default()
+                })
+                .filter(session_row::Column::Id.eq(row.id))
+                .filter(session_row::Column::Version.eq(row.version))
+                .filter(session_row::Column::LeaseToken.eq(row.lease_token))
+                .exec(&txn)
+                .await
+            })
+            .await?;
+            if changed.rows_affected != 1 {
+                return Err(invalid());
+            }
+            desk_diagnose_core::future::boxed(|| async { txn.commit().await }).await?;
+            Ok(Some(session))
+        })
+        .await
     }
 }

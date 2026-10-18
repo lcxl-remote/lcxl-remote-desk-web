@@ -19,14 +19,17 @@ pub(crate) async fn runtime_facts_on(
     now_ms: i64,
 ) -> Result<RuntimeFacts, DbErr> {
     let mut facts = RuntimeFacts::default();
-    let rows = work::Entity::find()
-        .filter(work::Column::ConversationId.eq(&session.conversation_id))
-        .filter(work::Column::ActorId.eq(&session.actor_id))
-        .filter(work::Column::TargetDeviceId.eq(&session.device_id))
-        .order_by_asc(work::Column::Id)
-        .limit(MAX_ACTION_FACTS as u64 + 1)
-        .all(txn)
-        .await?;
+    let rows = desk_diagnose_core::future::boxed(|| async {
+        work::Entity::find()
+            .filter(work::Column::ConversationId.eq(&session.conversation_id))
+            .filter(work::Column::ActorId.eq(&session.actor_id))
+            .filter(work::Column::TargetDeviceId.eq(&session.device_id))
+            .order_by_asc(work::Column::Id)
+            .limit(MAX_ACTION_FACTS as u64 + 1)
+            .all(txn)
+            .await
+    })
+    .await?;
     if rows.len() > MAX_ACTION_FACTS {
         return Err(invalid());
     }
@@ -50,12 +53,15 @@ pub(crate) async fn runtime_facts_on(
             }
             continue;
         }
-        let original = outbox::Entity::find()
-            .filter(outbox::Column::WorkId.eq(row.id))
-            .order_by_asc(outbox::Column::Id)
-            .limit(2)
-            .all(txn)
-            .await?;
+        let original = desk_diagnose_core::future::boxed(|| async {
+            outbox::Entity::find()
+                .filter(outbox::Column::WorkId.eq(row.id))
+                .order_by_asc(outbox::Column::Id)
+                .limit(2)
+                .all(txn)
+                .await
+        })
+        .await?;
         let [dispatch] = original.as_slice() else {
             return Err(invalid());
         };
@@ -73,11 +79,14 @@ pub(crate) async fn runtime_facts_on(
         if payload.tool_name == desk_diagnose_core::command_confirmation::COMMAND_TOOL {
             let origin = payload.command_origin.as_ref().ok_or_else(invalid)?;
             validate_origin(session, origin).map_err(|_| invalid())?;
-            let task = agent_exec_task::Entity::find()
-                .filter(agent_exec_task::Column::ExecutionGeneration.eq(&dispatch.dispatch_id))
-                .filter(agent_exec_task::Column::ConversationId.eq(&session.conversation_id))
-                .one(txn)
-                .await?;
+            let task = desk_diagnose_core::future::boxed(|| async {
+                agent_exec_task::Entity::find()
+                    .filter(agent_exec_task::Column::ExecutionGeneration.eq(&dispatch.dispatch_id))
+                    .filter(agent_exec_task::Column::ConversationId.eq(&session.conversation_id))
+                    .one(txn)
+                    .await
+            })
+            .await?;
             let Some(task) = task else {
                 facts
                     .dependency(TaskDependency::Work { work_id: id })
@@ -89,10 +98,12 @@ pub(crate) async fn runtime_facts_on(
             }
             tracked_generations.push(task.execution_generation.clone());
             if task.status == crate::agent_exec_store::STATUS_DONE {
-                let Some((_output, receipt)) =
+                let Some((_output, receipt)) = desk_diagnose_core::future::boxed(|| async {
                     crate::agent_exec_store::SignalAgentExecStore::command_result_on(txn, &task)
                         .await
-                        .map_err(|_| invalid())?
+                })
+                .await
+                .map_err(|_| invalid())?
                 else {
                     return Err(invalid());
                 };
@@ -148,8 +159,10 @@ pub(crate) async fn runtime_facts_on(
                 }
                 continue;
             }
-            let (current, origin, result) =
-                SignalCapabilityGrantStore::computer_facts_on(txn, &dispatch.dispatch_id).await?;
+            let (current, origin, result) = desk_diagnose_core::future::boxed(|| async {
+                SignalCapabilityGrantStore::computer_facts_on(txn, &dispatch.dispatch_id).await
+            })
+            .await?;
             if current != row {
                 return Err(invalid());
             }
