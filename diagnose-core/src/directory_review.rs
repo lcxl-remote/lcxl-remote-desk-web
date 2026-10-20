@@ -99,6 +99,12 @@ pub fn failure_reason(reason: Option<crate::approval_observation::ReviewReason>)
         Some(ReviewReason::Policy) => {
             "Policy blocked the directory review. No directory or file operation was authorized."
         }
+        Some(ReviewReason::SourceExpired) => {
+            "The originating task reached its deadline before directory approval. No directory or file operation was authorized."
+        }
+        Some(ReviewReason::TaskExpired) => {
+            "The subagent reached its fixed deadline before directory approval. No directory or file operation was authorized."
+        }
         Some(ReviewReason::Budget) => {
             "The directory review could not complete within its authorized budget. No directory or file operation was authorized."
         }

@@ -17,6 +17,24 @@ const policy = (revision: number, deviceUnavailableMaxMs = 86_400_000) => ({
 afterEach(() => vi.unstubAllGlobals());
 
 describe('goal budget policy settings', () => {
+    it('keeps both time limits unlimited until their switches are explicitly enabled', async () => {
+        const unlimited = { ...policy(1), limits: { ...policy(1).limits, activeTimeMs: null, deadlineMs: null } };
+        const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true, json: async () => ({ success: true, data: unlimited }) })
+            .mockResolvedValueOnce({ ok: true, json: async () => ({ success: true, data: { ...unlimited, revision: 2, limits: { ...unlimited.limits, activeTimeMs: 7_200_000 } } }) });
+        vi.stubGlobal('fetch', fetchMock);
+        render(<GoalBudgetPolicySettings />);
+        const active = await screen.findByRole('switch', { name: 'pages.aiAssistant.goalBudgetActiveHours' });
+        const deadline = screen.getByRole('switch', { name: 'pages.aiAssistant.goalBudgetDeadlineDays' });
+        expect(active).not.toBeChecked();
+        expect(deadline).not.toBeChecked();
+        fireEvent.click(active);
+        expect(active).toBeChecked();
+        fireEvent.click(screen.getByRole('button', { name: 'pages.aiAssistant.goalBudgetSave' }));
+        await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+        const saved = JSON.parse(fetchMock.mock.calls[1][1].body);
+        expect(saved.limits).toMatchObject({ activeTimeMs: 7_200_000, deadlineMs: null });
+    });
+
     it('edits the always-on device unavailable maximum together with the limits', async () => {
         const fetchMock = vi.fn()
             .mockResolvedValueOnce({ ok: true, json: async () => ({ success: true, data: policy(4) }) })

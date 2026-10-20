@@ -265,6 +265,7 @@ pub enum ContextAttachmentEvent {
 
 /// Validate one persisted attachment projection. Idempotency request IDs and
 /// immutable attachment IDs must both be unique.
+#[inline(never)]
 pub fn validate_attachment_set(
     attachments: &[ContextAttachment],
 ) -> Result<(), ContextAttachmentError> {
@@ -285,6 +286,7 @@ pub fn validate_attachment_set(
     Ok(())
 }
 
+#[inline(never)]
 pub fn validate_attachment_subject(
     attachment: &ContextAttachment,
     actor_id: &str,

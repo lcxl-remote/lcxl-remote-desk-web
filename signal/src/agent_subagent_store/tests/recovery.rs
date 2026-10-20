@@ -30,6 +30,9 @@ async fn child_source(db: &DatabaseConnection, goal_source: bool) -> (SubAgentSt
         )
         .unwrap();
         let txn = db.begin().await.unwrap();
+        crate::agent_goal_store::insert_on(&txn, &goal)
+            .await
+            .unwrap();
         initialize_goal_group_on(&txn, &mut parent, &goal, now.timestamp_millis())
             .await
             .unwrap();

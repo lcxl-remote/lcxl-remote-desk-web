@@ -910,6 +910,7 @@ mod tests {
         crate::db::initialize_schema(&db).await.unwrap();
         let mut configured = crate::goal_budget_policy::read(&db).await.unwrap().limits;
         configured.model_calls = Some(4);
+        configured.deadline_ms = Some(7 * 86_400_000);
         crate::goal_budget_policy::update(
             &db,
             &desk_agent_protocol::ai_assistant::goal_budget::UpdateGoalBudgetPolicy {
@@ -957,7 +958,7 @@ mod tests {
         assert_eq!(goal.state, desk_diagnose_core::goal::GoalState::Queued);
         assert_eq!(goal.limits.model_calls, 4);
         let mut extended = configured;
-        extended.deadline_ms = Some(desk_diagnose_core::goal::DEFAULT_DEADLINE_MS + 86_400_000);
+        extended.deadline_ms = Some(8 * 86_400_000);
         extended.model_calls = Some(1);
         crate::goal_budget_policy::update(
             &db,

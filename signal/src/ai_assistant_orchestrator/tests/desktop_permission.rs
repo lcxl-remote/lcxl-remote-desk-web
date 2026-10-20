@@ -867,7 +867,7 @@ async fn approve_with_independent_model(
     use crate::entity::{agent_approval_review as review_row, agent_session as session_row};
     use desk_agent_protocol::capability_provider::ProductSurface;
     use desk_diagnose_core::approval_review::ApprovalEvidenceTrust;
-    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, TransactionTrait};
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set, TransactionTrait};
 
     let row = session_row::Entity::find()
         .filter(session_row::Column::ConversationId.eq(run_id))
@@ -880,6 +880,32 @@ async fn approve_with_independent_model(
         session.delegation_group_id.is_some(),
         "exercise delegated review admission"
     );
+    // Reproduce downtime beyond the old allocation lifetime without expiring
+    // the current session/review leases or the authoritative goal.
+    let group = crate::entity::agent_delegation_group::Entity::find()
+        .filter(
+            crate::entity::agent_delegation_group::Column::GroupId
+                .eq(session.delegation_group_id.as_ref().unwrap()),
+        )
+        .one(db)
+        .await
+        .unwrap()
+        .unwrap();
+    if group.source_goal_id.is_some() {
+        let mut stale = crate::agent_subagent_store::decode_group(&group).unwrap();
+        stale.limits.deadline_ms = Utc::now().timestamp_millis() - 7_200_000;
+        crate::entity::agent_delegation_group::Entity::update_many()
+            .set(crate::entity::agent_delegation_group::ActiveModel {
+                deadline_ms: Set(stale.limits.deadline_ms),
+                state_json: Set(serde_json::to_string(&stale).unwrap()),
+                ..Default::default()
+            })
+            .filter(crate::entity::agent_delegation_group::Column::Id.eq(group.id))
+            .exec(db)
+            .await
+            .unwrap();
+    }
+
     let listener = Arc::new(TcpListener::bind("127.0.0.1:0").await.unwrap());
     let address = listener.local_addr().unwrap();
     let mut config = crate::approval_model_provider::ApprovalModelConfig {

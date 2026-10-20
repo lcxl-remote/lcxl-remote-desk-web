@@ -566,6 +566,31 @@ async fn seed_parent(db: &DatabaseConnection) {
 }
 
 async fn seed_task(db: &DatabaseConnection, group_id: &str, goal_id: &str) -> SubAgentRun {
+    use desk_diagnose_core::goal::{GoalLimits, GoalModelBinding, GoalOpening, GoalRun};
+    let goal = GoalRun::new(
+        goal_id.into(),
+        "root".into(),
+        "1".into(),
+        "1".into(),
+        "Investigate".into(),
+        format!("owner-{group_id}"),
+        GoalOpening::OwnerRequest,
+        GoalModelBinding {
+            connection_id: "gateway".into(),
+            connection_revision: 1,
+            profile_revision: 1,
+            model_id: "model".into(),
+        },
+        1,
+        1,
+        GoalLimits::default(),
+    )
+    .unwrap();
+    let txn = db.begin().await.unwrap();
+    crate::agent_goal_store::insert_on(&txn, &goal)
+        .await
+        .unwrap();
+    txn.commit().await.unwrap();
     let task_id = format!("task-{group_id}");
     let binding = DelegatedTaskBinding {
         root_conversation_id: "root".into(),
@@ -890,4 +915,31 @@ async fn bounded_pages_and_results_are_owner_root_scoped() {
             .await
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn expired_child_review_reports_its_fixed_deadline_instead_of_a_storage_fault() {
+    use desk_diagnose_core::subagent::reservation::CallRejection;
+    let db = database().await;
+    seed_parent(&db).await;
+    let run = seed_task(&db, "expired-review", "goal-expired-review").await;
+    let row = session_row::Entity::find()
+        .filter(session_row::Column::ConversationId.eq(&run.child_conversation_id))
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    let session = PersistedAgentSession::decode_json(&row.state_json).unwrap();
+    let txn = db.begin().await.unwrap();
+    let failure = super::review_budget::explain_closed_review_source_on(
+        &txn,
+        &session,
+        run.binding.deadline_ms,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(failure, DbErr::Custom(message) if CallRejection::from_storage(&message) == Some(CallRejection::TaskExpired))
+    );
+    txn.rollback().await.unwrap();
 }

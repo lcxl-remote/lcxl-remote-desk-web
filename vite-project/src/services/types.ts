@@ -538,34 +538,34 @@ export type AiAssistantGoalControlBody = {
 export type AiAssistantGoalLimitsDto = {
     /**
      * @minLength 0
-     * @type integer, int64
+     * @type integer,null, int64
     */
-    activeTimeMs: number;
+    activeTimeMs: number | null;
     /**
      * @minLength 0
-     * @type integer, int32
+     * @type integer,null, int32
     */
-    modelCalls: number;
+    modelCalls: number | null;
     /**
      * @minLength 0
-     * @type integer, int64
+     * @type integer,null, int64
     */
-    modelTokens: number;
+    modelTokens: number | null;
     /**
      * @minLength 0
-     * @type integer, int32
+     * @type integer,null, int32
     */
-    slices: number;
+    slices: number | null;
     /**
      * @minLength 0
-     * @type integer, int32
+     * @type integer,null, int32
     */
-    stalledSlices: number;
+    stalledSlices: number | null;
     /**
      * @minLength 0
-     * @type integer, int32
+     * @type integer,null, int32
     */
-    toolCalls: number;
+    toolCalls: number | null;
 };
 
 export type AiAssistantGoalDto = {
@@ -580,9 +580,9 @@ export type AiAssistantGoalDto = {
     createdAtUnixMs: number;
     /**
      * @minLength 0
-     * @type integer, int64
+     * @type integer,null, int64
     */
-    deadlineUnixMs: number;
+    deadlineUnixMs: number | null;
     /**
      * @type string
     */
@@ -602,14 +602,14 @@ export type AiAssistantGoalDto = {
     goalText: string;
     /**
      * @minLength 0
-     * @type integer, int64
+     * @type integer,null, int64
     */
-    limitModelTokens: number;
+    limitModelTokens: number | null;
     /**
      * @minLength 0
-     * @type integer, int32
+     * @type integer,null, int32
     */
-    limitSlices: number;
+    limitSlices: number | null;
     /**
      * @type object
     */
@@ -9157,9 +9157,9 @@ export type RestResponseAiAssistantGoalDto = {
         createdAtUnixMs: number;
         /**
          * @minLength 0
-         * @type integer, int64
+         * @type integer,null, int64
         */
-        deadlineUnixMs: number;
+        deadlineUnixMs: number | null;
         /**
          * @type string
         */
@@ -9179,14 +9179,14 @@ export type RestResponseAiAssistantGoalDto = {
         goalText: string;
         /**
          * @minLength 0
-         * @type integer, int64
+         * @type integer,null, int64
         */
-        limitModelTokens: number;
+        limitModelTokens: number | null;
         /**
          * @minLength 0
-         * @type integer, int32
+         * @type integer,null, int32
         */
-        limitSlices: number;
+        limitSlices: number | null;
         /**
          * @type object
         */

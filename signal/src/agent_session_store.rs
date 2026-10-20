@@ -865,6 +865,12 @@ impl SignalAgentSessionStore {
                 })
                 && session.pending_schedule_review.is_none();
             let previous = (goal.state_version, goal.lease_epoch);
+            goal.apply_budget_policy(
+                &crate::goal_budget_policy::read(&txn)
+                    .await
+                    .map_err(|_| internal("load recovered goal policy"))?,
+            )
+            .map_err(|_| internal("invalid recovered goal policy"))?;
             goal.recover_interrupted_slice(safe_to_resume, now_ms)
                 .map_err(|_| internal("invalid lapsed goal recovery"))?;
             session.last_event_seq = session

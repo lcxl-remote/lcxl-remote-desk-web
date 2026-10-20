@@ -109,6 +109,76 @@ pub struct BudgetLedger {
     pub child_outstanding: Usage,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BudgetDimension {
+    ModelCalls,
+    ToolCalls,
+    ModelTokens,
+    ActiveTime,
+    Slices,
+    LedgerCapacity,
+    ParentSynthesis,
+    Scheduled,
+}
+
+impl BudgetDimension {
+    pub const ALL: [Self; 8] = [
+        Self::ModelCalls,
+        Self::ToolCalls,
+        Self::ModelTokens,
+        Self::ActiveTime,
+        Self::Slices,
+        Self::LedgerCapacity,
+        Self::ParentSynthesis,
+        Self::Scheduled,
+    ];
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::ModelCalls => "budget_model_calls",
+            Self::ToolCalls => "budget_tool_calls",
+            Self::ModelTokens => "budget_model_tokens",
+            Self::ActiveTime => "budget_active_time",
+            Self::Slices => "budget_slices",
+            Self::LedgerCapacity => "budget_ledger_capacity",
+            Self::ParentSynthesis => "budget_parent_synthesis",
+            Self::Scheduled => "budget_scheduled",
+        }
+    }
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::ModelCalls => "The task's model-call budget is exhausted.",
+            Self::ToolCalls => "The task's tool-call budget is exhausted.",
+            Self::ModelTokens => "The task's model-token budget is exhausted.",
+            Self::ActiveTime => "The task's cumulative active-time budget is exhausted.",
+            Self::Slices => "The task's planning-segment budget is exhausted.",
+            Self::LedgerCapacity => "The task's budget ledger has reached its capacity.",
+            Self::ParentSynthesis => {
+                "The child allocation is exhausted; remaining capacity is reserved for the main assistant's synthesis."
+            }
+            Self::Scheduled => "The scheduled execution's call budget is exhausted.",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReserveError {
+    DeadlineReached,
+    Budget(BudgetDimension),
+    InvalidLimits,
+    ArithmeticOverflow,
+}
+
+fn exceeded_dimension(usage: Usage, limit: Allowance) -> BudgetDimension {
+    if usage.model_calls > limit.model_calls {
+        BudgetDimension::ModelCalls
+    } else if usage.tool_calls > limit.tool_calls {
+        BudgetDimension::ToolCalls
+    } else {
+        BudgetDimension::ModelTokens
+    }
+}
+
 impl BudgetLedger {
     pub fn reserve(
         &mut self,
@@ -116,25 +186,40 @@ impl BudgetLedger {
         amount: Usage,
         child: bool,
         now_ms: i64,
-    ) -> Result<(), &'static str> {
-        limits.validate()?;
+    ) -> Result<(), ReserveError> {
+        limits.validate().map_err(|_| ReserveError::InvalidLimits)?;
         if now_ms >= limits.deadline_ms {
-            return Err("delegation deadline reached");
+            return Err(ReserveError::DeadlineReached);
         }
-        let outstanding = self.outstanding.checked_add(amount)?;
-        if !limits.total.permits(self.charged.checked_add(outstanding)?) {
-            return Err("delegation budget exhausted");
+        let outstanding = self
+            .outstanding
+            .checked_add(amount)
+            .map_err(|_| ReserveError::ArithmeticOverflow)?;
+        if !limits.total.permits(
+            self.charged
+                .checked_add(outstanding)
+                .map_err(|_| ReserveError::ArithmeticOverflow)?,
+        ) {
+            return Err(ReserveError::Budget(exceeded_dimension(
+                self.charged
+                    .checked_add(outstanding)
+                    .map_err(|_| ReserveError::ArithmeticOverflow)?,
+                limits.total,
+            )));
         }
         let child_outstanding = if child {
-            self.child_outstanding.checked_add(amount)?
+            self.child_outstanding
+                .checked_add(amount)
+                .map_err(|_| ReserveError::ArithmeticOverflow)?
         } else {
             self.child_outstanding
         };
-        if !limits
-            .child_ceiling()
-            .permits(self.child_charged.checked_add(child_outstanding)?)
-        {
-            return Err("delegation child budget exhausted; parent synthesis capacity is reserved");
+        if !limits.child_ceiling().permits(
+            self.child_charged
+                .checked_add(child_outstanding)
+                .map_err(|_| ReserveError::ArithmeticOverflow)?,
+        ) {
+            return Err(ReserveError::Budget(BudgetDimension::ParentSynthesis));
         }
         self.outstanding = outstanding;
         self.child_outstanding = child_outstanding;

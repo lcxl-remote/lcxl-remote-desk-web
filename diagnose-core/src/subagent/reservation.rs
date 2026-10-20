@@ -32,7 +32,89 @@ impl DelegationCallKind {
 pub enum CallAdmission {
     Untracked,
     Reserved(DelegationCallReservation),
-    Exhausted,
+    Rejected(CallRejection),
+}
+
+/// Admission failures do not authorize a provider send or reset any usage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallRejection {
+    Budget(super::budget::BudgetDimension),
+    SourceExpired,
+    TaskExpired,
+}
+
+impl CallRejection {
+    pub fn from_reserve(error: super::budget::ReserveError) -> Option<Self> {
+        match error {
+            super::budget::ReserveError::DeadlineReached => Some(Self::SourceExpired),
+            super::budget::ReserveError::Budget(dimension) => Some(Self::Budget(dimension)),
+            super::budget::ReserveError::InvalidLimits
+            | super::budget::ReserveError::ArithmeticOverflow => None,
+        }
+    }
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::Budget(dimension) => dimension.message(),
+            Self::SourceExpired => {
+                "The originating task has reached its absolute deadline. No new model request or device operation was started."
+            }
+            Self::TaskExpired => {
+                "This subagent has reached its fixed execution deadline. Its main goal may still continue; this task was not restarted."
+            }
+        }
+    }
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::Budget(dimension) => dimension.reason(),
+            Self::SourceExpired => "source_deadline_reached",
+            Self::TaskExpired => "delegation_deadline_reached",
+        }
+    }
+    pub fn storage_message(self) -> String {
+        format!("call_admission:{}", self.reason())
+    }
+    pub fn from_storage(message: &str) -> Option<Self> {
+        let reason = message.strip_prefix("call_admission:")?;
+        [Self::SourceExpired, Self::TaskExpired]
+            .into_iter()
+            .chain(
+                super::budget::BudgetDimension::ALL
+                    .into_iter()
+                    .map(Self::Budget),
+            )
+            .find(|candidate| candidate.reason() == reason)
+    }
+    pub fn review_reason(self) -> crate::approval_observation::ReviewReason {
+        match self {
+            Self::Budget(_) => crate::approval_observation::ReviewReason::Budget,
+            Self::SourceExpired => crate::approval_observation::ReviewReason::SourceExpired,
+            Self::TaskExpired => crate::approval_observation::ReviewReason::TaskExpired,
+        }
+    }
+    #[inline(never)]
+    pub fn into_error(self) -> desk_agent_protocol::AgentError {
+        desk_agent_protocol::AgentError {
+            kind: desk_agent_protocol::AgentErrorKind::OutputLimitExceeded,
+            message: self.message().into(),
+            retryable: false,
+            safe_for_model: true,
+            error_code: None,
+        }
+    }
+    #[inline(never)]
+    pub fn from_error(error: &desk_agent_protocol::AgentError) -> Option<Self> {
+        if error.kind != desk_agent_protocol::AgentErrorKind::OutputLimitExceeded {
+            return None;
+        }
+        [Self::SourceExpired, Self::TaskExpired]
+            .into_iter()
+            .chain(
+                super::budget::BudgetDimension::ALL
+                    .into_iter()
+                    .map(Self::Budget),
+            )
+            .find(|reason| error.message == reason.message())
+    }
 }
 
 pub fn known_model_usage(
@@ -455,5 +537,44 @@ mod tests {
         request.use_case = crate::model_profile::ModelUseCase::Safety;
         request.delegation_call = Some(receipt());
         assert!(request.validate_delegation_call().is_err());
+    }
+}
+
+#[cfg(test)]
+mod admission_reason_tests {
+    use super::*;
+    use crate::subagent::budget::{BudgetDimension, ReserveError};
+
+    #[test]
+    fn closed_reasons_round_trip_without_turning_internal_errors_into_budget_exhaustion() {
+        for reason in [CallRejection::SourceExpired, CallRejection::TaskExpired]
+            .into_iter()
+            .chain(BudgetDimension::ALL.into_iter().map(CallRejection::Budget))
+        {
+            assert_eq!(
+                CallRejection::from_error(&reason.into_error()),
+                Some(reason)
+            );
+            assert_eq!(
+                CallRejection::from_storage(&reason.storage_message()),
+                Some(reason)
+            );
+        }
+        assert_eq!(
+            CallRejection::from_reserve(ReserveError::ArithmeticOverflow),
+            None
+        );
+        assert_eq!(
+            CallRejection::from_reserve(ReserveError::InvalidLimits),
+            None
+        );
+        assert_eq!(
+            CallRejection::from_reserve(ReserveError::DeadlineReached),
+            Some(CallRejection::SourceExpired)
+        );
+        assert_eq!(
+            CallRejection::from_storage("database connection failed"),
+            None
+        );
     }
 }

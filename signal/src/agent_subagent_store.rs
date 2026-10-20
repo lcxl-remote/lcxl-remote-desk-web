@@ -55,7 +55,9 @@ mod recovery;
 mod resources;
 mod scheduled_source;
 mod source_context;
+mod source_timing;
 pub(crate) use scheduled_source::lock_child_source_on;
+use source_timing::current_group_on;
 mod scheduled_initialization;
 #[cfg(test)]
 pub(crate) use tests::scheduled::{
@@ -120,6 +122,7 @@ fn invalid() -> DbErr {
     DbErr::Custom("delegated task is unavailable or its control state changed".into())
 }
 
+#[inline(never)]
 pub(crate) fn decode_group(row: &group_row::Model) -> Result<DelegationGroup, DbErr> {
     let group: DelegationGroup = serde_json::from_str(&row.state_json).map_err(|_| invalid())?;
     group.validate().map_err(|_| invalid())?;
@@ -151,6 +154,7 @@ pub(crate) fn decode_group(row: &group_row::Model) -> Result<DelegationGroup, Db
     Ok(group)
 }
 
+#[inline(never)]
 pub(crate) fn decode_run(row: &run_row::Model) -> Result<SubAgentRun, DbErr> {
     let run: SubAgentRun = serde_json::from_str(&row.state_json).map_err(|_| invalid())?;
     run.validate().map_err(|_| invalid())?;
@@ -389,29 +393,17 @@ pub(crate) async fn apply_goal_source_on<C: ConnectionTrait + crate::config::Con
     })
     .await?;
     for row in groups {
-        let mut group = decode_group(&row)?;
+        let mut group = current_group_on(db, &row).await?;
         if group.source_admission == SourceAdmission::Closed {
             continue;
         }
         let epoch = group
             .set_source_admission(admission)
             .map_err(|_| invalid())?;
-        let changed = group_row::Entity::update_many()
-            .set(group_row::ActiveModel {
-                source_admission: Set(admission_label(group.source_admission).into()),
-                source_epoch: Set(i64::try_from(epoch).map_err(|_| invalid())?),
-                state_json: Set(serde_json::to_string(&group).map_err(|_| invalid())?),
-                version: Set(i64::try_from(group.version).map_err(|_| invalid())?),
-                updated_at: Set(now_ms),
-                ..Default::default()
-            })
-            .filter(group_row::Column::Id.eq(row.id))
-            .filter(group_row::Column::Version.eq(row.version))
-            .exec(db)
-            .await?;
-        if changed.rows_affected != 1 {
-            return Err(invalid());
+        if group.limits.deadline_ms != row.deadline_ms && group.version == row.version as u64 {
+            group.version = group.version.checked_add(1).ok_or_else(invalid)?;
         }
+        desk_diagnose_core::future::boxed(|| replace_group_on(db, &row, &group, now_ms)).await?;
         let runs = desk_diagnose_core::future::boxed(|| async {
             run_row::Entity::find()
                 .filter(run_row::Column::GroupId.eq(&group.group_id))
@@ -551,7 +543,7 @@ pub(crate) async fn check_child_action_on<C: ConnectionTrait + crate::config::Co
     else {
         return Ok(false);
     };
-    let group = decode_group(&row)?;
+    let group = current_group_on(db, &row).await?;
     if group.source_admission != SourceAdmission::Open
         || now_ms >= group.limits.deadline_ms
         || now_ms >= run.binding.deadline_ms
@@ -583,3 +575,8 @@ pub(crate) async fn check_child_action_on<C: ConnectionTrait + crate::config::Co
 
 #[cfg(test)]
 mod tests;
+
+#[inline(never)]
+fn boxed_group(row: &group_row::Model) -> Result<Box<DelegationGroup>, DbErr> {
+    Ok(Box::new(decode_group(row)?))
+}

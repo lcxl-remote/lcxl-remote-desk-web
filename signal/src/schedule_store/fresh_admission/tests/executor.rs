@@ -145,11 +145,15 @@ async fn exercise(model_budget: u64) {
             desk_agent_protocol::AgentErrorKind::OutputLimitExceeded
         );
         assert_eq!(error.error_code, None);
-        assert!(
-            error
-                .message
-                .contains("source has exhausted its call budget")
+        assert_eq!(
+            desk_diagnose_core::subagent::reservation::CallRejection::from_error(&error),
+            Some(
+                desk_diagnose_core::subagent::reservation::CallRejection::Budget(
+                    desk_diagnose_core::subagent::budget::BudgetDimension::ModelTokens
+                )
+            )
         );
+
         assert!(!error.retryable);
         assert_eq!(requests.load(Ordering::SeqCst), 0);
         assert!(

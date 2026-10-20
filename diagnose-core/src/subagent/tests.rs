@@ -1584,3 +1584,49 @@ fn text_result_uses_only_runtime_receipts_and_cannot_override_dependencies_or_un
         assert_eq!(task.state, SubAgentState::Failed);
     }
 }
+
+#[test]
+fn goal_source_outlives_group_creation_and_children_keep_fixed_deadlines() {
+    use crate::goal::{GoalLimits, GoalModelBinding, GoalOpening, GoalRun};
+    let source = completion_context().source;
+    let mut goal = GoalRun::new(
+        source.source.goal_id().unwrap().into(),
+        source.root_conversation_id.clone(),
+        source.actor_id.clone(),
+        source.device_id.clone(),
+        source.owner_requirement.text.clone(),
+        source.owner_requirement.message_id.clone(),
+        GoalOpening::OwnerRequest,
+        GoalModelBinding::from_destination(&source.model_destination).unwrap(),
+        source.parent_input_revision,
+        1_000,
+        GoalLimits::default(),
+    )
+    .unwrap();
+    let mut group = source.new_group(1_000, Some(&goal)).unwrap();
+    assert_eq!(group.limits.deadline_ms, i64::MAX);
+    let later = 1_000 + 8 * 86_400_000;
+    group
+        .budget
+        .reserve(
+            group.limits,
+            budget::Usage {
+                model_calls: 1,
+                ..Default::default()
+            },
+            false,
+            later,
+        )
+        .unwrap();
+    let child_deadline = creation::child_deadline_ms(group.limits.deadline_ms, later).unwrap();
+    assert_eq!(child_deadline, later + creation::DEFAULT_GROUP_LIFETIME_MS);
+    goal.deadline_unix_ms = (later + 60_000) as u64;
+    let limited = source.new_group(later, Some(&goal)).unwrap();
+    assert_eq!(limited.limits.deadline_ms, later + 60_000);
+    assert_eq!(
+        creation::child_deadline_ms(limited.limits.deadline_ms, later).unwrap(),
+        later + 60_000
+    );
+    assert!(creation::child_deadline_ms(later, later).is_err());
+    assert!(creation::child_deadline_ms(i64::MAX, i64::MAX - 1).is_err());
+}

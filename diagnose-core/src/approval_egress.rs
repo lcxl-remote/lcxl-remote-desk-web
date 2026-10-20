@@ -844,7 +844,7 @@ mod tests {
         let owner = session.conversation.remove(0);
         session.conversation_id = "child".into();
         session.trigger_origin = crate::session::TriggerOrigin::DelegatedTask;
-        session.delegated_owner_requirement = Some(owner.clone());
+        session.delegated_owner_requirement = Some(Box::new(owner.clone()));
         session.agent_role = AgentRole::SubAgent {
             binding: Box::new(DelegatedTaskBinding {
                 root_conversation_id: "conversation".into(),

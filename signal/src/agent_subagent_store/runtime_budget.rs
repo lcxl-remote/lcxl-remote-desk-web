@@ -77,9 +77,9 @@ impl SubAgentStore {
         .await;
         let receipt = match result {
             Ok(BudgetAdmission::Reserved(reservation)) => CallAdmission::Reserved(reservation),
-            Ok(BudgetAdmission::Exhausted) => {
+            Ok(BudgetAdmission::Rejected(reason)) => {
                 txn.rollback().await?;
-                return Ok(CallAdmission::Exhausted);
+                return Ok(CallAdmission::Rejected(reason));
             }
             // Retries resolve the original operation ledger. Returning a prior
             // receipt here would authorize a second physical call with one charge.

@@ -493,7 +493,7 @@ pub struct PersistedAgentSession {
     pub agent_role: crate::subagent::AgentRole,
     /// Authentic source evidence for ordinary business preflights. It is never
     /// inserted as a User turn and never conveys parent grants or consent.
-    pub delegated_owner_requirement: Option<ChatMessage>,
+    pub delegated_owner_requirement: Option<Box<ChatMessage>>,
     /// Owner controls fence main waits and interpretation without changing child input.
     pub control_revision: u64,
     /// Explicit owner stop blocks automatic claims until a new owner input or
@@ -843,7 +843,7 @@ impl PersistedAgentSession {
             }
             if session
                 .delegated_owner_requirement
-                .as_ref()
+                .as_deref()
                 .is_some_and(|source| {
                     source.role != crate::chat::ChatRole::User
                         || crate::permission_resume::is_resume_control_message(source)
@@ -1164,6 +1164,10 @@ impl PersistedAgentSession {
         scope: AgentScope,
         now: impl Into<String> + Clone,
     ) -> Self {
+        let conversation_id = conversation_id.into();
+        let actor_id = actor_id.into();
+        let device_id = device_id.into();
+        let now: String = now.into();
         Self {
             agent_role: crate::subagent::AgentRole::Main,
             delegated_owner_requirement: None,
@@ -1178,7 +1182,7 @@ impl PersistedAgentSession {
             accepted_subagent_observations: Vec::new(),
             interpreted_subagent_results: Vec::new(),
             subagent_report_corrections_used: 0,
-            conversation_id: conversation_id.into(),
+            conversation_id,
             response_locale: None,
             client_conversation_id: None,
             surface: AgentSessionSurface::Unknown,
@@ -1198,10 +1202,10 @@ impl PersistedAgentSession {
             file_scope: crate::file_scope::SessionFileScope::default(),
             visual_evidence: Vec::new(),
             pending_visual_verification: None,
-            actor_id: actor_id.into(),
-            device_id: device_id.into(),
+            actor_id,
+            device_id,
             policy_revision,
-            turn_start_scope: scope.clone(),
+            turn_start_scope: clone_initial_scope(&scope),
             scope_snapshot: scope,
             trigger_origin: TriggerOrigin::User,
             chain_id: String::new(),
@@ -1228,8 +1232,8 @@ impl PersistedAgentSession {
             current_turn_tokens: TokenUsage::default(),
             lifetime_steps: 0,
             lifetime_tokens: TokenUsage::default(),
-            created_at: now.clone().into(),
-            updated_at: now.into(),
+            created_at: now.clone(),
+            updated_at: now,
             version: 0,
         }
     }
@@ -1296,7 +1300,7 @@ impl PersistedAgentSession {
         if self.agent_role.is_main() {
             crate::permission_resume::latest_user_requirement(&self.conversation)
         } else {
-            self.delegated_owner_requirement.as_ref()
+            self.delegated_owner_requirement.as_deref()
         }
     }
 
@@ -1326,12 +1330,12 @@ impl PersistedAgentSession {
             || source.device_id != self.device_id
             || self
                 .delegated_owner_requirement
-                .as_ref()
+                .as_deref()
                 .is_some_and(|previous| previous != &source.owner_requirement)
         {
             return Err("delegated owner evidence differs from the original source");
         }
-        self.delegated_owner_requirement = Some(source.owner_requirement.clone());
+        self.delegated_owner_requirement = Some(Box::new(source.owner_requirement.clone()));
         Ok(())
     }
 
@@ -1383,13 +1387,13 @@ impl PersistedAgentSession {
             }) {
                 return Err("focus epoch references a missing or stale attachment");
             }
-            let mut focus_epoch = crate::focus_epoch::FocusEpochState::default();
-            focus_epoch.reset(next_input_revision, selected_attachment_ids)?;
-            if self.agent_role.is_main() && next_input_revision > self.focus_epoch.input_revision {
+            let previous_input_revision = self.focus_epoch.input_revision;
+            self.focus_epoch
+                .reset(next_input_revision, selected_attachment_ids)?;
+            if self.agent_role.is_main() && next_input_revision > previous_input_revision {
                 self.main_stopped = false;
                 self.subagent_result_only = false;
             }
-            self.focus_epoch = focus_epoch;
             self.capability_disclosure
                 .reset_for_input(next_input_revision);
             self.task_status_projection = None;
@@ -1553,7 +1557,7 @@ impl PersistedAgentSession {
             return Err(ContextAttachmentError::DuplicateClientRequestId);
         }
         let mut projected = self.context_attachments.clone();
-        projected.push(attachment.clone());
+        projected.push(attachment);
         validate_attachment_set(&projected)?;
         self.context_attachments = projected;
         Ok(true)
@@ -4331,4 +4335,10 @@ mod tests {
         assert!(!replay.contains("assistant-0"));
         assert!(replay.contains("assistant-1"));
     }
+}
+
+// Keep the initial scope clone outside the session construction frame.
+#[inline(never)]
+fn clone_initial_scope(scope: &AgentScope) -> AgentScope {
+    scope.clone()
 }

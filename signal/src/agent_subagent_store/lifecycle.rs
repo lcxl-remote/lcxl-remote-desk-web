@@ -37,14 +37,14 @@ pub(crate) async fn child_records_on(
         .one(txn)
         .await?
         .ok_or_else(invalid)?;
-    let group = decode_group(&source)?;
+    let group = current_group_on(txn, &source).await?;
     let creation: TaskCreationEnvelope =
         serde_json::from_str(&row.creation_envelope_json).map_err(|_| invalid())?;
     creation
         .validate_task(&run.binding)
         .map_err(|_| invalid())?;
     if creation.source != decode_creation(&source)?
-        || held.delegated_owner_requirement.as_ref() != Some(&creation.source.owner_requirement)
+        || held.delegated_owner_requirement.as_deref() != Some(&creation.source.owner_requirement)
     {
         return Err(invalid());
     }
@@ -83,7 +83,7 @@ pub(crate) async fn child_records_on(
     {
         return Err(invalid());
     }
-    Ok((row, run, group))
+    Ok((row, run, *group))
 }
 
 async fn begin_child_control(
@@ -293,7 +293,7 @@ impl SubAgentStore {
             .one(&txn)
             .await?
             .ok_or_else(invalid)?;
-        let group = decode_group(&source)?;
+        let group = current_group_on(&txn, &source).await?;
         if run.binding.task_id != binding.task_id
             || run.binding.group_id != binding.group_id
             || run.binding.root_conversation_id != binding.root_conversation_id

@@ -2,6 +2,7 @@
 use super::*;
 use crate::config::connection::DatabaseTransaction;
 use crate::entity::agent_delegation_reservation as reservation_row;
+use desk_diagnose_core::subagent::reservation::CallRejection;
 use desk_diagnose_core::subagent::{
     budget::Usage,
     reservation::{DelegationCallKind, DelegationCallReservation, ReviewCallAuthority},
@@ -11,7 +12,7 @@ use sha2::{Digest, Sha256};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BudgetAdmission {
-    Exhausted,
+    Rejected(CallRejection),
     Reserved(DelegationCallReservation),
     /// A replay cannot admit another physical call. The host retrieves the
     /// original call ledger/result or creates a separately charged retry identity.
@@ -76,21 +77,7 @@ pub(crate) async fn replace_group_on<C: ConnectionTrait + crate::config::ConfigC
 ) -> Result<(), DbErr> {
     group.validate().map_err(|_| invalid())?;
     let changed = group_row::Entity::update_many()
-        .set(group_row::ActiveModel {
-            source_admission: Set(admission_label(group.source_admission).into()),
-            source_epoch: Set(i64::try_from(group.source_epoch).map_err(|_| invalid())?),
-            parent_input_revision: Set(
-                i64::try_from(group.parent_input_revision).map_err(|_| invalid())?
-            ),
-            parent_control_revision: Set(
-                i64::try_from(group.parent_control_revision).map_err(|_| invalid())?
-            ),
-            parent_active: Set(group.parent_active),
-            state_json: Set(serde_json::to_string(group).map_err(|_| invalid())?),
-            version: Set(i64::try_from(group.version).map_err(|_| invalid())?),
-            updated_at: Set(now_ms),
-            ..Default::default()
-        })
+        .set(group_projection(group, now_ms)?)
         .filter(group_row::Column::Id.eq(old.id))
         .filter(group_row::Column::Version.eq(old.version))
         .exec(db)
@@ -180,7 +167,7 @@ pub(super) async fn reserve_budget_for_session_on(
     })
     .await?
     .ok_or_else(invalid)?;
-    let mut group = decode_group(&row)?;
+    let mut group = boxed_group(&row)?;
     let child = session.agent_role.binding();
     let logical_key = format!(
         "{:x}",
@@ -310,21 +297,23 @@ pub(super) async fn reserve_budget_for_session_on(
         let run = decode_run(&task_row)?;
         run.validate_session(session).map_err(|_| invalid())?;
         run.require_current(run.fence()).map_err(|_| invalid())?;
-        if binding.source_epoch != group.source_epoch
-            || binding.source != group.source
-            || now_ms >= binding.deadline_ms
-        {
+        if binding.source_epoch != group.source_epoch || binding.source != group.source {
             return Err(invalid());
+        }
+        if now_ms >= binding.deadline_ms {
+            return Ok(BudgetAdmission::Rejected(CallRejection::TaskExpired));
         }
     } else if !group.can_interpret(session.input_revision, session.control_revision) {
         return Err(invalid());
     }
-    if group
+    group = current_group_on(txn, &row).await?;
+    if let Err(error) = group
         .budget
         .reserve(group.limits, upper, child.is_some(), now_ms)
-        .is_err()
     {
-        return Ok(BudgetAdmission::Exhausted);
+        return Ok(BudgetAdmission::Rejected(
+            CallRejection::from_reserve(error).ok_or_else(invalid)?,
+        ));
     }
     group.version = group.version.checked_add(1).ok_or_else(invalid)?;
     desk_diagnose_core::future::boxed(|| async {
@@ -439,4 +428,24 @@ pub(crate) async fn settle_budget_on(
         return Err(invalid());
     }
     Ok(())
+}
+
+#[inline(never)]
+fn group_projection(group: &DelegationGroup, now_ms: i64) -> Result<group_row::ActiveModel, DbErr> {
+    Ok(group_row::ActiveModel {
+        source_admission: Set(admission_label(group.source_admission).into()),
+        source_epoch: Set(i64::try_from(group.source_epoch).map_err(|_| invalid())?),
+        parent_input_revision: Set(
+            i64::try_from(group.parent_input_revision).map_err(|_| invalid())?
+        ),
+        parent_control_revision: Set(
+            i64::try_from(group.parent_control_revision).map_err(|_| invalid())?
+        ),
+        parent_active: Set(group.parent_active),
+        deadline_ms: Set(group.limits.deadline_ms),
+        state_json: Set(serde_json::to_string(group).map_err(|_| invalid())?),
+        version: Set(i64::try_from(group.version).map_err(|_| invalid())?),
+        updated_at: Set(now_ms),
+        ..Default::default()
+    })
 }

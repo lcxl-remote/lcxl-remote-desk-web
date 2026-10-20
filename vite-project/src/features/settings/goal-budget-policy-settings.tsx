@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Checkbox } from '@/components/ui/checkbox';
+import { Switch } from '@/components/ui/switch';
 import { Input } from '@/components/ui/input';
 
 export type GoalBudgetLimits = {
@@ -120,10 +121,16 @@ export default function GoalBudgetPolicySettings() {
             <p className="text-sm text-muted-foreground">{t('pages.aiAssistant.goalBudgetPolicyDescription')}</p>
             {fields.map(({ key, label, scale, maximum }) => <div key={key} className="flex flex-wrap items-center gap-3">
                 <label className="flex min-w-56 items-center gap-2">
-                    <Checkbox checked={draft?.[key] !== null && !!draft} disabled={!draft || busy}
-                        onCheckedChange={(checked) => setDraft(previous => previous && ({
-                            ...previous, [key]: checked === true ? Number(input?.[key] ?? 1) * scale : null,
-                        }))} />
+                    {key === 'activeTimeMs' || key === 'deadlineMs'
+                        ? <Switch checked={draft?.[key] !== null && !!draft} disabled={!draft || busy}
+                            aria-label={t(`pages.aiAssistant.${label}`)}
+                            onCheckedChange={(checked) => setDraft(previous => previous && ({
+                                ...previous, [key]: checked ? Number(input?.[key] ?? 1) * scale : null,
+                            }))} />
+                        : <Checkbox checked={draft?.[key] !== null && !!draft} disabled={!draft || busy}
+                            onCheckedChange={(checked) => setDraft(previous => previous && ({
+                                ...previous, [key]: checked === true ? Number(input?.[key] ?? 1) * scale : null,
+                            }))} />}
                     <span>{t(`pages.aiAssistant.${label}`)}</span>
                 </label>
                 <Input className="w-32" type="number" min={1} max={maximum} step={1}

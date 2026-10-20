@@ -62,6 +62,49 @@ describe('useAiAssistantChat', () => {
             });
         } finally { unmount(); }
     });
+    it.each([
+        ['paused', false, false], ['blocked', false, false], ['waiting_user', false, false],
+        ['queued', false, true], ['waiting_work', false, true], ['waiting_approval', false, true],
+        ['waiting_device', false, true], ['waiting_model', false, true], ['running', false, true],
+        ['paused', true, true],
+    ])('shows the stop control for %s with background work=%s: %s', async (state, background, expected) => {
+        localStorage.setItem('ai-assistant-conversation:goal-stop', 'conversation');
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: {
+            ...snapshotFields, sessionId: 'session', seq: 1, active: false, messages: [],
+            goal: { goalId: 'goal', state, stateVersion: 1, goalText: 'Continue' },
+            commandTasks: background ? [{ taskId: 'command', callId: 'call', executionGeneration: 'generation', state: 'running', updatedAt: 'now' }] : [],
+        } }) }));
+        const { result, unmount } = renderHook(() => useAiAssistantChat({ deskId: 'goal-stop',
+            subscribe: () => () => undefined, sendMessage: () => 'request' }));
+        try {
+            await waitFor(() => expect(result.current.goal?.state).toBe(state));
+            expect(result.current.canStop).toBe(expected);
+        } finally { unmount(); }
+    });
+    it('clears a disconnected local turn when a newer idle snapshot settles it', async () => {
+        vi.useFakeTimers();
+        localStorage.setItem('ai-assistant-conversation:recovered-stop', 'conversation');
+        let subscriber: SignalingSubscriber | null = null;
+        let seq = 1;
+        vi.stubGlobal('fetch', vi.fn().mockImplementation(async () => ({ ok: true, json: async () => ({ data: {
+            ...snapshotFields, sessionId: 'session', seq: seq++, active: false, messages: [],
+            goal: { goalId: 'goal', state: 'paused', stateVersion: 1, goalText: 'Continue' },
+        } }) })));
+        const sendMessage = vi.fn((_type: number, _data: unknown, _to?: string, id?: string) => id!);
+        const { result, unmount } = renderHook(() => useAiAssistantChat({ deskId: 'recovered-stop',
+            subscribe: handler => { subscriber = handler; return () => undefined; }, sendMessage }));
+        try {
+            await act(async () => { await Promise.resolve(); });
+            act(() => { result.current.start('Continue after recovery'); });
+            const requestId = sendMessage.mock.calls.at(-1)![3]!;
+            act(() => subscriber?.({ request_id: requestId, signaling_type: SIGNALING_TYPE_CODE_AI_ASSISTANT_UPDATED,
+                signaling_data: { seq: 1, kind: 'status', status: 'accepted' } }));
+            expect(result.current.canStop).toBe(true);
+            await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+            expect(result.current.turnRunning).toBe(false);
+            expect(result.current.canStop).toBe(false);
+        } finally { unmount(); }
+    });
     it('does not let a read started before goal control overwrite its committed state', async () => {
         vi.useFakeTimers();
         localStorage.setItem('ai-assistant-conversation:desk-1', 'conversation-1');

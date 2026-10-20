@@ -115,7 +115,7 @@ pub(crate) async fn spawn_on(
     })
     .await?
     .ok_or_else(invalid)?;
-    let mut group = decode_group(&original_row)?;
+    let mut group = boxed_group(&original_row)?;
     let creation = decode_creation(&original_row)?;
     if !group.can_interpret(held.input_revision, held.control_revision) {
         return Err(invalid());
@@ -172,6 +172,7 @@ pub(crate) async fn spawn_on(
                 ),
             ));
         }
+        group = current_group_on(txn, &original_row).await?;
         let child_used = group
             .budget
             .child_charged
@@ -208,7 +209,11 @@ pub(crate) async fn spawn_on(
             input_revision: 1,
             control_revision: 1,
             source_epoch: group.source_epoch,
-            deadline_ms: group.limits.deadline_ms,
+            deadline_ms: desk_diagnose_core::subagent::creation::child_deadline_ms(
+                group.limits.deadline_ms,
+                now.timestamp_millis(),
+            )
+            .map_err(|_| invalid())?,
         };
         let base_scope = desk_agent_protocol::AgentScope {
             granted: desk_diagnose_core::ai_assistant::selected_context_capabilities(&[])

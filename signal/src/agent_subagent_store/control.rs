@@ -215,7 +215,7 @@ pub(crate) async fn check_child_permission_on<
     else {
         return Ok(false);
     };
-    let group = decode_group(&row)?;
+    let group = current_group_on(db, &row).await?;
     Ok(run.validate_session(session).is_ok()
         && !run.state.is_terminal()
         && run.state != SubAgentState::Cancelling

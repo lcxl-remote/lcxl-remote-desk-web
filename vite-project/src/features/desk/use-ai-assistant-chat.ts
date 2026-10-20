@@ -200,15 +200,15 @@ export type AiAssistantGoal = {
     pauseReason?: string | null;
     sliceSeq: number;
     usedSlices: number;
-    limitSlices: number;
+    limitSlices: number | null;
     usedModelTokens: number;
-    limitModelTokens: number;
+    limitModelTokens: number | null;
     usedModelCalls: number;
     usedToolCalls: number;
     usedActiveTimeMs: number;
     limits: AiAssistantGoalLimits;
     createdAtUnixMs: number;
-    deadlineUnixMs: number;
+    deadlineUnixMs: number | null;
     nextAttemptUnixMs?: number | null;
     updatedAtUnixMs: number;
     checkpointSummary?: string | null;
@@ -227,12 +227,12 @@ export type AiAssistantGoalOpenRequest = {
 };
 
 export type AiAssistantGoalLimits = {
-    activeTimeMs: number;
-    modelTokens: number;
-    modelCalls: number;
-    toolCalls: number;
-    slices: number;
-    stalledSlices: number;
+    activeTimeMs: number | null;
+    modelTokens: number | null;
+    modelCalls: number | null;
+    toolCalls: number | null;
+    slices: number | null;
+    stalledSlices: number | null;
 };
 
 export type AiAssistantGoalOwnerAction = 'pause' | 'resume' | 'retry_stalled' | 'cancel';
@@ -1935,7 +1935,9 @@ export function useAiAssistantChat({
         confirmStop,
         canStop: !hydrating && !!snapshotWatermark.current && (remoteActive || !!(activeRequest.current ?? snapshotActiveRequest.current)
             || (subagents.tasks?.unfinished ?? 0) > 0 || subagents.active_tasks.length > 0
-            || (!mainStopped && !!goal && !['completed', 'failed', 'cancelled'].includes(goal.state))),
+            || commandTasks.some(task => task.state === 'running')
+            || backgroundTasks.some(task => task.state === 'running')
+            || (!mainStopped && !!goal && ['queued', 'running', 'waiting_approval', 'waiting_work', 'waiting_device', 'waiting_model'].includes(goal.state))),
         turnRunning: activeRequest.current !== null || remoteActive,
         running: activeRequest.current !== null || remoteActive || contextUpdating || approvalInitializing || permissionUpdating || outcomeDisposing,
         start,

@@ -3,6 +3,11 @@ import unittest
 import report
 
 
+def frame_family(name, pattern, **extra):
+    return dict(name=name, patterns=[pattern],
+                evidence='nested preparation and execution frames in the same reviewed call path', **extra)
+
+
 def record(size, symbol='_ZN18desk_diagnose_core10agent_loop14run_inner_impl17h0123456789abcdefE'):
     return json.dumps({'message': {'message': f"{size} stack bytes in function '{symbol}'"}})
 
@@ -108,6 +113,98 @@ class Reports(unittest.TestCase):
         current = dict(metadata,frames={'one':101})
         with self.assertRaises(ValueError):
             report.compare_baselines(current, previous)
+
+    def test_frame_family_allows_redistribution_but_not_growth_or_oversized_members(self):
+        metadata = dict(toolchain='test', target='test', profile='debug', package='test')
+        baseline = dict(metadata, required=['turn'], frames={'turn::prepare': 100, 'turn::run': 200},
+                        frame_families=[frame_family('turn', '^turn::')])
+        actual = dict(metadata, frames={'turn::prepare': 150, 'turn::run': 140})
+        self.assertEqual(report.check(actual, baseline), [])
+        actual['frames']['turn::run'] = 151
+        self.assertTrue(report.check(actual, baseline))
+        baseline['frames'] = {'turn::prepare': 65536, 'turn::run': 65536}
+        actual['frames'] = {'turn::prepare': 65537, 'turn::run': 1}
+        self.assertTrue(report.check(actual, baseline))
+
+    def test_family_adoption_uses_the_exact_historical_scope_and_requires_a_decrease(self):
+        metadata = dict(toolchain='test', target='test', profile='debug', package='test')
+        previous = dict(metadata, frames={'turn::old': 300, 'other': 10000})
+        current = dict(metadata, frames={'turn::prepare': 120, 'turn::run': 160, 'other': 10000},
+                       frame_families=[frame_family('turn', '^turn::')])
+        report.compare_baselines(current, previous)
+        current['frames']['turn::run'] = 180
+        with self.assertRaises(ValueError):
+            report.compare_baselines(current, previous)
+
+    def test_family_reallocation_does_not_allow_unrelated_frame_growth(self):
+        metadata = dict(toolchain='test', target='test', profile='debug', package='test')
+        previous = dict(metadata, frames={'turn::one': 100, 'turn::two': 200, 'other': 10})
+        current = dict(metadata, frames={'turn::one': 150, 'turn::two': 140, 'other': 11},
+                       frame_families=[frame_family('turn', '^turn::')])
+        with self.assertRaises(ValueError):
+            report.compare_baselines(current, previous)
+        self.assertTrue(report.check(dict(metadata, frames=current['frames']),
+                                     dict(current, required=[], frames=previous['frames'])))
+
+    def test_new_family_members_still_require_registration(self):
+        metadata = dict(toolchain='test', target='test', profile='debug', package='test')
+        baseline = dict(metadata, required=[], frames={'turn::one': 200},
+                        frame_families=[frame_family('turn', '^turn::')])
+        actual = dict(metadata, frames={'turn::one': 100, 'turn::new': 1})
+        self.assertIn('unregistered frame family member: turn::new', report.check(actual, baseline))
+
+    def test_family_savings_cannot_hide_a_nested_extraction_lineage_regression(self):
+        metadata = dict(toolchain='test', target='test', profile='debug', package='test')
+        baseline = dict(metadata, required=[],
+                        frames={'turn::one': 100, 'turn::two': 100, 'turn::other': 200},
+                        frame_families=[frame_family('turn', '^turn::')],
+                        lineages=[dict(source='old', source_limit=300, members=['turn::one', 'turn::two'],
+                            evidence='nested source stages', tree={'kind': 'sum',
+                                'terms': [{'frame': 'turn::one'}, {'frame': 'turn::two'}]})])
+        actual = dict(metadata, frames={'turn::one': 150, 'turn::two': 80, 'turn::other': 160})
+        self.assertTrue(any('extraction lineage budget exceeded' in error
+                            for error in report.check(actual, baseline)))
+
+    def test_family_scope_cannot_overlap_or_be_empty(self):
+        baseline = dict(frames={'turn::one': 100},
+                        frame_families=[frame_family('turn', '^missing::')])
+        with self.assertRaises(ValueError):
+            report.frame_family_budgets(baseline)
+        baseline['frame_families'] = [frame_family('turn', '^turn::'),
+                                      frame_family('duplicate', '^turn::')]
+        with self.assertRaises(ValueError):
+            report.frame_family_budgets(baseline)
+
+    def test_existing_families_cannot_reset_scope_or_total_budget(self):
+        metadata = dict(toolchain='test', target='test', profile='debug', package='test')
+        previous = dict(metadata, frames={'turn::one': 100, 'turn::two': 200},
+                        frame_families=[frame_family('turn', '^turn::')])
+        current = json.loads(json.dumps(previous))
+        current['frames'] = {'turn::one': 150, 'turn::two': 140}
+        report.compare_baselines(current, previous)
+        report.compare_baselines(previous, previous)
+        for patch in [dict(frame_families=[]), dict(frames={'turn::one': 150, 'turn::two': 150}),
+                      dict(frame_families=[frame_family('turn', '.*')])]:
+            with self.assertRaises(ValueError):
+                report.compare_baselines(dict(current, **patch), previous)
+
+    def test_removed_old_symbols_cannot_fund_two_new_families(self):
+        metadata = dict(toolchain='test', target='test', profile='debug', package='test')
+        previous = dict(metadata, frames={'old': 1000})
+        current = dict(metadata, frames={'one': 400, 'two': 400}, frame_families=[
+            frame_family('one', '^(old|one)$'),
+            frame_family('two', '^(old|two)$')])
+        with self.assertRaises(ValueError):
+            report.compare_baselines(current, previous)
+
+    def test_excluded_scopes_have_independent_nonoverlapping_budgets(self):
+        metadata = dict(toolchain='test', target='test', profile='debug', package='test')
+        previous = dict(metadata, frames={'turn::one': 300, 'turn::provider::one': 200})
+        current = dict(metadata, frames={'turn::one': 250, 'turn::provider::one': 190}, frame_families=[
+            frame_family('turn', '^turn::', exclude_patterns=['::provider::']),
+            frame_family('provider', '::provider::')])
+        report.compare_baselines(current, previous)
+        self.assertEqual(report.frame_family_budgets(current)[0], {'turn': 250, 'provider': 190})
 
 
 if __name__ == '__main__':

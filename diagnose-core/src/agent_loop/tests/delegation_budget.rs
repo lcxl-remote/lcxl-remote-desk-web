@@ -41,7 +41,11 @@ impl SessionSeam for BudgetSessions {
         _now: &str,
     ) -> Result<CallAdmission, AgentError> {
         if self.deny == Some(kind) {
-            return Ok(CallAdmission::Exhausted);
+            return Ok(CallAdmission::Rejected(
+                crate::subagent::reservation::CallRejection::Budget(
+                    crate::subagent::budget::BudgetDimension::ModelTokens,
+                ),
+            ));
         }
         if self
             .reservations
@@ -124,7 +128,7 @@ async fn exhausted_budget_stops_before_any_provider_call() {
     )
     .await
     .unwrap_err();
-    assert!(call_budget::is_exhausted(&error));
+    assert!(call_budget::is_admission_rejected(&error));
     assert!(model.requests.borrow().is_empty());
     assert!(sessions.settlements.borrow().is_empty());
 }
@@ -203,7 +207,7 @@ async fn denied_tool_budget_closes_history_before_any_device_dispatch() {
     )
     .await
     .unwrap_err();
-    assert!(call_budget::is_exhausted(&error));
+    assert!(call_budget::is_admission_rejected(&error));
     assert!(tools.calls.borrow().is_empty());
     let saved = sessions.sessions.inner.borrow();
     let session = saved.as_ref().unwrap();

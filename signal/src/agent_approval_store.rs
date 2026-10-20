@@ -52,6 +52,12 @@ pub enum ReviewStartError {
 }
 impl From<DbErr> for ReviewStartError {
     fn from(error: DbErr) -> Self {
+        if let DbErr::Custom(message) = &error
+            && let Some(reason) =
+                desk_diagnose_core::subagent::reservation::CallRejection::from_storage(message)
+        {
+            return Self::Unavailable(reason.review_reason());
+        }
         Self::Backend(error)
     }
 }

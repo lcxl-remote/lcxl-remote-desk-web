@@ -26,6 +26,17 @@ pub const DEFAULT_GROUP_TOOL_CALLS: u64 = 200;
 pub const DEFAULT_GROUP_LIFETIME_MS: i64 = 2 * 60 * 60 * 1_000;
 pub const MAX_CREATION_ENVELOPE_BYTES: usize = 512 * 1024;
 
+/// A child receives its own fixed lifetime; resuming the source never renews it.
+pub fn child_deadline_ms(source_deadline_ms: i64, now_ms: i64) -> Result<i64, &'static str> {
+    if now_ms <= 0 || now_ms >= source_deadline_ms {
+        return Err("delegation source expired");
+    }
+    let deadline = now_ms
+        .checked_add(DEFAULT_GROUP_LIFETIME_MS)
+        .ok_or("delegation child deadline overflow")?;
+    Ok(deadline.min(source_deadline_ms))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreationEnvelope {
@@ -465,10 +476,8 @@ impl CreationEnvelope {
                     .tool_calls
                     .min(u64::from(goal.limits.tool_calls));
                 limits.total.tokens = goal.effective_budget_limits().model_tokens;
-                limits.deadline_ms = limits.deadline_ms.min(
-                    i64::try_from(goal.deadline_unix_ms)
-                        .map_err(|_| super::invalid("invalid source deadline"))?,
-                );
+                limits.deadline_ms = i64::try_from(goal.deadline_unix_ms)
+                    .map_err(|_| super::invalid("invalid source deadline"))?;
             }
             (DelegationSource::Goal { .. }, _) | (_, Some(_)) => {
                 return Err(super::invalid("delegation goal source mismatch"));

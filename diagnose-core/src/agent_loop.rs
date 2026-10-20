@@ -316,8 +316,6 @@ pub enum LoopOutcome {
         control: crate::goal::GoalControl,
         call_id: String,
     },
-    /// A hard total-goal budget could not reserve the next model/tool call.
-    GoalBudgetReached,
     /// A durable main dependency wait releases this turn's lease and model slot.
     SubAgentsWaiting { wait_id: String },
     /// The child's source group closed admission while its original task persists.
@@ -829,6 +827,12 @@ async fn drive_claimed_inner(
         sink.on_turn_retracted(StreamRetractionReason::Incomplete, None);
     }
     let terminal = match &result {
+        Err(error)
+            if session.trigger_origin == TriggerOrigin::GoalContinuation
+                && call_budget::is_admission_rejected(error) =>
+        {
+            TurnState::Idle
+        }
         Ok(LoopOutcome::ProtocolError(_))
         | Ok(LoopOutcome::ContentSafetyUnavailable(_))
         | Err(_) => TurnState::Failed,
@@ -890,17 +894,7 @@ async fn drive_claimed_inner(
         Ok(LoopOutcome::PermissionRequested { request_id }) => Some(request_id.clone()),
         _ => None,
     };
-    session.terminal_error = match &result {
-        Err(error) | Ok(LoopOutcome::ContentSafetyUnavailable(error)) => Some(error.clone()),
-        Ok(LoopOutcome::ProtocolError(error)) => Some(AgentError {
-            kind: AgentErrorKind::Internal,
-            message: error.to_string(),
-            retryable: false,
-            safe_for_model: true,
-            error_code: None,
-        }),
-        _ => None,
-    };
+    session.terminal_error = settled_terminal_error(&result);
     if terminal == TurnState::Idle && !matches!(&result, Ok(LoopOutcome::Superseded { .. })) {
         session.handled_input_seq = session.latest_input_seq;
     }
@@ -928,6 +922,12 @@ async fn drive_claimed_inner(
             .map(|_| ())
     } else if session.agent_role.binding().is_some() {
         let reason = match &result {
+            Err(error)
+                if crate::subagent::reservation::CallRejection::from_error(error).is_some() =>
+            {
+                crate::subagent::reservation::CallRejection::from_error(error)
+                    .map(|reason| reason.reason())
+            }
             Err(error)
                 if error.kind == AgentErrorKind::ModelUnavailable
                     && error.retryable
@@ -967,8 +967,11 @@ async fn drive_claimed_inner(
             Ok(LoopOutcome::GoalControlled { control, .. }) => {
                 crate::goal::GoalSegmentEnd::Control(control.clone())
             }
-            Ok(LoopOutcome::GoalBudgetReached) => {
-                crate::goal::GoalSegmentEnd::Pause(crate::goal::GoalPauseReason::Budget)
+            Err(error) if call_budget::is_admission_rejected(error) => {
+                crate::goal::GoalSegmentEnd::AdmissionRejected(
+                    crate::subagent::reservation::CallRejection::from_error(error)
+                        .expect("classified call admission"),
+                )
             }
             Ok(LoopOutcome::PermissionRequested { request_id }) => {
                 crate::goal::GoalSegmentEnd::Control(crate::goal::GoalControl::Wait {
@@ -1178,8 +1181,7 @@ fn settled_goal_result_fingerprints(
     fingerprints.into_iter().collect()
 }
 fn canonical_arguments_json(raw: &str) -> String {
-    let value: serde_json::Value =
-        serde_json::from_str(raw).expect("classify_model_turn validated tool arguments");
+    let value = parsed_tool_arguments(raw);
     serde_json::to_string(&value).expect("JSON values are serializable")
 }
 
@@ -1644,43 +1646,15 @@ async fn project_command_completion(
     }
 }
 
+#[inline(never)]
 fn assemble_context_request(
     template: &ModelRequest,
     view: &crate::model_context::ModelContextView,
     session: &crate::session::PersistedAgentSession,
 ) -> Result<ModelRequest, AgentError> {
-    let mut request = template.clone();
+    let mut request = clone_context_request(template);
     request.preparation = None;
-    let mut anchors = std::collections::BTreeSet::new();
-    if session.agent_role.is_main()
-        && view
-            .messages
-            .iter()
-            .any(|message| message.role == ChatRole::ContextSummary)
-    {
-        if let Some(source) = session.authorization_requirement() {
-            anchors.insert(source.message_id.clone());
-        }
-        if let Some(segment) = &session.focus_epoch.goal_segment {
-            anchors.insert(segment.source_message_id.clone());
-        }
-        if let Some(source) = session.conversation.iter().find(|message| {
-            message.role == ChatRole::User
-                && !crate::permission_resume::is_resume_control_message(message)
-        }) {
-            anchors.insert(source.message_id.clone());
-        }
-        for message in &view.messages {
-            if message.role == ChatRole::ContextSummary
-                && let Ok(summary) =
-                    serde_json::from_str::<crate::model_context::ContextSummaryV1>(&message.text)
-            {
-                for fact in summary.goals.iter().chain(&summary.historical_constraints) {
-                    anchors.extend(fact.source_message_ids.iter().cloned());
-                }
-            }
-        }
-    }
+    let anchors = context_request_anchors(view, session);
     let mut included = request
         .messages
         .iter()
@@ -1706,7 +1680,7 @@ fn assemble_context_request(
             .is_some_and(|message| message.role == ChatRole::System),
     );
     request.messages.splice(at..at, history);
-    Ok(request)
+    Ok(*request)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2427,12 +2401,7 @@ pub(crate) fn verified_browser_result(message: &ChatMessage) -> Option<BrowserAc
     ) {
         return None;
     }
-    if let Ok(completion) =
-        serde_json::from_str::<ComputerActionCompleted>(&message.trusted_tool_result().text)
-        && completion.result == ComputerActionResultClass::Verified
-        && let Some(ComputerActionOutput::Browser(result)) = completion.output
-        && result.validate().is_ok()
-    {
+    if let Some(result) = verified_completion_browser(&message.trusted_tool_result().text) {
         return Some(result);
     }
 
@@ -4413,4 +4382,79 @@ async fn read_conversation_attachment(
     *remaining_budget -= cost;
     message.tool_call_id = Some(call.id.clone());
     Ok(message)
+}
+
+#[inline(never)]
+fn settled_terminal_error(result: &Result<LoopOutcome, AgentError>) -> Option<AgentError> {
+    match result {
+        Err(error) | Ok(LoopOutcome::ContentSafetyUnavailable(error)) => Some(error.clone()),
+        Ok(LoopOutcome::ProtocolError(error)) => Some(AgentError {
+            kind: AgentErrorKind::Internal,
+            message: error.to_string(),
+            retryable: false,
+            safe_for_model: true,
+            error_code: None,
+        }),
+        _ => None,
+    }
+}
+
+#[inline(never)]
+fn parsed_tool_arguments(raw: &str) -> serde_json::Value {
+    serde_json::from_str(raw).expect("classify_model_turn validated tool arguments")
+}
+
+#[inline(never)]
+fn verified_completion_browser(text: &str) -> Option<BrowserActionResult> {
+    let completion = serde_json::from_str::<ComputerActionCompleted>(text).ok()?;
+    if completion.result == ComputerActionResultClass::Verified
+        && let Some(ComputerActionOutput::Browser(result)) = completion.output
+        && result.validate().is_ok()
+    {
+        return Some(result);
+    }
+    None
+}
+
+#[inline(never)]
+fn context_request_anchors(
+    view: &crate::model_context::ModelContextView,
+    session: &PersistedAgentSession,
+) -> std::collections::BTreeSet<String> {
+    let mut anchors = std::collections::BTreeSet::new();
+    if session.agent_role.is_main()
+        && view
+            .messages
+            .iter()
+            .any(|message| message.role == ChatRole::ContextSummary)
+    {
+        if let Some(source) = session.authorization_requirement() {
+            anchors.insert(source.message_id.clone());
+        }
+        if let Some(segment) = &session.focus_epoch.goal_segment {
+            anchors.insert(segment.source_message_id.clone());
+        }
+        if let Some(source) = session.conversation.iter().find(|message| {
+            message.role == ChatRole::User
+                && !crate::permission_resume::is_resume_control_message(message)
+        }) {
+            anchors.insert(source.message_id.clone());
+        }
+        for message in &view.messages {
+            if message.role == ChatRole::ContextSummary
+                && let Ok(summary) =
+                    serde_json::from_str::<crate::model_context::ContextSummaryV1>(&message.text)
+            {
+                for fact in summary.goals.iter().chain(&summary.historical_constraints) {
+                    anchors.extend(fact.source_message_ids.iter().cloned());
+                }
+            }
+        }
+    }
+    anchors
+}
+
+#[inline(never)]
+fn clone_context_request(template: &ModelRequest) -> Box<ModelRequest> {
+    Box::new(template.clone())
 }

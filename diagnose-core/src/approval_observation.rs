@@ -38,6 +38,8 @@ pub enum ReviewReason {
     InvalidDecision,
     Policy,
     Budget,
+    SourceExpired,
+    TaskExpired,
     Revoked,
     SourceChanged,
     CandidateExpired,
@@ -266,7 +268,11 @@ impl ReviewTracking {
                 Some(ReviewReason::Revoked) => ReviewOutcome::Cancelled,
                 Some(ReviewReason::SourceChanged) => ReviewOutcome::Superseded,
                 Some(ReviewReason::Budget | ReviewReason::Policy) => ReviewOutcome::PolicyBlocked,
-                Some(ReviewReason::CandidateExpired) => ReviewOutcome::Expired,
+                Some(
+                    ReviewReason::CandidateExpired
+                    | ReviewReason::SourceExpired
+                    | ReviewReason::TaskExpired,
+                ) => ReviewOutcome::Expired,
                 Some(ReviewReason::Unknown) | None => ReviewOutcome::Unknown,
                 _ => ReviewOutcome::Fault,
             },

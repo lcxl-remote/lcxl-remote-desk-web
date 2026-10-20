@@ -544,12 +544,14 @@ async fn goal_approval_funding_failure_is_terminal_instead_of_a_storage_retry() 
             now,
         )
         .await;
-        assert!(matches!(
-            result,
-            Err(approval::ReviewStartError::Unavailable(
-                ReviewReason::Budget
-            ))
-        ));
+        let expected = if expired {
+            ReviewReason::SourceExpired
+        } else {
+            ReviewReason::Budget
+        };
+        assert!(
+            matches!(result, Err(approval::ReviewStartError::Unavailable(reason)) if reason == expected)
+        );
         assert_eq!(review_row::Entity::find().count(&db).await.unwrap(), 0);
         let group_after = group::Entity::find_by_id(row.id)
             .one(&db)
@@ -611,12 +613,14 @@ async fn goal_approval_funding_failure_is_terminal_instead_of_a_storage_retry() 
             .iter()
             .find(|m| m.text.contains("goal_proposal_decision"))
             .unwrap();
-        assert!(
-            receipt
-                .text
-                .contains("budget or execution deadline was exhausted")
-        );
-        assert!(receipt.text.contains("Send a new message"));
+        assert!(receipt.text.contains(if expired {
+            "originating task reached its deadline"
+        } else {
+            "originating task's budget was exhausted"
+        }));
+        if !expired {
+            assert!(receipt.text.contains("Send a new message"));
+        }
     }
 }
 

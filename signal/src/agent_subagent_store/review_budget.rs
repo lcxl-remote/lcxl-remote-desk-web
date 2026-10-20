@@ -2,6 +2,7 @@
 use super::*;
 use crate::config::connection::DatabaseTransaction;
 use crate::entity::agent_approval_review as review_row;
+use desk_diagnose_core::subagent::reservation::CallRejection;
 use desk_diagnose_core::{
     approval_review::{APPROVAL_REVIEW_STATUS_REVIEWING, ApprovalReviewCandidate},
     goal::GoalUsage,
@@ -123,6 +124,11 @@ async fn validate_review_session_on(
         return Err(invalid());
     }
     if !shared_approval_current_on(txn, session, now_ms).await? {
+        // Preserve the original authority check while explaining a time rejection.
+        desk_diagnose_core::future::send_phase(|| {
+            explain_closed_review_source_on(txn, session, now_ms)
+        })
+        .await?;
         return Err(invalid());
     }
     let delegated = crate::entity::agent_approval_delegation::Entity::find()
@@ -175,12 +181,16 @@ async fn validate_review_source_on(
         .one(txn)
         .await?
         .ok_or_else(invalid)?;
-    let group = decode_group(&source)?;
+    let group = current_group_on(txn, &source).await?;
     if group.source_admission != SourceAdmission::Open
         || Some(group.source_epoch) != authority.source_epoch
-        || now_ms >= group.limits.deadline_ms
     {
         return Err(invalid());
+    }
+    if now_ms >= group.limits.deadline_ms {
+        return Err(DbErr::Custom(
+            CallRejection::SourceExpired.storage_message(),
+        ));
     }
     if let SessionRead::Reuse(proof) = read
         && group.root_conversation_id == proof.session().conversation_id
@@ -207,11 +217,11 @@ async fn validate_review_source_on(
         let run = decode_run(&task)?;
         run.validate_session(session).map_err(|_| invalid())?;
         run.require_current(run.fence()).map_err(|_| invalid())?;
-        if run.binding.source_epoch != group.source_epoch
-            || run.binding.source != group.source
-            || now_ms >= run.binding.deadline_ms
-        {
+        if run.binding.source_epoch != group.source_epoch || run.binding.source != group.source {
             return Err(invalid());
+        }
+        if now_ms >= run.binding.deadline_ms {
+            return Err(DbErr::Custom(CallRejection::TaskExpired.storage_message()));
         }
     } else if !group.can_interpret(session.input_revision, session.control_revision) {
         return Err(invalid());
@@ -240,25 +250,23 @@ pub(crate) async fn check_goal_review_funding_on(
         .one(txn)
         .await?
         .ok_or_else(invalid)?;
-    let group = decode_group(&row)?;
+    let group = current_group_on(txn, &row).await?;
     if !group.can_interpret(session.input_revision, session.control_revision) {
         return Err(ReviewStartError::Unavailable(ReviewReason::SourceChanged));
     }
     let mut budget = group.budget;
-    if budget
-        .reserve(
-            group.limits,
-            Usage {
-                model_calls: 1,
-                tool_calls: 0,
-                tokens: reserved_tokens,
-            },
-            false,
-            now_ms,
-        )
-        .is_err()
-    {
-        return Err(ReviewStartError::Unavailable(ReviewReason::Budget));
+    if let Err(error) = budget.reserve(
+        group.limits,
+        Usage {
+            model_calls: 1,
+            tool_calls: 0,
+            tokens: reserved_tokens,
+        },
+        false,
+        now_ms,
+    ) {
+        let reason = CallRejection::from_reserve(error).ok_or_else(invalid)?;
+        return Err(ReviewStartError::Unavailable(reason.review_reason()));
     }
     Ok(())
 }
@@ -349,7 +357,7 @@ pub(crate) async fn reserve_review_attempt_on(
         })
         .await?
         .ok_or_else(invalid)?;
-        Some(decode_group(&row)?)
+        Some(current_group_on(txn, &row).await?)
     } else {
         None
     };
@@ -470,9 +478,7 @@ pub(crate) async fn reserve_review_attempt_on(
     .await?;
     let reservation = match admission {
         BudgetAdmission::Reserved(value) => value,
-        BudgetAdmission::Exhausted => {
-            return Err(DbErr::Custom("approval review budget exhausted".into()));
-        }
+        BudgetAdmission::Rejected(reason) => return Err(DbErr::Custom(reason.storage_message())),
         _ => return Err(invalid()),
     };
     let changed = desk_diagnose_core::future::boxed(|| async {
@@ -788,6 +794,34 @@ async fn validate_review_subject_on(
         }
 
         _ => return Err(invalid()),
+    }
+    Ok(())
+}
+
+pub(super) async fn explain_closed_review_source_on(
+    txn: &DatabaseTransaction,
+    session: &PersistedAgentSession,
+    now_ms: i64,
+) -> Result<(), DbErr> {
+    let Some(binding) = session.agent_role.binding() else {
+        return Ok(());
+    };
+    let source = group_row::Entity::find()
+        .filter(group_row::Column::GroupId.eq(&binding.group_id))
+        .filter(group_row::Column::RootConversationId.eq(&binding.root_conversation_id))
+        .filter(group_row::Column::ActorId.eq(&session.actor_id))
+        .filter(group_row::Column::DeviceId.eq(&session.device_id))
+        .one(txn)
+        .await?
+        .ok_or_else(invalid)?;
+    let group = current_group_on(txn, &source).await?;
+    if now_ms >= group.limits.deadline_ms {
+        return Err(DbErr::Custom(
+            CallRejection::SourceExpired.storage_message(),
+        ));
+    }
+    if now_ms >= binding.deadline_ms {
+        return Err(DbErr::Custom(CallRejection::TaskExpired.storage_message()));
     }
     Ok(())
 }

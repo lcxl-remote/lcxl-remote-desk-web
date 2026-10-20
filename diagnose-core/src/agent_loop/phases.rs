@@ -78,6 +78,32 @@ async fn prepare_iteration<'a, 'd: 'a, M: FnMut() -> String + 'a>(
     sink: &'a mut dyn TurnSink,
     state: &'a mut LoopState<M>,
 ) -> Result<PhaseResult<PromptPhase<'a>>, AgentError> {
+    prepare_iteration_phase(deps, session, turn_id, sink, state).await
+}
+
+fn prepare_iteration_phase<'a, 'd: 'a, M: FnMut() -> String + 'a>(
+    deps: &'a LoopDeps<'d>,
+    session: &'a mut PersistedAgentSession,
+    turn_id: &'a str,
+    sink: &'a mut dyn TurnSink,
+    state: &'a mut LoopState<M>,
+) -> Pin<Box<dyn Future<Output = Result<PhaseResult<PromptPhase<'a>>, AgentError>> + 'a>> {
+    let mut inputs = Some(Box::new((deps, session, turn_id, sink, state)));
+    crate::future::phase(|| {
+        prepare_iteration_inner(inputs.take().expect("immediate phase factory"))
+    })
+}
+
+async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
+    inputs: Box<(
+        &'a LoopDeps<'d>,
+        &'a mut PersistedAgentSession,
+        &'a str,
+        &'a mut dyn TurnSink,
+        &'a mut LoopState<M>,
+    )>,
+) -> Result<PhaseResult<PromptPhase<'a>>, AgentError> {
+    let (deps, session, turn_id, sink, state) = *inputs;
     if child_source_paused(deps, session).await? {
         return Ok(PhaseResult::Complete(Some(
             LoopOutcome::DelegationSourcePaused,
@@ -182,7 +208,10 @@ async fn prepare_iteration<'a, 'd: 'a, M: FnMut() -> String + 'a>(
         && session.agent_role.is_main()
         && session.trigger_origin == TriggerOrigin::User
     {
-        deps.session_seam.load_goal_for_planning(session).await?
+        deps.session_seam
+            .load_goal_for_planning(session)
+            .await?
+            .map(Box::new)
     } else {
         None
     };
@@ -194,6 +223,7 @@ async fn prepare_iteration<'a, 'd: 'a, M: FnMut() -> String + 'a>(
         deps.session_seam
             .load_latest_completed_goal(session)
             .await?
+            .map(Box::new)
     } else {
         None
     };
@@ -1131,7 +1161,7 @@ async fn prepare_iteration<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                     "goal_state_projection",
                 )?;
                 messages.push(marker);
-            } else if let Some(goal) = planning_goal.as_ref() {
+            } else if let Some(goal) = planning_goal.as_deref() {
                 let source = session
                     .conversation
                     .iter()
@@ -1162,7 +1192,7 @@ async fn prepare_iteration<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                 )?;
                 messages.push(marker);
             }
-            if let Some(goal) = latest_completed_goal.as_ref() {
+            if let Some(goal) = latest_completed_goal.as_deref() {
                 let marker_id = format!(
                     "goal-completed-hint-{}-{}",
                     goal.goal_id, session.input_revision
@@ -1267,12 +1297,6 @@ async fn prepare_iteration<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                 .await
                 {
                     Ok(view) => view,
-                    Err(error)
-                        if call_budget::is_exhausted(&error)
-                            && session.trigger_origin == TriggerOrigin::GoalContinuation =>
-                    {
-                        return Ok(PhaseResult::Complete(Some(LoopOutcome::GoalBudgetReached)));
-                    }
                     Err(error) => return Err(error),
                 };
                 if deps.model.command_completion_event_id().is_none() {
@@ -1460,6 +1484,7 @@ async fn prepare_iteration<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                 state.projection_rebuilds = 0;
                 // Interpretation is published only after protocol and safety validation.
 
+                let mut request = Box::new(request);
                 let model: ModelPhase<'a> = crate::future::phase(|| async move {
                     let exposed = owned_exposed.iter().collect::<Vec<_>>();
                     let completion_only = deps.model.command_completion_event_id().is_some();
@@ -1478,12 +1503,6 @@ async fn prepare_iteration<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                     .await
                     {
                         Ok(budget) => budget,
-                        Err(error)
-                            if call_budget::is_exhausted(&error)
-                                && session.trigger_origin == TriggerOrigin::GoalContinuation =>
-                        {
-                            return Ok(PhaseResult::Complete(Some(LoopOutcome::GoalBudgetReached)));
-                        }
                         Err(error) => return Err(error),
                     };
                     let mut model_controls = crate::model_controls::FrozenModelControls::capture(
@@ -1594,11 +1613,9 @@ async fn prepare_iteration<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                             )
                         });
                     let dial_result = if completion_only {
-                        deps.model
-                            .call(request, &mut crate::seam::NullTurnSink)
-                            .await
+                        dial_request(deps.model, request, &mut crate::seam::NullTurnSink).await
                     } else {
-                        deps.model.call(request, sink).await
+                        dial_request(deps.model, request, sink).await
                     };
                     if dial_result.is_ok()
                         && let Some(projection) = &mut correction_projection
@@ -2175,11 +2192,6 @@ async fn prepare_iteration<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                                     deps.session_seam.save(session).await?;
                                     for call in &turn.tool_calls {
                                         finish_tool(session, &call.id, false, sink);
-                                    }
-                                    if call_budget::is_exhausted(&error)
-                                        && session.trigger_origin == TriggerOrigin::GoalContinuation
-                                    {
-                                        return Ok(Some(LoopOutcome::GoalBudgetReached));
                                     }
                                     return Err(error);
                                 }
@@ -3402,7 +3414,7 @@ async fn prepare_iteration<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                                                             &call.id,
                                                         ),
                                                     );
-                                                    let mut request = if let Some(goal) = planning_goal.as_ref() {
+                                                    let mut request = if let Some(goal) = planning_goal.as_deref() {
                                     if proposal.previous_completed_goal_id.is_some() {
                                         tool_observation.reject(crate::model_observability::Stage::Preflight,crate::model_observability::InputIssue::Combination);
                                         return Err(crate::goal_tools::invalid("a revision cannot reference a completed goal"));
@@ -4443,4 +4455,14 @@ async fn prepare_iteration<'a, 'd: 'a, M: FnMut() -> String + 'a>(
         Ok(PhaseResult::Ready(runtime))
     });
     Ok(PhaseResult::Ready(prompt))
+}
+
+// Move the owned request into the existing model future outside the driver frame.
+#[inline(never)]
+fn dial_request<'a>(
+    model: &'a dyn ModelSeam,
+    request: Box<ModelRequest>,
+    sink: &'a mut dyn TurnSink,
+) -> Pin<Box<dyn Future<Output = Result<crate::chat::ModelTurn, AgentError>> + 'a>> {
+    model.call(*request, sink)
 }

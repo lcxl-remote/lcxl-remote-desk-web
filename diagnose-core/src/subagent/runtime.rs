@@ -68,7 +68,7 @@ impl RuntimeTurn {
                 run.validate_session(session).map_err(super::invalid)?;
                 creation.validate_task(&run.binding)?;
                 if creation.response_locale != session.response_locale
-                    || session.delegated_owner_requirement.as_ref()
+                    || session.delegated_owner_requirement.as_deref()
                         != Some(&creation.source.owner_requirement)
                 {
                     return Err(super::invalid("delegated response locale changed"));

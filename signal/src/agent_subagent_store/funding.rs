@@ -2,6 +2,7 @@
 use super::*;
 use crate::config::connection::DatabaseTransaction;
 use crate::entity::agent_goal_run as goal_row;
+use desk_diagnose_core::subagent::{budget::BudgetDimension, reservation::CallRejection};
 use desk_diagnose_core::{
     goal::{GoalRun, GoalUsage},
     subagent::{
@@ -154,11 +155,13 @@ pub(super) async fn reserve_call_for_session_on(
     })
     .await?;
     let (mut reservation, actual) = match &admitted {
-        BudgetAdmission::Exhausted => return Ok(BudgetAdmission::Exhausted),
+        BudgetAdmission::Rejected(reason) => return Ok(BudgetAdmission::Rejected(*reason)),
         BudgetAdmission::Reserved(reservation) | BudgetAdmission::AlreadyReserved(reservation) => {
-            (reservation.clone(), None)
+            (boxed_reservation(reservation), None)
         }
-        BudgetAdmission::Settled(reservation, actual) => (reservation.clone(), Some(*actual)),
+        BudgetAdmission::Settled(reservation, actual) => {
+            (boxed_reservation(reservation), Some(*actual))
+        }
     };
     if !super::scheduled_budget::reserve_on(
         txn,
@@ -168,7 +171,9 @@ pub(super) async fn reserve_call_for_session_on(
     )
     .await?
     {
-        return Ok(BudgetAdmission::Exhausted);
+        return Ok(BudgetAdmission::Rejected(CallRejection::Budget(
+            BudgetDimension::Scheduled,
+        )));
     }
     let Some(goal_upper) = goal_upper else {
         if reservation.source_goal_upper.is_some() {
@@ -211,12 +216,15 @@ pub(super) async fn reserve_call_for_session_on(
             .max(goal.updated_at_unix_ms);
         match goal.reserve_delegation_with_id(&reservation.reservation_id, goal_upper, now) {
             Ok(_) => {}
-            Err(
-                desk_diagnose_core::goal::GoalError::BudgetExceeded
-                | desk_diagnose_core::goal::GoalError::DeadlineReached,
-            ) => {
+            Err(desk_diagnose_core::goal::GoalError::BudgetExceeded) => {
                 // The caller rolls back the allocation reservation already written.
-                return Ok(BudgetAdmission::Exhausted);
+                return Ok(BudgetAdmission::Rejected(CallRejection::Budget(
+                    goal.exhausted_dimension(goal_upper)
+                        .map_err(|_| invalid())?,
+                )));
+            }
+            Err(desk_diagnose_core::goal::GoalError::DeadlineReached) => {
+                return Ok(BudgetAdmission::Rejected(CallRejection::SourceExpired));
             }
             Err(_) => return Err(invalid()),
         }
@@ -240,7 +248,7 @@ pub(super) async fn reserve_call_for_session_on(
         if changed.rows_affected != 1 {
             return Err(invalid());
         }
-        Ok(BudgetAdmission::Reserved(reservation))
+        Ok(BudgetAdmission::Reserved(*reservation))
     })
     .await
 }
@@ -311,4 +319,9 @@ pub(crate) async fn settle_call_budget_on(
         }
     }
     settle_budget_on(txn, reservation, actual, now_ms).await
+}
+
+#[inline(never)]
+fn boxed_reservation(reservation: &DelegationCallReservation) -> Box<DelegationCallReservation> {
+    Box::new(reservation.clone())
 }

@@ -97,7 +97,7 @@ impl SubAgentStore {
         })
         .await?
         .ok_or_else(invalid)?;
-        let group = decode_group(&source)?;
+        let group = current_group_on(&txn, &source).await?;
         let creation: TaskCreationEnvelope =
             serde_json::from_str(&row.creation_envelope_json).map_err(|_| invalid())?;
         creation
@@ -141,7 +141,7 @@ impl SubAgentStore {
             if session.version != session_row.version
                 || i64::try_from(session.lease_token).ok() != Some(session_row.lease_token)
                 || session.response_locale != creation.response_locale
-                || session.delegated_owner_requirement.as_ref()
+                || session.delegated_owner_requirement.as_deref()
                     != Some(&creation.source.owner_requirement)
             {
                 return Err(invalid());

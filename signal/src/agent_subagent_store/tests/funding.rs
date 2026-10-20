@@ -222,7 +222,11 @@ async fn source_goal_exhaustion_rolls_back_the_group_reservation() {
             )
             .await
             .unwrap(),
-        CallAdmission::Exhausted
+        CallAdmission::Rejected(
+            desk_diagnose_core::subagent::reservation::CallRejection::Budget(
+                desk_diagnose_core::subagent::budget::BudgetDimension::ModelCalls
+            )
+        )
     );
     let row = group_row::Entity::find()
         .filter(group_row::Column::GroupId.eq(parent.delegation_group_id.unwrap()))
@@ -1297,4 +1301,143 @@ async fn ordinary_input_reserves_more_than_the_old_total_without_skipping_accoun
         assert_eq!(receipt.upper.tokens, 1_228_000);
         assert_eq!(receipt.source_goal_upper, None);
     }
+}
+
+async fn stale_derived_deadline(db: &DatabaseConnection, parent: &PersistedAgentSession) -> i64 {
+    let row = group_row::Entity::find()
+        .filter(group_row::Column::GroupId.eq(parent.delegation_group_id.as_ref().unwrap()))
+        .one(db)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut group = decode_group(&row).unwrap();
+    group.limits.deadline_ms = chrono::Utc::now().timestamp_millis() - 7_200_000;
+    group_row::Entity::update_many()
+        .set(group_row::ActiveModel {
+            deadline_ms: Set(group.limits.deadline_ms),
+            state_json: Set(serde_json::to_string(&group).unwrap()),
+            ..Default::default()
+        })
+        .filter(group_row::Column::Id.eq(row.id))
+        .exec(db)
+        .await
+        .unwrap();
+    row.version
+}
+
+#[tokio::test]
+async fn current_goal_source_admits_model_after_the_derived_group_deadline() {
+    let db = database().await;
+    let (parent, _) = funded_parent(&db).await;
+    let version = stale_derived_deadline(&db, &parent).await;
+    let now = chrono::Utc::now().timestamp_millis();
+    let store = SubAgentStore::new(db.clone());
+    let receipt = match store
+        .reserve_runtime_call(
+            &parent,
+            "post-downtime-model",
+            DelegationCallKind::Model,
+            &"a".repeat(64),
+            GoalUsage {
+                model_calls: 1,
+                input_tokens: 10,
+                ..Default::default()
+            },
+            now,
+        )
+        .await
+        .unwrap()
+    {
+        CallAdmission::Reserved(receipt) => receipt,
+        other => panic!("new source call: {other:?}"),
+    };
+    let row = group_row::Entity::find()
+        .filter(group_row::Column::GroupId.eq(&receipt.group_id))
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    let group = decode_group(&row).unwrap();
+    assert_eq!(row.deadline_ms, i64::MAX);
+    assert_eq!(group.limits.deadline_ms, row.deadline_ms);
+    assert!(row.version > version);
+    assert_eq!(group.source_epoch, 1);
+    assert_eq!(group.parent_control_revision, parent.control_revision);
+}
+
+#[tokio::test]
+async fn current_goal_source_admits_review_after_the_derived_group_deadline() {
+    let db = database().await;
+    let (parent, authority) = review_without_planner(&db).await;
+    stale_derived_deadline(&db, &parent).await;
+    let txn = db.begin().await.unwrap();
+    super::super::review_budget::check_goal_review_funding_on(
+        &txn,
+        &parent,
+        230,
+        chrono::Utc::now().timestamp_millis(),
+    )
+    .await
+    .unwrap();
+    txn.rollback().await.unwrap();
+    let receipt = reserve_review(&db, &parent, &authority).await;
+    assert_eq!(receipt.review_authority, Some(authority));
+}
+
+#[tokio::test]
+async fn source_expiry_rejects_new_model_and_review_without_reserving_budget() {
+    use desk_diagnose_core::subagent::reservation::CallRejection;
+    let db = database().await;
+    let (parent, mut goal) = funded_parent(&db).await;
+    goal.created_at_unix_ms -= 2 * 86_400_000;
+    let version = goal.state_version;
+    goal.state_version += 1;
+    let txn = db.begin().await.unwrap();
+    assert!(
+        crate::agent_goal_store::replace_on(&txn, &goal, version, goal.lease_epoch, None, None)
+            .await
+            .unwrap()
+    );
+    txn.commit().await.unwrap();
+    let mut policy = crate::goal_budget_policy::read(&db).await.unwrap();
+    policy.limits.deadline_ms = Some(86_400_000);
+    crate::goal_budget_policy::update(
+        &db,
+        &desk_agent_protocol::ai_assistant::goal_budget::UpdateGoalBudgetPolicy {
+            expected_revision: policy.revision,
+            limits: policy.limits,
+            device_unavailable_max_ms: policy.device_unavailable_max_ms,
+        },
+    )
+    .await
+    .unwrap();
+    let now = chrono::Utc::now().timestamp_millis();
+    let txn = db.begin().await.unwrap();
+    assert!(matches!(
+        super::super::review_budget::check_goal_review_funding_on(&txn, &parent, 230, now).await,
+        Err(crate::agent_approval_store::ReviewStartError::Unavailable(
+            desk_diagnose_core::approval_observation::ReviewReason::SourceExpired
+        ))
+    ));
+    txn.rollback().await.unwrap();
+    let rejected = SubAgentStore::new(db.clone())
+        .reserve_runtime_call(
+            &parent,
+            "expired-source",
+            DelegationCallKind::Model,
+            &"a".repeat(64),
+            GoalUsage {
+                model_calls: 1,
+                input_tokens: 10,
+                ..Default::default()
+            },
+            now,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        rejected,
+        CallAdmission::Rejected(CallRejection::SourceExpired)
+    );
+    assert!(recorded_goal(&db).await.delegation_reservations.is_empty());
 }

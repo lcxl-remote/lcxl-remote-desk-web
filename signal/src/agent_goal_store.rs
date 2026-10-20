@@ -1759,6 +1759,15 @@ pub async fn settle_slice(
             session.focus_epoch.selected_attachment_ids.clone(),
             now_ms,
         ),
+        GoalSegmentEnd::AdmissionRejected(reason) => goal.finish_admission_rejected_slice(
+            session.input_revision,
+            segment.goal_revision,
+            segment.lease_epoch,
+            *reason,
+            event_seq,
+            session.focus_epoch.selected_attachment_ids.clone(),
+            now_ms,
+        ),
         GoalSegmentEnd::WaitForModel {
             retry_after_unix_ms,
         } => goal.finish_model_wait_slice(

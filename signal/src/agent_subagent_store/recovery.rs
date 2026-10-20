@@ -58,7 +58,7 @@ impl SubAgentStore {
             .one(&txn)
             .await?
             .ok_or_else(invalid)?;
-        let group = decode_group(&source)?;
+        let group = current_group_on(&txn, &source).await?;
         let stored = session_row::Entity::find()
             .filter(session_row::Column::ConversationId.eq(&run.child_conversation_id))
             .filter(session_row::Column::ActorId.eq(&run.actor_id))

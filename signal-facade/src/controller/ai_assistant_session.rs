@@ -627,15 +627,18 @@ pub struct AiAssistantGoalDto {
     pub pause_reason: Option<String>,
     pub slice_seq: u32,
     pub used_slices: u32,
-    pub limit_slices: u32,
+    #[schema(required = true)]
+    pub limit_slices: Option<u32>,
     pub used_model_tokens: u64,
-    pub limit_model_tokens: u64,
+    #[schema(required = true)]
+    pub limit_model_tokens: Option<u64>,
     pub used_model_calls: u32,
     pub used_tool_calls: u32,
     pub used_active_time_ms: u64,
     pub limits: AiAssistantGoalLimitsDto,
     pub created_at_unix_ms: u64,
-    pub deadline_unix_ms: u64,
+    #[schema(required = true)]
+    pub deadline_unix_ms: Option<u64>,
     pub next_attempt_unix_ms: Option<u64>,
     pub updated_at_unix_ms: u64,
     pub checkpoint_summary: Option<String>,
@@ -725,23 +728,29 @@ pub enum AiAssistantGoalOwnerAction {
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AiAssistantGoalLimitsDto {
-    pub active_time_ms: u64,
-    pub model_tokens: u64,
-    pub model_calls: u32,
-    pub tool_calls: u32,
-    pub slices: u32,
-    pub stalled_slices: u32,
+    #[schema(required = true)]
+    pub active_time_ms: Option<u64>,
+    #[schema(required = true)]
+    pub model_tokens: Option<u64>,
+    #[schema(required = true)]
+    pub model_calls: Option<u32>,
+    #[schema(required = true)]
+    pub tool_calls: Option<u32>,
+    #[schema(required = true)]
+    pub slices: Option<u32>,
+    #[schema(required = true)]
+    pub stalled_slices: Option<u32>,
 }
 
 impl From<desk_diagnose_core::goal::GoalLimits> for AiAssistantGoalLimitsDto {
     fn from(value: desk_diagnose_core::goal::GoalLimits) -> Self {
         Self {
-            active_time_ms: value.active_time_ms,
-            model_tokens: value.model_tokens,
-            model_calls: value.model_calls,
-            tool_calls: value.tool_calls,
-            slices: value.slices,
-            stalled_slices: value.stalled_slices,
+            active_time_ms: (value.active_time_ms != u64::MAX).then_some(value.active_time_ms),
+            model_tokens: (value.model_tokens != u64::MAX).then_some(value.model_tokens),
+            model_calls: (value.model_calls != u32::MAX).then_some(value.model_calls),
+            tool_calls: (value.tool_calls != u32::MAX).then_some(value.tool_calls),
+            slices: (value.slices != u32::MAX).then_some(value.slices),
+            stalled_slices: (value.stalled_slices != u32::MAX).then_some(value.stalled_slices),
         }
     }
 }
@@ -782,15 +791,17 @@ impl From<&desk_diagnose_core::goal::GoalRun> for AiAssistantGoalDto {
             },
             slice_seq: goal.slice_seq,
             used_slices: goal.used.slices,
-            limit_slices: goal.limits.slices,
+            limit_slices: (goal.limits.slices != u32::MAX).then_some(goal.limits.slices),
             used_model_tokens: goal.used.total_tokens().unwrap_or(u64::MAX),
-            limit_model_tokens: goal.limits.model_tokens,
+            limit_model_tokens: (goal.limits.model_tokens != u64::MAX)
+                .then_some(goal.limits.model_tokens),
             used_model_calls: goal.used.model_calls,
             used_tool_calls: goal.used.tool_calls,
             used_active_time_ms: goal.used.active_time_ms,
             limits: goal.limits.into(),
             created_at_unix_ms: goal.created_at_unix_ms,
-            deadline_unix_ms: goal.deadline_unix_ms,
+            deadline_unix_ms: (goal.deadline_unix_ms != i64::MAX as u64)
+                .then_some(goal.deadline_unix_ms),
             next_attempt_unix_ms: goal.next_attempt_unix_ms,
             updated_at_unix_ms: goal.updated_at_unix_ms,
             checkpoint_summary: goal
@@ -1928,6 +1939,7 @@ impl AiAssistantAttentionItemDto {
             .map(|reason| vec![Self::from_goal(goal, reason)])
             .unwrap_or_default();
         if !goal.state.is_terminal()
+            && goal.deadline_unix_ms != i64::MAX as u64
             && now_unix_ms < goal.deadline_unix_ms
             && goal.deadline_unix_ms - now_unix_ms <= 24 * 60 * 60 * 1_000
         {
@@ -1959,7 +1971,8 @@ impl AiAssistantAttentionItemDto {
             reason,
             state_version: goal.state_version,
             updated_at_unix_ms: goal.updated_at_unix_ms,
-            deadline_unix_ms: Some(goal.deadline_unix_ms),
+            deadline_unix_ms: (goal.deadline_unix_ms != i64::MAX as u64)
+                .then_some(goal.deadline_unix_ms),
         }
     }
 
@@ -2111,7 +2124,7 @@ mod tests {
     #[test]
     fn approaching_deadline_is_a_separate_action_without_goal_text() {
         use desk_diagnose_core::goal::{GoalLimits, GoalModelBinding, GoalOpening, GoalRun};
-        let goal = GoalRun::new(
+        let mut goal = GoalRun::new(
             "goal".into(),
             "run".into(),
             "owner".into(),
@@ -2130,6 +2143,7 @@ mod tests {
             GoalLimits::default(),
         )
         .unwrap();
+        goal.deadline_unix_ms = 1_000 + 86_400_000;
         let soon = AiAssistantAttentionItemDto::for_goal(&goal, goal.deadline_unix_ms - 60_000);
         assert_eq!(soon.len(), 1);
         assert_eq!(soon[0].reason, AiAssistantAttentionReason::GoalDeadlineSoon);
@@ -2616,3 +2630,72 @@ pub struct AssistantImageQuery {
 #[derive(utoipa::ToSchema)]
 #[schema(value_type = String, format = Binary)]
 pub struct AssistantImageBytes(pub Vec<u8>);
+
+#[cfg(test)]
+mod goal_time_contract_tests {
+    use super::*;
+    use desk_diagnose_core::goal::{GoalLimits, GoalModelBinding, GoalOpening, GoalRun};
+
+    #[test]
+    fn finite_and_unlimited_goal_snapshots_match_the_mobile_contract() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/goal_time_contract.json"))
+                .unwrap();
+        for unlimited in [false, true] {
+            let limits = if unlimited {
+                GoalLimits {
+                    active_time_ms: u64::MAX,
+                    model_tokens: u64::MAX,
+                    model_calls: u32::MAX,
+                    tool_calls: u32::MAX,
+                    slices: u32::MAX,
+                    stalled_slices: u32::MAX,
+                }
+            } else {
+                GoalLimits {
+                    active_time_ms: 60000,
+                    model_tokens: 1000,
+                    model_calls: 10,
+                    tool_calls: 20,
+                    slices: 3,
+                    stalled_slices: 2,
+                }
+            };
+            let mut goal = GoalRun::new(
+                "goal".into(),
+                "run".into(),
+                "owner".into(),
+                "device".into(),
+                "Verify recovery".into(),
+                "message".into(),
+                GoalOpening::OwnerRequest,
+                GoalModelBinding {
+                    connection_id: "gateway".into(),
+                    connection_revision: 1,
+                    profile_revision: 1,
+                    model_id: "model".into(),
+                },
+                1,
+                1000,
+                limits,
+            )
+            .unwrap();
+            if !unlimited {
+                goal.deadline_unix_ms = 86401000;
+            }
+            let value = serde_json::to_value(AiAssistantGoalDto::from(&goal)).unwrap();
+            assert_eq!(
+                value,
+                fixture[if unlimited { "unlimited" } else { "finite" }]
+            );
+            let attention = AiAssistantAttentionItemDto::from_goal(
+                &goal,
+                AiAssistantAttentionReason::GoalBudget,
+            );
+            assert_eq!(attention.deadline_unix_ms, (!unlimited).then_some(86401000));
+            if unlimited {
+                assert!(AiAssistantAttentionItemDto::for_goal(&goal, 1000).is_empty());
+            }
+        }
+    }
+}

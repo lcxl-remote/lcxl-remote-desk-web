@@ -3,21 +3,18 @@ use super::*;
 use crate::goal::GoalUsage;
 use crate::subagent::reservation::{CallAdmission, DelegationCallKind, DelegationCallReservation};
 
-const EXHAUSTED: &str =
-    "The delegation source has exhausted its call budget or reached its deadline.";
+#[cfg(test)]
+use crate::subagent::budget::BudgetDimension;
+use crate::subagent::reservation::CallRejection;
 
-pub(super) fn exhausted() -> AgentError {
-    AgentError {
-        kind: AgentErrorKind::OutputLimitExceeded,
-        message: EXHAUSTED.into(),
-        retryable: false,
-        safe_for_model: true,
-        error_code: None,
-    }
+#[cfg(test)]
+fn exhausted() -> AgentError {
+    CallRejection::Budget(BudgetDimension::ModelTokens).into_error()
 }
 
-pub(super) fn is_exhausted(error: &AgentError) -> bool {
-    error.kind == AgentErrorKind::OutputLimitExceeded && error.message == EXHAUSTED
+#[inline(never)]
+pub(super) fn is_admission_rejected(error: &AgentError) -> bool {
+    CallRejection::from_error(error).is_some()
 }
 
 // Bounded records transfer as one owned value across admission and claim.
@@ -50,30 +47,14 @@ async fn reserve(
         .await?
     {
         CallAdmission::Reserved(receipt) => Accounting::Delegation(receipt),
-        CallAdmission::Exhausted => return Err(exhausted()),
+        CallAdmission::Rejected(reason) => return Err(reason.into_error()),
         CallAdmission::Untracked if session.agent_role.binding().is_some() => {
             return Err(crate::subagent::invalid(
                 "a child call requires durable budget admission",
             ));
         }
         CallAdmission::Untracked if session.trigger_origin == TriggerOrigin::GoalContinuation => {
-            let goal = deps.session_seam.load_claimed_goal(session).await?;
-            match goal.available_for(upper) {
-                Ok(()) => {}
-                Err(crate::goal::GoalError::BudgetExceeded) => return Err(exhausted()),
-                Err(_) => return Err(crate::subagent::invalid("invalid source goal budget")),
-            }
-            if let Err(error) = deps
-                .session_seam
-                .reserve_goal_budget(session, logical_id, upper, &(deps.clock)())
-                .await
-            {
-                let latest = deps.session_seam.load_claimed_goal(session).await?;
-                if latest.available_for(upper) == Err(crate::goal::GoalError::BudgetExceeded) {
-                    return Err(exhausted());
-                }
-                return Err(error);
-            }
+            crate::future::phase(|| reserve_direct_goal(deps, session, logical_id, upper)).await?;
             Accounting::Goal(logical_id.into())
         }
         CallAdmission::Untracked => Accounting::Untracked,
@@ -83,6 +64,51 @@ async fn reserve(
         upper,
         started: std::time::Instant::now(),
     })
+}
+
+async fn reserve_direct_goal(
+    deps: &LoopDeps<'_>,
+    session: &PersistedAgentSession,
+    logical_id: &str,
+    upper: GoalUsage,
+) -> Result<(), AgentError> {
+    let goal = deps.session_seam.load_claimed_goal(session).await?;
+    if (deps.clock)()
+        .parse::<chrono::DateTime<chrono::Utc>>()
+        .map_err(|_| crate::subagent::invalid("invalid call clock"))?
+        .timestamp_millis() as u64
+        >= goal.deadline_unix_ms
+    {
+        return Err(CallRejection::SourceExpired.into_error());
+    }
+    match goal.available_for(upper) {
+        Ok(()) => {}
+        Err(crate::goal::GoalError::BudgetExceeded) => {
+            return Err(CallRejection::Budget(
+                goal.exhausted_dimension(upper)
+                    .map_err(|_| crate::subagent::invalid("invalid goal budget"))?,
+            )
+            .into_error());
+        }
+        Err(_) => return Err(crate::subagent::invalid("invalid source goal budget")),
+    }
+    if let Err(error) = deps
+        .session_seam
+        .reserve_goal_budget(session, logical_id, upper, &(deps.clock)())
+        .await
+    {
+        let latest = deps.session_seam.load_claimed_goal(session).await?;
+        if latest.available_for(upper) == Err(crate::goal::GoalError::BudgetExceeded) {
+            return Err(CallRejection::Budget(
+                latest
+                    .exhausted_dimension(upper)
+                    .map_err(|_| crate::subagent::invalid("invalid goal budget"))?,
+            )
+            .into_error());
+        }
+        return Err(error);
+    }
+    Ok(())
 }
 
 /// Hash the exact neutral request, including steering and provider cache input.
@@ -148,9 +174,11 @@ fn prepare_model_budget(
             .iter()
             .filter_map(|message| message.image_data_url.as_deref()),
     )
-    .ok_or_else(exhausted)?;
+    .ok_or_else(|| crate::subagent::invalid("model budget arithmetic overflow"))?;
     let upper = GoalUsage {
-        input_tokens: total.checked_sub(output_cap as u64).ok_or_else(exhausted)?,
+        input_tokens: total
+            .checked_sub(output_cap as u64)
+            .ok_or_else(|| crate::subagent::invalid("model budget arithmetic overflow"))?,
         output_tokens: output_cap as u64,
         model_calls: 1,
         active_time_ms: 600_000,

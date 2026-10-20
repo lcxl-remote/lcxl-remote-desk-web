@@ -273,7 +273,7 @@ async fn apply_task_control_with_source_on(
         })
         .await?
         .ok_or_else(invalid)?;
-        let group = decode_group(&group_row)?;
+        let group = current_group_on(txn, &group_row).await?;
         if group.source != run.binding.source {
             return Err(invalid());
         }

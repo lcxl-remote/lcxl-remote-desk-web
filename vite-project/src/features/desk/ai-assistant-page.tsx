@@ -1114,30 +1114,29 @@ export function AiAssistantWorkspace({
                             <p className="mt-1 text-muted-foreground">
                                 {t('pages.aiAssistant.goalUsage', {
                                     slices: chat.goal.usedSlices,
-                                    sliceLimit: goalBudgetPolicy?.limits.slices === null ? t('pages.aiAssistant.goalBudgetDisabled') : goalBudgetPolicy?.limits.slices ?? '…',
+                                    sliceLimit: chat.goal.limits.slices === null ? t('pages.aiAssistant.goalBudgetDisabled') : chat.goal.limits.slices,
                                     tokens: chat.goal.usedModelTokens,
-                                    tokenLimit: goalBudgetPolicy?.limits.modelTokens === null ? t('pages.aiAssistant.goalBudgetDisabled') : goalBudgetPolicy?.limits.modelTokens ?? '…',
+                                    tokenLimit: chat.goal.limits.modelTokens === null ? t('pages.aiAssistant.goalBudgetDisabled') : chat.goal.limits.modelTokens,
                                 })}
                             </p>
                             <p className="mt-1 text-muted-foreground">
                                 {t('pages.aiAssistant.goalBudgetUsage', {
                                     modelCalls: chat.goal.usedModelCalls,
-                                    modelCallLimit: goalBudgetPolicy?.limits.modelCalls === null ? t('pages.aiAssistant.goalBudgetDisabled') : goalBudgetPolicy?.limits.modelCalls ?? '…',
+                                    modelCallLimit: chat.goal.limits.modelCalls === null ? t('pages.aiAssistant.goalBudgetDisabled') : chat.goal.limits.modelCalls,
                                     toolCalls: chat.goal.usedToolCalls,
-                                    toolCallLimit: goalBudgetPolicy?.limits.toolCalls === null ? t('pages.aiAssistant.goalBudgetDisabled') : goalBudgetPolicy?.limits.toolCalls ?? '…',
+                                    toolCallLimit: chat.goal.limits.toolCalls === null ? t('pages.aiAssistant.goalBudgetDisabled') : chat.goal.limits.toolCalls,
                                     activeMinutes: Math.floor(chat.goal.usedActiveTimeMs / 60_000),
-                                    activeMinuteLimit: goalBudgetPolicy?.limits.activeTimeMs === null ? t('pages.aiAssistant.goalBudgetDisabled') : goalBudgetPolicy?.limits.activeTimeMs ? Math.floor(goalBudgetPolicy.limits.activeTimeMs / 60_000) : '…',
+                                    activeMinuteLimit: chat.goal.limits.activeTimeMs === null ? t('pages.aiAssistant.goalBudgetDisabled') : Math.floor(chat.goal.limits.activeTimeMs / 60_000),
                                 })}
                             </p>
                             <p className="mt-1 text-muted-foreground">
                                 {t('pages.aiAssistant.goalIdentity', {
                                     revision: chat.goal.goalRevision,
                                     device: chat.goal.deviceId,
-                                    deadline: goalBudgetPolicy?.limits.deadlineMs === null ? t('pages.aiAssistant.goalBudgetDisabled')
-                                        : goalBudgetPolicy?.limits.deadlineMs ? new Date(chat.goal.createdAtUnixMs + goalBudgetPolicy.limits.deadlineMs).toLocaleString() : '…',
+                                    deadline: chat.goal.deadlineUnixMs === null ? t('pages.aiAssistant.goalBudgetDisabled')
+                                        : new Date(chat.goal.deadlineUnixMs).toLocaleString(),
                                 })}
                             </p>
-                            {goalBudgetPolicy && <GoalLimitsSummary policy={goalBudgetPolicy} />}
                             {chat.goal.checkpointSummary && <p className="mt-1 line-clamp-2">{t('pages.aiAssistant.goalCheckpoint', { summary: chat.goal.checkpointSummary })}</p>}
                             {chat.goal.previousCompletedGoalId && <p className="mt-1 text-muted-foreground">
                                 {t('pages.aiAssistant.goalContinuesPrevious', { goalId: chat.goal.previousCompletedGoalId })}

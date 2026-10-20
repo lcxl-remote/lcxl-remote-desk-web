@@ -1,8 +1,8 @@
 //! Validation and projection of the platform goal budget.
 
 use crate::goal::{
-    DEFAULT_ACTIVE_TIME_MS, DEFAULT_DEADLINE_MS, DEFAULT_MODEL_CALLS, DEFAULT_MODEL_TOKENS,
-    DEFAULT_SLICES, DEFAULT_STALLED_SLICES, DEFAULT_TOOL_CALLS, GoalError, GoalLimits,
+    DEFAULT_MODEL_CALLS, DEFAULT_MODEL_TOKENS, DEFAULT_SLICES, DEFAULT_STALLED_SLICES,
+    DEFAULT_TOOL_CALLS, GoalError, GoalLimits,
 };
 use desk_agent_protocol::ai_assistant::goal_budget::{GoalBudgetLimits, GoalBudgetPolicy};
 
@@ -17,8 +17,8 @@ pub fn initial() -> GoalBudgetPolicy {
         schema_version: SCHEMA_VERSION,
         revision: 0,
         limits: GoalBudgetLimits {
-            active_time_ms: Some(DEFAULT_ACTIVE_TIME_MS),
-            deadline_ms: Some(DEFAULT_DEADLINE_MS),
+            active_time_ms: None,
+            deadline_ms: None,
             model_tokens: Some(DEFAULT_MODEL_TOKENS),
             model_calls: Some(DEFAULT_MODEL_CALLS),
             tool_calls: Some(DEFAULT_TOOL_CALLS),
@@ -117,6 +117,26 @@ pub fn deadline_unix_ms(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn initial_time_limits_are_unlimited_and_can_be_enabled_independently() {
+        let policy = initial();
+        assert_eq!(policy.limits.active_time_ms, None);
+        assert_eq!(policy.limits.deadline_ms, None);
+        assert_eq!(effective_limits(&policy).unwrap().active_time_ms, u64::MAX);
+        assert_eq!(deadline_unix_ms(&policy, 1_000).unwrap(), i64::MAX as u64);
+        let mut limited = policy.clone();
+        limited.limits.active_time_ms = Some(3_600_000);
+        assert_eq!(
+            effective_limits(&limited).unwrap().active_time_ms,
+            3_600_000
+        );
+        assert_eq!(deadline_unix_ms(&limited, 1_000).unwrap(), i64::MAX as u64);
+        limited.limits.active_time_ms = None;
+        limited.limits.deadline_ms = Some(86_400_000);
+        assert_eq!(effective_limits(&limited).unwrap().active_time_ms, u64::MAX);
+        assert_eq!(deadline_unix_ms(&limited, 1_000).unwrap(), 86_401_000);
+    }
 
     #[test]
     fn disabled_limits_remove_goal_budget_enforcement() {

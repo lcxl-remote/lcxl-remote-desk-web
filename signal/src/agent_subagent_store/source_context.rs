@@ -31,11 +31,11 @@ pub(crate) async fn task_context_on<C: ConnectionTrait + crate::config::ConfigCo
         .one(db)
         .await?
         .ok_or_else(invalid)?;
-    let group = decode_group(&source)?;
+    let group = current_group_on(db, &source).await?;
     let creation: TaskCreationEnvelope =
         serde_json::from_str(&row.creation_envelope_json).map_err(|_| invalid())?;
     creation.validate_task(binding).map_err(|_| invalid())?;
-    if session.delegated_owner_requirement.as_ref() != Some(&creation.source.owner_requirement)
+    if session.delegated_owner_requirement.as_deref() != Some(&creation.source.owner_requirement)
         || creation.source != decode_creation(&source)?
         || group.source != binding.source
         || group.source_epoch != binding.source_epoch
@@ -83,6 +83,24 @@ pub(crate) async fn child_resume_admitted_on<
     session: &PersistedAgentSession,
     now_ms: i64,
 ) -> Result<bool, DbErr> {
+    child_resume_admitted_phase(db, session, now_ms).await
+}
+
+fn child_resume_admitted_phase<'a, C: ConnectionTrait + crate::config::ConfigConnection + 'a>(
+    db: &'a C,
+    session: &'a PersistedAgentSession,
+    now_ms: i64,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool, DbErr>> + Send + 'a>> {
+    let mut inputs = Some(Box::new((db, session, now_ms)));
+    desk_diagnose_core::future::send_phase(|| {
+        child_resume_admitted_inner(inputs.take().expect("immediate phase factory"))
+    })
+}
+
+async fn child_resume_admitted_inner<C: ConnectionTrait + crate::config::ConfigConnection>(
+    inputs: Box<(&C, &PersistedAgentSession, i64)>,
+) -> Result<bool, DbErr> {
+    let (db, session, now_ms) = *inputs;
     let Some(binding) = session.agent_role.binding() else {
         return Ok(!session.main_stopped);
     };
@@ -101,7 +119,7 @@ pub(crate) async fn child_resume_admitted_on<
         .one(db)
         .await?
         .ok_or_else(invalid)?;
-    let group = decode_group(&group)?;
+    let group = current_group_on(db, &group).await?;
     let charged = group
         .budget
         .charged
@@ -142,7 +160,7 @@ pub(crate) async fn record_child_resume_on(
         .one(txn)
         .await?
         .ok_or_else(invalid)?;
-    let group = decode_group(&group)?;
+    let group = current_group_on(txn, &group).await?;
     let facts = super::facts::runtime_facts_on(txn, session, now_ms).await?;
     let now = chrono::DateTime::from_timestamp_millis(now_ms)
         .ok_or_else(invalid)?

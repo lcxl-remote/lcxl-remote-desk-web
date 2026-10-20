@@ -10,6 +10,7 @@ use desk_diagnose_core::{
 };
 use sea_orm::ActiveModelTrait;
 
+#[inline(never)]
 pub(crate) fn decode_creation(row: &group_row::Model) -> Result<CreationEnvelope, DbErr> {
     let creation: CreationEnvelope =
         serde_json::from_str(&row.creation_envelope_json).map_err(|_| invalid())?;
@@ -39,6 +40,30 @@ pub(crate) async fn initialize_goal_group_on(
     goal: &GoalRun,
     now_ms: i64,
 ) -> Result<(), DbErr> {
+    initialize_goal_group_phase(db, session, goal, now_ms).await
+}
+
+fn initialize_goal_group_phase<'a>(
+    db: &'a DatabaseTransaction,
+    session: &'a mut PersistedAgentSession,
+    goal: &'a GoalRun,
+    now_ms: i64,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), DbErr>> + Send + 'a>> {
+    let mut inputs = Some(Box::new((db, session, goal, now_ms)));
+    desk_diagnose_core::future::send_phase(|| {
+        initialize_goal_group_inner(inputs.take().expect("immediate phase factory"))
+    })
+}
+
+async fn initialize_goal_group_inner(
+    inputs: Box<(
+        &DatabaseTransaction,
+        &mut PersistedAgentSession,
+        &GoalRun,
+        i64,
+    )>,
+) -> Result<(), DbErr> {
+    let (db, session, goal, now_ms) = *inputs;
     if !session.agent_role.is_main()
         || session.surface != AgentSessionSurface::AiAssistant
         || goal.conversation_id != session.conversation_id
@@ -57,7 +82,7 @@ pub(crate) async fn initialize_goal_group_on(
         .one(db)
         .await?
         .ok_or_else(invalid)?;
-    let group = decode_group(&row)?;
+    let group = current_group_on(db, &row).await?;
     let creation = decode_creation(&row)?;
     let binding =
         desk_diagnose_core::goal::GoalModelBinding::from_destination(&creation.model_destination)
@@ -116,6 +141,32 @@ pub(super) async fn persist_source_group_on(
     goal: Option<&GoalRun>,
     now_ms: i64,
 ) -> Result<(), DbErr> {
+    persist_source_group_phase(db, session, creation, goal, now_ms).await
+}
+
+fn persist_source_group_phase<'a>(
+    db: &'a DatabaseTransaction,
+    session: &'a mut PersistedAgentSession,
+    creation: &'a CreationEnvelope,
+    goal: Option<&'a GoalRun>,
+    now_ms: i64,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), DbErr>> + Send + 'a>> {
+    let mut inputs = Some(Box::new((db, session, creation, goal, now_ms)));
+    desk_diagnose_core::future::send_phase(|| {
+        persist_source_group_inner(inputs.take().expect("immediate phase factory"))
+    })
+}
+
+async fn persist_source_group_inner(
+    inputs: Box<(
+        &DatabaseTransaction,
+        &mut PersistedAgentSession,
+        &CreationEnvelope,
+        Option<&GoalRun>,
+        i64,
+    )>,
+) -> Result<(), DbErr> {
+    let (db, session, creation, goal, now_ms) = *inputs;
     let group = creation.new_group(now_ms, goal).map_err(|error| {
         DbErr::Custom(format!("initialize delegation group: {}", error.message))
     })?;
@@ -128,7 +179,7 @@ pub(super) async fn persist_source_group_on(
         if decode_creation(&existing)? != *creation {
             return Err(invalid());
         }
-        let existing = decode_group(&existing)?;
+        let existing = current_group_on(db, &existing).await?;
         if !existing.can_interpret(session.input_revision, session.control_revision) {
             return Err(invalid());
         }

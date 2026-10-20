@@ -99,7 +99,28 @@ def check(report, baseline):
         if not any(re.search(pattern, key) for key in frames):
             errors.append(f'missing required family: {pattern}')
     limits = baseline['frames']
-    lineage_budgets(baseline)
+    lineage_limits = lineage_budgets(baseline)
+    lineage_usage = lineage_budgets(dict(baseline, frames={key: frames.get(key, 0) for key in limits}))
+    for source, actual in lineage_usage.items():
+        if actual > lineage_limits[source]:
+            errors.append(f'extraction lineage budget exceeded: {source}: {actual} > {lineage_limits[source]}')
+    family_limits, owners = frame_family_budgets(baseline)
+    family_usage = {name: 0 for name in family_limits}
+    for key, actual in frames.items():
+        matches = [family['name'] for family in baseline.get('frame_families', [])
+                   if family_matches(family, key)]
+        if len(matches) > 1:
+            errors.append(f'ambiguous frame family: {key}')
+        elif matches:
+            name = matches[0]
+            if owners.get(key) != name:
+                errors.append(f'unregistered frame family member: {key}')
+            family_usage[name] += actual
+            if actual > 65536:
+                errors.append(f'{actual} > 65536: {key}')
+    for name, actual in family_usage.items():
+        if actual > family_limits[name]:
+            errors.append(f'frame family budget exceeded: {name}: {actual} > {family_limits[name]}')
     for lineage in baseline.get('lineages', []):
         members = set(lineage['members'])
         for key in frames:
@@ -109,10 +130,38 @@ def check(report, baseline):
         if report.get(field, default) != baseline.get(field, default):
             raise ValueError(f'baseline build options changed: {field}')
     for key, actual in frames.items():
+        if key in owners:
+            continue
         limit = limits.get(key, baseline.get('new_function_limit', 65536))
         if actual > limit:
             errors.append(f'{actual} > {limit}: {key}')
     return errors
+
+
+def family_matches(family, key):
+    return (any(re.search(pattern, key) for pattern in family['patterns'])
+            and not any(re.search(pattern, key) for pattern in family.get('exclude_patterns', [])))
+
+
+def frame_family_budgets(baseline):
+    """Sum reviewed frame inventories, not an inferred maximum call-stack peak."""
+    totals, owners = {}, {}
+    for family in baseline.get('frame_families', []):
+        name = family['name']
+        if not family.get('patterns') or not family.get('evidence'):
+            raise ValueError('frame family needs stable scope and call-path evidence')
+        members = [key for key in baseline['frames'] if family_matches(family, key)]
+        if name in totals or not members:
+            raise ValueError('duplicate or empty frame family')
+        for key in members:
+            if key in owners:
+                raise ValueError('frame family scopes overlap')
+            value = baseline['frames'][key]
+            if not isinstance(value, int) or not 0 <= value <= 65536:
+                raise ValueError('frame family member exceeds the 64 KiB hard ceiling')
+            owners[key] = name
+        totals[name] = sum(baseline['frames'][key] for key in members)
+    return totals, owners
 
 
 def lineage_budgets(baseline):
@@ -169,6 +218,34 @@ def compare_baselines(current, previous):
         raise ValueError('new function ceiling increased')
     if not set(previous.get('required', [])).issubset(current.get('required', [])):
         raise ValueError('required symbol coverage removed')
+    current_families, owners = frame_family_budgets(current)
+    previous_families, previous_owners = frame_family_budgets(previous)
+    if not set(previous_families).issubset(current_families):
+        raise ValueError('existing frame family was removed')
+    old_families = {family['name']: family for family in previous.get('frame_families', [])}
+    for key in previous['frames']:
+        matches = [family['name'] for family in current.get('frame_families', [])
+                   if family_matches(family, key)]
+        if len(matches) > 1 or (matches and key in previous_owners and previous_owners[key] != matches[0]):
+            raise ValueError('historical frame budget allocated to multiple families')
+    for family in current.get('frame_families', []):
+        name = family['name']
+        if name in old_families:
+            old = old_families[name]
+            for field in ('patterns', 'exclude_patterns'):
+                if family.get(field, []) != old.get(field, []):
+                    raise ValueError('frame family scope changed')
+            allowed = previous_families[name]
+        else:
+            # Initial adoption must spend only this exact scope's reviewed
+            # historical frames, including functions replaced by extraction.
+            allowed = sum(size for key, size in previous['frames'].items()
+                          if family_matches(family, key))
+        total = current_families[name]
+        redistributed = any(current['frames'][key] > previous['frames'].get(key, 0)
+                            for key, owner in owners.items() if owner == name)
+        if total > allowed or (redistributed and total >= allowed):
+            raise ValueError(f'frame family budget did not decrease during redistribution: {name}')
     current_totals = lineage_budgets(current)
     previous_totals = lineage_budgets(previous)
     if not set(previous_totals).issubset(current_totals):
@@ -183,7 +260,7 @@ def compare_baselines(current, previous):
             raise ValueError(f'source family budget increased or was not registered: {source}')
     derived = {key for entry in current.get('lineages', []) for key in entry.get('members', [])}
     for key, maximum in current['frames'].items():
-        if key in previous['frames'] and maximum > previous['frames'][key]:
+        if key in previous['frames'] and maximum > previous['frames'][key] and key not in owners:
             raise ValueError(f'ratchet budget increased: {key}')
         if key not in previous['frames'] and maximum > 65536 and key not in derived:
             raise ValueError(f'ratchet budget increased: {key}')

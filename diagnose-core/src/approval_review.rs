@@ -1845,6 +1845,14 @@ pub fn system_review_reason(
             "approval_budget",
             "The approval call could not use the required budget.",
         ),
+        ReviewReason::SourceExpired => (
+            "approval_source_expired",
+            "The originating task reached its deadline before approval. No approval model call or device operation was started.",
+        ),
+        ReviewReason::TaskExpired => (
+            "approval_task_expired",
+            "The subagent reached its fixed deadline before approval. No approval model call or device operation was started.",
+        ),
         ReviewReason::Policy => (
             "approval_policy",
             "The approval call is blocked by platform policy.",
@@ -1874,6 +1882,8 @@ pub fn system_review_reason_from_code(code: &str) -> crate::approval_observation
         "approval_output_truncated" => ReviewReason::OutputTruncated,
         "approval_invalid_decision" => ReviewReason::InvalidDecision,
         "approval_budget" => ReviewReason::Budget,
+        "approval_source_expired" => ReviewReason::SourceExpired,
+        "approval_task_expired" => ReviewReason::TaskExpired,
         "approval_policy" | "approval_context_capacity" => ReviewReason::Policy,
         "approval_revoked" => ReviewReason::Revoked,
         "approval_source_changed" => ReviewReason::SourceChanged,

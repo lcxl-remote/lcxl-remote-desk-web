@@ -74,7 +74,7 @@ impl SubAgentStore {
             .one(&txn)
             .await?
             .ok_or_else(invalid)?;
-        let group = decode_group(&source)?;
+        let group = current_group_on(&txn, &source).await?;
         run.fail("delegation_deadline_reached", &now.to_rfc3339())
             .map_err(|_| invalid())?;
         replace_run_on(&txn, &row, &run, now.timestamp_millis()).await?;
@@ -133,7 +133,7 @@ impl SubAgentStore {
             .one(&txn)
             .await?
             .ok_or_else(invalid)?;
-        let group = decode_group(&source)?;
+        let group = current_group_on(&txn, &source).await?;
         let stored = session_row::Entity::find()
             .filter(session_row::Column::ConversationId.eq(&run.child_conversation_id))
             .one(&txn)
@@ -239,7 +239,7 @@ impl SubAgentStore {
             .one(&txn)
             .await?
             .ok_or_else(invalid)?;
-        let group = decode_group(&source)?;
+        let group = current_group_on(&txn, &source).await?;
         if group.source_admission != SourceAdmission::Open
             || run.source_paused
             || group.source_epoch != run.binding.source_epoch

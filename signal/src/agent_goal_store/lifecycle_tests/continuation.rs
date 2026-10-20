@@ -902,3 +902,72 @@ async fn a_new_wait_can_track_earlier_work_of_the_resumed_goal() {
         .await
         .unwrap();
 }
+
+#[tokio::test]
+async fn orphan_goal_uses_current_time_policy_before_deciding_whether_to_continue() {
+    for finite in [false, true] {
+        let db = db().await;
+        let now = Utc::now();
+        let old = now - Duration::days(8);
+        let claimed = claimed_fixture(&db, "time-recovery", old).await;
+        // Persist the inverse of today's policy to prove recovery reads authority.
+        let mut stale = claimed.goal.clone();
+        stale.deadline_unix_ms = if finite {
+            i64::MAX as u64
+        } else {
+            stale.created_at_unix_ms + 7_200_000
+        };
+        goal_row::Entity::update_many()
+            .set(goal_row::ActiveModel {
+                state_json: Set(serde_json::to_string(&stale).unwrap()),
+                absolute_deadline: Set(stale.deadline_unix_ms as i64),
+                ..Default::default()
+            })
+            .filter(goal_row::Column::GoalId.eq(&stale.goal_id))
+            .exec(&db)
+            .await
+            .unwrap();
+        if finite {
+            let mut policy = crate::goal_budget_policy::read(&db).await.unwrap();
+            let revision = policy.revision;
+            policy.limits.deadline_ms = Some(86_400_000);
+            crate::goal_budget_policy::update(
+                &db,
+                &desk_agent_protocol::ai_assistant::goal_budget::UpdateGoalBudgetPolicy {
+                    expected_revision: revision,
+                    limits: policy.limits,
+                    device_unavailable_max_ms: policy.device_unavailable_max_ms,
+                },
+            )
+            .await
+            .unwrap();
+        }
+        let row = agent_session::Entity::find()
+            .filter(agent_session::Column::ConversationId.eq("time-recovery"))
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        let store = crate::agent_session_store::SignalAgentSessionStore::new(db.clone());
+        assert!(store.settle_lapsed_session(&row, now).await.unwrap());
+        let current = goal_row::Entity::find()
+            .filter(goal_row::Column::GoalId.eq(&stale.goal_id))
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        let current = decode(&current).unwrap();
+        assert_eq!(
+            current.state,
+            if finite {
+                GoalState::Failed
+            } else {
+                GoalState::Queued
+            }
+        );
+        assert!(current.used.slices >= stale.used.slices);
+        assert_eq!(current.goal_id, stale.goal_id);
+        assert_eq!(current.source_message_id, stale.source_message_id);
+        assert!(!store.settle_lapsed_session(&row, now).await.unwrap());
+    }
+}

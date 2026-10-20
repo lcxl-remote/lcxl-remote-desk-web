@@ -60,6 +60,7 @@ impl Default for FocusEpochState {
 }
 
 impl FocusEpochState {
+    #[inline(never)]
     pub fn reset(
         &mut self,
         input_revision: u64,

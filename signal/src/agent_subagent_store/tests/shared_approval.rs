@@ -73,7 +73,7 @@ async fn child(
     session.permission_requests[0] = event.request.clone();
     let source = session
         .delegated_owner_requirement
-        .as_ref()
+        .as_deref()
         .unwrap()
         .data_envelope
         .as_ref()
@@ -548,7 +548,7 @@ async fn closed_child_claim_releases_the_root_reservation_without_dialing() {
     assert_eq!(candidate.conversation_id, child.conversation_id);
     assert_eq!(
         candidate.context.current_user_requirement,
-        child.delegated_owner_requirement.as_ref().unwrap().text
+        child.delegated_owner_requirement.as_deref().unwrap().text
     );
     let claim = approval::claim_permission_review(
         &db,
@@ -724,7 +724,7 @@ async fn approved_child_review_keeps_its_grant_and_audit_in_the_child_and_usage_
         evidence_event_ids: vec![
             child
                 .delegated_owner_requirement
-                .as_ref()
+                .as_deref()
                 .unwrap()
                 .message_id
                 .clone(),

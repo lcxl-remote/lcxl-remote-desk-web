@@ -51,11 +51,14 @@ fn document_preserves_null_options_disabled_limits_and_decimal_revisions() {
     config.ai_gateway.api_key = Some("synthetic-model-key".into());
     config.approval_gateway.gateway.api_key = Some("synthetic-review-key".into());
     config.goal_budget_policy.limits.model_tokens = None;
+    config.goal_budget_policy.limits.active_time_ms = None;
+    config.goal_budget_policy.limits.deadline_ms = None;
     config.subagent_policy.revision = u64::MAX;
     config.initialize_metadata().unwrap();
     let encoded = toml::to_string(&config).unwrap();
     assert!(encoded.contains("request_options_json"));
-    assert!(encoded.contains("disabled"));
+    assert!(encoded.contains("activeTimeMs = \"disabled\""));
+    assert!(encoded.contains("deadlineMs = \"disabled\""));
     assert!(encoded.contains(&format!("revision = \"{}\"", u64::MAX)));
     let decoded: GlobalConfig = toml::from_str(&encoded).unwrap();
     assert_eq!(

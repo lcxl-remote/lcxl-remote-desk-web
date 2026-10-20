@@ -597,7 +597,11 @@ async fn parent_compression_and_safety_share_the_occurrence_without_duplicate_ru
             )
             .await
             .unwrap(),
-        CallAdmission::Exhausted
+        CallAdmission::Rejected(
+            desk_diagnose_core::subagent::reservation::CallRejection::Budget(
+                desk_diagnose_core::subagent::budget::BudgetDimension::ModelTokens
+            )
+        )
     );
     assert_eq!(cost::Entity::find().count(&db).await.unwrap(), 5);
     store
@@ -785,7 +789,7 @@ async fn child_claim_and_quota_survive_parent_holder_release_but_not_source_canc
         _ => panic!("independent child holder"),
     };
     assert!(
-        claimed.session.delegated_owner_requirement.as_ref() == Some(&source.owner_requirement)
+        claimed.session.delegated_owner_requirement.as_deref() == Some(&source.owner_requirement)
     );
     let receipt = reserve(
         &store,

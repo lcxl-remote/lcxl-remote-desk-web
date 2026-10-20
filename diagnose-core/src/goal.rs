@@ -8,8 +8,6 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const GOAL_SCHEMA_VERSION: u16 = 3;
-pub const DEFAULT_ACTIVE_TIME_MS: u64 = 2 * 60 * 60 * 1_000;
-pub const DEFAULT_DEADLINE_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
 pub const DEFAULT_MODEL_TOKENS: u64 = 10_000_000;
 pub const DEFAULT_MODEL_CALLS: u32 = 160;
 pub const DEFAULT_TOOL_CALLS: u32 = 200;
@@ -704,7 +702,7 @@ pub struct GoalLimits {
 impl Default for GoalLimits {
     fn default() -> Self {
         Self {
-            active_time_ms: DEFAULT_ACTIVE_TIME_MS,
+            active_time_ms: u64::MAX,
             model_tokens: DEFAULT_MODEL_TOKENS,
             model_calls: DEFAULT_MODEL_CALLS,
             tool_calls: DEFAULT_TOOL_CALLS,
@@ -903,6 +901,7 @@ pub enum GoalSegmentEnd {
     Yield,
     Control(GoalControl),
     Pause(GoalPauseReason),
+    AdmissionRejected(crate::subagent::reservation::CallRejection),
     /// Only the runtime can classify an upstream model failure as transient.
     WaitForModel {
         retry_after_unix_ms: Option<u64>,
@@ -1297,9 +1296,7 @@ impl GoalRun {
         {
             return Err(GoalError::InvalidIdentity);
         }
-        let deadline_unix_ms = created_at_unix_ms
-            .checked_add(DEFAULT_DEADLINE_MS)
-            .ok_or(GoalError::ArithmeticOverflow)?;
+        let deadline_unix_ms = i64::MAX as u64;
         Ok(Self {
             schema_version: GOAL_SCHEMA_VERSION,
             goal_id,
@@ -1373,6 +1370,36 @@ impl GoalRun {
         } else {
             Err(GoalError::BudgetExceeded)
         }
+    }
+
+    pub fn exhausted_dimension(
+        &self,
+        delta: GoalUsage,
+    ) -> Result<crate::subagent::budget::BudgetDimension, GoalError> {
+        use crate::subagent::budget::BudgetDimension;
+        let projected = self
+            .used
+            .checked_add(self.reserved)
+            .and_then(|usage| usage.checked_add(self.delegation_reserved_usage().ok()?))
+            .and_then(|usage| usage.checked_add(delta))
+            .ok_or(GoalError::ArithmeticOverflow)?;
+        Ok(if projected.active_time_ms > self.limits.active_time_ms {
+            BudgetDimension::ActiveTime
+        } else if projected
+            .total_tokens()
+            .ok_or(GoalError::ArithmeticOverflow)?
+            > self.limits.model_tokens
+        {
+            BudgetDimension::ModelTokens
+        } else if projected.model_calls > self.limits.model_calls {
+            BudgetDimension::ModelCalls
+        } else if projected.tool_calls > self.limits.tool_calls {
+            BudgetDimension::ToolCalls
+        } else if projected.slices > self.limits.slices {
+            BudgetDimension::Slices
+        } else {
+            BudgetDimension::LedgerCapacity
+        })
     }
 
     pub fn next_slice_budget_available(&self) -> bool {
@@ -1893,6 +1920,46 @@ impl GoalRun {
         self.checkpoint = Some(checkpoint);
         self.updated_at_unix_ms = now_unix_ms;
         Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn finish_admission_rejected_slice(
+        &mut self,
+        input_revision: u64,
+        goal_revision: u64,
+        lease_epoch: u64,
+        rejection: crate::subagent::reservation::CallRejection,
+        checkpoint_event_seq: u64,
+        protected_attachment_ids: Vec<String>,
+        now_unix_ms: u64,
+    ) -> Result<(), GoalError> {
+        use crate::subagent::reservation::CallRejection;
+        let reason = match rejection {
+            CallRejection::Budget(_) => GoalPauseReason::Budget,
+            _ => GoalPauseReason::Recovery,
+        };
+        self.finish_paused_slice(
+            input_revision,
+            goal_revision,
+            lease_epoch,
+            reason,
+            checkpoint_event_seq,
+            protected_attachment_ids,
+            now_unix_ms,
+        )?;
+        let label = match rejection {
+            CallRejection::Budget(dimension) => dimension.reason(),
+            CallRejection::SourceExpired => {
+                self.state = GoalState::Failed;
+                "absolute_deadline_reached"
+            }
+            CallRejection::TaskExpired => "delegation_deadline_reached",
+        };
+        self.status_reason = Some(label.into());
+        if let Some(checkpoint) = &mut self.checkpoint {
+            checkpoint.summary = rejection.message().into();
+        }
+        self.validate()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2804,7 +2871,7 @@ mod tests {
     }
 
     fn goal() -> GoalRun {
-        GoalRun::new(
+        let mut goal = GoalRun::new(
             "goal".into(),
             "run".into(),
             "owner".into(),
@@ -2822,7 +2889,10 @@ mod tests {
             1_000,
             GoalLimits::default(),
         )
-        .unwrap()
+        .unwrap();
+        goal.deadline_unix_ms = 1_000 + 7 * 86_400_000;
+        goal.limits.active_time_ms = 7_200_000;
+        goal
     }
 
     #[test]
@@ -3431,10 +3501,16 @@ mod tests {
         goal.state = GoalState::Paused(GoalPauseReason::Budget);
         goal.revise_input(2, 1_001).unwrap();
         assert_eq!(goal.state, GoalState::Paused(GoalPauseReason::Budget));
-        assert_eq!(goal.limits, GoalLimits::default());
+        assert_eq!(
+            goal.limits,
+            GoalLimits {
+                active_time_ms: 7_200_000,
+                ..GoalLimits::default()
+            }
+        );
         goal.revise_input(3, goal.deadline_unix_ms).unwrap();
         assert_eq!(goal.state, GoalState::Failed);
-        assert_eq!(goal.deadline_unix_ms, 1_000 + DEFAULT_DEADLINE_MS);
+        assert_eq!(goal.deadline_unix_ms, 1_000 + 7 * 86_400_000);
     }
 
     #[test]

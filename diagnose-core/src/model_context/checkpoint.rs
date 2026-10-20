@@ -153,10 +153,12 @@ pub struct ContextProtectionSet {
 }
 
 impl ContextProtectionSet {
+    #[inline(never)]
     pub fn protect_message(&mut self, id: impl Into<String>) {
         self.protected_message_ids.insert(id.into());
     }
 
+    #[inline(never)]
     pub fn protect_tool_call(&mut self, id: impl Into<String>) {
         self.protected_tool_call_ids.insert(id.into());
     }
