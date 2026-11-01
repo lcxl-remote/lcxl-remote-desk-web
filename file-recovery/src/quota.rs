@@ -108,7 +108,7 @@ impl DeviceQuota {
         let storage = self.storage.lock()?;
         let ledger: Ledger = match storage.read("index.json", MAX_INDEX_BYTES) {
             Ok(bytes) => serde_json::from_slice(&bytes)
-                .map_err(|_| invalid("device quota index is corrupt"))?,
+                .map_err(|error| super::undecodable("device quota index", &error))?,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 storage.validate_missing_index()?;
                 Ledger::default()

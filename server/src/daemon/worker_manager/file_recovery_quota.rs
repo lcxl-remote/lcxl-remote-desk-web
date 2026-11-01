@@ -165,7 +165,11 @@ fn apply(
     result.unwrap_or_else(|error| match error.kind() {
         io::ErrorKind::PermissionDenied => FileRecoveryQuotaOutcome::IdentityChanged,
         io::ErrorKind::StorageFull => FileRecoveryQuotaOutcome::CapacityExceeded,
-        io::ErrorKind::InvalidInput | io::ErrorKind::AlreadyExists => FileRecoveryQuotaOutcome::InvalidRequest,
+        io::ErrorKind::InvalidInput | io::ErrorKind::AlreadyExists => {
+            // The outcome sent to the worker carries no text, so keep the reason here.
+            tracing::warn!(%error, "Device file recovery quota request rejected");
+            FileRecoveryQuotaOutcome::InvalidRequest
+        },
         _ => { tracing::warn!(error_kind = ?error.kind(), "Device file recovery quota operation failed"); FileRecoveryQuotaOutcome::StorageUnavailable },
     })
 }

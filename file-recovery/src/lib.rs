@@ -217,6 +217,12 @@ impl std::error::Error for CleanupClockError {}
 fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
 }
+/// Report the actual decoding failure: a missing or changed field is not corruption.
+fn undecodable(ledger: &str, error: &serde_json::Error) -> io::Error {
+    invalid(&format!(
+        "{ledger} could not be decoded and was not recreated: {error}"
+    ))
+}
 fn hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
@@ -261,7 +267,7 @@ impl Vault {
     fn load_locked(&self, storage: storage::Locked) -> io::Result<LockedVault> {
         let ledger: Ledger = match storage.read("index.json", MAX_LEDGER_BYTES) {
             Ok(bytes) => serde_json::from_slice(&bytes)
-                .map_err(|_| invalid("recovery index is corrupt; refusing to recreate it"))?,
+                .map_err(|error| undecodable("recovery index", &error))?,
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 storage.validate_missing_index()?;
                 Ledger::default()

@@ -929,8 +929,18 @@ fn cleanup_rejects_symlinks_and_retains_retryable_error() {
 fn corrupt_index_is_not_recreated() {
     let (root, vault) = fixture();
     save(&mut vault.lock().unwrap(), "s", "a");
-    fs::write(root.path().join("file-recovery/index.json"), b"broken").unwrap();
-    assert!(vault.lock().is_err());
+    let index = root.path().join("file-recovery/index.json");
+    fs::write(&index, b"broken").unwrap();
+    let error = vault.lock().err().unwrap();
+    assert!(
+        error.to_string().contains("could not be decoded"),
+        "{error}"
+    );
+    // A ledger from another format names the actual field instead of claiming corruption.
+    fs::write(&index, b"{}").unwrap();
+    let error = vault.lock().err().unwrap();
+    assert!(error.to_string().contains("missing field"), "{error}");
+    assert_eq!(fs::read(&index).unwrap(), b"{}");
 }
 #[test]
 fn separate_worker_handles_are_exclusively_locked() {

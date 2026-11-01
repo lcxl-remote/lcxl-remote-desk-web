@@ -825,7 +825,7 @@ pub fn permission_planning_tool_registry() -> Vec<RegisteredTool> {
                                 "application_scope": {"type":"object","description":"Required for every native UI permission in this conversation. Do not supply exact_input. Copy an observed application reference; approved actions are limited to this application and the owner-selected expiry/use count. The server resolves the application name. Actual calls pass application plus the current target and action.","properties":{"application":{"type":"object","properties":{"token":{"type":"string"},"snapshot_id":{"type":"string"},"object_kind":{"const":"application"},"expires_at":{"type":"string"}},"required":["token","snapshot_id","object_kind","expires_at"],"additionalProperties":false},"actions":{"type":"array","minItems":1,"maxItems":6,"uniqueItems":true,"items":{"type":"string","enum":["invoke","select","focus","toggle","set_value","click","double_click","scroll","type_text","key_press"]}}},"required":["application","actions"],"additionalProperties":false},
                                 "exact_input": {"type": "object", "description": "Use the target tool definition (describe_tools if missing) and copy its complete input shape. Do not supply fixed schema_version fields; the server supplies them. Required for write_external_draft, send_external, input_fallback, execute_command, formula-workbook creation, browser navigation, live/batch iWork semantic mutations, and update_text_file/delete_text_file (one exact use). For iWork mutations, first obtain the fresh target and destination references from the matching read tools, then request the mutation separately with the complete tool arguments as exact_input; never batch that mutation permission with its prerequisite read permission. Follow permission_input_mode: contextual_exact_input file reads may omit only choices already bound by the current accepted input (inspect_files also accepts a unique approved directory); keep required worksheet/cell or merge rules. New artifacts require their output name and business content. Metadata and defaults are restored by the server before approval."},
                                 "suggested_ttl_seconds": {"type": "integer", "minimum": 1, "maximum": MAX_REQUEST_TTL_SECONDS, "description":"Optional; uses the server default. The owner can narrow it."},
-                                "suggested_max_uses": {"type": "integer", "minimum": 1, "maximum": MAX_REQUEST_USES, "description":"Optional; server defaults to one use. Exact one-shot actions remain one use regardless of this suggestion."},
+                                "suggested_max_uses": {"type": "integer", "minimum": 1, "maximum": MAX_REQUEST_USES, "description":"Optional; read-only device tools default to the maximum and other tools to one use. Exact one-shot actions remain one use regardless of this suggestion."},
                                 "reason": {"type": "string", "maxLength": MAX_PERMISSION_REASON_BYTES}
                             },
                             "required": ["item_id", "tool_name", "reason"],
@@ -1371,8 +1371,15 @@ pub fn build_permission_request(
             {
                 1
             } else {
+                // Observing often takes several reads, and each extra grant interrupts
+                // the task. Anything with a side effect stays one use unless asked.
+                let default_uses = if capability.wire.effect == CapabilityEffect::ReadDevice {
+                    MAX_REQUEST_USES
+                } else {
+                    1
+                };
                 item.suggested_max_uses
-                    .unwrap_or(1)
+                    .unwrap_or(default_uses)
                     .clamp(1, MAX_REQUEST_USES)
             },
             reason: item.reason.trim().to_string(),
@@ -1596,7 +1603,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(request.items[0].suggested_ttl_seconds, 300);
-        assert_eq!(request.items[0].suggested_max_uses, 1);
+        assert_eq!(request.items[0].suggested_max_uses, MAX_REQUEST_USES);
         assert!(build_permission_request(
             &call(r#"{"items":[{"item_id":"send","tool_name":"send_gmail_message","reason":"Send message"}]}"#),
             &registry,
@@ -2049,6 +2056,38 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.message.contains("requires exact_input"));
+    }
+
+    #[test]
+    fn default_uses_follow_the_tool_effect_and_an_explicit_value_wins() {
+        let registry = crate::ai_assistant::ai_assistant_provider_registry();
+        let build = |input: &str| {
+            build_permission_request(
+                &call(input),
+                &registry,
+                "permission-default-uses".into(),
+                1,
+                "2026-09-25T00:00:00Z".into(),
+            )
+            .unwrap()
+        };
+        let read = build(
+            r#"{"items":[{"item_id":"read","tool_name":"inspect_desktop_ui","reason":"Read"}]}"#,
+        );
+        assert_eq!(read.items[0].suggested_max_uses, MAX_REQUEST_USES);
+        let narrowed = build(
+            r#"{"items":[{"item_id":"narrow","tool_name":"inspect_desktop_ui","suggested_max_uses":2,"reason":"Read"}]}"#,
+        );
+        assert_eq!(narrowed.items[0].suggested_max_uses, 2);
+        let write = build(
+            r#"{"items":[{"item_id":"act","tool_name":"execute_ui_actions","application_scope":{"application":{"token":"app","snapshot_id":"snapshot","object_kind":"application","expires_at":"2099-01-01T00:00:00Z"},"actions":["invoke"]},"reason":"Act"}]}"#,
+        );
+        let action = write
+            .items
+            .iter()
+            .find(|item| item.tool_name == "execute_ui_actions")
+            .unwrap();
+        assert_eq!(action.suggested_max_uses, 1);
     }
 
     #[test]
