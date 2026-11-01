@@ -118,7 +118,6 @@ fn observed_event_types() -> Vec<CGEventType> {
         CGEventType::RightMouseUp,
         CGEventType::OtherMouseDown,
         CGEventType::OtherMouseUp,
-        CGEventType::MouseMoved,
         CGEventType::LeftMouseDragged,
         CGEventType::RightMouseDragged,
         CGEventType::OtherMouseDragged,
@@ -166,6 +165,12 @@ mod tests {
         );
         assert!(
             events
+                .iter()
+                .any(|event| matches!(event, CGEventType::LeftMouseDragged))
+        );
+        // Moving the pointer changes nothing in the target; it must not stop a batch.
+        assert!(
+            !events
                 .iter()
                 .any(|event| matches!(event, CGEventType::MouseMoved))
         );

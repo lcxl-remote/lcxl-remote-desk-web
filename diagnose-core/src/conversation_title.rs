@@ -28,13 +28,9 @@ pub fn request(question: ChatMessage, maximum_chars: usize) -> ModelRequest {
             ),
             question,
         ],
-        ResponseFormatSpec::JsonSchema {
-            name: "conversation_title".into(),
-            schema: serde_json::json!({
-                "type": "object", "additionalProperties": false,
-                "required": ["title"], "properties": {"title": {"type": "string"}}
-            }),
-        },
+        // Gateways differ on structured output, and a title is optional: ask in the
+        // prompt instead of failing the request on an unsupported format.
+        ResponseFormatSpec::None,
     );
     request.use_case = ModelUseCase::ConversationTitle;
     request
@@ -45,7 +41,8 @@ pub fn parse(turn: &ModelTurn, maximum_chars: usize) -> Result<String, String> {
     if !turn.tool_calls.is_empty() || turn.stop_reason != StopReason::EndTurn {
         return Err("conversation title was incomplete or attempted a tool call".into());
     }
-    let output: Output = serde_json::from_str(&turn.text)
+    let json = crate::text_parse::extract_json_object(&turn.text).unwrap_or(&turn.text);
+    let output: Output = serde_json::from_str(json)
         .map_err(|error| format!("invalid conversation title JSON: {error}"))?;
     let title = normalize(&output.title);
     if title.is_empty() || title.chars().count() > maximum_chars {
@@ -137,6 +134,18 @@ mod tests {
         assert_eq!(call_identity(&a), call_identity(&b));
         b.messages[1].message_id = "input-2".into();
         assert_ne!(call_identity(&a), call_identity(&b));
+    }
+
+    #[test]
+    fn title_request_needs_no_structured_output_and_tolerates_a_code_fence() {
+        let request = request(ChatMessage::text("q", ChatRole::User, "question"), 40);
+        assert!(matches!(request.response_format, ResponseFormatSpec::None));
+        let turn = ModelTurn {
+            text: "```json\n{\"title\":\"Daily report\"}\n```".into(),
+            stop_reason: StopReason::EndTurn,
+            ..Default::default()
+        };
+        assert_eq!(parse(&turn, 40).unwrap(), "Daily report");
     }
 
     #[test]

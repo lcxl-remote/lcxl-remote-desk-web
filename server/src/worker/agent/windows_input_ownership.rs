@@ -19,7 +19,7 @@ use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, GetMessageW, KBDLLHOOKSTRUCT, LLKHF_INJECTED, LLMHF_INJECTED, MSG,
     MSLLHOOKSTRUCT, PM_NOREMOVE, PeekMessageW, PostThreadMessageW, SetWindowsHookExW,
-    UnhookWindowsHookEx, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_QUIT,
+    UnhookWindowsHookEx, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_MOUSEMOVE, WM_QUIT,
 };
 
 use super::computer_use_broker::ComputerUseBroker;
@@ -187,7 +187,8 @@ unsafe extern "system" fn mouse_hook_callback(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    if code >= 0 {
+    // Moving the pointer changes nothing in the target; it must not stop a batch.
+    if code >= 0 && wparam.0 as u32 != WM_MOUSEMOVE {
         let event = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
         note_if_external(event.dwExtraInfo, event.flags & LLMHF_INJECTED != 0);
     }

@@ -300,10 +300,10 @@ pub async fn externalize_with(
         return Ok(message);
     }
     // The stored reference is never used as a substitute for original-byte authorization.
-    let source = if let Some(policy) = policy {
+    let (source, attachment_parent) = if let Some(policy) = policy {
         let mut history = session.conversation.clone();
         history.push(message.clone());
-        policy
+        let mut authorized = policy
             .authorize_request_with_history(
                 ModelRequest::text_only(
                     vec![message.clone()],
@@ -311,12 +311,13 @@ pub async fn externalize_with(
                 ),
                 &history,
             )
-            .map_err(|error| error.agent_error())?
-            .request
-            .messages
-            .remove(0)
+            .map_err(|error| error.agent_error())?;
+        // `request` keeps source labels. A later attachment read has no originating
+        // call to re-derive authority from, so it needs the admitted export label.
+        let exported = authorized.input_envelopes.pop();
+        (authorized.request.messages.remove(0), exported)
     } else {
-        message.clone()
+        (message.clone(), message.data_envelope.clone())
     };
     let now = now?;
     let mut delivery = prepared.delivery;
@@ -324,7 +325,7 @@ pub async fn externalize_with(
         part.metadata.created_at_unix_ms = now;
         part.metadata.last_accessed_at_unix_ms = now;
         part.metadata.source_envelope = projection_envelope(
-            source.data_envelope.as_ref(),
+            attachment_parent.as_ref(),
             &part.content,
             &part.metadata.part,
         )?;
@@ -561,6 +562,73 @@ pub(crate) mod tests {
             "now",
         )
     }
+    #[tokio::test]
+    async fn attachment_keeps_the_gateway_authority_admitted_when_it_was_stored() {
+        use crate::model_egress::ModelEgressPolicy;
+        use desk_agent_protocol::data_lineage::{
+            ContentRef, DATA_ENVELOPE_SCHEMA_VERSION, DataEnvelope, DataProvenance,
+            DestinationIdentity, RetentionBoundary, Sensitivity,
+        };
+        let store = Store::default();
+        let session = session();
+        let original = json!({"body": "data".repeat(2000)}).to_string();
+        let sha = digest(original.as_bytes());
+        // A device read result carries no destination until it is admitted for a model.
+        let mut result = ChatMessage::tool_result("message", "call", &original);
+        result.data_envelope = Some(DataEnvelope {
+            schema_version: DATA_ENVELOPE_SCHEMA_VERSION,
+            envelope_id: "tool-result".into(),
+            content: ContentRef::ImmutableBlob {
+                blob_id: "tool-result".into(),
+                sha256: sha.clone(),
+                size_bytes: original.len() as u64,
+                media_type: "application/octet-stream".into(),
+            },
+            provenance: DataProvenance {
+                source_provider_id: "desktop.ui".into(),
+                source_tool_name: "inspect_desktop_ui".into(),
+                source_object_id: Some("call".into()),
+                source_envelope_ids: Vec::new(),
+            },
+            digest_sha256: sha,
+            sensitivity: Sensitivity::Sensitive,
+            allowed_destinations: Vec::new(),
+            retention: RetentionBoundary {
+                expires_at_unix_ms: None,
+                delete_with_run: true,
+            },
+        });
+        let gateway = |revision| DestinationIdentity::Model {
+            connection_id: "gateway".into(),
+            connection_revision: revision,
+            model_id: "model".into(),
+            profile_revision: 1,
+        };
+        let policy = |destination| ModelEgressPolicy {
+            destination,
+            selected_source_tools: ["inspect_desktop_ui".to_string()].into(),
+            export_authorization_id: "selection".into(),
+            now_unix_ms: 100,
+            byte_cap: crate::sink_authorizer::MAX_SINK_BYTES,
+            permission_resume: false,
+        };
+        externalize(
+            &store,
+            &session,
+            result,
+            ToolOutputFormat::Json,
+            Some(&policy(gateway(1))),
+            Ok(1),
+        )
+        .await
+        .unwrap();
+        let stored = store.0.borrow();
+        let envelope = stored[0].metadata.source_envelope.as_ref().unwrap();
+        assert!(policy(gateway(1)).has_gateway_authority(envelope));
+        // A changed connection is a different recipient and stays rejected.
+        assert!(!policy(gateway(2)).has_gateway_authority(envelope));
+    }
+
     #[tokio::test]
     async fn json_is_externalized_without_preview_and_restored_only_for_internal_checks() {
         let store = Store::default();

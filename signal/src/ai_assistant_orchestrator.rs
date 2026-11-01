@@ -3264,9 +3264,10 @@ mod tests {
         let answer = capture_one_openai_request_with_sse(listener.borrow(), sse).await;
         let title = capture_one_openai_request_with_reply(listener.borrow(), |body| {
             let request: serde_json::Value = serde_json::from_slice(body).unwrap();
-            assert_eq!(
-                request["response_format"]["json_schema"]["name"],
-                "conversation_title"
+            assert!(
+                request["messages"][0]["content"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("Create a short conversation title"))
             );
             assert!(
                 request["tools"]

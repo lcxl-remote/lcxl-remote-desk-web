@@ -28,7 +28,7 @@ pub async fn start() -> Gateway {
         actix_web::App::new().route("/v1/chat/completions", actix_web::web::post().to(move |body: actix_web::web::Json<Value>| {
             let body = body.into_inner();
             seen.lock().unwrap().push(body.clone());
-            let delta = if body["response_format"]["json_schema"]["name"] == "conversation_title" {
+            let delta = if body["messages"][0]["content"].as_str().is_some_and(|text| text.contains("Create a short conversation title")) {
                 json!({"content":r#"{"title":"Find a result"}"#})
             } else {
                 match count.fetch_add(1, Ordering::SeqCst) {

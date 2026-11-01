@@ -16,6 +16,18 @@ pub(crate) fn supports(steps: &[ComputerActionStep]) -> bool {
         })
 }
 
+/// `completed_steps` excludes the failed step, which may still have been dispatched.
+fn recovery_progress(completed: usize, failed_step_may_have_effect: bool) -> &'static str {
+    match (completed, failed_step_may_have_effect) {
+        (0, false) => "No step was dispatched.",
+        (0, true) => "The first step may have been dispatched; later steps were not executed.",
+        (_, false) => "Earlier steps completed native dispatch; later steps were not executed.",
+        (_, true) => {
+            "Earlier steps completed native dispatch and the failed step may also have been dispatched; later steps were not executed."
+        }
+    }
+}
+
 pub(crate) fn execute(
     steps: &[ComputerActionStep],
     mut action: impl FnMut(&ComputerActionStep) -> Result<Option<serde_json::Value>, (AgentError, bool)>,
@@ -40,7 +52,7 @@ pub(crate) fn execute(
                 "completed_steps":index,
                 "effect":if may_have_effect {"may_have_effect"} else {"no_effect"},
                 "error":{"kind":error.kind,"code":error.error_code,"message":error.message},
-                "recovery":"Earlier steps completed native dispatch; later steps were not executed. Read the current UI/window screenshot before replanning unfinished work. Do not replay the whole batch. Other authorized writes remain available; no user acknowledgement is required."
+                "recovery":format!("{} {}",recovery_progress(index,may_have_effect),"Read the current UI/window screenshot before replanning unfinished work. Do not replay the whole batch. Other authorized writes remain available; no user acknowledgement is required.")
             }).to_string());
         }
     }
@@ -166,6 +178,15 @@ mod tests {
             assert_eq!(value["error"]["message"], "window closed");
             assert!(value.get("steps").is_none());
         }
+    }
+
+    #[test]
+    fn recovery_text_matches_what_was_dispatched() {
+        assert_eq!(recovery_progress(0, false), "No step was dispatched.");
+        assert!(recovery_progress(0, true).starts_with("The first step may have been"));
+        assert!(!recovery_progress(0, true).contains("Earlier steps"));
+        assert!(recovery_progress(2, false).starts_with("Earlier steps completed"));
+        assert!(recovery_progress(2, true).contains("failed step may also"));
     }
 
     #[test]

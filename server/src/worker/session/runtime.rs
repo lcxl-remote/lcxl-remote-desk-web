@@ -1170,7 +1170,6 @@ impl WorkerSession {
                                 }
                                 ServiceToWorker::MouseMoveInput(payload) => {
                                     if interactive_route_active {
-                                        computer_use_broker.note_browser_input();
                                         input_dispatcher.dispatch_mouse_move(&payload);
                                     }
                                 }

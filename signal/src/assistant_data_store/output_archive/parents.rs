@@ -31,13 +31,21 @@ async fn find_parent_reusing_on<C: ConnectionTrait>(
         .await?
         .ok_or(AssistantStoreError::Inaccessible)?;
     let stored = match known {
-        Some(known) if known.row == row => known.clone(),
+        Some(known) if known.row == row => return validated_reference(reference, known.clone()),
         _ => decode_row(row)?,
     };
+    let stored = validated_reference(reference, stored)?;
+    verify_on(db, &stored.proof).await?;
+    Ok(stored)
+}
+
+fn validated_reference(
+    reference: &NativeDerivedInputPolicy,
+    stored: StoredOutput,
+) -> Result<StoredOutput, AssistantStoreError> {
     reference
         .validate_archive(&stored.proof)
         .map_err(AssistantStoreError::Invalid)?;
-    verify_on(db, &stored.proof).await?;
     Ok(stored)
 }
 
@@ -53,26 +61,31 @@ pub(super) async fn prepare_on<C: ConnectionTrait>(
     let consumer_fingerprint = proof.fingerprint().map_err(AssistantStoreError::Invalid)?;
     let mut rows = Vec::with_capacity(proof.input_policy_graph.parents.len());
     for reference in &proof.input_policy_graph.parents {
+        let known = known
+            .iter()
+            .find(|value| value.row.physical_call_id == reference.physical_call_id);
         let parent = find_parent_reusing_on(
             db,
             &proof.source_set.actor_id,
             &proof.source_set.consumer_conversation_id,
             reference,
-            known
-                .iter()
-                .find(|value| value.row.physical_call_id == reference.physical_call_id),
+            known,
         )
         .await?;
         if parent.proof.source_set.source_device_ref != proof.source_set.source_device_ref {
             return Err(AssistantStoreError::Inaccessible);
         }
-        crate::model_egress_store::SignalModelEgressStore::verify_retained_output_on(
-            db,
-            &parent.proof.source_set,
-            &parent.proof.sources,
-            &parent.proof.output,
-        )
-        .await?;
+        // This transaction holds the SQLite writer, so a parent verified earlier in it
+        // and re-read unchanged cannot have new links or a new native receipt.
+        if known.is_none_or(|known| known.row != parent.row) {
+            crate::model_egress_store::SignalModelEgressStore::verify_retained_output_on(
+                db,
+                &parent.proof.source_set,
+                &parent.proof.sources,
+                &parent.proof.output,
+            )
+            .await?;
+        }
         rows.push(expected_row(proof, reference, &consumer_fingerprint)?);
     }
     // A new archive cannot silently absorb an orphan or partial prior pin set.

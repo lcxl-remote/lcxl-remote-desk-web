@@ -354,6 +354,7 @@ mod tests {
         ));
     }
 
+    #[cfg(windows)]
     #[test]
     #[ignore = "requires Outlook (new) to be the current Windows mailto handler"]
     fn live_outlook_new_handler_probe() {

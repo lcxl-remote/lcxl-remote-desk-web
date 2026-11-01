@@ -52,7 +52,8 @@ async fn naming(malformed: bool, stack_bytes: Option<usize>) {
         let title = tokio::time::timeout(MODEL_IO_TIMEOUT, capture_one_openai_request_with_reply(&listener, |body| {
             let request: Value = serde_json::from_slice(body).unwrap();
             assert_eq!(request["model"], "title-test-model");
-            assert_eq!(request["response_format"]["json_schema"]["name"], "conversation_title");
+            assert!(request["messages"][0]["content"].as_str().is_some_and(|text| text.contains("Create a short conversation title")));
+            assert!(request.get("response_format").is_none());
             assert_eq!(request["messages"].as_array().unwrap().len(), 2);
             assert_eq!(request["messages"][1]["content"], "Find my report");
             assert!(request["tools"].as_array().is_none_or(|tools| tools.is_empty()));

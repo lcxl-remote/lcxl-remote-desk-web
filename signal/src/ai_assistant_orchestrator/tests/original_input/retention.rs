@@ -119,9 +119,10 @@ async fn retention_scenario() {
                     MODEL_IO_TIMEOUT,
                     capture_one_openai_request_with_reply(&listener, |body| {
                         let request: Value = serde_json::from_slice(body).unwrap();
-                        assert_eq!(
-                            request["response_format"]["json_schema"]["name"],
-                            "conversation_title"
+                        assert!(
+                            request["messages"][0]["content"].as_str().is_some_and(
+                                |text| text.contains("Create a short conversation title")
+                            )
                         );
                         memory_sse(json!({"content":r#"{"title":"Reply preference"}"#}), "stop")
                     }),

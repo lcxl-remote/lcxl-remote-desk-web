@@ -245,7 +245,8 @@ pub(crate) async fn find_reusing_on<C: ConnectionTrait>(
 
 pub(crate) fn decode_row(row: archived::Model) -> Result<StoredOutput, AssistantStoreError> {
     let proof = Box::new(
-        ArchivedAssistantOutput::decode(&row.proof_json).map_err(AssistantStoreError::Invalid)?,
+        ArchivedAssistantOutput::decode_stored(&row.proof_json)
+            .map_err(AssistantStoreError::Invalid)?,
     );
     let evidence = &proof.sources.evidence;
     if row.proof_sha256 != proof.fingerprint().map_err(AssistantStoreError::Invalid)?
