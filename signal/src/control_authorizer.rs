@@ -503,7 +503,17 @@ impl ControlFrameAuthorizer for SignalControlAuthorizer {
                             };
                         }
                     };
-                    if let Err(message) = ask.validate() {
+                    let limits = crate::assistant_data_config::policy(&self.db)
+                        .await
+                        .limits
+                        .conversation;
+                    if let Err(message) = ask.validate_with_limits(&limits).and_then(|_| {
+                        desk_diagnose_core::ai_assistant::source::valid_statement_timezone(
+                            &ask.client_timezone,
+                        )
+                        .then_some(())
+                        .ok_or("invalid AI Assistant client timezone")
+                    }) {
                         return ControlFrameOutcome::Reject {
                             code: DeskErrorCode::INVALID_PARAMS,
                             message: message.into(),
@@ -676,6 +686,8 @@ mod tests {
 
     fn assistant_model(request_id: &str, to: Option<&str>) -> SignalingModel {
         let data = serde_json::to_value(AiAssistantAsk {
+            client_timezone: "UTC".into(),
+            temporary_conversation: None,
             question: "why slow?".to_string(),
             client_message_id: "message-1".to_string(),
             ..Default::default()

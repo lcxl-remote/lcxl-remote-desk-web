@@ -1,8 +1,10 @@
 //! Production entry with a local model gateway and a reopened SQLite database.
 use super::*;
 
+const OWNER: i32 = crate::control_authorizer::SINGLE_ACCOUNT_USER_ID;
+
 #[actix_web::test]
-async fn expired_history_remains_available_without_compaction() {
+async fn changed_retention_on_a_frozen_output_cannot_authorize_reexport() {
     use sea_orm::{ActiveModelTrait, IntoActiveModel, Set};
     let listener = std::sync::Arc::new(TcpListener::bind("127.0.0.1:0").await.unwrap());
     let address = listener.local_addr().unwrap();
@@ -28,7 +30,7 @@ async fn expired_history_remains_available_without_compaction() {
     .unwrap();
     let first_listener = listener.clone();
     let first = actix_web::rt::spawn(async move {
-        capture_one_openai_request_with_sse(first_listener.as_ref(), &sse("expired-answer-marker"))
+        capture_openai_answer_with_title(first_listener.as_ref(), &sse("expired-answer-marker"))
             .await
     });
     ask(
@@ -38,7 +40,7 @@ async fn expired_history_remains_available_without_compaction() {
         "expired-question-marker".into(),
     )
     .await;
-    tokio::time::timeout(std::time::Duration::from_secs(5), first)
+    tokio::time::timeout(MODEL_IO_TIMEOUT, first)
         .await
         .unwrap()
         .unwrap();
@@ -49,7 +51,12 @@ async fn expired_history_remains_available_without_compaction() {
         .unwrap();
     let mut session =
         desk_diagnose_core::session::PersistedAgentSession::decode_json(&row.state_json).unwrap();
-    let original_len = session.conversation.len();
+    let original_receipts = crate::entity::model_egress_receipt::Entity::find()
+        .all(&db)
+        .await
+        .unwrap();
+    // This changes the native message after its original output proof was
+    // frozen. It is not a natural expiry of that original retention policy.
     for message in &mut session.conversation {
         if message.role == ChatRole::Assistant {
             message
@@ -63,18 +70,29 @@ async fn expired_history_remains_available_without_compaction() {
     let mut active = row.into_active_model();
     active.state_json = Set(serde_json::to_string(&session).unwrap());
     active.update(&db).await.unwrap();
-    let second = actix_web::rt::spawn(async move {
+    let mut second = actix_web::rt::spawn(async move {
         capture_one_openai_request_with_sse(listener.as_ref(), &sse("continued-ok")).await
     });
     ask(&db, "expired-history", "second", "continue".into()).await;
-    let body = tokio::time::timeout(std::time::Duration::from_secs(5), second)
-        .await
-        .unwrap()
-        .unwrap();
-    let body = String::from_utf8(body).unwrap();
-    assert!(body.contains("expired-question-marker"));
-    assert!(body.contains("expired-answer-marker"));
-    let run = derive_conversation_key("7", "device", Some("expired-history"), "unused");
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), &mut second)
+            .await
+            .is_err()
+    );
+    second.abort();
+    assert_eq!(
+        crate::entity::model_egress_receipt::Entity::find()
+            .all(&db)
+            .await
+            .unwrap(),
+        original_receipts
+    );
+    let run = derive_conversation_key(
+        &OWNER.to_string(),
+        "device",
+        Some("expired-history"),
+        "unused",
+    );
     let snapshot = crate::agent_session_store::SignalAgentSessionStore::new(db.clone())
         .read_snapshot(&run)
         .await
@@ -82,10 +100,8 @@ async fn expired_history_remains_available_without_compaction() {
         .unwrap();
     assert_eq!(
         latest_committed_answer(&snapshot).as_deref(),
-        Some("continued-ok")
+        Some("expired-answer-marker")
     );
-    assert!(snapshot.terminal_error.is_none());
-    assert!(snapshot.messages.len() > original_len);
     assert!(
         snapshot
             .messages
@@ -124,17 +140,23 @@ async fn production_compaction_answers_and_restores_checkpoint_from_sqlite() {
     };
     crate::model_provider::save(&db, config).await.unwrap();
     let client = "compaction-entry";
-    let run = derive_conversation_key("7", "device", Some(client), "unused");
+    let run = derive_conversation_key(&OWNER.to_string(), "device", Some(client), "unused");
     let sessions = crate::agent_session_store::SignalAgentSessionStore::new(db.clone())
         .with_client_metadata(Some(client.into()), AgentSessionSurface::AiAssistant);
     for index in 0..3 {
         let first_listener = listener.clone();
         let first = actix_web::rt::spawn(async move {
-            capture_one_openai_request_with_sse(first_listener.as_ref(), &sse(&"z".repeat(14_000)))
-                .await
+            let answer = sse(&"z".repeat(14_000));
+            if index == 0 {
+                capture_openai_answer_with_title(first_listener.as_ref(), &answer)
+                    .await
+                    .0
+            } else {
+                capture_one_openai_request_with_sse(first_listener.as_ref(), &answer).await
+            }
         });
         ask(&db, client, &format!("first-{index}"), "a".repeat(14_000)).await;
-        tokio::time::timeout(std::time::Duration::from_secs(5), first)
+        tokio::time::timeout(MODEL_IO_TIMEOUT, first)
             .await
             .unwrap()
             .unwrap();
@@ -184,7 +206,7 @@ async fn production_compaction_answers_and_restores_checkpoint_from_sqlite() {
         "{:?}",
         after.task_status_projection
     );
-    let (compression, answer) = tokio::time::timeout(std::time::Duration::from_secs(5), second)
+    let (compression, answer) = tokio::time::timeout(MODEL_IO_TIMEOUT, second)
         .await
         .unwrap()
         .unwrap();
@@ -246,16 +268,18 @@ async fn ask(
     let result = tokio::time::timeout(
         // Cold macOS trust-store initialization can itself exceed 15 seconds.
         // This watchdog bounds the harness, not the production model timeout.
-        std::time::Duration::from_secs(60),
+        SCENARIO_TIMEOUT,
         run_turn_inner(
             web::Data::new(SharedConnectionMap::new()),
             db.clone(),
             format!("transport-{message}"),
             "controller".into(),
             "offline-host".into(),
-            7,
+            OWNER,
             "device".into(),
             AiAssistantAsk {
+                client_timezone: "UTC".into(),
+                temporary_conversation: None,
                 question,
                 client_message_id: message.into(),
                 conversation_id: Some(client.into()),

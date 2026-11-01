@@ -165,6 +165,9 @@ pub enum ModelUseCase {
     FleetNaturalLanguage,
     /// Inline portable checkpoint-summary compressor.
     ContextCompression,
+    /// Independent validation, reconstruction and relation checks for memory.
+    /// Optional title derived from the first owner input.
+    ConversationTitle,
 }
 
 /// A validated positive provider output-token limit.

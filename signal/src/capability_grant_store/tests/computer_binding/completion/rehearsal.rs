@@ -18,7 +18,16 @@ async fn rehearsal_native_read_is_classified_once_with_original_receipt() {
     report_fixture(true).await;
 }
 
+#[tokio::test]
+async fn aliased_rehearsal_native_read_keeps_original_model_json_and_execution_receipt() {
+    report_fixture_with_aliases(true, true).await;
+}
+
 async fn report_fixture(read: bool) {
+    report_fixture_with_aliases(read, false).await;
+}
+
+async fn report_fixture_with_aliases(read: bool, aliased: bool) {
     let dir = tempfile::tempdir().unwrap();
     let page: desk_agent_protocol::browser_control::BrowserPageRef = serde_json::from_value(serde_json::json!({
         "schema_version":1,"adapter":{"engine":"chrome_extension","device_id":"device-1",
@@ -30,17 +39,46 @@ async fn report_fixture(read: bool) {
     let custom = read.then(|| ToolCall {
         id: "model-call-original".into(),
         name: "browser_wait_for".into(),
-        arguments_json: serde_json::json!({"page":page,"element":{"page_id":"page-1","page_incarnation":"page-first","document_revision":1,"element_id":"ready","role":"button","accessible_name":"Ready","value":null,"element_revision":1},"state":"absent","timeout_ms":1000}).to_string(),
+        arguments_json: serde_json::json!({"page":page,"element":{"page_id":"page-1","page_incarnation":"page-first","document_revision":1,"element_id":"ready","role":"button","accessible_name":"Ready","value":null,"element_revision":1},"state":if aliased { "present" } else { "absent" },"timeout_ms":1000}).to_string(),
     });
-    let f = Fixture::new_with_call(
+    let mut f = Fixture::new_with_source(
         file_db(&dir.path().join("rehearsal.db")).await,
         "1",
         false,
         false,
         false,
         custom,
+        None,
     )
     .await;
+    if aliased {
+        let input: serde_json::Value = serde_json::from_str(&f.call.arguments_json).unwrap();
+        let message = f
+            .session
+            .conversation
+            .iter_mut()
+            .find(|message| message.tool_calls.iter().any(|call| call.id == f.call.id))
+            .unwrap();
+        let source = message.message_id.clone();
+        let original = message
+            .tool_calls
+            .iter_mut()
+            .find(|call| call.id == f.call.id)
+            .unwrap();
+        original.arguments_json = serde_json::json!({"page_id":"p1","element_id":"b1","state":"present","timeout_ms":1000}).to_string();
+        f.session.ui_references = serde_json::from_value(serde_json::json!({"counters":{"p":1,"b":1},"entries":{
+            "p1":{"identity":format!("{:x}", Sha256::digest(serde_json::to_vec(&("p", "page-1", &input["page"])).unwrap())),"prefix":"p","native_id":"page-1","reference":input["page"],"sources":[{"Message":source}]},
+            "b1":{"identity":format!("{:x}", Sha256::digest(serde_json::to_vec(&("b", "ready", &input["element"])).unwrap())),"prefix":"b","native_id":"ready","reference":input["element"],"sources":[{"Message":source}]}
+        }})).unwrap();
+        let mut row: agent_session::ActiveModel = agent_session::Entity::find()
+            .one(&f.store.db)
+            .await
+            .unwrap()
+            .unwrap()
+            .into();
+        row.state_json = Set(f.session.encode_json_for_storage().unwrap());
+        row.update(&f.store.db).await.unwrap();
+    }
     f.bind().await;
     let mut native = verified(&f.plan);
     if read {

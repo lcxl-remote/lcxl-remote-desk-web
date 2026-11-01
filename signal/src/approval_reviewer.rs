@@ -29,18 +29,18 @@ pub async fn call_claimed_permission_review(
     candidate: &ApprovalReviewCandidate,
     claim: &ClaimedPermissionReview,
 ) -> Result<ReviewerResponse, AgentError> {
-    let mut sink = crate::approval_trace::Store::new(db.clone())
-        .capture(candidate, claim)
-        .await;
+    let mut sink =
+        Box::pin(crate::approval_trace::Store::new(db.clone()).capture(candidate, claim)).await;
     sink.tracking = Some(claim.statistics.clone());
     sink.publish = Some(std::sync::Arc::new(crate::model_metrics::runtime::submit));
     sink.event("preparation");
-    let mut current = claim.clone();
+    let mut corrected_claim: Option<Box<ClaimedPermissionReview>> = None;
     let mut combined_usage = None;
     let result = loop {
+        let current = corrected_claim.as_deref().unwrap_or(claim);
         sink.begin_attempt(current.call_authority.attempt.index);
         let mut response = Box::pin(call_claimed_permission_review_inner(
-            db, candidate, &current, &mut sink,
+            db, candidate, current, &mut sink,
         ))
         .await;
         if let Ok(value) = &mut response {
@@ -55,14 +55,15 @@ pub async fn call_claimed_permission_review(
                     desk_diagnose_core::approval_usage::sum_review_usage(previous, value.usage)
                 }
             });
-            if crate::approval_attempt::record_response(
-                db,
-                &current.call_authority,
-                value.response_complete,
-                value.format_issue,
-            )
-            .await
-            .is_err()
+            if (value.decision.is_none() || value.format_issue.is_some())
+                && Box::pin(crate::approval_attempt::record_response(
+                    db,
+                    &current.call_authority,
+                    value.response_complete,
+                    value.format_issue,
+                ))
+                .await
+                .is_err()
             {
                 break Err(AgentError {
                     kind: AgentErrorKind::Internal,
@@ -81,12 +82,12 @@ pub async fn call_claimed_permission_review(
             {
                 sink.event("format_retry_requested");
                 match Box::pin(crate::approval_retry::advance(
-                    db, candidate, &current, issue,
+                    db, candidate, current, issue,
                 ))
                 .await
                 {
                     Ok(Some(next)) => {
-                        current = next;
+                        corrected_claim = Some(next);
                         continue;
                     }
                     Ok(None) => {}
@@ -293,14 +294,18 @@ async fn call_claimed_permission_review_inner(
         .await
         .map_err(|_| reviewer_unavailable())?;
     }
+    let input_snapshot = desk_diagnose_core::model_egress::NativeModelInputSnapshot::capture(
+        &claim.authorized.prompt_audit,
+        std::slice::from_ref(&claim.authorized.prompt_envelope),
+    )
+    .map_err(|_| reviewer_unavailable())?;
     desk_diagnose_core::future::boxed(|| async {
-        crate::model_egress_store::SignalModelEgressStore::record_dispatch_intent_on(
+        crate::model_egress_store::SignalModelEgressStore::record_snapshot_intent_on(
             &txn,
             receipt_id.clone(),
             export_id.clone(),
             1,
-            &claim.authorized.prompt_audit,
-            std::slice::from_ref(&claim.authorized.prompt_envelope),
+            &input_snapshot,
         )
         .await
     })

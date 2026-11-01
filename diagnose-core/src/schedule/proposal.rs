@@ -43,7 +43,7 @@ pub fn registry() -> Vec<crate::registry::RegisteredTool> {
                 crate::registry::ToolEffect::SchedulePlanning
             },
             spec,
-            required_capability: desk_agent_protocol::Capability::SystemInfo,
+            required_device_capability: None,
         })
         .collect()
 }
@@ -53,6 +53,11 @@ pub fn spec() -> ToolSpec {
         name: REQUEST_SCHEDULE.into(),
         description: "Propose a scheduled task for the owner to review. The AI conversation proposal creates a pending review request without granting permissions; it is not a saved task draft. conversation_resume is a one-time continuation of this conversation and must run within the deployment's conversation retention window; the server rejects a later run and reports the current maximum delay in seconds. This call waits for the owner review decision, and the server approval or rejection receipt is returned before you continue. Owner approval enables the timer; rejection leaves it disabled. fresh_task starts a new context each time and requires owner-guided rehearsal and authorization before publication. For local times use time_input with the explicit user timezone and reference date; the server converts it. For relative conversation continuations use rule kind after_confirmation with delay_seconds; the server counts from confirmation. Ordinary chat confirmation does not activate a draft; the owner must confirm in the review dialog. Use other rule kinds only for explicit UTC input or an absolute RFC3339 instant with an explicit offset; preserve the supplied offset. Supply exactly one of rule or time_input; never guess a timezone or compute UTC yourself. The server binds the current owner, device and conversation.".into(),
         parameters_schema: json!({"type":"object","additionalProperties":false,"required":["kind","title","prompt"],"oneOf":[{"required":["rule"],"not":{"required":["time_input"]}},{"required":["time_input"],"not":{"required":["rule"]}}],
+            "if":{"properties":{"kind":{"const":"conversation_resume"}}},
+            "then":{"properties":{
+                "rule":{"properties":{"kind":{"enum":["once","after_confirmation"]}}},
+                "time_input":{"properties":{"rule":{"properties":{"kind":{"const":"once"}}}}}
+            }},
             "properties":{
                 "kind":{"type":"string","enum":["conversation_resume","fresh_task"]},
                 "title":{"type":"string","minLength":1,"maxLength":240},
@@ -156,7 +161,9 @@ pub fn draft(
         )
     {
         observation.reject(Stage::Preflight, InputIssue::Combination);
-        return Err("conversation continuation must be one-time");
+        return Err(
+            "conversation_resume requires a one-time rule (once or after_confirmation); use fresh_task for recurring tasks",
+        );
     }
     let identity = serde_json::to_vec(&(
         &session.actor_id,
@@ -189,6 +196,16 @@ pub fn unavailable() -> desk_agent_protocol::AgentError {
         message:
             "The schedule operation could not be completed under the current conversation authority. Query the task again; do not claim it was changed."
                 .into(),
+        retryable: false,
+        safe_for_model: true,
+        error_code: None,
+    }
+}
+
+pub fn invalid_input(message: &'static str) -> desk_agent_protocol::AgentError {
+    desk_agent_protocol::AgentError {
+        kind: desk_agent_protocol::AgentErrorKind::InvalidInput,
+        message: message.into(),
         retryable: false,
         safe_for_model: true,
         error_code: None,
@@ -241,6 +258,67 @@ fn resolve_time(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn recurring_rules_require_fresh_tasks_in_schema_and_domain_errors() {
+        let mut session =
+            crate::ai_assistant::test_support::personal_session("owner", "chat", "device");
+        session.input_revision = 1;
+        session.turn_state = crate::session::TurnState::Running;
+        for timing in [
+            json!({"rule":{"kind":"daily","utc_time":"00:30:00"}}),
+            json!({"time_input":{"timezone":"Asia/Shanghai","reference_date":"2026-11-01","local_time":"08:30:00","rule":{"kind":"daily"}}}),
+        ] {
+            let mut input =
+                json!({"kind":"conversation_resume","title":"Report","prompt":"Read-only report"});
+            input
+                .as_object_mut()
+                .unwrap()
+                .extend(timing.as_object().unwrap().clone());
+            let schema_error = crate::model_input::validate_format_with_schema(
+                REQUEST_SCHEDULE,
+                &spec().parameters_schema,
+                &input,
+            )
+            .unwrap_err();
+            assert!(schema_error.contains("once"), "{schema_error}");
+            let mut call = ToolCall {
+                id: "call".into(),
+                name: REQUEST_SCHEDULE.into(),
+                arguments_json: input.to_string(),
+            };
+            let error = draft(&session, &call, &Default::default()).err().unwrap();
+            assert!(error.contains("fresh_task"), "{error}");
+            assert_eq!(
+                invalid_input(error).kind,
+                desk_agent_protocol::AgentErrorKind::InvalidInput
+            );
+            input["kind"] = json!("fresh_task");
+            crate::model_input::validate_format_with_schema(
+                REQUEST_SCHEDULE,
+                &spec().parameters_schema,
+                &input,
+            )
+            .unwrap();
+            call.arguments_json = input.to_string();
+            assert_eq!(
+                draft(&session, &call, &Default::default()).unwrap().kind,
+                ScheduledTaskKind::FreshTask
+            );
+        }
+        for rule in [
+            json!({"kind":"after_confirmation","delay_seconds":60}),
+            json!({"kind":"once","at":"2026-11-01T00:30:00Z"}),
+        ] {
+            let input = json!({"kind":"conversation_resume","title":"Report","prompt":"Report","rule":rule});
+            crate::model_input::validate_format_with_schema(
+                REQUEST_SCHEDULE,
+                &spec().parameters_schema,
+                &input,
+            )
+            .unwrap();
+        }
+    }
+
     #[test]
     fn schedule_proposals_convert_local_time_and_reject_conflicting_or_ambiguous_inputs() {
         let input: ScheduleTimeConversion = serde_json::from_value(json!({

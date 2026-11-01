@@ -83,7 +83,7 @@ impl CapabilityDescriptor {
     pub fn registered_tool(&self) -> RegisteredTool {
         RegisteredTool {
             spec: self.tool_spec.clone(),
-            required_capability: self.required_capability,
+            required_device_capability: Some(self.required_capability),
             effect: self.legacy_effect(),
         }
     }
@@ -330,6 +330,7 @@ impl ProviderRegistry {
             .find(|capability| capability.tool_spec.name == tool_name)
     }
 
+    #[cfg(test)]
     /// Stable descriptor inventory safe for persistence/UI projection. Tool JSON
     /// schema and credentials are intentionally absent from this view.
     pub fn wire_inventory(&self) -> Vec<ProviderWireDescriptor> {

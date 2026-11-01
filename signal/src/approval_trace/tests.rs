@@ -372,3 +372,28 @@ async fn unclaimed_approval_failures_paginate_by_fixed_milliseconds_and_remain_p
     assert_eq!(ids.len(), 3);
     assert!(query.cursor.is_none());
 }
+
+#[tokio::test]
+async fn settlement_recovers_provider_start_from_the_original_call_ledger() {
+    let db = database().await;
+    candidate(&db, "started-ledger", "root", "1").await;
+    let mut row = review::Entity::find()
+        .filter(review::Column::CandidateId.eq("started-ledger"))
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    let before: ReviewTracking =
+        serde_json::from_str(row.statistics_json.as_deref().unwrap()).unwrap();
+    assert!(before.snapshot.provider_started_at_ms.is_none());
+    row.provider_started_at_ms = Some(row.created_at + 1);
+    let encoded =
+        crate::approval_metrics::settled_json(&row, None, "denied", None, row.created_at + 100)
+            .unwrap();
+    let after: ReviewTracking = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(
+        after.snapshot.provider_started_at_ms,
+        row.provider_started_at_ms
+    );
+    assert_eq!(after.object_id, before.object_id);
+}

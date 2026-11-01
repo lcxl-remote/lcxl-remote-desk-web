@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
-import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet';
+import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
 
 export type AssistantPanelId = 'details' | 'capabilities' | 'context' | 'connection' | 'observation';
 
@@ -13,10 +13,9 @@ export function AssistantDetailsSheet({ panel, onPanelChange, sections }: {
     const { t } = useTranslation();
     return (
         <Sheet open={panel !== null} onOpenChange={(open) => { if (!open) onPanelChange(null); }}>
-            <SheetContent className="flex w-full flex-col overflow-hidden sm:max-w-xl">
+            <SheetContent aria-describedby={undefined} className="flex w-full flex-col overflow-hidden sm:max-w-xl">
                 <SheetHeader className="pr-8 text-left">
                     <SheetTitle>{t(`pages.aiAssistant.workspace.${panel ?? 'details'}`)}</SheetTitle>
-                    <SheetDescription>{t('pages.aiAssistant.workspace.panelHint')}</SheetDescription>
                 </SheetHeader>
                 <nav className="flex flex-wrap gap-1 border-b py-3" aria-label={t('pages.aiAssistant.workspace.details')}>
                     {(['details', 'capabilities', 'context', 'connection', 'observation'] as const).filter(id => id in sections).map((id) => (

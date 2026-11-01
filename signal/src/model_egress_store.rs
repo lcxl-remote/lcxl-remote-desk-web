@@ -5,10 +5,14 @@ use desk_diagnose_core::sink_authorizer::SinkProjectionAudit;
 #[cfg(test)]
 use sea_orm::TransactionTrait;
 use sea_orm::sea_query::Expr;
-use sea_orm::{ActiveModelTrait, ColumnTrait, DbErr, EntityTrait, QueryFilter, Set};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DbErr, EntityTrait, QueryFilter, Set,
+};
 use sha2::{Digest, Sha256};
 
+use crate::assistant_data_store::model_gate;
 use crate::entity::model_egress_receipt;
+use desk_diagnose_core::schedule::model_admission::ModelAdmissionError;
 
 pub const STATE_DISPATCH_INTENT: &str = "dispatch_intent";
 pub const STATE_SUCCEEDED: &str = "succeeded";
@@ -60,8 +64,17 @@ impl SignalModelEgressStore {
         Self { db }
     }
 
+    #[cfg(test)]
     pub async fn link_context_dispatch(
         &self,
+        receipt_id: &str,
+        conversation_id: &str,
+    ) -> Result<(), DbErr> {
+        Self::link_context_dispatch_on(&self.db, receipt_id, conversation_id).await
+    }
+
+    pub(crate) async fn link_context_dispatch_on<C: ConnectionTrait>(
+        db: &C,
         receipt_id: &str,
         conversation_id: &str,
     ) -> Result<(), DbErr> {
@@ -72,7 +85,7 @@ impl SignalModelEgressStore {
             })
             .filter(model_egress_receipt::Column::ReceiptId.eq(receipt_id))
             .filter(model_egress_receipt::Column::ContextConversationId.is_null())
-            .exec(&self.db)
+            .exec(db)
             .await?;
         if changed.rows_affected != 1 {
             return Err(DbErr::Custom(
@@ -109,6 +122,7 @@ impl SignalModelEgressStore {
 
     /// Persist the exact authorizer projection before any provider I/O. Failure
     /// is fail-closed: the caller must not dispatch a request without a receipt.
+    #[cfg(test)]
     pub async fn record_dispatch_intent(
         &self,
         receipt_id: String,
@@ -135,6 +149,7 @@ impl SignalModelEgressStore {
     /// Join task authority and budget admission without committing independently.
     /// A receipt permits no I/O until the caller commits all admission checks.
     /// Roll back on error; duplicate receipt identities must never dispatch again.
+    #[cfg(test)]
     pub async fn record_dispatch_intent_on(
         txn: &crate::config::connection::DatabaseTransaction,
         receipt_id: String,
@@ -143,11 +158,51 @@ impl SignalModelEgressStore {
         audit: &SinkProjectionAudit,
         inputs: &[desk_agent_protocol::data_lineage::DataEnvelope],
     ) -> Result<model_egress_receipt::Model, DbErr> {
+        let input_snapshot =
+            desk_diagnose_core::model_egress::NativeModelInputSnapshot::capture(audit, inputs)
+                .map_err(|_| DbErr::Custom("invalid native input snapshot".into()))?;
+        Self::record_snapshot_intent_on(
+            txn,
+            receipt_id,
+            export_authorization_id,
+            model_call_ordinal,
+            &input_snapshot,
+        )
+        .await
+    }
+
+    /// The actual authorizer supplies original export labels and transformations
+    /// along with the audited inputs. Join the caller's native dispatch transaction.
+    pub async fn record_snapshot_intent_on(
+        txn: &crate::config::connection::DatabaseTransaction,
+        receipt_id: String,
+        export_authorization_id: String,
+        model_call_ordinal: u64,
+        input_snapshot: &desk_diagnose_core::model_egress::NativeModelInputSnapshot,
+    ) -> Result<model_egress_receipt::Model, DbErr> {
+        let audit = input_snapshot
+            .audit()
+            .map_err(|_| DbErr::Custom("invalid native input snapshot".into()))?;
+        input_snapshot
+            .validate_export_authorization(&export_authorization_id)
+            .map_err(|_| DbErr::Custom("invalid native export binding".into()))?;
+        let inputs = &input_snapshot.envelopes;
         let input_lineage =
-            desk_diagnose_core::model_egress::project_model_input_lineage(audit, inputs)
+            desk_diagnose_core::model_egress::project_model_input_lineage(&audit, inputs)
                 .map_err(|_| DbErr::Custom("invalid model input lineage".into()))?;
+        desk_diagnose_core::model_egress::sink_metadata_sha256(&(
+            &audit.destination,
+            &audit.envelope_ids,
+            &audit.digests_sha256,
+            &input_lineage,
+            &input_snapshot,
+            audit.total_bytes,
+        ))
+        .map_err(|_| DbErr::Custom("model lineage metadata limit".into()))?;
         let input_lineage_json = serde_json::to_string(&input_lineage)
             .map_err(|_| DbErr::Custom("invalid model input lineage".into()))?;
+        let input_snapshot_json = serde_json::to_string(&input_snapshot)
+            .map_err(|_| DbErr::Custom("invalid native input snapshot encoding".into()))?;
         let destination_json = serde_json::to_string(&audit.destination)
             .map_err(|error| DbErr::Custom(format!("encode model destination: {error}")))?;
         let envelope_ids_json = serde_json::to_string(&audit.envelope_ids)
@@ -163,6 +218,7 @@ impl SignalModelEgressStore {
             &envelope_ids_json,
             &digests_sha256_json,
             &input_lineage_json,
+            &input_snapshot_json,
             total_bytes,
         );
         let now = chrono::Utc::now();
@@ -174,11 +230,15 @@ impl SignalModelEgressStore {
             envelope_ids_json: Set(envelope_ids_json),
             digests_sha256_json: Set(digests_sha256_json),
             input_lineage_json: Set(input_lineage_json),
+            input_snapshot_json: Set(input_snapshot_json),
+            assistant_source_set_json: Set(None),
+
             projection_digest_sha256: Set(projection_digest_sha256),
             total_bytes: Set(total_bytes),
             state: Set(STATE_DISPATCH_INTENT.into()),
             model_output_envelope_id: Set(None),
             model_output_digest_sha256: Set(None),
+            model_output_label_sha256: Set(None),
             authorized_at: Set(now),
             completed_at: Set(None),
             provider_context_observation_json: Set(None),
@@ -232,13 +292,24 @@ impl SignalModelEgressStore {
         Ok(())
     }
 
-    pub async fn mark_succeeded(
+    pub(crate) async fn mark_succeeded(
         &self,
         receipt_id: &str,
         output: &desk_agent_protocol::data_lineage::DataEnvelope,
-    ) -> Result<(), DbErr> {
+    ) -> Result<(), ModelAdmissionError<DbErr>> {
+        let acceptance_started = std::time::Instant::now();
         let txn =
             crate::db::begin_write(&self.db, crate::entity::model_egress_receipt::Entity).await?;
+        let source_hint = model_egress_receipt::Entity::find_by_id(receipt_id)
+            .one(&txn)
+            .await?
+            .filter(|row| row.state == STATE_DISPATCH_INTENT)
+            .and_then(|row| row.assistant_source_set_json);
+        let source_fence = desk_diagnose_core::future::boxed(|| {
+            model_gate::output::prepare_on(&txn, source_hint.as_deref())
+        })
+        .await
+        .map_err(model_gate::admission_error)?;
         // Acquire SQLite's writer slot before reading the validation snapshot.
         // A deferred read followed by UPDATE can fail immediately with BUSY_SNAPSHOT
         // despite busy_timeout when another connection commits in between.
@@ -258,9 +329,56 @@ impl SignalModelEgressStore {
             .await?
             .ok_or_else(|| DbErr::Custom("model egress receipt missing".into()))?;
         let invalid = || DbErr::Custom("invalid model output lineage".into());
-        let (audit, inputs) = receipt_inputs(&row)?;
+        let (audit, inputs, _) = receipt_inputs(&row)?;
         desk_diagnose_core::model_egress::validate_model_output_lineage(&audit, &inputs, output)
             .map_err(|_| invalid())?;
+        let output_label_sha256 =
+            desk_diagnose_core::model_egress::model_output_label_sha256(output)
+                .map_err(|_| invalid())?;
+        if row.state == STATE_SUCCEEDED {
+            // An accepted output is immutable historical evidence. Replaying
+            // it neither reopens current sources nor republishes an archive.
+            if row.completed_at.is_none_or(|at| at < row.authorized_at)
+                || row.model_output_envelope_id.as_deref() != Some(output.envelope_id.as_str())
+                || row.model_output_digest_sha256.as_deref() != Some(output.digest_sha256.as_str())
+                || row.model_output_label_sha256.as_deref() != Some(output_label_sha256.as_str())
+            {
+                return Err(ModelAdmissionError::AssistantDataChanged);
+            }
+            return txn.commit().await.map_err(Into::into);
+        }
+        let deadline = desk_diagnose_core::future::boxed(|| {
+            model_gate::output::validate_on(&txn, source_fence.as_deref(), &row)
+        })
+        .await
+        .map_err(model_gate::admission_error)?;
+        let completed_at = chrono::Utc::now();
+        let pending_archive = desk_diagnose_core::future::boxed(|| {
+            model_gate::output::archive_on(
+                &txn,
+                source_fence.as_deref(),
+                &row,
+                output,
+                completed_at.timestamp_millis() as u64,
+            )
+        })
+        .await
+        .map_err(model_gate::admission_error)?;
+        if deadline.is_some_and(|until| until <= chrono::Utc::now().timestamp_millis() as u64) {
+            log::warn!(
+                "[assistant-output] deadline elapsed: phase=archive, receipt_id={receipt_id}, elapsed_ms={}",
+                acceptance_started.elapsed().as_millis()
+            );
+            return Err(ModelAdmissionError::AssistantDataChanged);
+        }
+        let expected_sources = match &row.assistant_source_set_json {
+            Some(raw) => model_egress_receipt::Column::AssistantSourceSetJson.eq(raw.clone()),
+            None => model_egress_receipt::Column::AssistantSourceSetJson.is_null(),
+        };
+        let expected_context = match &row.context_conversation_id {
+            Some(id) => model_egress_receipt::Column::ContextConversationId.eq(id.clone()),
+            None => model_egress_receipt::Column::ContextConversationId.is_null(),
+        };
         let result = model_egress_receipt::Entity::update_many()
             .col_expr(
                 model_egress_receipt::Column::State,
@@ -275,15 +393,167 @@ impl SignalModelEgressStore {
                 Expr::value(Some(output.digest_sha256.clone())),
             )
             .col_expr(
+                model_egress_receipt::Column::ModelOutputLabelSha256,
+                Expr::value(Some(output_label_sha256)),
+            )
+            .col_expr(
                 model_egress_receipt::Column::CompletedAt,
-                Expr::value(Some(chrono::Utc::now())),
+                Expr::value(Some(completed_at)),
             )
             .filter(model_egress_receipt::Column::ReceiptId.eq(receipt_id))
             .filter(model_egress_receipt::Column::State.eq(STATE_DISPATCH_INTENT))
+            .filter(model_egress_receipt::Column::CompletedAt.is_null())
+            .filter(model_egress_receipt::Column::ModelOutputEnvelopeId.is_null())
+            .filter(model_egress_receipt::Column::ModelOutputDigestSha256.is_null())
+            .filter(model_egress_receipt::Column::ModelOutputLabelSha256.is_null())
+            .filter(model_egress_receipt::Column::InputSnapshotJson.eq(row.input_snapshot_json))
+            .filter(model_egress_receipt::Column::InputLineageJson.eq(row.input_lineage_json))
+            .filter(
+                model_egress_receipt::Column::ProjectionDigestSha256
+                    .eq(row.projection_digest_sha256),
+            )
+            .filter(model_egress_receipt::Column::DestinationJson.eq(row.destination_json))
+            .filter(model_egress_receipt::Column::EnvelopeIdsJson.eq(row.envelope_ids_json))
+            .filter(model_egress_receipt::Column::DigestsSha256Json.eq(row.digests_sha256_json))
+            .filter(
+                model_egress_receipt::Column::ExportAuthorizationId.eq(row.export_authorization_id),
+            )
+            .filter(model_egress_receipt::Column::AuthorizedAt.eq(row.authorized_at))
+            .filter(expected_sources)
+            .filter(expected_context)
             .exec(&txn)
             .await?;
         ensure_single_update(result.rows_affected, "complete successful model egress")?;
-        txn.commit().await
+        if deadline.is_some_and(|until| until <= chrono::Utc::now().timestamp_millis() as u64) {
+            log::warn!(
+                "[assistant-output] deadline elapsed: phase=native_write, receipt_id={receipt_id}, elapsed_ms={}",
+                acceptance_started.elapsed().as_millis()
+            );
+            return Err(ModelAdmissionError::AssistantDataChanged);
+        }
+        if let Some(pending) = pending_archive {
+            desk_diagnose_core::future::boxed(|| pending.finalize_on())
+                .await
+                .map_err(model_gate::admission_error)?;
+        }
+
+        if deadline.is_some_and(|until| until <= chrono::Utc::now().timestamp_millis() as u64) {
+            log::warn!(
+                "[assistant-output] deadline elapsed: phase=archive_commit, receipt_id={receipt_id}, elapsed_ms={}",
+                acceptance_started.elapsed().as_millis()
+            );
+            return Err(ModelAdmissionError::AssistantDataChanged);
+        }
+        log::debug!(
+            "[assistant-output] accepted: receipt_id={receipt_id}, elapsed_ms={}",
+            acceptance_started.elapsed().as_millis()
+        );
+        txn.commit().await.map_err(Into::into)
+    }
+
+    /// The caller authenticates its owner-bound native source context. This is
+    /// historical evidence, never current source
+    /// access, task authority or permission to repeat a model dispatch.
+    pub(crate) async fn read_context_output_on<C: sea_orm::ConnectionTrait>(
+        db: &C,
+        conversation: &str,
+        output: &desk_agent_protocol::data_lineage::DataEnvelope,
+    ) -> Result<desk_diagnose_core::model_egress::NativeModelOutputSources, DbErr> {
+        Self::read_context_output_reusing_on(db, conversation, output, None).await
+    }
+
+    pub(crate) async fn read_context_output_reusing_on<C: sea_orm::ConnectionTrait>(
+        db: &C,
+        conversation: &str,
+        output: &desk_agent_protocol::data_lineage::DataEnvelope,
+        known: Option<&crate::assistant_data_store::StoredOutput>,
+    ) -> Result<desk_diagnose_core::model_egress::NativeModelOutputSources, DbErr> {
+        Self::read_context_output_with_archive_on(db, conversation, output, known)
+            .await
+            .map(|(sources, _)| sources)
+    }
+
+    pub(crate) async fn read_context_output_with_archive_on<C: sea_orm::ConnectionTrait>(
+        db: &C,
+        conversation: &str,
+        output: &desk_agent_protocol::data_lineage::DataEnvelope,
+        known: Option<&crate::assistant_data_store::StoredOutput>,
+    ) -> Result<
+        (
+            desk_diagnose_core::model_egress::NativeModelOutputSources,
+            Option<crate::assistant_data_store::StoredOutput>,
+        ),
+        DbErr,
+    > {
+        use sea_orm::QuerySelect;
+        let invalid = || DbErr::Custom("original accepted model output is unavailable".into());
+        let rows = model_egress_receipt::Entity::find()
+            .filter(model_egress_receipt::Column::ContextConversationId.eq(conversation))
+            .filter(model_egress_receipt::Column::ModelOutputEnvelopeId.eq(&output.envelope_id))
+            .filter(model_egress_receipt::Column::ModelOutputDigestSha256.eq(&output.digest_sha256))
+            .limit(2)
+            .all(db)
+            .await?;
+        if rows.len() > 1 {
+            return Err(invalid());
+        }
+        if let Some(row) = rows.first() {
+            let sources = context_sources_from_row(row, conversation, output)?;
+            let archive = if row.assistant_source_set_json.is_some() {
+                let stored = crate::assistant_data_store::find_output_reusing_on(
+                    db,
+                    conversation,
+                    output,
+                    known,
+                )
+                .await
+                .map_err(|_| invalid())?
+                .ok_or_else(invalid)?;
+                if stored.proof.sources != sources || row.assistant_source_set_json.as_deref()
+                    .map(desk_diagnose_core::ai_assistant::native_export::AssistantNativeSourceSet::decode).transpose().map_err(|_| invalid())?.as_ref()
+                    != Some(&stored.proof.source_set) { return Err(invalid()); }
+                Some(stored)
+            } else {
+                None
+            };
+            return Ok((sources, archive));
+        }
+        let stored =
+            crate::assistant_data_store::find_output_reusing_on(db, conversation, output, known)
+                .await
+                .map_err(|_| invalid())?
+                .ok_or_else(invalid)?;
+        if let Some(row) =
+            model_egress_receipt::Entity::find_by_id(&stored.proof.source_set.physical_call_id)
+                .one(db)
+                .await?
+        {
+            let sources = context_sources_from_row(&row, conversation, output)?;
+            if sources != stored.proof.sources || row.assistant_source_set_json.as_deref()
+                .map(desk_diagnose_core::ai_assistant::native_export::AssistantNativeSourceSet::decode).transpose().map_err(|_| invalid())?.as_ref()
+                != Some(&stored.proof.source_set) { return Err(invalid()); }
+        }
+        Ok((stored.proof.sources.clone(), Some(stored)))
+    }
+
+    /// The caller authenticates the exact immutable archive and its parent links.
+    /// A missing short-lived receipt grants no I/O; contradictory live data fails.
+    pub(crate) async fn verify_retained_output_on<C: sea_orm::ConnectionTrait>(
+        db: &C,
+        set: &desk_diagnose_core::ai_assistant::native_export::AssistantNativeSourceSet,
+        sources: &desk_diagnose_core::model_egress::NativeModelOutputSources,
+        output: &desk_agent_protocol::data_lineage::DataEnvelope,
+    ) -> Result<(), DbErr> {
+        let invalid = || DbErr::Custom("retained native output provenance changed".into());
+        sources.validate(output).map_err(|_| invalid())?;
+        if let Some(row) =
+            model_egress_receipt::Entity::find_by_id(&sources.evidence.physical_call_id)
+                .one(db)
+                .await?
+            && (context_sources_from_row(&row, &sources.evidence.context_conversation_id, output)? != *sources
+                || row.assistant_source_set_json.as_deref().map(desk_diagnose_core::ai_assistant::native_export::AssistantNativeSourceSet::decode)
+                    .transpose().map_err(|_| invalid())?.as_ref() != Some(set)) { return Err(invalid()); }
+        Ok(())
     }
 
     /// The export identity and ordinal must come from the owner-bound frozen
@@ -447,10 +717,54 @@ impl SignalModelEgressStore {
     }
 }
 
+fn context_sources_from_row(
+    row: &model_egress_receipt::Model,
+    conversation: &str,
+    output: &desk_agent_protocol::data_lineage::DataEnvelope,
+) -> Result<desk_diagnose_core::model_egress::NativeModelOutputSources, DbErr> {
+    let invalid = || DbErr::Custom("invalid original accepted model output".into());
+    if row.context_conversation_id.as_deref() != Some(conversation) {
+        return Err(invalid());
+    }
+    let (audit, inputs, input_snapshot) = completed_output_parts(row, output)?;
+    let evidence = desk_diagnose_core::model_egress::NativeModelOutputEvidence::from_receipt(
+        &row.receipt_id,
+        conversation,
+        &row.export_authorization_id,
+        u64::try_from(row.authorized_at.timestamp_millis()).map_err(|_| invalid())?,
+        u64::try_from(row.completed_at.ok_or_else(invalid)?.timestamp_millis())
+            .map_err(|_| invalid())?,
+        &audit,
+        &inputs,
+        &input_snapshot,
+        output,
+    )
+    .map_err(|_| invalid())?;
+    Ok(desk_diagnose_core::model_egress::NativeModelOutputSources {
+        evidence,
+        inputs,
+        input_snapshot,
+    })
+}
+
 fn completed_output_inputs(
     row: &model_egress_receipt::Model,
     output: &desk_agent_protocol::data_lineage::DataEnvelope,
 ) -> Result<Vec<desk_diagnose_core::model_egress::ModelInputLineage>, DbErr> {
+    Ok(completed_output_parts(row, output)?.1)
+}
+
+fn completed_output_parts(
+    row: &model_egress_receipt::Model,
+    output: &desk_agent_protocol::data_lineage::DataEnvelope,
+) -> Result<
+    (
+        SinkProjectionAudit,
+        Vec<desk_diagnose_core::model_egress::ModelInputLineage>,
+        desk_diagnose_core::model_egress::NativeModelInputSnapshot,
+    ),
+    DbErr,
+> {
     let invalid = || DbErr::Custom("invalid completed model output evidence".into());
     if row.state != STATE_SUCCEEDED
         || row.model_call_ordinal <= 0
@@ -460,25 +774,44 @@ fn completed_output_inputs(
     }
     if row.model_output_envelope_id.as_deref() != Some(output.envelope_id.as_str())
         || row.model_output_digest_sha256.as_deref() != Some(output.digest_sha256.as_str())
+        || row.model_output_label_sha256.as_deref()
+            != Some(
+                desk_diagnose_core::model_egress::model_output_label_sha256(output)
+                    .map_err(|_| invalid())?
+                    .as_str(),
+            )
     {
         return Err(invalid());
     }
-    let (audit, inputs) = receipt_inputs(row)?;
+    let (audit, inputs, input_snapshot) = receipt_inputs(row)?;
     desk_diagnose_core::model_egress::validate_model_output_lineage(&audit, &inputs, output)
         .map_err(|_| invalid())?;
-    Ok(inputs)
+    Ok((audit, inputs, input_snapshot))
 }
 
-fn receipt_inputs(
+pub(crate) fn receipt_inputs(
     row: &model_egress_receipt::Model,
 ) -> Result<
     (
         SinkProjectionAudit,
         Vec<desk_diagnose_core::model_egress::ModelInputLineage>,
+        desk_diagnose_core::model_egress::NativeModelInputSnapshot,
     ),
     DbErr,
 > {
     let invalid = || DbErr::Custom("invalid model output lineage".into());
+    let size = row
+        .destination_json
+        .len()
+        .checked_add(row.envelope_ids_json.len())
+        .and_then(|bytes| bytes.checked_add(row.digests_sha256_json.len()))
+        .and_then(|bytes| bytes.checked_add(row.input_lineage_json.len()))
+        .and_then(|bytes| bytes.checked_add(row.input_snapshot_json.len()))
+        .and_then(|bytes| bytes.checked_add(8));
+    if size.is_none_or(|bytes| bytes > desk_agent_protocol::data_lineage::MAX_SOURCE_LINEAGE_BYTES)
+    {
+        return Err(invalid());
+    }
     let audit = SinkProjectionAudit {
         destination: serde_json::from_str(&row.destination_json).map_err(|_| invalid())?,
         envelope_ids: serde_json::from_str(&row.envelope_ids_json).map_err(|_| invalid())?,
@@ -489,12 +822,15 @@ fn receipt_inputs(
         &row.input_lineage_json,
     )
     .map_err(|_| invalid())?;
+    let input_snapshot: desk_diagnose_core::model_egress::NativeModelInputSnapshot =
+        serde_json::from_str(&row.input_snapshot_json).map_err(|_| invalid())?;
     if row.projection_digest_sha256
         != projection_digest(
             &row.destination_json,
             &row.envelope_ids_json,
             &row.digests_sha256_json,
             &row.input_lineage_json,
+            &row.input_snapshot_json,
             row.total_bytes,
         )
     {
@@ -502,7 +838,13 @@ fn receipt_inputs(
     }
     desk_diagnose_core::model_egress::validate_model_input_lineage(&audit, &inputs)
         .map_err(|_| invalid())?;
-    Ok((audit, inputs))
+    input_snapshot
+        .validate(&audit, &inputs)
+        .map_err(|_| invalid())?;
+    input_snapshot
+        .validate_export_authorization(&row.export_authorization_id)
+        .map_err(|_| invalid())?;
+    Ok((audit, inputs, input_snapshot))
 }
 
 fn ensure_single_update(rows_affected: u64, operation: &str) -> Result<(), DbErr> {
@@ -520,6 +862,7 @@ fn projection_digest(
     envelope_ids_json: &str,
     digests_sha256_json: &str,
     input_lineage_json: &str,
+    input_snapshot_json: &str,
     total_bytes: i64,
 ) -> String {
     let mut hasher = Sha256::new();
@@ -528,6 +871,7 @@ fn projection_digest(
         envelope_ids_json,
         digests_sha256_json,
         input_lineage_json,
+        input_snapshot_json,
     ] {
         hasher.update((part.len() as u64).to_le_bytes());
         hasher.update(part.as_bytes());
@@ -578,6 +922,8 @@ mod tests {
     use super::*;
     use desk_agent_protocol::data_lineage::DestinationIdentity;
     use sea_orm::EntityTrait;
+
+    mod input_snapshot;
 
     fn audit() -> SinkProjectionAudit {
         SinkProjectionAudit {
@@ -659,6 +1005,15 @@ mod tests {
         };
 
         store
+            .link_context_dispatch("output-binding", "conversation")
+            .await
+            .unwrap();
+        assert!(
+            SignalModelEgressStore::read_context_output_on(&db, "conversation", &valid)
+                .await
+                .is_err()
+        );
+        store
             .mark_succeeded("output-binding", &valid)
             .await
             .unwrap();
@@ -672,6 +1027,45 @@ mod tests {
             Some(valid.digest_sha256.as_str())
         );
         assert_eq!(finished.state, STATE_SUCCEEDED);
+        assert_eq!(
+            finished.model_output_label_sha256.as_deref(),
+            Some(
+                desk_diagnose_core::model_egress::model_output_label_sha256(&valid)
+                    .unwrap()
+                    .as_str()
+            )
+        );
+        let witnessed = SignalModelEgressStore::read_context_output_on(&db, "conversation", &valid)
+            .await
+            .unwrap();
+        assert_eq!(witnessed.evidence.physical_call_id, "output-binding");
+        witnessed.validate(&valid).unwrap();
+        assert!(
+            SignalModelEgressStore::read_context_output_on(&db, "another-conversation", &valid)
+                .await
+                .is_err()
+        );
+        for case in 0..3 {
+            let mut changed = valid.clone();
+            match case {
+                0 => changed.sensitivity = desk_agent_protocol::data_lineage::Sensitivity::Public,
+                1 => changed.retention.delete_with_run = false,
+                _ => changed
+                    .allowed_destinations
+                    .push(DestinationIdentity::Model {
+                        connection_id: "another-gateway".into(),
+                        connection_revision: 1,
+                        model_id: "model".into(),
+                        profile_revision: 1,
+                    }),
+            }
+            assert_eq!(changed.digest_sha256, valid.digest_sha256);
+            assert!(
+                SignalModelEgressStore::read_context_output_on(&db, "conversation", &changed)
+                    .await
+                    .is_err()
+            );
+        }
         assert!(
             store
                 .mark_succeeded("output-binding", &output("another-output"))
@@ -716,6 +1110,15 @@ mod tests {
         duplicate.model_call_ordinal = Set(2);
         duplicate.insert(&db).await.unwrap();
         let before = model_egress_receipt::Entity::find().all(&db).await.unwrap();
+        assert!(
+            SignalModelEgressStore::read_context_output_on(
+                &db,
+                "conversation",
+                message.data_envelope.as_ref().unwrap()
+            )
+            .await
+            .is_err()
+        );
         assert!(
             SignalModelEgressStore::find_output_evidence_on(&db, "export", &message)
                 .await

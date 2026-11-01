@@ -10,7 +10,9 @@ use desk_diagnose_core::durable_action::{
 };
 use desk_diagnose_core::session::WorkKind;
 use sea_orm::sea_query::Expr;
-use sea_orm::{ActiveModelTrait, ColumnTrait, DbErr, EntityTrait, ExprTrait, QueryFilter, Set};
+#[cfg(test)]
+use sea_orm::{ActiveModelTrait, Set};
+use sea_orm::{ColumnTrait, DbErr, EntityTrait, ExprTrait, QueryFilter};
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -69,6 +71,7 @@ impl SignalActionStore {
         Self { db }
     }
 
+    #[cfg(test)]
     /// Create a personal-owner approval. The table intentionally has no org
     /// resolution column, so an organization member can never become an alternate
     /// approver in OSS.
@@ -113,6 +116,7 @@ impl SignalActionStore {
         .await
     }
 
+    #[cfg(test)]
     /// Resolve approval against the exact personal owner subject captured at
     /// draft time. This check is repeated again by [`claim_personal_by_id`] at the
     /// dispatch boundary.
@@ -185,6 +189,7 @@ impl SignalActionStore {
         })
     }
 
+    #[cfg(test)]
     /// Record an owner's explicit disposition of the exact unresolved action.
     /// This is an audit fact only: the action remains `unknown`, no grant use is
     /// restored, and a late provider result may still be recorded separately.
@@ -222,6 +227,7 @@ impl SignalActionStore {
         })
     }
 
+    #[cfg(test)]
     pub async fn claim_personal_by_id(
         &self,
         work_id: i64,

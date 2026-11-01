@@ -9,13 +9,13 @@ import {
     restoreSignalingStubs,
     flush,
     type SignalingGlobals,
-} from './file-transfer-test-harness';
+} from './__tests__/harness';
 
 // Hook-level wiring for the W2/W6 download fixes. Downloads must stream
 // straight to the destination writable (never buffered in memory) and a
 // write failure must abort the transfer and tell the host to stop — all
 // without leaking an unhandled rejection. One comprehensive test per
-// file: see the note in `file-transfer-test-harness.ts`.
+// file: see the note in `__tests__/harness.ts`.
 
 function fakeWritable(opts: { failWrite?: boolean; failAbort?: boolean } = {}) {
     const w = {

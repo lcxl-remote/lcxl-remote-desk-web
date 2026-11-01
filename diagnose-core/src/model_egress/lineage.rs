@@ -42,7 +42,7 @@ pub fn project_model_input_lineage(
     Ok(entries)
 }
 
-fn is_public_system_prompt(input: &DataEnvelope) -> bool {
+pub(crate) fn is_public_system_prompt(input: &DataEnvelope) -> bool {
     let Some(message_id) = input.provenance.source_object_id.as_deref() else {
         return false;
     };

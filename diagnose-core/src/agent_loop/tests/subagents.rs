@@ -484,7 +484,7 @@ async fn child_recovery_notices_keep_delegated_model_authority_without_user_mess
                     description: "request permission".into(),
                     parameters_schema: serde_json::json!({"type": "object"}),
                 },
-                required_capability: Capability::SystemInfo,
+                required_device_capability: None,
                 effect: ToolEffect::RunProjection,
             },
         ];

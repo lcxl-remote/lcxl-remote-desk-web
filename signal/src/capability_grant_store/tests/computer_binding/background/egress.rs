@@ -1,4 +1,5 @@
 use super::*;
+use desk_diagnose_core::test_timing::{MODEL_IO_TIMEOUT, SCENARIO_TIMEOUT};
 use desk_diagnose_core::{
     chat::{ChatRole, ModelTurn},
     model_egress::ModelEgressPolicy,
@@ -64,8 +65,9 @@ async fn set_session(f: &Fixture, session: &PersistedAgentSession) {
 async fn fixture(
     config: &crate::model_provider::ModelProviderConfig,
     secret: bool,
+    database_url: &str,
 ) -> (Fixture, ModelEgressPolicy) {
-    let db = crate::config::test_support::Database::connect("sqlite::memory:")
+    let db = crate::config::test_support::Database::connect(database_url)
         .await
         .unwrap();
     crate::db::initialize_schema(&db).await.unwrap();
@@ -73,7 +75,18 @@ async fn fixture(
         .await
         .unwrap();
     let config = crate::model_provider::load(&db).await.unwrap();
-    let mut f = Fixture::new(db).await;
+    let mut user = desk_diagnose_core::model_message_labels::model_bound_user_message(
+        "input-1".into(),
+        "explain the original background result".into(),
+        config.destination_identity().unwrap(),
+    )
+    .unwrap();
+    user.turn_id = Some("turn-1".into());
+    if secret {
+        user.data_envelope.as_mut().unwrap().sensitivity = Sensitivity::Secret;
+    }
+    let mut f =
+        Fixture::new_with_source(db, "1", false, false, false, None, Some(user.clone())).await;
     let policy = ModelEgressPolicy {
         destination: config.destination_identity().unwrap(),
         selected_source_tools: [f.call.name.clone()].into_iter().collect(),
@@ -82,13 +95,7 @@ async fn fixture(
         byte_cap: desk_diagnose_core::sink_authorizer::MAX_SINK_BYTES,
         permission_resume: false,
     };
-    let mut user = desk_diagnose_core::model_message_labels::model_bound_user_message(
-        "input-1".into(),
-        "explain the original background result".into(),
-        policy.destination.clone(),
-    )
-    .unwrap();
-    user.turn_id = Some("turn-1".into());
+
     let mut proposal = f.session.conversation[1].clone();
     use desk_diagnose_core::seam::ModelSeam;
     let context = crate::model_dial::SignalModelSeam::from_config(&config)
@@ -122,7 +129,7 @@ async fn fixture(
         schema_version: CONTEXT_ATTACHMENT_SCHEMA_VERSION,
         attachment_id: "selected-context".into(),
         client_request_id: "select-context".into(),
-        actor_id: "actor-1".into(),
+        actor_id: "1".into(),
         device_id: "device-1".into(),
         surface: AgentSessionSurface::AiAssistant,
         kind: ContextAttachmentKind::InteractiveSession,
@@ -143,33 +150,94 @@ async fn fixture(
         state: AttachmentState::Active,
     });
     set_session(&f, &f.session).await;
+    if !secret {
+        // The tool proposal must have the same original receipt and accepted
+        // output provenance as a real model call, rather than only a derived label.
+        use crate::assistant_data_store::model_gate;
+        use crate::model_egress_store::SignalModelEgressStore;
+        use desk_diagnose_core::{
+            prompt::ResponseFormatSpec,
+            seam::{ModelRequest, SessionSeam},
+        };
+        use sea_orm::TransactionTrait;
+        let mut request = ModelRequest::text_only(
+            vec![f.session.conversation[0].clone()],
+            ResponseFormatSpec::None,
+        );
+        request.context_conversation_id = Some(f.session.conversation_id.clone());
+        let sessions = crate::agent_session_store::SignalAgentSessionStore::new(f.store.db.clone())
+            .with_client_metadata(None, AgentSessionSurface::AiAssistant);
+        request.assistant_data = sessions
+            .assistant_data_request_manifest(&f.session, &request, now)
+            .await
+            .unwrap()
+            .map(Box::new);
+        let authorized = policy.authorize_request(request).unwrap();
+        let txn = f.store.db.begin().await.unwrap();
+        let prepared = model_gate::prepare_on(&txn, &authorized.request)
+            .await
+            .unwrap()
+            .unwrap();
+        SignalModelEgressStore::record_snapshot_intent_on(
+            &txn,
+            "original-proposal".into(),
+            policy.export_authorization_id.clone(),
+            1,
+            &authorized.input_snapshot().unwrap(),
+        )
+        .await
+        .unwrap();
+        SignalModelEgressStore::link_context_dispatch_on(
+            &txn,
+            "original-proposal",
+            &f.session.conversation_id,
+        )
+        .await
+        .unwrap();
+        model_gate::authorize_on(
+            &txn,
+            Some(&prepared),
+            &authorized.request,
+            "original-proposal",
+        )
+        .await
+        .unwrap();
+        txn.commit().await.unwrap();
+        SignalModelEgressStore::new(f.store.db.clone())
+            .mark_succeeded(
+                "original-proposal",
+                f.session.conversation[1].data_envelope.as_ref().unwrap(),
+            )
+            .await
+            .unwrap();
+    }
     (f, policy)
 }
 
 async fn publish_as_runtime_task(db: crate::config::connection::DatabaseConnection) {
     actix_web::rt::spawn(async move {
-        SignalCapabilityGrantStore::new(db)
-            .publish_computer_results_once()
-            .await
-            .unwrap();
+        let store = SignalCapabilityGrantStore::new(db);
+        let execution = store.publish_computer_results_once();
+        assert!(std::mem::size_of_val(&execution) <= 16 * 1024);
+        execution.await.unwrap();
     })
     .await
     .unwrap();
 }
 
-#[test]
-fn background_result_publication_fits_production_thread_stack() {
-    std::thread::Builder::new()
-        .name("background-result-stack".into())
-        .stack_size(2 * 1024 * 1024)
-        .spawn(production_publisher_uses_original_export_and_strict_model_before_network)
-        .unwrap()
-        .join()
-        .unwrap();
+#[actix_web::test]
+async fn background_result_publication_fits_production_thread_stack() {
+    for bytes in [1024 * 1024, 2 * 1024 * 1024] {
+        exercise(Some(bytes)).await;
+    }
 }
 
 #[actix_web::test]
 async fn production_publisher_uses_original_export_and_strict_model_before_network() {
+    exercise(None).await;
+}
+
+async fn exercise(stack_bytes: Option<usize>) {
     crate::ai_assistant_gate::global_ai_assistant_gate().replace(
         desk_agent_protocol::ai_assistant::AiAssistantSettings {
             revision: 1,
@@ -200,7 +268,12 @@ async fn production_publisher_uses_original_export_and_strict_model_before_netwo
             max_context_bytes: Some(131072),
             ..Default::default()
         };
-        let (f, mut policy) = fixture(&config, case == "secret").await;
+        let directory = tempfile::tempdir().unwrap();
+        let url = format!(
+            "sqlite://{}?mode=rwc",
+            directory.path().join("completion.sqlite").display()
+        );
+        let (f, mut policy) = fixture(&config, case == "secret", &url).await;
         if case == "unselected" {
             policy.selected_source_tools.clear();
         }
@@ -286,6 +359,20 @@ async fn production_publisher_uses_original_export_and_strict_model_before_netwo
             };
         }
         set_session(&f, &session).await;
+        if case == "crash" {
+            // A real owner claim has a live lease. Process loss becomes
+            // recoverable only after that original planner lease expires.
+            agent_session::Entity::update_many()
+                .set(agent_session::ActiveModel {
+                    lease_deadline: Set(Some(Utc::now() - chrono::Duration::seconds(1))),
+                    ..Default::default()
+                })
+                .filter(agent_session::Column::ConversationId.eq(&f.session.conversation_id))
+                .filter(agent_session::Column::ActorId.eq(&f.session.actor_id))
+                .exec(&f.store.db)
+                .await
+                .unwrap();
+        }
         if case == "changed-model" {
             let mut changed = config.clone();
             changed.profile_revision += 1;
@@ -304,9 +391,13 @@ async fn production_publisher_uses_original_export_and_strict_model_before_netwo
             .unwrap();
         let original = f
             .store
-            .read_computer_result(&f.plan.execution_generation, "run-1", "actor-1", "device-1")
+            .read_computer_result(&f.plan.execution_generation, "run-1", "1", "device-1")
             .await
             .unwrap()
+            .unwrap();
+        let original_receipts = crate::entity::model_egress_receipt::Entity::find()
+            .all(&f.store.db)
+            .await
             .unwrap();
         let allowed = matches!(case, "running" | "crash" | "expired-label");
         let capture = actix_web::rt::spawn(capture(listener));
@@ -315,8 +406,27 @@ async fn production_publisher_uses_original_export_and_strict_model_before_netwo
             // Leave enough headroom when the full crate runs in parallel on
             // a loaded macOS builder; semantic deadlines are asserted by the
             // production store rather than this test harness watchdog.
-            std::time::Duration::from_secs(30),
-            publish_as_runtime_task(f.store.db.clone()),
+            SCENARIO_TIMEOUT,
+            async {
+                if let Some(bytes) = stack_bytes {
+                    let db = f.store.db.clone();
+                    let (sent, done) = tokio::sync::oneshot::channel();
+                    let thread = std::thread::Builder::new()
+                        .name("background-result-stack".into())
+                        .stack_size(bytes)
+                        .spawn(move || {
+                            actix_web::rt::System::new().block_on(async move {
+                                publish_as_runtime_task(db).await;
+                                sent.send(()).unwrap();
+                            })
+                        })
+                        .unwrap();
+                    done.await.unwrap();
+                    thread.join().unwrap();
+                } else {
+                    publish_as_runtime_task(f.store.db.clone()).await;
+                }
+            },
         )
         .await
         .expect(case);
@@ -326,19 +436,39 @@ async fn production_publisher_uses_original_export_and_strict_model_before_netwo
             .unwrap()
             .unwrap();
         let after = PersistedAgentSession::decode_json(&row.state_json).unwrap();
-        let receipts = crate::entity::model_egress_receipt::Entity::find()
+        let all_receipts = crate::entity::model_egress_receipt::Entity::find()
             .all(&f.store.db)
             .await
             .unwrap();
+        assert!(
+            original_receipts
+                .iter()
+                .all(|row| all_receipts.contains(row))
+        );
+        let receipts: Vec<_> = all_receipts
+            .into_iter()
+            .filter(|row| {
+                !original_receipts
+                    .iter()
+                    .any(|original| original.receipt_id == row.receipt_id)
+            })
+            .collect();
         if allowed {
+            assert_eq!(after.turn_state, TurnState::Idle, "{case}");
+            assert!(
+                after.terminal_error.is_none(),
+                "{case}: {:?}",
+                after.terminal_error
+            );
             assert!(
                 capture.is_finished() || !receipts.is_empty(),
-                "{case}: turn={:?} pending={:?} tail={:?}",
+                "{case}: turn={:?} error={:?} pending={:?} tail={:?}",
                 after.turn_state,
+                after.terminal_error,
                 after.pending_auto_triggers,
                 after.conversation.last()
             );
-            let body = tokio::time::timeout(std::time::Duration::from_secs(10), capture)
+            let body = tokio::time::timeout(MODEL_IO_TIMEOUT, capture)
                 .await
                 .expect(case)
                 .unwrap();

@@ -17,6 +17,12 @@ pub struct Model {
     pub envelope_ids_json: String,
     pub digests_sha256_json: String,
     pub input_lineage_json: String,
+    #[sea_orm(column_type = "Text")]
+    pub input_snapshot_json: String,
+    /// Complete assistant-source use identities, committed with dispatch intent.
+    #[sea_orm(column_type = "Text", nullable)]
+    pub assistant_source_set_json: Option<String>,
+    /// Digest of the actual native model input projection.
     pub projection_digest_sha256: String,
     pub total_bytes: i64,
     /// `dispatch_intent` is intentionally durable before provider I/O. A crash
@@ -24,6 +30,7 @@ pub struct Model {
     pub state: String,
     pub model_output_envelope_id: Option<String>,
     pub model_output_digest_sha256: Option<String>,
+    pub model_output_label_sha256: Option<String>,
     pub authorized_at: DateTimeUtc,
     #[sea_orm(column_type = "Text", nullable)]
     pub provider_context_observation_json: Option<String>,

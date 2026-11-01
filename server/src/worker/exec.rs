@@ -48,6 +48,7 @@ use desk_ipc_protocol::message::ExecSpawnReport;
 /// bounded at `cap + REDACTION_MARGIN` per stream.
 const REDACTION_MARGIN: usize = 8 * 1024;
 
+#[cfg(test)]
 /// Execute a sealed plan and return a receipt, including execution failures.
 /// `ExecOutput::succeeded` distinguishes successful completion from a failed
 /// receipt with retained output. Invalid input and redaction failure return Err.

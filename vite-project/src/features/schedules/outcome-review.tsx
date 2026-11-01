@@ -16,7 +16,7 @@ export function OutcomeReview({ client, scheduleId, runId, connected, onReload }
     const epoch = useRef(0);
     useEffect(() => { ++epoch.current; inFlight.current = false; setBusy(false); setError(false); return () => { ++epoch.current; }; }, [scheduleId, runId, connected]);
     const submit = async () => {
-        if (!connected || inFlight.current || !note.trim() || new TextEncoder().encode(note).length > 2048) return;
+        if (!connected || inFlight.current || !note.trim()) return;
         const current = epoch.current;
         inFlight.current = true; setBusy(true); setError(false);
         try {
@@ -37,10 +37,10 @@ export function OutcomeReview({ client, scheduleId, runId, connected, onReload }
         <p className="text-sm">{t('schedules.review.note')}</p>
         <label className="block text-sm">{t('schedules.review.description')}
             <Textarea className="mt-1 block w-full rounded border bg-background p-2" value={note}
-                disabled={!connected || busy} maxLength={2048} onChange={event => setNote(event.target.value)} />
+                disabled={!connected || busy} onChange={event => setNote(event.target.value)} />
         </label>
         {error && <p role="alert">{t('schedules.requestFailed')}</p>}
-        <Button disabled={!connected || busy || !note.trim() || new TextEncoder().encode(note).length > 2048}
+        <Button disabled={!connected || busy || !note.trim()}
             onClick={() => void submit()}>{t('schedules.review.confirm')}</Button>
     </div>;
 }

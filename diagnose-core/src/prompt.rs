@@ -39,11 +39,6 @@ pub enum ResponseFormatSpec {
     },
 }
 
-/// Semantic version of the system prompt / output contract. Bump whenever
-/// [`SYSTEM_PROMPT`] or the requested output shape changes, so eval regressions
-/// and the audit trail can attribute a diagnosis to the prompt that produced it.
-pub const PROMPT_VERSION: &str = "diagnose-v1";
-
 /// The system prompt: output contract + injection defence + suggest-only stance.
 pub const SYSTEM_PROMPT: &str = "\
 You are a remote-device troubleshooting assistant. You are given a user question \
@@ -70,6 +65,7 @@ Respond with ONLY a JSON object, no prose or code fences, of the shape:
   \"missing_info\": [string]
 }";
 
+#[cfg(test)]
 /// JSON schema describing the diagnosis output (mirrors `SYSTEM_PROMPT` and the
 /// [`desk_agent_protocol::diagnose::Diagnosis`] serde shape). Used for the
 /// `json_schema` response-format mode so a gateway that enforces it locks the

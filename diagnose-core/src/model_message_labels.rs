@@ -92,7 +92,7 @@ pub fn read_result_envelope(
         schema_version: DATA_ENVELOPE_SCHEMA_VERSION,
         envelope_id: label.envelope_id,
         content: ContentRef::ImmutableBlob {
-            blob_id: label.observation_id,
+            blob_id: format!("native-read-snapshot-{}", label.observation_id),
             sha256: digest_sha256.clone(),
             size_bytes: payload.len() as u64,
             media_type: "application/octet-stream".into(),
@@ -206,11 +206,116 @@ pub fn conversation_history_result_envelope(
             .iter()
             .filter_map(|message| message.data_envelope.as_ref()),
     );
+    source_result_envelope(
+        &inputs,
+        call_id,
+        content,
+        crate::dynamic_run::RUN_CONTROL_PROVIDER_ID,
+        crate::conversation_history::LOAD_CONVERSATION_HISTORY_TOOL_NAME,
+        None,
+    )
+}
+
+pub fn assistant_data_result_envelope(
+    parent: Option<&DataEnvelope>,
+    sources: &[DataEnvelope],
+    call_id: &str,
+    content: &str,
+    tool_name: &str,
+    episode_id: &str,
+) -> Result<Option<DataEnvelope>, AgentError> {
+    if let [snapshot] = sources
+        && snapshot.provenance.source_provider_id == "assistant-conversation-snapshot"
+    {
+        return Ok(Some(snapshot.clone()));
+    }
+    let mut inputs = Vec::with_capacity(sources.len() + 1);
+    if let Some(parent) = parent {
+        inputs.push(parent);
+    }
+    inputs.extend(sources);
+    source_result_envelope(
+        &inputs,
+        call_id,
+        content,
+        "assistant-data-result",
+        tool_name,
+        Some(episode_id),
+    )
+}
+
+fn source_result_envelope(
+    inputs: &[&DataEnvelope],
+    call_id: &str,
+    content: &str,
+    provider: &str,
+    tool_name: &str,
+    object: Option<&str>,
+) -> Result<Option<DataEnvelope>, AgentError> {
+    let digest = format!("{:x}", Sha256::digest(content.as_bytes()));
+    source_result_identity(
+        inputs,
+        call_id,
+        &digest,
+        content.len() as u64,
+        provider,
+        tool_name,
+        object,
+    )
+}
+
+/// Reconstruct an original tool-result label from immutable projection metadata,
+/// without loading or retaining the old result body. This grants no source use.
+pub(crate) fn retained_assistant_data_result(
+    parent: &DataEnvelope,
+    source: &DataEnvelope,
+    call_id: &str,
+    tool_name: &str,
+    episode_id: &str,
+) -> Result<Option<DataEnvelope>, AgentError> {
+    source.validate().map_err(|_| invalid_label())?;
+    let ContentRef::ImmutableBlob {
+        sha256, size_bytes, ..
+    } = &source.content
+    else {
+        return Err(invalid_label());
+    };
+    if sha256 != &source.digest_sha256 {
+        return Err(invalid_label());
+    }
+    source_result_identity(
+        &[parent, source],
+        call_id,
+        sha256,
+        *size_bytes,
+        "assistant-data-result",
+        tool_name,
+        Some(episode_id),
+    )
+}
+
+fn source_result_identity(
+    inputs: &[&DataEnvelope],
+    call_id: &str,
+    digest: &str,
+    size_bytes: u64,
+    provider: &str,
+    tool_name: &str,
+    object: Option<&str>,
+) -> Result<Option<DataEnvelope>, AgentError> {
     if inputs.is_empty() {
         return Ok(None);
     }
-    for input in &inputs {
+    for input in inputs {
         input.validate().map_err(|_| invalid_label())?;
+    }
+    let mut by_id = std::collections::BTreeMap::new();
+    for input in inputs {
+        if let Some(previous) = by_id.insert(input.envelope_id.as_str(), *input)
+            && previous != *input
+        {
+            return Err(invalid_label());
+        }
     }
     let mut source_envelope_ids = inputs
         .iter()
@@ -227,11 +332,24 @@ pub fn conversation_history_result_envelope(
         .map(|input| input.sensitivity)
         .max()
         .unwrap_or(Sensitivity::Sensitive);
+    let effective_retention = |input: &DataEnvelope| {
+        if let ContentRef::EphemeralObservation {
+            expires_at_unix_ms, ..
+        } = input.content
+        {
+            input.retention.most_restrictive(RetentionBoundary {
+                expires_at_unix_ms: Some(expires_at_unix_ms),
+                delete_with_run: true,
+            })
+        } else {
+            input.retention
+        }
+    };
     let retention = inputs
         .iter()
         .skip(1)
-        .fold(inputs[0].retention, |current, input| {
-            current.most_restrictive(input.retention)
+        .fold(effective_retention(inputs[0]), |current, input| {
+            current.most_restrictive(effective_retention(input))
         });
     let mut allowed = inputs[0]
         .allowed_destinations
@@ -246,27 +364,31 @@ pub fn conversation_history_result_envelope(
             .collect::<BTreeSet<_>>();
         allowed = allowed.intersection(&destinations).cloned().collect();
     }
-    let digest = format!("{:x}", Sha256::digest(content.as_bytes()));
+    let identity = serde_json::to_vec(&(
+        provider,
+        tool_name,
+        object,
+        call_id,
+        &digest,
+        by_id.values().collect::<Vec<_>>(),
+    ))
+    .map_err(|_| invalid_label())?;
     let envelope = DataEnvelope {
         schema_version: DATA_ENVELOPE_SCHEMA_VERSION,
-        envelope_id: format!(
-            "history-result-{:x}",
-            Sha256::digest(format!("{call_id}:{digest}").as_bytes())
-        ),
+        envelope_id: format!("source-result-{:x}", Sha256::digest(identity)),
         content: ContentRef::ImmutableBlob {
             blob_id: format!("history-content-{:x}", Sha256::digest(digest.as_bytes())),
-            sha256: digest.clone(),
-            size_bytes: content.len() as u64,
+            sha256: digest.into(),
+            size_bytes,
             media_type: "application/json".into(),
         },
         provenance: DataProvenance {
-            source_provider_id: crate::dynamic_run::RUN_CONTROL_PROVIDER_ID.into(),
-            source_tool_name: crate::conversation_history::LOAD_CONVERSATION_HISTORY_TOOL_NAME
-                .into(),
-            source_object_id: None,
+            source_provider_id: provider.into(),
+            source_tool_name: tool_name.into(),
+            source_object_id: object.map(str::to_owned),
             source_envelope_ids,
         },
-        digest_sha256: digest,
+        digest_sha256: digest.into(),
         sensitivity,
         allowed_destinations: allowed.into_iter().collect(),
         retention,
@@ -278,6 +400,182 @@ pub fn conversation_history_result_envelope(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn source(id: &str) -> DataEnvelope {
+        model_bound_user_message(
+            id.into(),
+            "source text".into(),
+            DestinationIdentity::Model {
+                connection_id: "gateway".into(),
+                connection_revision: 1,
+                model_id: "model".into(),
+                profile_revision: 1,
+            },
+        )
+        .unwrap()
+        .data_envelope
+        .unwrap()
+    }
+
+    #[test]
+    fn source_result_identity_binds_purpose_episode_and_complete_parent_proofs() {
+        let a = source("a");
+        let b = source("b");
+        let result = assistant_data_result_envelope(
+            None,
+            &[a.clone(), b.clone()],
+            "call",
+            "{}",
+            "search_memories",
+            "episode-1",
+        )
+        .unwrap()
+        .unwrap();
+        let reordered = assistant_data_result_envelope(
+            None,
+            &[b.clone(), a.clone(), a.clone()],
+            "call",
+            "{}",
+            "search_memories",
+            "episode-1",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(result, reordered);
+        let other_tool = assistant_data_result_envelope(
+            None,
+            &[a.clone(), b.clone()],
+            "call",
+            "{}",
+            "search_conversations",
+            "episode-1",
+        )
+        .unwrap()
+        .unwrap();
+        let other_episode = assistant_data_result_envelope(
+            None,
+            &[a.clone(), b.clone()],
+            "call",
+            "{}",
+            "search_memories",
+            "episode-2",
+        )
+        .unwrap()
+        .unwrap();
+        assert_ne!(result.envelope_id, other_tool.envelope_id);
+        assert_ne!(result.envelope_id, other_episode.envelope_id);
+        let mut restricted = a.clone();
+        restricted.allowed_destinations.clear();
+        let changed = assistant_data_result_envelope(
+            None,
+            &[restricted.clone(), b],
+            "call",
+            "{}",
+            "search_memories",
+            "episode-1",
+        )
+        .unwrap()
+        .unwrap();
+        assert_ne!(result.envelope_id, changed.envelope_id);
+        assert!(changed.allowed_destinations.is_empty());
+        assert!(
+            assistant_data_result_envelope(
+                None,
+                &[a, restricted],
+                "call",
+                "{}",
+                "search_memories",
+                "episode-1"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn original_assistant_result_identity_survives_body_cleanup_and_binds_all_original_metadata() {
+        let parent = source("producer");
+        let read = source("projection");
+        let original = assistant_data_result_envelope(
+            Some(&parent),
+            std::slice::from_ref(&read),
+            "read-call",
+            "source text",
+            "search_memories",
+            "original-episode",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            retained_assistant_data_result(
+                &parent,
+                &read,
+                "read-call",
+                "search_memories",
+                "original-episode"
+            )
+            .unwrap(),
+            Some(original.clone())
+        );
+        for case in 0..7 {
+            let mut producer = parent.clone();
+            let mut projection = read.clone();
+            let mut call = "read-call";
+            let mut tool = "search_memories";
+            let mut episode = "original-episode";
+            match case {
+                0 => producer.allowed_destinations.clear(),
+                1 => producer.retention.expires_at_unix_ms = Some(5000),
+                2 => projection.provenance.source_object_id = Some("other-object".into()),
+                3 => call = "other-call",
+                4 => tool = "search_conversations",
+                5 => episode = "other-episode",
+                _ => {
+                    if let ContentRef::ImmutableBlob { size_bytes, .. } = &mut projection.content {
+                        *size_bytes += 1;
+                    }
+                }
+            }
+            assert_ne!(
+                retained_assistant_data_result(&producer, &projection, call, tool, episode)
+                    .unwrap(),
+                Some(original.clone()),
+                "case {case}"
+            );
+        }
+    }
+
+    #[test]
+    fn history_and_memory_results_preserve_ephemeral_content_deadlines() {
+        let mut input = source("ephemeral");
+        input.content = ContentRef::EphemeralObservation {
+            observation_id: "obs".into(),
+            size_bytes: 11,
+            expires_at_unix_ms: 100,
+        };
+        input.retention = RetentionBoundary {
+            expires_at_unix_ms: Some(500),
+            delete_with_run: false,
+        };
+        let result = assistant_data_result_envelope(
+            None,
+            std::slice::from_ref(&input),
+            "call",
+            "{}",
+            "search_memories",
+            "episode",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(result.retention.expires_at_unix_ms, Some(100));
+        assert!(result.retention.delete_with_run);
+        let mut message = ChatMessage::text("message", ChatRole::User, "source text");
+        message.data_envelope = Some(input);
+        let history = conversation_history_result_envelope(None, &[message], "call", "{}")
+            .unwrap()
+            .unwrap();
+        assert_eq!(history.retention, result.retention);
+        assert_ne!(history.envelope_id, result.envelope_id);
+    }
 
     #[test]
     fn internal_result_never_renews_ephemeral_parent_or_mints_missing_authority() {

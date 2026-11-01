@@ -1,6 +1,7 @@
 pub mod ai_assistant_session;
 pub mod ai_usage;
 pub mod approval_model_provider;
+pub mod assistant_data;
 pub mod connection;
 pub mod context_management;
 pub mod device_code;

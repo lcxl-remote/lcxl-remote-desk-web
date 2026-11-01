@@ -51,26 +51,20 @@ async fn fixture() -> (
         .destination_identity()
         .unwrap();
     let now = chrono::Utc::now();
-    let mut session = PersistedAgentSession::new("root", "1", "1", 1, scope(), now.to_rfc3339());
-    session.adopt_client_metadata(Some("client"), AgentSessionSurface::AiAssistant);
-    session.input_revision = 1;
-    session.begin_focus_epoch(1, Vec::new()).unwrap();
-    session.control_revision = 1;
-    session.latest_input_seq = 1;
-    session.current_turn_id = Some("goal-turn".into());
-    session.lease_token = 1;
-    insert_session(&db, &session).await;
-    super::shared_approval::enable(&db, "goal-delegation").await;
-    session.turn_state = TurnState::Idle;
-    session.file_scope = Default::default();
-    session.conversation.clear();
-    session.permission_requests.clear();
     let user = desk_diagnose_core::model_message_labels::model_bound_user_message(
         "goal-user".into(),
         "Please keep working until the report is finished".into(),
         destination.clone(),
     )
     .unwrap();
+    let mut session = super::input_sources::first_input(&db, user.clone(), now).await;
+    session.current_turn_id = Some("goal-turn".into());
+    session.lease_token = 1;
+    super::shared_approval::enable(&db, "goal-delegation").await;
+    session.turn_state = TurnState::Idle;
+    session.file_scope = Default::default();
+    session.conversation.clear();
+    session.permission_requests.clear();
     let mut assistant = ChatMessage::assistant_tool_calls(
         "goal-assistant",
         "",
@@ -111,6 +105,10 @@ async fn fixture() -> (
         .col_expr(
             session_row::Column::StateJson,
             Expr::value(session.encode_json_for_storage().unwrap()),
+        )
+        .col_expr(
+            session_row::Column::LeaseToken,
+            Expr::value(session.lease_token as i64),
         )
         .col_expr(
             session_row::Column::LeaseDeadline,

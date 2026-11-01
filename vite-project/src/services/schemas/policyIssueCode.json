@@ -1,0 +1,1 @@
+{"type":"string","enum":["value_out_of_range","default_exceeds_maximum","point_accounting_unavailable","duplicate_fact_types","response_too_small","relevance_page_limited","history_candidates_limited","native_summary_limited","owner_scan_limited","current_memories_limited","revision_mismatch"],"x-readme-ref-name":"PolicyIssueCode"}

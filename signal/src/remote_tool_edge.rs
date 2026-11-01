@@ -917,14 +917,9 @@ fn validate_selected_batch_destination(
 
 fn semantic_action_target_kind(action: &ComputerActionKind) -> Option<ObjectKind> {
     match action {
-        ComputerActionKind::File(action)
-            if matches!(
-                action,
-                FilePatchAction::UpdateText { .. } | FilePatchAction::DeleteText { .. }
-            ) =>
-        {
-            Some(ObjectKind::File)
-        }
+        ComputerActionKind::File(
+            FilePatchAction::UpdateText { .. } | FilePatchAction::DeleteText { .. },
+        ) => Some(ObjectKind::File),
         ComputerActionKind::UiInApplication { .. } => Some(ObjectKind::UiElement),
         ComputerActionKind::BackgroundInput { .. } => Some(ObjectKind::Window),
         ComputerActionKind::RawInput(_) => Some(ObjectKind::Application),
@@ -990,7 +985,6 @@ impl SignalAiAssistantTools {
             connections.clone(),
             crate::agent_exec::global_agent_exec_pending(),
             target_connection_id.clone(),
-            run_id.clone(),
             desk_agent_protocol::evidence::EvidenceSnapshot::record(
                 "ai-assistant-command",
                 "owner-approved exact command dispatch",
@@ -2369,12 +2363,12 @@ impl SignalAiAssistantTools {
                     exec_store.find(&server_call_id, &dispatch_id).await
                 })
                 .await?
-                .ok_or_else(|| completion::invalid())?;
+                .ok_or_else(completion::invalid)?;
                 let (durable_output, receipt) = desk_diagnose_core::future::boxed(|| async {
                     exec_store.command_result(&task).await
                 })
                 .await?
-                .ok_or_else(|| completion::invalid())?;
+                .ok_or_else(completion::invalid)?;
                 if durable_output.content != output.content
                     || durable_output.image_data_url != output.image_data_url
                 {
@@ -2608,7 +2602,7 @@ impl SignalAiAssistantTools {
                         crate::computer_use_readiness::global_computer_use_readiness_cache()
                             .get_fresh(&self.target_connection_id, chrono::Utc::now())
                             .filter(|record| record.readiness.revision == self.readiness_revision)
-                            .ok_or_else(|| desk_diagnose_core::directory_tools::unavailable())?;
+                            .ok_or_else(desk_diagnose_core::directory_tools::unavailable)?;
                     Some(
                         desk_diagnose_core::provider_preflight::IworkCallPreflight::from_session(
                             &self.provider_registry,
@@ -2885,7 +2879,7 @@ impl SignalAiAssistantTools {
                                     && entry.supported
                                     && entry.ready
                             })
-                            .ok_or_else(|| desk_diagnose_core::directory_tools::unavailable())?;
+                            .ok_or_else(desk_diagnose_core::directory_tools::unavailable)?;
                         if !desk_diagnose_core::ai_assistant::valid_ui_adapter(&ui_adapter.adapter)
                         {
                             return Err(desk_diagnose_core::directory_tools::unavailable());
@@ -3938,7 +3932,7 @@ impl SignalAiAssistantTools {
                             true,
                         )
                     })?;
-                if args.web_search_call_id.is_some() != !args.web_sources.is_empty()
+                if args.web_search_call_id.is_some() == args.web_sources.is_empty()
                     || args.web_sources.len() > 8
                 {
                     return Err(error(

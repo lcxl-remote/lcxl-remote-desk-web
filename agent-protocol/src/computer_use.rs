@@ -2211,22 +2211,6 @@ fn validate_encoded_size_with_limit<T: Serialize>(
     }
 }
 
-pub fn validate_ui_inspect_params(
-    params: &UiInspectParams,
-) -> Result<(), ComputerUseValidationError> {
-    if params.max_nodes == 0 || params.max_nodes > MAX_COMPUTER_USE_INSPECT_NODES {
-        return Err(ComputerUseValidationError::InspectLimitExceeded(
-            "max_nodes",
-        ));
-    }
-    if params.max_bytes == 0 || params.max_bytes > MAX_COMPUTER_USE_INSPECT_BYTES {
-        return Err(ComputerUseValidationError::InspectLimitExceeded(
-            "max_bytes",
-        ));
-    }
-    Ok(())
-}
-
 // ============================ Lifecycle ============================
 
 #[derive(

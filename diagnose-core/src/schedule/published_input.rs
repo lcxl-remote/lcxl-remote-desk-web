@@ -1,7 +1,12 @@
 //! Published task input keeps its occurrence identity instead of impersonating a new owner message.
 
 use super::contract::ValidatedTaskContract;
+use crate::ai_assistant::{
+    source::{history_dependencies_sha256, owner_text_policy, policy_hash, validate_policy},
+    source_registry::NativeDerivedInputPolicy,
+};
 use crate::chat::{ChatMessage, ChatRole};
+use desk_agent_protocol::ai_assistant::source::{HistoryDependency, SourceUsePolicy};
 use desk_agent_protocol::{
     AgentError,
     data_lineage::{
@@ -9,10 +14,112 @@ use desk_agent_protocol::{
         DestinationIdentity, RetentionBoundary, Sensitivity,
     },
 };
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub const PUBLISHED_INPUT_PROVIDER: &str = "assistant-published-task";
 pub const PUBLISHED_INPUT_TOOL: &str = "scheduled-occurrence-input";
+
+/// Frozen by the native task producer, never supplied by a client or model.
+/// The original prompt is already in the task; this stores metadata only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskPromptRetention {
+    pub actor_id: String,
+    pub target_device_id: String,
+    pub prompt_sha256: String,
+    pub policy: SourceUsePolicy,
+    pub dependencies: Vec<HistoryDependency>,
+    pub model_source: Option<NativeDerivedInputPolicy>,
+}
+
+impl TaskPromptRetention {
+    pub fn owner(actor: &str, device: &str, prompt: &str, revision: u64) -> Self {
+        let mut policy = owner_text_policy(revision, false);
+        // A published requirement is not a new assertion of a stable fact.
+        policy.independent_fact_allowed = false;
+        policy.policy_sha256 = policy_hash(&policy).expect("native task prompt policy");
+        Self {
+            actor_id: actor.into(),
+            target_device_id: device.into(),
+            prompt_sha256: format!("{:x}", Sha256::digest(prompt.as_bytes())),
+            policy,
+            dependencies: Vec::new(),
+            model_source: None,
+        }
+    }
+
+    pub fn validate(
+        &self,
+        actor: &str,
+        device: &str,
+        prompt_hash: &str,
+    ) -> Result<(), &'static str> {
+        if self.actor_id != actor
+            || self.target_device_id != device
+            || self.prompt_sha256 != prompt_hash
+            || actor.is_empty()
+            || device.is_empty()
+            || prompt_hash.len() != 64
+            || !prompt_hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || self.policy.independent_fact_allowed
+            || self.dependencies.len() > 128
+        {
+            return Err("invalid original task prompt retention binding");
+        }
+        validate_policy(&self.policy)?;
+        history_dependencies_sha256(&self.dependencies)?;
+        if let Some(parent) = &self.model_source {
+            parent.validate()?;
+            if parent.actor_id != actor {
+                return Err("task prompt belongs to another actor");
+            }
+        } else if !self.dependencies.is_empty()
+            || self.policy != Self::owner(actor, device, "", self.policy.policy_revision).policy
+        {
+            return Err("owner task prompt changed its original policy");
+        }
+        if crate::model_egress::sink_metadata_size(self)? > 64 * 1024 {
+            return Err("task prompt retention exceeds its metadata bound");
+        }
+        Ok(())
+    }
+}
+
+/// Shape registration is not native authority. The host must reconstruct the
+/// full label from the original owner-bound occurrence and published contract.
+pub fn is_published_input_label(source: &DataEnvelope) -> bool {
+    let Some(message_id) = source.provenance.source_object_id.as_deref() else {
+        return false;
+    };
+    let Some(run_id) = message_id.strip_suffix(":input") else {
+        return false;
+    };
+    let Some(key) = source.envelope_id.strip_prefix("published-task-input-") else {
+        return false;
+    };
+    run_id.starts_with("schedule-run-")
+        && crate::subagent::valid_id(message_id)
+        && key.len() == 64
+        && key.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && source.provenance.source_provider_id == PUBLISHED_INPUT_PROVIDER
+        && source.provenance.source_tool_name == PUBLISHED_INPUT_TOOL
+        && source.provenance.source_envelope_ids.is_empty()
+        && source.sensitivity == Sensitivity::UserContent
+        && source.retention
+            == (RetentionBoundary {
+                expires_at_unix_ms: None,
+                delete_with_run: true,
+            })
+        && source.allowed_destinations.len() == 1
+        && matches!(
+            source.allowed_destinations[0],
+            DestinationIdentity::Model { .. }
+        )
+        && matches!(&source.content, ContentRef::ImmutableBlob { blob_id, sha256, size_bytes, media_type }
+            if blob_id == &format!("published-task-content-{key}") && sha256 == &source.digest_sha256
+                && *size_bytes > 0 && media_type == "text/plain;charset=utf-8")
+}
 
 /// The caller verifies current publication and occurrence authority. This label
 /// records provenance and the selected model; it grants no tool permission.
@@ -87,4 +194,115 @@ pub fn validate_published_input(
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn owner_requirement_is_retained_without_becoming_a_stable_fact() {
+        let original = TaskPromptRetention::owner("1", "device", "review a report", 2);
+        original
+            .validate("1", "device", &original.prompt_sha256)
+            .unwrap();
+        assert!(original.policy.history_retention_allowed);
+        assert!(!original.policy.independent_fact_allowed);
+        for changed in ["2", "device"] {
+            assert!(
+                original
+                    .validate(changed, "device", &original.prompt_sha256)
+                    .is_err()
+            );
+        }
+        assert!(
+            original
+                .validate("1", "another-device", &original.prompt_sha256)
+                .is_err()
+        );
+        assert!(original.validate("1", "device", &"a".repeat(64)).is_err());
+        let mut forged = original.clone();
+        forged.policy.independent_fact_allowed = true;
+        forged.policy.policy_sha256 = policy_hash(&forged.policy).unwrap();
+        assert!(
+            forged
+                .validate("1", "device", &original.prompt_sha256)
+                .is_err()
+        );
+        let mut forged = original.clone();
+        forged.policy.content_hard_expires_at_unix_ms = Some(10);
+        forged.policy.policy_sha256 = policy_hash(&forged.policy).unwrap();
+        assert!(
+            forged
+                .validate("1", "device", &original.prompt_sha256)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn task_input_shape_does_not_authorize_arbitrary_provider_or_owner_labels() {
+        let key = "a".repeat(64);
+        let hash = "b".repeat(64);
+        let source = DataEnvelope {
+            schema_version: DATA_ENVELOPE_SCHEMA_VERSION,
+            envelope_id: format!("published-task-input-{key}"),
+            digest_sha256: hash.clone(),
+            content: ContentRef::ImmutableBlob {
+                blob_id: format!("published-task-content-{key}"),
+                sha256: hash,
+                size_bytes: 4,
+                media_type: "text/plain;charset=utf-8".into(),
+            },
+            provenance: DataProvenance {
+                source_provider_id: PUBLISHED_INPUT_PROVIDER.into(),
+                source_tool_name: PUBLISHED_INPUT_TOOL.into(),
+                source_object_id: Some("schedule-run-shape:input".into()),
+                source_envelope_ids: Vec::new(),
+            },
+            sensitivity: Sensitivity::UserContent,
+            allowed_destinations: vec![DestinationIdentity::Model {
+                connection_id: "p".into(),
+                connection_revision: 1,
+                model_id: "m".into(),
+                profile_revision: 1,
+            }],
+            retention: RetentionBoundary {
+                expires_at_unix_ms: None,
+                delete_with_run: true,
+            },
+        };
+        assert!(is_published_input_label(&source));
+        let mut forged = source.clone();
+        forged.provenance.source_provider_id = "ai-assistant-user".into();
+        assert!(!is_published_input_label(&forged));
+        let mut forged = source.clone();
+        forged.provenance.source_object_id = Some("ordinary-chat:input".into());
+        assert!(!is_published_input_label(&forged));
+        let mut forged = source.clone();
+        forged.retention.delete_with_run = false;
+        assert!(!is_published_input_label(&forged));
+        let mut forged = source.clone();
+        forged
+            .allowed_destinations
+            .push(source.allowed_destinations[0].clone());
+        assert!(!is_published_input_label(&forged));
+        let mut forged = source.clone();
+        forged
+            .provenance
+            .source_envelope_ids
+            .push("hidden-parent".into());
+        assert!(!is_published_input_label(&forged));
+        let registered = crate::ai_assistant::source_registry::registered_leaf(
+            &source,
+            2,
+            crate::ai_assistant::source_registry::SOURCE_CONTRACT_REVISION,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            registered.contract,
+            crate::ai_assistant::source_registry::RegisteredSourceContract::PublishedTaskInput
+        );
+        assert!(!registered.policy.history_retention_allowed);
+        assert!(!registered.policy.independent_fact_allowed);
+    }
 }

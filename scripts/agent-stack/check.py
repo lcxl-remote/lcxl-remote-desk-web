@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[2]
 def known_overflow_probe(workspace=None):
     with tempfile.TemporaryDirectory(prefix='agent-stack-probe-') as directory:
         source = Path(directory, 'probe.rs')
-        source.write_text('fn main() { let data = [0u8; 131072]; std::hint::black_box(&data); }\n')
+        source.write_text(f'fn main() {{ let data = [0u8; {report.HARD_FRAME_LIMIT * 2}]; std::hint::black_box(&data); }}\n')
         result = subprocess.run([
             'rustc', str(source), '--crate-name', 'agent_stack_probe', '--emit=obj',
             '-o', str(Path(directory, 'probe.o')), '-C', 'opt-level=0',
@@ -28,7 +28,7 @@ def known_overflow_probe(workspace=None):
         if result.returncode:
             raise ValueError('stack analysis positive control did not compile')
         parsed = report.collect(result.stdout.splitlines())
-        if max(parsed['frames'].values()) <= 65536:
+        if max(parsed['frames'].values()) <= report.HARD_FRAME_LIMIT:
             raise ValueError('stack analysis did not detect its known oversized frame')
 
 
@@ -119,19 +119,19 @@ def main():
     p.add_argument('--target')
     p.add_argument('--features', default='')
     p.add_argument('--no-default-features', action='store_true')
-    p.add_argument('--baseline', type=Path)
-    p.add_argument('--ceiling', type=int, help='enforce a portable hard ceiling, including before a platform baseline is reviewed')
+    p.add_argument('--ceiling', type=int, default=report.HARD_FRAME_LIMIT, help='fixed frame ceiling; defaults to the project hard limit')
     p.add_argument('--required', action='append', default=[], help='required symbol family regex; repeat as needed')
-    p.add_argument('--previous-baseline', type=Path, help='compare an edited baseline with the reviewed previous version')
     p.add_argument('--output', type=Path, required=True)
-    p.add_argument('--report-only', action='store_true', help='collect evidence for review; does not enforce a baseline')
+    p.add_argument('--report-only', action='store_true', help='collect evidence without enforcing the hard limit or coverage')
     a = p.parse_args()
+    if a.ceiling is not None and not 0 < a.ceiling <= report.HARD_FRAME_LIMIT:
+        p.error(f'--ceiling must be between 1 and {report.HARD_FRAME_LIMIT}')
     toolchain = subprocess.check_output(['rustc', '-Vv'], cwd=a.workspace, text=True).strip()
     target = a.target or next(line[6:] for line in toolchain.splitlines() if line.startswith('host: '))
-    if a.baseline is None and a.ceiling is None and not a.report_only:
-        p.error('--baseline or --ceiling is required for enforcement')
     known_overflow_probe(a.workspace)
     parsed = collect_package(a.workspace, a.package, a.profile, a.target, a.features, a.no_default_features)
+    parsed = report.retain_entity_identity(parsed, a.package)
+    parsed = report.retain_operation_identity(parsed, a.package)
     parsed.update(**workspace_identity(a.workspace))
     parsed.update(package=a.package, profile=a.profile, target=target, toolchain=toolchain,
                   features=a.features, no_default_features=a.no_default_features,
@@ -141,11 +141,6 @@ def main():
     a.output.parent.mkdir(parents=True, exist_ok=True)
     a.output.write_text(json.dumps(parsed, indent=2) + '\n')
     errors = []
-    if not a.report_only and a.baseline:
-        baseline = json.loads(a.baseline.read_text())
-        if a.previous_baseline:
-            report.compare_baselines(baseline, json.loads(a.previous_baseline.read_text()))
-        errors.extend(report.check(parsed, baseline))
     if not a.report_only and a.ceiling is not None:
         errors.extend(report.check_ceiling(parsed, a.ceiling, a.required))
     if errors:

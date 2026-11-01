@@ -9,6 +9,8 @@ pub struct Model {
     #[sea_orm(indexed)]
     pub device_id: String,
     pub created_at_unix_ms: i64,
+    /// Only an explicit owner deletion revokes retained assistant history.
+    pub history_deleted_at_unix_ms: Option<i64>,
     #[sea_orm(indexed)]
     pub next_attempt_at_unix_ms: i64,
     pub attempts: i64,

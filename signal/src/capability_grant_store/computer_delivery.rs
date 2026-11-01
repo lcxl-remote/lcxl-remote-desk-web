@@ -152,14 +152,15 @@ impl SignalCapabilityGrantStore {
     ) -> Result<EventAppend, DbErr> {
         let txn = crate::db::begin_write(&self.db, crate::entity::agent_session::Entity).await?;
         let result = async {
-            let (outbox, work, payload) = original_on(&txn, generation).await?;
-            let binding = bound(&outbox, &work, &payload)?;
+            let computer_original = original_on(&txn, generation).await?;
+            let (outbox, work, payload) = computer_original.as_ref();
+            let binding = bound(outbox, work, payload)?;
             let now = Utc::now();
             let now_ms = u64::try_from(now.timestamp_millis()).map_err(|_| invalid())?;
-            if now_ms < deadlines(&outbox, &binding)?.0 {
+            if now_ms < deadlines(outbox, &binding)?.0 {
                 return Ok(EventAppend::Busy);
             }
-            let original = terminal_result(&outbox, work, &payload)?.ok_or_else(invalid)?;
+            let original = terminal_result(outbox, work.clone(), payload)?.ok_or_else(invalid)?;
             let Some(row) = agent_session::Entity::find()
                 .filter(agent_session::Column::ConversationId.eq(&original.work.conversation_id))
                 .one(&txn)
@@ -317,8 +318,9 @@ impl SignalCapabilityGrantStore {
                     session.recover_session(RecoveryVerdict::InterruptedUnknown, now);
                     return Ok(true);
                 }
-                let (outbox, work, payload) = original_on(&txn, &outbox.dispatch_id).await?;
-                let binding = bound(&outbox, &work, &payload)?;
+                let computer_original = original_on(&txn, &outbox.dispatch_id).await?;
+                let (outbox, work, payload) = computer_original.as_ref();
+                let binding = bound(outbox, work, payload)?;
                 let action = desk_diagnose_core::session::ActionIdentity::new(
                     work.id,
                     &payload.call_id,
@@ -515,11 +517,12 @@ impl SignalCapabilityGrantStore {
                 let txn = self.db.begin().await?;
                 let original = original_on(&txn, &outbox.dispatch_id).await;
                 txn.rollback().await?;
-                let (outbox, work, payload) = original?;
-                let binding = bound(&outbox, &work, &payload)?;
+                let computer_original = original?;
+                let (outbox, work, payload) = computer_original.as_ref();
+                let binding = bound(outbox, work, payload)?;
                 let now = u64::try_from(Utc::now().timestamp_millis()).map_err(|_| invalid())?;
                 if work.status == CAPABILITY_WORK_DISPATCHING
-                    && now >= deadlines(&outbox, &binding)?.1
+                    && now >= deadlines(outbox, &binding)?.1
                 {
                     self.mark_dispatch_outcome_unknown(
                         &outbox.dispatch_id,
@@ -542,11 +545,12 @@ impl SignalCapabilityGrantStore {
     async fn project_computer_unknown(&self, generation: &str) -> Result<(), DbErr> {
         let txn = crate::db::begin_write(&self.db, crate::entity::agent_session::Entity).await?;
         let result = async {
-            let (outbox, work, payload) = original_on(&txn, generation).await?;
+            let computer_original = original_on(&txn, generation).await?;
+            let (outbox, work, payload) = computer_original.as_ref();
             if work.status != CAPABILITY_WORK_OUTCOME_UNKNOWN {
                 return Ok(());
             }
-            let binding = bound(&outbox, &work, &payload)?;
+            let binding = bound(outbox, work, payload)?;
             let Some(row) = agent_session::Entity::find()
                 .filter(agent_session::Column::ConversationId.eq(&work.conversation_id))
                 .one(&txn).await? else { return Ok(()); };

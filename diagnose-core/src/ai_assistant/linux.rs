@@ -34,7 +34,7 @@ pub(super) fn supports_adapter(id: &str) -> bool {
 pub(super) fn output_tool() -> RegisteredTool {
     let mut tool = send_raw_input_tool();
     tool.spec.name = OUTPUT_TOOL.into();
-    tool.required_capability = Capability::DesktopOutputInputConfirmed;
+    tool.required_device_capability = Some(Capability::DesktopOutputInputConfirmed);
     tool.spec.description = "Execute one bounded input step on an entire authorized GNOME Wayland output. This is whole-screen authority, not application authority: it can affect any application shown on that output. Requires a device-issued output reference, its exact original frame and geometry, and a separate one-shot exact grant. latest_observed is allowed as best-effort evidence, never relabeled fresh. The original local receipt must be at most 30 seconds old at each submission; if expired, observe again and obtain a new exact grant. The device rechecks stream/session identity, geometry, continuity and the locally authorized best-effort input control period. The screen may change despite these checks. A Portal reply does not prove the intended UI effect; never replay an unknown outcome.".into();
     let schema = &mut tool.spec.parameters_schema;
     schema["properties"]["target"]["properties"]["object_kind"]["const"] = json!("desktop_output");

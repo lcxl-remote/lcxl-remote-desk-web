@@ -119,6 +119,11 @@ pub async fn pending_permission_reviews(
         );
         for conversation_id in conversations {
             let session_row = agent_session::Entity::find()
+                .filter(
+                    agent_session::Column::ConversationSchemaVersion.eq(i32::from(
+                        desk_diagnose_core::session::CONVERSATION_SCHEMA_VERSION,
+                    )),
+                )
                 .filter(agent_session::Column::ConversationId.eq(&conversation_id))
                 .filter(agent_session::Column::ActorId.eq(&owner_id))
                 .filter(agent_session::Column::DeviceId.eq(&row.device_id))
@@ -127,8 +132,14 @@ pub async fn pending_permission_reviews(
             let Some(session_row) = session_row else {
                 continue;
             };
-            let session = PersistedAgentSession::decode_json(&session_row.state_json)
-                .map_err(|_| invalid())?;
+            let Ok(session) = PersistedAgentSession::decode_json(&session_row.state_json) else {
+                // Invalid current-format data must not block unrelated conversations.
+                log::debug!(
+                    "Skipping invalid current-format assistant snapshot in batch scan: {}",
+                    session_row.id
+                );
+                continue;
+            };
             if session.surface != AgentSessionSurface::AiAssistant
                 || !session.allows_delegated_review()
                 || session.approval_delegation_conversation_id() != row.conversation_id
@@ -826,6 +837,9 @@ pub async fn settle_permission_review(
     let usage_in_bounds = actual_tokens.is_none_or(|used| used <= row.reserved_tokens as u64);
     let valid_decision = physical.dispatched
         && decision.is_some_and(|review| review.validate_for(candidate).is_ok());
+    if valid_decision {
+        crate::approval_attempt::record_response_on(&txn, &row, true, None).await?;
+    }
     let status = if expired {
         APPROVAL_REVIEW_STATUS_EXPIRED
     } else if !authorized || !usage_in_bounds || !valid_decision {

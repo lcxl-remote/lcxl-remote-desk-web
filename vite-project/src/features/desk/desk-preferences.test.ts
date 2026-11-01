@@ -5,7 +5,6 @@ import {
     devicePreferenceStorageKey,
     parseDeskDevicePreferences,
     parseDeskUserPreferences,
-    preferenceDeviceKey,
     userPreferenceStorageKey,
 } from "./desk-preferences"
 
@@ -72,21 +71,6 @@ describe("desk preference schema", () => {
 })
 
 describe("desk preference keys", () => {
-    it("uses manager device id or standalone client id, never connection id", () => {
-        expect(preferenceDeviceKey({
-            connection_id: "volatile-1",
-            device_id: "manager-device",
-            version_info: { client_id: "standalone-client" } as never,
-        })).toBe("device:manager-device")
-        expect(preferenceDeviceKey({
-            connection_id: "volatile-2",
-            version_info: { client_id: "standalone-client" } as never,
-        })).toBe("client:standalone-client")
-        expect(preferenceDeviceKey({
-            connection_id: "volatile-only",
-            version_info: {} as never,
-        })).toBeNull()
-    })
 
     it("does not build persistent keys for grants or missing identities", () => {
         expect(devicePreferenceStorageKey(persistentScope)).toBe(

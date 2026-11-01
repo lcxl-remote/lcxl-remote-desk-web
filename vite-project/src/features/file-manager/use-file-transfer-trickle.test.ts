@@ -9,7 +9,7 @@ import {
     sentSignalingOfType,
     StubPeerConnection,
     type SignalingGlobals,
-} from './file-transfer-test-harness';
+} from './__tests__/harness';
 
 // The file manager negotiates with trickle ICE, like every other client of this
 // host. It used to hold the offer until gathering completed, which made any slow
@@ -17,7 +17,7 @@ import {
 // configured server's allocation attempt has timed out, and the page gave up
 // first. What this asserts is the ordering — offer out while gathering is still
 // running, candidates following one frame at a time. One comprehensive
-// `renderHook` test per file: see the note in `file-transfer-test-harness.ts`.
+// `renderHook` test per file: see the note in `__tests__/harness.ts`.
 
 const OFFER = 102;
 const ICE_CANDIDATE = 104;

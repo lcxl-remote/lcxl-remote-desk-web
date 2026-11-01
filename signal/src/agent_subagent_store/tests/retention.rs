@@ -262,3 +262,203 @@ async fn terminal_assistant_retention_does_not_require_an_ai_assistant_execution
     assert_eq!(group_row::Entity::find().count(&db).await.unwrap(), 0);
     assert_eq!(run_row::Entity::find().count(&db).await.unwrap(), 0);
 }
+
+#[test]
+fn unreadable_removal_closes_children_with_small_stacks() {
+    for bytes in [1024 * 1024, 2 * 1024 * 1024] {
+        std::thread::Builder::new()
+            .stack_size(bytes)
+            .spawn(|| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                runtime.block_on(unreadable_removal());
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+}
+
+async fn unreadable_removal() {
+    let db = database().await;
+    seed_parent(&db).await;
+    let original = seed_task(&db, "unsupported", "goal-unsupported").await;
+    for conversation in ["root", original.child_conversation_id.as_str()] {
+        let row = session_row::Entity::find()
+            .filter(session_row::Column::ConversationId.eq(conversation))
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut value: serde_json::Value = serde_json::from_str(&row.state_json).unwrap();
+        value["conversation_schema_version"] =
+            serde_json::json!(desk_diagnose_core::session::CONVERSATION_SCHEMA_VERSION - 1);
+        value["assistant_data"] = serde_json::json!({"closed_control_message_ids": []});
+        let raw = value.to_string();
+        assert!(PersistedAgentSession::decode_json(&raw).is_err());
+        session_row::Entity::update_many()
+            .col_expr(
+                session_row::Column::ConversationSchemaVersion,
+                sea_orm::sea_query::Expr::value(
+                    i32::from(desk_diagnose_core::session::CONVERSATION_SCHEMA_VERSION) - 1,
+                ),
+            )
+            .col_expr(
+                session_row::Column::StateJson,
+                sea_orm::sea_query::Expr::value(raw),
+            )
+            .filter(session_row::Column::Id.eq(row.id))
+            .exec(&db)
+            .await
+            .unwrap();
+    }
+    let before = session_row::Entity::find()
+        .filter(session_row::Column::ConversationId.eq(&original.child_conversation_id))
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    let txn = db.begin().await.unwrap();
+    close_root_for_subject_on(&txn, "root", "1", "1", 100)
+        .await
+        .unwrap();
+    assert_eq!(
+        decode_run(
+            &run_row::Entity::find()
+                .filter(run_row::Column::TaskId.eq(&original.binding.task_id))
+                .one(&txn)
+                .await
+                .unwrap()
+                .unwrap()
+        )
+        .unwrap()
+        .state,
+        SubAgentState::Cancelled
+    );
+    txn.rollback().await.unwrap();
+    assert!(!deleted_on(&db, "root").await.unwrap());
+    assert_eq!(load(&db, &original.binding.task_id).await, original);
+    let txn = db.begin().await.unwrap();
+    let pending = close_root_for_subject_on(&txn, "root", "1", "1", 200);
+    assert!(std::mem::size_of_val(&pending) <= 16 * 1024);
+    pending.await.unwrap();
+    txn.commit().await.unwrap();
+    let after = session_row::Entity::find_by_id(before.id)
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.state_json, before.state_json);
+    assert!(after.version > before.version && after.lease_token > before.lease_token);
+    assert!(after.lease_deadline.is_none());
+    assert!(
+        deleted_on(&db, &original.child_conversation_id)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        load(&db, &original.binding.task_id).await.state,
+        SubAgentState::Cancelled
+    );
+}
+
+#[test]
+fn unreadable_expiry_reclaims_idle_root_and_keeps_live_lease() {
+    for bytes in [1024 * 1024, 2 * 1024 * 1024] {
+        std::thread::Builder::new()
+            .stack_size(bytes)
+            .spawn(|| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                runtime.block_on(unreadable_expiry());
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+}
+
+async fn unreadable_expiry() {
+    use sea_orm::IntoActiveModel;
+    let db = database().await;
+    seed_parent(&db).await;
+    let original = session_row::Entity::find()
+        .filter(session_row::Column::ConversationId.eq("root"))
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut value: serde_json::Value = serde_json::from_str(&original.state_json).unwrap();
+    value["conversation_schema_version"] =
+        serde_json::json!(desk_diagnose_core::session::CONVERSATION_SCHEMA_VERSION - 1);
+    value["assistant_data"] = serde_json::json!({"model_history_exclusions": []});
+    value["turn_state"] = serde_json::json!("running");
+    let raw = value.to_string();
+    session_row::Entity::update_many()
+        .col_expr(
+            session_row::Column::ConversationSchemaVersion,
+            sea_orm::sea_query::Expr::value(
+                i32::from(desk_diagnose_core::session::CONVERSATION_SCHEMA_VERSION) - 1,
+            ),
+        )
+        .col_expr(
+            session_row::Column::StateJson,
+            sea_orm::sea_query::Expr::value(raw.clone()),
+        )
+        .filter(session_row::Column::Id.eq(original.id))
+        .exec(&db)
+        .await
+        .unwrap();
+    let mut live = original.clone().into_active_model();
+    live.id = sea_orm::ActiveValue::NotSet;
+    live.conversation_id = Set("live-old".into());
+    value["conversation_id"] = serde_json::json!("live-old");
+    live.state_json = Set(value.to_string());
+    live.conversation_schema_version = Set(Some(
+        i32::from(desk_diagnose_core::session::CONVERSATION_SCHEMA_VERSION) - 1,
+    ));
+    let live_until = chrono::Utc::now() + chrono::Duration::hours(1);
+    live.lease_deadline = Set(Some(live_until));
+    let live = live.insert(&db).await.unwrap();
+    let cutoff = chrono::Utc::now() - chrono::Duration::days(30);
+    let pending = crate::agent_session_store::retire_unsupported_sessions(&db, cutoff, 2, 100);
+    assert!(
+        std::mem::size_of_val(&pending) <= 16 * 1024,
+        "retirement future: {}",
+        std::mem::size_of_val(&pending)
+    );
+    pending.await.unwrap();
+    assert!(deleted_on(&db, "root").await.unwrap());
+    assert!(!deleted_on(&db, "live-old").await.unwrap());
+    let unchanged = session_row::Entity::find_by_id(live.id)
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(unchanged.state_json, live.state_json);
+    assert_eq!(unchanged.version, live.version);
+    assert_eq!(unchanged.lease_deadline, live.lease_deadline);
+    let (_, deleted) =
+        crate::usage_retention::cleanup_agent_sessions(&db, cutoff, chrono::Utc::now())
+            .await
+            .unwrap();
+    assert_eq!(deleted, 1);
+    assert!(
+        session_row::Entity::find_by_id(original.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        session_row::Entity::find_by_id(live.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .is_some()
+    );
+}

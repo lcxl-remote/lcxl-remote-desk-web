@@ -434,6 +434,7 @@ impl SharedCaptureRegistry {
             .map(|inner| SharedCaptureHandle { inner })
     }
 
+    #[cfg(test)]
     /// Diagnostic / test introspection: count of live capture loops.
     pub fn live_count(&self) -> usize {
         let g = self.map.lock().expect("shared capture registry poisoned");

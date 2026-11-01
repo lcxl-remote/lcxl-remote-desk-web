@@ -236,7 +236,7 @@ async fn new_input_supersedes_pending_but_preserves_original_receipt() {
     let (claimant, params) = prepare(&store).await;
     let pending = candidate(&store).await;
     SignalAgentRunEventStore::new(store.db.clone())
-        .append_user_followup(followup("new-input", "new-user", "replace the task"))
+        .append_user_followup(&followup("new-input", "new-user", "replace the task"))
         .await
         .unwrap();
     let saved = state(&store).await;
@@ -267,7 +267,7 @@ async fn old_candidate_cannot_recover_a_new_input_turn_even_if_its_lease_lapsed(
     decide(&store, &decisions, true).await.unwrap();
     let pending = candidate(&store).await;
     SignalAgentRunEventStore::new(store.db.clone())
-        .append_user_followup(followup("new-input", "new-user", "new task"))
+        .append_user_followup(&followup("new-input", "new-user", "new task"))
         .await
         .unwrap();
     store.claim_turn(claim("new-turn")).await.unwrap();

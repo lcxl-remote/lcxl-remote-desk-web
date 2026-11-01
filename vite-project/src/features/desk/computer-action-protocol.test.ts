@@ -14,7 +14,6 @@ import {
     SIGNALING_TYPE_CODE_QUERY_COMPUTER_ACTION_TURN,
     SIGNALING_TYPE_CODE_COMPUTER_ACTION_TURN_STATUS,
 } from './constants';
-import { matchesComputerActionResponse } from './computer-action-protocol';
 
 describe('Computer Action signaling protocol', () => {
     it('does not consume host turn messages as controller action replies', () => {
@@ -23,17 +22,7 @@ describe('Computer Action signaling protocol', () => {
         const previewTypes = [SIGNALING_TYPE_CODE_REQUEST_DOCUMENT_PREVIEW_PAGE, SIGNALING_TYPE_CODE_DOCUMENT_PREVIEW_PAGE_UPDATED];
         expect(previewTypes).toEqual([649, 650]);
         expect(new Set([...types, ...previewTypes]).size).toBe(4);
-        for (const signaling_type of types) {
-            for (const request of [
-                SIGNALING_TYPE_CODE_DISPATCH_COMPUTER_ACTION,
-                SIGNALING_TYPE_CODE_CANCEL_COMPUTER_ACTION,
-                SIGNALING_TYPE_CODE_QUERY_COMPUTER_ACTION_STATE,
-            ]) {
-                expect(matchesComputerActionResponse('current', request, {
-                    request_id: 'current', signaling_type,
-                })).toBe(false);
-            }
-        }
+
     });
 
     it('keeps the shared discriminants stable', () => {
@@ -49,18 +38,4 @@ describe('Computer Action signaling protocol', () => {
         ]).toEqual([626, 627, 628, 629, 630, 631, 632]);
     });
 
-    it('rejects stale request ids and responses for another command role', () => {
-        expect(matchesComputerActionResponse('current', SIGNALING_TYPE_CODE_DISPATCH_COMPUTER_ACTION, {
-            request_id: 'stale',
-            signaling_type: SIGNALING_TYPE_CODE_COMPUTER_ACTION_STARTED,
-        })).toBe(false);
-        expect(matchesComputerActionResponse('current', SIGNALING_TYPE_CODE_CANCEL_COMPUTER_ACTION, {
-            request_id: 'current',
-            signaling_type: SIGNALING_TYPE_CODE_COMPUTER_ACTION_COMPLETED,
-        })).toBe(false);
-        expect(matchesComputerActionResponse('current', SIGNALING_TYPE_CODE_QUERY_COMPUTER_ACTION_STATE, {
-            request_id: 'current',
-            signaling_type: SIGNALING_TYPE_CODE_COMPUTER_ACTION_STATE_REPORTED,
-        })).toBe(true);
-    });
 });

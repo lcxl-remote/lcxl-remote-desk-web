@@ -990,16 +990,19 @@ mod tests {
                 serde_json::json!("opaque reasoning"),
             ),
         });
-        let groups = group_messages(&[message.clone()], &source("same")).unwrap();
+        let groups = group_messages(std::slice::from_ref(&message), &source("same")).unwrap();
         assert!(groups[0].replay_safe);
         assert!(
             groups[0].cost
                 > model_context_cost(&ChatMessage::text("answer", ChatRole::Assistant, "done"))
         );
-        assert!(!group_messages(&[message.clone()], &source("other")).unwrap()[0].replay_safe);
+        assert!(
+            !group_messages(std::slice::from_ref(&message), &source("other")).unwrap()[0]
+                .replay_safe
+        );
         message.role = ChatRole::User;
         assert!(matches!(
-            group_messages(&[message.clone()], &source("same")),
+            group_messages(std::slice::from_ref(&message), &source("same")),
             Err(ModelContextError::UnexpectedReplayDisposition(_))
         ));
         message.role = ChatRole::Assistant;

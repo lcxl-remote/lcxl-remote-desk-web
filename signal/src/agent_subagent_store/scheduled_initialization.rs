@@ -13,7 +13,7 @@ impl SubAgentStore {
         node: &str,
         run_epoch: i64,
         destination: &DestinationIdentity,
-    ) -> Result<(PersistedAgentSession, CreationEnvelope), DbErr> {
+    ) -> Result<(Box<PersistedAgentSession>, CreationEnvelope), DbErr> {
         let txn = desk_diagnose_core::future::boxed(|| async {
             crate::db::begin_write(&self.db, session_row::Entity).await
         })
@@ -25,8 +25,8 @@ impl SubAgentStore {
         .map_err(|_| invalid())?
         .ok_or_else(invalid)?;
         let mut current =
-            PersistedAgentSession::decode_json(&row.state_json).map_err(|_| invalid())?;
-        if current != *held || !current.agent_role.is_main() {
+            Box::new(PersistedAgentSession::decode_json(&row.state_json).map_err(|_| invalid())?);
+        if *current != *held || !current.agent_role.is_main() {
             return Err(invalid());
         }
         let authority = desk_diagnose_core::future::boxed(|| async {

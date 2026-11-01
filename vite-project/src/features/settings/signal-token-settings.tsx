@@ -27,7 +27,7 @@ export function SignalTokenSettings() {
             toast({
                 title: t('pages.signalToken.copySuccess'),
             })
-        } catch (error) {
+        } catch {
             toast({
                 variant: "destructive",
                 title: t('pages.signalToken.copyFailed'),

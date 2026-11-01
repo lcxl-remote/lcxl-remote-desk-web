@@ -2,8 +2,6 @@ use desk_utils::error::DeskErrorCode;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-pub const FILE_TRANSFER_CHUNK_SIZE: usize = 32 * 1024;
-
 /// File transfer message types (JSON text messages over DataChannel)
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]

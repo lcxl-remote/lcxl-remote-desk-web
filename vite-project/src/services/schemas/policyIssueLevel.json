@@ -1,0 +1,1 @@
+{"type":"string","enum":["error","warning"],"x-readme-ref-name":"PolicyIssueLevel"}

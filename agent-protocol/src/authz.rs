@@ -236,6 +236,8 @@ mod tests {
         // The inner payload is preserved verbatim through a serde round-trip.
         let wrapper = AuthorizedControlPayload {
             inner: crate::ai_assistant::AiAssistantAsk {
+                client_timezone: "UTC".into(),
+                temporary_conversation: None,
                 question: "why slow?".to_string(),
                 client_message_id: "message-1".to_string(),
                 ..Default::default()

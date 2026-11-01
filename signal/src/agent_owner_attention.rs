@@ -55,12 +55,23 @@ pub async fn list_goal_attention(
 
     let sessions = agent_session::Entity::find()
         .filter(agent_session::Column::ActorId.eq(actor_id))
+        .filter(
+            agent_session::Column::ConversationSchemaVersion.eq(i32::from(
+                desk_diagnose_core::session::CONVERSATION_SCHEMA_VERSION,
+            )),
+        )
         .all(db)
         .await?;
     let mut client_conversations = HashMap::new();
     for row in sessions {
-        let session = PersistedAgentSession::decode_json(&row.state_json)
-            .map_err(|error| DbErr::Custom(error.to_string()))?;
+        let Ok(session) = PersistedAgentSession::decode_json(&row.state_json) else {
+            // Invalid current-format data must not block unrelated conversations.
+            log::debug!(
+                "Skipping invalid current-format assistant snapshot in batch scan: {}",
+                row.id
+            );
+            continue;
+        };
         client_conversations.insert(
             row.conversation_id.clone(),
             session.client_conversation_id.clone(),

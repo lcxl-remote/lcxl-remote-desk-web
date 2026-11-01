@@ -88,7 +88,7 @@ async fn exercise_with_restart(
     let listener = std::sync::Arc::new(TcpListener::bind("127.0.0.1:0").await.unwrap());
     let address = listener.local_addr().unwrap();
     let gateway = actix_web::rt::spawn(async move {
-        let first = capture_one_openai_request_with_sse(listener.clone(), ANSWER).await;
+        let (first, _) = capture_openai_answer_with_title(listener.as_ref(), ANSWER).await;
         if newer_input {
             let chat = capture_one_openai_request_with_sse(listener.clone(), ANSWER).await;
             assert!(String::from_utf8_lossy(&chat).contains("SYNTHETIC_REPLACEMENT_REQUIREMENT"));
@@ -138,7 +138,7 @@ async fn exercise_with_restart(
     let client_id = "scheduled-original";
     let conversation = derive_conversation_key("1", "device", Some(client_id), "first");
     tokio::time::timeout(
-        std::time::Duration::from_secs(15),
+        MODEL_IO_TIMEOUT,
         actix_web::rt::spawn(run_turn_inner(
             connections.clone(),
             db.clone(),
@@ -148,6 +148,8 @@ async fn exercise_with_restart(
             1,
             "device".into(),
             AiAssistantAsk {
+                client_timezone: "UTC".into(),
+                temporary_conversation: None,
                 question: "SYNTHETIC_SCHEDULED_ORIGINAL".into(),
                 client_message_id: "original-message".into(),
                 conversation_id: Some(client_id.into()),
@@ -252,6 +254,8 @@ async fn exercise_with_restart(
             1,
             "device".into(),
             AiAssistantAsk {
+                client_timezone: "UTC".into(),
+                temporary_conversation: None,
                 question: "SYNTHETIC_REPLACEMENT_REQUIREMENT".into(),
                 client_message_id: "replacement-message".into(),
                 conversation_id: Some(client_id.into()),
@@ -353,7 +357,7 @@ async fn exercise_with_restart(
                 now,
             )
             .unwrap();
-        let (a, b) = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        let (a, b) = tokio::time::timeout(SCENARIO_TIMEOUT, async {
             let scan_a = executor.clone();
             let scan_b = executor.clone();
             let (a, b) = tokio::join!(
@@ -389,7 +393,7 @@ async fn exercise_with_restart(
             after.latest_input_seq,
             original.latest_input_seq + u64::from(newer_input)
         );
-        let (_, body) = tokio::time::timeout(std::time::Duration::from_secs(5), gateway)
+        let (_, body) = tokio::time::timeout(MODEL_IO_TIMEOUT, gateway)
             .await
             .unwrap()
             .unwrap();
@@ -503,7 +507,7 @@ async fn exercise_with_restart(
         permission.then_some("scheduled-permission")
     );
     let result = tokio::time::timeout(
-        std::time::Duration::from_secs(15),
+        MODEL_IO_TIMEOUT,
         actix_web::rt::spawn(compose_turn(
             connections,
             db.clone(),
@@ -513,6 +517,8 @@ async fn exercise_with_restart(
             1,
             "device".into(),
             AiAssistantAsk {
+                client_timezone: "UTC".into(),
+                temporary_conversation: None,
                 question: "MUST_NOT_REPLACE_INPUT".into(),
                 client_message_id: "MUST_NOT_APPEND".into(),
                 ..Default::default()
@@ -585,7 +591,7 @@ async fn exercise_with_restart(
         assert_eq!(failures.consecutive_failures, 1);
         assert!(failures.pause_reasons.is_empty());
         assert!(task.active_run_id.is_none());
-        tokio::time::timeout(std::time::Duration::from_secs(5), gateway)
+        tokio::time::timeout(MODEL_IO_TIMEOUT, gateway)
             .await
             .unwrap()
             .unwrap();
@@ -593,7 +599,7 @@ async fn exercise_with_restart(
     }
     let result = result.unwrap().unwrap();
     assert!(matches!(result, LoopOutcome::Answered(_)), "{result:?}");
-    let (_, second) = tokio::time::timeout(std::time::Duration::from_secs(5), gateway)
+    let (_, second) = tokio::time::timeout(MODEL_IO_TIMEOUT, gateway)
         .await
         .unwrap()
         .unwrap();
@@ -880,6 +886,22 @@ async fn owner_decision(
     mut claimed: crate::schedule_store::ClaimedContinuation,
 ) -> crate::schedule_store::ClaimedContinuation {
     use desk_diagnose_core::{dynamic_run::*, seam::SessionSeam, session::TurnState};
+    let retrieval = &mut claimed
+        .session
+        .assistant_data
+        .as_mut()
+        .unwrap()
+        .retrieval_budget;
+    retrieval
+        .reserve(
+            "scheduled-permission-spent",
+            &"b".repeat(64),
+            desk_diagnose_core::ai_assistant::history::RetrievalCallKind::Relevance,
+            4096,
+            chrono::Utc::now().timestamp_millis() as u64,
+        )
+        .unwrap();
+    let original_retrieval_budget = retrieval.clone();
     let store = crate::agent_session_store::SignalAgentSessionStore::new(db.clone())
         .with_client_metadata(
             claimed.session.client_conversation_id.clone(),
@@ -965,7 +987,7 @@ async fn owner_decision(
         .unwrap()
         .unwrap();
     let current = PersistedAgentSession::decode_json(&row.state_json).unwrap();
-    schedules
+    let resumed = schedules
         .claim_continuation_permission(crate::schedule_store::ContinuationPermissionClaim {
             continuation: ContinuationClaim {
                 owner: 1,
@@ -981,7 +1003,17 @@ async fn owner_decision(
             grants: &[],
         })
         .await
-        .unwrap()
+        .unwrap();
+    assert_eq!(
+        resumed
+            .session
+            .assistant_data
+            .as_ref()
+            .unwrap()
+            .retrieval_budget,
+        original_retrieval_budget
+    );
+    resumed
 }
 
 #[actix_web::test]

@@ -4,7 +4,9 @@ use crate::{
     file_scope::{DirectoryConsentSource, DirectoryProposal},
     registry::{RegisteredTool, ToolEffect},
 };
-use desk_agent_protocol::{AgentError, AgentErrorKind, Capability};
+#[cfg(test)]
+use desk_agent_protocol::Capability;
+use desk_agent_protocol::{AgentError, AgentErrorKind};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -56,7 +58,7 @@ pub fn registry() -> Vec<RegisteredTool> {
         spec: ToolSpec { name: REQUEST_DIRECTORY.into(),
             description: "Request consent for one existing absolute directory on the controlled device in this conversation. Supply the path and purpose. Resolves directory identity only, without listing or reading contents. In interactive conversations, this call waits for AI approval when the owner enabled it, otherwise for the owner to approve or reject the canonical path in Conversation directories, then returns the decision. Continue the existing requirement after approval; do not ask for another directory confirmation. Directory consent does not grant file read, write or export permissions; request those separately when required.".into(),
             parameters_schema: json!({"type":"object","properties":{"path":{"type":"string","minLength":1,"maxLength":4096},"purpose":{"type":"string","minLength":1,"maxLength":2048}},"required":["path","purpose"],"additionalProperties":false}) },
-        required_capability: Capability::SystemInfo,
+        required_device_capability: None,
         effect: ToolEffect::DirectoryPlanning,
     }]
 }

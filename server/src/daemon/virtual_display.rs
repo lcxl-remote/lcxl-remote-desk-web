@@ -1119,6 +1119,7 @@ impl VirtualDisplaySupervisor {
         }
     }
 
+    #[cfg(test)]
     /// Subscribe to a watch reader of the exclusive state. Used by
     /// `await_exclusive_idle` and by tests that need to observe the
     /// transition sequence.

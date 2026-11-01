@@ -108,7 +108,8 @@ describe('automatic approval in a blank conversation', () => {
         render(<Workspace />);
         await waitFor(() => expect(chat!.hydrating).toBe(false));
         fireEvent.click(screen.getByRole('button', { name: 'Approval settings' }));
-        await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('Could not load approval settings'));
+        await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(
+            failure === 'missing-approval-state' ? 'Could not load approval settings' : 'Could not restore conversation'));
         expect(screen.queryByRole('status')).not.toBeInTheDocument();
         expect(sendMessage).not.toHaveBeenCalled();
         retry = true;

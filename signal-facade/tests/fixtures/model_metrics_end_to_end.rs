@@ -272,7 +272,7 @@ async fn execute(protocol: WireProtocol, mode: CaptureMode) -> BusinessResult {
     let session = Session(RefCell::new(seeded));
     let device = ReadDevice::default();
     let registry = [RegisteredTool {
-        required_capability: Capability::SystemInfo, effect: ToolEffect::ReadOnly,
+        required_device_capability: Some(Capability::SystemInfo), effect: ToolEffect::ReadOnly,
         spec: ToolSpec { name: "sysinfo".into(), description: "Read OS metadata".into(),
             parameters_schema: json!({"type":"object","additionalProperties":false,"required":["fields"],
                 "properties":{"fields":{"type":"array","minItems":1,"uniqueItems":true,

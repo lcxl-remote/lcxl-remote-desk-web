@@ -18,7 +18,8 @@ The **Usage → Data Retention** page configures TURN rollups and AI conversatio
 - **TURN traffic retention** is in the range `[1, 10000]` days, **default 30 days**. Model call statistics retention is managed separately under **Settings → Model call statistics settings**.
 - **AI conversation retention** is also in the range `[1, 10000]` days, **default 30 days**. It controls the conversation lifecycle and its existing pending-work protections, independently of content-free model observations. Increasing a window cannot restore deleted conversations or statistics.
 - A background cleanup loop deletes rollup rows older than the configured window. Because the portable server runs as a **single node** and does no billing, cleanup simply deletes by age — there is no billing-safety window to preserve.
-- The config is a single local row saved last-writer-wins (no revision), taking effect on the next cleanup tick and query.
+- The configuration is saved atomically to the active `config.toml` and takes effect on subsequent cleanup ticks and queries. Rebuilding the runtime database does not reset these settings.
+- Personal-assistant maintenance receipts additionally require completed original maintenance and daily-usage accounting, an absent main execution session, and completion/settlement older than the conversation-retention window. Unknown usage stays retained. Receipt cleanup refunds only its stored source-proof bytes; it does not set a lifetime for long-term memory facts or delete independent history evidence.
 
 ## Related
 

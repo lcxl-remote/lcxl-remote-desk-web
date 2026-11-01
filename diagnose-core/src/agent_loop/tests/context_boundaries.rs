@@ -286,6 +286,12 @@ async fn one_long_turn_can_compress_two_new_prefixes_without_replaying_tools() {
         })
         .collect::<Vec<_>>();
     assert_eq!(summaries.len(), 2);
+    for summary in &summaries {
+        assert_eq!(
+            summary.context_conversation_id.as_deref(),
+            Some(claim().conversation_id.as_str())
+        );
+    }
     assert_ne!(
         summaries[0].compression_identity,
         summaries[1].compression_identity

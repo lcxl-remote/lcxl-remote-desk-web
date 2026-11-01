@@ -117,6 +117,16 @@ impl SubAgentStore {
             begin_child_control(&self.db, held).await
         })
         .await?;
+        let binding = held.agent_role.binding().ok_or_else(invalid)?;
+        let history = desk_diagnose_core::future::boxed(|| {
+            crate::assistant_data_store::native_scope_on(
+                &txn,
+                &held.actor_id,
+                &held.device_id,
+                &binding.root_conversation_id,
+            )
+        })
+        .await?;
         let now = chrono::Utc::now();
         let (row, mut run, group) = desk_diagnose_core::future::boxed(|| async {
             child_records_on(&txn, held, now.timestamp_millis()).await
@@ -194,6 +204,9 @@ impl SubAgentStore {
             append_state_event_on(&txn, &group, &run, now.timestamp_millis()).await
         })
         .await?;
+        if let Some(history) = &history {
+            desk_diagnose_core::future::boxed(|| history.capture_on(&txn)).await?;
+        }
         desk_diagnose_core::future::boxed(|| async { txn.commit().await }).await?;
         permission_ends.submit(
             now.timestamp_millis(),
@@ -368,6 +381,16 @@ impl SubAgentStore {
             begin_child_control(&self.db, held).await
         })
         .await?;
+        let binding = held.agent_role.binding().ok_or_else(invalid)?;
+        let history = desk_diagnose_core::future::boxed(|| {
+            crate::assistant_data_store::native_scope_on(
+                &txn,
+                &held.actor_id,
+                &held.device_id,
+                &binding.root_conversation_id,
+            )
+        })
+        .await?;
         let now = chrono::Utc::now();
         let (row, mut run, group) = desk_diagnose_core::future::boxed(|| async {
             child_records_on(&txn, held, now.timestamp_millis()).await
@@ -477,6 +500,9 @@ impl SubAgentStore {
             append_state_event_on(&txn, &group, &run, now.timestamp_millis()).await
         })
         .await?;
+        if let Some(history) = &history {
+            desk_diagnose_core::future::boxed(|| history.capture_on(&txn)).await?;
+        }
         desk_diagnose_core::future::boxed(|| async { txn.commit().await }).await?;
         next.version = version;
         *held = next;

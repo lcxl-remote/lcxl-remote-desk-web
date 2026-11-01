@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { assistantMessageId } from './assistant-native-ids';
+import { assistantDataControlId, assistantMessageId } from './assistant-native-ids';
 
 describe('native assistant message identities', () => {
     it('encodes all bytes using the shared URL-safe representation', () => {
@@ -13,5 +13,12 @@ describe('native assistant message identities', () => {
 
     it('rejects incomplete identity material', () => {
         expect(() => assistantMessageId(new Uint8Array(15))).toThrow();
+    });
+
+    it('keeps data controls in their independent native identity domain', () => {
+        const bytes = Uint8Array.from({ length: 16 }, (_, i) => i);
+        expect(assistantDataControlId(bytes)).toBe('dc_AAECAwQFBgcICQoLDA0ODw');
+        expect(assistantDataControlId(bytes)).not.toBe(assistantMessageId(bytes));
+        expect(() => assistantDataControlId(new Uint8Array(15))).toThrow();
     });
 });

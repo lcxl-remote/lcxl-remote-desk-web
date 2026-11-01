@@ -571,7 +571,59 @@ fn owner_freeform_approval_is_exact_one_shot_and_rechecks_the_frozen_policy() {
         assert_eq!(grants[0].resource_scope, request.items[0].resource_scope);
         let mut changed = policy.clone();
         changed.target_session_id.push_str("-new");
-        assert!(build(&registry.clone().with_command_policy(changed), &request).is_err());
+        let changed_registry = registry.clone().with_command_policy(changed);
+        let error = build(&changed_registry, &request).unwrap_err();
+        let mut automatic = crate::dynamic_run::PermissionDecisionSource::AutomaticReview {
+            delegation_id: "review".into(),
+            delegation_revision: 1,
+            reviews: vec![],
+            failures: vec![],
+        };
+        let mut denied = decisions.clone();
+        assert!(apply_automatic_grant_failure(
+            &mut denied,
+            &mut automatic,
+            &error
+        ));
+        let mut projected = request.clone();
+        assert_eq!(
+            projected.apply_user_decision(&denied).unwrap(),
+            PermissionRequestState::Denied
+        );
+        assert_eq!(
+            automatic,
+            crate::dynamic_run::PermissionDecisionSource::SystemDecision {
+                reason_code: "approval_source_changed".into(),
+                reason: "The request authority changed during review.".into(),
+            }
+        );
+        assert!(
+            build_permission_grants(
+                &session,
+                &request,
+                &denied,
+                &PermissionGrantIssuanceContext {
+                    surface,
+                    registry: &changed_registry,
+                    inventory: &inventory,
+                    readiness_revision: 7,
+                    now_unix_ms: 1000,
+                    implicit_fresh_object_refs: &[],
+                },
+                None
+            )
+            .unwrap()
+            .is_empty()
+        );
+        let mut owner = crate::dynamic_run::PermissionDecisionSource::UserDecision;
+        let mut unchanged = decisions.clone();
+        assert!(!apply_automatic_grant_failure(
+            &mut unchanged,
+            &mut owner,
+            &error
+        ));
+        assert_eq!(unchanged, decisions);
+
         let mut missing = request.clone();
         missing.items[0].command_confirmation = None;
         assert!(build(&registry, &missing).is_err());
@@ -1122,8 +1174,8 @@ fn application_scope_is_reusable_but_cannot_cross_actions_apps_or_expiry() {
         let mut approved = request.clone();
         approved.state = crate::dynamic_run::PermissionRequestState::Approved;
         let prompt = crate::permission_tools::capability_authorization_prompt(
-            &[old_grant.clone()],
-            &[approved.clone()],
+            std::slice::from_ref(&old_grant),
+            std::slice::from_ref(&approved),
             &[],
             now,
             session.input_revision,
@@ -1360,8 +1412,8 @@ fn background_scope_is_reusable_but_cannot_cross_actions_apps_or_expiry() {
         let mut approved = request.clone();
         approved.state = crate::dynamic_run::PermissionRequestState::Approved;
         let prompt = crate::permission_tools::capability_authorization_prompt(
-            &[old_grant.clone()],
-            &[approved.clone()],
+            std::slice::from_ref(&old_grant),
+            std::slice::from_ref(&approved),
             &[],
             now,
             session.input_revision,
@@ -1688,5 +1740,37 @@ fn conversion_permission_freezes_source_and_directory_for_manual_and_ai_on_both_
             ArtifactCallPreflight::from_session(&registry, surface, &changed, &operation, NOW)
                 .is_err()
         );
+    }
+}
+
+#[test]
+fn automatic_grant_failure_keeps_transient_and_internal_errors_retryable() {
+    let (_, _, original) = decision_fixture();
+    for (kind, retryable) in [
+        (AgentErrorKind::PermissionDenied, true),
+        (AgentErrorKind::Internal, false),
+    ] {
+        let mut source = crate::dynamic_run::PermissionDecisionSource::AutomaticReview {
+            delegation_id: "review".into(),
+            delegation_revision: 1,
+            reviews: vec![],
+            failures: vec![],
+        };
+        let before = source.clone();
+        let mut decisions = original.clone();
+        let error = AgentError {
+            kind,
+            message: "unavailable".into(),
+            retryable,
+            safe_for_model: false,
+            error_code: None,
+        };
+        assert!(!apply_automatic_grant_failure(
+            &mut decisions,
+            &mut source,
+            &error
+        ));
+        assert_eq!(decisions, original);
+        assert_eq!(source, before);
     }
 }

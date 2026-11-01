@@ -182,8 +182,8 @@ pub const PIPE_NAME: &str = r"\\.\pipe\LcxlVirtualDisplay";
 // Schema additions are forward-compatible (new commands / response fields
 // are tolerated by older peers thanks to `serde`'s default skip-unknown
 // behaviour for structs and the explicit `command` tag for requests). A
-// breaking change to the wire format MUST bump `DRIVER_PROTOCOL_VERSION`
-// on both sides — runtime version negotiation is not yet implemented.
+// breaking change requires deploying matching driver and controller builds.
+// Runtime version negotiation is not implemented.
 
 /// Request envelope sent from the worker to the driver.
 ///
@@ -254,13 +254,6 @@ impl DriverResponse {
         }
     }
 }
-
-/// Schema version for the driver named-pipe protocol. Bump whenever the
-/// wire format changes in a way an older peer cannot parse; both Rust
-/// and C++ sides MUST be rebuilt together. Runtime negotiation is not
-/// yet implemented — for now we rely on lockstep deployment of the
-/// driver and the user-mode controller.
-pub const DRIVER_PROTOCOL_VERSION: u32 = 1;
 
 /// Hard cap on a single framed message (header + body). 64 KiB is far
 /// above anything the current command set needs and protects the driver
@@ -659,12 +652,7 @@ mod tests {
     }
 
     #[test]
-    fn driver_protocol_version_and_max_size_constants() {
-        // These constants pin the wire contract — bumping them is a
-        // breaking change shared with the C++ driver. The test exists so
-        // a casual edit ("let's bump to 2") shows up as a failing test
-        // and forces the author to acknowledge the cross-repo blast.
-        assert_eq!(DRIVER_PROTOCOL_VERSION, 1);
+    fn driver_message_size_matches_the_frame_limit() {
         assert_eq!(DRIVER_MAX_MESSAGE_SIZE, 64 * 1024);
     }
 }

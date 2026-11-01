@@ -1,4 +1,4 @@
-//! End an original child wait without reclaiming planning or inventing native results.
+//! End original child waits without reclaiming planning or inventing native results.
 use super::{ScheduleStore, ScheduleStoreError, entity};
 use crate::agent_subagent_store as children;
 #[cfg(test)]
@@ -8,6 +8,31 @@ use crate::entity::{
 };
 use desk_diagnose_core::session::{PersistedAgentSession, TriggerOrigin, TurnState};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set};
+
+// The original transaction and decoded rows stay owned across sequential phases.
+struct FreshWait {
+    txn: crate::config::connection::DatabaseTransaction,
+    work: Box<run::Model>,
+    row: Box<agent_session::Model>,
+    session: Box<PersistedAgentSession>,
+    subject_withdrawn: bool,
+}
+
+struct ClosingFreshWait {
+    wait: Box<FreshWait>,
+    group: Box<group_row::Model>,
+    now: i64,
+    cancelled: bool,
+    expired: bool,
+}
+
+struct FreshReceipts {
+    txn: crate::config::connection::DatabaseTransaction,
+    work: Box<run::Model>,
+    row: Box<agent_session::Model>,
+    session: Box<PersistedAgentSession>,
+    now: i64,
+}
 
 impl ScheduleStore {
     pub(super) async fn children_wait_candidates(
@@ -36,8 +61,13 @@ impl ScheduleStore {
         &self,
         run_id: &str,
     ) -> Result<bool, ScheduleStoreError> {
-        self.settle_fresh_children_wait_with_observer(run_id, crate::model_metrics::runtime::submit)
-            .await
+        desk_diagnose_core::future::send_phase(|| {
+            self.settle_fresh_children_wait_with_observer(
+                run_id,
+                crate::model_metrics::runtime::submit,
+            )
+        })
+        .await
     }
 
     async fn settle_fresh_children_wait_with_observer(
@@ -45,6 +75,41 @@ impl ScheduleStore {
         run_id: &str,
         mut submit: impl FnMut(desk_diagnose_core::model_observability::ObservationEvent),
     ) -> Result<bool, ScheduleStoreError> {
+        let Some(wait) =
+            desk_diagnose_core::future::send_phase(|| self.load_fresh_children_wait(run_id))
+                .await?
+        else {
+            return Ok(false);
+        };
+        let Some(closing) = desk_diagnose_core::future::send_phase(|| {
+            Self::prepare_fresh_children_close(wait, run_id)
+        })
+        .await?
+        else {
+            return Ok(false);
+        };
+        let now = closing.now;
+        let (native, permission_ends) =
+            desk_diagnose_core::future::send_phase(|| Self::close_fresh_children_source(&closing))
+                .await?;
+        if native == children::ScheduledNativeDisposition::Pending {
+            let FreshWait { txn, .. } = *closing.wait;
+            txn.commit().await?;
+            permission_ends.submit(now, &mut submit);
+            return Ok(false);
+        }
+        desk_diagnose_core::future::send_phase(|| {
+            Self::persist_fresh_children_close(closing, native)
+        })
+        .await?;
+        permission_ends.submit(now, &mut submit);
+        Ok(true)
+    }
+
+    async fn load_fresh_children_wait(
+        &self,
+        run_id: &str,
+    ) -> Result<Option<Box<FreshWait>>, ScheduleStoreError> {
         let peek = run::Entity::find()
             .filter(run::Column::RunId.eq(run_id))
             .one(&self.db)
@@ -61,7 +126,7 @@ impl ScheduleStore {
             .await?
             .ok_or(ScheduleStoreError::NotFound)?;
         if task.kind != "fresh_task" || task.active_run_id.as_deref() != Some(run_id) {
-            return Ok(false);
+            return Ok(None);
         }
         if snapshot.owner_user_id != peek.owner_user_id
             || snapshot.schedule_id != task.schedule_id
@@ -82,11 +147,13 @@ impl ScheduleStore {
         if locked.rows_affected != 1 {
             return Err(ScheduleStoreError::Conflict);
         }
-        let work = run::Entity::find_by_id(peek.id)
-            .one(&txn)
-            .await?
-            .ok_or(ScheduleStoreError::NotFound)?;
-        if work.status != "awaiting_children"
+        let work = Box::new(
+            run::Entity::find_by_id(peek.id)
+                .one(&txn)
+                .await?
+                .ok_or(ScheduleStoreError::NotFound)?,
+        );
+        if !matches!(work.status.as_str(), "awaiting_children")
             || work.failure_accounted
             || work.finished_at.is_some()
             || work.lease_owner.is_some()
@@ -95,15 +162,19 @@ impl ScheduleStore {
             || work.conversation_id != work.run_id
             || work.started_at.is_none()
         {
-            return Ok(false);
+            return Ok(None);
         }
-        let row = agent_session::Entity::find()
-            .filter(agent_session::Column::ConversationId.eq(run_id))
-            .one(&txn)
-            .await?
-            .ok_or(ScheduleStoreError::NotFound)?;
-        let mut session = PersistedAgentSession::decode_json(&row.state_json)
-            .map_err(|_| ScheduleStoreError::Invalid)?;
+        let row = Box::new(
+            agent_session::Entity::find()
+                .filter(agent_session::Column::ConversationId.eq(run_id))
+                .one(&txn)
+                .await?
+                .ok_or(ScheduleStoreError::NotFound)?,
+        );
+        let session = Box::new(
+            PersistedAgentSession::decode_json(&row.state_json)
+                .map_err(|_| ScheduleStoreError::Invalid)?,
+        );
         if session.actor_id != work.owner_user_id.to_string()
             || row.actor_id != session.actor_id
             || session.device_id != snapshot.target_device_id
@@ -138,6 +209,24 @@ impl ScheduleStore {
         {
             return Err(ScheduleStoreError::Conflict);
         }
+        Ok(Some(Box::new(FreshWait {
+            txn,
+            work,
+            row,
+            session,
+            subject_withdrawn,
+        })))
+    }
+
+    async fn prepare_fresh_children_close(
+        wait: Box<FreshWait>,
+        run_id: &str,
+    ) -> Result<Option<Box<ClosingFreshWait>>, ScheduleStoreError> {
+        let txn = &wait.txn;
+        let work = &wait.work;
+        let session = &wait.session;
+        let subject_withdrawn = wait.subject_withdrawn;
+
         let reference = work
             .result_ref
             .as_deref()
@@ -178,7 +267,7 @@ impl ScheduleStore {
             .filter(group_row::Column::DeviceId.eq(&session.device_id))
             .order_by_asc(group_row::Column::Id)
             .limit(2)
-            .all(&txn)
+            .all(txn)
             .await?;
         let [group_row] = groups.as_slice() else {
             return Err(ScheduleStoreError::Conflict);
@@ -193,12 +282,13 @@ impl ScheduleStore {
             return Err(ScheduleStoreError::Conflict);
         }
         let group = children::decode_group(group_row)?;
+
         let source = children::decode_creation(group_row)?
             .scheduled_source
             .ok_or(ScheduleStoreError::Invalid)?;
-        let now = super::authority::authority_now(&txn).await?;
+        let now = super::authority::authority_now(txn).await?;
         let authority_withdrawn = match Self::lock_delegation_source_authority(
-            &txn,
+            txn,
             work.owner_user_id,
             &session.device_id,
             &source,
@@ -213,7 +303,7 @@ impl ScheduleStore {
             ) => true,
             Err(error) => return Err(error),
         };
-        let tasks = children::group_children_on(&txn, &group).await?;
+        let tasks = children::group_children_on(txn, &group).await?;
         let mut all_terminal = true;
         for task in &tasks {
             all_terminal &= children::decode_run(task)?.state.is_terminal();
@@ -227,15 +317,43 @@ impl ScheduleStore {
             || group.source_admission
                 == desk_diagnose_core::subagent::group::SourceAdmission::Closed;
         if !cancelled && !withdrawn {
-            return Ok(false);
+            return Ok(None);
         }
+        let group = Box::new(group_row.clone());
+        Ok(Some(Box::new(ClosingFreshWait {
+            wait,
+            group,
+            now,
+            cancelled,
+            expired,
+        })))
+    }
+
+    async fn close_fresh_children_source(
+        closing: &ClosingFreshWait,
+    ) -> Result<
+        (
+            children::ScheduledNativeDisposition,
+            desk_diagnose_core::model_observability::permission::PendingEnds,
+        ),
+        ScheduleStoreError,
+    > {
+        let txn = &closing.wait.txn;
+        let session = &closing.wait.session;
+        let group_row = &closing.group;
+        let ClosingFreshWait {
+            now,
+            cancelled,
+            expired,
+            ..
+        } = *closing;
         // Closing planning and native stop intents commit even while the real
         // command is still running. Returning false never rolls these back.
         let (_, mut permission_ends) =
-            children::close_scheduled_group_on(&txn, group_row, now).await?;
+            children::close_scheduled_group_on(txn, group_row, now).await?;
         permission_ends.extend(
             desk_diagnose_core::model_observability::permission::PendingEnds::waiting(
-                &session,
+                session,
                 if cancelled {
                     desk_diagnose_core::model_observability::PermissionOutcome::Cancelled
                 } else if expired {
@@ -246,16 +364,31 @@ impl ScheduleStore {
             ),
         );
         let current_group = group_row::Entity::find_by_id(group_row.id)
-            .one(&txn)
+            .one(txn)
             .await?
             .ok_or(ScheduleStoreError::NotFound)?;
-        let native = children::scheduled_native_on(&txn, &current_group).await?;
-        if native == children::ScheduledNativeDisposition::Pending {
-            txn.commit().await?;
-            permission_ends.submit(now, &mut submit);
-            return Ok(false);
-        }
+        let native = children::scheduled_native_on(txn, &current_group).await?;
+        Ok((native, permission_ends))
+    }
 
+    async fn persist_fresh_children_close(
+        closing: Box<ClosingFreshWait>,
+        native: children::ScheduledNativeDisposition,
+    ) -> Result<(), ScheduleStoreError> {
+        let ClosingFreshWait {
+            wait,
+            now,
+            cancelled,
+            expired,
+            ..
+        } = *closing;
+        let FreshWait {
+            txn,
+            work,
+            row,
+            mut session,
+            ..
+        } = *wait;
         let unknown = native == children::ScheduledNativeDisposition::Unknown;
         let outcome = if unknown {
             desk_agent_protocol::schedule::ScheduledRunStatus::OutcomeUnknown
@@ -330,39 +463,64 @@ impl ScheduleStore {
             return Err(ScheduleStoreError::Conflict);
         }
         let result_ref = work.result_ref.clone();
-        super::settlement::settle(super::settlement::Settlement {
-            txn,
-            work,
-            now,
-            outcome,
-            offline_timeout: false,
-            result_ref,
-            error_kind: Some(
-                if unknown {
-                    "outcome_unknown"
-                } else if cancelled {
-                    "cancelled"
-                } else if expired {
-                    "child_wait_timeout"
-                } else {
-                    "source_withdrawn"
-                }
-                .into(),
-            ),
+        desk_diagnose_core::future::send_phase(|| {
+            super::settlement::settle(super::settlement::Settlement {
+                txn,
+                work: *work,
+                now,
+                outcome,
+                offline_timeout: false,
+                result_ref,
+                error_kind: Some(
+                    if unknown {
+                        "outcome_unknown"
+                    } else if cancelled {
+                        "cancelled"
+                    } else if expired {
+                        "child_wait_timeout"
+                    } else {
+                        "source_withdrawn"
+                    }
+                    .into(),
+                ),
+            })
         })
         .await?;
-        permission_ends.submit(now, &mut submit);
-        Ok(true)
+        Ok(())
     }
 }
 
 impl ScheduleStore {
     /// Late original results backfill genuine root receipts and close the marker.
     /// The original outcome, failure policy and source admission stay unchanged.
-    pub(super) async fn reconcile_fresh_children_receipts(
+    pub(super) fn reconcile_fresh_children_receipts<'a>(
+        &'a self,
+        run_id: &'a str,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<bool, ScheduleStoreError>> + Send + 'a>,
+    > {
+        desk_diagnose_core::future::send_phase(|| {
+            self.reconcile_fresh_children_receipts_inner(run_id)
+        })
+    }
+
+    async fn reconcile_fresh_children_receipts_inner(
         &self,
         run_id: &str,
     ) -> Result<bool, ScheduleStoreError> {
+        let Some(wait) =
+            desk_diagnose_core::future::send_phase(|| self.load_fresh_children_receipts(run_id))
+                .await?
+        else {
+            return Ok(false);
+        };
+        desk_diagnose_core::future::send_phase(|| Self::persist_fresh_children_receipts(wait)).await
+    }
+
+    async fn load_fresh_children_receipts(
+        &self,
+        run_id: &str,
+    ) -> Result<Option<Box<FreshReceipts>>, ScheduleStoreError> {
         let peek = run::Entity::find()
             .filter(run::Column::RunId.eq(run_id))
             .one(&self.db)
@@ -397,10 +555,12 @@ impl ScheduleStore {
         if locked.rows_affected != 1 {
             return Err(ScheduleStoreError::Conflict);
         }
-        let work = run::Entity::find_by_id(peek.id)
-            .one(&txn)
-            .await?
-            .ok_or(ScheduleStoreError::NotFound)?;
+        let work = Box::new(
+            run::Entity::find_by_id(peek.id)
+                .one(&txn)
+                .await?
+                .ok_or(ScheduleStoreError::NotFound)?,
+        );
         if work.status != "outcome_unknown"
             || !work.failure_accounted
             || work.finished_at.is_none()
@@ -414,7 +574,7 @@ impl ScheduleStore {
                     || value.starts_with("delegated-effects:")
             })
         {
-            return Ok(false);
+            return Ok(None);
         }
         let groups = group_row::Entity::find()
             .filter(group_row::Column::RootConversationId.eq(run_id))
@@ -429,18 +589,36 @@ impl ScheduleStore {
             return Err(ScheduleStoreError::Conflict);
         };
         if group.source_admission != "closed"
-            || children::scheduled_native_on(&txn, group).await?
+            || desk_diagnose_core::future::send_phase(|| children::scheduled_native_on(&txn, group))
+                .await?
                 != children::ScheduledNativeDisposition::Settled
         {
-            return Ok(false);
+            return Ok(None);
         }
-        let row = agent_session::Entity::find()
-            .filter(agent_session::Column::ConversationId.eq(run_id))
-            .one(&txn)
-            .await?
-            .ok_or(ScheduleStoreError::NotFound)?;
-        let mut session = PersistedAgentSession::decode_json(&row.state_json)
-            .map_err(|_| ScheduleStoreError::Invalid)?;
+        desk_diagnose_core::future::send_phase(|| {
+            Self::load_fresh_receipt_root(txn, work, Box::new(snapshot), run_id)
+        })
+        .await
+        .map(Some)
+    }
+
+    async fn load_fresh_receipt_root(
+        txn: crate::config::connection::DatabaseTransaction,
+        work: Box<run::Model>,
+        snapshot: Box<entity::Model>,
+        run_id: &str,
+    ) -> Result<Box<FreshReceipts>, ScheduleStoreError> {
+        let row = Box::new(
+            agent_session::Entity::find()
+                .filter(agent_session::Column::ConversationId.eq(run_id))
+                .one(&txn)
+                .await?
+                .ok_or(ScheduleStoreError::NotFound)?,
+        );
+        let session = Box::new(
+            PersistedAgentSession::decode_json(&row.state_json)
+                .map_err(|_| ScheduleStoreError::Invalid)?,
+        );
         if row.actor_id != work.owner_user_id.to_string()
             || row.actor_id != session.actor_id
             || row.device_id != snapshot.target_device_id
@@ -462,18 +640,40 @@ impl ScheduleStore {
             return Err(ScheduleStoreError::Conflict);
         }
         let now = super::authority::authority_now(&txn).await?;
+        Ok(Box::new(FreshReceipts {
+            txn,
+            work,
+            row,
+            session,
+            now,
+        }))
+    }
+
+    async fn persist_fresh_children_receipts(
+        wait: Box<FreshReceipts>,
+    ) -> Result<bool, ScheduleStoreError> {
+        let FreshReceipts {
+            txn,
+            work,
+            row,
+            mut session,
+            now,
+        } = *wait;
         let timestamp =
             chrono::DateTime::from_timestamp_millis(now).ok_or(ScheduleStoreError::Invalid)?;
         if !session.execution_state.states().is_empty()
             || !session.unclosed_tool_call_ids().is_empty()
         {
             let context = super::TaskReceiptContext::load(&txn, &work).await?;
-            let restored = crate::capability_grant_store::fresh_recovery::restore_completed_calls(
-                &txn,
-                &mut session,
-                &context,
-                &timestamp.to_rfc3339(),
-            )
+            let finished_at = timestamp.to_rfc3339();
+            let restored = desk_diagnose_core::future::send_phase(|| {
+                crate::capability_grant_store::fresh_recovery::restore_completed_calls(
+                    &txn,
+                    &mut session,
+                    &context,
+                    &finished_at,
+                )
+            })
             .await?;
             if !restored
                 || !session.execution_state.states().is_empty()
@@ -729,7 +929,17 @@ mod tests {
 
     #[tokio::test]
     async fn native_running_and_unknown_facts_survive_source_closure_without_replanning() {
-        let (db, schedule, _, parent, task_id) = children::scheduled_test_wait_fixture().await;
+        exercise_original_native_wait(false).await;
+    }
+
+    #[tokio::test]
+    async fn owner_stop_retains_running_native_work_and_unknown_outcomes() {
+        exercise_original_native_wait(true).await;
+    }
+
+    async fn exercise_original_native_wait(owner_stop: bool) {
+        let (db, schedule, store, parent, task_id) = children::scheduled_test_wait_fixture().await;
+
         let child = child_row::Entity::find()
             .filter(child_row::Column::TaskId.eq(&task_id))
             .one(&db)
@@ -757,18 +967,38 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let metric_aliases =
-            seed_observed_schedule_waits(&db, &parent, &child.child_conversation_id).await;
+        let metric_aliases = if owner_stop {
+            None
+        } else {
+            Some(seed_observed_schedule_waits(&db, &parent, &child.child_conversation_id).await)
+        };
         let original = original_run(&db, &parent.conversation_id).await;
-        run::Entity::update_many()
-            .set(run::ActiveModel {
-                cancel_requested_at: Set(Some(chrono::Utc::now().timestamp_millis())),
-                ..Default::default()
-            })
-            .filter(run::Column::Id.eq(original.id))
-            .exec(&db)
-            .await
-            .unwrap();
+        if owner_stop {
+            store
+                .stop_for_owner(
+                    &parent.conversation_id,
+                    &parent.actor_id,
+                    &parent.device_id,
+                    &AiAssistantStopControl {
+                        client_request_id: "stop-context-with-original-native-work".into(),
+                        expected_input_revision: parent.input_revision,
+                        expected_control_revision: parent.control_revision,
+                        subagent_choice: Some(SubAgentStopChoice::IncludeSubAgents),
+                    },
+                )
+                .await
+                .unwrap();
+        } else {
+            run::Entity::update_many()
+                .set(run::ActiveModel {
+                    cancel_requested_at: Set(Some(chrono::Utc::now().timestamp_millis())),
+                    ..Default::default()
+                })
+                .filter(run::Column::Id.eq(original.id))
+                .exec(&db)
+                .await
+                .unwrap();
+        }
         let mut metric_events = Vec::new();
         assert!(
             !schedule
@@ -778,7 +1008,9 @@ mod tests {
                 .await
                 .unwrap()
         );
-        assert_observed_schedule_waits_ended(&metric_events, &metric_aliases);
+        if let Some(aliases) = metric_aliases {
+            assert_observed_schedule_waits_ended(&metric_events, &aliases);
+        }
         let before_unknown = original_run(&db, &parent.conversation_id).await;
         assert_eq!(before_unknown.status, "awaiting_children");
         let retained = native::Entity::find_by_id(command.id)

@@ -71,7 +71,7 @@ async fn exercise_process(reconnect: bool) {
     let listener = std::sync::Arc::new(TcpListener::bind("127.0.0.1:0").await.unwrap());
     let address = listener.local_addr().unwrap();
     let gateway = actix_web::rt::spawn(async move {
-        let first = capture_one_openai_request_with_sse(listener.clone(), ANSWER).await;
+        let (first, _) = capture_openai_answer_with_title(listener.as_ref(), ANSWER).await;
         let second = if reconnect {
             Some(capture_one_openai_request_with_sse(listener, ANSWER).await)
         } else {
@@ -89,6 +89,19 @@ async fn exercise_process(reconnect: bool) {
         .unwrap();
     crate::db::initialize_schema(&db).await.unwrap();
     crate::ai_assistant_gate::enable_test_host();
+    let data_settings = crate::assistant_data_config::settings(&db).await;
+    crate::assistant_data_config::update_settings(
+        &db,
+        &desk_agent_protocol::ai_assistant::user_instructions::AssistantDataSettingsUpdate {
+            expected_revision: data_settings.revision,
+            automatic_memory_enabled: false,
+            model_history_search_enabled: data_settings.model_history_search_enabled,
+
+            explanation_version: data_settings.explanation_version,
+        },
+    )
+    .await
+    .unwrap();
     crate::model_provider::save(
         &db,
         crate::model_provider::ModelProviderConfig {
@@ -108,7 +121,7 @@ async fn exercise_process(reconnect: bool) {
     let client_id = "scheduled-original";
     let conversation = derive_conversation_key("1", "device", Some(client_id), "first");
     tokio::time::timeout(
-        std::time::Duration::from_secs(15),
+        SCENARIO_TIMEOUT,
         run_turn_inner(
             connections.clone(),
             db.clone(),
@@ -118,6 +131,8 @@ async fn exercise_process(reconnect: bool) {
             1,
             "device".into(),
             AiAssistantAsk {
+                client_timezone: "UTC".into(),
+                temporary_conversation: None,
                 question: "SYNTHETIC_SCHEDULED_ORIGINAL".into(),
                 client_message_id: "original-message".into(),
                 conversation_id: Some(client_id.into()),
@@ -178,8 +193,11 @@ async fn exercise_process(reconnect: bool) {
     let port = listener.local_addr().unwrap().port();
     drop(listener);
     let config = durable.path().join("config.toml");
+    let central = crate::config::ConfigConnection::config_read(&db).await;
+    let settings = toml::to_string(&**central).unwrap();
+    drop(central);
     std::fs::write(&config, format!(
-        "[system]\nport = {port}\nlisten_addr_ipv4 = \"127.0.0.1\"\nenable_ipv6 = false\ntelemetry_consent = false\nlocal_signaling_token = \"process-test-node-token\"\n[turn]\nenable_turn = false\n[ai_assistant]\nenabled = true\nrevision = 1\n"
+        "{settings}\n[system]\nport = {port}\nlisten_addr_ipv4 = \"127.0.0.1\"\nenable_ipv6 = false\ntelemetry_consent = false\nlocal_signaling_token = \"process-test-node-token\"\n[turn]\nenable_turn = false\n[ai_assistant]\nenabled = true\nrevision = 1\n"
     )).unwrap();
     let first = start(
         &executable,
@@ -339,7 +357,7 @@ async fn exercise_process(reconnect: bool) {
         }
         socket_task.abort();
     }
-    let (_, second_request) = tokio::time::timeout(Duration::from_secs(5), gateway)
+    let (_, second_request) = tokio::time::timeout(MODEL_IO_TIMEOUT, gateway)
         .await
         .unwrap()
         .unwrap();

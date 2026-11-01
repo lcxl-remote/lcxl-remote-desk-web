@@ -324,6 +324,7 @@ impl ManagerCredentialLink {
             .map(|scope| scope.state)
     }
 
+    #[cfg(test)]
     pub async fn has_credential_deadline(&self) -> bool {
         self.registry
             .state

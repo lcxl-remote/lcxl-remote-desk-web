@@ -107,7 +107,7 @@ pub(super) async fn issue_on(
         .iter()
         .find(|step| step.rule_id == rule.rule_id)
         .map(|step| step.step_id.as_str());
-    let original = if matches!(
+    let executed = if matches!(
         rule.input,
         desk_agent_protocol::schedule::contract::TaskInputConstraint::GeneratedMessage { .. }
             | desk_agent_protocol::schedule::contract::TaskInputConstraint::GeneratedTextArtifact { .. }
@@ -127,7 +127,16 @@ pub(super) async fn issue_on(
         if tools.next().is_some() || tool.name != call.tool_name {
             return Err(invalid());
         }
-        let raw = serde_json::from_str(&tool.arguments_json).map_err(|_| invalid())?;
+        let executed = desk_diagnose_core::ui_model_ids::resolve_recorded_call(
+            &desk_diagnose_core::chat::ToolCall {
+                id: tool.id.clone(),
+                name: tool.name.clone(),
+                arguments_json: tool.arguments_json.clone(),
+            },
+            session,
+        )
+        .map_err(|_| invalid())?;
+        let raw = serde_json::from_str(&executed.arguments_json).map_err(|_| invalid())?;
         if desk_diagnose_core::permission_tools::canonical_tool_permission_input_json(
             &tool.name, raw,
         )
@@ -136,12 +145,7 @@ pub(super) async fn issue_on(
         {
             return Err(invalid());
         }
-        let original = desk_diagnose_core::chat::ToolCall {
-            id: tool.id.clone(),
-            name: tool.name.clone(),
-            arguments_json: tool.arguments_json.clone(),
-        };
-        Some(original)
+        Some(executed)
     } else {
         None
     };
@@ -155,7 +159,7 @@ pub(super) async fn issue_on(
                     txn,
                     session,
                     &authority,
-                    original.as_ref().ok_or_else(invalid)?,
+                    executed.as_ref().ok_or_else(invalid)?,
                     step_id.ok_or_else(invalid)?,
                 )
                 .await
@@ -174,7 +178,7 @@ pub(super) async fn issue_on(
                 txn,
                 session,
                 &authority,
-                &original.as_ref().ok_or_else(invalid)?.id,
+                &executed.as_ref().ok_or_else(invalid)?.id,
             )
             .await
         })
@@ -189,7 +193,7 @@ pub(super) async fn issue_on(
         desk_diagnose_core::schedule::contract::artifact::bind_directory(
             contract,
             session,
-            original.as_ref().ok_or_else(invalid)?,
+            executed.as_ref().ok_or_else(invalid)?,
             step_id.ok_or_else(invalid)?,
             call.resource_scope,
             u64::try_from(authority.verified_at()).map_err(|_| invalid())?,

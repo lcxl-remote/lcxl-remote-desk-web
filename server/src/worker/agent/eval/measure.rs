@@ -51,6 +51,7 @@ fn measure(
     }
 }
 
+#[cfg(test)]
 /// Run every host-available read collector once and measure it. Async
 /// (container) collectors are measured too when Docker is reachable, degrading
 /// to an `unsupported` row otherwise.
@@ -115,6 +116,7 @@ pub async fn measure_full_collection() -> Vec<Measurement> {
     rows
 }
 
+#[cfg(test)]
 /// Total serialized size of all `ok` collectors, in bytes.
 pub fn total_size_bytes(rows: &[Measurement]) -> usize {
     rows.iter().map(|r| r.size_bytes).sum()

@@ -12,7 +12,7 @@ import {
     sentSignalingOfType,
     StubPeerConnection,
     type SignalingGlobals,
-} from './file-transfer-test-harness';
+} from './__tests__/harness';
 import { deskErrorCodeEnum } from '@/services/types';
 
 // A request the host rejects before its own handler runs — the door1 gate — comes
@@ -24,7 +24,7 @@ import { deskErrorCodeEnum } from '@/services/types';
 // cases are pinned here: a rejected request, a rejected data-plane frame, and a
 // rejected session. The middle one matters most — a data-plane rejection must not
 // take browsing down with it. One comprehensive `renderHook` test per file: see
-// the note in `file-transfer-test-harness.ts`.
+// the note in `__tests__/harness.ts`.
 
 const ERROR_FRAME = -1;
 const LIST_FILES = 10005;

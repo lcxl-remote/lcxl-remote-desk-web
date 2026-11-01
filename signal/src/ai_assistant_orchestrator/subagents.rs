@@ -42,6 +42,7 @@ pub async fn resume_subagent_turn(
         target.ok_or_else(|| transport_error("delegated device is unavailable or ambiguous"))?
     };
     let ask = AiAssistantAsk {
+        temporary_conversation: None,
         question: runtime.source().owner_requirement.text.clone(),
         locale: session.response_locale.clone(),
         ..Default::default()

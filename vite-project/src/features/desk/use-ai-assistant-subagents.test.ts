@@ -26,6 +26,47 @@ const props = { connection: 'original-device', conversation: 'owner-conversation
 describe('owner subagent views', () => {
     afterEach(() => { vi.unstubAllGlobals(); vi.clearAllMocks(); });
 
+    it('adds the sending client timezone to an owner adjustment', async () => {
+        const fetch = vi.fn(async (_url: string, _init?: RequestInit) => ok(task));
+        vi.stubGlobal('fetch', fetch);
+        const { result, unmount } = renderHook(() => useAiAssistantSubagents(props));
+        await act(async () => {
+            expect(await result.current.control(task, { kind: 'adjust', message: '检查昨天的日志' })).toBe(true);
+        });
+        const submitted = fetch.mock.calls.find(([url]) => url.endsWith('/subagents/control'));
+        expect(JSON.parse(submitted![1]!.body as string).control.action).toEqual({
+            kind: 'adjust', message: '检查昨天的日志',
+            client_timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        });
+        unmount();
+    });
+
+    it('submits long directory input intact and retains revision and control-character guards', async () => {
+        const childWithScope = { ...child, fileScope: { revision: 7, directories: [] } };
+        const fetch = vi.fn(async (url: string, _init?: RequestInit) => {
+            if (url.includes('/subagents/result')) return ok(report);
+            if (url.endsWith('/subagents/read') || url.endsWith('/directory-control')) return ok(true);
+            return ok(childWithScope);
+        });
+        vi.stubGlobal('fetch', fetch);
+        const { result, unmount } = renderHook(() => useAiAssistantSubagents(props));
+        act(() => result.current.openDetail(task));
+        await waitFor(() => expect(result.current.detail?.session.fileScope?.revision).toBe(7));
+        const action = { kind: 'select_directory' as const, expected_revision: 7,
+            path: '/tmp/' + '目录'.repeat(3000), purpose: '分析项目'.repeat(1500) };
+        expect(result.current.updateDirectory({ ...action, expected_revision: 6 }, 'timeout')).toBe(false);
+        expect(result.current.updateDirectory({ ...action, purpose: 'invalid\ncontrol' }, 'timeout')).toBe(false);
+        act(() => { expect(result.current.updateDirectory(action, 'timeout')).toBe(true); });
+        await waitFor(() => expect(fetch.mock.calls.some(([url]) => url.endsWith('/directory-control'))).toBe(true));
+        const submitted = fetch.mock.calls.find(([url]) => url.endsWith('/directory-control'));
+        const body = JSON.parse(submitted![1]!.body as string);
+        expect(body.operation).toEqual(action);
+        expect(body.connection).toBe(props.connection);
+        expect(body.session).toBe(child.sessionId);
+        await waitFor(() => expect(result.current.updating).toBe(false));
+        unmount();
+    });
+
     it('reads the original child and marks UI attention without changing task or model state', async () => {
         const fetch = vi.fn(async (url: string) => {
             if (url.includes('/subagents/result')) return ok(report);

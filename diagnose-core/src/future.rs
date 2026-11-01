@@ -142,10 +142,10 @@ mod tests {
     #[should_panic(expected = "phase future grew")]
     fn raw_phase_size_guard_observes_state_before_erasure() {
         let oversized = [0u8; 16 * 1024 + 1];
-        let _ = phase(|| async move {
+        drop(phase(|| async move {
             std::future::pending::<()>().await;
             std::hint::black_box(oversized);
-        });
+        }));
     }
 
     #[test]

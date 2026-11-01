@@ -57,7 +57,7 @@ export function TurnClientSettingsPage() {
                 title: t('pages.system.settings.success'),
                 description: t('pages.turnClient.settings.updateSucceedMessage'),
             })
-        } catch (error) {
+        } catch {
             toast({
                 variant: "destructive",
                 title: t('pages.system.settings.error'),

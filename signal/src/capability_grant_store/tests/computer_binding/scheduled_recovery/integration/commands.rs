@@ -6,27 +6,6 @@ use desk_diagnose_core::{
 };
 
 async fn fixture(db: DatabaseConnection) -> (ScheduleStore, String, String) {
-    insert_session(&db, 1, 1).await;
-    let row = agent_session::Entity::find()
-        .one(&db)
-        .await
-        .unwrap()
-        .unwrap();
-    let mut session = PersistedAgentSession::decode_json(&row.state_json).unwrap();
-    session.actor_id = "1".into();
-    session.version = row.version;
-    session.surface = AgentSessionSurface::AiAssistant;
-    session.begin_focus_epoch(1, Vec::<String>::new()).unwrap();
-    session
-        .begin_turn(
-            "turn-1",
-            None,
-            None,
-            7,
-            session.scope_snapshot.clone(),
-            Utc::now().to_rfc3339(),
-        )
-        .unwrap();
     let mut call = ToolCall {
         id: "original-command".into(),
         name: desk_diagnose_core::command_confirmation::COMMAND_TOOL.into(),
@@ -51,6 +30,7 @@ async fn fixture(db: DatabaseConnection) -> (ScheduleStore, String, String) {
         destination.clone(),
     )
     .unwrap();
+    let mut session = owner_session(&db, user.clone()).await;
     let mut proposal = ChatMessage::assistant_tool_calls(
         "command-proposal",
         "Run the approved command",
@@ -69,7 +49,12 @@ async fn fixture(db: DatabaseConnection) -> (ScheduleStore, String, String) {
             "test_model_output",
         )
         .unwrap();
-    session.conversation.extend([user, proposal]);
+    session.conversation.push(proposal);
+    let row = agent_session::Entity::find()
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
     let mut row: agent_session::ActiveModel = row.into();
     row.actor_id = Set("1".into());
     row.lease_token = Set(session.lease_token as i64);
@@ -104,6 +89,7 @@ async fn fixture(db: DatabaseConnection) -> (ScheduleStore, String, String) {
     origin.command_completion = Some(context);
     let capability = registry.capability_for_tool(&call.name).unwrap();
     let mut permission = grant(1);
+    permission.policy_revision = session.policy_revision;
     permission.actor_id = "1".into();
     permission.provider_id = origin.provider_id.clone();
     permission.capability_id = capability.wire.capability_id.clone();
@@ -133,6 +119,7 @@ async fn fixture(db: DatabaseConnection) -> (ScheduleStore, String, String) {
         );
         input.turn_id = session.current_turn_id.as_deref().unwrap();
         input.call.actor_id = "1";
+        input.call.policy_revision = session.policy_revision;
         input.call.provider_id = &permission.provider_id;
         input.call.capability_id = &permission.capability_id;
         input.call.tool_name = &call.name;

@@ -148,6 +148,7 @@ pub(crate) fn is_business_content(field: &str) -> bool {
 }
 
 fn visit_references(value: &Value, visitor: &mut impl FnMut(&Value)) {
+    crate::document_model_ids::visit_live_references(value, visitor);
     if native_reference(value).is_some() {
         visitor(value);
         return;
@@ -275,7 +276,12 @@ impl UiReferenceState {
                     .find(|(call, _)| call.id == *id)
                     .map(|(call, _)| call.name.as_str())
             });
-            if !native && !browser && accepted.is_none() {
+            let data_tool = crate::assistant_data_model::tool(source).filter(|tool| {
+                history.iter().flat_map(|m| &m.tool_calls).any(|call| {
+                    Some(&call.id) == message.tool_call_id.as_ref() && call.name == *tool
+                })
+            });
+            if !native && !browser && accepted.is_none() && data_tool.is_none() {
                 continue;
             }
             let Ok(mut value) = crate::image_input::structured_tool_result(&source.text) else {
@@ -292,6 +298,12 @@ impl UiReferenceState {
             });
             if let Some(error) = error {
                 return Err(error);
+            }
+            if data_tool.is_some() {
+                self.observe_conversations(
+                    &value,
+                    ReferenceSource::Message(message.message_id.clone()),
+                )?;
             }
             if let Some(tool) = accepted {
                 self.observe_cursors(
@@ -333,6 +345,77 @@ impl UiReferenceState {
         Ok(())
     }
 
+    fn observe_conversations(
+        &mut self,
+        value: &Value,
+        source: ReferenceSource,
+    ) -> Result<(), AgentError> {
+        let mut ids = BTreeSet::new();
+        crate::assistant_data_model::conversations(value, &mut |id| {
+            ids.insert(id.to_owned());
+        });
+        for id in ids {
+            self.register_entry(
+                "cv",
+                id.clone(),
+                &serde_json::json!({"conversation_id":id}),
+                source.clone(),
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Resolve only the query selector; the original model call and its digest stay intact.
+    pub fn resolve_conversation_request(
+        &self,
+        request: &desk_agent_protocol::ai_assistant::history::ConversationSearchRequest,
+    ) -> Result<desk_agent_protocol::ai_assistant::history::ConversationSearchRequest, AgentError>
+    {
+        let mut request = request.clone();
+        for id in &mut request.conversation_ids {
+            if id.starts_with("cv") {
+                let mut value = Value::String(id.clone());
+                self.expand_id(&mut value, &["cv"], &mut Vec::new())?;
+                *id = value.as_str().expect("expanded conversation ID").into();
+            }
+        }
+        Ok(request)
+    }
+
+    pub(crate) fn alias_conversation_arguments(&self, tool: &str, value: &mut Value) {
+        if tool == "search_conversations"
+            && let Some(ids) = value
+                .get_mut("conversation_ids")
+                .and_then(Value::as_array_mut)
+        {
+            for id in ids {
+                if let Some(alias) = id.as_str().and_then(|id| self.alias("cv", id, None)) {
+                    *id = Value::String(alias.into());
+                }
+            }
+        }
+    }
+
+    fn project_conversations(&self, value: &mut Value, source: &str) {
+        fn ids(state: &UiReferenceState, value: &mut Value, source: &str) {
+            for field in ["conversation_id", "root_conversation_id"] {
+                if let Some(id) = value.get_mut(field)
+                    && let Some(alias) = id
+                        .as_str()
+                        .and_then(|id| state.alias("cv", id, Some(source)))
+                {
+                    *id = Value::String(alias.into());
+                }
+            }
+        }
+        ids(self, value, source);
+        if let Some(hits) = value.get_mut("hits").and_then(Value::as_array_mut) {
+            for hit in hits {
+                ids(self, hit, source);
+            }
+        }
+    }
+
     pub(crate) fn observe_attachment(
         &mut self,
         part: &crate::conversation_attachment::batch::PreparedAttachment,
@@ -371,6 +454,9 @@ impl UiReferenceState {
         });
         if let Some(error) = error {
             return Err(error);
+        }
+        if crate::ai_assistant::data_tools::is_data_tool(&envelope.provenance.source_tool_name) {
+            self.observe_conversations(&value, source.clone())?;
         }
         self.observe_cursors(&envelope.provenance.source_tool_name, &value, source)?;
         Ok(*self != before)
@@ -621,6 +707,19 @@ impl UiReferenceState {
                     }
                 }
             }
+            if tool == "search_conversations"
+                && let Some(conversations) = value.get("conversation_ids").and_then(Value::as_array)
+            {
+                for id in conversations.iter().filter_map(Value::as_str) {
+                    if state
+                        .entries
+                        .get(id)
+                        .is_some_and(|entry| entry.prefix == "cv")
+                    {
+                        ids.insert(id.into());
+                    }
+                }
+            }
             if !UiReferenceState::cursor_paths(tool).is_empty()
                 && let Some(id) = value.get("cursor").and_then(Value::as_str)
                 && state
@@ -706,6 +805,9 @@ impl UiReferenceState {
     }
 
     pub(crate) fn shorten_value(&self, value: &mut Value, source: Option<&str>) {
+        crate::document_model_ids::map_live_references(value, &mut |reference| {
+            self.shorten_value(reference, source)
+        });
         if let Some(alias) = self.projected_alias(value).map(str::to_owned)
             && value.get("token").is_some()
         {
@@ -855,6 +957,9 @@ impl UiReferenceState {
                 }))
         {
             crate::ui_model_output::expand_value(&mut value);
+            if crate::assistant_data_model::tool(message).is_some() {
+                self.project_conversations(&mut value, &source);
+            }
             self.shorten_value(&mut value, Some(&source));
             if let Some(envelope) = &message.data_envelope {
                 self.project_cursors(&envelope.provenance.source_tool_name, &mut value);
@@ -968,7 +1073,7 @@ impl UiReferenceState {
         Ok(())
     }
 
-    fn expand_arguments(
+    pub(crate) fn expand_arguments(
         &self,
         tool: &str,
         value: &mut Value,
@@ -1101,6 +1206,91 @@ mod tests {
         serde_json::json!({"token":token,"snapshot_id":snapshot,"object_kind":"application","expires_at":"2030-01-01T00:00:00Z"})
     }
     #[test]
+    fn recorded_calls_restore_aliases_but_preserve_native_inputs_and_business_text() {
+        for bytes in [1024 * 1024, 2 * 1024 * 1024] {
+            std::thread::Builder::new()
+                .stack_size(bytes)
+                .spawn(exercise_recorded_call_inputs)
+                .unwrap()
+                .join()
+                .unwrap();
+        }
+    }
+
+    fn exercise_recorded_call_inputs() {
+        let mut session =
+            crate::ai_assistant::test_support::personal_session("owner", "run", "device");
+        let native = reference("native-application", "recorded-snapshot");
+        session.ui_references.register(&native, "source").unwrap();
+        let original = ToolCall {
+            id: "inspect".into(),
+            name: "inspect_desktop_ui".into(),
+            arguments_json: r#"{ "root_id": "a1", "queries": ["a1"] }"#.into(),
+        };
+        let executed =
+            crate::ui_model_ids::resolve_session_call_with_context(&original, &session, 0, None)
+                .unwrap();
+        let recorded = crate::ui_model_ids::resolve_recorded_call(&original, &session).unwrap();
+        let canonical = |call: &ToolCall| {
+            crate::permission_tools::canonical_tool_permission_input_json(
+                &call.name,
+                serde_json::from_str(&call.arguments_json).unwrap(),
+            )
+            .unwrap()
+        };
+        assert_eq!(canonical(&recorded), canonical(&executed));
+        let value: Value = serde_json::from_str(&recorded.arguments_json).unwrap();
+        assert_eq!(value["root"], native);
+        assert_eq!(value["queries"], serde_json::json!(["a1"]));
+        assert_eq!(
+            canonical(&crate::ui_model_ids::resolve_recorded_call(&executed, &session).unwrap()),
+            canonical(&executed)
+        );
+        session.conversation.extend([
+            ChatMessage::assistant_tool_calls(
+                "proposal",
+                "",
+                vec![crate::chat::ToolCallRef {
+                    id: original.id.clone(),
+                    name: original.name.clone(),
+                    arguments_json: original.arguments_json.clone(),
+                }],
+            ),
+            ChatMessage::tool_result(
+                "later-observation",
+                &original.id,
+                serde_json::json!({"ReadContext":{"DesktopUiInspect":{
+                    "root":reference("native-application", "later-snapshot")
+                }}})
+                .to_string(),
+            ),
+        ]);
+        assert!(
+            crate::ui_model_ids::resolve_session_call_with_context(&original, &session, 0, None)
+                .is_err()
+        );
+        assert_eq!(
+            canonical(&crate::ui_model_ids::resolve_recorded_call(&original, &session).unwrap()),
+            canonical(&executed)
+        );
+        let invalid = ToolCall {
+            arguments_json: r#"{"root_id":"a99"}"#.into(),
+            ..original.clone()
+        };
+        assert!(crate::ui_model_ids::resolve_recorded_call(&invalid, &session).is_err());
+        let wrong_kind = ToolCall {
+            arguments_json: r#"{"window_id":"a1"}"#.into(),
+            name: "read_current_screen".into(),
+            ..original.clone()
+        };
+        assert!(crate::ui_model_ids::resolve_recorded_call(&wrong_kind, &session).is_err());
+        assert_eq!(
+            original.arguments_json,
+            r#"{ "root_id": "a1", "queries": ["a1"] }"#
+        );
+    }
+
+    #[test]
     fn aliases_are_stable_persisted_independent_and_never_reused() {
         let mut state = UiReferenceState::default();
         state
@@ -1174,14 +1364,19 @@ mod tests {
             name: "inspect_desktop_ui".into(),
             arguments_json: serde_json::json!({"root_id":"a1","queries":["Calendar"]}).to_string(),
         };
-        let resolved = crate::ui_model_ids::resolve_session_call(&call, &session, 1).unwrap();
+        let resolved =
+            crate::ui_model_ids::resolve_session_call_with_context(&call, &session, 1, None)
+                .unwrap();
         let value: Value = serde_json::from_str(&resolved.arguments_json).unwrap();
         assert_eq!(value["root"], original);
         let wrong = ToolCall {
             arguments_json: serde_json::json!({"root_id":"native-in-attachment"}).to_string(),
             ..call
         };
-        assert!(crate::ui_model_ids::resolve_session_call(&wrong, &session, 1).is_err());
+        assert!(
+            crate::ui_model_ids::resolve_session_call_with_context(&wrong, &session, 1, None)
+                .is_err()
+        );
     }
 }
 
@@ -1338,19 +1533,30 @@ mod reference_lifecycle_tests {
             name: "inspect_live_document".into(),
             arguments_json: json!({"target_id":"doc1"}).to_string(),
         };
-        let resolved = crate::ui_model_ids::resolve_session_call(&call, &session, 1).unwrap();
+        let resolved =
+            crate::ui_model_ids::resolve_session_call_with_context(&call, &session, 1, None)
+                .unwrap();
         assert_eq!(
             serde_json::from_str::<Value>(&resolved.arguments_json).unwrap()["target"],
             original
         );
         assert!(
-            crate::ui_model_ids::resolve_session_call(&call, &session, 4_200_000_000_000).is_err()
+            crate::ui_model_ids::resolve_session_call_with_context(
+                &call,
+                &session,
+                4_200_000_000_000,
+                None
+            )
+            .is_err()
         );
         session
             .ui_references
             .retain_attachment_sources(&BTreeSet::new(), &BTreeSet::from(["doc1".into()]));
         assert!(session.ui_references.entries.contains_key("doc1"));
-        assert!(crate::ui_model_ids::resolve_session_call(&call, &session, 1).is_err());
+        assert!(
+            crate::ui_model_ids::resolve_session_call_with_context(&call, &session, 1, None)
+                .is_err()
+        );
     }
 
     #[test]

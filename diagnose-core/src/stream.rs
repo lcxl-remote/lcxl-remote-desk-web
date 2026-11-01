@@ -132,7 +132,8 @@ impl<S: AgentFrameSink> StreamingTurnSink<S> {
 
     /// Map a loop outcome to its terminal frame: a successful `Answered` already
     /// emitted its `Answer` via [`TurnSink::on_answer_committed`], so nothing more
-    /// is sent; every other outcome becomes a terminal `Error`.
+    /// is sent. Committed platform waits close without model text;
+    /// rejected outcomes receive a terminal error.
     pub fn finish_outcome(&mut self, outcome: &LoopOutcome) {
         if let LoopOutcome::ContentRejected(decision) = outcome
             && let Some(reason) = stream_retraction_reason_for(*decision)
@@ -140,11 +141,13 @@ impl<S: AgentFrameSink> StreamingTurnSink<S> {
             self.emit_error(content_blocked_error(), Some(reason));
             return;
         }
+
         if let Some(err) = terminal_error_for(outcome) {
             self.error(err);
         }
     }
 
+    #[cfg(test)]
     /// Whether a terminal frame (answer or error) has been emitted.
     pub fn is_terminated(&self) -> bool {
         self.terminated
@@ -633,7 +636,24 @@ mod tests {
         assert_eq!(store.borrow().len(), 1);
     }
 
-    /// Every non-answered outcome maps to a single terminal `Error` frame.
+    #[test]
+    fn a_finished_tool_keeps_stream_open_for_the_model_answer() {
+        let (store, sink) = recorder();
+        let mut stream = StreamingTurnSink::new(sink, "forget");
+        stream.on_tool_finished("manage_memories", true, "forgotten", Some("forget-call"));
+        assert!(!stream.is_terminated());
+        assert!(store.borrow().iter().all(|event| !event.is_terminal()));
+        stream.on_answer_committed("The memory was deleted.");
+        stream.finish_outcome(&LoopOutcome::Answered("The memory was deleted.".into()));
+        let events = store.borrow();
+        assert_eq!(events.iter().filter(|event| event.is_terminal()).count(), 1);
+        assert_eq!(
+            events.last().unwrap().answer.as_deref(),
+            Some("The memory was deleted.")
+        );
+    }
+
+    /// Every rejected outcome maps to a single terminal `Error` frame.
     #[test]
     fn finish_outcome_maps_non_answered_to_terminal_error() {
         let outcomes = [

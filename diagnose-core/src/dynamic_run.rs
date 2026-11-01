@@ -503,6 +503,7 @@ impl BackgroundCancelRequestedRunEvent {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserFollowupEvent {
     pub event: AgentRunEvent,
+    pub client_timezone: String,
     pub actor_id: String,
     pub input_seq: u64,
     pub message_id: String,
@@ -535,6 +536,11 @@ impl TaskStatusUpdatedEvent {
 impl UserFollowupEvent {
     pub fn validate(&self) -> Result<(), DynamicRunContractError> {
         self.event.validate()?;
+        if !crate::ai_assistant::source::valid_statement_timezone(&self.client_timezone) {
+            return Err(DynamicRunContractError::InvalidEnvelope(
+                "invalid input timezone".into(),
+            ));
+        }
         if self.event.kind != AgentRunEventKind::UserFollowup {
             return Err(DynamicRunContractError::WrongEventKind);
         }
@@ -806,8 +812,8 @@ pub enum PermissionDecisionSource {
         reviews: Vec<AiPermissionDecisionEvidence>,
         failures: Vec<SystemPermissionDecisionEvidence>,
     },
-    /// The server could not obtain a trustworthy reviewer verdict. This is a
-    /// non-execution decision, never attributed to the reviewer model or owner.
+    /// The server refused automatic permission issuance. This non-execution
+    /// decision is never attributed to the reviewer model or owner.
     SystemDecision {
         reason_code: String,
         reason: String,

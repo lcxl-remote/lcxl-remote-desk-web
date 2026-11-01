@@ -24,6 +24,14 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.clearAllMocks(); vi.unstubAllGlobals(); });
 describe('durable assistant images', () => {
+    it('keeps image reading but hides deletion in read-only conversation mode', async () => {
+        render(<AssistantImages sessionId="stored-run" evidence={[]} readOnly />);
+        fireEvent.click(await screen.findByRole('button', { name: 'pages.aiAssistant.imageOpen' }));
+        expect(await screen.findByRole('img')).toBeVisible();
+        expect(screen.queryByRole('button', { name: 'pages.aiAssistant.imageDelete' })).toBeNull();
+        expect(deleteAssistantImage).not.toHaveBeenCalled();
+    });
+
     it('labels the stored observation record time and preserves it when reopening', async () => {
         const recordedAt = Date.UTC(2026, 9, 10, 12, 30);
         vi.mocked(listAssistantImages).mockResolvedValue({ data: [{ ...frame, captured_at_unix_ms: recordedAt }], success: true, code: 0 });

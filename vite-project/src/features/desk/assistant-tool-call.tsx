@@ -46,9 +46,9 @@ function batchResult(tool: AiAssistantToolActivity) {
     return null;
 }
 
-export function AssistantToolCall({ tool, running, displayName }: { tool?: AiAssistantToolActivity; running: boolean; displayName?: string }) {
+export function AssistantToolCall({ tool, running, displayName, initialOpen = false }: { tool?: AiAssistantToolActivity; running: boolean; displayName?: string; initialOpen?: boolean }) {
     const { t } = useTranslation();
-    const [open, setOpen] = useState(false);
+    const [open, setOpen] = useState(initialOpen);
     if (!tool) return null;
     const prefix = 'pages.aiAssistant.toolCall.';
     const batch = batchResult(tool);

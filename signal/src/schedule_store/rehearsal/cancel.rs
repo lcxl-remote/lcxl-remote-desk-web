@@ -8,6 +8,7 @@ use desk_diagnose_core::{
 use sea_orm::QuerySelect;
 
 impl ScheduleStore {
+    #[cfg(test)]
     /// Session and action rows are authoritative; an error return alone is insufficient.
     pub async fn finish_cancelled_rehearsal(
         &self,

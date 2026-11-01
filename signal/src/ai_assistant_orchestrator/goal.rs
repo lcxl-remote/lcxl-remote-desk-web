@@ -41,6 +41,7 @@ pub async fn resume_queued_goal(
         goal.slice_seq.saturating_add(1)
     );
     let ask = AiAssistantAsk {
+        temporary_conversation: None,
         question: goal.goal_text.clone(),
         client_message_id: goal.source_message_id.clone(),
         ..Default::default()

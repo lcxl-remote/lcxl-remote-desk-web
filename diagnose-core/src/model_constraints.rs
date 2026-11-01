@@ -1,6 +1,8 @@
-//! Model schema constraints matching existing parser combinations and byte budgets.
+//! Model schema constraints and one shared reminder to follow them.
 use crate::chat::ToolSpec;
 use serde_json::{Value, json};
+
+const SCHEMA_REMINDER: &str = "Follow schema limits.";
 
 pub(crate) fn project(tool: &mut ToolSpec) {
     let schema = &mut tool.parameters_schema;
@@ -63,6 +65,10 @@ pub(crate) fn project(tool: &mut ToolSpec) {
         _ => {}
     }
     add_byte_budgets(schema, &tool.name);
+    if !tool.description.contains(SCHEMA_REMINDER) {
+        tool.description.push(' ');
+        tool.description.push_str(SCHEMA_REMINDER);
+    }
 }
 
 fn add_byte_budgets(schema: &mut Value, tool: &str) {
@@ -117,26 +123,45 @@ fn add_byte_budgets(schema: &mut Value, tool: &str) {
                 && field.is_object()
             {
                 field["x-maxUtf8Bytes"] = json!(limit);
-                let description = field["description"].as_str().unwrap_or("");
-                if !description.contains("UTF-8 bytes") {
-                    field["description"] = json!(format!(
-                        "{description} Maximum {limit} UTF-8 bytes (independent of Unicode character count)."
-                    ));
-                }
             }
         }
     }
-    match schema {
-        Value::Object(object) => {
-            for child in object.values_mut() {
-                add_byte_budgets(child, tool);
+    // Only schema children carry constraints; examples, enums and literal data remain opaque.
+    if let Some(object) = schema.as_object_mut() {
+        for (key, child) in object {
+            match key.as_str() {
+                "properties" | "patternProperties" | "$defs" | "definitions"
+                | "dependentSchemas" => {
+                    if let Some(properties) = child.as_object_mut() {
+                        for field in properties.values_mut() {
+                            add_byte_budgets(field, tool);
+                        }
+                    }
+                }
+                "items"
+                | "additionalProperties"
+                | "contains"
+                | "not"
+                | "if"
+                | "then"
+                | "else"
+                | "oneOf"
+                | "anyOf"
+                | "allOf"
+                | "prefixItems" => {
+                    if let Some(variants) = child.as_array_mut() {
+                        for variant in variants {
+                            add_byte_budgets(variant, tool);
+                        }
+                    } else {
+                        add_byte_budgets(child, tool);
+                    }
+                }
+                _ => {}
             }
         }
-        Value::Array(array) => {
-            for child in array {
-                add_byte_budgets(child, tool);
-            }
-        }
-        _ => {}
     }
 }
+
+#[cfg(test)]
+mod tests;

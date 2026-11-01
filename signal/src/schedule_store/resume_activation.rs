@@ -25,7 +25,10 @@ impl ScheduleStore {
         }
         let txn = crate::db::begin_write(&self.db, crate::entity::agent_schedule::Entity).await?;
         let now = super::authority::authority_now(&txn).await?;
-        let task = Self::create_draft_on(&txn, owner, request, now).await?;
+        let task = desk_diagnose_core::future::send_phase(|| {
+            Self::create_draft_on(&txn, owner, request, now, None)
+        })
+        .await?;
         let result = if task.status == "pending_review" {
             self.enable_conversation_resume_on(
                 &txn,
@@ -117,6 +120,7 @@ impl ScheduleStore {
         {
             return Err(ScheduleStoreError::Conflict);
         }
+        Self::retrieval_consent(&task)?;
         let mut failures: FailureState = serde_json::from_str(&task.failure_state_json)
             .map_err(|_| ScheduleStoreError::Invalid)?;
         if resume {

@@ -79,8 +79,7 @@ impl RuntimeTurn {
                     || session.conversation_id != source.root_conversation_id
                     || session.input_revision != source.parent_input_revision
                     || session.control_revision != source.parent_control_revision
-                    || (session.ready_subagent_wait.is_none()
-                        && session.ready_subagent_notification.is_none())
+                    || session.ready_subagent_wait.is_none()
                     || session.subagent_wait.is_some()
                     || !matches!(source.source, DelegationSource::UserInput { .. })
                 {

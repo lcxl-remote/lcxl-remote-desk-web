@@ -37,8 +37,10 @@ pub mod approval_delegation;
 pub mod approval_egress;
 pub mod approval_review;
 pub mod approval_usage;
+mod assistant_data_model;
 pub mod assistant_policy;
 pub mod background_input;
+#[cfg(test)]
 pub mod browser_control;
 mod browser_model_ids;
 pub mod capability_availability;
@@ -58,6 +60,7 @@ pub mod context_usage;
 pub mod conversation_attachment;
 pub mod conversation_history;
 pub mod conversation_key;
+pub mod conversation_title;
 pub mod data_policy;
 pub mod directory_review;
 pub mod directory_tools;
@@ -112,6 +115,7 @@ pub mod seam;
 pub mod selection;
 pub mod session;
 pub mod session_reclaim;
+#[cfg(any(test, feature = "test-support"))]
 pub mod simulated_grant;
 pub mod sink_authorizer;
 pub mod spreadsheet_formula;
@@ -121,6 +125,8 @@ pub mod task_status_tools;
 pub mod terminal_ai_assistant;
 pub mod terminal_complete;
 pub mod terminal_completion_policy;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_timing;
 mod text_parse;
 pub mod trim;
 pub mod visual_evidence;
@@ -173,9 +179,8 @@ mod file_model_input;
 pub mod model_input;
 pub mod native_ids;
 
-pub mod tool_exposure;
-
 pub mod runtime_context;
+pub mod tool_exposure;
 
 pub mod approval_observation;
 pub mod prompt_cache;

@@ -76,7 +76,7 @@ export function LogSettings() {
                 title: t('pages.system.settings.success'),
                 description: t('pages.log.settings.updateSucceedMessage'),
             })
-        } catch (error) {
+        } catch {
             toast({
                 variant: "destructive",
                 title: t('pages.system.settings.error'),

@@ -1,7 +1,37 @@
 //! AI Assistant-specific prompt and typed, non-executable draft preview.
 
+pub mod assistant_data_admission;
+pub mod citation;
+pub mod current_memory;
+pub mod data_access;
+pub mod data_control;
+pub mod data_tools;
+pub mod history;
 pub mod linux;
+pub mod memory_access;
+pub mod memory_content;
+pub mod memory_control;
+pub mod memory_evidence;
+pub mod native_export;
+pub mod native_history;
+pub mod output_archive;
+pub mod policy;
 mod prerequisites;
+pub mod read_projection;
+pub mod retained_copy;
+pub mod retrieval;
+pub mod retrieval_query;
+pub mod retrieval_rank;
+pub mod retrieval_response;
+pub mod retrieval_state;
+pub mod retrieval_task;
+pub mod scheduled_retrieval;
+pub mod seam;
+pub mod settings;
+pub mod source;
+pub mod source_registry;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod windows_excel;
 pub mod windows_office;
 pub mod windows_text;
@@ -279,17 +309,6 @@ pub fn valid_ui_adapter(
         _ => return false,
     };
     adapter.version == version
-}
-
-pub fn system_diagnostic_capabilities() -> [Capability; 6] {
-    [
-        Capability::SystemInfo,
-        Capability::ProcessList,
-        Capability::NetworkPorts,
-        Capability::ServiceStatus,
-        Capability::LogRecent,
-        Capability::ContainerList,
-    ]
 }
 
 /// Whether a capability can be explicitly selected as read context by a
@@ -929,7 +948,7 @@ fn live_inspect_tool(
                 "additionalProperties": false
             }),
         },
-        required_capability: capability,
+        required_device_capability: Some(capability),
         effect: ToolEffect::ReadOnly,
     }
 }
@@ -947,7 +966,7 @@ fn batch_inspect_tool(name: &str, description: &str, capability: Capability) -> 
                 "additionalProperties": false
             }),
         },
-        required_capability: capability,
+        required_device_capability: Some(capability),
         effect: ToolEffect::ReadOnly,
     }
 }
@@ -1043,7 +1062,7 @@ fn spreadsheet_live_patch_tool() -> RegisteredTool {
                 "additionalProperties": false
             }),
         },
-        required_capability: Capability::SpreadsheetLivePatchConfirmed,
+        required_device_capability: Some(Capability::SpreadsheetLivePatchConfirmed),
         effect: ToolEffect::Mutating,
     }
 }
@@ -1063,7 +1082,7 @@ fn document_live_patch_tool() -> RegisteredTool {
                 "additionalProperties": false
             }),
         },
-        required_capability: Capability::DocumentLivePatchConfirmed,
+        required_device_capability: Some(Capability::DocumentLivePatchConfirmed),
         effect: ToolEffect::Mutating,
     }
 }
@@ -1114,7 +1133,7 @@ fn presentation_live_patch_tool() -> RegisteredTool {
                 "additionalProperties": false
             }),
         },
-        required_capability: Capability::PresentationLivePatchConfirmed,
+        required_device_capability: Some(Capability::PresentationLivePatchConfirmed),
         effect: ToolEffect::Mutating,
     }
 }
@@ -1226,7 +1245,7 @@ fn preview_tool() -> RegisteredTool {
                 "additionalProperties": false
             }),
         },
-        required_capability: Capability::AssistantActionPreview,
+        required_device_capability: Some(Capability::AssistantActionPreview),
         effect: ToolEffect::ReadOnly,
     }
 }
@@ -1235,7 +1254,7 @@ fn execute_ui_actions_tool() -> RegisteredTool {
     RegisteredTool {
         spec: ToolSpec {
             name: EXECUTE_CONFIRMED_UI_ACTION_TOOL.into(),
-            description: "Execute 1–20 ordered semantic UI steps in one application using application_id and steps with observed element_id/action pairs. Reuse an active application_scope grant covering all action kinds; one batch consumes one use. Prefer semantic UI over background input. Stop at the first failure, do not roll back or retry automatically, and read UI afterward to verify application state. Split asynchronous UI dependencies into separate batches with a read between them.".into(),
+            description: "Execute ordered semantic UI steps in one application using application_id and steps with observed element_id/action pairs. Reuse an active application_scope grant covering all action kinds; one batch consumes one use. Prefer semantic UI over background input. Stop at the first failure, do not roll back or retry automatically, and read UI afterward to verify application state. Split asynchronous UI dependencies into separate batches with a read between them.".into(),
             parameters_schema: json!({
                 "type": "object",
                 "properties": {
@@ -1312,7 +1331,7 @@ fn execute_ui_actions_tool() -> RegisteredTool {
                 "additionalProperties": false
             }),
         },
-        required_capability: Capability::DesktopUiActionConfirmed,
+        required_device_capability: Some(Capability::DesktopUiActionConfirmed),
         effect: ToolEffect::Mutating,
     }
 }
@@ -1427,7 +1446,7 @@ fn send_raw_input_tool() -> RegisteredTool {
                 "additionalProperties": false
             }),
         },
-        required_capability: Capability::DesktopInputFallbackConfirmed,
+        required_device_capability: Some(Capability::DesktopInputFallbackConfirmed),
         effect: ToolEffect::Mutating,
     }
 }
@@ -1456,7 +1475,7 @@ fn create_text_artifact_tool() -> RegisteredTool {
                 "additionalProperties": false
             }),
         },
-        required_capability: Capability::FileArtifactCreateConfirmed,
+        required_device_capability: Some(Capability::FileArtifactCreateConfirmed),
         effect: ToolEffect::Mutating,
     }
 }
@@ -1473,7 +1492,7 @@ fn preview_document_tool() -> RegisteredTool {
                 "additionalProperties": false
             }),
         },
-        required_capability: Capability::DocumentPreview,
+        required_device_capability: Some(Capability::DocumentPreview),
         effect: ToolEffect::ReadOnly,
     }
 }
@@ -1505,7 +1524,7 @@ fn convert_document_tool() -> RegisteredTool {
                 "additionalProperties": false
             }),
         },
-        required_capability: Capability::DocumentConvertConfirmed,
+        required_device_capability: Some(Capability::DocumentConvertConfirmed),
         effect: ToolEffect::Mutating,
     }
 }
@@ -1559,7 +1578,7 @@ fn create_local_message_draft_tool() -> RegisteredTool {
                 "additionalProperties": false
             }),
         },
-        required_capability: Capability::CommunicationLocalDraftCreateConfirmed,
+        required_device_capability: Some(Capability::CommunicationLocalDraftCreateConfirmed),
         effect: ToolEffect::Mutating,
     }
 }
@@ -1603,7 +1622,7 @@ fn prepare_outlook_new_handoff_tool() -> RegisteredTool {
                 "additionalProperties": false
             }),
         },
-        required_capability: Capability::CommunicationOutlookNewHandoffConfirmed,
+        required_device_capability: Some(Capability::CommunicationOutlookNewHandoffConfirmed),
         effect: ToolEffect::Mutating,
     }
 }
@@ -1630,7 +1649,7 @@ fn prepare_slack_web_handoff_tool() -> RegisteredTool {
                 "additionalProperties": false
             }),
         },
-        required_capability: Capability::BrowserExternalDraftWriteConfirmed,
+        required_device_capability: Some(Capability::BrowserExternalDraftWriteConfirmed),
         effect: ToolEffect::Mutating,
     }
 }
@@ -1735,7 +1754,7 @@ fn prepare_gmail_web_handoff_tool() -> RegisteredTool {
                 "additionalProperties": false
             }),
         },
-        required_capability: Capability::BrowserExternalDraftWriteConfirmed,
+        required_device_capability: Some(Capability::BrowserExternalDraftWriteConfirmed),
         effect: ToolEffect::Mutating,
     }
 }
@@ -1787,7 +1806,7 @@ fn send_gmail_message_tool() -> RegisteredTool {
                 "additionalProperties": false
             }),
         },
-        required_capability: Capability::BrowserExternalSendConfirmed,
+        required_device_capability: Some(Capability::BrowserExternalSendConfirmed),
         effect: ToolEffect::Mutating,
     }
 }
@@ -1814,7 +1833,7 @@ fn send_slack_message_tool() -> RegisteredTool {
                 "additionalProperties": false
             }),
         },
-        required_capability: Capability::BrowserExternalSendConfirmed,
+        required_device_capability: Some(Capability::BrowserExternalSendConfirmed),
         effect: ToolEffect::Mutating,
     }
 }
@@ -1910,7 +1929,7 @@ fn browser_open_tool() -> RegisteredTool {
                 "additionalProperties": false
             }),
         },
-        required_capability: Capability::BrowserPageNavigateConfirmed,
+        required_device_capability: Some(Capability::BrowserPageNavigateConfirmed),
         effect: ToolEffect::Mutating,
     }
 }
@@ -1938,7 +1957,7 @@ fn browser_navigate_tool() -> RegisteredTool {
                 "additionalProperties": false
             }),
         },
-        required_capability: Capability::BrowserPageNavigateConfirmed,
+        required_device_capability: Some(Capability::BrowserPageNavigateConfirmed),
         effect: ToolEffect::Mutating,
     }
 }
@@ -1947,18 +1966,18 @@ fn browser_snapshot_tool() -> RegisteredTool {
     RegisteredTool {
         spec: ToolSpec {
             name: "browser_take_snapshot".into(),
-            description: "Use this same input as request_permissions.exact_input when read permission is required. Read a bounded semantic accessibility projection from one provider-owned page. Use an observed page_id; max_elements defaults to 60 and accepts 1-512. Approval and execution freeze the same bound. This is semantic JSON, not a screenshot. After navigation, this read can refresh the known tab within the same origin and account; use returned page_id and element_id values for subsequent actions. Static page text, arbitrary DOM, credentials, cookies, storage and non-task tab inventory are excluded.".into(),
+            description: "Use this same input as request_permissions.exact_input when read permission is required. Read a bounded semantic accessibility projection from one provider-owned page. Use an observed page_id; Use max_elements to bound the result. Approval and execution freeze the same bound. This is semantic JSON, not a screenshot. After navigation, this read can refresh the known tab within the same origin and account; use returned page_id and element_id values for subsequent actions. Static page text, arbitrary DOM, credentials, cookies, storage and non-task tab inventory are excluded.".into(),
             parameters_schema: json!({
                 "type": "object",
                 "properties": {
                     "page": browser_page_schema(),
-                    "max_elements": {"type": "integer", "minimum": 1, "maximum": 512, "default":60,"description": "Result count bound; omit for 60."}
+                    "max_elements": {"type": "integer", "minimum": 1, "maximum": 512, "default":60,"description": "Result count bound; omit for the schema default."}
                 },
                 "required": ["page"],
                 "additionalProperties": false
             }),
         },
-        required_capability: Capability::BrowserPageObserve,
+        required_device_capability: Some(Capability::BrowserPageObserve),
         effect: ToolEffect::ReadOnly,
     }
 }
@@ -1967,7 +1986,7 @@ fn browser_wait_tool() -> RegisteredTool {
     RegisteredTool {
         spec: ToolSpec {
             name: "browser_wait_for".into(),
-            description: "Wait for one observed semantic element to remain present. Supply page_id, element_id and timeout_ms (1-30000), including in request_permissions.exact_input; the server fixes state=present and restores the full references. To recover after navigation, use browser_take_snapshot instead of waiting on an old element. The first slice deliberately rejects absent/enabled/disabled predicates that the pinned upstream tool cannot prove.".into(),
+            description: "Wait for one observed semantic element to remain present. Supply page_id, element_id and timeout_ms, including in request_permissions.exact_input; the server fixes state=present and restores the full references. To recover after navigation, use browser_take_snapshot instead of waiting on an old element. The first slice deliberately rejects absent/enabled/disabled predicates that the pinned upstream tool cannot prove.".into(),
             parameters_schema: json!({
                 "type": "object",
                 "properties": {
@@ -1984,7 +2003,7 @@ fn browser_wait_tool() -> RegisteredTool {
                 "additionalProperties": false
             }),
         },
-        required_capability: Capability::BrowserPageObserve,
+        required_device_capability: Some(Capability::BrowserPageObserve),
         effect: ToolEffect::ReadOnly,
     }
 }
@@ -2017,7 +2036,7 @@ fn browser_fill_tool() -> RegisteredTool {
                 "additionalProperties": false
             }),
         },
-        required_capability: Capability::BrowserInputFallbackConfirmed,
+        required_device_capability: Some(Capability::BrowserInputFallbackConfirmed),
         effect: ToolEffect::Mutating,
     }
 }
@@ -2037,7 +2056,7 @@ fn browser_activate_tool() -> RegisteredTool {
                 "additionalProperties": false
             }),
         },
-        required_capability: Capability::BrowserInputFallbackConfirmed,
+        required_device_capability: Some(Capability::BrowserInputFallbackConfirmed),
         effect: ToolEffect::Mutating,
     }
 }
@@ -2067,7 +2086,7 @@ fn create_spreadsheet_artifact_tool() -> RegisteredTool {
                 "additionalProperties": false
             }),
         },
-        required_capability: Capability::SpreadsheetWorkbookCreateConfirmed,
+        required_device_capability: Some(Capability::SpreadsheetWorkbookCreateConfirmed),
         effect: ToolEffect::Mutating,
     }
 }
@@ -2104,7 +2123,7 @@ fn create_spreadsheet_formula_artifact_tool() -> RegisteredTool {
                 "additionalProperties": false
             }),
         },
-        required_capability: Capability::SpreadsheetFormulaWorkbookCreateConfirmed,
+        required_device_capability: Some(Capability::SpreadsheetFormulaWorkbookCreateConfirmed),
         effect: ToolEffect::Mutating,
     }
 }
@@ -2161,7 +2180,7 @@ fn create_word_report_artifact_tool() -> RegisteredTool {
                 "additionalProperties": false
             }),
         },
-        required_capability: Capability::WordDocumentCreateConfirmed,
+        required_device_capability: Some(Capability::WordDocumentCreateConfirmed),
         effect: ToolEffect::Mutating,
     }
 }
@@ -2206,7 +2225,7 @@ fn exec_command_tool() -> RegisteredTool {
                 "additionalProperties": false
             }),
         },
-        required_capability: Capability::ShellExecConfirmed,
+        required_device_capability: Some(Capability::ShellExecConfirmed),
         effect: ToolEffect::Mutating,
     }
 }
@@ -2231,7 +2250,7 @@ fn fetch_public_web_page_tool() -> RegisteredTool {
                 "additionalProperties": false
             }),
         },
-        required_capability: Capability::WebResearchFetch,
+        required_device_capability: Some(Capability::WebResearchFetch),
         effect: ToolEffect::ReadOnly,
     }
 }
@@ -2261,7 +2280,7 @@ fn search_public_web_tool() -> RegisteredTool {
                 "additionalProperties": false
             }),
         },
-        required_capability: Capability::WebResearchSearch,
+        required_device_capability: Some(Capability::WebResearchSearch),
         effect: ToolEffect::ReadOnly,
     }
 }
@@ -2367,7 +2386,9 @@ fn provider_for_tool(
             exposure,
             wire,
             tool_spec: tool.spec,
-            required_capability: tool.required_capability,
+            required_capability: tool
+                .required_device_capability
+                .expect("device Provider tools declare their capability"),
             adapter_ids,
         }],
     }
@@ -3780,11 +3801,6 @@ pub fn ai_assistant_edge_adapter_registry() -> EdgeAdapterRegistry {
         .expect("static AI Assistant edge adapter registry must be valid")
 }
 
-/// Agent-loop projection generated exclusively from the Provider Registry.
-pub fn ai_assistant_tool_registry() -> Vec<RegisteredTool> {
-    ai_assistant_provider_registry().registered_tools()
-}
-
 /// Parse and fully validate a model-produced preview. The returned canonical
 /// JSON is safe to persist/display as untrusted text; no sealed plan is created.
 pub fn validate_preview_call(call: &ToolCall) -> Result<String, AgentError> {
@@ -4127,7 +4143,7 @@ mod tests {
     #[test]
     fn desktop_reads_are_planning_candidates_without_implicit_authority() {
         let providers = ai_assistant_provider_registry();
-        let mut tools = ai_assistant_tool_registry();
+        let mut tools = ai_assistant_provider_registry().registered_tools();
         retain_selected_context_tools(&providers, &mut tools, &[]);
         let scope = selected_context_capabilities(&[]).unwrap();
         for name in [
@@ -4136,7 +4152,7 @@ mod tests {
             "read_current_screen",
         ] {
             let tool = tools.iter().find(|t| t.name() == name).unwrap();
-            assert!(!scope.contains(&tool.required_capability));
+            assert!(!tool.has_device_capability(&scope));
             let descriptor = providers.capability_for_tool(name).unwrap();
             assert_eq!(
                 crate::capability_risk::classify_provider_descriptor_floor(
@@ -4162,7 +4178,7 @@ mod tests {
 
     #[test]
     fn file_source_schemas_use_discriminated_result_selectors() {
-        let tools = ai_assistant_tool_registry();
+        let tools = ai_assistant_provider_registry().registered_tools();
         for name in [
             "inspect_numbers_file",
             "inspect_pages_file",
@@ -4287,7 +4303,7 @@ mod tests {
 
     #[test]
     fn registry_contains_reads_preview_and_bounded_artifact_create() {
-        let tools = ai_assistant_tool_registry();
+        let tools = ai_assistant_provider_registry().registered_tools();
         assert_eq!(tools.len(), 63);
         assert_eq!(
             tools
@@ -4595,7 +4611,7 @@ mod tests {
             crate::provider_preflight::text_file::selection::add_schema(tool);
         }
         legacy.sort_by(|left, right| left.name().cmp(right.name()));
-        let projected = ai_assistant_tool_registry();
+        let projected = ai_assistant_provider_registry().registered_tools();
         assert_eq!(projected.len(), legacy.len());
         for (actual, expected) in projected.iter().zip(&legacy) {
             let mut spec = actual.spec.clone();
@@ -4609,7 +4625,10 @@ mod tests {
                 assert_eq!(selector["maxLength"], 256);
             }
             assert_eq!(spec, expected.spec);
-            assert_eq!(actual.required_capability, expected.required_capability);
+            assert_eq!(
+                actual.required_device_capability,
+                expected.required_device_capability
+            );
             assert_eq!(actual.effect, expected.effect);
         }
     }
@@ -4755,7 +4774,7 @@ mod tests {
     #[test]
     fn context_selection_keeps_system_tools_and_is_exact_for_selected_context() {
         let providers = ai_assistant_provider_registry();
-        let mut empty = ai_assistant_tool_registry();
+        let mut empty = ai_assistant_provider_registry().registered_tools();
         retain_selected_context_tools(&providers, &mut empty, &[]);
         assert_eq!(empty.iter().map(|tool| tool.name()).collect::<Vec<_>>(), {
             let mut expected = vec![
@@ -4809,7 +4828,7 @@ mod tests {
         });
 
         let selected = vec![DESKTOP_SESSION_CAPABILITY_ID.to_string()];
-        let mut tools = ai_assistant_tool_registry();
+        let mut tools = ai_assistant_provider_registry().registered_tools();
         retain_selected_context_tools(&providers, &mut tools, &selected);
         assert_eq!(tools.iter().map(|tool| tool.name()).collect::<Vec<_>>(), {
             let mut expected = vec![

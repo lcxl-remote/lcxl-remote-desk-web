@@ -44,6 +44,9 @@ async fn active_parent_for_group(db: &DatabaseConnection, group_id: &str) -> Per
     let deadline = chrono::DateTime::from_timestamp_millis(5_000).unwrap();
     session_row::Entity::update_many()
         .set(session_row::ActiveModel {
+            conversation_schema_version: Set(Some(i32::from(
+                desk_diagnose_core::session::CONVERSATION_SCHEMA_VERSION,
+            ))),
             state_json: Set(parent.encode_json_for_storage().unwrap()),
             version: Set(parent.version),
             lease_token: Set(parent.lease_token as i64),
@@ -188,7 +191,7 @@ async fn unknown_usage_stays_reserved_and_late_settlement_does_not_resume_a_paus
 
 #[tokio::test]
 async fn recent_presentation_keeps_an_unfinished_task_that_is_outside_the_page() {
-    let db = database().await;
+    let db = source_isolation_database().await;
     seed_parent(&db).await;
     let active = seed_task(&db, "first", "goal-first").await;
     for index in 0..11 {
@@ -254,6 +257,7 @@ async fn explicit_child_adjustment_is_idempotent_and_never_resets_source_limits(
         expected_input_revision: 1,
         expected_control_revision: 1,
         action: SubAgentControlAction::Adjust {
+            client_timezone: "UTC".into(),
             message: "Inspect the second symptom".into(),
         },
     };
@@ -282,6 +286,7 @@ async fn explicit_child_adjustment_is_idempotent_and_never_resets_source_limits(
     );
     let mut conflicting = request.clone();
     conflicting.action = SubAgentControlAction::Adjust {
+        client_timezone: "UTC".into(),
         message: "Different objective".into(),
     };
     assert!(
@@ -305,7 +310,7 @@ async fn terminal_cancellation_cannot_be_reopened_and_controls_do_not_change_sib
     use desk_agent_protocol::ai_assistant::subagent::{
         AiAssistantSubAgentControl, SubAgentControlAction,
     };
-    let db = database().await;
+    let db = source_isolation_database().await;
     seed_parent(&db).await;
     let first = seed_task(&db, "a", "goal-a").await;
     let sibling = seed_task(&db, "b", "goal-b").await;
@@ -330,6 +335,7 @@ async fn terminal_cancellation_cannot_be_reopened_and_controls_do_not_change_sib
         client_request_id: "adjust-cancelled".into(),
         expected_control_revision: result.task.control_revision,
         action: SubAgentControlAction::Adjust {
+            client_timezone: "UTC".into(),
             message: "Start again".into(),
         },
         ..request
@@ -363,6 +369,9 @@ async fn source_pause_rotates_child_session_fence_but_preserves_approval_recordi
     old.version = row.version + 1;
     session_row::Entity::update_many()
         .set(session_row::ActiveModel {
+            conversation_schema_version: Set(Some(i32::from(
+                desk_diagnose_core::session::CONVERSATION_SCHEMA_VERSION,
+            ))),
             state_json: Set(old.encode_json_for_storage().unwrap()),
             version: Set(old.version),
             lease_token: Set(old.lease_token as i64),
@@ -500,31 +509,28 @@ async fn database() -> DatabaseConnection {
     database_at("sqlite::memory:").await
 }
 
-async fn database_at(url: &str) -> DatabaseConnection {
-    let db = crate::config::test_support::Database::connect(url)
+// Store isolation tests inject independent Goal sources into one root.
+// Native opening/input tests use database() with the complete startup schema.
+async fn source_isolation_database() -> DatabaseConnection {
+    let db = crate::config::test_support::Database::connect("sqlite::memory:")
         .await
         .unwrap();
     let schema = Schema::new(db.get_database_backend());
     for statement in [
         schema.create_table_from_entity(session_row::Entity),
-        schema.create_table_from_entity(crate::entity::agent_file_recovery_cleanup::Entity),
-        schema.create_table_from_entity(crate::entity::agent_permission_resume::Entity),
-        schema.create_table_from_entity(crate::entity::agent_action_item::Entity),
-        schema.create_table_from_entity(crate::entity::agent_capability_dispatch_outbox::Entity),
-        schema.create_table_from_entity(crate::entity::agent_exec_task::Entity),
-        schema.create_table_from_entity(group_row::Entity),
-        schema.create_table_from_entity(goal_row::Entity),
         schema.create_table_from_entity(crate::entity::model_egress_receipt::Entity),
-        schema.create_table_from_entity(run_row::Entity),
-        schema.create_table_from_entity(crate::entity::agent_subagent_inbox::Entity),
-        schema.create_table_from_entity(crate::entity::agent_delegation_reservation::Entity),
-        schema.create_table_from_entity(crate::entity::agent_approval_review::Entity),
-        schema.create_table_from_entity(crate::entity::agent_approval_attempt::Entity),
-        schema.create_table_from_entity(crate::entity::agent_approval_delegation::Entity),
     ] {
         db.execute(&statement).await.unwrap();
     }
     crate::db::ensure_lifecycle_tables(&db).await;
+    db
+}
+
+async fn database_at(url: &str) -> DatabaseConnection {
+    let db = crate::config::test_support::Database::connect(url)
+        .await
+        .unwrap();
+    crate::db::initialize_schema(&db).await.unwrap();
     db
 }
 
@@ -543,6 +549,9 @@ async fn insert_session(db: &DatabaseConnection, session: &PersistedAgentSession
         conversation_id: Set(session.conversation_id.clone()),
         actor_id: Set(session.actor_id.clone()),
         device_id: Set(session.device_id.clone()),
+        conversation_schema_version: Set(Some(i32::from(
+            desk_diagnose_core::session::CONVERSATION_SCHEMA_VERSION,
+        ))),
         state_json: Set(session.encode_json_for_storage().unwrap()),
         version: Set(session.version),
         lease_token: Set(session.lease_token as i64),
@@ -778,7 +787,7 @@ async fn load(db: &DatabaseConnection, task_id: &str) -> SubAgentRun {
 
 #[tokio::test]
 async fn goal_pause_and_resume_only_change_the_matching_source_group() {
-    let db = database().await;
+    let db = source_isolation_database().await;
     seed_parent(&db).await;
     let first = seed_task(&db, "a", "goal-a").await;
     let second = seed_task(&db, "b", "goal-b").await;
@@ -878,7 +887,7 @@ async fn expired_paused_child_fails_without_extending_deadline() {
 
 #[tokio::test]
 async fn bounded_pages_and_results_are_owner_root_scoped() {
-    let db = database().await;
+    let db = source_isolation_database().await;
     seed_parent(&db).await;
     let first = seed_task(&db, "a", "goal-a").await;
     seed_task(&db, "b", "goal-b").await;
@@ -942,4 +951,23 @@ async fn expired_child_review_reports_its_fixed_deadline_instead_of_a_storage_fa
         matches!(failure, DbErr::Custom(message) if CallRejection::from_storage(&message) == Some(CallRejection::TaskExpired))
     );
     txn.rollback().await.unwrap();
+}
+
+async fn seed_unreadable_session(db: &DatabaseConnection) -> session_row::Model {
+    use sea_orm::IntoActiveModel;
+    let original = session_row::Entity::find()
+        .filter(session_row::Column::ConversationId.eq("root"))
+        .one(db)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut json: serde_json::Value = serde_json::from_str(&original.state_json).unwrap();
+    json["assistant_data"] = serde_json::json!({"model_history_exclusions": []});
+    let mut row = original.into_active_model();
+    row.id = sea_orm::ActiveValue::NotSet;
+    row.conversation_id = Set("unreadable-session".into());
+    row.state_json = Set(serde_json::to_string(&json).unwrap());
+    let stored = row.insert(db).await.unwrap();
+    assert!(PersistedAgentSession::decode_json(&stored.state_json).is_err());
+    stored
 }

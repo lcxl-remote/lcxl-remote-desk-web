@@ -1,7 +1,8 @@
 //! Tool registry and the server-authoritative exposure matrix.
 //!
-//! A [`RegisteredTool`] binds a model-facing [`ToolSpec`] to the [`Capability`]
-//! it requires and the [`ToolEffect`] it has. [`exposed_tools`] is the first line
+//! A [`RegisteredTool`] binds a model-facing [`ToolSpec`] to its optional device
+//! [`Capability`] and its [`ToolEffect`]. Internal tools carry no device capability.
+//! [`exposed_tools`] is the first line
 //! of prompt-injection defence (§D8): the model is only ever shown the tools that
 //! the current scope grants and the current mode permits — and a mutating tool is
 //! independent of prior action failures.
@@ -42,6 +43,12 @@ pub enum ToolEffect {
     /// Loads a bounded, re-authorized page of older user-visible messages from
     /// this same conversation. It grants no device or execution authority.
     ConversationHistory,
+    /// Searches or reads other personal conversations under a frozen owner scope.
+    AssistantHistory,
+    /// Reads current owner facts without any device capability or execution authority.
+    MemoryQuery,
+    /// Maintains stable owner facts; data controls require their own exact batch.
+    MemoryWrite,
     /// Resolves one candidate directory and stores pending owner consent only.
     DirectoryPlanning,
     /// Creates only an owner-reviewable schedule draft from a user turn.
@@ -62,16 +69,28 @@ pub enum ToolEffect {
     SubAgentWait,
 }
 
-/// A tool registered with the agent loop: its model-facing spec, the capability
-/// it requires (for scope gating), and its effect (for mode / approval gating).
+/// A model-facing tool, its optional device grant, and its effect. Internal data
+/// tools are additionally gated by the original assistant data scope.
 #[derive(Debug, Clone)]
 pub struct RegisteredTool {
     pub spec: ToolSpec,
-    pub required_capability: Capability,
+    pub required_device_capability: Option<Capability>,
     pub effect: ToolEffect,
 }
 
+impl ToolEffect {
+    #[cfg(test)]
+    pub fn requires_device_capability(self) -> bool {
+        matches!(self, Self::ReadOnly | Self::Mutating)
+    }
+}
+
 impl RegisteredTool {
+    pub fn has_device_capability(&self, granted: &[Capability]) -> bool {
+        self.required_device_capability
+            .is_some_and(|capability| granted.contains(&capability))
+    }
+
     /// The tool's model-facing name.
     pub fn name(&self) -> &str {
         &self.spec.name
@@ -90,6 +109,9 @@ fn mode_allows_effect(mode: ExecutionMode, effect: ToolEffect) -> bool {
         | ToolEffect::PermissionPlanning
         | ToolEffect::CapabilityDiscovery
         | ToolEffect::ConversationHistory
+        | ToolEffect::AssistantHistory
+        | ToolEffect::MemoryQuery
+        | ToolEffect::MemoryWrite
         | ToolEffect::DirectoryPlanning
         | ToolEffect::SchedulePlanning
         | ToolEffect::ScheduleQuery
@@ -129,17 +151,6 @@ pub fn exposure_block_reason(
     execution_state: &ExecutionState,
     origin: TriggerOrigin,
 ) -> Option<&'static str> {
-    if origin == TriggerOrigin::SubAgentCompletion
-        && !matches!(
-            tool.effect,
-            ToolEffect::SubAgentQuery
-                | ToolEffect::SubAgentWait
-                | ToolEffect::RunProjection
-                | ToolEffect::ConversationHistory
-        )
-    {
-        return Some("subagent_completion_allows_existing_dependency_queries_only");
-    }
     if matches!(
         tool.effect,
         ToolEffect::SubAgentPlanning | ToolEffect::SubAgentControl
@@ -183,20 +194,41 @@ pub fn exposure_block_reason(
     if tool.effect == ToolEffect::ConversationHistory {
         return None;
     }
+    if matches!(
+        tool.effect,
+        ToolEffect::MemoryQuery | ToolEffect::MemoryWrite | ToolEffect::AssistantHistory
+    ) {
+        return (!matches!(
+            origin,
+            TriggerOrigin::User
+                | TriggerOrigin::PermissionDecision
+                | TriggerOrigin::GoalContinuation
+                | TriggerOrigin::ScheduledTask
+                | TriggerOrigin::ScheduledContinuation
+                | TriggerOrigin::SubAgentCompletion
+        ))
+        .then_some("trigger_origin_has_no_assistant_data_scope");
+    }
     if tool.effect == ToolEffect::SchedulePlanning {
         return (origin != TriggerOrigin::User).then_some("trigger_origin_disallows_planning");
     }
     if tool.effect == ToolEffect::ScheduleQuery {
         return (!matches!(
             origin,
-            TriggerOrigin::User | TriggerOrigin::DelegatedTask | TriggerOrigin::PermissionDecision
+            TriggerOrigin::User
+                | TriggerOrigin::DelegatedTask
+                | TriggerOrigin::PermissionDecision
+                | TriggerOrigin::SubAgentCompletion
         ))
         .then_some("trigger_origin_disallows_schedule_query");
     }
     if tool.effect == ToolEffect::DirectoryPlanning {
         return (!origin.allows_new_mutation()).then_some("trigger_origin_disallows_mutation");
     }
-    if !scope.granted.contains(&tool.required_capability) {
+    if tool
+        .required_device_capability
+        .is_none_or(|capability| !scope.granted.contains(&capability))
+    {
         return Some("missing_scope_capability");
     }
     if !mode_allows_effect(scope.mode, tool.effect) {
@@ -252,6 +284,7 @@ pub fn exposed_for_session<'a>(
     .into_iter()
     .filter(|tool| {
         session.agent_role.allows_effect(tool.effect)
+            && crate::ai_assistant::data_tools::session_allows(tool, session)
             && (!session.is_subagent_result_turn()
                 || matches!(
                     tool.effect,
@@ -262,7 +295,10 @@ pub fn exposed_for_session<'a>(
                 ))
             && (tool.effect != ToolEffect::ScheduleQuery
                 || !session.agent_role.is_main()
-                || session.trigger_origin == TriggerOrigin::User)
+                || matches!(
+                    session.trigger_origin,
+                    TriggerOrigin::User | TriggerOrigin::SubAgentCompletion
+                ))
     })
     .collect()
 }
@@ -281,6 +317,7 @@ pub fn lookup_for_session<'a>(
     )
     .filter(|tool| {
         session.agent_role.allows_effect(tool.effect)
+            && crate::ai_assistant::data_tools::session_allows(tool, session)
             && (!session.is_subagent_result_turn()
                 || matches!(
                     tool.effect,
@@ -291,7 +328,10 @@ pub fn lookup_for_session<'a>(
                 ))
             && (tool.effect != ToolEffect::ScheduleQuery
                 || !session.agent_role.is_main()
-                || session.trigger_origin == TriggerOrigin::User)
+                || matches!(
+                    session.trigger_origin,
+                    TriggerOrigin::User | TriggerOrigin::SubAgentCompletion
+                ))
     })
 }
 
@@ -307,7 +347,7 @@ mod tests {
                 description: "t".into(),
                 parameters_schema: json!({"type":"object"}),
             },
-            required_capability: cap,
+            required_device_capability: effect.requires_device_capability().then_some(cap),
             effect,
         }
     }

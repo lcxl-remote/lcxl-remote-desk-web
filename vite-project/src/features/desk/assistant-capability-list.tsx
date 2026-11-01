@@ -37,7 +37,6 @@ export function AssistantCapabilityList({ entries, loading, error, refreshDisabl
     })).filter((group) => group.entries.length > 0);
     return (
         <section data-testid="ai-assistant-capability-inventory" className="space-y-4">
-            <p className="text-sm text-muted-foreground">{t('pages.aiAssistant.workspace.capabilityHint')}</p>
             <div className="flex items-center gap-2">
                 <Input value={query} onChange={(event) => setQuery(event.target.value)}
                     aria-label={t('pages.aiAssistant.workspace.capabilitySearch')}

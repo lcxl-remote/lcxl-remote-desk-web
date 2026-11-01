@@ -122,6 +122,7 @@ impl HostDataPaths {
         Self::resolve(HostDataScope::current(), config_override)
     }
 
+    #[cfg(test)]
     pub fn for_test(root: impl AsRef<Path>) -> Result<Self, HostDataPathError> {
         let root = absolute_path(root.as_ref())?;
         let config_file = root.join("config").join("config.toml");
@@ -157,6 +158,7 @@ impl HostDataPaths {
         self.scope
     }
 
+    #[cfg(test)]
     pub fn is_explicit(&self) -> bool {
         self.explicit_config
     }

@@ -4,14 +4,14 @@ use crate::entity::{agent_action_item as work_item, agent_schedule_run as run, a
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set};
 
 impl ScheduleStore {
-    pub(super) async fn approval_wait_candidates(
+    pub(super) async fn wait_expiry_candidates(
         &self,
         after: i64,
         limit: u64,
     ) -> Result<Vec<run::Model>, ScheduleStoreError> {
         Ok(run::Entity::find()
             .filter(run::Column::Id.gt(after))
-            .filter(run::Column::Status.eq("awaiting_permission"))
+            .filter(run::Column::Status.is_in(["awaiting_permission"]))
             .filter(run::Column::FailureAccounted.eq(false))
             .filter(run::Column::FinishedAt.is_null())
             .order_by_asc(run::Column::Id)

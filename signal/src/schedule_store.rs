@@ -6,7 +6,7 @@ use desk_diagnose_core::schedule::{
     SCHEDULE_CALC_VERSION, lifecycle::FailureState, normalize_draft,
 };
 use sea_orm::{
-    ColumnTrait, DbErr, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set,
+    ColumnTrait, DbErr, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait,
     sea_query::OnConflict,
 };
 use sha2::{Digest, Sha256};
@@ -85,6 +85,7 @@ mod settlement;
 #[derive(Debug)]
 pub enum ScheduleStoreError {
     Invalid,
+    ToolInput(&'static str),
     NotFound,
     Conflict,
     BudgetExceeded,
@@ -229,16 +230,21 @@ impl ScheduleStore {
         request: &ScheduleDraft,
         now_ms: i64,
     ) -> Result<entity::Model, ScheduleStoreError> {
-        Self::create_draft_on(&self.db, owner, request, now_ms).await
+        let txn = self.db.begin().await?;
+        let task = desk_diagnose_core::future::send_phase(|| {
+            Self::create_draft_on(&txn, owner, request, now_ms, None)
+        })
+        .await?;
+        txn.commit().await?;
+        Ok(task)
     }
 
-    pub(crate) async fn create_draft_on<
-        C: sea_orm::ConnectionTrait + crate::config::ConfigConnection,
-    >(
-        db: &C,
+    pub(crate) async fn create_draft_on(
+        db: &crate::config::connection::DatabaseTransaction,
         owner: i32,
         request: &ScheduleDraft,
         now_ms: i64,
+        original: Option<&desk_diagnose_core::session::PersistedAgentSession>,
     ) -> Result<entity::Model, ScheduleStoreError> {
         if owner <= 0 || now_ms < 0 {
             return Err(ScheduleStoreError::Invalid);
@@ -246,11 +252,50 @@ impl ScheduleStore {
         let request = normalize_draft(request).map_err(|_| ScheduleStoreError::Invalid)?;
         let creation_identity = digest(&json(&(owner, &request.client_create_key))?);
         let payload_hash = digest(&json(&request)?);
+        // An idempotent retry returns the original consent, even after a later
+        // input or settings change. It must not capture another episode.
+        if let Some(existing) = entity::Entity::find()
+            .filter(entity::Column::CreationIdentity.eq(&creation_identity))
+            .filter(entity::Column::OwnerUserId.eq(owner))
+            .one(db)
+            .await?
+        {
+            return if existing.creation_payload_sha256 == payload_hash {
+                Ok(existing)
+            } else {
+                Err(ScheduleStoreError::Conflict)
+            };
+        }
+        let schedule_id = desk_diagnose_core::native_ids::from_bytes(
+            desk_diagnose_core::native_ids::Kind::Schedule,
+            uuid::Uuid::new_v4().as_bytes(),
+        );
+        let retrieval_consent = desk_diagnose_core::future::send_phase(|| {
+            Self::capture_retrieval_consent_on(db, owner, &schedule_id, &request, original)
+        })
+        .await?;
+        let prompt_actor = owner.to_string();
+        let prompt_retention = if request.kind
+            == desk_agent_protocol::schedule::ScheduledTaskKind::FreshTask
+            && request.creation_source
+                == desk_agent_protocol::schedule::ScheduleCreationSource::Manual
+        {
+            Some(
+                desk_diagnose_core::future::send_phase(|| {
+                    Self::owner_prompt_retention_on(
+                        db,
+                        &prompt_actor,
+                        &request.target_device_id,
+                        &request.prompt,
+                    )
+                })
+                .await?,
+            )
+        } else {
+            None
+        };
         let model = entity::ActiveModel {
-            schedule_id: Set(desk_diagnose_core::native_ids::from_bytes(
-                desk_diagnose_core::native_ids::Kind::Schedule,
-                uuid::Uuid::new_v4().as_bytes(),
-            )),
+            schedule_id: Set(schedule_id),
             owner_user_id: Set(owner),
             target_device_id: Set(request.target_device_id),
             kind: Set(json(&request.kind)?.trim_matches('"').to_string()),
@@ -280,6 +325,8 @@ impl ScheduleStore {
             creation_payload_sha256: Set(payload_hash.clone()),
             source_conversation_id: Set(request.source_conversation_id),
             requirement_revision: Set(request.requirement_revision.map(|r| r as i64)),
+            retrieval_consent_json: Set(retrieval_consent),
+            prompt_retention_json: Set(prompt_retention),
             contract_revision: Set(None),
             authorization_revision: Set(None),
             failure_state_json: Set(json(&FailureState::default())?),
@@ -306,6 +353,185 @@ impl ScheduleStore {
             return Err(ScheduleStoreError::Conflict);
         }
         Ok(row)
+    }
+
+    /// Capture only the original owner-bound source under the caller's root
+    /// transaction. Neither the public draft nor current global settings can
+    /// supply or enlarge this consent.
+    async fn capture_retrieval_consent_on(
+        db: &crate::config::connection::DatabaseTransaction,
+        owner: i32,
+        schedule_id: &str,
+        request: &ScheduleDraft,
+        original: Option<&desk_diagnose_core::session::PersistedAgentSession>,
+    ) -> Result<Option<String>, ScheduleStoreError> {
+        if owner != crate::control_authorizer::SINGLE_ACCOUNT_USER_ID {
+            return Err(ScheduleStoreError::NotFound);
+        }
+        use crate::entity::agent_session;
+        use desk_diagnose_core::{
+            ai_assistant::scheduled_retrieval::TaskRetrievalConsent, session::PersistedAgentSession,
+        };
+        let source = original
+            .map(|source| source.conversation_id.as_str())
+            .or(request.source_conversation_id.as_deref());
+        let Some(source) = source else {
+            return desk_diagnose_core::future::send_phase(|| {
+                Self::capture_definition_consent_on(db, owner, schedule_id, request)
+            })
+            .await
+            .map(Some)
+            .map_err(|error| match error {
+                crate::assistant_data_store::AssistantStoreError::Backend(error) => {
+                    ScheduleStoreError::Backend(error)
+                }
+                crate::assistant_data_store::AssistantStoreError::Inaccessible => {
+                    ScheduleStoreError::NotFound
+                }
+                _ => ScheduleStoreError::Invalid,
+            });
+        };
+
+        let row = agent_session::Entity::find()
+            .filter(agent_session::Column::ConversationId.eq(source))
+            .filter(agent_session::Column::ActorId.eq(owner.to_string()))
+            .filter(agent_session::Column::DeviceId.eq(&request.target_device_id))
+            .one(db)
+            .await?
+            .ok_or(ScheduleStoreError::NotFound)?;
+        let session = Box::new(
+            PersistedAgentSession::decode_json(&row.state_json)
+                .map_err(|_| ScheduleStoreError::Invalid)?,
+        );
+        if session.actor_id != owner.to_string()
+            || session.device_id != request.target_device_id
+            || session.conversation_id != source
+            || session.version != row.version
+            || i64::try_from(session.lease_token).ok() != Some(row.lease_token)
+            || request
+                .source_conversation_id
+                .as_deref()
+                .is_some_and(|id| id != source)
+            || request
+                .requirement_revision
+                .is_some_and(|revision| revision != session.input_revision)
+            || original.is_some_and(|expected| expected != session.as_ref())
+        {
+            return Err(ScheduleStoreError::Conflict);
+        }
+        let captured_at = authority::authority_now(db).await?;
+        let consent = TaskRetrievalConsent::capture(
+            schedule_id,
+            1,
+            &session,
+            captured_at
+                .try_into()
+                .map_err(|_| ScheduleStoreError::Invalid)?,
+        )
+        .map_err(|_| ScheduleStoreError::Invalid)?
+        .encode()
+        .map_err(|_| ScheduleStoreError::Invalid)?;
+        // All source writers use this row. Retain both the complete decode and
+        // the exact original bytes; a transaction is not a single snapshot.
+        let locked = agent_session::Entity::update_many()
+            .set(agent_session::ActiveModel {
+                version: Set(row.version),
+                ..Default::default()
+            })
+            .filter(agent_session::Column::Id.eq(row.id))
+            .filter(agent_session::Column::ConversationId.eq(source))
+            .filter(agent_session::Column::ActorId.eq(&session.actor_id))
+            .filter(agent_session::Column::DeviceId.eq(&session.device_id))
+            .filter(agent_session::Column::Version.eq(row.version))
+            .filter(agent_session::Column::LeaseToken.eq(row.lease_token))
+            .filter(agent_session::Column::StateJson.eq(&row.state_json))
+            .exec(db)
+            .await?;
+        if locked.rows_affected != 1 {
+            return Err(ScheduleStoreError::Conflict);
+        }
+        let current = agent_session::Entity::find_by_id(row.id)
+            .one(db)
+            .await?
+            .ok_or(ScheduleStoreError::NotFound)?;
+        let decoded = Box::new(
+            PersistedAgentSession::decode_json(&current.state_json)
+                .map_err(|_| ScheduleStoreError::Invalid)?,
+        );
+        if current != row || decoded != session {
+            return Err(ScheduleStoreError::Conflict);
+        }
+        Ok(Some(consent))
+    }
+
+    async fn capture_definition_consent_on(
+        db: &crate::config::connection::DatabaseTransaction,
+        owner: i32,
+        schedule_id: &str,
+        request: &ScheduleDraft,
+    ) -> Result<String, crate::assistant_data_store::AssistantStoreError> {
+        use crate::{assistant_data_store as data, config::ConfigConnection};
+        use desk_diagnose_core::ai_assistant::scheduled_retrieval::TaskRetrievalConsent;
+        if owner != crate::control_authorizer::SINGLE_ACCOUNT_USER_ID {
+            return Err(data::AssistantStoreError::Inaccessible);
+        }
+        let actor = owner.to_string();
+        data::ensure_runtime_on(db, &actor).await?;
+        let config = db.config_read().await;
+        let runtime = data::runtime_on(db, &actor).await?;
+        let now = authority::authority_now(db)
+            .await
+            .map_err(|error| match error {
+                ScheduleStoreError::Backend(error) => data::AssistantStoreError::Backend(error),
+                _ => data::AssistantStoreError::Invalid("invalid task snapshot clock"),
+            })?;
+        let mut consent = TaskRetrievalConsent::capture_definition(
+            schedule_id,
+            1,
+            &actor,
+            &request.target_device_id,
+            &config.assistant_user_instructions,
+            request
+                .time_confirmation
+                .as_ref()
+                .map_or("UTC", |confirmation| confirmation.input.timezone.as_str()),
+            data::unsigned(now)?,
+        )
+        .map_err(data::AssistantStoreError::Invalid)?;
+        let seed = consent.assistant_seed.as_mut().unwrap();
+        seed.memory_state_generation = data::unsigned(runtime.memory_state_generation)?;
+        seed.control_generation = data::unsigned(runtime.control_generation)?;
+        consent.encode().map_err(data::AssistantStoreError::Invalid)
+    }
+
+    pub(super) fn retrieval_consent(
+        task: &entity::Model,
+    ) -> Result<
+        Option<desk_diagnose_core::ai_assistant::scheduled_retrieval::TaskRetrievalConsent>,
+        ScheduleStoreError,
+    > {
+        use desk_diagnose_core::ai_assistant::scheduled_retrieval::TaskRetrievalConsent;
+        let Some(raw) = task.retrieval_consent_json.as_deref() else {
+            return Ok(None);
+        };
+        let consent = TaskRetrievalConsent::decode(raw).map_err(|_| ScheduleStoreError::Invalid)?;
+        consent
+            .validate_definition(
+                &task.schedule_id,
+                task.task_revision
+                    .try_into()
+                    .map_err(|_| ScheduleStoreError::Invalid)?,
+                &task.owner_user_id.to_string(),
+                &task.target_device_id,
+                consent.source_conversation_id.as_deref(),
+            )
+            .map_err(|_| ScheduleStoreError::Conflict)?;
+        if task.kind == "conversation_resume"
+            && task.source_conversation_id.as_deref() != consent.source_conversation_id.as_deref()
+        {
+            return Err(ScheduleStoreError::Conflict);
+        }
+        Ok(Some(consent))
     }
 
     pub async fn read(
@@ -416,6 +642,11 @@ pub(crate) mod tests {
             .await
             .unwrap();
         let schema = Schema::new(db.get_database_backend());
+        db.execute(
+            &schema.create_table_from_entity(crate::entity::agent_assistant_runtime::Entity),
+        )
+        .await
+        .unwrap();
         db.execute(&schema.create_table_from_entity(crate::entity::agent_schedule_run::Entity))
             .await
             .unwrap();
@@ -430,6 +661,329 @@ pub(crate) mod tests {
         }
         ScheduleStore::new(db)
     }
+
+    pub(super) async fn retrieval_source(
+        store: &ScheduleStore,
+        enabled: bool,
+    ) -> desk_diagnose_core::session::PersistedAgentSession {
+        use crate::entity::agent_session;
+        use desk_agent_protocol::{
+            AgentScope, ExecutionMode,
+            ai_assistant::user_instructions::{AssistantDataSettings, UserInstructions},
+        };
+        use desk_diagnose_core::{
+            ai_assistant::{data_control::AssistantDataSession, history::AssistantRetrievalBudget},
+            session::{AgentSessionSurface, PersistedAgentSession},
+        };
+        use sea_orm::ActiveModelTrait;
+        store
+            .db
+            .execute(
+                &Schema::new(store.db.get_database_backend())
+                    .create_table_from_entity(agent_session::Entity)
+                    .if_not_exists()
+                    .to_owned(),
+            )
+            .await
+            .unwrap();
+        let mut session = PersistedAgentSession::new(
+            "source",
+            "1",
+            "device-1",
+            1,
+            AgentScope {
+                granted: vec![],
+                mode: ExecutionMode::ReadOnly,
+                expires_at: None,
+                policy_name: None,
+            },
+            "2026-10-23T00:00:00Z",
+        );
+        session.surface = AgentSessionSurface::AiAssistant;
+        session.input_revision = 1;
+        session.begin_focus_epoch(1, Vec::<String>::new()).unwrap();
+        let settings = AssistantDataSettings {
+            automatic_memory_enabled: enabled,
+            model_history_search_enabled: enabled,
+            ..Default::default()
+        };
+        session.assistant_data = Some(Box::new(AssistantDataSession {
+            limits: Box::default(),
+            temporary: false,
+            source_device_ref: "original-device-public-id".into(),
+            source_instance_id: None,
+            current_actor_input_seq: 1,
+            current_input_recorded_at_unix_ms: chrono::Utc::now().timestamp_millis() as u64,
+            current_input_timezone: "UTC".into(),
+            instructions: desk_diagnose_core::ai_assistant::settings::freeze_instructions(
+                &UserInstructions::default(),
+                1,
+                100,
+            )
+            .unwrap(),
+            memory_state_generation: 1,
+            control_generation: 1,
+            current_memories: vec![],
+            retrieval_budget: AssistantRetrievalBudget::new("original-episode".into()).unwrap(),
+            retrieval_task_id: None,
+            history_access_scope:
+                desk_diagnose_core::ai_assistant::data_access::owner_history_scope(
+                    "1",
+                    "source",
+                    "original-device-public-id",
+                    1,
+                    100,
+                    "original-episode",
+                    1,
+                    &settings,
+                    "UTC",
+                    false,
+                )
+                .unwrap(),
+            memory_access_scope:
+                desk_diagnose_core::ai_assistant::memory_access::owner_memory_scope(
+                    "1",
+                    "source",
+                    "original-device-public-id",
+                    1,
+                    100,
+                    "original-episode",
+                    1,
+                    &settings,
+                    false,
+                )
+                .unwrap(),
+            history_dependencies: vec![],
+            read_uses: vec![],
+        }));
+        agent_session::ActiveModel {
+            conversation_id: Set(session.conversation_id.clone()),
+            actor_id: Set(session.actor_id.clone()),
+            device_id: Set(session.device_id.clone()),
+            state_json: Set(session.encode_json_for_storage().unwrap()),
+            version: Set(session.version),
+            lease_token: Set(session.lease_token as i64),
+            created_at: Set(chrono::Utc::now()),
+            updated_at: Set(chrono::Utc::now()),
+            ..Default::default()
+        }
+        .insert(&store.db)
+        .await
+        .unwrap();
+        session
+    }
+
+    #[tokio::test]
+    async fn scheduled_retrieval_consent_is_atomic_and_retries_keep_the_original_scope() {
+        for enabled in [false, true] {
+            let store = store().await;
+            let session = retrieval_source(&store, enabled).await;
+            exercise_retrieval_consent(store, session, enabled).await;
+        }
+    }
+
+    async fn exercise_retrieval_consent(
+        store: ScheduleStore,
+        session: desk_diagnose_core::session::PersistedAgentSession,
+        enabled: bool,
+    ) {
+        use crate::entity::agent_session;
+        use desk_diagnose_core::ai_assistant::scheduled_retrieval::TaskRetrievalConsent;
+        let original = agent_session::Entity::find()
+            .one(&store.db)
+            .await
+            .unwrap()
+            .unwrap();
+        store.db.execute_unprepared("CREATE TRIGGER reject_task_consent BEFORE INSERT ON agent_schedule BEGIN SELECT RAISE(ABORT, 'injected'); END").await.unwrap();
+        let input = draft();
+        let txn = store.db.begin().await.unwrap();
+        assert!(
+            desk_diagnose_core::future::send_phase(|| ScheduleStore::create_draft_on(
+                &txn,
+                1,
+                &input,
+                1000,
+                Some(&session)
+            ))
+            .await
+            .is_err()
+        );
+        txn.rollback().await.unwrap();
+        assert!(
+            entity::Entity::find()
+                .all(&store.db)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            agent_session::Entity::find_by_id(original.id)
+                .one(&store.db)
+                .await
+                .unwrap()
+                .unwrap(),
+            original
+        );
+        store
+            .db
+            .execute_unprepared("DROP TRIGGER reject_task_consent")
+            .await
+            .unwrap();
+        let txn = store.db.begin().await.unwrap();
+        let task = desk_diagnose_core::future::send_phase(|| {
+            ScheduleStore::create_draft_on(&txn, 1, &input, 1000, Some(&session))
+        })
+        .await
+        .unwrap();
+        txn.commit().await.unwrap();
+        let consent =
+            TaskRetrievalConsent::decode(task.retrieval_consent_json.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            consent.source_device_ref.as_deref(),
+            Some("original-device-public-id")
+        );
+        assert_eq!(consent.history_scope.is_some(), enabled);
+        assert_eq!(consent.memory_scope.is_some(), enabled);
+        assert_eq!(
+            consent.source_conversation_id.as_deref(),
+            Some(session.conversation_id.as_str())
+        );
+        assert_eq!(consent.source_input_revision, Some(1));
+        assert!(
+            consent.captured_at_unix_ms
+                >= session
+                    .assistant_data
+                    .as_ref()
+                    .unwrap()
+                    .current_input_recorded_at_unix_ms
+        );
+        assert!(consent.captured_at_unix_ms <= chrono::Utc::now().timestamp_millis() as u64);
+        // A retry after the source changed cannot replace the first consent.
+        let mut later = session.clone();
+        later.input_revision += 1;
+        later.assistant_data = None;
+        agent_session::Entity::update_many()
+            .set(agent_session::ActiveModel {
+                state_json: Set(later.encode_json_for_storage().unwrap()),
+                ..Default::default()
+            })
+            .filter(agent_session::Column::Id.eq(original.id))
+            .exec(&store.db)
+            .await
+            .unwrap();
+        let txn = store.db.begin().await.unwrap();
+        let retry = desk_diagnose_core::future::send_phase(|| {
+            ScheduleStore::create_draft_on(&txn, 1, &input, 2000, Some(&later))
+        })
+        .await
+        .unwrap();
+        txn.commit().await.unwrap();
+        assert_eq!(retry, task);
+        let edited = store
+            .change_prompt(1, &task.schedule_id, task.revision, "A revised report")
+            .await
+            .unwrap();
+        let mut revised = consent;
+        revised.task_revision += 1;
+        assert_eq!(
+            ScheduleStore::retrieval_consent(&edited).unwrap(),
+            Some(revised)
+        );
+    }
+
+    #[test]
+    fn scheduled_retrieval_consent_fits_small_stacks() {
+        const STACK: &str = "LRD_TEST_SCHEDULE_CONSENT_STACK_BYTES";
+        if let Some(bytes) = std::env::var_os(STACK) {
+            let bytes: usize = bytes.to_str().unwrap().parse().unwrap();
+            assert!([1024 * 1024, 2 * 1024 * 1024].contains(&bytes));
+            actix_web::rt::System::new().block_on(async {
+                let mut cases = Vec::new();
+                for enabled in [false, true] {
+                    let store = store().await;
+                    let source = retrieval_source(&store, enabled).await;
+                    cases.push((store, source, enabled));
+                }
+                let (done, ready) = tokio::sync::oneshot::channel();
+                let thread = std::thread::Builder::new()
+                    .name("schedule-consent-stack".into())
+                    .stack_size(bytes)
+                    .spawn(move || {
+                        actix_web::rt::System::new().block_on(async move {
+                            eprintln!("scheduled retrieval consent running on {bytes} byte thread");
+                            for (store, source, enabled) in cases {
+                                desk_diagnose_core::future::boxed(|| {
+                                    exercise_retrieval_consent(store, source, enabled)
+                                })
+                                .await;
+                            }
+                            let _ = done.send(());
+                        });
+                    })
+                    .unwrap();
+                ready.await.unwrap();
+                thread.join().unwrap();
+            });
+            return;
+        }
+        for bytes in [1024 * 1024, 2 * 1024 * 1024] {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "scheduled_retrieval_consent_fits_small_stacks",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(STACK, bytes.to_string())
+                .env_remove("RUST_MIN_STACK")
+                .status()
+                .unwrap();
+            assert!(
+                status.success(),
+                "scheduled consent failed on {bytes} bytes: {status}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn scheduled_retrieval_consent_rejects_spoofed_sources_without_creating_tasks() {
+        let store = store().await;
+        let original = retrieval_source(&store, true).await;
+        let input = draft();
+        for change in ["actor", "device", "version", "surface"] {
+            let mut altered = original.clone();
+            match change {
+                "actor" => altered.actor_id = "2".into(),
+                "device" => altered.device_id = "other-device".into(),
+                "version" => altered.version += 1,
+                _ => {
+                    altered.surface =
+                        desk_diagnose_core::session::AgentSessionSurface::TerminalAiAssistant
+                }
+            }
+            let txn = store.db.begin().await.unwrap();
+            assert!(
+                desk_diagnose_core::future::send_phase(|| ScheduleStore::create_draft_on(
+                    &txn,
+                    1,
+                    &input,
+                    1000,
+                    Some(&altered)
+                ))
+                .await
+                .is_err(),
+                "{change}"
+            );
+            txn.rollback().await.unwrap();
+        }
+        assert!(
+            entity::Entity::find()
+                .all(&store.db)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
     #[tokio::test]
     async fn create_is_idempotent_but_changed_payload_conflicts() {
         let store = store().await;
@@ -452,13 +1006,15 @@ pub(crate) mod tests {
     async fn ownership_and_client_keys_are_isolated_and_pagination_is_bounded() {
         let store = store().await;
         let first = store.create_draft(1, &draft(), 1000).await.unwrap();
-        let other = store.create_draft(2, &draft(), 1000).await.unwrap();
-        assert_ne!(first.schedule_id, other.schedule_id);
+        assert!(matches!(
+            store.create_draft(2, &draft(), 1000).await,
+            Err(ScheduleStoreError::NotFound)
+        ));
         assert!(matches!(
             store.read(2, &first.schedule_id).await,
             Err(ScheduleStoreError::NotFound)
         ));
-        assert_eq!(store.list(2, 0, 100).await.unwrap(), vec![other]);
+        assert!(store.list(2, 0, 100).await.unwrap().is_empty());
         assert!(store.list(1, first.id, 100).await.unwrap().is_empty());
         assert!(matches!(
             store.list(1, 0, 101).await,

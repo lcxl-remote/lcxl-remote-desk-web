@@ -307,13 +307,13 @@ fn batch_retries_preserve_access_time_and_never_resurrect_tombstones() {
     let retry = delivery(vec![text_part("stdout", 5000)], 99).unwrap();
     let mut stored = first.attachments[0].metadata.clone();
     stored.last_accessed_at_unix_ms = 20;
-    let plan = batch::plan_batch(&[stored.clone()], &retry.attachments).unwrap();
+    let plan = batch::plan_batch(std::slice::from_ref(&stored), &retry.attachments).unwrap();
     assert!(plan.insert_indices.is_empty());
     assert!(plan.evict_ids.is_empty());
     let changed = delivery(vec![text_part("stdout", 5001)], 99).unwrap();
-    assert!(batch::plan_batch(&[stored.clone()], &changed.attachments).is_err());
+    assert!(batch::plan_batch(std::slice::from_ref(&stored), &changed.attachments).is_err());
     stored.availability = Availability::Evicted { at_unix_ms: 21 };
-    assert!(batch::plan_batch(&[stored.clone()], &retry.attachments).is_err());
+    assert!(batch::plan_batch(std::slice::from_ref(&stored), &retry.attachments).is_err());
     stored.availability = Availability::Deleted { at_unix_ms: 21 };
     assert!(batch::plan_batch(&[stored], &retry.attachments).is_err());
 }

@@ -143,6 +143,7 @@ pub fn check_provider_url(
     )
 }
 
+#[cfg(test)]
 /// Validate a single resolved IP at connect time against the SSRF address floor
 /// (private reachability by `mode`), ignoring the TLS policy. Retained for callers
 /// that judge an already-resolved address without a scheme in hand; the transport
@@ -156,6 +157,7 @@ pub fn check_resolved_ip(ip: IpAddr, mode: ProviderSsrfMode) -> Result<(), SsrfE
 }
 
 /// Core address judgment for the active mode, after IPv4-mapped normalization.
+#[cfg(test)]
 fn is_blocked(ip: IpAddr, mode: ProviderSsrfMode) -> bool {
     let ip = normalize(ip);
     match mode {

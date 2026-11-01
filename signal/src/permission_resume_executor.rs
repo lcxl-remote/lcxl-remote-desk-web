@@ -180,6 +180,7 @@ impl SignalPermissionResumeExecutor {
             session.conversation_id,
             candidate.request_id.clone(),
             AiAssistantAsk {
+                temporary_conversation: None,
                 question,
                 locale,
                 client_message_id: candidate.permission_id.clone(),

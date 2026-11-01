@@ -29,7 +29,7 @@ fn destination() -> DestinationIdentity {
 fn subject() -> InputSubject<'static> {
     InputSubject {
         run_id: "run",
-        actor_id: "7",
+        actor_id: "1",
         device_id: "device",
         client_conversation_id: Some("client-run"),
     }
@@ -126,7 +126,7 @@ async fn select_live_document(store: &SignalAgentRunEventStore) {
             readiness: Some(&readiness),
             selected_capability_ids: &selected_capability_ids,
             request_id: "select-live-document",
-            actor_id: "7",
+            actor_id: "1",
             device_id: "device",
             destination: &destination(),
             now_unix_ms: now.timestamp_millis() as u64,
@@ -138,7 +138,7 @@ async fn select_live_document(store: &SignalAgentRunEventStore) {
         .with_context_selection(selection)
         .update_context_selection(
             "run",
-            "7",
+            "1",
             "device",
             "select-live-document",
             &now.to_rfc3339(),
@@ -168,7 +168,7 @@ async fn attach(store: &SignalAgentRunEventStore, id: &str, kind: ObjectKind) ->
     sessions(store)
         .seed_read_context(&UpdateObjectContext {
             run_id: "run".into(),
-            actor_id: "7".into(),
+            actor_id: "1".into(),
             device_id: "device".into(),
             update: AiAssistantObjectContextUpdate {
                 conversation_id: "client-run".into(),
@@ -192,7 +192,7 @@ async fn detach(store: &SignalAgentRunEventStore, object: &ContextAttachment) {
     sessions(store)
         .update_object_context(&UpdateObjectContext {
             run_id: "run".into(),
-            actor_id: "7".into(),
+            actor_id: "1".into(),
             device_id: "device".into(),
             update: AiAssistantObjectContextUpdate {
                 conversation_id: "client-run".into(),
@@ -211,9 +211,11 @@ async fn detach(store: &SignalAgentRunEventStore, object: &ContextAttachment) {
 fn input(id: &str, mut objects: Vec<ContextAttachment>) -> AppendUserFollowupParams {
     objects.sort_by(|a, b| a.attachment_id.cmp(&b.attachment_id));
     AppendUserFollowupParams {
+        client_timezone: "UTC".into(),
+        temporary_conversation: None,
         event_id: id.into(),
         run_id: "run".into(),
-        actor_id: "7".into(),
+        actor_id: "1".into(),
         device_id: "device".into(),
         client_conversation_id: Some("client-run".into()),
         surface: AgentSessionSurface::AiAssistant,
@@ -266,9 +268,9 @@ async fn original_input_survives_reopen_and_later_unselected_context_without_ren
     let store = setup(&url).await;
     let chosen = attach(&store, "first", ObjectKind::File).await;
     let params = input("message", vec![chosen.clone()]);
-    let first = store.append_user_followup(params.clone()).await.unwrap();
+    let first = store.append_user_followup(&params).await.unwrap();
     let saved = session_row(&store).await;
-    let retry = store.append_user_followup(params.clone()).await.unwrap();
+    let retry = store.append_user_followup(&params).await.unwrap();
     assert!(!retry.newly_appended);
     assert_eq!(retry.input_revision, first.input_revision);
     assert_eq!(session_row(&store).await, saved);
@@ -316,7 +318,7 @@ async fn original_input_survives_reopen_and_later_unselected_context_without_ren
     expired_retry.created_at = (Utc::now() + chrono::Duration::days(1)).to_rfc3339();
     assert!(
         !store
-            .append_user_followup(expired_retry)
+            .append_user_followup(&expired_retry)
             .await
             .unwrap()
             .newly_appended
@@ -333,7 +335,7 @@ async fn original_input_survives_reopen_and_later_unselected_context_without_ren
     );
     assert!(
         !reopened
-            .append_user_followup(params)
+            .append_user_followup(&params)
             .await
             .unwrap()
             .newly_appended
@@ -346,7 +348,7 @@ async fn replay_checks_full_message_subject_and_selection_without_any_writes() {
     let store = setup("sqlite::memory:").await;
     let object = attach(&store, "original", ObjectKind::File).await;
     let params = input("message", vec![object]);
-    store.append_user_followup(params.clone()).await.unwrap();
+    store.append_user_followup(&params).await.unwrap();
     let saved = session_row(&store).await;
     for mutation in 0..9 {
         let mut retry = params.clone();
@@ -380,7 +382,7 @@ async fn replay_checks_full_message_subject_and_selection_without_any_writes() {
             }
         }
         assert!(
-            store.append_user_followup(retry).await.is_err(),
+            store.append_user_followup(&retry).await.is_err(),
             "mutation={mutation}"
         );
         assert_eq!(session_row(&store).await, saved);
@@ -394,12 +396,12 @@ async fn withdrawal_between_selection_and_append_and_event_failure_roll_back() {
     let params = input("message", vec![object.clone()]);
     detach(&store, &object).await;
     let saved = session_row(&store).await;
-    assert!(store.append_user_followup(params).await.is_err());
+    assert!(store.append_user_followup(&params).await.is_err());
     assert_eq!(session_row(&store).await, saved);
     store.db.execute_unprepared("CREATE TRIGGER reject_input BEFORE INSERT ON agent_run_event WHEN NEW.kind = 'user_followup' BEGIN SELECT RAISE(ABORT, 'synthetic failure'); END").await.unwrap();
     assert!(
         store
-            .append_user_followup(input("new", vec![]))
+            .append_user_followup(&input("new", vec![]))
             .await
             .is_err()
     );
@@ -411,9 +413,9 @@ async fn stale_prepared_turn_and_changed_input_cannot_claim_or_read_the_new_requ
     let store = setup("sqlite::memory:").await;
     let object = attach(&store, "first", ObjectKind::File).await;
     let first = input("message", vec![object]);
-    let receipt = store.append_user_followup(first.clone()).await.unwrap();
+    let receipt = store.append_user_followup(&first).await.unwrap();
     let next = store
-        .append_user_followup(input("followup", vec![]))
+        .append_user_followup(&input("followup", vec![]))
         .await
         .unwrap();
     let saved = session_row(&store).await;
@@ -430,7 +432,7 @@ async fn stale_prepared_turn_and_changed_input_cannot_claim_or_read_the_new_requ
     );
     let claim = ClaimTurnParams {
         conversation_id: "run".into(),
-        actor_id: "7".into(),
+        actor_id: "1".into(),
         device_id: "device".into(),
         policy_revision: first.policy_revision,
         current_pdp_scope: first.current_scope,
@@ -463,7 +465,7 @@ async fn original_context_schema_and_columns_cannot_be_downgraded_or_relabelled(
         let store = setup("sqlite::memory:").await;
         let object = attach(&store, "first", ObjectKind::File).await;
         let params = input("message", vec![object]);
-        let receipt = store.append_user_followup(params.clone()).await.unwrap();
+        let receipt = store.append_user_followup(&params).await.unwrap();
         let mut update = agent_run_event::Entity::update_many()
             .filter(agent_run_event::Column::EventId.eq("message"));
         update = match mutation {
@@ -486,7 +488,7 @@ async fn original_context_schema_and_columns_cannot_be_downgraded_or_relabelled(
                 .await
                 .is_err()
         );
-        assert!(store.append_user_followup(params).await.is_err());
+        assert!(store.append_user_followup(&params).await.is_err());
     }
 }
 
@@ -622,14 +624,14 @@ async fn independent_sqlite_pools_preserve_one_original_input_under_competing_re
     );
     let original = input("message", vec![object]);
     let (left, right) = tokio::join!(
-        first.append_user_followup(original.clone()),
-        second.append_user_followup(original.clone()),
+        first.append_user_followup(&original),
+        second.append_user_followup(&original),
     );
     assert!(left.is_ok() || right.is_ok());
     // SQLITE_BUSY may reject a losing write transaction; the same receipt is
     // replayable after that transaction has ended, without creating new input.
-    let left = first.append_user_followup(original.clone()).await.unwrap();
-    let right = second.append_user_followup(original.clone()).await.unwrap();
+    let left = first.append_user_followup(&original).await.unwrap();
+    let right = second.append_user_followup(&original).await.unwrap();
     assert_eq!(left, right);
     assert!(!left.newly_appended);
     let saved = session_row(&first).await;
@@ -653,12 +655,261 @@ async fn independent_sqlite_pools_preserve_one_original_input_under_competing_re
         .object_attachments
         .clear();
     let (replay, rejected) = tokio::join!(
-        first.append_user_followup(original),
-        second.append_user_followup(conflict),
+        first.append_user_followup(&original),
+        second.append_user_followup(&conflict),
     );
     assert!(replay.is_ok());
     assert!(rejected.is_err());
     assert_eq!(session_row(&first).await, saved);
     first.db.close().await.unwrap();
     second.db.close().await.unwrap();
+}
+
+async fn save_recovery_fixture(
+    store: &SignalAgentRunEventStore,
+    session: &mut PersistedAgentSession,
+) {
+    let row = session_row(store).await;
+    session.version = row.version + 1;
+    let raw = session.encode_json_for_storage().unwrap();
+    PersistedAgentSession::decode_json(&raw).unwrap();
+    let mut active: agent_session::ActiveModel = row.into();
+    active.version = Set(session.version);
+    active.state_json = Set(raw);
+    active.update(&store.db).await.unwrap();
+}
+
+/// The real input ledger recovers the model answer after a committed forget.
+/// Native forget authorization is covered by the storage tests.
+async fn recovered_control_fixture() -> (
+    SignalAgentRunEventStore,
+    AppendUserFollowupParams,
+    UserFollowupAck,
+    desk_agent_protocol::ai_assistant::memory::AssistantDataControlReceipt,
+) {
+    use desk_agent_protocol::ai_assistant::memory::{
+        AssistantDataControlReceipt, DataControlOutcome, DataControlReason,
+    };
+    use desk_diagnose_core::{
+        ai_assistant::{data_control, data_tools},
+        native_ids::{self, Kind},
+    };
+    let store = setup("sqlite::memory:").await;
+    let params = input("original-control", vec![]);
+    let accepted = store.append_user_followup(&params).await.unwrap();
+    assert_eq!(
+        store.handled_outcome(&params, &accepted).await.unwrap(),
+        None
+    );
+    let mut session = state(&store).await;
+    session
+        .begin_turn(
+            "original-turn",
+            None,
+            None,
+            session.policy_revision,
+            session.scope_snapshot.clone(),
+            &params.created_at,
+        )
+        .unwrap();
+    session
+        .conversation
+        .iter_mut()
+        .find(|message| message.message_id == params.message.message_id)
+        .unwrap()
+        .turn_id = Some("original-turn".into());
+    let call = ToolCall { id: "forget-call".into(), name: data_tools::MANAGE_MEMORIES.into(), arguments_json: serde_json::json!({"operation":"forget","memory_id": native_ids::stable(Kind::Memory, &"target"), "expected_revision":1}).to_string() };
+    session.conversation.push(
+        ChatMessage::assistant_tool_calls(
+            "forget-producer",
+            "old model wording",
+            vec![call.to_ref()],
+        )
+        .with_turn_id("original-turn"),
+    );
+    let hash =
+        data_control::tool_group_sha256(&session.conversation[session.conversation.len() - 1..])
+            .unwrap();
+    let data = session.assistant_data.as_ref().unwrap();
+    let receipt = AssistantDataControlReceipt {
+        operation_id: "recovered-control".into(),
+        outcome: DataControlOutcome::Applied,
+        reason: DataControlReason::MemoryForget,
+        affected_count: 1,
+        control_generation: data.control_generation + 1,
+        memory_state_generation: data.memory_state_generation + 1,
+        cleanup_pending: true,
+    };
+    data_control::commit_memory_forget_group(
+        &mut session,
+        "forget-producer",
+        &hash,
+        &receipt,
+        &params.created_at,
+    )
+    .unwrap();
+    // The synthetic committed control image includes its runtime generations.
+    use crate::entity::agent_assistant_runtime as runtime;
+    runtime::Entity::update_many()
+        .set(runtime::ActiveModel {
+            control_generation: Set(receipt.control_generation as i64),
+            memory_state_generation: Set(receipt.memory_state_generation as i64),
+            ..Default::default()
+        })
+        .filter(runtime::Column::ActorId.eq(&session.actor_id))
+        .exec(&store.db)
+        .await
+        .unwrap();
+    save_recovery_fixture(&store, &mut session).await;
+    assert_eq!(
+        store.handled_outcome(&params, &accepted).await.unwrap(),
+        None
+    );
+    session.conversation.push(
+        ChatMessage::text(
+            "forget-confirmation",
+            ChatRole::Assistant,
+            "The memory was deleted.",
+        )
+        .with_turn_id("original-turn"),
+    );
+    session.handled_input_seq = session.latest_input_seq;
+    session.finish_turn(
+        desk_diagnose_core::session::TurnState::Idle,
+        &params.created_at,
+    );
+    save_recovery_fixture(&store, &mut session).await;
+    let later = input("later-owner-input", vec![]);
+    store.append_user_followup(&later).await.unwrap();
+    let mut session = state(&store).await;
+    session
+        .begin_turn(
+            "later-turn",
+            None,
+            None,
+            session.policy_revision,
+            session.scope_snapshot.clone(),
+            &later.created_at,
+        )
+        .unwrap();
+    session
+        .conversation
+        .iter_mut()
+        .find(|message| message.message_id == later.message.message_id)
+        .unwrap()
+        .turn_id = Some("later-turn".into());
+    session.conversation.push(
+        ChatMessage::text("later-answer", ChatRole::Assistant, "unrelated answer")
+            .with_turn_id("later-turn"),
+    );
+    session.handled_input_seq = session.latest_input_seq;
+    session.finish_turn(
+        desk_diagnose_core::session::TurnState::Idle,
+        &later.created_at,
+    );
+    save_recovery_fixture(&store, &mut session).await;
+    (store, params, accepted, receipt)
+}
+
+#[tokio::test]
+async fn handled_outcome_binds_the_original_receipt_message_and_subject_without_writes() {
+    use desk_diagnose_core::agent_loop::LoopOutcome;
+    let (store, params, accepted, _receipt) = recovered_control_fixture().await;
+    let before = session_row(&store).await;
+    let events = agent_run_event::Entity::find()
+        .all(&store.db)
+        .await
+        .unwrap();
+    assert_eq!(
+        store.handled_outcome(&params, &accepted).await.unwrap(),
+        Some(LoopOutcome::Answered("The memory was deleted.".into()))
+    );
+    let later = input("later-owner-input", vec![]);
+    let later_ack = store.append_user_followup(&later).await.unwrap();
+    assert_eq!(
+        store.handled_outcome(&later, &later_ack).await.unwrap(),
+        Some(LoopOutcome::Answered("unrelated answer".into()))
+    );
+    for change in 0..9 {
+        let mut retry = params.clone();
+        let mut ack = accepted.clone();
+
+        match change {
+            0 => retry.actor_id = "other".into(),
+            1 => retry.device_id = "other-device".into(),
+            2 => retry.client_conversation_id = Some("other-client".into()),
+            3 => ack.event_seq += 1,
+            4 => ack.input_seq += 1,
+            5 => ack.input_revision += 1,
+            6 => ack.event_id = "missing".into(),
+            7 => retry.message.text.push_str("changed"),
+            _ => retry.message.message_id = "later-owner-input".into(),
+        }
+        assert!(
+            store.handled_outcome(&retry, &ack).await.is_err(),
+            "change {change}"
+        );
+    }
+    assert_eq!(session_row(&store).await, before);
+    assert_eq!(
+        agent_run_event::Entity::find()
+            .all(&store.db)
+            .await
+            .unwrap(),
+        events
+    );
+}
+
+#[test]
+fn handled_control_recovery_fits_explicit_small_stacks() {
+    const STACK: &str = "LRD_TEST_INPUT_OUTCOME_STACK_BYTES";
+    if let Some(bytes) = std::env::var_os(STACK) {
+        let bytes: usize = bytes.to_str().unwrap().parse().unwrap();
+        assert!([1024 * 1024, 2 * 1024 * 1024].contains(&bytes));
+        actix_web::rt::System::new().block_on(async {
+            let (store, params, accepted, _receipt) = recovered_control_fixture().await;
+            let (done, ready) = tokio::sync::oneshot::channel();
+            let thread = std::thread::Builder::new()
+                .name("input-outcome-stack".into())
+                .stack_size(bytes)
+                .spawn(move || {
+                    actix_web::rt::System::new().block_on(async move {
+                        let before = session_row(&store).await;
+                        let outcome = desk_diagnose_core::future::send_phase(|| {
+                            store.handled_outcome(&params, &accepted)
+                        })
+                        .await
+                        .unwrap();
+                        assert_eq!(
+                            outcome,
+                            Some(desk_diagnose_core::agent_loop::LoopOutcome::Answered(
+                                "The memory was deleted.".into()
+                            ))
+                        );
+                        assert_eq!(session_row(&store).await, before);
+                        let _ = done.send(());
+                    });
+                })
+                .unwrap();
+            ready.await.unwrap();
+            thread.join().unwrap();
+        });
+        return;
+    }
+    for bytes in [1024 * 1024, 2 * 1024 * 1024] {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "handled_control_recovery_fits_explicit_small_stacks",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(STACK, bytes.to_string())
+            .env_remove("RUST_MIN_STACK")
+            .status()
+            .unwrap();
+        assert!(
+            status.success(),
+            "input outcome recovery failed on {bytes} bytes"
+        );
+    }
 }

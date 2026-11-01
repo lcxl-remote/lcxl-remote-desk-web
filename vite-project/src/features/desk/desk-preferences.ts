@@ -1,4 +1,4 @@
-import type { AudioDataFlow, ConnectionModel } from "@/services/types"
+import type { AudioDataFlow } from "@/services/types"
 
 export type WaylandControlMode = "auto" | "none" | "uinput" | "portal"
 
@@ -211,20 +211,6 @@ export function userPreferenceStorageKey(
     return controllerUserKey
         ? `${USER_KEY_PREFIX}${controllerUserKey}:global`
         : null
-}
-
-/**
- * Resolve the stable identity used only inside preference keys. The live
- * connection id is intentionally absent: manager devices use their persistent
- * device handle, while standalone hosts use their persistent client id.
- */
-export function preferenceDeviceKey(
-    connection: ConnectionModel | null | undefined,
-): string | null {
-    const managerDeviceId = connection?.device_id?.trim()
-    if (managerDeviceId) return `device:${managerDeviceId}`
-    const standaloneClientId = connection?.version_info?.client_id?.trim()
-    return standaloneClientId ? `client:${standaloneClientId}` : null
 }
 
 /**

@@ -8,7 +8,7 @@ import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '
 import { manageDeviceFileRecovery } from '@/services/clients';
 import { AssistantBackupCleanup } from './assistant-backup-cleanup';
 
-type Session = { sessionId: string; conversationId: string | null; firstQuestion: string | null; updatedAt: string; active?: boolean };
+type Session = { sessionId: string; conversationId: string | null; title: string | null; updatedAt: string; active?: boolean };
 
 export function AssistantHistory({ deskId, deviceId, disabled, onSelect, onDeleted, onNew }: {
     deskId: string;
@@ -16,7 +16,7 @@ export function AssistantHistory({ deskId, deviceId, disabled, onSelect, onDelet
     disabled: boolean;
     onDeleted?: (conversationId: string | null) => void;
     onSelect: (conversationId: string) => boolean;
-    onNew?: () => void;
+    onNew?: (temporary?: boolean) => void;
 }) {
     const { t } = useTranslation();
     const [open, setOpen] = useState(false);
@@ -84,6 +84,10 @@ export function AssistantHistory({ deskId, deviceId, disabled, onSelect, onDelet
                     <MessageSquarePlus className="h-4 w-4" aria-hidden="true" />
                     {t('pages.aiAssistant.newConversation')}
                 </Button>}
+                {onNew && <Button type="button" variant="outline" className="w-full justify-start gap-2" disabled={disabled}
+                    onClick={() => { onNew(true); setOpen(false); }}>
+                    {t('pages.aiAssistant.temporary.new')}
+                </Button>}
                 {disabled && <p className="text-sm text-muted-foreground">{t('pages.aiAssistant.history.busy')}</p>}
                 {cleanupPending && <p role="status" className="text-sm text-muted-foreground">{t('pages.fileRecovery.deletionPending')}</p>}
                 <div className="min-h-0 flex-1 space-y-2 overflow-y-auto py-4">
@@ -97,7 +101,7 @@ export function AssistantHistory({ deskId, deviceId, disabled, onSelect, onDelet
                         <Button variant="unstyled" type="button" disabled={disabled || busy || !session.conversationId}
                             onClick={() => { if (session.conversationId && onSelect(session.conversationId)) setOpen(false); }}
                             className="min-w-0 flex-1 text-left hover:text-primary disabled:opacity-50">
-                            <span className="block whitespace-pre-wrap text-sm [overflow-wrap:anywhere]">{session.firstQuestion || t('pages.aiAssistant.history.untitled')}</span>
+                            <span className="block truncate text-sm font-medium">{session.title || t('pages.aiAssistant.history.untitled')}</span>
                             <span className="mt-1 block text-xs text-muted-foreground">{formatLocalTime(session.updatedAt)}</span>
                             {!session.conversationId && <span className="block text-xs">{t('pages.aiAssistant.history.unavailable')}</span>}
                         </Button>
@@ -114,7 +118,7 @@ export function AssistantHistory({ deskId, deviceId, disabled, onSelect, onDelet
             <DialogContent>
                 <DialogHeader><DialogTitle>{t('pages.aiAssistant.history.deleteTitle')}</DialogTitle>
                     <DialogDescription>{t('pages.aiAssistant.history.deleteHint')}</DialogDescription></DialogHeader>
-                <p className="break-words text-sm">{deleting?.firstQuestion || t('pages.aiAssistant.history.untitled')}</p>
+                <p className="break-words text-sm">{deleting?.title || t('pages.aiAssistant.history.untitled')}</p>
                 <p className="text-sm text-amber-700 dark:text-amber-300">{t(`pages.fileRecovery.deleteBackup.${backupSummary}`, { count: backupCount })}</p>
                 {(deleting?.active || sessions.some(value => value.sessionId === deleting?.sessionId && value.active)) && <p className="text-sm text-destructive">{t('pages.aiAssistant.history.deleteRunning')}</p>}
                 {deleteError && <p role="alert" className="text-sm text-destructive">{t('pages.aiAssistant.history.deleteError')}</p>}

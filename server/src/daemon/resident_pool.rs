@@ -77,6 +77,7 @@ impl ResidentWorkerPoolState {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn mark_ready(&mut self, key: &WorkerKey, incarnation: u64) -> Result<(), PoolStateError> {
         let record = self
             .workers
@@ -131,6 +132,7 @@ impl ResidentWorkerPoolState {
         true
     }
 
+    #[cfg(test)]
     pub fn retire_session(&mut self, session: &SessionKey) -> usize {
         let before = self.workers.len();
         self.workers.retain(|key, _| &key.session != session);
@@ -139,6 +141,7 @@ impl ResidentWorkerPoolState {
         before - self.workers.len()
     }
 
+    #[cfg(test)]
     pub fn activate_interactive(
         &mut self,
         session: &SessionKey,
@@ -214,23 +217,6 @@ impl ResidentWorkerPoolState {
             route_class,
             route_epoch,
         })
-    }
-
-    pub fn broadcast_policy(&self) -> Vec<RouteTicket> {
-        self.workers
-            .values()
-            .filter(|record| {
-                matches!(
-                    record.state,
-                    WorkerState::ReadyStandby | WorkerState::ActiveInteractive { .. }
-                )
-            })
-            .map(|record| RouteTicket {
-                worker: record.identity.clone(),
-                route_class: RouteClass::BroadcastPolicy,
-                route_epoch: None,
-            })
-            .collect()
     }
 
     pub fn accepts(&self, ticket: &RouteTicket) -> bool {

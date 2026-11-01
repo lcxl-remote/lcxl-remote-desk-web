@@ -59,60 +59,76 @@ impl Fixture {
         prepared_only: bool,
         intent_only: bool,
     ) -> Self {
-        Self::new_with_call(db, actor, scheduled, prepared_only, intent_only, None).await
+        Self::new_with_source(db, actor, scheduled, prepared_only, intent_only, None, None).await
     }
 
-    async fn new_with_call(
+    async fn new_with_source(
         db: DatabaseConnection,
         actor: &str,
         scheduled: bool,
         prepared_only: bool,
         intent_only: bool,
         custom_call: Option<ToolCall>,
+        original_input: Option<ChatMessage>,
     ) -> Self {
-        insert_session(&db, 1, 1).await;
-        let mut row = agent_session::Entity::find()
-            .one(&db)
-            .await
-            .unwrap()
-            .unwrap();
-        let mut session = PersistedAgentSession::decode_json(&row.state_json).unwrap();
-        session.actor_id = actor.into();
-        session.version = row.version;
-        row.actor_id = actor.into();
-        session.policy_revision =
-            desk_diagnose_core::assistant_policy::PERSONAL_ASSISTANT_POLICY_REVISION;
-        session.surface = AgentSessionSurface::AiAssistant;
-        session
-            .begin_focus_epoch(session.input_revision, std::iter::empty::<String>())
-            .unwrap();
-        session
-            .begin_turn(
-                "turn-1",
-                None,
-                None,
-                1,
-                session.scope_snapshot.clone(),
-                "now",
-            )
-            .unwrap();
         let call = custom_call.unwrap_or_else(|| ToolCall {
             id: "model-call-original".into(),
             name: "browser_open_page".into(),
             arguments_json: r#"{ "target": { "url": "https://example.test/approved", "origin": { "kind": "https", "host_ascii": "example.test", "port": 443 } } }"#.into(),
         });
-        let mut user = desk_diagnose_core::model_message_labels::model_bound_user_message(
-            "input-1".into(),
-            "private test input".into(),
-            DestinationIdentity::Model {
-                connection_id: "model-1".into(),
-                connection_revision: 1,
-                model_id: "test".into(),
-                profile_revision: 1,
-            },
-        )
-        .unwrap();
-        user.data_envelope.as_mut().unwrap().sensitivity = Sensitivity::Secret;
+        let user = original_input.unwrap_or_else(|| {
+            let mut user = desk_diagnose_core::model_message_labels::model_bound_user_message(
+                "input-1".into(),
+                "private test input".into(),
+                DestinationIdentity::Model {
+                    connection_id: "model-1".into(),
+                    connection_revision: 1,
+                    model_id: "test".into(),
+                    profile_revision: 1,
+                },
+            )
+            .unwrap();
+            user.data_envelope.as_mut().unwrap().sensitivity = Sensitivity::Secret;
+            user
+        });
+        let personal = actor == crate::control_authorizer::SINGLE_ACCOUNT_USER_ID.to_string();
+        let mut session = if personal {
+            scheduled_recovery::integration::owner_session(&db, user.clone()).await
+        } else {
+            insert_session(&db, 1, 1).await;
+            let mut row = agent_session::Entity::find()
+                .one(&db)
+                .await
+                .unwrap()
+                .unwrap();
+            let mut session = PersistedAgentSession::decode_json(&row.state_json).unwrap();
+            session.actor_id = actor.into();
+            session.version = row.version;
+            row.actor_id = actor.into();
+            session.policy_revision =
+                desk_diagnose_core::assistant_policy::PERSONAL_ASSISTANT_POLICY_REVISION;
+            session.surface = AgentSessionSurface::AiAssistant;
+            session
+                .begin_focus_epoch(session.input_revision, std::iter::empty::<String>())
+                .unwrap();
+            session
+                .begin_turn(
+                    "turn-1",
+                    None,
+                    None,
+                    1,
+                    session.scope_snapshot.clone(),
+                    "now",
+                )
+                .unwrap();
+            session
+        };
+        let mut row = agent_session::Entity::find()
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        row.actor_id = actor.into();
         let mut proposal = ChatMessage::assistant_tool_calls(
             "proposal-1",
             "open approved page",
@@ -131,7 +147,11 @@ impl Fixture {
             )
             .unwrap();
         proposal.turn_id = Some("turn-1".into());
-        session.conversation.extend([user, proposal]);
+        if personal {
+            session.conversation.push(proposal);
+        } else {
+            session.conversation.extend([user, proposal]);
+        }
         row.state_json = session.encode_json_for_storage().unwrap();
         row.lease_token = i64::try_from(session.lease_token).unwrap();
         let active: agent_session::ActiveModel = row.into();

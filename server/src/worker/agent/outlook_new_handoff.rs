@@ -98,11 +98,6 @@ fn is_outlook_new_executable(path: &str) -> bool {
         || normalized.ends_with("\\appdata\\local\\microsoft\\windowsapps\\olk.exe")
 }
 
-#[cfg(not(windows))]
-fn is_outlook_new_executable(_path: &str) -> bool {
-    false
-}
-
 pub fn preflight(
     request: &OutlookNewComposeHandoffRequest,
 ) -> Result<OutlookNewHandler, AgentError> {

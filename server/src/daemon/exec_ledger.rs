@@ -96,6 +96,7 @@ impl ExecLedger {
         Self::connect(&sqlite_url(&path)).await
     }
 
+    #[cfg(test)]
     /// Open an in-memory ledger. Tests only — an in-memory ledger survives
     /// nothing, which is the one property the real one exists to provide.
     pub async fn open_in_memory() -> Result<Self, DbErr> {

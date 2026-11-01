@@ -33,6 +33,7 @@ pub(super) async fn database_now<C: ConnectionTrait + crate::config::ConfigConne
 }
 
 impl ScheduleStore {
+    #[cfg(test)]
     /// Manual execution has its own idempotency identity and never moves the calendar.
     pub async fn enqueue_manual(
         &self,
@@ -332,6 +333,7 @@ impl ScheduleStore {
         Ok(Some(result))
     }
 
+    #[cfg(test)]
     /// A running or uncertain lease is never reclaimed by this entry point.
     pub async fn claim_queued(
         &self,
@@ -389,6 +391,7 @@ impl ScheduleStore {
         if work.conversation_id != work.run_id || work.turn_id != format!("{}-turn", work.run_id) {
             return Err(ScheduleStoreError::Conflict);
         }
+        Self::retrieval_consent(&schedule)?;
         let snapshot: entity::Model = serde_json::from_str(&work.task_snapshot_json)
             .map_err(|_| ScheduleStoreError::Invalid)?;
         if work.owner_user_id != schedule.owner_user_id
@@ -397,6 +400,7 @@ impl ScheduleStore {
             || snapshot.kind != schedule.kind
             || snapshot.revision != work.schedule_revision
             || snapshot.task_revision != schedule.task_revision
+            || snapshot.retrieval_consent_json != schedule.retrieval_consent_json
             || snapshot.target_device_id != schedule.target_device_id
             || snapshot.prompt != schedule.prompt
             || snapshot.locale != schedule.locale
@@ -474,6 +478,7 @@ impl ScheduleStore {
         Ok(result)
     }
 
+    #[cfg(test)]
     pub async fn renew_run(
         &self,
         run_id: &str,

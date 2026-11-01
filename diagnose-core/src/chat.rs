@@ -300,6 +300,7 @@ impl ChatMessage {
         self
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     /// An assistant message that requested one or more tools.
     pub fn assistant_tool_calls(
         message_id: impl Into<String>,

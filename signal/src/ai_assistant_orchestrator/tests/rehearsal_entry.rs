@@ -83,6 +83,8 @@ async fn run_case(failed: bool) {
         .await
         .unwrap();
     let ask = AiAssistantAsk {
+        client_timezone: "UTC".into(),
+        temporary_conversation: None,
         question: reserved.prompt.clone(),
         locale: reserved.locale.clone(),
         conversation_id: Some(reserved.client_conversation_id.clone()),
@@ -93,7 +95,7 @@ async fn run_case(failed: bool) {
     };
     let connections = web::Data::new(SharedConnectionMap::new());
     tokio::time::timeout(
-        std::time::Duration::from_secs(15),
+        SCENARIO_TIMEOUT,
         run_turn(
             connections.clone(),
             db.clone(),
@@ -147,7 +149,7 @@ async fn run_case(failed: bool) {
             "rehearsal-complete"
         );
     }
-    let request = tokio::time::timeout(std::time::Duration::from_secs(2), gateway)
+    let request = tokio::time::timeout(MODEL_IO_TIMEOUT, gateway)
         .await
         .unwrap()
         .unwrap();

@@ -372,6 +372,28 @@ impl SignalModelSeam {
         sink: &mut dyn TurnSink,
         _permit: crate::model_admission::ModelPermit,
     ) -> Result<ModelTurn, AgentError> {
+        self.call_admitted_until(&request, sink, _permit, None)
+            .await
+    }
+
+    pub(crate) async fn call_admitted_until(
+        &self,
+        request: &ModelRequest,
+        sink: &mut dyn TurnSink,
+        permit: crate::model_admission::ModelPermit,
+        assistant_data_deadline: Option<u64>,
+    ) -> Result<ModelTurn, AgentError> {
+        self.call_admitted_until_authorized(request, sink, permit, assistant_data_deadline)
+            .await
+    }
+
+    async fn call_admitted_until_authorized(
+        &self,
+        request: &ModelRequest,
+        sink: &mut dyn TurnSink,
+        _permit: crate::model_admission::ModelPermit,
+        assistant_data_deadline: Option<u64>,
+    ) -> Result<ModelTurn, AgentError> {
         use desk_diagnose_core::model_observability::{
             Origin, OutputOutcome, RequestObservation, RequestOutcome,
         };
@@ -392,7 +414,8 @@ impl SignalModelSeam {
         let result = tokio::select! {
             biased;
             _ = self.cancel.cancelled() => Err(cancelled()),
-            result = self.call_uncancelled(request, sink, &mut observation) => {
+
+            result = desk_diagnose_core::future::boxed(|| self.call_uncancelled(request, sink, &mut observation, assistant_data_deadline)) => {
                 if self.cancel.is_cancelled() { Err(cancelled()) } else { result }
             },
         };
@@ -407,10 +430,10 @@ impl SignalModelSeam {
                     chrono::Utc::now().timestamp_millis(),
                 );
             }
-            let outcome = if error.kind == AgentErrorKind::Cancelled {
-                RequestOutcome::Cancelled
-            } else {
-                RequestOutcome::ObservationIncomplete
+            let outcome = match error.kind {
+                AgentErrorKind::Cancelled => RequestOutcome::Cancelled,
+                AgentErrorKind::Timeout => RequestOutcome::Timeout,
+                _ => RequestOutcome::ObservationIncomplete,
             };
             observation.finish(
                 outcome,
@@ -423,9 +446,10 @@ impl SignalModelSeam {
 
     async fn call_uncancelled(
         &self,
-        request: ModelRequest,
+        request: &ModelRequest,
         sink: &mut dyn TurnSink,
         observation: &mut Option<desk_diagnose_core::model_observability::RequestObservation>,
+        assistant_data_deadline: Option<u64>,
     ) -> Result<ModelTurn, AgentError> {
         use futures_util::StreamExt;
         self.retry_after_unix_ms.set(None);
@@ -528,7 +552,7 @@ impl SignalModelSeam {
             self.dialect,
             request.tools.len()
         );
-        let mut body = self.build_body(&request).inspect_err(|_| {
+        let mut body = self.build_body(request).inspect_err(|_| {
             if let Some(observation) = observation {
                 observation.not_started(
                     desk_diagnose_core::model_observability::NotStartedReason::RequestValidation,
@@ -570,7 +594,7 @@ impl SignalModelSeam {
             Some(
                 desk_diagnose_core::thinking_context::project_anthropic_prefix(
                     &mut body,
-                    &request,
+                    request,
                     &self.source_context_key,
                 )
                 .map_err(|error| config_error(error.to_string()))?,
@@ -588,16 +612,28 @@ impl SignalModelSeam {
                 }
             })?;
         }
-        if let Some(observation) = observation {
-            observation.outbound(chrono::Utc::now().timestamp_millis());
-        }
         desk_diagnose_core::model_preparation::ModelRequestPreparation::verify_send(
             &body,
-            &request,
+            request,
             self.profile
                 .max_context_bytes()
                 .map_err(|error| config_error(error.to_string()))?,
         )?;
+        desk_diagnose_core::schedule::model_admission::check_assistant_data_deadline(
+            assistant_data_deadline,
+            chrono::Utc::now().timestamp_millis(),
+        )
+        .inspect_err(|_| {
+            if let Some(observation) = observation {
+                observation.not_started(
+                    desk_diagnose_core::model_observability::NotStartedReason::Permission,
+                    chrono::Utc::now().timestamp_millis(),
+                );
+            }
+        })?;
+        if let Some(observation) = observation {
+            observation.outbound(chrono::Utc::now().timestamp_millis());
+        }
         sink.on_provider_request(&body);
         let mut response = http
             .insert_header(("Content-Type", "application/json"))
@@ -1975,6 +2011,58 @@ fn append_block_string(
 
 #[cfg(test)]
 mod tests {
+    mod tool_output_fixture {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../signal-facade/tests/fixtures/tool_output_projection.rs"
+        ));
+    }
+
+    #[test]
+    fn tool_outputs_use_the_same_reducing_view_in_both_wire_protocols() {
+        let request = tool_output_fixture::request();
+        let original = serde_json::to_string(&request.messages).unwrap();
+        tool_output_fixture::assert_wire(&build_openai_body("model", &request));
+        tool_output_fixture::assert_wire(&build_anthropic_body("model", &request));
+        assert_eq!(serde_json::to_string(&request.messages).unwrap(), original);
+    }
+
+    #[actix_web::test]
+    async fn expired_assistant_source_deadline_prevents_the_actual_http_connection() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let config = ModelProviderConfig {
+            base_url: Some(format!("http://{address}")),
+            model: Some("test".into()),
+            api_key: Some("test-only".into()),
+            wire_protocol: Some(WireProtocol::OpenAiChatCompletions),
+            max_context_bytes: Some(131_072),
+            ..Default::default()
+        };
+        let seam = SignalModelSeam::from_config(&config).unwrap();
+        let permit = seam.acquire_admission().await.unwrap();
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            seam.call_admitted_until(
+                &text_request(ResponseFormatSpec::None),
+                &mut desk_diagnose_core::seam::NullTurnSink,
+                permit,
+                Some(1),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(
+            error.error_code,
+            Some(desk_utils::error::DeskErrorCode::AI_ASSISTANT_DATA_CHANGED.code())
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), listener.accept())
+                .await
+                .is_err()
+        );
+    }
 
     #[test]
     fn pure_preparation_measures_oversized_protocol_bodies_without_spending_a_call() {
@@ -2156,7 +2244,8 @@ mod tests {
             "os":"macos","interactive_session_incarnation":"worker",
             "active_application":{"token":"calendar-id","snapshot_id":"private-snapshot","object_kind":"application","expires_at":"2030-01-01T00:00:00Z"},"active_application_name":"Calendar"
         }}}).to_string())], ResponseFormatSpec::None);
-        request.tools = desk_diagnose_core::ai_assistant::ai_assistant_tool_registry()
+        request.tools = desk_diagnose_core::ai_assistant::ai_assistant_provider_registry()
+            .registered_tools()
             .into_iter()
             .filter(|tool| {
                 matches!(
@@ -2704,6 +2793,7 @@ mod tests {
             previous_cache_projection: None,
             delegation_call: None,
             preparation: None,
+            assistant_data: None,
             compression_identity: None,
             caller_output_hard_cap: None,
         }
@@ -3694,6 +3784,7 @@ mod tests {
                 previous_cache_projection: None,
                 delegation_call: None,
                 preparation: None,
+                assistant_data: None,
                 compression_identity: None,
                 caller_output_hard_cap: Some(1024),
             };
@@ -4112,6 +4203,7 @@ mod tests {
                 previous_cache_projection: None,
                 delegation_call: None,
                 preparation: None,
+                assistant_data: None,
                 compression_identity: None,
                 caller_output_hard_cap: Some(1024),
             };

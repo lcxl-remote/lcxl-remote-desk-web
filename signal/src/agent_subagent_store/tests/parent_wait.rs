@@ -155,8 +155,8 @@ async fn completion_before_parent_release_is_found_after_release_and_claimed_onc
         claimed.session.trigger_origin,
         TriggerOrigin::SubAgentCompletion
     );
-    assert!(!claimed.session.trigger_origin.allows_new_mutation());
-    assert!(!claimed.session.trigger_origin.allows_delegated_review());
+    assert!(claimed.session.trigger_origin.allows_new_mutation());
+    assert!(claimed.session.trigger_origin.allows_delegated_review());
     assert_eq!(claimed.session.delegation_group_id, original_group);
     assert!(claimed.session.ready_subagent_wait.is_some());
     assert!(claimed.session.subagent_wait.is_none());
@@ -269,6 +269,7 @@ async fn explicit_adjustment_delivers_dependency_changed_instead_of_waiting_for_
                 expected_control_revision: 1,
                 action:
                     desk_agent_protocol::ai_assistant::subagent::SubAgentControlAction::Adjust {
+                        client_timezone: "UTC".into(),
                         message: "Investigate another symptom".into(),
                     },
             },

@@ -1,0 +1,1 @@
+{"type":"string","enum":["applied","already_applied","stale_target"],"x-readme-ref-name":"DataControlOutcome"}

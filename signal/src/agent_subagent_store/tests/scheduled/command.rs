@@ -256,6 +256,16 @@ async fn expire_as_unknown(
 #[tokio::test]
 async fn genuine_late_command_restores_original_root_without_current_planner_authority() {
     let (db, schedule, _, parent, task_id, generation) = fixture().await;
+    exercise_late_command(db, schedule, parent, task_id, generation).await;
+}
+
+async fn exercise_late_command(
+    db: DatabaseConnection,
+    schedule: ScheduleStore,
+    parent: PersistedAgentSession,
+    task_id: String,
+    generation: String,
+) {
     let original = original_run(&db, &parent.conversation_id).await;
     expire_as_unknown(&db, &schedule, &parent, &generation).await;
     let before = saved_root(&db, &parent.conversation_id).await;
@@ -523,6 +533,54 @@ async fn missing_native_or_dispatch_proof_keeps_original_unknown_fact_unresolved
                 .unwrap()
                 .attempt,
             original_attempt
+        );
+    }
+}
+
+#[test]
+fn scheduled_native_receipt_recovery_fits_small_stacks() {
+    const STACK: &str = "LRD_TEST_SCHEDULE_NATIVE_RECEIPT_STACK_BYTES";
+    if let Some(bytes) = std::env::var_os(STACK) {
+        let bytes: usize = bytes.to_str().unwrap().parse().unwrap();
+        assert!([1024 * 1024, 2 * 1024 * 1024].contains(&bytes));
+        actix_web::rt::System::new().block_on(async {
+            // Build the real published source outside the bounded execution thread.
+            let (db, schedule, _, parent, task_id, generation) = fixture().await;
+            let (done, ready) = tokio::sync::oneshot::channel();
+            let thread = std::thread::Builder::new()
+                .name("scheduled-native-receipt-stack".into())
+                .stack_size(bytes)
+                .spawn(move || {
+                    actix_web::rt::System::new().block_on(async move {
+                        eprintln!(
+                            "original native receipt recovery running on {bytes} byte thread"
+                        );
+                        desk_diagnose_core::future::boxed(|| {
+                            exercise_late_command(db, schedule, parent, task_id, generation)
+                        })
+                        .await;
+                        let _ = done.send(());
+                    });
+                })
+                .unwrap();
+            ready.await.unwrap();
+            thread.join().unwrap();
+        });
+        return;
+    }
+    for bytes in [1024 * 1024, 2 * 1024 * 1024] {
+        assert!(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "scheduled_native_receipt_recovery_fits_small_stacks",
+                    "--nocapture",
+                    "--test-threads=1"
+                ])
+                .env(STACK, bytes.to_string())
+                .env_remove("RUST_MIN_STACK")
+                .status()
+                .unwrap()
+                .success()
         );
     }
 }

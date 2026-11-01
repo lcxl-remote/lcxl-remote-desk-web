@@ -27,6 +27,9 @@ use crate::session::{PersistedAgentSession, SubjectMismatch};
 /// wire shape (OpenAI vs Anthropic) is the [`ModelSeam`] implementation's concern.
 #[derive(Debug, Clone)]
 pub struct ModelRequest {
+    /// Host-only selected-source manifest; the physical receipt gate mints the
+    /// actual send authorization. Never serialized as a provider parameter.
+    pub assistant_data: Option<Box<crate::ai_assistant::seam::AssistantModelDataManifest>>,
     /// Pure preparation receipt, never a provider parameter or durable authority.
     pub preparation: Option<Box<crate::model_preparation::ModelRequestPreparation>>,
     /// Stable server identity for one compression source range.
@@ -105,7 +108,7 @@ impl ModelRequest {
                 crate::subagent::reservation::DelegationCallKind::ApprovalReview
             }
             ModelUseCase::Safety => crate::subagent::reservation::DelegationCallKind::SafetyReview,
-            ModelUseCase::Agent | ModelUseCase::Completion => {
+            ModelUseCase::Agent | ModelUseCase::Completion | ModelUseCase::ConversationTitle => {
                 crate::subagent::reservation::DelegationCallKind::Model
             }
             _ => {
@@ -150,6 +153,7 @@ impl ModelRequest {
         Self {
             observation: None,
             preparation: None,
+            assistant_data: None,
             compression_identity: None,
             messages,
             tools: Vec::new(),
@@ -986,6 +990,56 @@ pub enum ClaimError {
 /// in DB with optimistic-concurrency CAS and is the authority across instances.
 #[async_trait(?Send)]
 pub trait SessionSeam {
+    /// Optional naming support for personal assistant conversations.
+    async fn conversation_title_limit(
+        &self,
+        _session: &PersistedAgentSession,
+    ) -> Result<Option<usize>, AgentError> {
+        Ok(None)
+    }
+
+    async fn save_conversation_title(
+        &self,
+        _session: &PersistedAgentSession,
+        _title: &str,
+    ) -> Result<(), AgentError> {
+        Ok(())
+    }
+
+    /// Bind selected saved observations and temporary reads to the current request.
+    async fn assistant_data_request_manifest(
+        &self,
+        _session: &PersistedAgentSession,
+        _request: &ModelRequest,
+        _now_unix_ms: u64,
+    ) -> Result<Option<crate::ai_assistant::seam::AssistantModelDataManifest>, AgentError> {
+        Ok(None)
+    }
+
+    /// Fresh settings and generations for new reads. Saved snapshots retain
+    /// their conversation ownership.
+    async fn assistant_data_access(
+        &self,
+        _session: &PersistedAgentSession,
+        _now_unix_ms: u64,
+    ) -> Result<Option<crate::ai_assistant::data_access::AssistantDataToolAccess>, AgentError> {
+        Ok(None)
+    }
+
+    fn memory(&self) -> Option<&dyn crate::ai_assistant::seam::MemorySeam> {
+        None
+    }
+
+    fn memory_mutation(&self) -> Option<&dyn crate::ai_assistant::seam::MemoryMutationSeam> {
+        None
+    }
+
+    fn conversation_search(
+        &self,
+    ) -> Option<&dyn crate::ai_assistant::seam::ConversationSearchSeam> {
+        None
+    }
+
     /// Group and source-goal limits reserve the same logical provider/tool call
     /// atomically. Hosts without durable delegation leave ordinary turns on
     /// their existing limits; a child cannot run without this accounting.
@@ -1430,6 +1484,7 @@ mod tests {
             previous_cache_projection: None,
             delegation_call: None,
             preparation: None,
+            assistant_data: None,
             compression_identity: None,
             caller_output_hard_cap: None,
         };

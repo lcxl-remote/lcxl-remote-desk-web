@@ -1,8 +1,4 @@
-//! Stage-2-only grant simulation.
-//!
-//! This module exercises permission-decision matching and bounded use counts
-//! without creating a production authority token, work item, reservation, or
-//! dispatch intent. Stage 3 replaces this with the durable authorizer.
+//! Test-only permission decisions and bounded use counts without runtime authority.
 
 use desk_agent_protocol::{
     capability_provider::CapabilityEffect, data_lineage::DestinationIdentity,
@@ -88,8 +84,7 @@ impl SimulatedGrantAuthorizer {
         &self.grants
     }
 
-    /// Match and consume one simulated use. Returning `true` is only a Stage-2
-    /// assertion: this type has no dispatch method and cannot authorize runtime I/O.
+    /// Match one simulated use without granting authority for runtime I/O.
     pub fn match_and_consume(&mut self, call: &SimulatedCapabilityCall<'_>) -> bool {
         let Some(grant) = self.grants.iter_mut().find(|grant| {
             grant.remaining_uses > 0

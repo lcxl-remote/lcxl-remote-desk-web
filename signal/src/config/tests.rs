@@ -1,6 +1,88 @@
 use super::*;
 use sea_orm::TransactionTrait;
 
+#[tokio::test]
+async fn assistant_settings_and_limits_survive_runtime_database_recreation_in_the_original_config_file()
+ {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("runtime.sqlite");
+    let url = format!("sqlite://{}?mode=rwc", path.display());
+    let db = test_support::Database::connect(url.clone()).await.unwrap();
+    let original = crate::assistant_data_config::settings(&db).await;
+    let saved = crate::assistant_data_config::update_settings(
+        &db,
+        &desk_agent_protocol::ai_assistant::user_instructions::AssistantDataSettingsUpdate {
+            expected_revision: original.revision,
+            automatic_memory_enabled: original.automatic_memory_enabled,
+            model_history_search_enabled: original.model_history_search_enabled,
+
+            explanation_version: original.explanation_version,
+        },
+    )
+    .await
+    .unwrap();
+    let original_policy = crate::assistant_data_config::policy(&db).await;
+    let mut policy = original_policy.clone();
+    policy.limits.retrieval.query_chars = 512;
+    policy.limits.retrieval.episode.query_ttl_ms = 60_000;
+    policy.max_memory_records = 7;
+    policy.limits.conversation.question_bytes = 131072;
+    policy.limits.conversation.citations = 80;
+    policy.limits.conversation.citation_bytes = 131072;
+    policy.limits.conversation.citation_page_answers = 150;
+    policy.limits.conversation.page_bytes = 1024 * 1024;
+    policy.limits.retrieval.snippet_bytes = 2048;
+    policy.limits.retrieval.episode.query_devices = 20000;
+    policy.limits.retrieval.episode.query_cursors = 64;
+    policy.limits.retrieval.episode.query_state_bytes = 2097152;
+    policy.limits.retrieval.episode.query_seen_sources = 1000;
+    policy.limits.retrieval.episode.query_delivered_calls = 64;
+    policy.limits.retrieval.read_messages = 60;
+    policy.limits.retrieval.episode.response_bytes = 128 * 1024;
+    policy.limits.retrieval.episode.unused_projection_ttl_ms = 3_600_000;
+    policy.limits.processing =
+        desk_agent_protocol::ai_assistant::limits::AssistantProcessingLimits {
+            status_coverage: 80,
+            native_status_rows: 40,
+            native_status_items: 60,
+            native_status_model_items: 8,
+            native_status_source_refs: 10,
+
+            output_gc_interval_ms: 71,
+            output_gc_actor_batch_size: 35,
+            output_gc_batch_size: 129,
+            native_retention_page_size: 3,
+            history_capture_batch_size: 129,
+            history_scan_page_size: 7,
+            current_memory_page_size: 2,
+        };
+    let saved_policy = crate::assistant_data_config::update_policy(
+        &db,
+        &desk_agent_protocol::ai_assistant::user_instructions::AssistantDataPolicyUpdate {
+            expected_revision: original_policy.revision,
+            policy,
+        },
+    )
+    .await
+    .unwrap()
+    .policy;
+    let file = path.with_extension("config.toml");
+    let persisted: GlobalConfig = toml::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    assert_eq!(persisted.assistant_data_settings, saved);
+    assert_eq!(persisted.assistant_data_policy, saved_policy);
+    db.close().await.unwrap();
+    std::fs::remove_file(&path).unwrap();
+    let rebuilt = test_support::Database::connect(url).await.unwrap();
+    assert_eq!(
+        crate::assistant_data_config::policy(&rebuilt).await,
+        saved_policy
+    );
+    assert_eq!(
+        crate::assistant_data_config::settings(&rebuilt).await,
+        saved
+    );
+}
+
 #[test]
 fn gateways_persist_only_the_runtime_budget_and_edits_invalidate_their_probes() {
     let mut config = GlobalConfig::default();
@@ -410,4 +492,68 @@ fn auxiliary_output_policies_round_trip_and_manual_edits_advance_revisions() {
             .is_err()
         );
     }
+}
+
+#[tokio::test]
+async fn failed_policy_save_keeps_the_live_policy_and_revision() {
+    let mut initial = GlobalConfig::default();
+    initial.initialize_metadata().unwrap();
+    let context = ConfigContext::new(initial.clone(), Arc::new(FailingFile)).unwrap();
+    let db = connection::DatabaseConnection::new(
+        sea_orm::Database::connect("sqlite::memory:").await.unwrap(),
+        context.clone(),
+    );
+    let mut policy = initial.assistant_data_policy.clone();
+    policy.limits.retrieval.relevance_hits = 100;
+    let request = desk_agent_protocol::ai_assistant::user_instructions::AssistantDataPolicyUpdate {
+        expected_revision: policy.revision,
+        policy,
+    };
+    assert!(matches!(
+        crate::assistant_data_config::update_policy(&db, &request).await,
+        Err(crate::assistant_data_config::WriteError::Backend(_))
+    ));
+    assert_eq!(
+        context.read().await.assistant_data_policy,
+        initial.assistant_data_policy
+    );
+}
+
+#[test]
+fn file_policy_errors_name_the_field_and_small_read_budgets_remain_valid() {
+    let mut config = GlobalConfig::default();
+    config
+        .assistant_data_policy
+        .limits
+        .retrieval
+        .episode
+        .read_bytes = 1;
+    assert!(config.validate().is_ok());
+    config
+        .assistant_data_policy
+        .limits
+        .retrieval
+        .episode
+        .response_bytes = 4;
+    assert!(
+        config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("limits.retrieval.episode.response_bytes")
+    );
+    config
+        .assistant_data_policy
+        .limits
+        .retrieval
+        .episode
+        .response_bytes = 32768;
+    config.assistant_data_policy.history_retention_days = 0;
+    assert!(
+        config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("history_retention_days")
+    );
 }

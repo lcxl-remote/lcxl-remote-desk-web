@@ -6,6 +6,15 @@ use desk_diagnose_core::session::{
 };
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set};
 
+// Own the same original transaction and row fences across sequential phases.
+struct ExpiredFreshTask {
+    txn: crate::config::connection::DatabaseTransaction,
+    work: run::Model,
+    row: agent_session::Model,
+    session: Box<PersistedAgentSession>,
+    now: i64,
+}
+
 impl ScheduleStore {
     pub(super) async fn expired_fresh_candidates(
         &self,
@@ -25,135 +34,177 @@ impl ScheduleStore {
             .await?)
     }
 
-    pub async fn recover_action_free_fresh_task(
-        &self,
+    pub fn recover_action_free_fresh_task<'a>(
+        &'a self,
+        run_id: &'a str,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<bool, ScheduleStoreError>> + Send + 'a>,
+    > {
+        desk_diagnose_core::future::send_phase(|| async move {
+            let txn =
+                crate::db::begin_write(&self.db, crate::entity::agent_schedule::Entity).await?;
+
+            let initial = run::Entity::find()
+                .filter(run::Column::RunId.eq(run_id))
+                .one(&txn)
+                .await?
+                .ok_or(ScheduleStoreError::NotFound)?;
+            let task = entity::Entity::find()
+                .filter(entity::Column::ScheduleId.eq(&initial.schedule_id))
+                .filter(entity::Column::OwnerUserId.eq(initial.owner_user_id))
+                .one(&txn)
+                .await?
+                .ok_or(ScheduleStoreError::NotFound)?;
+            if task.kind != "fresh_task" || task.active_run_id.as_deref() != Some(run_id) {
+                return Ok(false);
+            }
+            let locked = entity::Entity::update_many()
+                .col_expr(
+                    entity::Column::Revision,
+                    sea_orm::sea_query::Expr::col(entity::Column::Revision),
+                )
+                .filter(entity::Column::Id.eq(task.id))
+                .filter(entity::Column::Revision.eq(task.revision))
+                .exec(&txn)
+                .await?;
+            if locked.rows_affected != 1 {
+                return Err(ScheduleStoreError::Conflict);
+            }
+            let work = run::Entity::find_by_id(initial.id)
+                .one(&txn)
+                .await?
+                .ok_or(ScheduleStoreError::NotFound)?;
+            let now = super::authority::authority_now(&txn).await?;
+            if work.status != "running"
+                || work.failure_accounted
+                || work.finished_at.is_some()
+                || work.started_at.is_none()
+                || work.lease_deadline.is_none_or(|at| at > now)
+                || work.conversation_id != work.run_id
+                || work.result_ref.as_deref().is_some_and(|reference| {
+                    !reference.starts_with("permission:")
+                        && !reference.starts_with("directory:")
+                        && !reference.starts_with("children:")
+                        && !reference.starts_with("stopped-children:")
+                        && !reference.starts_with("answer-children:")
+                        && !reference.starts_with("delegated-effects:")
+                })
+            {
+                return Ok(false);
+            }
+            let row = agent_session::Entity::find()
+                .filter(agent_session::Column::ConversationId.eq(run_id))
+                .lock_exclusive()
+                .one(&txn)
+                .await?
+                .ok_or(ScheduleStoreError::NotFound)?;
+            let session = Box::new(
+                PersistedAgentSession::decode_json(&row.state_json)
+                    .map_err(|_| ScheduleStoreError::Invalid)?,
+            );
+            if session.trigger_origin != TriggerOrigin::ScheduledTask
+                || session.surface != desk_diagnose_core::session::AgentSessionSurface::AiAssistant
+                || session.conversation_id != work.run_id
+                || session.actor_id != work.owner_user_id.to_string()
+                || row.actor_id != session.actor_id
+                || session.device_id != task.target_device_id
+                || row.device_id != session.device_id
+                || row.version != session.version
+                || i64::try_from(session.lease_token).ok() != Some(row.lease_token)
+                || session.current_request_id.as_deref() != Some(run_id)
+                || session.current_turn_id.as_deref() != Some(work.turn_id.as_str())
+                || session.input_revision != 1
+            {
+                return Err(ScheduleStoreError::Conflict);
+            }
+            let stopped_children = if session.main_stopped {
+                use crate::entity::agent_subagent_run as child;
+                child::Entity::find()
+                    .filter(child::Column::RootConversationId.eq(run_id))
+                    .filter(
+                        child::Column::GroupId
+                            .eq(session.delegation_group_id.clone().unwrap_or_default()),
+                    )
+                    .filter(child::Column::ActorId.eq(&session.actor_id))
+                    .filter(child::Column::DeviceId.eq(&session.device_id))
+                    .one(&txn)
+                    .await?
+                    .is_some()
+            } else {
+                false
+            };
+
+            let answer_children = if session.delegation_group_id.is_some()
+                && session.execution_state == desk_diagnose_core::session::ExecutionState::None
+                && session.unclosed_tool_call_ids().is_empty()
+            {
+                use crate::entity::agent_subagent_run as child;
+                let unfinished = child::Entity::find()
+                    .filter(child::Column::RootConversationId.eq(run_id))
+                    .filter(
+                        child::Column::GroupId
+                            .eq(session.delegation_group_id.clone().unwrap_or_default()),
+                    )
+                    .filter(child::Column::ActorId.eq(&session.actor_id))
+                    .filter(child::Column::DeviceId.eq(&session.device_id))
+                    .filter(child::Column::State.is_not_in(["completed", "failed", "cancelled"]))
+                    .one(&txn)
+                    .await?
+                    .is_some();
+                super::fresh_children_recovery::answer_wait_reference(&work, &session, unfinished)
+                    .is_some()
+            } else {
+                false
+            };
+            if session.delegation_group_id.is_some()
+                && (stopped_children
+                    || session.subagent_wait.is_some()
+                    || session.ready_subagent_wait.is_some()
+                    || answer_children)
+            {
+                return desk_diagnose_core::future::send_phase(|| {
+                    super::fresh_children_recovery::recover(txn, work, row, *session, now)
+                })
+                .await;
+            }
+            if (session.turn_state == TurnState::Idle
+                && session.terminal_permission_request_id.is_some())
+                || desk_diagnose_core::schedule::permission_wait::unfinished_pause(&session)
+                    .is_some()
+            {
+                return desk_diagnose_core::future::send_phase(|| {
+                    super::fresh_permission_recovery::recover(txn, work, row, *session, now)
+                })
+                .await;
+            }
+
+            desk_diagnose_core::future::send_phase(|| {
+                Self::reconcile_expired_fresh_task(
+                    Box::new(ExpiredFreshTask {
+                        txn,
+                        work,
+                        row,
+                        session,
+                        now,
+                    }),
+                    run_id,
+                )
+            })
+            .await
+        })
+    }
+
+    async fn reconcile_expired_fresh_task(
+        original: Box<ExpiredFreshTask>,
         run_id: &str,
     ) -> Result<bool, ScheduleStoreError> {
-        let txn = crate::db::begin_write(&self.db, crate::entity::agent_schedule::Entity).await?;
-
-        let initial = run::Entity::find()
-            .filter(run::Column::RunId.eq(run_id))
-            .one(&txn)
-            .await?
-            .ok_or(ScheduleStoreError::NotFound)?;
-        let task = entity::Entity::find()
-            .filter(entity::Column::ScheduleId.eq(&initial.schedule_id))
-            .filter(entity::Column::OwnerUserId.eq(initial.owner_user_id))
-            .one(&txn)
-            .await?
-            .ok_or(ScheduleStoreError::NotFound)?;
-        if task.kind != "fresh_task" || task.active_run_id.as_deref() != Some(run_id) {
-            return Ok(false);
-        }
-        let locked = entity::Entity::update_many()
-            .col_expr(
-                entity::Column::Revision,
-                sea_orm::sea_query::Expr::col(entity::Column::Revision),
-            )
-            .filter(entity::Column::Id.eq(task.id))
-            .filter(entity::Column::Revision.eq(task.revision))
-            .exec(&txn)
-            .await?;
-        if locked.rows_affected != 1 {
-            return Err(ScheduleStoreError::Conflict);
-        }
-        let work = run::Entity::find_by_id(initial.id)
-            .one(&txn)
-            .await?
-            .ok_or(ScheduleStoreError::NotFound)?;
-        let now = super::authority::authority_now(&txn).await?;
-        if work.status != "running"
-            || work.failure_accounted
-            || work.finished_at.is_some()
-            || work.started_at.is_none()
-            || work.lease_deadline.is_none_or(|at| at > now)
-            || work.conversation_id != work.run_id
-            || work.result_ref.as_deref().is_some_and(|reference| {
-                !reference.starts_with("permission:")
-                    && !reference.starts_with("directory:")
-                    && !reference.starts_with("children:")
-                    && !reference.starts_with("stopped-children:")
-                    && !reference.starts_with("answer-children:")
-                    && !reference.starts_with("delegated-effects:")
-            })
-        {
-            return Ok(false);
-        }
-        let row = agent_session::Entity::find()
-            .filter(agent_session::Column::ConversationId.eq(run_id))
-            .lock_exclusive()
-            .one(&txn)
-            .await?
-            .ok_or(ScheduleStoreError::NotFound)?;
-        let mut session = PersistedAgentSession::decode_json(&row.state_json)
-            .map_err(|_| ScheduleStoreError::Invalid)?;
-        if session.trigger_origin != TriggerOrigin::ScheduledTask
-            || session.surface != desk_diagnose_core::session::AgentSessionSurface::AiAssistant
-            || session.conversation_id != work.run_id
-            || session.actor_id != work.owner_user_id.to_string()
-            || row.actor_id != session.actor_id
-            || session.device_id != task.target_device_id
-            || row.device_id != session.device_id
-            || row.version != session.version
-            || i64::try_from(session.lease_token).ok() != Some(row.lease_token)
-            || session.current_request_id.as_deref() != Some(run_id)
-            || session.current_turn_id.as_deref() != Some(work.turn_id.as_str())
-            || session.input_revision != 1
-        {
-            return Err(ScheduleStoreError::Conflict);
-        }
-        let stopped_children = if session.main_stopped {
-            use crate::entity::agent_subagent_run as child;
-            child::Entity::find()
-                .filter(child::Column::RootConversationId.eq(run_id))
-                .filter(
-                    child::Column::GroupId
-                        .eq(session.delegation_group_id.clone().unwrap_or_default()),
-                )
-                .filter(child::Column::ActorId.eq(&session.actor_id))
-                .filter(child::Column::DeviceId.eq(&session.device_id))
-                .one(&txn)
-                .await?
-                .is_some()
-        } else {
-            false
-        };
-        let answer_children = if session.delegation_group_id.is_some()
-            && session.execution_state == desk_diagnose_core::session::ExecutionState::None
-            && session.unclosed_tool_call_ids().is_empty()
-        {
-            use crate::entity::agent_subagent_run as child;
-            let unfinished = child::Entity::find()
-                .filter(child::Column::RootConversationId.eq(run_id))
-                .filter(
-                    child::Column::GroupId
-                        .eq(session.delegation_group_id.clone().unwrap_or_default()),
-                )
-                .filter(child::Column::ActorId.eq(&session.actor_id))
-                .filter(child::Column::DeviceId.eq(&session.device_id))
-                .filter(child::Column::State.is_not_in(["completed", "failed", "cancelled"]))
-                .one(&txn)
-                .await?
-                .is_some();
-            super::fresh_children_recovery::answer_wait_reference(&work, &session, unfinished)
-                .is_some()
-        } else {
-            false
-        };
-        if session.delegation_group_id.is_some()
-            && (stopped_children
-                || session.subagent_wait.is_some()
-                || session.ready_subagent_wait.is_some()
-                || answer_children)
-        {
-            return super::fresh_children_recovery::recover(txn, work, row, session, now).await;
-        }
-        if (session.turn_state == TurnState::Idle
-            && session.terminal_permission_request_id.is_some())
-            || desk_diagnose_core::schedule::permission_wait::unfinished_pause(&session).is_some()
-        {
-            return super::fresh_permission_recovery::recover(txn, work, row, session, now).await;
-        }
+        let ExpiredFreshTask {
+            txn,
+            work,
+            row,
+            mut session,
+            now,
+        } = *original;
         let committed = match session.turn_state {
             TurnState::Idle
                 if session.terminal_error.is_none()
@@ -185,8 +236,8 @@ impl ScheduleStore {
             || (work.result_ref.is_none() && !session.permission_requests.is_empty())
             || session.permission_requests.iter().any(|request| {
                 matches!(request.state,
-                desk_diagnose_core::dynamic_run::PermissionRequestState::Pending
-                    | desk_diagnose_core::dynamic_run::PermissionRequestState::NeedsRevalidation)
+            desk_diagnose_core::dynamic_run::PermissionRequestState::Pending
+                | desk_diagnose_core::dynamic_run::PermissionRequestState::NeedsRevalidation)
             })
             || !session.pending_auto_triggers.is_empty()
         {
@@ -263,6 +314,36 @@ impl ScheduleStore {
                 crate::agent_subagent_store::ScheduledNativeDisposition::Settled => {}
             }
         }
+        desk_diagnose_core::future::send_phase(|| {
+            Self::settle_expired_fresh_task(
+                Box::new(ExpiredFreshTask {
+                    txn,
+                    work,
+                    row,
+                    session,
+                    now,
+                }),
+                committed,
+                action_failure,
+                unknown_effect,
+            )
+        })
+        .await
+    }
+
+    async fn settle_expired_fresh_task(
+        original: Box<ExpiredFreshTask>,
+        committed: bool,
+        action_failure: bool,
+        unknown_effect: bool,
+    ) -> Result<bool, ScheduleStoreError> {
+        let ExpiredFreshTask {
+            txn,
+            work,
+            row,
+            mut session,
+            now,
+        } = *original;
         let mut result_ref = None;
         let mut incomplete_steps = false;
         let answered = session.turn_state == TurnState::Idle;

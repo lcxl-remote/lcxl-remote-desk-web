@@ -652,7 +652,7 @@ pub(crate) fn project_tool(tool: &mut ToolSpec) {
                 properties.insert("web_source_ids".into(), json!({"type":"array","minItems":1,"maxItems":8,"uniqueItems":true,"items":{"type":"string","minLength":1,"maxLength":32},"description":"Select source_id values from that search; the server restores the original title and HTTPS URL."}));
                 schema["dependentRequired"] = json!({"web_search_result_id":["web_source_ids"],"web_source_ids":["web_search_result_id"]});
             }
-            tool.description = tool.description.replace("one prior search_public_web call id from this same run plus 1-8 title/URL pairs copied exactly from that result", "web_search_result_id from one verified prior search_public_web result and 1-8 web_source_ids from that result");
+            tool.description = tool.description.replace("one prior search_public_web call id from this same run plus 1-8 title/URL pairs copied exactly from that result", "web_search_result_id from one verified prior search_public_web result and web_source_ids from that result");
         }
         "update_text_file" | "delete_text_file" => {
             replace_fields(
@@ -796,11 +796,37 @@ pub(crate) fn project_result_message(message: &mut ChatMessage) {
     if !value.is_object() {
         return;
     }
+    let before = value.clone();
     let Some(call_id) = &message.tool_call_id else {
         return;
     };
     let original = serde_json::from_str::<Value>(&message.trusted_tool_result().text)
         .unwrap_or_else(|_| value.clone());
+    if value.get("status").and_then(Value::as_str) == Some("attachment_capacity") {
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("original_result_sha256");
+        message.text = value.to_string();
+        return;
+    }
+    if source == "preview_computer_action" {
+        for field in ["schema_version", "adapter"] {
+            value.as_object_mut().unwrap().remove(field);
+        }
+        message.text = value.to_string();
+        return;
+    }
+    if source == "load_conversation_history" && value["unavailable_count"] == 0 {
+        value.as_object_mut().unwrap().remove("availability_notice");
+        message.text = value.to_string();
+        return;
+    }
+    if source == "update_task_status" {
+        value.as_object_mut().unwrap().remove("revision");
+        message.text = value.to_string();
+        return;
+    }
     if source == "preview_document" {
         if let Some(object) = value.as_object_mut() {
             object.remove("preview_id");
@@ -812,15 +838,38 @@ pub(crate) fn project_result_message(message: &mut ChatMessage) {
         message.text = value.to_string();
         return;
     }
-    if serde_json::from_value::<ComputerActionCompleted>(original.clone()).is_ok()
-        && let Some(object) = value.as_object_mut()
+    // Only the admitted completion header; earlier domain projection may have
+    // already reduced its nested output. Business records remain opaque.
+    if let Some(object) = value.as_object_mut()
+        && [
+            "work_id",
+            "action_request_id",
+            "execution_generation",
+            "result",
+            "facts",
+        ]
+        .iter()
+        .all(|field| object.contains_key(*field))
     {
         for field in ["work_id", "action_request_id", "execution_generation"] {
             object.remove(field);
         }
     }
     if source == "search_public_web" {
-        value.as_object_mut().unwrap().remove("web_search_call_id");
+        for field in [
+            "schema_version",
+            "configuration_revision",
+            "web_search_call_id",
+            "query_sha256",
+            "response_sha256",
+            "response_bytes",
+        ] {
+            value.as_object_mut().unwrap().remove(field);
+        }
+        if let Some(connector) = value.get_mut("connector").and_then(Value::as_object_mut) {
+            connector.remove("requires_api_key");
+            connector.remove("experimental");
+        }
         value["search_result_id"] = json!(message.message_id);
         if let Some(entries) = value["results"].as_array_mut() {
             for entry in entries {
@@ -835,6 +884,44 @@ pub(crate) fn project_result_message(message: &mut ChatMessage) {
         }
         message.text = value.to_string();
         return;
+    }
+    if source == "fetch_public_web_page" {
+        for field in ["schema_version", "sha256", "body_bytes"] {
+            value.as_object_mut().unwrap().remove(field);
+        }
+        message.text = value.to_string();
+        return;
+    }
+    // SendReceipt IDs are provider UI correlation hashes, not remote message IDs.
+    for path in [
+        "",
+        "/send_receipt",
+        "/output/value",
+        "/output/value/send_receipt",
+    ] {
+        if let Some(receipt) = value.pointer_mut(path).and_then(Value::as_object_mut)
+            && receipt.contains_key("idempotency_key")
+            && receipt.contains_key("outcome")
+            && receipt.contains_key("evidence")
+        {
+            for field in [
+                "schema_version",
+                "snapshot_id",
+                "snapshot_sha256",
+                "idempotency_key",
+                "provider_receipt_id",
+            ] {
+                receipt.remove(field);
+            }
+        }
+    }
+    if crate::document_model_ids::copy_tool(source)
+        && let Some(artifact) = value
+            .pointer_mut("/output/value")
+            .and_then(Value::as_object_mut)
+    {
+        artifact.remove("validation_sha256");
+        artifact.remove("validation_byte_len");
     }
     let created = artifact(&original);
     if created.is_some() {
@@ -903,6 +990,9 @@ pub(crate) fn project_result_message(message: &mut ChatMessage) {
         || source.starts_with("inspect_office_")
     {
         hide_internal(&mut value);
+    }
+    // Completion metadata and nested send receipts also occur outside artifact tools.
+    if value != before {
         message.text = value.to_string();
     }
 }

@@ -18,7 +18,50 @@ async fn read_report_with_task(
     db: &DatabaseConnection,
     include_task: bool,
 ) -> PersistedAgentSession {
-    let (mut parent, calls) = super::creation::runnable_parent(db).await;
+    read_report_source(db, include_task, false).await
+}
+
+async fn read_report_source(
+    db: &DatabaseConnection,
+    include_task: bool,
+    retain_history: bool,
+) -> PersistedAgentSession {
+    let (mut parent, calls) = super::creation::runnable_parent_with_source(
+        db,
+        super::creation::destination(),
+        desk_agent_protocol::data_lineage::Sensitivity::UserContent,
+    )
+    .await;
+    if retain_history && parent.assistant_data.is_none() {
+        let txn = db.begin().await.unwrap();
+
+        crate::assistant_data_store::accept_input_on(
+            &txn,
+            &mut parent,
+            "UTC",
+            None,
+            chrono::Utc::now().timestamp_millis() as u64,
+        )
+        .await
+        .unwrap();
+        let row = session_row::Entity::find()
+            .filter(session_row::Column::ConversationId.eq(&parent.conversation_id))
+            .one(&txn)
+            .await
+            .unwrap()
+            .unwrap();
+        session_row::Entity::update_many()
+            .col_expr(
+                session_row::Column::StateJson,
+                sea_orm::sea_query::Expr::value(parent.encode_json_for_storage().unwrap()),
+            )
+            .filter(session_row::Column::Id.eq(row.id))
+            .filter(session_row::Column::Version.eq(row.version))
+            .exec(&txn)
+            .await
+            .unwrap();
+        txn.commit().await.unwrap();
+    }
     let store = SubAgentStore::new(db.clone());
     let task = store
         .spawn_for_turn(&parent, &calls[0], &super::creation::spawn_request())
@@ -136,21 +179,82 @@ pub(super) async fn record_accepted_provider(
         total_bytes: 1024,
     };
     let receipts = crate::model_egress_store::SignalModelEgressStore::new(db.clone());
-    receipts
-        .record_dispatch_intent(
+    if desk_diagnose_core::ai_assistant::data_access::eligible_origin(parent) {
+        use desk_diagnose_core::seam::SessionSeam;
+        let message = match parent
+            .conversation
+            .iter()
+            .find(|message| message.data_envelope.as_ref() == Some(input))
+        {
+            Some(message) => message.clone(),
+            None => {
+                let projection = store.main_projection_for_turn(parent).await.unwrap();
+                assert_eq!(projection.data_envelope.as_ref(), Some(input));
+                projection
+            }
+        };
+        let mut request = desk_diagnose_core::seam::ModelRequest::text_only(
+            vec![message],
+            desk_diagnose_core::prompt::ResponseFormatSpec::None,
+        );
+        request.context_conversation_id = Some(parent.conversation_id.clone());
+        request.assistant_data =
+            crate::agent_session_store::SignalAgentSessionStore::new(db.clone())
+                .assistant_data_request_manifest(parent, &request, now.timestamp_millis() as u64)
+                .await
+                .unwrap()
+                .map(Box::new);
+        let authorized = policy.authorize_request(request).unwrap();
+        let snapshot = authorized.input_snapshot().unwrap();
+        let txn = db.begin().await.unwrap();
+        let prepared =
+            crate::assistant_data_store::model_gate::prepare_on(&txn, &authorized.request)
+                .await
+                .unwrap();
+        crate::model_egress_store::SignalModelEgressStore::record_snapshot_intent_on(
+            &txn,
             id.clone(),
             policy.export_authorization_id.clone(),
             1,
-            &audit,
-            std::slice::from_ref(input),
+            &snapshot,
         )
         .await
         .unwrap();
-    receipts.mark_succeeded(&id, output).await.unwrap();
-    receipts
-        .link_context_dispatch(&id, &parent.conversation_id)
+        crate::model_egress_store::SignalModelEgressStore::link_context_dispatch_on(
+            &txn,
+            &id,
+            &parent.conversation_id,
+        )
         .await
         .unwrap();
+        crate::assistant_data_store::model_gate::authorize_on(
+            &txn,
+            prepared.as_deref(),
+            &authorized.request,
+            &id,
+        )
+        .await
+        .unwrap();
+        txn.commit().await.unwrap();
+    } else {
+        receipts
+            .record_dispatch_intent(
+                id.clone(),
+                policy.export_authorization_id.clone(),
+                1,
+                &audit,
+                std::slice::from_ref(input),
+            )
+            .await
+            .unwrap();
+    }
+    if !desk_diagnose_core::ai_assistant::data_access::eligible_origin(parent) {
+        receipts
+            .link_context_dispatch(&id, &parent.conversation_id)
+            .await
+            .unwrap();
+    }
+    receipts.mark_succeeded(&id, output).await.unwrap();
 }
 
 #[tokio::test]
@@ -376,4 +480,102 @@ async fn finished_child_requires_current_model_review_before_parent_completion()
             .unwrap()
     );
     txn.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn native_inventory_parent_observation_is_captured_after_original_result_acknowledgement() {
+    let db = database().await;
+    let mut parent = read_report_source(&db, false, true).await;
+    assert!(parent.assistant_data.is_some());
+    // Completion is retained by its original transaction before the parent
+    // observes the result or calls another model.
+    let completed = crate::entity::agent_assistant_history::Entity::find()
+        .filter(crate::entity::agent_assistant_history::Column::Kind.eq("native_status"))
+        .all(&db)
+        .await
+        .unwrap();
+    assert!(completed.iter().any(|row| {
+        let proof = serde_json::from_str(&row.retention_proof_json).unwrap();
+        crate::assistant_data_store::read_native_history(row, &proof).unwrap().unwrap().status_snapshot.unwrap().items
+            .iter().any(|item| item.kind == desk_diagnose_core::ai_assistant::native_history::NativeHistoryTaskKind::Subagent && item.state == "completed")
+    }));
+    assert!(
+        completed
+            .iter()
+            .all(|row| !row.content.contains("Investigation finished"))
+    );
+
+    for state in ["queued", "running"] {
+        assert!(completed.iter().any(|row| {
+            let proof = serde_json::from_str(&row.retention_proof_json).unwrap();
+            crate::assistant_data_store::read_native_history(row, &proof).unwrap().unwrap().status_snapshot.unwrap().items
+                .iter().any(|item| item.kind == desk_diagnose_core::ai_assistant::native_history::NativeHistoryTaskKind::Subagent && item.state == state)
+        }), "original child transition must be retained: {state}");
+    }
+    parent.trigger_origin = desk_diagnose_core::session::TriggerOrigin::SubAgentCompletion;
+    let row = session_row::Entity::find()
+        .filter(session_row::Column::ConversationId.eq(&parent.conversation_id))
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    session_row::Entity::update_many()
+        .col_expr(
+            session_row::Column::StateJson,
+            sea_orm::sea_query::Expr::value(parent.encode_json_for_storage().unwrap()),
+        )
+        .filter(session_row::Column::Id.eq(row.id))
+        .filter(session_row::Column::Version.eq(row.version))
+        .exec(&db)
+        .await
+        .unwrap();
+    response(&db, &mut parent, true).await;
+    let transcript = parent.conversation.clone();
+    save_main_delegation_session(&db, &mut parent)
+        .await
+        .unwrap();
+    assert_eq!(parent.conversation, transcript);
+    assert!(desk_diagnose_core::ai_assistant::data_access::eligible_origin(&parent));
+    let observed = crate::entity::agent_subagent_inbox::Entity::find()
+        .filter(crate::entity::agent_subagent_inbox::Column::EventKind.eq("completed"))
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(observed.model_observed_at_ms.is_some());
+    assert!(observed.interpreted_at_ms.is_some());
+    let rows = crate::entity::agent_assistant_history::Entity::find()
+        .filter(crate::entity::agent_assistant_history::Column::Kind.eq("native_status"))
+        .all(&db)
+        .await
+        .unwrap();
+    assert!(!rows.is_empty());
+    let latest = rows
+        .iter()
+        .max_by_key(|row| row.admitted_generation)
+        .unwrap();
+    let proof = serde_json::from_str(&latest.retention_proof_json).unwrap();
+    let snapshot = crate::assistant_data_store::read_native_history(latest, &proof)
+        .unwrap()
+        .unwrap()
+        .status_snapshot
+        .unwrap();
+    assert!(
+        snapshot
+            .items
+            .iter()
+            .any(|item| item.native_id == observed.task_id && item.state == "completed")
+    );
+    let before = rows;
+    save_main_delegation_session(&db, &mut parent)
+        .await
+        .unwrap();
+    assert_eq!(
+        crate::entity::agent_assistant_history::Entity::find()
+            .filter(crate::entity::agent_assistant_history::Column::Kind.eq("native_status"))
+            .all(&db)
+            .await
+            .unwrap(),
+        before
+    );
 }

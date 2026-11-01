@@ -50,6 +50,12 @@ mod tests {
                     error: AgentErrorKind::Cancelled,
                 },
             ),
+            (
+                "timeout",
+                Agent {
+                    error: AgentErrorKind::Timeout,
+                },
+            ),
             ("provider failed with secret credentials", Unavailable),
         ] {
             assert_eq!(public_issue("failed", Some(code)), Some(expected));

@@ -23,6 +23,7 @@
 
 use std::io::Cursor;
 
+#[cfg(test)]
 use desk_capture_engine::video_encoder::video_encoder_factory::list_video_encoder;
 use desk_ipc_protocol::message::MediaCodec;
 use webrtc::sdp::description::session::SessionDescription;
@@ -86,6 +87,7 @@ pub fn parse_offer_video_codecs(sdp: &str) -> Vec<MediaCodec> {
     out
 }
 
+#[cfg(test)]
 /// The set of video wire codecs the host can encode, derived from the
 /// capture-engine factory enumeration. `X264` and `H264` both collapse onto
 /// [`MediaCodec::H264`]; `AV1` is present only where SVT-AV1 is compiled in
@@ -103,6 +105,7 @@ pub fn server_encodable_video_codecs() -> Vec<MediaCodec> {
     out
 }
 
+#[cfg(test)]
 /// Pick the codec the host should encode for a connection.
 ///
 /// 1. If the `preferred` hint (from `desk_settings.video_encoder`) is in

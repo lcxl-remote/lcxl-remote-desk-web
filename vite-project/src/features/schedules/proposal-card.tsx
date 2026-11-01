@@ -24,7 +24,7 @@ export function ScheduleProposalCards({ tools, running = false, deviceId, connec
     useEffect(() => {
         const added: string[] = [];
         for (const tool of tools) {
-            if (tool.name !== 'request_scheduled_task' || tool.status === 'failed' || !tool.output || tool.output.length > 8192) continue;
+            if (tool.name !== 'request_scheduled_task' || tool.status === 'failed' || !tool.output) continue;
             try {
                 const value = JSON.parse(tool.output);
                 if (((value.state === 'draft' && value.kind === 'fresh_task') || (value.state === 'pending_review' && value.kind === 'conversation_resume'))

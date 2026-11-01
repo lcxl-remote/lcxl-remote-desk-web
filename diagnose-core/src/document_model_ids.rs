@@ -59,6 +59,11 @@ fn object_id(reference: &ObjectRef) -> String {
 }
 
 fn references(value: &Value, found: &mut Vec<ObjectRef>) {
+    visit_live_references(value, &mut |reference| {
+        if let Ok(reference) = serde_json::from_value(reference.clone()) {
+            found.push(reference);
+        }
+    });
     let reference = if value.get("token").is_some()
         && value.get("snapshot_id").is_some()
         && value.get("object_kind").is_some()
@@ -85,6 +90,72 @@ fn references(value: &Value, found: &mut Vec<ObjectRef>) {
                 }
             }
             _ => {}
+        }
+    }
+}
+
+const DOCUMENT_READS: &[(&str, &str)] = &[
+    ("OfficeDocumentInspect", "selection"),
+    ("SpreadsheetLiveInspect", "projection"),
+    ("DocumentLiveInspect", "projection"),
+    ("PresentationLiveInspect", "projection"),
+];
+const DOCUMENT_REFS: &[&str] = &[
+    "document",
+    "worksheet",
+    "range",
+    "presentation",
+    "slide",
+    "slides",
+    "shapes",
+];
+
+pub(crate) fn visit_live_references(value: &Value, visitor: &mut impl FnMut(&Value)) {
+    let Some(read) = value.get("ReadContext") else {
+        return;
+    };
+    for (kind, projection) in DOCUMENT_READS {
+        if let Some(data) = read
+            .get(*kind)
+            .and_then(|v| v.get(*projection))
+            .and_then(|v| v.get("data"))
+        {
+            for field in DOCUMENT_REFS {
+                if let Some(reference) = data.get(*field) {
+                    if let Some(references) = reference.as_array() {
+                        for reference in references {
+                            visitor(reference);
+                        }
+                    } else {
+                        visitor(reference);
+                    }
+                }
+            }
+        }
+    }
+}
+
+pub(crate) fn map_live_references(value: &mut Value, visitor: &mut impl FnMut(&mut Value)) {
+    let Some(read) = value.get_mut("ReadContext") else {
+        return;
+    };
+    for (kind, projection) in DOCUMENT_READS {
+        if let Some(data) = read
+            .get_mut(*kind)
+            .and_then(|v| v.get_mut(*projection))
+            .and_then(|v| v.get_mut("data"))
+        {
+            for field in DOCUMENT_REFS {
+                if let Some(reference) = data.get_mut(*field) {
+                    if let Some(references) = reference.as_array_mut() {
+                        for reference in references {
+                            visitor(reference);
+                        }
+                    } else {
+                        visitor(reference);
+                    }
+                }
+            }
         }
     }
 }
@@ -469,6 +540,7 @@ pub(crate) fn project_tool(tool: &mut ToolSpec) {
 }
 
 fn project_refs(value: &mut Value) {
+    map_live_references(value, &mut project_refs);
     if value.get("token").is_some()
         && value.get("snapshot_id").is_some()
         && value.get("object_kind").is_some()
@@ -514,6 +586,22 @@ pub(crate) fn project_result_message(message: &mut ChatMessage) {
         && let Ok(mut value) = serde_json::from_str::<Value>(&message.text)
     {
         project_refs(&mut value);
+        if let Some(read) = value.get_mut("ReadContext") {
+            for (kind, projection) in DOCUMENT_READS {
+                if let Some(body) = read.get_mut(*kind) {
+                    if let Some(object) = body.as_object_mut() {
+                        object.remove("adapter");
+                    }
+                    if let Some(data) = body
+                        .get_mut(*projection)
+                        .and_then(|v| v.get_mut("data"))
+                        .and_then(Value::as_object_mut)
+                    {
+                        data.remove("body_sha256");
+                    }
+                }
+            }
+        }
         message.text = value.to_string();
     }
 }
@@ -550,7 +638,9 @@ mod tests {
             name: "preview_computer_action".into(),
             arguments_json: input.to_string(),
         };
-        let resolved = crate::ui_model_ids::resolve_session_call(&call, &session, 1).unwrap();
+        let resolved =
+            crate::ui_model_ids::resolve_session_call_with_context(&call, &session, 1, None)
+                .unwrap();
         let native: Value = serde_json::from_str(&resolved.arguments_json).unwrap();
         assert_eq!(native["adapter"], adapter);
         crate::ai_assistant::validate_preview_call(&resolved).unwrap();
@@ -558,13 +648,14 @@ mod tests {
         let mut supplied = input.clone();
         supplied["adapter"] = adapter;
         assert!(
-            crate::ui_model_ids::resolve_session_call(
+            crate::ui_model_ids::resolve_session_call_with_context(
                 &ToolCall {
                     arguments_json: supplied.to_string(),
                     ..call.clone()
                 },
                 &session,
-                1
+                1,
+                None
             )
             .is_err()
         );
@@ -579,7 +670,9 @@ mod tests {
             json!({}),
             missing,
         );
-        let error = crate::ui_model_ids::resolve_session_call(&call, &session, 1).unwrap_err();
+        let error =
+            crate::ui_model_ids::resolve_session_call_with_context(&call, &session, 1, None)
+                .unwrap_err();
         assert!(error.message.contains("Inspect the target again"));
     }
 
@@ -644,7 +737,9 @@ mod tests {
             name: "replace_live_document_body".into(),
             arguments_json: input.to_string(),
         };
-        let resolved = crate::ui_model_ids::resolve_session_call(&call, &session, 1).unwrap();
+        let resolved =
+            crate::ui_model_ids::resolve_session_call_with_context(&call, &session, 1, None)
+                .unwrap();
         assert_eq!(
             serde_json::from_str::<Value>(&resolved.arguments_json).unwrap()["target"],
             json!(reference)
@@ -713,7 +808,9 @@ mod tests {
                 name: "inspect_live_document".into(),
                 arguments_json: json!({"target_id":id}).to_string(),
             };
-            let resolved = crate::ui_model_ids::resolve_session_call(&call, &session, 1).unwrap();
+            let resolved =
+                crate::ui_model_ids::resolve_session_call_with_context(&call, &session, 1, None)
+                    .unwrap();
             assert_eq!(
                 serde_json::from_str::<Value>(&resolved.arguments_json).unwrap()["target"],
                 json!(expected)
@@ -754,7 +851,9 @@ mod tests {
             .decide(&subject, 1, "approved-directory", true, 1)
             .unwrap();
         let call=ToolCall{id:"copy".into(),name:"replace_pages_copy_body".into(),arguments_json:json!({"target_id":"doc1","output":{"native_file_name":"report.pages","directory_request_id":"approved-directory"},"text":"requested"}).to_string()};
-        let resolved = crate::ui_model_ids::resolve_session_call(&call, &session, 1).unwrap();
+        let resolved =
+            crate::ui_model_ids::resolve_session_call_with_context(&call, &session, 1, None)
+                .unwrap();
         let canonical: Value = serde_json::from_str(&resolved.arguments_json).unwrap();
         assert_eq!(canonical["output"]["destination_parent"], json!(directory));
         assert!(same_input(
@@ -774,13 +873,14 @@ mod tests {
         let mut bad: Value = serde_json::from_str(&call.arguments_json).unwrap();
         bad["output"]["directory_request_id"] = json!("unapproved");
         assert!(
-            crate::ui_model_ids::resolve_session_call(
+            crate::ui_model_ids::resolve_session_call_with_context(
                 &ToolCall {
                     arguments_json: bad.to_string(),
                     ..call
                 },
                 &session,
-                1
+                1,
+                None
             )
             .is_err()
         );

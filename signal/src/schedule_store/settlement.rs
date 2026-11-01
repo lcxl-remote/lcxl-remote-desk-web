@@ -7,6 +7,7 @@ use desk_diagnose_core::schedule::lifecycle::FailureState;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set};
 
 impl ScheduleStore {
+    #[cfg(test)]
     /// A result acknowledges the exact live lease. Unknown effects pause all future runs.
     pub async fn finish_run(
         &self,
@@ -151,6 +152,12 @@ pub(super) async fn settle(args: Settlement) -> Result<run::Model, ScheduleStore
         .one(&txn)
         .await?
         .ok_or(ScheduleStoreError::NotFound)?;
+    let actor = work.owner_user_id.to_string();
+    let device = task.target_device_id.to_string();
+    let history = desk_diagnose_core::future::boxed(|| {
+        crate::assistant_data_store::native_scope_on(&txn, &actor, &device, &work.conversation_id)
+    })
+    .await?;
     if task.active_run_id.as_deref() != Some(run_id) {
         return Err(ScheduleStoreError::Conflict);
     }
@@ -224,6 +231,9 @@ pub(super) async fn settle(args: Settlement) -> Result<run::Model, ScheduleStore
         .one(&txn)
         .await?
         .ok_or(ScheduleStoreError::NotFound)?;
+    if let Some(history) = &history {
+        desk_diagnose_core::future::boxed(|| history.capture_on(&txn)).await?;
+    }
     txn.commit().await?;
     Ok(result)
 }

@@ -56,11 +56,11 @@ pub(crate) async fn original_on<C: sea_orm::ConnectionTrait + crate::config::Con
     txn: &C,
     generation: &str,
 ) -> Result<
-    (
+    Box<(
         agent_capability_dispatch_outbox::Model,
         agent_action_item::Model,
         CapabilityDispatchPayload,
-    ),
+    )>,
     DbErr,
 > {
     let outbox = agent_capability_dispatch_outbox::Entity::find()
@@ -127,7 +127,7 @@ pub(crate) async fn original_on<C: sea_orm::ConnectionTrait + crate::config::Con
     {
         return Err(invalid());
     }
-    Ok((outbox, work, payload))
+    Ok(Box::new((outbox, work, payload)))
 }
 
 pub(super) fn validate_binding(
@@ -235,7 +235,8 @@ impl SignalCapabilityGrantStore {
     ) -> Result<(), DbErr> {
         let txn = crate::db::begin_write(&self.db, crate::entity::agent_session::Entity).await?;
         let result = async {
-            let (outbox, work, payload) = original_on(&txn, &plan.execution_generation).await?;
+            let computer_original = original_on(&txn, &plan.execution_generation).await?;
+            let (outbox, work, payload) = computer_original.as_ref();
             if desk_diagnose_core::native_ids::background_action(
                 &work.conversation_id,
                 &work.turn_id,
@@ -301,7 +302,7 @@ impl SignalCapabilityGrantStore {
                     chain_id: session.chain_id.clone(),
                 }),
             };
-            validate_binding(&binding, &outbox, &work, &payload)?;
+            validate_binding(&binding, outbox, work, payload)?;
             let json = serde_json::to_string(&binding).map_err(|_| invalid())?;
             if let Some(existing) = &outbox.computer_binding_json {
                 if existing != &json {
@@ -420,7 +421,8 @@ impl SignalCapabilityGrantStore {
         }
         let txn = crate::db::begin_write(&self.db, crate::entity::agent_session::Entity).await?;
         let result = async {
-            let (outbox, work, payload) = original_on(&txn, frame_request_id).await?;
+            let computer_original = original_on(&txn, frame_request_id).await?;
+            let (outbox, work, payload) = computer_original.as_ref();
             if !work.is_side_effecting && outbox.computer_binding_json.is_none() {
                 // Inline browser observations deliberately have no durable
                 // binding. An Adaptive observation (currently browser wait)
@@ -443,7 +445,7 @@ impl SignalCapabilityGrantStore {
                 .as_deref()
                 .ok_or_else(invalid)?;
             let binding: ComputerBinding = serde_json::from_str(json).map_err(|_| invalid())?;
-            validate_binding(&binding, &outbox, &work, &payload)?;
+            validate_binding(&binding, outbox, work, payload)?;
             if binding.connection_id != connection_id
                 || binding.plan.device_id != audience
                 || binding.plan.work_id != started.work_id

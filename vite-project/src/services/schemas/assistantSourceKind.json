@@ -1,0 +1,1 @@
+{"type":"string","enum":["input","assistant_message","receipt","native_status","previous_memory"],"x-readme-ref-name":"AssistantSourceKind"}

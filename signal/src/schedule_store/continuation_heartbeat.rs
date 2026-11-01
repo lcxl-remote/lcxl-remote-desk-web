@@ -141,7 +141,7 @@ impl LeaseHeartbeat for ScheduleHeartbeat {
                     biased;
                     _ = cancel.cancelled() => break,
                     _ = timer.tick() => {
-                        let renewed = store.renew_paired_lease(ContinuationLease { owner, run_id: &run_id, node_id: &node_id, run_epoch, session_token }, lease_seconds, fresh).await;
+                        let renewed = desk_diagnose_core::future::send_phase(|| store.renew_paired_lease(ContinuationLease { owner, run_id: &run_id, node_id: &node_id, run_epoch, session_token }, lease_seconds, fresh)).await;
                         if !matches!(renewed, Ok(true)) {
                             healthy.store(false, Ordering::Release);
                             cancel.cancel();

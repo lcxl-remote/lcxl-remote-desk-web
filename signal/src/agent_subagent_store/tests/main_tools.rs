@@ -35,10 +35,11 @@ async fn runtime_schema_defaults_preserve_result_and_list_call_authority() {
         ),
     ] {
         let original = committed_call(&db, &mut parent, id, name, arguments).await;
-        let resolved = desk_diagnose_core::ui_model_ids::resolve_session_call(
+        let resolved = desk_diagnose_core::ui_model_ids::resolve_session_call_with_context(
             &original,
             &parent,
             chrono::Utc::now().timestamp_millis() as u64,
+            None,
         )
         .unwrap();
         let mut input: serde_json::Value = serde_json::from_str(&resolved.arguments_json).unwrap();
@@ -666,8 +667,10 @@ async fn short_task_ids_keep_query_wait_and_control_call_authority() {
             _ => serde_json::json!({"task_id":native}),
         };
         let original = committed_call(&db, &mut parent, "short-call", tool, arguments).await;
-        let resolved =
-            desk_diagnose_core::ui_model_ids::resolve_session_call(&original, &parent, 1).unwrap();
+        let resolved = desk_diagnose_core::ui_model_ids::resolve_session_call_with_context(
+            &original, &parent, 1, None,
+        )
+        .unwrap();
         let operation = tools::parse(&parent, &resolved).unwrap();
         let receipt = store
             .execute_main_tool(&mut parent, &resolved, operation, "short-result")
@@ -762,7 +765,7 @@ async fn frozen_model_control_survives_session_decode_but_observation_race_keeps
         parent =
             PersistedAgentSession::decode_json(&parent.encode_json_for_storage().unwrap()).unwrap();
         if changed {
-            store.control_for_owner("root", "1", "1", &desk_agent_protocol::ai_assistant::subagent::AiAssistantSubAgentControl { client_request_id: "concurrent-owner-adjustment".into(), task_id: task.task_id.clone(), expected_input_revision: 1, expected_control_revision: 1, action: desk_agent_protocol::ai_assistant::subagent::SubAgentControlAction::Adjust { message: "Check the additional symptom".into() } }).await.unwrap();
+            store.control_for_owner("root", "1", "1", &desk_agent_protocol::ai_assistant::subagent::AiAssistantSubAgentControl { client_request_id: "concurrent-owner-adjustment".into(), task_id: task.task_id.clone(), expected_input_revision: 1, expected_control_revision: 1, action: desk_agent_protocol::ai_assistant::subagent::SubAgentControlAction::Adjust { client_timezone: "UTC".into(), message: "Check the additional symptom".into() } }).await.unwrap();
         }
         let before = load(&db, &task.task_id).await;
         let operation = tools::parse(&parent, &call).unwrap();

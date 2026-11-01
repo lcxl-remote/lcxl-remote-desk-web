@@ -11,6 +11,20 @@ const page = (runs: ReturnType<typeof run>[], next_cursor: string | null = null,
 afterEach(() => vi.unstubAllGlobals());
 
 describe('run history', () => {
+    it('cancels a permission wait by its original run id and keeps the pending cancellation disabled', async () => {
+        const waiting = { ...run('original-run', 'awaiting_permission'), started_at: '2026-10-01T12:00:00.000Z' };
+        const initial = { result: 'runs', schedule_id: 'task-1', runs: [waiting], next_cursor: null };
+        const request = vi.fn().mockResolvedValueOnce(initial)
+            .mockResolvedValueOnce({ result: 'task', task: {} })
+            .mockResolvedValueOnce({ ...initial, runs: [{ ...waiting, cancel_requested_at: '2026-10-01T12:00:01.000Z' }] });
+        render(<RunHistory client={{ request } as unknown as ScheduleClient} scheduleId="task-1" connected zone="UTC" />);
+        expect(await screen.findByText('Awaiting permission')).toBeInTheDocument();
+        fireEvent.click(screen.getByRole('button', { name: 'Cancel this run' }));
+        await waitFor(() => expect(request).toHaveBeenCalledTimes(3));
+        expect(request.mock.calls[1][0]).toEqual({ operation: 'cancel_task_run', run_id: 'original-run' });
+        expect(screen.getByRole('button', { name: 'Cancel this run' })).toBeDisabled();
+        expect(request.mock.calls.map(([body]) => body.operation)).toEqual(['list_runs', 'cancel_task_run', 'list_runs']);
+    });
     it('loads older occurrences with the returned cursor and refreshes from the newest', async () => {
         const request = vi.fn().mockResolvedValueOnce(page([run('new')], 'new')).mockResolvedValueOnce(page([run('old', 'failed')])).mockResolvedValueOnce(page([]));
         render(<RunHistory client={{ request } as unknown as ScheduleClient} scheduleId="task-1" connected zone="UTC" />);

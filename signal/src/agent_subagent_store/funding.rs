@@ -191,7 +191,7 @@ pub(super) async fn reserve_call_for_session_on(
             match actual {
                 Some(actual) => {
                     let recorded = goal
-                        .delegation_settlements
+                        .independent_settlements
                         .get(&reservation.reservation_id)
                         .ok_or_else(invalid)?;
                     if recorded.total_tokens() != Some(actual.tokens)
@@ -202,7 +202,7 @@ pub(super) async fn reserve_call_for_session_on(
                     }
                 }
                 None if goal
-                    .delegation_reservations
+                    .independent_reservations
                     .get(&reservation.reservation_id)
                     == Some(&goal_upper) => {}
                 None => return Err(invalid()),
@@ -214,7 +214,7 @@ pub(super) async fn reserve_call_for_session_on(
         let now = u64::try_from(now_ms)
             .map_err(|_| invalid())?
             .max(goal.updated_at_unix_ms);
-        match goal.reserve_delegation_with_id(&reservation.reservation_id, goal_upper, now) {
+        match goal.reserve_independent_with_id(&reservation.reservation_id, goal_upper, now) {
             Ok(_) => {}
             Err(desk_diagnose_core::goal::GoalError::BudgetExceeded) => {
                 // The caller rolls back the allocation reservation already written.
@@ -309,9 +309,9 @@ pub(crate) async fn settle_call_budget_on(
             && reservation.kind != DelegationCallKind::Tool
             && old.provider_receipt_id.is_none()
         {
-            goal.release_unstarted_delegation_model_with_id(&reservation.reservation_id, now)
+            goal.release_unstarted_independent_model_with_id(&reservation.reservation_id, now)
         } else {
-            goal.settle_delegation_with_id(&reservation.reservation_id, goal_actual, now)
+            goal.settle_independent_with_id(&reservation.reservation_id, goal_actual, now)
         }
         .map_err(|_| invalid())?;
         if changed {

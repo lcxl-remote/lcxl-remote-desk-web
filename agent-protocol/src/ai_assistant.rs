@@ -13,8 +13,16 @@ use wincode::{SchemaRead, SchemaWrite};
 use crate::computer_use::{ObjectKind, ObjectRef};
 
 pub mod goal_budget;
+pub mod history;
+pub mod history_window;
+pub mod memory;
+pub mod owner_history;
+pub mod policy;
+pub mod processing;
+pub mod source;
 pub mod subagent;
 pub mod subagent_policy;
+pub mod user_instructions;
 
 /// Device-owned product switch projected to trusted central orchestrators.
 ///
@@ -59,11 +67,15 @@ pub struct AiAssistantSettingsUpdate {
     Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
 )]
 pub struct AiAssistantAsk {
+    /// Optional first-input choice; an existing conversation keeps its frozen mode.
+    pub temporary_conversation: Option<bool>,
     /// The owner's natural-language request.
     pub question: String,
     /// Stable idempotency identity for this user message. It is distinct from
     /// the transport request id so reconnect/retry cannot duplicate input.
     pub client_message_id: String,
+    /// IANA time zone observed by the sending client for this exact input.
+    pub client_timezone: String,
     /// Stable client intent for multi-turn continuity. The server validates and
     /// subject-namespaces it before using it as a persistence key.
     #[serde(default)]
@@ -285,10 +297,19 @@ fn validate_wire_id(value: &str, error: &'static str) -> Result<(), &'static str
 pub type AiAssistantObjectContextUpdated = AiAssistantContextUpdated;
 
 impl AiAssistantAsk {
+    pub fn validate_with_limits(
+        &self,
+        limits: &limits::AssistantConversationLimits,
+    ) -> Result<(), &'static str> {
+        if self.question.trim().len() > limits.question_bytes as usize {
+            return Err("AI Assistant question exceeds the configured byte limit");
+        }
+        self.validate()
+    }
     pub fn validate(&self) -> Result<(), &'static str> {
         let question = self.question.trim();
-        if question.is_empty() || question.len() > 16 * 1024 {
-            return Err("AI Assistant question must be 1..=16384 bytes");
+        if question.is_empty() {
+            return Err("AI Assistant question must not be empty");
         }
         validate_wire_id(
             &self.client_message_id,
@@ -348,8 +369,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn owner_inputs_require_an_explicit_client_timezone() {
+        let missing = serde_json::json!({"question":"昨天做了什么", "client_message_id":"input"});
+        assert!(serde_json::from_value::<AiAssistantAsk>(missing.clone()).is_err());
+        for timezone in ["Asia/Shanghai", "America/Los_Angeles"] {
+            let mut value = missing.clone();
+            value["client_timezone"] = timezone.into();
+            let ask: AiAssistantAsk = serde_json::from_value(value).unwrap();
+            assert_eq!(ask.client_timezone, timezone);
+        }
+    }
+
+    #[test]
     fn ask_round_trips_without_any_mutation_payload() {
         let ask = AiAssistantAsk {
+            client_timezone: "UTC".into(),
+            temporary_conversation: None,
             question: "Inspect the active application and suggest a safe change.".into(),
             client_message_id: "message-1".into(),
             conversation_id: Some("assistant-1".into()),
@@ -370,7 +405,8 @@ mod tests {
     fn explicit_goal_intent_is_distinct_from_tool_approval() {
         let mut ask: AiAssistantAsk = serde_json::from_value(serde_json::json!({
             "question": "Keep working on the report",
-            "client_message_id": "message-2"
+            "client_message_id": "message-2",
+            "client_timezone": "Asia/Shanghai"
         }))
         .unwrap();
         assert!(!ask.start_goal);
@@ -384,6 +420,8 @@ mod tests {
     #[test]
     fn previous_completed_goal_requires_explicit_goal_start() {
         let mut ask = AiAssistantAsk {
+            client_timezone: "UTC".into(),
+            temporary_conversation: None,
             question: "Continue unfinished work".into(),
             client_message_id: "message-1".into(),
             previous_completed_goal_id: Some("goal-1".into()),
@@ -494,3 +532,5 @@ mod tests {
         assert!(invalid_kind.validate().is_err());
     }
 }
+
+pub mod limits;

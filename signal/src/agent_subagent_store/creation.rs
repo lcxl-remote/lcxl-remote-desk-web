@@ -17,7 +17,7 @@ pub(crate) async fn parent_planning_on(
     txn: &DatabaseTransaction,
     held: &PersistedAgentSession,
     now_ms: i64,
-) -> Result<PersistedAgentSession, DbErr> {
+) -> Result<Box<PersistedAgentSession>, DbErr> {
     let current = parent_on(txn, &held.conversation_id, &held.actor_id, &held.device_id).await?;
     let row = session_row::Entity::find()
         .filter(session_row::Column::ConversationId.eq(&held.conversation_id))
@@ -45,6 +45,7 @@ pub(crate) async fn parent_planning_on(
 }
 
 impl SubAgentStore {
+    #[cfg(test)]
     pub async fn spawn_for_turn(
         &self,
         held: &PersistedAgentSession,
@@ -56,7 +57,19 @@ impl SubAgentStore {
         }
         let txn = crate::db::begin_write(&self.db, session_row::Entity).await?;
 
+        let history = desk_diagnose_core::future::boxed(|| {
+            crate::assistant_data_store::native_scope_on(
+                &txn,
+                &held.actor_id,
+                &held.device_id,
+                &held.conversation_id,
+            )
+        })
+        .await?;
         let result = spawn_on(&txn, held, call, request).await?;
+        if let Some(history) = &history {
+            desk_diagnose_core::future::boxed(|| history.capture_on(&txn)).await?;
+        }
         txn.commit().await?;
         Ok(result)
     }
@@ -309,6 +322,9 @@ pub(crate) async fn spawn_on(
                 conversation_id: Set(child_id),
                 actor_id: Set(held.actor_id.clone()),
                 device_id: Set(held.device_id.clone()),
+                conversation_schema_version: Set(Some(i32::from(
+                    desk_diagnose_core::session::CONVERSATION_SCHEMA_VERSION,
+                ))),
                 state_json: Set(child.encode_json_for_storage().map_err(|_| invalid())?),
                 version: Set(0),
                 lease_token: Set(0),

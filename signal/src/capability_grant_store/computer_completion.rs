@@ -11,6 +11,7 @@ use desk_diagnose_core::{
     session::{ActionIdentity, WorkKind},
 };
 
+mod history;
 pub(crate) mod observation;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -155,8 +156,8 @@ fn binding(
     outbox: &agent_capability_dispatch_outbox::Model,
     work: &agent_action_item::Model,
     payload: &CapabilityDispatchPayload,
-) -> Result<ComputerBinding, DbErr> {
-    let value: ComputerBinding = serde_json::from_str(
+) -> Result<Box<ComputerBinding>, DbErr> {
+    let value: Box<ComputerBinding> = serde_json::from_str(
         outbox
             .computer_binding_json
             .as_deref()
@@ -308,10 +309,11 @@ impl SignalCapabilityGrantStore {
         ),
         DbErr,
     > {
-        let (outbox, work, payload) = original_on(txn, generation).await?;
-        let frozen = binding(&outbox, &work, &payload)?;
-        let result = terminal_result(&outbox, work.clone(), &payload)?;
-        Ok((work, frozen.origin, result))
+        let computer_original = original_on(txn, generation).await?;
+        let (outbox, work, payload) = computer_original.as_ref();
+        let frozen = binding(outbox, work, payload)?;
+        let result = terminal_result(outbox, work.clone(), payload)?;
+        Ok((work.clone(), frozen.origin, result))
     }
 
     pub(crate) async fn wait_computer_result(
@@ -334,7 +336,8 @@ impl SignalCapabilityGrantStore {
             if outbox.computer_binding_json.is_none() {
                 return Ok(None);
             }
-            let (outbox, work, payload) = original_on(&txn, generation).await?;
+            let computer_original = original_on(&txn, generation).await?;
+            let (outbox, work, payload) = computer_original.as_ref();
             if work.conversation_id != run_id
                 || work.actor_id != actor_id
                 || work.target_device_id != device_id
@@ -342,11 +345,11 @@ impl SignalCapabilityGrantStore {
             {
                 return Err(invalid());
             }
-            let binding = binding(&outbox, &work, &payload)?;
-            let identity = identity(&work, &payload);
+            let binding = binding(outbox, work, payload)?;
+            let identity = identity(work, payload);
             let running = super::computer_background::task_on(
                 &txn,
-                &work,
+                work,
                 u64::try_from(Utc::now().timestamp_millis()).map_err(|_| invalid())?,
             )
             .await?
@@ -357,14 +360,16 @@ impl SignalCapabilityGrantStore {
                         | desk_diagnose_core::dynamic_run::BackgroundTaskState::CancelRequested
                 )
             });
-            Ok(Some(match terminal_result(&outbox, work, &payload)? {
-                Some(original) => original.into_wait(),
-                None if running => WaitOutcome::StillRunning,
-                None => WaitOutcome::UnknownWithIdentity {
-                    action: identity,
-                    original_call_id: binding.origin.tool_call_id,
+            Ok(Some(
+                match terminal_result(outbox, work.clone(), payload)? {
+                    Some(original) => original.into_wait(),
+                    None if running => WaitOutcome::StillRunning,
+                    None => WaitOutcome::UnknownWithIdentity {
+                        action: identity,
+                        original_call_id: binding.origin.tool_call_id,
+                    },
                 },
-            }))
+            ))
         }
         .await;
         txn.rollback().await?;
@@ -429,7 +434,8 @@ impl SignalCapabilityGrantStore {
         if frame != completed.execution_generation {
             return Err(invalid());
         }
-        let (outbox, work, payload) = original_on(txn, frame).await?;
+        let computer_original = original_on(txn, frame).await?;
+        let (outbox, work, payload) = computer_original.as_ref();
         if completed.work_id != work.id.to_string()
             || completed.action_request_id != payload.call_id
             || audience != work.target_device_id
@@ -442,7 +448,7 @@ impl SignalCapabilityGrantStore {
             // its own connection and handles the original inline completion.
             return Ok(CompletionObservation::InlineOrLegacy.into());
         }
-        let binding = binding(&outbox, &work, &payload)?;
+        let binding = binding(outbox, work, payload)?;
         if binding.connection_id != connection || binding.plan.device_id != audience {
             return Err(invalid());
         }
@@ -459,7 +465,7 @@ impl SignalCapabilityGrantStore {
             return Ok(CompletionObservation::Stale.into());
         }
         let mut record = if work.result_json.is_some() {
-            decode(&outbox, &work, &payload, &binding)?
+            decode(outbox, work, payload, &binding)?
         } else {
             Record {
                 schema_version: 2,
@@ -514,7 +520,7 @@ impl SignalCapabilityGrantStore {
             let receipt = binding
                 .origin
                 .receipt(
-                    identity(&work, &payload),
+                    identity(work, payload),
                     1,
                     now_ms,
                     &ToolRunOutput {
@@ -583,6 +589,10 @@ impl SignalCapabilityGrantStore {
         if changed.rows_affected != 1 || updated.rows_affected != 1 {
             return Err(invalid());
         }
+        desk_diagnose_core::future::boxed(|| {
+            history::capture_on(txn, frame, outbox, work, &binding, &record)
+        })
+        .await?;
         #[cfg(test)]
         pause_crash_fixture_before_commit("computer_completion_before_commit");
         Ok(CompletionReport {
@@ -605,14 +615,15 @@ impl SignalCapabilityGrantStore {
     ) -> Result<Option<OriginalResult>, DbErr> {
         let txn = self.db.begin().await?;
         let result = async {
-            let (outbox, work, payload) = original_on(&txn, generation).await?;
+            let computer_original = original_on(&txn, generation).await?;
+            let (outbox, work, payload) = computer_original.as_ref();
             if work.conversation_id != run_id
                 || work.actor_id != actor_id
                 || work.target_device_id != device_id
             {
                 return Err(invalid());
             }
-            terminal_result(&outbox, work, &payload)
+            terminal_result(outbox, work.clone(), payload)
         }
         .await;
         txn.rollback().await?;
@@ -643,14 +654,15 @@ impl SignalCapabilityGrantStore {
                 .one(&txn)
                 .await?
                 .ok_or_else(invalid)?;
-            let (outbox, work, payload) = original_on(&txn, &outbox.dispatch_id).await?;
+            let computer_original = original_on(&txn, &outbox.dispatch_id).await?;
+            let (outbox, work, payload) = computer_original.as_ref();
             if work.conversation_id != run_id
                 || work.actor_id != actor_id
                 || work.target_device_id != device_id
             {
                 return Err(invalid());
             }
-            if terminal_result(&outbox, work, &payload)?.is_none() {
+            if terminal_result(outbox, work.clone(), payload)?.is_none() {
                 return Err(invalid());
             }
             agent_action_item::Entity::update_many()

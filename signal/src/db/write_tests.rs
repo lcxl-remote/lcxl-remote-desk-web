@@ -98,3 +98,42 @@ async fn writer_reservation_never_changes_rows_or_fires_row_triggers() {
         .unwrap();
     assert_eq!(row.try_get::<i64>("", "n").unwrap(), 0);
 }
+
+#[tokio::test]
+async fn production_pool_queues_internal_writes_before_acquiring_a_sqlite_snapshot() {
+    let dir = tempfile::tempdir().unwrap();
+    let options = sqlite_connection_options(format!(
+        "sqlite://{}?mode=rwc",
+        dir.path().join("production.db").display()
+    ));
+    let db = crate::config::test_support::Database::connect(options)
+        .await
+        .unwrap();
+    let backend = db.get_database_backend();
+    let schema = sea_orm::Schema::new(backend).create_table_from_entity(counter::Entity);
+    db.execute_raw(backend.build(&schema)).await.unwrap();
+    counter::Entity::insert(counter::ActiveModel {
+        id: sea_orm::Set(1),
+        value: sea_orm::Set(0),
+    })
+    .exec(&db)
+    .await
+    .unwrap();
+    let writer = begin_write(&db, counter::Entity).await.unwrap();
+    let clone = db.clone();
+    let waiting = begin_write(&clone, counter::Entity);
+    tokio::pin!(waiting);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut waiting)
+            .await
+            .is_err()
+    );
+    writer.commit().await.unwrap();
+    let next = tokio::time::timeout(Duration::from_secs(2), waiting)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(value(&next).await, 0);
+    next.commit().await.unwrap();
+    db.close().await.unwrap();
+}

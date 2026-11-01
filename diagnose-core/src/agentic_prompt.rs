@@ -19,6 +19,7 @@
 
 use crate::chat::{ChatMessage, ChatRole};
 
+#[cfg(test)]
 /// Semantic version of the agentic system prompt. Bump whenever
 /// [`AGENTIC_SYSTEM_PROMPT`] changes so the audit trail can attribute a turn to
 /// the prompt that produced it (mirrors [`crate::prompt::PROMPT_VERSION`]).

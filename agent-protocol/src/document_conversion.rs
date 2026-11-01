@@ -6,7 +6,6 @@ use wincode::{SchemaRead, SchemaWrite};
 
 use crate::computer_use::{CreatedFileArtifactOutput, ObjectKind, ObjectRef};
 
-pub const DOCUMENT_CONVERSION_SCHEMA_VERSION: u16 = 1;
 pub const DOCUMENT_CONVERSION_ADAPTER_VERSION: &str = "document-conversion-in-process/v1";
 pub const DOCUMENT_PREVIEW_SPEC_VERSION: u16 = 1;
 pub const MAX_DOCUMENT_SOURCE_BYTES: u64 = 32 * 1024 * 1024;

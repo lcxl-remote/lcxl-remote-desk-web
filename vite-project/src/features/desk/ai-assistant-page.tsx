@@ -1,7 +1,8 @@
 import { AssistantGoalProposalControls } from './assistant-goal-proposal-controls';
 import { ApprovalReviews, useOwnApprovalAccess } from '@/features/approval/reviews';
 import { AssistantGoalPanel, goalPlanningAction } from './assistant-goal-panel';
-import { AssistantTranscript } from './assistant-transcript';
+import { AssistantConversationMessages } from './assistant-conversation-messages';
+import { AssistantConversationHistory } from './assistant-conversation-history';
 import { permissionToolLabel, permissionResourceLabel, permissionOperationLabel, isReusableWebHost } from './assistant-permission-labels';
 import { AssistantAttachments } from './assistant-attachments';
 import { requireRecoveryZip } from '@/lib/file-recovery-error';
@@ -34,7 +35,7 @@ import { capabilityDescriptionKey } from './assistant-capability-copy';
 import { type FormEvent, useEffect, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { Bot, Check, AlertTriangle, ArrowDown, ArrowLeft, CalendarClock, Eye, FolderKey, ListTodo, ListTree, LoaderCircle, Monitor, Paperclip, RefreshCw, Settings2, ShieldCheck, X } from 'lucide-react';
+import { Bot, Check, AlertTriangle, ArrowDown, ArrowLeft, CalendarClock, Eye, FolderKey, ListTodo, ListTree, LoaderCircle, Monitor, Paperclip, RefreshCw, Settings2, ShieldCheck, SlidersHorizontal, X } from 'lucide-react';
 
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
@@ -258,7 +259,7 @@ export function AiAssistantWorkspace({
         subscribe,
         sendMessage,
     });
-    const scheduleNavigate = useNavigate();
+    const navigate = useNavigate();
     const setupOrigin = useLocation();
     const chat = useAiAssistantChat({
         rehearsal,
@@ -316,8 +317,7 @@ export function AiAssistantWorkspace({
         setStartGoal(true);
         setPreviousCompletedGoalId(chat.goal?.goalId ?? null);
         const draft = t('pages.aiAssistant.goalStillIncompletePrompt', { goal: chat.goal?.goalText ?? '' });
-        setQuestion(new TextEncoder().encode(draft).length <= 16_384
-            ? draft : t('pages.aiAssistant.goalStillIncompletePromptShort'));
+        setQuestion(draft);
         focusGoalComposer();
     };
     const [approvalSettingsOpen, setApprovalSettingsOpen] = useState(false);
@@ -449,7 +449,7 @@ export function AiAssistantWorkspace({
     }, [chat.acceptedInput]);
 
     const sendDisabled = chat.turnRunning || chat.stopping || !!chat.deliveryState || !rehearsalCanStart
-        || !assistantEnabled || !question.trim() || !isConnected || chat.hydrating || !chat.sessionTargetReady
+        || !assistantEnabled || !question.trim() || !isConnected || chat.hydrating || chat.historyRestoreFailed || !chat.sessionTargetReady
         || chat.sessionTargetResolving || chat.contextUpdating || !providerConfig?.api_key_set
         || !providerConfig?.model || (startGoal && !goalBudgetPolicy);
     const submit = (event: FormEvent) => {
@@ -459,8 +459,8 @@ export function AiAssistantWorkspace({
         chat.start(question, i18n.language, selectedContext, startGoal, previousCompletedGoalId);
     };
 
-    const resetConversation = () => {
-        chat.reset();
+    const resetConversation = (temporary = false) => {
+        chat.reset(temporary);
         setSelectedCapabilityIds([]);
         setStartGoal(false);
         setPreviousCompletedGoalId(null);
@@ -613,7 +613,7 @@ export function AiAssistantWorkspace({
                 onSelect: () => setSchedulesOpen(true) },
             ...(!rehearsal ? [{ label: t('schedules.createResume'), icon: CalendarClock,
                 disabled: !assistantEnabled || chat.running || chat.hydrating || !chat.conversationId || !chat.inputRevision,
-                onSelect: () => { if (chat.conversationId && chat.inputRevision) scheduleNavigate(`/schedules?${new URLSearchParams({
+                onSelect: () => { if (chat.conversationId && chat.inputRevision) navigate(`/schedules?${new URLSearchParams({
                     resume_conversation: chat.conversationId, resume_device: stableDeviceId,
                     resume_revision: String(chat.inputRevision),
                 })}`); } }] : []),
@@ -625,6 +625,8 @@ export function AiAssistantWorkspace({
                 onSelect: () => setPermissionHistorySession(permissionHistoryKey) },
             ...(featureProfile.approval_delegation ? [{ label: t('pages.aiAssistant.autoApprovalTitle'), icon: Bot,
                 onSelect: () => setApprovalSettingsOpen(true) }] : []),
+            { label: t('pages.aiAssistant.personalization.title'), icon: SlidersHorizontal,
+                onSelect: () => navigate('/ai-assistant/personalization') },
             { label: t('pages.aiAssistant.workspace.deviceSettings'), icon: Settings2,
                 onSelect: () => setDeviceSettingsOpen(true) },
         ] },
@@ -837,6 +839,9 @@ export function AiAssistantWorkspace({
                     </div>
                 </CardHeader>
                 <CardContent className="flex min-h-0 flex-1 flex-col gap-2 px-3 pb-3 pt-0">
+                    {chat.temporaryConversation && <p role="status" className="shrink-0 rounded-md bg-muted px-3 py-2 text-xs text-muted-foreground">
+                        <strong>{t('pages.aiAssistant.temporary.title')}</strong> {t('pages.aiAssistant.temporary.description')}
+                    </p>}
                     {chat.goal && <AssistantGoalPanel key={`${permissionHistoryKey}:${chat.goal.goalId}:${subagents.selected?.task_id ?? 'main'}`} goal={chat.goal} connected={isConnected}
                         main={!subagents.selected} enabled={assistantEnabled && isConnected && !chat.pendingGoalOpenRequest}
                         busy={chat.goalUpdating || chat.turnRunning || !!chat.deliveryState}
@@ -855,27 +860,12 @@ export function AiAssistantWorkspace({
                     <div ref={scrollRef} onScroll={onScroll} data-testid="assistant-scroll-area"
                         className="assistant-scrollbar h-full overflow-y-auto overscroll-contain [overflow-wrap:anywhere]">
                     <div ref={contentRef} className="mx-auto w-full max-w-[840px] space-y-4 pb-4">
-                    <div data-testid="ai-assistant-transcript" className="min-h-48 space-y-5 py-4">
-                        {chat.hydrating && <Skeleton className="h-20 w-full" />}
-                        {chat.hasMoreMessages && (
-                            <div className="flex justify-center">
-                                <Button
-                                    type="button"
-                                    size="sm"
-                                    variant="ghost"
-                                    disabled={chat.loadingOlderMessages}
-                                    onClick={() => void chat.loadOlderMessages()}
-                                >
-                                    {chat.loadingOlderMessages && <LoaderCircle className="mr-2 h-4 w-4 animate-spin" />}
-                                    {t('pages.aiAssistant.loadEarlierMessages')}
-                                </Button>
-                            </div>
-                        )}
-                        <AssistantDocumentPreviews previews={chat.documentPreviews}
-                            requestPage={chat.requestDocumentPreviewPage} />
-                        <AssistantTranscript sessionId={chat.sessionId} messages={chat.messages} tools={chat.tools}
-                            running={chat.running} evidence={chat.visualEvidence} notices={chat.contextNotices}
-                            displayNameForTool={displayNameForTool} exportBackup={exportBackup} />
+                    <AssistantConversationMessages sessionId={chat.sessionId} messages={chat.messages} tools={chat.tools}
+                        running={chat.running} evidence={chat.visualEvidence} notices={chat.contextNotices}
+                        displayNameForTool={displayNameForTool} exportBackup={exportBackup}
+                        loading={chat.hydrating} hasMore={chat.hasMoreMessages} loadingOlder={chat.loadingOlderMessages}
+                        onOlder={() => void chat.loadOlderMessages()}
+                        before={<AssistantDocumentPreviews previews={chat.documentPreviews} requestPage={chat.requestDocumentPreviewPage} />}>
                         <ScheduleProposalCards key={`${deskId}:${chat.conversationId}`} tools={chat.tools} running={chat.running}
                             deviceId={stableDeviceId} connectionId={deskId} onPendingCountChange={setPendingScheduleCount} />
                         {chat.partial && (
@@ -883,7 +873,7 @@ export function AiAssistantWorkspace({
                                 {chat.partial}
                             </MarkdownContent>
                         )}
-                    </div>
+                    </AssistantConversationMessages>
 
                     {externalSendReceipts.length > 0 && (
                         <div data-testid="ai-assistant-external-send-results" className="space-y-3">
@@ -1008,8 +998,18 @@ export function AiAssistantWorkspace({
                     })}
                     {chat.error && (
                         <Alert variant="destructive">
-                            <AlertTitle>{t('pages.aiAssistant.chatErrorTitle')}</AlertTitle>
-                            <AlertDescription>{chat.error === 'history_restore_failed' ? t('pages.aiAssistant.history.restoreError') : chat.error === 'selected_context_expired' ? t('pages.aiAssistant.selectedContextExpired') : chat.error}</AlertDescription>
+                            <AlertTitle>{t(chat.error === 'history_restore_failed'
+                                ? 'pages.aiAssistant.history.restoreError' : 'pages.aiAssistant.chatErrorTitle')}</AlertTitle>
+                            <AlertDescription>{chat.error === 'history_restore_failed' ? (
+                                <div className="flex gap-2">
+                                    <Button type="button" variant="outline" size="sm" onClick={chat.refreshSnapshot}>
+                                        {t('pages.aiAssistant.history.retry')}
+                                    </Button>
+                                    <Button type="button" variant="outline" size="sm" onClick={() => resetConversation()}>
+                                        {t('pages.aiAssistant.newConversation')}
+                                    </Button>
+                                </div>
+                            ) : chat.error === 'selected_context_expired' ? t('pages.aiAssistant.selectedContextExpired') : chat.error}</AlertDescription>
                         </Alert>
                     )}
                     {rehearsal && <Alert><AlertDescription>{t('schedules.rehearsal.executionNote')}</AlertDescription></Alert>}
@@ -1025,6 +1025,8 @@ export function AiAssistantWorkspace({
                     )}
                     </div>
                     <form onSubmit={submit} className="assistant-composer mx-auto w-full max-w-[840px] shrink-0 space-y-2 rounded-xl border bg-background p-3 shadow-sm">
+
+
                         {chat.deliveryState && <div role="status" className="flex items-center justify-between gap-2 text-sm">
                             <span>{t(chat.deliveryState === 'sending' ? 'pages.aiAssistant.deliverySending' : 'pages.aiAssistant.deliveryUnconfirmed')}</span>
                             {chat.deliveryState === 'unconfirmed' && <Button type="button" size="sm" variant="outline"
@@ -1048,7 +1050,6 @@ export function AiAssistantWorkspace({
                             readOnly={!!rehearsal}
                             onChange={(event) => setQuestion(event.target.value)}
                             placeholder={t('pages.aiAssistant.questionPlaceholder')}
-                            maxLength={16_384}
                             disabled={!assistantEnabled || !isConnected || chat.hydrating || chat.contextUpdating || !providerConfig?.api_key_set || !providerConfig?.model}
                             className="min-h-16 max-h-40 w-full resize-y rounded-md border-0 bg-background px-3 py-2 shadow-sm outline-none placeholder:text-muted-foreground focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
                         />
@@ -1195,7 +1196,7 @@ export function AiAssistantWorkspace({
     );
 }
 
-export default function AiAssistantPage({
+function AiAssistantDevicePage({
     featureProfile: suppliedFeatureProfile,
 }: {
     featureProfile?: AiAssistantFeatureProfile | null;
@@ -1283,4 +1284,11 @@ export default function AiAssistantPage({
             )}
         </div>
     );
+}
+
+/** History is selected before mounting any live connection or approval hook. */
+export default function AiAssistantPage(props: { featureProfile?: AiAssistantFeatureProfile | null }) {
+    const [query] = useSearchParams();
+    return query.has('source') ? <AssistantConversationHistory sourceId={query.get('source') ?? ''}
+        expectedRevision={query.has('revision') ? Number(query.get('revision')) : undefined} /> : <AiAssistantDevicePage {...props} />;
 }

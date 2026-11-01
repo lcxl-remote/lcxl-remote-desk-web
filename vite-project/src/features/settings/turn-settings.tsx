@@ -168,7 +168,7 @@ export function TurnSettings() {
                 title: t('pages.system.settings.success'),
                 description: t('pages.turn.settings.updateSucceedMessage'),
             })
-        } catch (error) {
+        } catch {
             toast({
                 variant: "destructive",
                 title: t('pages.system.settings.error'),
@@ -191,7 +191,7 @@ export function TurnSettings() {
                 description: t('pages.system.settings.regenerateSecretSuccess'),
             })
             setRegenerateDialogOpen(false)
-        } catch (error) {
+        } catch {
             toast({
                 variant: "destructive",
                 title: t('pages.system.settings.error'),

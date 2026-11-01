@@ -472,11 +472,15 @@ mod tests {
             source_envelope_ids: vec![],
             public_system_prompt: false,
         };
-        binding.validate_audit(&call, &[node.clone()]).unwrap();
+        binding
+            .validate_audit(&call, std::slice::from_ref(&node))
+            .unwrap();
         assert!(binding.validate_audit(&call, &[]).is_err());
         node.envelope_id = "export".into();
         node.source_envelope_ids = vec![label.envelope_id];
-        binding.validate_audit(&call, &[node.clone()]).unwrap();
+        binding
+            .validate_audit(&call, std::slice::from_ref(&node))
+            .unwrap();
         node.source_tool_name = "summary".into();
         assert!(binding.validate_audit(&call, &[node]).is_err());
         let spoof = ChatMessage::context_summary("summary", input.text);

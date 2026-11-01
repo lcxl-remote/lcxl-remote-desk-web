@@ -107,7 +107,7 @@ pub(crate) async fn advance(
     candidate: &ApprovalReviewCandidate,
     claim: &ClaimedPermissionReview,
     issue: ReviewFormatIssue,
-) -> Result<Option<ClaimedPermissionReview>, DbErr> {
+) -> Result<Option<Box<ClaimedPermissionReview>>, DbErr> {
     let Some(next) = claim.call_authority.attempt.next(issue) else {
         return Ok(None);
     };
@@ -189,9 +189,9 @@ pub(crate) async fn advance(
         return Err(invalid());
     }
     txn.commit().await?;
-    Ok(Some(ClaimedPermissionReview {
+    Ok(Some(Box::new(ClaimedPermissionReview {
         call_authority: authority,
         delegation_call: reservation,
         ..claim.clone()
-    }))
+    })))
 }

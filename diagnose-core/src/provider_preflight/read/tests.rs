@@ -14,6 +14,90 @@ fn destination() -> DestinationIdentity {
 }
 
 #[test]
+fn output_digest_accepts_equivalent_json_and_defaults_but_binds_business_content() {
+    let session = crate::ai_assistant::test_support::personal_session("7", "run", "11");
+    let output = crate::seam::ToolRunOutput {
+        format: crate::seam::ToolOutputFormat::Text,
+        content: "original result".into(),
+        image_data_url: None,
+        document_preview: None,
+    };
+    for (name, input) in [
+        ("read_system_info", "{ \n }"),
+        (
+            "read_process_list",
+            r#"{ "queries": ["worker"], "limit": 3 }"#,
+        ),
+        ("search_public_web", r#"{ "query": "Rust language" }"#),
+    ] {
+        let original = ToolCall {
+            id: "call".into(),
+            name: name.into(),
+            arguments_json: input.into(),
+        };
+        let resolved =
+            crate::ui_model_ids::resolve_session_call_with_context(&original, &session, 0, None)
+                .unwrap();
+        assert_ne!(original.arguments_json, resolved.arguments_json);
+        assert_eq!(
+            output_digest(&original, &output).unwrap(),
+            output_digest(&resolved, &output).unwrap()
+        );
+    }
+    let original = ToolCall {
+        id: "call".into(),
+        name: "search_public_web".into(),
+        arguments_json: r#"{"query":"Rust language"}"#.into(),
+    };
+    let expected = output_digest(&original, &output).unwrap();
+    let defaults = ToolCall {
+        arguments_json: r#"{ "max_results": 5, "query": "Rust language" }"#.into(),
+        ..original.clone()
+    };
+    assert_eq!(expected, output_digest(&defaults, &output).unwrap());
+    for input in [
+        r#"{"query":"different"}"#,
+        r#"{"query":"Rust language","max_results":2}"#,
+    ] {
+        let changed = ToolCall {
+            arguments_json: input.into(),
+            ..original.clone()
+        };
+        assert_ne!(expected, output_digest(&changed, &output).unwrap());
+    }
+    for changed in [
+        crate::seam::ToolRunOutput {
+            content: "different".into(),
+            ..output.clone()
+        },
+        crate::seam::ToolRunOutput {
+            image_data_url: Some("data:image/png;base64,eA==".into()),
+            ..output.clone()
+        },
+    ] {
+        assert_ne!(expected, output_digest(&original, &changed).unwrap());
+    }
+    let other_tool = ToolCall {
+        name: "read_system_info".into(),
+        ..original.clone()
+    };
+    assert_ne!(expected, output_digest(&other_tool, &output).unwrap());
+    let invalid = ToolCall {
+        arguments_json: "invalid JSON".into(),
+        ..original
+    };
+    assert!(output_digest(&invalid, &output).is_err());
+    let error_digest = error_output_digest(&invalid, &output);
+    assert_eq!(error_digest, error_output_digest(&invalid, &output));
+    let changed_invalid = ToolCall {
+        arguments_json: "different invalid JSON".into(),
+        ..invalid
+    };
+    assert_ne!(error_digest, error_output_digest(&changed_invalid, &output));
+    assert_ne!(expected, error_output_digest(&defaults, &output));
+}
+
+#[test]
 fn live_read_authority_uses_original_targets_on_both_surfaces() {
     let registry = ai_assistant_provider_registry();
     let now = 1_788_134_401_000;

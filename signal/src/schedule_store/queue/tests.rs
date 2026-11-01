@@ -390,6 +390,7 @@ async fn manual_run_has_separate_identity_and_leaves_calendar_unchanged() {
 }
 
 #[tokio::test]
+#[allow(clippy::field_reassign_with_default)]
 async fn finalization_counts_once_and_threshold_prevents_the_next_claim() {
     use desk_agent_protocol::schedule::{SchedulePauseReason, ScheduledRunStatus};
     let clock_db = crate::config::test_support::Database::connect("sqlite::memory:")
@@ -533,6 +534,9 @@ async fn fixture(rule: ScheduleRule, next: i64) -> (ScheduleStore, entity::Model
         .await
         .unwrap();
     let schema = Schema::new(db.get_database_backend());
+    db.execute(&schema.create_table_from_entity(crate::entity::agent_assistant_runtime::Entity))
+        .await
+        .unwrap();
     db.execute(&schema.create_table_from_entity(entity::Entity))
         .await
         .unwrap();
@@ -690,6 +694,7 @@ async fn pause_between_materialization_and_claim_blocks_dispatch() {
 }
 
 #[tokio::test]
+#[allow(clippy::field_reassign_with_default)]
 async fn pending_expiry_releases_slot_and_charges_only_device_timeout_once() {
     for offline in [false, true] {
         let clock_db = crate::config::test_support::Database::connect("sqlite::memory:")

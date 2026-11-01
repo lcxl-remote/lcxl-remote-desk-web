@@ -19,6 +19,8 @@ pub mod approval_dispatch;
 pub mod approval_model_provider;
 pub mod approval_review_secret;
 pub mod approval_reviewer;
+pub mod assistant_data_config;
+pub mod assistant_data_store;
 pub(crate) mod assistant_model;
 pub mod capability_grant_store;
 mod command_policy;

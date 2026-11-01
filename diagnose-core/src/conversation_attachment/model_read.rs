@@ -81,6 +81,7 @@ pub struct ReadReceipt {
     pub released: bool,
 }
 
+#[cfg(test)]
 /// Includes JSON escaping and protocol message framing, not just raw page bytes.
 pub fn text_page(
     part: &PreparedAttachment,
@@ -116,7 +117,7 @@ fn text_page_impl(
     }
     let mut request = input.request()?;
     part.metadata.verify(&part.content)?;
-    let projected = project_json_part(part)?;
+    let projected = project_json_part(part, references.as_deref())?;
     let page_part = projected.as_ref().unwrap_or(part);
     let mut upper = request.max_bytes;
     // Reduce only the new read; never discard an earlier read to make it fit.
@@ -180,7 +181,10 @@ fn text_page_impl(
 
 /// Model paging uses the same reducing view as inline results. Source proof and
 /// storage remain bound to the original bytes, not the derived page representation.
-fn project_json_part(part: &PreparedAttachment) -> Result<Option<PreparedAttachment>, AgentError> {
+fn project_json_part(
+    part: &PreparedAttachment,
+    references: Option<&crate::ui_references::UiReferenceState>,
+) -> Result<Option<PreparedAttachment>, AgentError> {
     if part.metadata.kind != ContentKind::Json {
         return Ok(None);
     }
@@ -194,7 +198,7 @@ fn project_json_part(part: &PreparedAttachment) -> Result<Option<PreparedAttachm
             .map_err(|_| invalid("Invalid JSON attachment encoding"))?,
     );
     message.data_envelope = Some(source.clone());
-    crate::ui_model_ids::project_tool_message(&mut message);
+    crate::ui_model_ids::project_result_view(&mut message, references);
     if message.text.as_bytes() == part.content.as_slice() {
         return Ok(None);
     }

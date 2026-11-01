@@ -9,7 +9,7 @@ pub async fn list_assistant_images(
 ) -> Result<HttpResponse, DeskSignalError> {
     let db = crate::db::get_db();
     let actor = SINGLE_ACCOUNT_USER_ID.to_string();
-    match crate::agent_image_store::list(&db, &query.session, &actor, query.before.as_deref()).await
+    match crate::agent_image_store::list(db, &query.session, &actor, query.before.as_deref()).await
     {
         Ok(frames) => Ok(HttpResponse::Ok()
             .insert_header(("Cache-Control", "no-store"))
@@ -29,7 +29,7 @@ pub async fn get_assistant_image(
     let Some(id) = query.attachment.as_deref() else {
         return Ok(HttpResponse::NotFound().finish());
     };
-    match crate::agent_image_store::read(&db, &query.session, &actor, Some(id), None).await {
+    match crate::agent_image_store::read(db, &query.session, &actor, Some(id), None).await {
         Ok((attachment, pixels)) => Ok(HttpResponse::Ok()
             .insert_header(("Cache-Control", "private, no-store"))
             .insert_header(("X-Content-Type-Options", "nosniff"))
@@ -56,7 +56,7 @@ pub async fn delete_assistant_image(
     let Some(id) = query.attachment.as_deref() else {
         return Ok(not_accessible());
     };
-    match crate::agent_image_store::delete(&db, &query.session, &actor, id).await {
+    match crate::agent_image_store::delete(db, &query.session, &actor, id).await {
         Ok(()) => Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(true))),
         Err(_) => Ok(not_accessible()),
     }

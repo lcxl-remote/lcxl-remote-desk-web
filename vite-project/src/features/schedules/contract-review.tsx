@@ -1,3 +1,4 @@
+import { sameJsonValue } from './json-value';
 import { Disclosure } from '@/components/ui/disclosure';
 import { ContractArtifacts } from './contract-artifacts';
 import { ContractAttachments } from './contract-attachments';
@@ -83,7 +84,7 @@ export function ContractReview({ client, scheduleId, connected, onPublished }: {
             <ContractContents contract={contract} />
             {review?.previous_contract && <section className="space-y-2">
                 <h3>{t('schedules.diff.title')}</h3>
-                {contractChanges.filter(key => canonicalValue(contract[key]) !== canonicalValue(review.previous_contract![key])).map(key =>
+                {contractChanges.filter(key => !sameJsonValue(contract[key], review.previous_contract![key])).map(key =>
                     <p key={key}>{t(`schedules.diff.${key}`)}</p>)}
                 <Disclosure title={<>{t('schedules.diff.previous')}</>}><ContractContents contract={review.previous_contract} /></Disclosure>
             </section>}
@@ -94,11 +95,6 @@ export function ContractReview({ client, scheduleId, connected, onPublished }: {
 }
 
 const contractChanges = ['budget', 'permissions', 'steps', 'exception_mode', 'prompt_sha256'] as const;
-function canonicalValue(value: unknown): string {
-    if (Array.isArray(value)) return `[${value.map(canonicalValue).join(',')}]`;
-    if (value !== null && typeof value === 'object') return `{${Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => `${JSON.stringify(key)}:${canonicalValue(item)}`).join(',')}}`;
-    return JSON.stringify(value) ?? 'null';
-}
 function ContractContents({ contract }: { contract: NonNullable<Review['contract']> }) {
     const { t } = useTranslation();
     return <>

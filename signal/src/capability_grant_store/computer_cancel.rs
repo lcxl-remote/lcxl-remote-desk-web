@@ -213,12 +213,13 @@ impl SignalCapabilityGrantStore {
             .one(&txn)
             .await?
             .ok_or_else(invalid)?;
-        let (outbox, work, payload) = original_on(&txn, &outbox.dispatch_id).await?;
+        let computer_original = original_on(&txn, &outbox.dispatch_id).await?;
+        let (outbox, work, payload) = computer_original.as_ref();
         let now = u64::try_from(Utc::now().timestamp_millis()).map_err(|_| invalid())?;
         if outbox.computer_background_json.is_none() {
-            return foreground::candidate(&outbox, &work, &payload);
+            return foreground::candidate(outbox, work, payload);
         }
-        if task_on(&txn, &work, now).await?.is_none() {
+        if task_on(&txn, work, now).await?.is_none() {
             return Ok(None);
         }
         let promotion: Promotion = serde_json::from_str(
@@ -236,19 +237,18 @@ impl SignalCapabilityGrantStore {
                 work.status.as_str(),
                 CAPABILITY_WORK_DISPATCHING | CAPABILITY_WORK_OUTCOME_UNKNOWN
             )
-            || super::computer_completion::terminal_result(&outbox, work.clone(), &payload)?
-                .is_some()
+            || super::computer_completion::terminal_result(outbox, work.clone(), payload)?.is_some()
         {
             return Ok(None);
         }
-        let binding = bound(&outbox, &work, &payload)?;
+        let binding = bound(outbox, work, payload)?;
         Ok(Some(CancelCandidate {
             work_id,
             connection_id: binding.connection_id,
-            audience: work.target_device_id,
-            actor_id: work.actor_id,
-            action_request_id: payload.call_id,
-            execution_generation: outbox.dispatch_id,
+            audience: work.target_device_id.clone(),
+            actor_id: work.actor_id.clone(),
+            action_request_id: payload.call_id.clone(),
+            execution_generation: outbox.dispatch_id.clone(),
         }))
     }
 
@@ -292,18 +292,19 @@ impl SignalCapabilityGrantStore {
         }
         let txn = crate::db::begin_write(&self.db, crate::entity::agent_session::Entity).await?;
         lock_task(&txn, &state.action_request_id).await?;
-        let (outbox, work, payload) = original_on(&txn, &state.execution_generation).await?;
+        let computer_original = original_on(&txn, &state.execution_generation).await?;
+        let (outbox, work, payload) = computer_original.as_ref();
         let now = u64::try_from(Utc::now().timestamp_millis()).map_err(|_| invalid())?;
         if outbox.computer_background_json.is_none() {
             let accepted = foreground::accept(
-                &txn, &outbox, &work, &payload, connection, audience, state, now,
+                &txn, outbox, work, payload, connection, audience, state, now,
             )
             .await?;
             txn.commit().await?;
             return Ok(accepted);
         }
-        task_on(&txn, &work, now).await?.ok_or_else(invalid)?;
-        let binding = bound(&outbox, &work, &payload)?;
+        task_on(&txn, work, now).await?.ok_or_else(invalid)?;
+        let binding = bound(outbox, work, payload)?;
         if work.id != id
             || payload.call_id != state.action_request_id
             || binding.connection_id != connection
@@ -326,7 +327,7 @@ impl SignalCapabilityGrantStore {
             return Err(invalid());
         }
         intent.observed_at_unix_ms = Some(now);
-        save_promotion(&txn, outbox, &promotion).await?;
+        save_promotion(&txn, outbox.clone(), &promotion).await?;
         txn.commit().await?;
         Ok(true)
     }

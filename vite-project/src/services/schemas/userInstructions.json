@@ -1,0 +1,1 @@
+{"type":"object","required":["revision","content"],"properties":{"content":{"type":"string"},"revision":{"type":"integer","format":"int64","minimum":0}},"additionalProperties":false,"x-readme-ref-name":"UserInstructions"}

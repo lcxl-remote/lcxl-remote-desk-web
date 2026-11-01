@@ -79,18 +79,20 @@ it('keeps the + menu available for a completed child and opens its context panel
     expect(await screen.findByText('Context child-1')).toBeVisible();
     expect(agents.control).not.toHaveBeenCalled();
 });
-it('keeps an oversized UTF-8 adjustment draft without submitting an invalid child control request', () => {
+it('submits a large UTF-8 adjustment unchanged and keeps the draft after server rejection', async () => {
     const agents = agentsFor('child-1');
     render(<AssistantSubagents agents={agents} connected canDecide mainStopped={false} />);
     const input = screen.getByRole('textbox', { name: 'New requirements for this subtask' });
+    vi.mocked(agents.control).mockResolvedValue(false);
     const message = '中'.repeat(6_000);
     fireEvent.change(input, { target: { value: message } });
     const submit = screen.getByRole('button', { name: 'Apply adjustment' });
-    expect(submit).toBeDisabled();
+    expect(submit).toBeEnabled();
+    expect(input).not.toHaveAttribute('maxlength');
     fireEvent.click(submit);
-    fireEvent.keyDown(input, { key: 'Enter' });
+    await waitFor(() => expect(agents.control).toHaveBeenCalledOnce());
+    expect(agents.control).toHaveBeenCalledWith(agents.selected, { kind: 'adjust', message });
     expect(input).toHaveValue(message);
-    expect(agents.control).not.toHaveBeenCalled();
 });
 it('submits a child adjustment with Enter and keeps the draft when the server rejects it', async () => {
     localStorage.removeItem('ai-assistant-send-shortcut');

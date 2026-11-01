@@ -1,8 +1,10 @@
 //! Command streams remain distinct from the bounded execution receipt.
-use super::batch::{
-    DeliveredPart, DeliveryIdentity, OutputPart, PartContent, PreparedAttachment, prepare_delivery,
-};
-use desk_agent_protocol::{AgentError, ExecOutput, ExecOutputStreams};
+use super::batch::{DeliveredPart, PreparedAttachment};
+#[cfg(test)]
+use super::batch::{DeliveryIdentity, OutputPart, PartContent, prepare_delivery};
+use desk_agent_protocol::AgentError;
+#[cfg(test)]
+use desk_agent_protocol::{ExecOutput, ExecOutputStreams};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,6 +25,7 @@ pub struct PreparedCommand {
     pub attachments: Vec<PreparedAttachment>,
 }
 
+#[cfg(test)]
 /// Call only for a completed command with a typed ExecOutput. Timeout/unknown
 /// outcomes retain their own state instead of being invented from stream text.
 pub fn prepare_command(

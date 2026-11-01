@@ -325,11 +325,6 @@ impl AgentEvent {
         self
     }
 
-    pub fn with_visual_evidence(mut self, visual_evidence: VisualEvidenceFrame) -> Self {
-        self.visual_evidence = Some(visual_evidence);
-        self
-    }
-
     pub fn visual_evidence(
         request_id: impl Into<String>,
         seq: u32,

@@ -172,7 +172,7 @@ impl ScheduleStore {
             if canonical != observed.canonical_input_json {
                 return Err(ScheduleStoreError::Conflict);
             }
-            report.actions.push(observed);
+            report.actions.push(*observed);
         }
         let directory_controls =
             super::super::directory_receipt::verified_control_calls(txn, &session).await?;

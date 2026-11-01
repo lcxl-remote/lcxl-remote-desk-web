@@ -36,14 +36,6 @@ pub(super) async fn runnable_parent_with_source(
     model_destination: DestinationIdentity,
     sensitivity: Sensitivity,
 ) -> (PersistedAgentSession, Vec<ToolCall>) {
-    seed_parent(db).await;
-    let row = session_row::Entity::find()
-        .filter(session_row::Column::ConversationId.eq("root"))
-        .one(db)
-        .await
-        .unwrap()
-        .unwrap();
-    let mut parent = PersistedAgentSession::decode_json(&row.state_json).unwrap();
     let now = chrono::Utc::now();
     let owner = desk_diagnose_core::model_message_labels::model_bound_user_message(
         "source-message".into(),
@@ -51,7 +43,13 @@ pub(super) async fn runnable_parent_with_source(
         model_destination,
     )
     .unwrap();
-    parent.conversation.push(owner.clone());
+    let mut parent = super::input_sources::first_input(db, owner.clone(), now).await;
+    let row = session_row::Entity::find()
+        .filter(session_row::Column::ConversationId.eq("root"))
+        .one(db)
+        .await
+        .unwrap()
+        .unwrap();
     let mut allowed = scope();
     allowed
         .granted

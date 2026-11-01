@@ -432,9 +432,11 @@ pub fn request_for_original_call(
         .filter(|remaining| *remaining >= 1000)
         .ok_or(Error::InvalidLimits)?
         / 1000;
+    let executed = crate::ui_model_ids::resolve_recorded_call(original, session)
+        .map_err(|_| Error::InvalidInput)?;
     let canonical = crate::permission_tools::canonical_tool_permission_input_json(
-        &original.name,
-        serde_json::from_str(&original.arguments_json).map_err(|_| Error::InvalidInput)?,
+        &executed.name,
+        serde_json::from_str(&executed.arguments_json).map_err(|_| Error::InvalidInput)?,
     )
     .map_err(|_| Error::InvalidInput)?;
     if format!("{:x}", Sha256::digest(canonical.as_bytes())) != call.canonical_input_digest_sha256 {
@@ -550,7 +552,10 @@ mod candidate_tests {
         };
         let mut message = ChatMessage::text("proposal", ChatRole::Assistant, "");
         message.tool_calls.push(original.to_ref());
-        assert!(unique_original_call(&[message.clone()], &original));
+        assert!(unique_original_call(
+            std::slice::from_ref(&message),
+            &original
+        ));
         assert!(!unique_original_call(&[], &original));
         assert!(!unique_original_call(
             &[message.clone(), message.clone()],

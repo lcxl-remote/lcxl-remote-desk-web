@@ -431,6 +431,7 @@ impl MediaProducer {
             .expect("media producer geometry handler lock poisoned") = Some(handler);
     }
 
+    #[cfg(test)]
     /// Start a per-connection capture + encode pipeline. Idempotent on
     /// duplicate `connection_id` — duplicates log a warning and are
     /// ignored (the daemon should never legitimately double-start).

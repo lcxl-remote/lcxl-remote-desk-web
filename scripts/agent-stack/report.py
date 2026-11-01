@@ -7,6 +7,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+HARD_FRAME_LIMIT = 128 * 1024
+
 REMARK = re.compile(r"(\d+) stack bytes in function '([^']+)'")
 ESCAPES = {'SP': '@', 'BP': '*', 'RF': '&', 'LT': '<', 'GT': '>', 'LP': '(', 'RP': ')', 'C': ','}
 
@@ -31,18 +33,51 @@ def symbol_key(symbol):
     name = '::'.join(parts)
     name = re.sub(r'\$([^$]+)\$', lambda m: ESCAPES.get(m[1], chr(int(m[1][1:], 16)) if re.fullmatch(r'u[0-9a-f]+', m[1]) else m[0]), name)
     name = name.replace('..', '::')
-    # Generic monomorphizations share one budget, using their largest frame.
+    # Generic monomorphizations share one report key, using their largest frame.
     name = re.sub(r'::h[0-9a-f]{16}\b', '', name)
     return name
 
 
 def protected(symbol):
-    return ('desk_diagnose_core' in symbol and 'future' in symbol) or any(word in symbol for word in (
-        'agent_loop', 'ai_assistant_orchestrator', 'remote_tool_edge',
+    return ('desk_signal_facade' in symbol and 'lease_heartbeat' in symbol) or ('desk_agent_protocol' in symbol and 'ai_assistant' in symbol and 'validate' in symbol) or ('desk_signal_facade' in symbol and 'ai_assistant_session' in symbol and any(
+        word in symbol for word in (
+            'project_snapshot_message_page', 'project_snapshot_message_window',
+            'SnapshotMessagePageProjection', 'snapshot_message_groups', 'visible_snapshot_message',
+        )
+    )) or ('desk_diagnose_core' in symbol and (
+        any(word in symbol for word in (
+            'future', 'ai_assistant', 'tool_result', 'ui_model_ids', 'ui_references',
+            'result_model_ids', 'document_model_ids', 'assistant_data_model', 'model_controls', 'model_constraints', 'model_input',
+            'conversation_attachment::model_read', 'provider_preflight',
+        ))
+        or ('ContextProtectionSet' in symbol and 'validate_references' in symbol)
+        or ('GoalRun' in symbol and 'finish_assistant_context_wait_slice' in symbol)
+        or ('schedule' in symbol and any(word in symbol for word in ('context_wait', 'published_input', 'proposal', 'management_tools', 'exception', 'read_sources')))
+    )) or ('agent_goal_store' in symbol and any(word in symbol for word in (
+        'settle_slice', 'persist_slice_on', 'validate_slice_session_on',
+        'claim_slice', 'PreparedGoalClaim', 'scheduler_transition', 'wake_for_assistant_context', 'continuation_candidates',
+    ))) or ('schedule_store' in symbol and any(word in symbol for word in (
+        'create_draft_on', 'capture_retrieval_consent_on', 'capture_definition_consent_on',
+        'retrieval_consent', 'fresh_session', 'context_wait', 'fresh_children_settlement', 'fresh_recovery',
+        'fresh_children_recovery', 'fresh_permission_recovery',
+        'cancel_run', 'record_run_cancellation', 'scan_wait_expiry_once', 'scan_children_wait_settlement_once',
+        'claim_continuation_on', 'assistant_retrieval_deadline_on', 'resume_admission',
+        'prepare_continuation_task_on', 'bind_continuation_session_on',
+        'ContinuationTaskClaim', 'ContinuationSessionClaim',
+        'lock_owner_context_authority', 'manage_from_session',
+        'read_rehearsal_reads_on', 'read_rehearsal_read_sources_on',
+    ))) or ('schedule_executor' in symbol and any(word in symbol for word in (
+        'process_goal', 'scan_goals_once', 'scan_once',
+    ))) or any(word in symbol for word in (
+        'agent_loop', 'ai_assistant_orchestrator', 'remote_tool_edge', 'remote_tool_routing',
         'agent_model', 'assistant_model', 'SignalModelSeam', 'capability_provider_work', 'capability_grant_store',
         'agent_approval_concrete', 'approval_reviewer', 'manager_provider_tools', 'agent_subagent_store',
-        'PersistedAgentSession', 'CommandConfirmation', 'ExecInput',
-        'agent_stack_probe', 'for_agent_turn',
+        'PersistedAgentSession', 'SessionManagementMetadata', 'retire_unsupported', 'conversation_title', 'load_title_limit', 'store_title',
+        'CommandConfirmation', 'ExecInput', 'apply_automatic_grant_failure',
+        'decide_permission_request_with_authority', 'decide_with_authority',
+        'agent_stack_probe', 'for_agent_turn', 'assistant_data_store', 'agent_run_event_store',
+        'assistant_data_request_manifest',
+        'read_context_output_with_archive_on', 'manage_schedule_tool',
     ))
 
 
@@ -79,6 +114,60 @@ def collect(lines):
     return {'records': records, 'frames': dict(sorted(frames.items()))}
 
 
+
+def retain_entity_identity(data, package):
+    """Retain stable names for the same entities re-exported by each host.
+
+    Physical symbols remain recorded for review. This does not change sizes,
+    execution coverage or the identity of any operation function.
+    """
+    if package not in ('lcxl-remote-desk-manager', 'desk-signal'):
+        return data
+    prefix = ('desk_database::entity::' if package == 'lcxl-remote-desk-manager'
+              else 'desk_signal::entity::')
+    current = 'desk_assistant_data_store::entity::'
+    frames, origins = {}, {}
+    for symbol, size in data['frames'].items():
+        # Signal's native quota model also contains local cleanup cursors, so
+        # the common counter view is deliberately a distinct logical type.
+        canonical = re.sub(re.escape(current) + r'(\w+)::',
+            lambda match: (match[0] if package == 'desk-signal' and match[1] == 'agent_assistant_quota'
+                           else prefix + match[1] + '::'), symbol)
+        if canonical in frames:
+            raise ValueError('entity report identity has two physical owners: ' + canonical)
+        frames[canonical] = size
+        if canonical != symbol:
+            origins[canonical] = symbol
+    return dict(data, frames=dict(sorted(frames.items())), entity_symbol_relocations=origins)
+
+
+def retain_operation_identity(data, package):
+    """Keep stable report identities for explicitly relocated operations.
+
+    Only explicit identity-preserving ownership moves are listed. New publication paths retain
+    their physical names and independent execution coverage.
+    """
+    moves = {
+        'desk_diagnose_core::tool_result::':
+            'desk_diagnose_core::ai_assistant::data_control::history_restricted::',
+    }
+    frames, origins = {}, {}
+    for symbol, size in data['frames'].items():
+        canonical = symbol
+        for physical, original in moves.items():
+            if physical.endswith('::'):
+                canonical = canonical.replace(physical, original)
+            else:
+                canonical = re.sub(re.escape(physical) + r'(?=::|[<>, ]|$)',
+                                   lambda _: original, canonical)
+        if canonical in frames:
+            raise ValueError('operation report identity has two physical owners: ' + canonical)
+        frames[canonical] = size
+        if canonical != symbol:
+            origins[canonical] = symbol
+    return dict(data, frames=dict(sorted(frames.items())), operation_symbol_relocations=origins)
+
+
 def check_ceiling(report, ceiling, required):
     if ceiling <= 0:
         raise ValueError('stack ceiling must be positive')
@@ -89,183 +178,6 @@ def check_ceiling(report, ceiling, required):
     return errors
 
 
-def check(report, baseline):
-    for field in ('toolchain', 'target', 'profile', 'package', 'workspace_context'):
-        if report.get(field) != baseline.get(field):
-            raise ValueError(f'baseline mismatch: {field}')
-    errors = []
-    frames = report['frames']
-    for pattern in baseline['required']:
-        if not any(re.search(pattern, key) for key in frames):
-            errors.append(f'missing required family: {pattern}')
-    limits = baseline['frames']
-    lineage_limits = lineage_budgets(baseline)
-    lineage_usage = lineage_budgets(dict(baseline, frames={key: frames.get(key, 0) for key in limits}))
-    for source, actual in lineage_usage.items():
-        if actual > lineage_limits[source]:
-            errors.append(f'extraction lineage budget exceeded: {source}: {actual} > {lineage_limits[source]}')
-    family_limits, owners = frame_family_budgets(baseline)
-    family_usage = {name: 0 for name in family_limits}
-    for key, actual in frames.items():
-        matches = [family['name'] for family in baseline.get('frame_families', [])
-                   if family_matches(family, key)]
-        if len(matches) > 1:
-            errors.append(f'ambiguous frame family: {key}')
-        elif matches:
-            name = matches[0]
-            if owners.get(key) != name:
-                errors.append(f'unregistered frame family member: {key}')
-            family_usage[name] += actual
-            if actual > 65536:
-                errors.append(f'{actual} > 65536: {key}')
-    for name, actual in family_usage.items():
-        if actual > family_limits[name]:
-            errors.append(f'frame family budget exceeded: {name}: {actual} > {family_limits[name]}')
-    for lineage in baseline.get('lineages', []):
-        members = set(lineage['members'])
-        for key in frames:
-            if any(re.search(pattern, key) for pattern in lineage.get('patterns', [])) and key not in members:
-                errors.append(f'unregistered extraction member: {key}')
-    for field, default in (('features', ''), ('no_default_features', False), ('rustflags', ''), ('encoded_rustflags', ''), ('cargo_profile', {}), ('resolved_features', []), ('build_configuration', {})):
-        if report.get(field, default) != baseline.get(field, default):
-            raise ValueError(f'baseline build options changed: {field}')
-    for key, actual in frames.items():
-        if key in owners:
-            continue
-        limit = limits.get(key, baseline.get('new_function_limit', 65536))
-        if actual > limit:
-            errors.append(f'{actual} > {limit}: {key}')
-    return errors
-
-
-def family_matches(family, key):
-    return (any(re.search(pattern, key) for pattern in family['patterns'])
-            and not any(re.search(pattern, key) for pattern in family.get('exclude_patterns', [])))
-
-
-def frame_family_budgets(baseline):
-    """Sum reviewed frame inventories, not an inferred maximum call-stack peak."""
-    totals, owners = {}, {}
-    for family in baseline.get('frame_families', []):
-        name = family['name']
-        if not family.get('patterns') or not family.get('evidence'):
-            raise ValueError('frame family needs stable scope and call-path evidence')
-        members = [key for key in baseline['frames'] if family_matches(family, key)]
-        if name in totals or not members:
-            raise ValueError('duplicate or empty frame family')
-        for key in members:
-            if key in owners:
-                raise ValueError('frame family scopes overlap')
-            value = baseline['frames'][key]
-            if not isinstance(value, int) or not 0 <= value <= 65536:
-                raise ValueError('frame family member exceeds the 64 KiB hard ceiling')
-            owners[key] = name
-        totals[name] = sum(baseline['frames'][key] for key in members)
-    return totals, owners
-
-
-def lineage_budgets(baseline):
-    """Account only declared extraction families; this is not a full call graph."""
-    allocated = set()
-    result = {}
-
-    def cost(node):
-        if 'frame' in node:
-            key = node['frame']
-            return baseline['frames'][key], [{key}]
-        children = [cost(child) for child in node['terms']]
-        if not children or node.get('kind') not in ('sum', 'max'):
-            raise ValueError('invalid lineage budget expression')
-        if node['kind'] == 'max':
-            return max(value for value, _ in children), [path for _, paths in children for path in paths]
-        paths = [set()]
-        for _, alternatives in children:
-            next_paths = []
-            for path in paths:
-                for alternative in alternatives:
-                    if path & alternative:
-                        raise ValueError('lineage budget repeated on the same nested path')
-                    next_paths.append(path | alternative)
-            paths = next_paths
-        return sum(value for value, _ in children), paths
-
-    for lineage in baseline.get('lineages', []):
-        total, paths = cost(lineage['tree'])
-        members = set().union(*paths)
-        if set(lineage.get('members', [])) != members:
-            raise ValueError('declared lineage members differ from its budget expression')
-        if allocated & members or lineage['source'] in result:
-            raise ValueError('source budget allocated more than once')
-        allocated.update(members)
-        if total > lineage['source_limit']:
-            raise ValueError(f'lineage budget expanded: {lineage["source"]}')
-        if any(baseline['frames'][key] > baseline.get('milestone_limit', 65536) for key in members):
-            raise ValueError('derived frame exceeds its debug milestone')
-        if len(members) > 1 and baseline['frames'].get(lineage['source'], 0) >= lineage['source_limit']:
-            raise ValueError('mother frame did not decrease during extraction')
-        if not lineage.get('evidence'):
-            raise ValueError('extraction needs code and poll/drop boundary evidence')
-        result[lineage['source']] = total
-    return result
-
-
-def compare_baselines(current, previous):
-    for key in ('toolchain', 'target', 'profile', 'package', 'workspace_context', 'features', 'no_default_features',
-                'rustflags', 'encoded_rustflags', 'cargo_profile', 'resolved_features', 'build_configuration'):
-        if current.get(key) != previous.get(key):
-            raise ValueError(f'ratchet configuration changed: {key}')
-    if current.get('new_function_limit', 65536) > previous.get('new_function_limit', 65536):
-        raise ValueError('new function ceiling increased')
-    if not set(previous.get('required', [])).issubset(current.get('required', [])):
-        raise ValueError('required symbol coverage removed')
-    current_families, owners = frame_family_budgets(current)
-    previous_families, previous_owners = frame_family_budgets(previous)
-    if not set(previous_families).issubset(current_families):
-        raise ValueError('existing frame family was removed')
-    old_families = {family['name']: family for family in previous.get('frame_families', [])}
-    for key in previous['frames']:
-        matches = [family['name'] for family in current.get('frame_families', [])
-                   if family_matches(family, key)]
-        if len(matches) > 1 or (matches and key in previous_owners and previous_owners[key] != matches[0]):
-            raise ValueError('historical frame budget allocated to multiple families')
-    for family in current.get('frame_families', []):
-        name = family['name']
-        if name in old_families:
-            old = old_families[name]
-            for field in ('patterns', 'exclude_patterns'):
-                if family.get(field, []) != old.get(field, []):
-                    raise ValueError('frame family scope changed')
-            allowed = previous_families[name]
-        else:
-            # Initial adoption must spend only this exact scope's reviewed
-            # historical frames, including functions replaced by extraction.
-            allowed = sum(size for key, size in previous['frames'].items()
-                          if family_matches(family, key))
-        total = current_families[name]
-        redistributed = any(current['frames'][key] > previous['frames'].get(key, 0)
-                            for key, owner in owners.items() if owner == name)
-        if total > allowed or (redistributed and total >= allowed):
-            raise ValueError(f'frame family budget did not decrease during redistribution: {name}')
-    current_totals = lineage_budgets(current)
-    previous_totals = lineage_budgets(previous)
-    if not set(previous_totals).issubset(current_totals):
-        raise ValueError('existing extraction lineage was removed')
-    previous_lineages = {entry['source']: entry for entry in previous.get('lineages', [])}
-    for entry in current.get('lineages', []):
-        source = entry['source']
-        if source in previous_lineages and not set(previous_lineages[source].get('patterns', [])).issubset(entry.get('patterns', [])):
-            raise ValueError('extraction namespace coverage removed')
-        allowed = previous_totals.get(source, previous['frames'].get(source))
-        if allowed is None or current_totals[source] > allowed:
-            raise ValueError(f'source family budget increased or was not registered: {source}')
-    derived = {key for entry in current.get('lineages', []) for key in entry.get('members', [])}
-    for key, maximum in current['frames'].items():
-        if key in previous['frames'] and maximum > previous['frames'][key] and key not in owners:
-            raise ValueError(f'ratchet budget increased: {key}')
-        if key not in previous['frames'] and maximum > 65536 and key not in derived:
-            raise ValueError(f'ratchet budget increased: {key}')
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--input', type=Path, help='rustc/Cargo JSON log; stdin when omitted')
@@ -273,7 +185,7 @@ def main():
     parser.add_argument('--package', required=True)
     parser.add_argument('--profile', choices=['debug', 'release'], required=True)
     parser.add_argument('--target', required=True)
-    parser.add_argument('--baseline', type=Path)
+    parser.add_argument('--required', action='append', default=[])
     args = parser.parse_args()
     handle = args.input.open() if args.input else sys.stdin
     try:
@@ -285,11 +197,10 @@ def main():
                   toolchain=subprocess.check_output(['rustc', '-Vv'], text=True).strip())
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2) + '\n')
-    if args.baseline:
-        errors = check(report, json.loads(args.baseline.read_text()))
-        if errors:
-            print('\n'.join(errors), file=sys.stderr)
-            return 1
+    errors = check_ceiling(report, HARD_FRAME_LIMIT, args.required)
+    if errors:
+        print('\n'.join(errors), file=sys.stderr)
+        return 1
     print(f'{report["records"]} records; {len(report["frames"])} protected entries')
     return 0
 

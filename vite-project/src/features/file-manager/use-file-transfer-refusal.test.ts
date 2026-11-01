@@ -11,14 +11,14 @@ import {
     restoreSignalingStubs,
     flush,
     type SignalingGlobals,
-} from './file-transfer-test-harness';
+} from './__tests__/harness';
 
 // Hook-level wiring for a download the host never delivers. Three ways that
 // happens — an explicit refusal, total silence, and a stream that stops
 // partway — must all end the transfer, and nothing arriving afterwards may
 // restart it. Asserted on the frames written to the channel and on the
 // destination writable, which is what the harness can observe. One
-// comprehensive test per file: see the note in `file-transfer-test-harness.ts`.
+// comprehensive test per file: see the note in `__tests__/harness.ts`.
 
 function fakeWritable() {
     const w = {

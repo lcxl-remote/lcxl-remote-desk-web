@@ -24,6 +24,193 @@ const snapshotFields = { controlRevision: 1, inputRevision: 1, mainStopped: fals
     subagents: { active_tasks: [], task: null, tasks: null, parent_session_id: null, attention_tasks: [], attention_count: 0 } };
 
 describe('useAiAssistantChat', () => {
+    it('samples the sending client timezone per input and freezes it for retries', async () => {
+        let timezone = 'Asia/Shanghai';
+        const options = Intl.DateTimeFormat().resolvedOptions();
+        const clock = vi.spyOn(Intl.DateTimeFormat.prototype, 'resolvedOptions')
+            .mockImplementation(() => ({ ...options, timeZone: timezone }));
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: null }) }));
+        let offline = true;
+        const sendMessage = vi.fn((_type: number, _payload: unknown, _to?: string, request?: string) => {
+            if (offline) throw new Error('offline');
+            return request!;
+        });
+        const { result, unmount } = renderHook(() => useAiAssistantChat({ deskId: 'client-timezone',
+            subscribe: () => () => undefined, sendMessage }));
+        try {
+            act(() => { expect(result.current.start('昨天做了什么？')).toBe(true); });
+            expect(sendMessage.mock.calls[0][1]).toMatchObject({ client_timezone: 'Asia/Shanghai' });
+            timezone = 'America/Los_Angeles';
+            offline = false;
+            await act(async () => { await result.current.retryDelivery(); });
+            expect(sendMessage.mock.calls[1]).toEqual(sendMessage.mock.calls[0]);
+            act(() => result.current.reset());
+            act(() => { expect(result.current.start('昨天做了什么？')).toBe(true); });
+            expect(sendMessage.mock.calls[2][1]).toMatchObject({ client_timezone: 'America/Los_Angeles' });
+        } finally { unmount(); clock.mockRestore(); }
+    });
+
+    it.each(['saved', 'storage event'])('reports failed %s history restoration and starts a distinct conversation after reset', async (entry) => {
+        const scope = `restore-failure-${entry}`;
+        const key = `ai-assistant-conversation:${scope}`;
+        const previous = 'obsolete-conversation';
+        if (entry === 'saved') localStorage.setItem(key, previous);
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({
+            success: false, code: deskErrorCodeEnum.SYSTEM_ERROR,
+            message: 'decode agent session snapshot: unknown field `model_history_exclusions`',
+        }) }));
+        const sendMessage = vi.fn(() => 'new-request');
+        const { result, unmount } = renderHook(() => useAiAssistantChat({ deskId: scope,
+            subscribe: () => () => undefined, sendMessage }));
+        try {
+            if (entry === 'storage event') act(() => {
+                localStorage.setItem(key, previous);
+                window.dispatchEvent(new StorageEvent('storage', { key, newValue: previous }));
+            });
+            await waitFor(() => expect(result.current.error).toBe('history_restore_failed'));
+            expect(result.current.hydrating).toBe(false);
+            expect(result.current.messages).toEqual([]);
+            expect(result.current.historyRestoreFailed).toBe(true);
+            act(() => { expect(result.current.start('must not continue the hidden old conversation')).toBe(false); });
+            expect(sendMessage).not.toHaveBeenCalled();
+            expect(localStorage.getItem(key)).toBe(previous);
+            await act(async () => { expect(await result.current.initializeApprovalConversation(true)).toBe(false); });
+            expect(result.current.historyRestoreFailed).toBe(true);
+            act(() => { expect(result.current.start('still unavailable after another settings failure')).toBe(false); });
+            expect(sendMessage).not.toHaveBeenCalled();
+            act(() => result.current.reset());
+            expect(result.current.error).toBeNull();
+            expect(result.current.historyRestoreFailed).toBe(false);
+            expect(localStorage.getItem(key)).toBeNull();
+            act(() => { expect(result.current.start('new question')).toBe(true); });
+            expect(sendMessage).toHaveBeenCalledTimes(1);
+            expect(result.current.conversationId).not.toBe(previous);
+            expect(result.current.conversationId).toBe(localStorage.getItem(key));
+            expect(sendMessage).toHaveBeenCalledWith(SIGNALING_TYPE_CODE_ASK_AI_ASSISTANT,
+                expect.objectContaining({ conversation_id: result.current.conversationId, question: 'new question' }),
+                scope, expect.any(String));
+        } finally { unmount(); }
+    });
+
+    it('recovers a failed initial restore by retrying the same conversation', async () => {
+        localStorage.setItem('ai-assistant-conversation:restore-retry', 'previous');
+        const fetcher = vi.fn().mockRejectedValueOnce(new Error('Connection interrupted')).mockResolvedValue({
+            ok: true, json: async () => ({ data: { ...snapshotFields,
+                sessionId: 'previous-session', seq: 1, active: false,
+                messages: [{ id: 'answer', role: 'assistant', text: 'Earlier answer' }],
+            } }),
+        });
+        vi.stubGlobal('fetch', fetcher);
+        const sendMessage = vi.fn(() => 'request');
+        const { result, unmount } = renderHook(() => useAiAssistantChat({ deskId: 'restore-retry',
+            subscribe: () => () => undefined, sendMessage }));
+        try {
+            await waitFor(() => expect(result.current.historyRestoreFailed).toBe(true));
+            act(() => result.current.refreshSnapshot());
+            await waitFor(() => expect(result.current.messages[0]?.text).toBe('Earlier answer'));
+            expect(result.current.historyRestoreFailed).toBe(false);
+            expect(result.current.error).toBeNull();
+            expect(localStorage.getItem('ai-assistant-conversation:restore-retry')).toBe('previous');
+            expect(sendMessage).not.toHaveBeenCalled();
+            act(() => { expect(result.current.start('continue')).toBe(true); });
+            expect(sendMessage).toHaveBeenCalledWith(SIGNALING_TYPE_CODE_ASK_AI_ASSISTANT,
+                expect.objectContaining({ conversation_id: 'previous' }), 'restore-retry', expect.any(String));
+        } finally { unmount(); }
+    });
+
+    it('does not apply a failed old restore after starting a new conversation', async () => {
+        localStorage.setItem('ai-assistant-conversation:restore-late', 'previous');
+        let rejectRestore: (reason: Error) => void = () => undefined;
+        vi.stubGlobal('fetch', vi.fn(() => new Promise((_resolve, reject) => { rejectRestore = reject; })));
+        const sendMessage = vi.fn(() => 'new-request');
+        const { result, unmount } = renderHook(() => useAiAssistantChat({ deskId: 'restore-late',
+            subscribe: () => () => undefined, sendMessage }));
+        try {
+            act(() => result.current.reset());
+            act(() => { expect(result.current.start('new question')).toBe(true); });
+            await act(async () => rejectRestore(new Error('Old request failed')));
+            expect(result.current.error).toBeNull();
+            expect(result.current.historyRestoreFailed).toBe(false);
+            expect(result.current.messages[0]?.text).toBe('new question');
+        } finally { unmount(); }
+    });
+
+    it('keeps a newer successful snapshot when the initial restore fails late', async () => {
+        localStorage.setItem('ai-assistant-conversation:restore-newer', 'previous');
+        let rejectRestore: (reason: Error) => void = () => undefined;
+        vi.stubGlobal('fetch', vi.fn().mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectRestore = reject; }))
+            .mockResolvedValue({ ok: true, json: async () => ({ data: { ...snapshotFields,
+                sessionId: 'previous-session', seq: 2, active: false,
+                messages: [{ id: 'answer', role: 'assistant', text: 'Current answer' }],
+            } }) }));
+        const { result, unmount } = renderHook(() => useAiAssistantChat({ deskId: 'restore-newer',
+            subscribe: () => () => undefined, sendMessage: () => 'request' }));
+        try {
+            act(() => result.current.refreshSnapshot());
+            await waitFor(() => expect(result.current.messages[0]?.text).toBe('Current answer'));
+            await act(async () => rejectRestore(new Error('Old request failed')));
+            expect(result.current.error).toBeNull();
+            expect(result.current.historyRestoreFailed).toBe(false);
+            expect(result.current.messages[0]?.text).toBe('Current answer');
+        } finally { unmount(); }
+    });
+
+    it('sends a large question unchanged and leaves the draft unacknowledged after server refusal', async () => {
+        const text = '正文🙂'.repeat(10000);
+        const failure = 'AI Assistant question must be 1..=16384 bytes';
+        let subscriber: SignalingSubscriber | null = null;
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: {
+            ...snapshotFields, sessionId: 'large-session', seq: 10, active: false,
+            messages: [],
+        } }) }));
+        const sendMessage = vi.fn((type: number, _payload?: unknown) => type === SIGNALING_TYPE_CODE_SELECT_AI_ASSISTANT_SESSION
+            ? 'session-request' : 'turn-request');
+        const { result, unmount } = renderHook(() => useAiAssistantChat({ deskId: 'large-question', connected: true,
+            subscribe: handler => { subscriber = handler; return () => undefined; }, sendMessage }));
+        try {
+            act(() => subscriber?.({ request_id: 'session-request', signaling_type: SIGNALING_TYPE_CODE_AI_ASSISTANT_SESSION_SELECTED,
+                signaling_data: { revision: 1, target: { target_id: 'desktop', display_name: 'Desktop', foreground: true,
+                    remote_desktop_ready: true, terminal_ready: true, file_ready: true, assistant_ready: true } },
+                response_state: { error_code: 0, message: '' } }));
+            act(() => { expect(result.current.start(text)).toBe(true); });
+            const sent = sendMessage.mock.calls.find(([type]) => type === SIGNALING_TYPE_CODE_ASK_AI_ASSISTANT);
+            expect(sent?.[1]).toMatchObject({ question: text });
+            await act(async () => subscriber?.({ request_id: 'turn-request', signaling_type: SIGNALING_TYPE_CODE_AI_ASSISTANT_UPDATED,
+                signaling_data: { seq: 1, kind: 'error', error: { message: failure } } }));
+            expect(result.current.error).toBe(failure);
+            expect(result.current.acceptedInput).toBeNull();
+            expect(result.current.deliveryState).toBeNull();
+        } finally { unmount(); }
+    });
+
+    it('restores native bound citations from the owner snapshot without sending another turn', async () => {
+        localStorage.setItem('ai-assistant-conversation:citations-native', 'conversation');
+        const citation = {answer_message_id:'answer',answer_revision:1,source_id:'src_AAECAwQFBgcICQoLDA0ODw',source_revision:2};
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ok:true,json:async()=>({success:true,data:{
+            ...snapshotFields,sessionId:'session',seq:1,active:false,messages:[{id:'answer',role:'assistant',text:`Answer 〔来源:${citation.source_id}〕`,
+                citations:[citation],citationsIncomplete:true}],
+        }})}));
+        const sendMessage = vi.fn(() => 'request');
+        const {result,unmount} = renderHook(()=>useAiAssistantChat({deskId:'citations-native',subscribe:()=>()=>undefined,sendMessage}));
+        try {
+            await waitFor(()=>expect(result.current.messages.find(message=>message.id==='answer')?.citations).toEqual([citation]));
+            expect(result.current.messages.find(message=>message.id==='answer')?.citationsIncomplete).toBe(true);
+            expect(sendMessage).not.toHaveBeenCalled();
+        } finally { unmount(); }
+    });
+    it('restores temporary mode from the owner snapshot and clears it for an ordinary new conversation', async () => {
+        localStorage.setItem('ai-assistant-conversation:temporary-restore', 'conversation');
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: {
+            ...snapshotFields, sessionId: 'session', seq: 1, active: false, messages: [], temporaryConversation: true,
+        } }) }));
+        const { result, unmount } = renderHook(() => useAiAssistantChat({ deskId: 'temporary-restore',
+            subscribe: () => () => undefined, sendMessage: () => 'request' }));
+        try {
+            await waitFor(() => expect(result.current.temporaryConversation).toBe(true));
+            act(() => { result.current.reset(); });
+            expect(result.current.temporaryConversation).toBe(false);
+        } finally { unmount(); }
+    });
     it('enables approval when configuration becomes ready without a new conversation event', async () => {
         vi.useFakeTimers();
         localStorage.setItem('ai-assistant-conversation:desk-1', 'conversation-1');
@@ -253,11 +440,14 @@ describe('useAiAssistantChat', () => {
         });
         const { result, unmount } = renderHook(() => useAiAssistantChat({ deskId: 'delivery-test',
             subscribe: handler => { subscriber = handler; return () => undefined; }, sendMessage }));
+        act(() => { result.current.reset(true); });
+        expect(result.current.temporaryConversation).toBe(true);
         act(() => { expect(result.current.start('Keep this message')).toBe(true); });
         expect(result.current.deliveryState).toBe('unconfirmed');
         expect(result.current.messages.at(-1)?.text).toBe('Keep this message');
         expect(result.current.acceptedInput).toBeNull();
         const original = sendMessage.mock.calls[0];
+        expect(original[1]).toMatchObject({ temporary_conversation: true });
         await act(async () => { await result.current.retryDelivery(); });
         expect(sendMessage.mock.calls[1]).toEqual(original);
         expect(result.current.messages.filter(m => m.role === 'user')).toHaveLength(1);
@@ -376,25 +566,6 @@ describe('useAiAssistantChat', () => {
         expect(result.current.error).toBeNull();
     });
 
-    it('restores server context usage and clears it for a new conversation', async () => {
-        localStorage.setItem('ai-assistant-conversation:budget-desk', 'budget-conversation');
-        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: {
-            ...snapshotFields,
-            sessionId: 'budget-session', seq: 1, active: false, messages: [],
-            contextUsage: { usedBytes: 200, limitBytes: 1000, strategy: 'checkpoint_summary' },
-            contextNotices: [
-                { id: 'notice-1', turnId: 'turn-1', kind: 'compacted' },
-                { id: 'notice-1', turnId: 'turn-1', kind: 'compacted' },
-            ],
-        } }) }));
-        const { result } = renderHook(() => useAiAssistantChat({ deskId: 'budget-desk',
-            subscribe: () => () => undefined, sendMessage: vi.fn() }));
-        await waitFor(() => expect(result.current.contextUsage?.usedBytes).toBe(200));
-        expect(result.current.contextNotices).toEqual([{ id: 'notice-1', turnId: 'turn-1', kind: 'compacted' }]);
-        act(() => result.current.reset());
-        expect(result.current.contextUsage).toBeNull();
-        expect(result.current.contextNotices).toEqual([]);
-    });
 
     it('opens history through its continuation id without sending a cancel or a question', async () => {
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: {

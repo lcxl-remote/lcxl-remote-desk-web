@@ -34,6 +34,10 @@ pub struct Model {
     pub creation_payload_sha256: String,
     pub source_conversation_id: Option<String>,
     pub requirement_revision: Option<i64>,
+    /// Original owner retrieval consent. Absent consent never follows later settings.
+    pub retrieval_consent_json: Option<String>,
+    /// Native prompt copy policy, frozen into each occurrence's task snapshot.
+    pub prompt_retention_json: Option<String>,
     pub contract_revision: Option<i64>,
     pub authorization_revision: Option<i64>,
     /// Validated shared FailureState, including its recovery epoch and blockers.

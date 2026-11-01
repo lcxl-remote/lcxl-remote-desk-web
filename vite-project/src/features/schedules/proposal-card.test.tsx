@@ -68,3 +68,9 @@ it('keeps multiple conversation approvals visible across follow-up renders', asy
     expect(screen.getAllByTestId('review')).toHaveLength(2);
     expect(screen.queryByRole('dialog')).toBeNull();
 });
+
+it('renders a valid large proposal result and still validates its selector', async () => {
+    const output = JSON.stringify({ ...JSON.parse(tool.output), awaiting_confirmation: true, detail: '中'.repeat(12000) });
+    render(<ScheduleProposalCards {...base} tools={[{ ...tool, output }]} running />);
+    expect(await screen.findByTestId('review')).toHaveTextContent(JSON.parse(tool.output).schedule_id);
+});

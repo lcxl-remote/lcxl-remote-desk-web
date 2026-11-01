@@ -105,11 +105,13 @@ impl EvidenceSnapshot {
         serde_json::from_str(json)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     /// Serialize to pretty JSON for committing as a fixture.
     pub fn to_json_pretty(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string_pretty(self)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     /// Total serialized evidence size across all contexts, in bytes.
     pub fn total_size_bytes(&self) -> usize {
         self.contexts.iter().map(|c| c.size_bytes).sum()

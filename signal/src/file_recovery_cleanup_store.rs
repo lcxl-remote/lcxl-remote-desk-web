@@ -54,6 +54,7 @@ impl FileRecoveryCleanupStore {
             .await
     }
 
+    #[cfg(test)]
     /// Device routing and owner authorization are the caller's responsibility.
     pub async fn pending_for_device(
         &self,
@@ -70,6 +71,7 @@ impl FileRecoveryCleanupStore {
             .await
     }
 
+    #[cfg(test)]
     pub async fn claim_due(&self, now_ms: i64) -> Result<Option<cleanup::Model>, sea_orm::DbErr> {
         self.claim_matching(None, now_ms).await
     }
@@ -229,6 +231,7 @@ mod tests {
             actor_id: Set("owner".into()),
             device_id: Set("device".into()),
             created_at_unix_ms: Set(1000),
+            history_deleted_at_unix_ms: Set(None),
             next_attempt_at_unix_ms: Set(1000),
             attempts: Set(0),
             lease_id: Set(None),

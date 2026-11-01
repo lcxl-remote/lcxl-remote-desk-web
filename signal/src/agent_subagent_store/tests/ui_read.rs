@@ -5,6 +5,7 @@ use crate::entity::agent_subagent_inbox as inbox;
 async fn ui_read_is_subject_scoped_monotonic_and_independent_of_model_consumption() {
     let db = database().await;
     seed_parent(&db).await;
+    let unreadable = seed_unreadable_session(&db).await;
     let mut task = seed_task(&db, "ui-attention", "goal-ui").await;
     let group = group_row::Entity::find()
         .filter(group_row::Column::GroupId.eq("ui-attention"))
@@ -57,6 +58,21 @@ async fn ui_read_is_subject_scoped_monotonic_and_independent_of_model_consumptio
         .await
         .unwrap();
     assert_eq!(global.len(), 2);
+    let scan = crate::agent_owner_attention::list_goal_attention(&db, "1", 1000);
+    assert!(std::mem::size_of_val(&scan) <= 16 * 1024);
+    let overview = scan.await.unwrap();
+    assert!(overview.iter().any(|item| item.session_id == "root"
+        && item.reason == desk_signal_facade::controller::ai_assistant_session::AiAssistantAttentionReason::SubAgentResult));
+    assert_eq!(
+        session_row::Entity::find_by_id(unreadable.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap()
+            .state_json,
+        unreadable.state_json
+    );
+
     assert!(global.iter().all(|item| item.session_id == "root"
         && item.client_conversation_id.as_deref() == Some("original-parent-intent")));
     let result_identity = global.iter().find(|item| item.reason == desk_signal_facade::controller::ai_assistant_session::AiAssistantAttentionReason::SubAgentResult).unwrap().attention_id.clone();
@@ -214,4 +230,16 @@ async fn reading_an_old_revision_cannot_hide_a_new_owner_approval_notification()
         .unwrap();
     assert!(newer.ui_read_at_ms.is_none());
     assert!(newer.model_observed_at_ms.is_none());
+}
+
+#[test]
+fn unreadable_snapshot_attention_scans_fit_small_stacks() {
+    for bytes in [1024 * 1024, 2 * 1024 * 1024] {
+        std::thread::Builder::new()
+            .stack_size(bytes)
+            .spawn(ui_read_is_subject_scoped_monotonic_and_independent_of_model_consumption)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
 }

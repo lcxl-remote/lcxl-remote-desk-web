@@ -25,9 +25,17 @@ async fn exercise(model_budget: u64) {
     let server = actix_web::HttpServer::new(move || {
         let requests = observed.clone();
         actix_web::App::new().route("/v1/chat/completions", actix_web::web::post().to(
-            move |_: actix_web::web::Json<serde_json::Value>| {
+            move |body: actix_web::web::Json<serde_json::Value>| {
+                let payload = body.to_string();
+                assert!(payload.contains("ORIGINAL_FRESH_PERSONALIZATION"));
+                assert!(!payload.contains("LATER_FRESH_PERSONALIZATION"));
                 requests.fetch_add(1, Ordering::SeqCst);
-                async {
+
+
+
+                async move {
+
+
                     actix_web::HttpResponse::Ok().content_type("text/event-stream").body(concat!(
                         "data: {\"choices\":[{\"delta\":{\"content\":\"fresh task complete\"}}]}\n\n",
                         "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
@@ -44,7 +52,27 @@ async fn exercise(model_budget: u64) {
         .await
         .unwrap();
     crate::db::initialize_schema(&db).await.unwrap();
+    use desk_agent_protocol::ai_assistant::user_instructions::UserInstructionsUpdate;
+    let first = crate::assistant_data_config::instructions(&db).await;
+    let frozen = crate::assistant_data_config::update_instructions(
+        &db,
+        &UserInstructionsUpdate {
+            expected_revision: first.revision,
+            content: "ORIGINAL_FRESH_PERSONALIZATION".into(),
+        },
+    )
+    .await
+    .unwrap();
     let (store, task, contract, mut publication) = fixture_on(db.clone()).await;
+    crate::assistant_data_config::update_instructions(
+        &db,
+        &UserInstructionsUpdate {
+            expected_revision: frozen.revision,
+            content: "LATER_FRESH_PERSONALIZATION".into(),
+        },
+    )
+    .await
+    .unwrap();
     // The full orchestration prompt is larger than the storage fixture's request.
     let mut definition: desk_agent_protocol::schedule::contract::TaskContract =
         serde_json::from_str(&contract.canonical_json).unwrap();
@@ -109,14 +137,18 @@ async fn exercise(model_budget: u64) {
             now,
         )
         .unwrap();
-    let executor = crate::schedule_executor::SignalScheduleExecutor::new(
-        db.clone(),
-        connections,
-        Arc::new(AiAssistantGate::new(AiAssistantSettings {
-            enabled: true,
-            revision: 1,
-        })),
-    );
+    let gate = Arc::new(AiAssistantGate::new(AiAssistantSettings {
+        enabled: true,
+        revision: 1,
+    }));
+
+    let input_seq_before_dispatch = crate::entity::agent_assistant_runtime::Entity::find()
+        .one(&db)
+        .await
+        .unwrap()
+        .map_or(0, |row| row.input_seq);
+    let executor =
+        crate::schedule_executor::SignalScheduleExecutor::new(db.clone(), connections, gate);
     let second = executor.clone();
     let (a, b) = tokio::join!(
         actix_web::rt::spawn(async move { executor.scan_once(0).await }),
@@ -137,6 +169,29 @@ async fn exercise(model_budget: u64) {
     let state =
         desk_diagnose_core::session::PersistedAgentSession::decode_json(&session.state_json)
             .unwrap();
+    let data = state.assistant_data.as_ref().unwrap();
+
+    assert_eq!(data.current_actor_input_seq, 0);
+    assert_eq!(data.instructions.accepted_input_seq, 0);
+    assert_eq!(data.instructions.content, "ORIGINAL_FRESH_PERSONALIZATION");
+    assert!(data.history_access_scope.is_none() && data.memory_access_scope.is_none());
+    let runtime = crate::entity::agent_assistant_runtime::Entity::find()
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(runtime.input_seq, input_seq_before_dispatch);
+    assert!(
+        crate::entity::agent_run_event::Entity::find()
+            .filter(
+                crate::entity::agent_run_event::Column::Kind
+                    .eq(desk_diagnose_core::dynamic_run::AgentRunEventKind::UserFollowup.as_str())
+            )
+            .all(&db)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     if model_budget == 10_000 {
         assert_eq!(finished.status, "failed");
         let error = state.terminal_error.unwrap();
@@ -184,6 +239,7 @@ async fn exercise(model_budget: u64) {
         assert!(finished.result_ref.is_some());
         assert_eq!(requests.load(Ordering::SeqCst), 1);
     }
+
     cache.remove_connection(&connection_id);
     handle.stop(true).await;
 }

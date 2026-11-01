@@ -54,6 +54,7 @@ impl SignalScheduleExecutor {
         let config = crate::model_provider::load(&self.db)
             .await
             .map_err(|_| ScheduleStoreError::Conflict)?;
+
         let (providers, inventory, _, readiness) =
             crate::ai_assistant_orchestrator::current_capability_projection(
                 &self.db,
@@ -89,9 +90,12 @@ impl SignalScheduleExecutor {
             )
         });
         let mut granted = Vec::new();
-        for tool in &tools {
-            if !granted.contains(&tool.required_capability) {
-                granted.push(tool.required_capability);
+        for capability in tools
+            .iter()
+            .filter_map(|tool| tool.required_device_capability)
+        {
+            if !granted.contains(&capability) {
+                granted.push(capability);
             }
         }
         let scope = AgentScope {

@@ -34,7 +34,7 @@ pub fn tool() -> crate::registry::RegisteredTool {
                 }, "required":["target"]
             }),
         },
-        required_capability: desk_agent_protocol::Capability::ApplicationLaunchConfirmed,
+        required_device_capability: Some(desk_agent_protocol::Capability::ApplicationLaunchConfirmed),
         effect: crate::registry::ToolEffect::Mutating,
     }
 }
@@ -171,6 +171,7 @@ pub enum LaunchDispatchState {
 }
 
 impl LaunchDispatchState {
+    #[cfg(test)]
     pub fn can_transition_to(self, next: Self) -> bool {
         matches!(
             (self, next),

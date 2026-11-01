@@ -179,6 +179,9 @@ which = { workspace = true }
 
 
 [dev-dependencies]
+desk-agent-protocol = { workspace = true, features = ["test-support"] }
+desk-signal-facade = { workspace = true, features = ["test-support"] }
+desk-turn = { workspace = true, features = ["test-support"] }
 hound = { workspace = true }
 
 [lints.rust]

@@ -40,6 +40,10 @@ impl SubAgentStore {
         })
         .await?;
 
+        let history = desk_diagnose_core::future::boxed(|| {
+            crate::assistant_data_store::native_scope_on(&txn, actor, device, root)
+        })
+        .await?;
         let parent = desk_diagnose_core::future::boxed(|| async {
             parent_on(&txn, root, actor, device).await
         })
@@ -49,6 +53,9 @@ impl SubAgentStore {
             prepare_owner_control_on(&txn, &parent, request, now_ms).await
         })
         .await?;
+        if let Some(history) = &history {
+            desk_diagnose_core::future::boxed(|| history.capture_on(&txn)).await?;
+        }
         desk_diagnose_core::future::boxed(|| async { txn.commit().await }).await?;
         prepared
             .permission_ends
@@ -66,8 +73,12 @@ fn validate_control(request: &AiAssistantSubAgentControl) -> Result<(), DbErr> {
         || request.expected_control_revision > i64::MAX as u64
         || match &request.action {
             SubAgentControlAction::Cancel => false,
-            SubAgentControlAction::Adjust { message } => {
-                message.trim().is_empty()
+            SubAgentControlAction::Adjust {
+                message,
+                client_timezone,
+            } => {
+                !desk_diagnose_core::ai_assistant::source::valid_statement_timezone(client_timezone)
+                    || message.trim().is_empty()
                     || message.chars().count()
                         > desk_diagnose_core::subagent::MAX_DELEGATED_TASK_CHARS
             }
@@ -141,7 +152,10 @@ pub(crate) async fn apply_task_control_from_turn_on(
             task_id,
             input_revision,
             control_revision,
-            SubAgentControlAction::Adjust { message },
+            SubAgentControlAction::Adjust {
+                message,
+                client_timezone: String::new(),
+            },
         ),
         _ => return Err(invalid()),
     };
@@ -190,9 +204,6 @@ async fn apply_task_control_with_source_on(
     now_ms: i64,
     input_observation: &ToolObservation,
 ) -> Result<PreparedControl, DbErr> {
-    validate_control(request).inspect_err(|_| {
-        input_observation.reject(Stage::Preflight, InputIssue::Semantic);
-    })?;
     if !parent.agent_role.is_main() || parent.surface != AgentSessionSurface::AiAssistant {
         input_observation.permission(PermissionOutcome::PolicyRejected);
         return Err(invalid());
@@ -315,7 +326,10 @@ async fn apply_task_control_with_source_on(
                 }
                 changed
             }
-            SubAgentControlAction::Adjust { message } => {
+            SubAgentControlAction::Adjust {
+                message,
+                client_timezone,
+            } => {
                 if adjustment_source.is_some()
                     && (run.state.is_terminal() || run.state == SubAgentState::Cancelling)
                 {
@@ -361,7 +375,25 @@ async fn apply_task_control_with_source_on(
                     .ok_or_else(invalid)?,
                 };
                 let adjusted = creation
-                    .adjusted(&run.binding, label, &run.child_conversation_id)
+                    .adjusted(
+                        &run.binding,
+                        label,
+                        &run.child_conversation_id,
+                        if adjustment_source.is_none() {
+                            Some((now_ms as u64, client_timezone.as_str()))
+                        } else {
+                            parent
+                                .assistant_data
+                                .as_ref()
+                                .filter(|data| data.current_actor_input_seq > 0)
+                                .map(|data| {
+                                    (
+                                        data.current_input_recorded_at_unix_ms,
+                                        data.current_input_timezone.as_str(),
+                                    )
+                                })
+                        },
+                    )
                     .map_err(|_| invalid())?;
                 let changed = run_row::Entity::update_many()
                     .set(run_row::ActiveModel {
@@ -433,4 +465,33 @@ async fn apply_task_control_with_source_on(
         })
     })
     .await
+}
+
+#[cfg(test)]
+mod client_timezone_tests {
+    use super::*;
+
+    #[test]
+    fn owner_adjustments_require_a_valid_client_timezone() {
+        let mut request = AiAssistantSubAgentControl {
+            client_request_id: "input".into(),
+            task_id: "task".into(),
+            expected_input_revision: 1,
+            expected_control_revision: 1,
+            action: SubAgentControlAction::Adjust {
+                message: "Check yesterday".into(),
+                client_timezone: "Asia/Shanghai".into(),
+            },
+        };
+        assert!(validate_control(&request).is_ok());
+        for timezone in ["", "Bad/Timezone"] {
+            if let SubAgentControlAction::Adjust {
+                client_timezone, ..
+            } = &mut request.action
+            {
+                *client_timezone = timezone.into();
+            }
+            assert!(validate_control(&request).is_err());
+        }
+    }
 }

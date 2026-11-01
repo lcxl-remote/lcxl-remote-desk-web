@@ -508,6 +508,7 @@ impl SignalExecPtyCarriers {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn validate_browser_binding(
     entry: &mut CarrierEntry,
     opened: &PtyStreamOpened,

@@ -45,3 +45,30 @@ pub mod agent_approval_trace;
 pub mod agent_approval_trace_part;
 
 pub mod agent_approval_attempt;
+
+pub use desk_assistant_data_store::entity::agent_assistant_citation;
+pub use desk_assistant_data_store::entity::agent_assistant_control_receipt;
+pub mod agent_assistant_device_binding;
+pub use desk_assistant_data_store::entity::agent_assistant_history;
+pub use desk_assistant_data_store::entity::agent_assistant_history_conversation;
+pub use desk_assistant_data_store::entity::agent_assistant_history_coverage;
+pub use desk_assistant_data_store::entity::agent_assistant_origin;
+// Signal also owns native maintenance cleanup cursors in this table.
+pub mod agent_assistant_quota;
+pub use desk_assistant_data_store::entity::agent_assistant_runtime;
+pub use desk_assistant_data_store::entity::agent_assistant_search_document;
+pub use desk_assistant_data_store::entity::agent_assistant_search_term;
+pub use desk_assistant_data_store::entity::agent_assistant_source_use;
+pub use desk_assistant_data_store::entity::agent_memory;
+pub use desk_assistant_data_store::entity::agent_memory_commit;
+pub use desk_assistant_data_store::entity::agent_memory_revision;
+pub use desk_assistant_data_store::entity::agent_memory_source;
+pub use desk_assistant_data_store::entity::agent_memory_tombstone;
+pub use desk_assistant_data_store::entity::agent_memory_use;
+
+pub use desk_assistant_data_store::entity::agent_assistant_data_authorization;
+pub use desk_assistant_data_store::entity::agent_assistant_model_output;
+pub use desk_assistant_data_store::entity::agent_assistant_model_parent;
+pub use desk_assistant_data_store::entity::agent_assistant_read_projection;
+pub use desk_assistant_data_store::entity::agent_assistant_retrieval_query;
+pub use desk_assistant_data_store::entity::agent_assistant_source_suppression;

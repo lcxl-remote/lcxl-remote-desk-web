@@ -119,6 +119,7 @@ export default {
     "modelMetrics.value.purpose.approval": "Approval",
     "modelMetrics.value.purpose.completion": "Completion",
     "modelMetrics.value.purpose.context_compression": "Context compression",
+    "modelMetrics.value.purpose.conversation_title": "Conversation title",
     "modelMetrics.value.purpose.safety": "Safety",
     "modelMetrics.value.purpose.probe": "Probe",
     "modelMetrics.value.purpose.fleet_natural_language": "Fleet natural language",

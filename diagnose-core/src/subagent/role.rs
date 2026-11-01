@@ -123,6 +123,9 @@ impl AgentRole {
             || !matches!(
                 effect,
                 ToolEffect::SchedulePlanning
+                    | ToolEffect::MemoryQuery
+                    | ToolEffect::MemoryWrite
+                    | ToolEffect::AssistantHistory
                     | ToolEffect::GoalOpenPlanning
                     | ToolEffect::GoalControl
                     | ToolEffect::SubAgentPlanning

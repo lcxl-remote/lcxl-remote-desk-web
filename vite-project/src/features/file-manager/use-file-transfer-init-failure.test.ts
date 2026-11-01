@@ -8,7 +8,7 @@ import {
     latestSocket,
     restoreSignalingStubs,
     type SignalingGlobals,
-} from './file-transfer-test-harness';
+} from './__tests__/harness';
 import { deskErrorCodeEnum } from '@/services/types';
 
 // A host that refuses the session answers `RemoteAccessInitialized` with an error
@@ -19,7 +19,7 @@ import { deskErrorCodeEnum } from '@/services/types';
 // Fake timers are installed before anything is scheduled and never advanced past
 // zero, so "rejects immediately" is not a matter of interpretation here: no
 // timeout could have fired. One comprehensive `renderHook` test per file: see the
-// note in `file-transfer-test-harness.ts`.
+// note in `__tests__/harness.ts`.
 
 describe('useFileTransfer when the host refuses the session', () => {
     let saved: SignalingGlobals;

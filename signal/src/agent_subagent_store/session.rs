@@ -8,12 +8,21 @@ pub(crate) async fn save_child_session(
 ) -> Result<(), DbErr> {
     desk_diagnose_core::image_input::retain_latest_session_image(&mut session.conversation)
         .map_err(|_| invalid())?;
-    session.agent_role.binding().ok_or_else(invalid)?;
+    let binding = session.agent_role.binding().ok_or_else(invalid)?;
     let txn = desk_diagnose_core::future::boxed(|| async {
         crate::db::begin_write(db, session_row::Entity).await
     })
     .await?;
 
+    let history = desk_diagnose_core::future::boxed(|| {
+        crate::assistant_data_store::native_scope_on(
+            &txn,
+            &session.actor_id,
+            &session.device_id,
+            &binding.root_conversation_id,
+        )
+    })
+    .await?;
     let now = chrono::Utc::now();
     let (row, mut run, group) = desk_diagnose_core::future::boxed(|| async {
         super::lifecycle::child_records_on(&txn, session, now.timestamp_millis()).await
@@ -72,6 +81,9 @@ pub(crate) async fn save_child_session(
         write_child_session_on(&txn, &next, now).await
     })
     .await?;
+    if let Some(history) = &history {
+        desk_diagnose_core::future::boxed(|| history.capture_on(&txn)).await?;
+    }
     desk_diagnose_core::future::boxed(|| async { txn.commit().await }).await?;
     permission_ends.submit(
         now.timestamp_millis(),

@@ -365,19 +365,8 @@ pub fn project_web_send_receipt(
     canonical_input: &str,
     completion: &ComputerActionCompleted,
 ) -> Result<Option<SendReceipt>, AgentError> {
-    if !matches!(tool_name, "send_gmail_message" | "send_slack_message") {
+    let Some(snapshot) = frozen_web_send_snapshot(tool_name, canonical_input)? else {
         return Ok(None);
-    }
-    let snapshot = if tool_name == "send_gmail_message" {
-        let input: GmailWebExactSendInput =
-            serde_json::from_str(canonical_input).map_err(|_| invalid())?;
-        crate::communication::verify_gmail_web_exact_send_input(&input).map_err(|_| invalid())?;
-        input.handoff.send_payload_snapshot.ok_or_else(invalid)?
-    } else {
-        let input: SlackWebExactSendInput =
-            serde_json::from_str(canonical_input).map_err(|_| invalid())?;
-        crate::communication::verify_slack_web_exact_send_input(&input).map_err(|_| invalid())?;
-        input.handoff.send_payload_snapshot.ok_or_else(invalid)?
     };
     let Some(ComputerActionOutput::Browser(result)) = &completion.output else {
         return Err(invalid());
@@ -418,6 +407,28 @@ pub fn project_web_send_receipt(
         return Err(invalid());
     }
     Ok(Some(receipt))
+}
+
+/// Original sealed metadata only; this grants no send or retention permission.
+pub(crate) fn frozen_web_send_snapshot(
+    tool_name: &str,
+    canonical_input: &str,
+) -> Result<Option<SendPayloadSnapshot>, AgentError> {
+    if !matches!(tool_name, "send_gmail_message" | "send_slack_message") {
+        return Ok(None);
+    }
+    let snapshot = if tool_name == "send_gmail_message" {
+        let input: GmailWebExactSendInput =
+            serde_json::from_str(canonical_input).map_err(|_| invalid())?;
+        crate::communication::verify_gmail_web_exact_send_input(&input).map_err(|_| invalid())?;
+        input.handoff.send_payload_snapshot.ok_or_else(invalid)?
+    } else {
+        let input: SlackWebExactSendInput =
+            serde_json::from_str(canonical_input).map_err(|_| invalid())?;
+        crate::communication::verify_slack_web_exact_send_input(&input).map_err(|_| invalid())?;
+        input.handoff.send_payload_snapshot.ok_or_else(invalid)?
+    };
+    Ok(Some(snapshot))
 }
 
 /// Add explicit call-receipt and business-effect semantics only at the

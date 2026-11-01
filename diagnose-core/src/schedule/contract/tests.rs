@@ -2055,54 +2055,28 @@ fn slack_generated_draft_binds_verified_account_page_and_destination() {
 
 #[test]
 fn automatic_approval_candidate_keeps_exact_input_scope_and_bounded_lifetime() {
+    for with_alias in [false, true] {
+        exercise_automatic_approval_candidate(with_alias);
+    }
+}
+
+fn exercise_automatic_approval_candidate(with_alias: bool) {
     use crate::{
         capability_grant::CapabilityGrantCall,
         chat::{ChatMessage, ChatRole, ToolCall},
         session::{PersistedAgentSession, TriggerOrigin},
     };
     let registry = crate::ai_assistant::ai_assistant_provider_registry();
-    let tool_name = "inspect_desktop_session";
+    let tool_name = if with_alias {
+        "inspect_desktop_ui"
+    } else {
+        "inspect_desktop_session"
+    };
     let capability = registry.capability_for_tool(tool_name).unwrap();
     let provider = registry
         .provider_for_capability(&capability.wire.capability_id)
         .unwrap();
-    let original = ToolCall {
-        id: "inspect-1".into(),
-        name: tool_name.into(),
-        arguments_json: "{}".into(),
-    };
-    let planning = ToolCall {
-        id: "planning".into(),
-        name: crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME.into(),
-        arguments_json: serde_json::json!({"items":[{
-            "item_id":"inspect-1", "provider_id":provider.wire.provider_id, "tool_name":tool_name,
-            "expected_effect":capability.wire.effect,
-            "exact_input":{}, "suggested_ttl_seconds":60, "suggested_max_uses":1, "reason":"Inspect"
-        }]})
-        .to_string(),
-    };
-    let normalized = crate::permission_tools::build_permission_request(
-        &planning,
-        &registry,
-        "normalized".into(),
-        1,
-        "2026-09-07T00:00:00Z".into(),
-    )
-    .unwrap();
-    let item = &normalized.items[0];
     let mut definition = contract();
-    let rule = &mut definition.permissions[0];
-    rule.provider_id = provider.wire.provider_id.clone();
-    rule.capability_id = capability.wire.capability_id.clone();
-    rule.tool_name = tool_name.into();
-    rule.tool_schema_version = capability.wire.input_schema_version;
-    rule.effect = capability.wire.effect;
-    for scope in [&mut rule.automatic, &mut rule.approval_ceiling] {
-        scope.resources = item.resource_scope.clone();
-        scope.operations = item.operation_scope.clone();
-        scope.export_destinations = item.export_destinations.clone();
-    }
-    let contract = validate_contract(&definition).unwrap();
     let mut session = PersistedAgentSession::new(
         "run",
         "owner",
@@ -2118,6 +2092,72 @@ fn automatic_approval_candidate_keeps_exact_input_scope_and_bounded_lifetime() {
     );
     session.input_revision = 1;
     session.trigger_origin = TriggerOrigin::ScheduledTask;
+    if with_alias {
+        let observation_call = ToolCall {
+            id: "observation-call".into(),
+            name: "inspect_desktop_session".into(),
+            arguments_json: "{}".into(),
+        };
+        let mut observation_proposal =
+            ChatMessage::text("observation-proposal", ChatRole::Assistant, "");
+        observation_proposal
+            .tool_calls
+            .push(observation_call.to_ref());
+        session.conversation.push(observation_proposal);
+        session.conversation.push(ChatMessage::tool_result("observation", &observation_call.id,
+            serde_json::json!({"ReadContext":{"DesktopSessionInspect":{
+                "session":{"token":"native-session","snapshot_id":"desktop","object_kind":"desktop_session","expires_at":"2030-01-01T00:00:00Z"},
+                "os":"macos","interactive_session_incarnation":"worker",
+                "active_application":{"token":"native-application","snapshot_id":"desktop","object_kind":"application","expires_at":"2030-01-01T00:00:00Z"},"active_application_name":"Calendar"
+            }}}).to_string()));
+        session
+            .ui_references
+            .observe(&session.conversation)
+            .unwrap();
+    }
+    let original = ToolCall {
+        id: "inspect-1".into(),
+        name: tool_name.into(),
+        arguments_json: if with_alias {
+            r#"{ "root_id": "a1", "queries": ["Calendar"] }"#.into()
+        } else {
+            "{}".into()
+        },
+    };
+    let executed =
+        crate::ui_model_ids::resolve_session_call_with_context(&original, &session, 1000, None)
+            .unwrap();
+    let planning = ToolCall {
+        id: "planning".into(),
+        name: crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME.into(),
+        arguments_json: serde_json::json!({"items":[{
+            "item_id":"inspect-1", "provider_id":provider.wire.provider_id, "tool_name":tool_name,
+            "expected_effect":capability.wire.effect,
+            "exact_input":serde_json::from_str::<serde_json::Value>(&executed.arguments_json).unwrap(), "suggested_ttl_seconds":60, "suggested_max_uses":1, "reason":"Inspect"
+        }]})
+        .to_string(),
+    };
+    let normalized = crate::permission_tools::build_permission_request(
+        &planning,
+        &registry,
+        "normalized".into(),
+        1,
+        "2026-09-07T00:00:00Z".into(),
+    )
+    .unwrap();
+    let item = &normalized.items[0];
+    let rule = &mut definition.permissions[0];
+    rule.provider_id = provider.wire.provider_id.clone();
+    rule.capability_id = capability.wire.capability_id.clone();
+    rule.tool_name = tool_name.into();
+    rule.tool_schema_version = capability.wire.input_schema_version;
+    rule.effect = capability.wire.effect;
+    for scope in [&mut rule.automatic, &mut rule.approval_ceiling] {
+        scope.resources = item.resource_scope.clone();
+        scope.operations = item.operation_scope.clone();
+        scope.export_destinations = item.export_destinations.clone();
+    }
+    let contract = validate_contract(&definition).unwrap();
     let mut proposal = ChatMessage::text("proposal", ChatRole::Assistant, "");
     proposal.tool_calls.push(original.to_ref());
     session.conversation.push(proposal);
@@ -2170,6 +2210,28 @@ fn automatic_approval_candidate_keeps_exact_input_scope_and_bounded_lifetime() {
     assert_eq!(long.items[0].suggested_ttl_seconds, 300);
     assert_eq!(short.request_id, long.request_id);
     assert!(create(1999).is_err());
+    let mut changed_session = session.clone();
+    let mut changed_original = original.clone();
+    changed_original.arguments_json = if with_alias {
+        r#"{"root_id":"a1","queries":["different business input"]}"#.into()
+    } else {
+        r#"{"changed":true}"#.into()
+    };
+    changed_session.conversation.last_mut().unwrap().tool_calls[0] = changed_original.to_ref();
+    assert!(
+        exception::request_for_original_call(
+            &contract,
+            &changed_session,
+            &changed_original,
+            &call,
+            &registry,
+            "edge",
+            62000,
+            "1970-01-01T00:00:01Z".into()
+        )
+        .is_err()
+    );
+
     let oversized = CapabilityGrantCall {
         byte_count: 201,
         ..call.clone()

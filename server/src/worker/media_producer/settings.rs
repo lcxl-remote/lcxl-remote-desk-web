@@ -359,6 +359,7 @@ pub(super) fn capturable_device_name(live: &[DisplayInfo], requested: &str) -> O
 }
 
 /// Inverse of [`codec_from_str`] for the video subset.
+#[cfg(test)]
 pub(super) fn video_codec_name(c: MediaCodec) -> Option<&'static str> {
     match c {
         MediaCodec::H264 => Some("H264"),

@@ -41,9 +41,12 @@ pub fn retain_candidates(
 /// Call only after readiness, policy and context have selected these candidates.
 /// Actual invocation still requires a live grant and exact-input authorization.
 pub fn extend_scope(tools: &[RegisteredTool], granted: &mut Vec<Capability>) {
-    for tool in tools {
-        if !granted.contains(&tool.required_capability) {
-            granted.push(tool.required_capability);
+    for capability in tools
+        .iter()
+        .filter_map(|tool| tool.required_device_capability)
+    {
+        if !granted.contains(&capability) {
+            granted.push(capability);
         }
     }
 }
@@ -70,16 +73,18 @@ pub fn extend_candidate_scope(
             }
             ExposureRequirement::SelectedContext => selected,
         };
-        if eligible && !granted.contains(&tool.required_capability) {
-            granted.push(tool.required_capability);
+        if eligible
+            && let Some(capability) = tool.required_device_capability
+            && !granted.contains(&capability)
+        {
+            granted.push(capability);
         }
     }
 }
 
 pub fn scope_has_mutation(providers: &ProviderRegistry, granted: &[Capability]) -> bool {
     providers.registered_tools().iter().any(|tool| {
-        granted.contains(&tool.required_capability)
-            && tool.effect == crate::registry::ToolEffect::Mutating
+        tool.has_device_capability(granted) && tool.effect == crate::registry::ToolEffect::Mutating
     })
 }
 
@@ -125,7 +130,7 @@ mod tests {
                         ExposureRequirement::SelectedContext => selected,
                     };
                     assert_eq!(
-                        candidates.contains(&tool.required_capability),
+                        tool.has_device_capability(&candidates),
                         expected,
                         "{} selected={selected} authorized={authorized}",
                         tool.name()

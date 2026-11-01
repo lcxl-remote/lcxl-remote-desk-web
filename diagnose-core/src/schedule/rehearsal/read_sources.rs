@@ -11,8 +11,8 @@ use crate::{
 
 /// Selected by the original receipt producer, never inferred from a hash match.
 #[derive(Debug, Clone, Copy)]
-pub enum ReadSourceDigest {
-    BoundToolOutput,
+pub enum ReadSourceDigest<'a> {
+    BoundToolOutput(&'a crate::session::PersistedAgentSession),
     ModelPayload,
 }
 
@@ -150,7 +150,7 @@ pub fn verified_action_source(
 pub fn verified_read_source(
     messages: &[ChatMessage],
     read: &ObservedRehearsalRead,
-    digest_kind: ReadSourceDigest,
+    digest_kind: ReadSourceDigest<'_>,
 ) -> Result<RehearsalToolSource, InvalidReadSource> {
     verified_tool_source(
         messages,
@@ -166,7 +166,7 @@ fn verified_tool_source(
     authority: &crate::provider_preflight::ObservedCapabilityAuthority,
     tool_call_id: &str,
     output_sha256: &str,
-    digest_kind: ReadSourceDigest,
+    digest_kind: ReadSourceDigest<'_>,
 ) -> Result<RehearsalToolSource, InvalidReadSource> {
     let results: Vec<_> = messages
         .iter()
@@ -193,7 +193,7 @@ fn project_tool_result_source(
     tool_call_id: &str,
     result: &ChatMessage,
     output_sha256: &str,
-    digest_kind: ReadSourceDigest,
+    digest_kind: ReadSourceDigest<'_>,
 ) -> Result<RehearsalToolSource, InvalidReadSource> {
     let proposals: Vec<_> = messages
         .iter()
@@ -227,8 +227,11 @@ fn project_tool_result_source(
     use sha2::{Digest, Sha256};
     let payload_digest = format!("{:x}", Sha256::digest(&bytes));
     let receipt_digest = match digest_kind {
-        ReadSourceDigest::BoundToolOutput => {
-            crate::provider_preflight::read::output_digest(&call, &output)
+        ReadSourceDigest::BoundToolOutput(session) => {
+            let executed = crate::ui_model_ids::resolve_recorded_call(&call, session)
+                .map_err(|_| InvalidReadSource::Invalid)?;
+            crate::provider_preflight::read::output_digest(&executed, &output)
+                .map_err(|_| InvalidReadSource::Invalid)?
         }
         ReadSourceDigest::ModelPayload => payload_digest.clone(),
     };
@@ -373,10 +376,33 @@ mod tests {
 
     #[test]
     fn source_requires_original_receipt_encoding_and_unmodified_result() {
+        for with_alias in [false, true] {
+            exercise_source_receipt(with_alias);
+        }
+    }
+
+    fn exercise_source_receipt(with_alias: bool) {
+        let mut session =
+            crate::ai_assistant::test_support::personal_session("owner", "run", "device");
+        if with_alias {
+            session.ui_references = serde_json::from_value(serde_json::json!({"counters":{"a":1},"entries":{"a1":{
+                "identity":"recorded-application","prefix":"a","native_id":"native-application",
+                "reference":{"token":"native-application","snapshot_id":"desktop","object_kind":"application","expires_at":"2030-01-01T00:00:00Z"},"sources":[{"Message":"proposal"}]}}})).unwrap();
+        }
         let call = ToolCall {
             id: "call".into(),
-            name: "read_system_info".into(),
-            arguments_json: "{}".into(),
+            name: if with_alias {
+                "inspect_desktop_ui"
+            } else {
+                "read_system_info"
+            }
+            .into(),
+            arguments_json: if with_alias {
+                r#"{ "root_id": "a1" }"#
+            } else {
+                "{ \n }"
+            }
+            .into(),
         };
         let output = ToolRunOutput {
             format: crate::seam::ToolOutputFormat::Text,
@@ -404,19 +430,29 @@ mod tests {
             ChatMessage::assistant_tool_calls("proposal", "", vec![call.to_ref()]),
             result,
         ];
+        let resolved =
+            crate::ui_model_ids::resolve_session_call_with_context(&call, &session, 0, None)
+                .unwrap();
+        assert_ne!(call.arguments_json, resolved.arguments_json);
         let mut read = ObservedRehearsalRead {
             call_id: "server-call".into(),
             tool_call_id: call.id.clone(),
             grant_id: "grant".into(),
             issued_by: CapabilityGrantIssuer::UserDecision,
             completed_at: 100,
-            output_sha256: crate::provider_preflight::read::output_digest(&call, &output),
+            output_sha256: crate::provider_preflight::read::output_digest(&resolved, &output)
+                .unwrap(),
             authority: ObservedCapabilityAuthority {
                 target_session_id: None,
                 envelope_ids: vec![],
                 content_digests_sha256: vec![],
                 provider_id: envelope.provenance.source_provider_id.clone(),
-                capability_id: "system-info".into(),
+                capability_id: registry
+                    .capability_for_tool(&call.name)
+                    .unwrap()
+                    .wire
+                    .capability_id
+                    .clone(),
                 tool_name: call.name.clone(),
                 tool_schema_version: 1,
                 effect: CapabilityEffect::ReadDevice,
@@ -427,17 +463,38 @@ mod tests {
                 export_destinations: vec![],
             },
         };
-        let proof =
-            verified_read_source(&messages, &read, ReadSourceDigest::BoundToolOutput).unwrap();
+        let proof = verified_read_source(
+            &messages,
+            &read,
+            ReadSourceDigest::BoundToolOutput(&session),
+        )
+        .unwrap();
         assert_eq!(proof.lineage.source_envelope_ids, ["original-question"]);
         assert_eq!(
             proof.authority.authority,
             TaskSourceAuthority::Scopes(vec!["device:1".into()])
         );
+        let mut changed_arguments = messages.clone();
+        changed_arguments[0].tool_calls[0].arguments_json = r#"{"changed":true}"#.into();
+        assert!(
+            verified_read_source(
+                &changed_arguments,
+                &read,
+                ReadSourceDigest::BoundToolOutput(&session)
+            )
+            .is_err()
+        );
         assert!(verified_read_source(&messages, &read, ReadSourceDigest::ModelPayload).is_err());
         read.output_sha256 = envelope.digest_sha256.clone();
         assert!(verified_read_source(&messages, &read, ReadSourceDigest::ModelPayload).is_ok());
-        assert!(verified_read_source(&messages, &read, ReadSourceDigest::BoundToolOutput).is_err());
+        assert!(
+            verified_read_source(
+                &messages,
+                &read,
+                ReadSourceDigest::BoundToolOutput(&session)
+            )
+            .is_err()
+        );
         let mut changed = messages.clone();
         changed[1].text = "changed result".into();
         assert!(verified_read_source(&changed, &read, ReadSourceDigest::ModelPayload).is_err());

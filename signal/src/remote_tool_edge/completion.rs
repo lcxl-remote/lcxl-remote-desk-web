@@ -345,23 +345,21 @@ fn project_with_observation(
             action,
             completed,
         )?;
+    } else if desk_agent_protocol::computer_use::office_batch::is_pptx(&plan.adapter)
+        || desk_agent_protocol::computer_use::office_batch::is_docx(&plan.adapter)
+        || desk_agent_protocol::computer_use::office_batch::is_xlsx(&plan.adapter)
+    {
+        desk_diagnose_core::provider_preflight::office_file_completion::validate(
+            &plan.adapter,
+            action,
+            completed,
+            chrono::Utc::now()
+                .timestamp_millis()
+                .try_into()
+                .map_err(|_| invalid())?,
+        )?;
     } else {
-        if desk_agent_protocol::computer_use::office_batch::is_pptx(&plan.adapter)
-            || desk_agent_protocol::computer_use::office_batch::is_docx(&plan.adapter)
-            || desk_agent_protocol::computer_use::office_batch::is_xlsx(&plan.adapter)
-        {
-            desk_diagnose_core::provider_preflight::office_file_completion::validate(
-                &plan.adapter,
-                action,
-                completed,
-                chrono::Utc::now()
-                    .timestamp_millis()
-                    .try_into()
-                    .map_err(|_| invalid())?,
-            )?;
-        } else {
-            validate_output(action, &plan.device_id, completed)?;
-        }
+        validate_output(action, &plan.device_id, completed)?;
     }
     let exact_send_receipt = if matches!(tool_name, "send_gmail_message" | "send_slack_message")
         && matches!(

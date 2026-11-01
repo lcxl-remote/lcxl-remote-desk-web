@@ -262,15 +262,14 @@ pub async fn test_approval_model_provider(
                     &probe.candidate,
                     &turn,
                 )
+                && retries < retry_count
             {
-                if retries < retry_count {
-                    retries = retries
-                        .checked_add(1)
-                        .ok_or_else(|| reject_invalid("approval retry count overflow"))?;
-                    format_retries += 1;
-                    feedback = Some(issue);
-                    continue;
-                }
+                retries = retries
+                    .checked_add(1)
+                    .ok_or_else(|| reject_invalid("approval retry count overflow"))?;
+                format_retries += 1;
+                feedback = Some(issue);
+                continue;
             }
             validated.map_err(|error| {
                 probe_failure(error, &turn, candidate.gateway.runtime_max_output_tokens)

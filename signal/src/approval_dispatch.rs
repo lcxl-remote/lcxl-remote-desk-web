@@ -181,7 +181,13 @@ pub async fn process_pending_permission_review(
             .await
             .unwrap_or(false);
         }
-        Err(_) => return false,
+        Err(error) => {
+            log::warn!(
+                "[approval-executor] permission preparation deferred: request={}, error={error}",
+                subject.request_id
+            );
+            return false;
+        }
     };
     if candidates.is_empty() {
         return true;
@@ -321,7 +327,15 @@ pub async fn process_pending_permission_review(
         .await;
     let outcome = match outcome {
         Ok(outcome) => outcome,
-        Err(_) => return false,
+        Err(error) => {
+            log::warn!(
+                "[approval-executor] permission decision deferred: request={}, kind={:?}, retryable={}",
+                subject.request_id,
+                error.kind,
+                error.retryable
+            );
+            return false;
+        }
     };
     if !outcome.newly_recorded {
         return true;
@@ -385,6 +399,7 @@ pub async fn process_pending_permission_review(
         .and_then(|(creation, _)| creation.response_locale.clone());
     let resume_request_id = format!("permission-resume-{}", subject.request_id);
     let ask = AiAssistantAsk {
+        temporary_conversation: None,
         question,
         locale,
         client_message_id: resume_request_id.clone(),

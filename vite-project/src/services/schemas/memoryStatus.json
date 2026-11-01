@@ -1,0 +1,1 @@
+{"type":"string","enum":["active","pending_conflict","superseded","forgotten"],"x-readme-ref-name":"MemoryStatus"}

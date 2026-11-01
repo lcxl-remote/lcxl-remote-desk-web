@@ -1,0 +1,1 @@
+{"type":"object","required":["operation_id","expected_memory_state_generation"],"properties":{"expected_memory_state_generation":{"type":"integer","format":"int64","minimum":0},"operation_id":{"type":"string"}},"additionalProperties":false,"x-readme-ref-name":"MemoryClearRequest"}

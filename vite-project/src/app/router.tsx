@@ -70,6 +70,26 @@ export const router = createBrowserRouter([
                 lazy: async () => ({ Component: (await import('@/features/desk/ai-assistant-attention-page')).default }),
             },
             {
+                path: 'ai-assistant/conversation',
+                lazy: async () => ({ Component: (await import('@/features/desk/ai-assistant-page')).default }),
+            },
+            {
+                        path: 'ai-assistant/processing',
+                        lazy: async () => ({ Component: (await import('@/features/desk/assistant-processing')).default }),
+                    },
+                    {
+                        path: 'ai-assistant/history',
+                        lazy: async () => ({ Component: (await import('@/features/desk/assistant-history-search')).default }),
+                    },
+                    {
+                path: 'ai-assistant/memories',
+                lazy: async () => ({ Component: (await import('@/features/desk/ai-assistant-memories')).default }),
+            },
+            {
+                path: 'ai-assistant/personalization',
+                lazy: async () => ({ Component: (await import('@/features/desk/ai-assistant-personalization')).default }),
+            },
+            {
                 path: 'desk/list',
                 lazy: async () => ({
                     Component: (await import('@/features/desk/desk-list')).default,

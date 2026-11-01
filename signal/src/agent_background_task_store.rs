@@ -12,11 +12,12 @@ use desk_agent_protocol::capability_provider::{
     CapabilityProgressEvent,
 };
 use desk_agent_protocol::data_lineage::{ContentRef, DataEnvelope};
+#[cfg(test)]
+use desk_diagnose_core::dynamic_run::BackgroundCancelDeliveredRunEvent;
 use desk_diagnose_core::dynamic_run::{
     AGENT_RUN_EVENT_SCHEMA_VERSION, AgentRunEvent, AgentRunEventKind,
-    BackgroundCancelDeliveredRunEvent, BackgroundCancelRequestedRunEvent,
-    BackgroundCompletionRunEvent, BackgroundProgressRunEvent, BackgroundTaskRecord,
-    BackgroundTaskState,
+    BackgroundCancelRequestedRunEvent, BackgroundCompletionRunEvent, BackgroundProgressRunEvent,
+    BackgroundTaskRecord, BackgroundTaskState,
 };
 use desk_diagnose_core::session::{PersistedAgentSession, WorkKind};
 use sea_orm::sea_query::Expr;
@@ -193,18 +194,6 @@ impl SignalBackgroundTaskStore {
             .await?
             .map(|row| decode_record(&row))
             .transpose()
-    }
-
-    pub async fn list_for_run(&self, run_id: &str) -> Result<Vec<BackgroundTaskRecord>, DbErr> {
-        agent_action_item::Entity::find()
-            .filter(agent_action_item::Column::ConversationId.eq(run_id))
-            .filter(agent_action_item::Column::Kind.eq(BACKGROUND_ACTION_KIND))
-            .order_by_asc(agent_action_item::Column::Id)
-            .all(&self.db)
-            .await?
-            .into_iter()
-            .map(|row| decode_record(&row))
-            .collect()
     }
 
     pub async fn apply_progress(
@@ -402,6 +391,7 @@ impl SignalBackgroundTaskStore {
     /// Persist an owner cancellation intent without accepting a browser-supplied
     /// task identity. The stable Provider task reference is recovered from the
     /// authorized row so callers cannot redirect cancellation to another run.
+    #[allow(clippy::too_many_arguments)]
     pub async fn request_cancel_for_subject(
         &self,
         task_id: &str,
@@ -521,6 +511,7 @@ impl SignalBackgroundTaskStore {
         Err(DbErr::Custom("background cancel CAS conflicted".into()))
     }
 
+    #[cfg(test)]
     /// Deliver every outstanding cancel intent through an idempotent Provider
     /// seam. A failed call is intentionally left pending: it may represent an
     /// ACK-loss window after the Provider accepted the request, so the next pass
@@ -542,6 +533,7 @@ impl SignalBackgroundTaskStore {
         Ok(())
     }
 
+    #[cfg(test)]
     async fn pending_cancel_requests(&self) -> Result<Vec<CapabilityCancelRequest>, DbErr> {
         let rows = agent_action_item::Entity::find()
             .filter(agent_action_item::Column::Kind.eq(BACKGROUND_ACTION_KIND))
@@ -592,6 +584,7 @@ impl SignalBackgroundTaskStore {
         Ok(pending)
     }
 
+    #[cfg(test)]
     async fn ack_cancel_delivery(
         &self,
         request: &CapabilityCancelRequest,
@@ -972,6 +965,7 @@ pub fn start_completion_publisher(db: DatabaseConnection) {
     });
 }
 
+#[cfg(test)]
 fn cancel_delivered_event_id(request: &CapabilityCancelRequest) -> String {
     format!(
         "background-cancel-delivered-{:x}",

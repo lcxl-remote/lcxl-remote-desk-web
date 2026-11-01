@@ -68,6 +68,49 @@ pub(crate) async fn fixture() -> (
     PersistedAgentSession,
 ) {
     let (store, task, row, session) = base_fixture().await;
+    materialize_fixture(store, task, row, session).await
+}
+
+pub(crate) async fn retrieval_fixture(
+    enabled: bool,
+) -> (
+    ScheduleStore,
+    run::Model,
+    session_row::Model,
+    PersistedAgentSession,
+) {
+    let store = super::super::tests::store().await;
+    let session = super::super::tests::retrieval_source(&store, enabled).await;
+    let row = session_row::Entity::find()
+        .one(&store.db)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut draft = super::super::tests::draft();
+    draft.kind = ScheduledTaskKind::ConversationResume;
+    draft.source_conversation_id = Some(session.conversation_id.clone());
+    draft.requirement_revision = Some(session.input_revision);
+    draft.spec.rule = ScheduleRule::Once {
+        at: "2099-01-01T00:00:00Z".into(),
+    };
+    let task = store
+        .create_draft(1, &draft, store.database_time().await.unwrap())
+        .await
+        .unwrap();
+    materialize_fixture(store, task, row, session).await
+}
+
+async fn materialize_fixture(
+    store: ScheduleStore,
+    task: entity::Model,
+    row: session_row::Model,
+    session: PersistedAgentSession,
+) -> (
+    ScheduleStore,
+    run::Model,
+    session_row::Model,
+    PersistedAgentSession,
+) {
     let now = store.database_time().await.unwrap();
     let at = now - 1000;
     let mut active: entity::ActiveModel = task.into();
@@ -105,6 +148,195 @@ fn claim(run: &run::Model) -> ContinuationClaim<'_> {
             expires_at: None,
             policy_name: None,
         },
+    }
+}
+
+async fn exercise_retrieval_claim(
+    store: ScheduleStore,
+    queued: run::Model,
+    original: session_row::Model,
+    prior: PersistedAgentSession,
+) {
+    use desk_diagnose_core::ai_assistant::history::RetrievalCallKind;
+    let task = store.read(1, &queued.schedule_id).await.unwrap();
+    store.db.execute_unprepared("CREATE TRIGGER reject_retrieval_claim BEFORE UPDATE OF status ON agent_schedule_run WHEN NEW.status = 'running' BEGIN SELECT RAISE(ABORT, 'injected'); END").await.unwrap();
+    assert!(matches!(
+        store.claim_conversation_resume(claim(&queued)).await,
+        Err(ScheduleStoreError::Backend(_))
+    ));
+    assert_eq!(
+        session_row::Entity::find_by_id(original.id)
+            .one(&store.db)
+            .await
+            .unwrap()
+            .unwrap(),
+        original
+    );
+    assert_eq!(
+        run::Entity::find_by_id(queued.id)
+            .one(&store.db)
+            .await
+            .unwrap()
+            .unwrap(),
+        queued
+    );
+    assert_eq!(store.read(1, &queued.schedule_id).await.unwrap(), task);
+    store
+        .db
+        .execute_unprepared("DROP TRIGGER reject_retrieval_claim")
+        .await
+        .unwrap();
+    let mut held = store
+        .claim_conversation_resume(claim(&queued))
+        .await
+        .unwrap();
+    let data = held.session.assistant_data.as_mut().unwrap();
+    let prior_data = prior.assistant_data.as_ref().unwrap();
+    assert_eq!(
+        data.retrieval_task_id.as_deref(),
+        Some(queued.run_id.as_str())
+    );
+    assert_ne!(
+        data.retrieval_budget.episode_id,
+        prior_data.retrieval_budget.episode_id
+    );
+    assert_eq!(
+        data.history_access_scope.is_some(),
+        prior_data.history_access_scope.is_some()
+    );
+    assert_eq!(
+        data.memory_access_scope.is_some(),
+        prior_data.memory_access_scope.is_some()
+    );
+    assert_eq!(data.instructions, prior_data.instructions);
+    assert_eq!(data.read_uses, prior_data.read_uses);
+    assert_eq!(data.history_dependencies, prior_data.history_dependencies);
+    assert_eq!(
+        data.current_actor_input_seq,
+        prior_data.current_actor_input_seq
+    );
+    data.retrieval_budget
+        .reserve(
+            "spent-call",
+            &"b".repeat(64),
+            RetrievalCallKind::Relevance,
+            4096,
+            store.database_time().await.unwrap() as u64,
+        )
+        .unwrap();
+    let spent = data.retrieval_budget.clone();
+    let txn = store.db.begin().await.unwrap();
+    assert!(
+        ScheduleStore::assistant_retrieval_deadline_on(&txn, &held.session)
+            .await
+            .is_err(),
+        "an in-memory budget change cannot replace the original persisted ledger"
+    );
+    txn.rollback().await.unwrap();
+    session_row::Entity::update_many()
+        .set(session_row::ActiveModel {
+            state_json: Set(held.session.encode_json_for_storage().unwrap()),
+            ..Default::default()
+        })
+        .filter(session_row::Column::Id.eq(original.id))
+        .exec(&store.db)
+        .await
+        .unwrap();
+    let txn = store.db.begin().await.unwrap();
+    for _ in 0..2 {
+        let until = desk_diagnose_core::future::send_phase(|| {
+            ScheduleStore::assistant_retrieval_deadline_on(&txn, &held.session)
+        })
+        .await
+        .unwrap();
+        assert_eq!(until, held.run.lease_deadline.unwrap() as u64);
+    }
+    txn.commit().await.unwrap();
+    assert!(
+        store
+            .claim_conversation_resume(claim(&queued))
+            .await
+            .is_err()
+    );
+    let persisted = session_row::Entity::find_by_id(original.id)
+        .one(&store.db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        PersistedAgentSession::decode_json(&persisted.state_json)
+            .unwrap()
+            .assistant_data
+            .as_ref()
+            .unwrap()
+            .retrieval_budget,
+        spent
+    );
+    store.cancel_run(1, &queued.run_id).await.unwrap();
+    let txn = store.db.begin().await.unwrap();
+    assert!(
+        ScheduleStore::assistant_retrieval_deadline_on(&txn, &held.session)
+            .await
+            .is_err()
+    );
+    txn.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn actual_occurrence_retrieval_binding_rolls_back_and_keeps_original_budget() {
+    for enabled in [false, true] {
+        let (store, queued, row, session) = retrieval_fixture(enabled).await;
+        exercise_retrieval_claim(store, queued, row, session).await;
+    }
+}
+
+#[test]
+fn actual_occurrence_retrieval_fits_small_stacks() {
+    const STACK: &str = "LRD_TEST_OCCURRENCE_RETRIEVAL_STACK_BYTES";
+    if let Some(bytes) = std::env::var_os(STACK) {
+        let bytes: usize = bytes.to_str().unwrap().parse().unwrap();
+        assert!([1024 * 1024, 2 * 1024 * 1024].contains(&bytes));
+        actix_web::rt::System::new().block_on(async {
+            let mut cases = Vec::new();
+            for enabled in [false, true] {
+                cases.push(retrieval_fixture(enabled).await);
+            }
+            let (done, ready) = tokio::sync::oneshot::channel();
+            let thread = std::thread::Builder::new()
+                .name("occurrence-retrieval-stack".into())
+                .stack_size(bytes)
+                .spawn(move || {
+                    actix_web::rt::System::new().block_on(async move {
+                        eprintln!("actual occurrence retrieval running on {bytes} byte thread");
+                        for (store, queued, row, session) in cases {
+                            desk_diagnose_core::future::boxed(|| {
+                                exercise_retrieval_claim(store, queued, row, session)
+                            })
+                            .await;
+                        }
+                        let _ = done.send(());
+                    });
+                })
+                .unwrap();
+            ready.await.unwrap();
+            thread.join().unwrap();
+        });
+        return;
+    }
+    for bytes in [1024 * 1024, 2 * 1024 * 1024] {
+        assert!(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "actual_occurrence_retrieval_fits_small_stacks",
+                    "--nocapture",
+                    "--test-threads=1"
+                ])
+                .env(STACK, bytes.to_string())
+                .env_remove("RUST_MIN_STACK")
+                .status()
+                .unwrap()
+                .success()
+        );
     }
 }
 
@@ -291,4 +523,58 @@ async fn occurrence_write_failure_rolls_back_the_already_written_session() {
         queued
     );
     assert_eq!(store.read(1, &queued.schedule_id).await.unwrap(), task);
+}
+
+#[tokio::test]
+async fn scheduled_retrieval_consent_cannot_change_between_task_and_occurrence() {
+    for change_snapshot in [true, false] {
+        let (store, work, original, _) = fixture().await;
+        let task = store.read(1, &work.schedule_id).await.unwrap();
+        let raw = task.retrieval_consent_json.as_deref().unwrap();
+        let mut altered = task.clone();
+        altered.retrieval_consent_json = None;
+        if change_snapshot {
+            run::Entity::update_many()
+                .set(run::ActiveModel {
+                    task_snapshot_json: Set(serde_json::to_string(&altered).unwrap()),
+                    ..Default::default()
+                })
+                .filter(run::Column::Id.eq(work.id))
+                .exec(&store.db)
+                .await
+                .unwrap();
+        } else {
+            entity::Entity::update_many()
+                .set(entity::ActiveModel {
+                    retrieval_consent_json: Set(Some(raw.replace("source", "different-source"))),
+                    ..Default::default()
+                })
+                .filter(entity::Column::Id.eq(task.id))
+                .exec(&store.db)
+                .await
+                .unwrap();
+        }
+        let before = run::Entity::find_by_id(work.id)
+            .one(&store.db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(store.claim_conversation_resume(claim(&work)).await.is_err());
+        assert_eq!(
+            session_row::Entity::find_by_id(original.id)
+                .one(&store.db)
+                .await
+                .unwrap()
+                .unwrap(),
+            original
+        );
+        assert_eq!(
+            run::Entity::find_by_id(work.id)
+                .one(&store.db)
+                .await
+                .unwrap()
+                .unwrap(),
+            before
+        );
+    }
 }

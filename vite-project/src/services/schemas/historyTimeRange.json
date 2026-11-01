@@ -1,0 +1,1 @@
+{"type":"object","required":["from_unix_ms","until_unix_ms"],"properties":{"from_unix_ms":{"type":"integer","format":"int64","minimum":0},"until_unix_ms":{"type":"integer","format":"int64","minimum":0}},"additionalProperties":false,"x-readme-ref-name":"HistoryTimeRange"}

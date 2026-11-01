@@ -139,7 +139,7 @@ async fn local_attachments_are_durable_scoped_atomic_and_do_not_resurrect() {
             .content,
         vec![b'x'; 5000]
     );
-    delete(&db, "conversation", "owner", &[id.clone()])
+    delete(&db, "conversation", "owner", std::slice::from_ref(id))
         .await
         .unwrap();
     assert_eq!(usage(&db, "conversation", "owner").await.unwrap(), 6000);

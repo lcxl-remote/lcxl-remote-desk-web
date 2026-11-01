@@ -21,6 +21,17 @@ pub enum Kind {
     Goal,
     StatusStep,
     Lineage,
+    AssistantSource,
+    AssistantOrigin,
+    Memory,
+    MemoryJob,
+    RetrievalEpisode,
+    AssistantDataControl,
+    AssistantReadAuthorization,
+    AssistantReadProjection,
+    AssistantDeviceBinding,
+    AssistantRetrievalQuery,
+    AssistantPageCursor,
 }
 
 impl Kind {
@@ -41,6 +52,17 @@ impl Kind {
             Self::Goal => "g",
             Self::StatusStep => "step",
             Self::Lineage => "id",
+            Self::AssistantSource => "src",
+            Self::AssistantOrigin => "origin",
+            Self::Memory => "mem",
+            Self::MemoryJob => "mjob",
+            Self::RetrievalEpisode => "lookup",
+            Self::AssistantDataControl => "dc",
+            Self::AssistantReadAuthorization => "read",
+            Self::AssistantReadProjection => "proj",
+            Self::AssistantDeviceBinding => "dev",
+            Self::AssistantRetrievalQuery => "query",
+            Self::AssistantPageCursor => "page",
         }
     }
 }

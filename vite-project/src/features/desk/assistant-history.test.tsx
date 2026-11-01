@@ -8,10 +8,21 @@ vi.mock('@/services/clients', () => ({ manageDeviceFileRecovery: vi.fn().mockRej
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
 afterEach(() => vi.unstubAllGlobals());
 describe('assistant history', () => {
+    it('uses the server title in a single line and in deletion confirmation', async () => {
+        const title = 'A generated title describing a question whose original text was much longer';
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: { sessions: [
+            { sessionId: 't', conversationId: 'title-conversation', title, updatedAt: '' },
+        ] } }) }));
+        render(<AssistantHistory deskId="d" disabled={false} onSelect={() => true} />);
+        fireEvent.click(screen.getByRole('button'));
+        expect((await screen.findByText(title)).classList.contains('truncate')).toBe(true);
+        fireEvent.click(screen.getByRole('button', { name: 'pages.aiAssistant.history.delete' }));
+        expect(within(screen.getByRole('dialog', { name: 'pages.aiAssistant.history.deleteTitle' })).getByText(title)).toBeTruthy();
+    });
     it('queries backups using the server session key even when the client conversation differs', async () => {
         vi.mocked(manageDeviceFileRecovery).mockResolvedValueOnce({ data: { outcome: { kind: 'page', page: { records: [{ recovery_id: 'backup' }] } } } } as never);
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: { sessions: [
-            { sessionId: 'server-session', conversationId: 'client-uuid', firstQuestion: 'Backup test', updatedAt: '' },
+            { sessionId: 'server-session', conversationId: 'client-uuid', title: 'Backup test', updatedAt: '' },
         ] } }) }));
         render(<AssistantHistory deskId="connection" disabled={false} onSelect={() => true} />);
         fireEvent.click(screen.getByRole('button'));
@@ -24,7 +35,7 @@ describe('assistant history', () => {
     });
     it('loads device history on demand and resumes the chosen conversation', async () => {
         const fetcher = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: { sessions: [
-            { sessionId: 's1', conversationId: 'c1', firstQuestion: 'Old question', updatedAt: '2026-09-05' },
+            { sessionId: 's1', conversationId: 'c1', title: 'Old question', updatedAt: '2026-09-05' },
         ] } }) });
         vi.stubGlobal('fetch', fetcher);
         const select = vi.fn().mockReturnValue(true);
@@ -51,7 +62,7 @@ describe('assistant history', () => {
 
     it('does not switch away from an active task', async () => {
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: { sessions: [
-            { sessionId: 's', conversationId: 'c', firstQuestion: 'Previous task', updatedAt: '' },
+            { sessionId: 's', conversationId: 'c', title: 'Previous task', updatedAt: '' },
         ] } }) }));
         const select = vi.fn();
         render(<AssistantHistory deskId="d" disabled onSelect={select} />);
@@ -62,7 +73,7 @@ describe('assistant history', () => {
 });
 
 it('shows a running spinner and confirms deletion before sending the request', async () => {
-    const row = { sessionId: 's', conversationId: 'c', firstQuestion: 'Running task', updatedAt: '', active: true };
+    const row = { sessionId: 's', conversationId: 'c', title: 'Running task', updatedAt: '', active: true };
     const fetcher = vi.fn().mockImplementation(async (_url, options) => ({ ok: true, json: async () =>
         options?.method === 'POST' ? { data: { deleted: true } } : { data: { sessions: [row] } } }));
     vi.stubGlobal('fetch', fetcher);
@@ -83,7 +94,7 @@ it('shows a running spinner and confirms deletion before sending the request', a
 
 it('can cancel an idle conversation deletion without sending a mutation', async () => {
     const fetcher = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: { sessions: [
-        { sessionId: 'idle', conversationId: 'idle-client', firstQuestion: 'Idle task', updatedAt: '', active: false },
+        { sessionId: 'idle', conversationId: 'idle-client', title: 'Idle task', updatedAt: '', active: false },
     ] } }) });
     vi.stubGlobal('fetch', fetcher);
     render(<AssistantHistory deskId="d" disabled={false} onSelect={() => true} />);
@@ -98,7 +109,7 @@ it('can cancel an idle conversation deletion without sending a mutation', async 
 it('keeps the confirmation visible when deletion fails', async () => {
     vi.stubGlobal('fetch', vi.fn().mockImplementation(async (_url, options) => options?.method === 'POST'
         ? { ok: false } : { ok: true, json: async () => ({ data: { sessions: [
-            { sessionId: 's', conversationId: 'c', firstQuestion: 'Task', updatedAt: '' },
+            { sessionId: 's', conversationId: 'c', title: 'Task', updatedAt: '' },
         ] } }) }));
     const deleted = vi.fn();
     render(<AssistantHistory deskId="d" disabled={false} onSelect={() => true} onDeleted={deleted} />);
@@ -113,10 +124,10 @@ it('keeps the confirmation visible when deletion fails', async () => {
 
 it('orders running conversations first and each group by last activity', async () => {
     const sessions = [
-        { sessionId: '1', conversationId: '1', firstQuestion: 'Idle newer', updatedAt: '2026-09-09T12:00:00Z', active: false },
-        { sessionId: '2', conversationId: '2', firstQuestion: 'Running older', updatedAt: '2026-09-09T08:00:00Z', active: true },
-        { sessionId: '3', conversationId: '3', firstQuestion: 'Idle older', updatedAt: '2026-09-09T09:00:00Z', active: false },
-        { sessionId: '4', conversationId: '4', firstQuestion: 'Running newer', updatedAt: '2026-09-09T10:00:00Z', active: true },
+        { sessionId: '1', conversationId: '1', title: 'Idle newer', updatedAt: '2026-09-09T12:00:00Z', active: false },
+        { sessionId: '2', conversationId: '2', title: 'Running older', updatedAt: '2026-09-09T08:00:00Z', active: true },
+        { sessionId: '3', conversationId: '3', title: 'Idle older', updatedAt: '2026-09-09T09:00:00Z', active: false },
+        { sessionId: '4', conversationId: '4', title: 'Running newer', updatedAt: '2026-09-09T10:00:00Z', active: true },
     ];
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: { sessions } }) }));
     render(<AssistantHistory deskId="d" disabled={false} onSelect={() => true} />);

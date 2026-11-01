@@ -101,7 +101,7 @@ function sameBinding(left: PtyBinding, right: Omit<PtyBinding, 'task_id'>): bool
         && left.worker_incarnation === right.worker_incarnation;
 }
 
-function encodeFrame(
+export function encodeFrame(
     kind: number,
     metadata: object,
     data: Uint8Array<ArrayBufferLike> = new Uint8Array(),
@@ -123,7 +123,7 @@ function encodeFrame(
     return frame.buffer;
 }
 
-function decodeFrame(buffer: ArrayBuffer): {
+export function decodeFrame(buffer: ArrayBuffer): {
     kind: number;
     metadata: unknown;
     data: Uint8Array;
@@ -438,5 +438,3 @@ export class ExecPtyClient {
         this.dispose();
     }
 }
-
-export const execPtyWireForTest = { encodeFrame, decodeFrame };

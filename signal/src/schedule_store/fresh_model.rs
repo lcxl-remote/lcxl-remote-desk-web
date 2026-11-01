@@ -97,6 +97,7 @@ impl ScheduleStore {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
     #[test]
@@ -131,10 +132,12 @@ impl ScheduleStore {
         export_authorization_id: &str,
         ordinal: u64,
         compression: Option<&str>,
-        audit: &desk_diagnose_core::sink_authorizer::SinkProjectionAudit,
-        inputs: &[desk_agent_protocol::data_lineage::DataEnvelope],
+        input_snapshot: &desk_diagnose_core::model_egress::NativeModelInputSnapshot,
     ) -> Result<FreshModelDispatch, ScheduleStoreError> {
         super::publication::key(export_authorization_id)?;
+        let audit = input_snapshot
+            .audit()
+            .map_err(|_| ScheduleStoreError::Invalid)?;
         if ordinal == 0
             || ordinal > i32::MAX as u64
             || request.logical_key != Self::model_dispatch_budget_key(ordinal, compression)
@@ -146,13 +149,12 @@ impl ScheduleStore {
             return Err(ScheduleStoreError::Invalid);
         }
         let budget = Self::reserve_fresh_model_budget_on(txn, held, request).await?;
-        let receipt = crate::model_egress_store::SignalModelEgressStore::record_dispatch_intent_on(
+        let receipt = crate::model_egress_store::SignalModelEgressStore::record_snapshot_intent_on(
             txn,
             format!("task-model-{}", budget.reservation_id),
             export_authorization_id.to_owned(),
             ordinal,
-            audit,
-            inputs,
+            input_snapshot,
         )
         .await?;
         // A duplicate receipt is an error, never evidence that sending is safe.

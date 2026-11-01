@@ -13,7 +13,12 @@ async fn age(f: &Fixture, seconds: i64) {
 
 async fn promote(f: &Fixture) -> bool {
     f.store
-        .promote_computer_background(&f.plan.execution_generation, "run-1", "actor-1", "device-1")
+        .promote_computer_background(
+            &f.plan.execution_generation,
+            &f.session.conversation_id,
+            &f.session.actor_id,
+            &f.session.device_id,
+        )
         .await
         .unwrap()
 }

@@ -1,3 +1,4 @@
+import { mergeAssistantMessages } from './assistant-message-history';
 import { projectGoalReviewReceipt } from './assistant-goal-review-receipt';
 import type { AssistantContextUsage } from './assistant-context-meter';
 import type { AssistantFileScopeView, AssistantDirectoryOperation } from './assistant-file-scope';
@@ -9,6 +10,7 @@ import { assistantMessageId } from './assistant-native-ids';
 
 import type { AiProvenance } from '@/components/ai-generated-mark';
 import type {
+    AssistantCitation,
     BackgroundTaskDto,
     AiAssistantDelegationSnapshot,
     AiAssistantStopControl,
@@ -42,6 +44,8 @@ import {
 const PREVIEW_TOOL = 'preview_computer_action';
 
 export type AiAssistantMessage = {
+    citations?: AssistantCitation[];
+    citationsIncomplete?: boolean;
     permissionReason?: string;
     contextBoundaryIds?: string[];
     id: string;
@@ -176,6 +180,8 @@ export type AiAssistantTaskStatusProjection = {
 };
 
 type PersistedSnapshotMessage = {
+    citations?: AssistantCitation[];
+    citationsIncomplete?: boolean;
     reasoning?: string | null;
     id: string;
     turnId?: string | null;
@@ -252,6 +258,7 @@ export type AiAssistantApprovalModelReadiness = {
 };
 
 export type PersistedSnapshot = {
+    temporaryConversation?: boolean | null;
     controlRevision: number;
     mainStopped: boolean;
     subagents: AiAssistantDelegationSnapshot;
@@ -286,7 +293,7 @@ export type PersistedSnapshot = {
     visualEvidence?: AiAssistantVisualEvidence[];
 };
 
-export function projectPersistedSnapshot(snapshot: PersistedSnapshot) {
+export function projectPersistedSnapshot(snapshot: Pick<PersistedSnapshot, 'messages' | 'actionPermissionReasons' | 'contextAttachments' | 'taskStatusProjection' | 'permissionRequests' | 'backgroundTasks' | 'capabilityGrants' | 'latestInputSeq' | 'handledInputSeq'>) {
     const messages: AiAssistantMessage[] = [];
     let tools: AiAssistantToolActivity[] = [];
     let draft: ComputerActionDraftPreview | null = null;
@@ -299,6 +306,8 @@ export function projectPersistedSnapshot(snapshot: PersistedSnapshot) {
                 role: message.role,
                 text: message.text,
                 turnId: message.turnId,
+                citations: message.citations,
+                citationsIncomplete: message.citationsIncomplete,
                 reasoning: message.role === 'assistant' ? message.reasoning : undefined,
             });
         }
@@ -383,14 +392,6 @@ export function projectPersistedSnapshot(snapshot: PersistedSnapshot) {
     };
 }
 
-function mergePersistedMessages(
-    earlier: AiAssistantMessage[], latest: AiAssistantMessage[],
-): AiAssistantMessage[] {
-    const messages = new Map(earlier.map((message) => [message.id, message]));
-    for (const message of latest) messages.set(message.id, message);
-    return [...messages.values()];
-}
-
 export function useAiAssistantChat({
     rehearsal,
     deskId,
@@ -405,6 +406,8 @@ export function useAiAssistantChat({
     const translate = useRef(t);
     translate.current = t;
     const targetSelectionEnabled = connected !== undefined;
+    const temporaryConversationRef = useRef(false);
+    const [temporaryConversation, setTemporaryConversation] = useState(false);
     const [contextUsage, setContextUsage] = useState<AssistantContextUsage | null>(null);
     const [contextNotices, setContextNotices] = useState<ContextNoticeDto[]>([]);
     const [messages, setMessages] = useState<AiAssistantMessage[]>([]);
@@ -444,6 +447,7 @@ export function useAiAssistantChat({
     const [fileScope, setFileScope] = useState<AssistantFileScopeView>({ revision: 0, directories: [] });
     const directorySelectors = useRef<{ conversationId: string; clientRequestId: string } | null>(null);
     const [hydrating, setHydrating] = useState(false);
+    const [historyRestoreFailed, setHistoryRestoreFailed] = useState(false);
     const [remoteActive, setRemoteActive] = useState(false);
     const [contextUpdating, setContextUpdating] = useState(false);
     const [approvalInitializing, setApprovalInitializing] = useState(false);
@@ -597,6 +601,15 @@ export function useAiAssistantChat({
         const expectedEpoch = snapshotEpoch.current;
         const expectedRequestOrder = ++snapshotRequestOrder.current;
         if (showHydrating) setHydrating(true);
+        const failed = () => {
+            if ((reportFailure || showHydrating) && snapshotEpoch.current === expectedEpoch
+                && conversationId.current === expectedConversationId
+                && expectedRequestOrder >= snapshotAcceptanceFloor.current
+                && expectedRequestOrder >= (snapshotWatermark.current?.requestOrder ?? 0)) {
+                setHistoryRestoreFailed(true);
+            }
+            return 'failed' as const;
+        };
         const controller = new AbortController();
         const timeout = window.setTimeout(() => controller.abort(), 10_000);
         try {
@@ -606,16 +619,15 @@ export function useAiAssistantChat({
             { credentials: 'include', headers: { Accept: 'application/json' }, signal: controller.signal },
             );
             const body = response.ok ? await response.json() : null;
-            if (reportFailure && !Array.isArray(body?.data?.messages)) throw new Error('Snapshot unavailable');
             if (
                 snapshotEpoch.current !== expectedEpoch
                 || expectedRequestOrder < snapshotAcceptanceFloor.current
                 || conversationId.current !== expectedConversationId
             ) return 'ignored';
             if (!Array.isArray(body?.data?.messages)) {
-                return response.ok && body?.success === false
-                    && body?.code === deskErrorCodeEnum.PERMISSION_ERROR && body.data == null
-                    ? 'missing' : 'failed';
+                const missing = response.ok && body?.success === false
+                    && body?.code === deskErrorCodeEnum.PERMISSION_ERROR && body.data == null;
+                return missing && !reportFailure ? 'missing' : failed();
             }
             const snapshot = body.data as PersistedSnapshot;
             if (pendingDelivery.current?.conversation === expectedConversationId
@@ -634,7 +646,7 @@ export function useAiAssistantChat({
                 || snapshot.subagents.attention_count < 0
                 || snapshot.subagents.task !== null || snapshot.subagents.parent_session_id !== null
                 || (requireApprovalState && typeof snapshot.approvalModelReadiness?.available !== 'boolean')
-            ) return 'failed';
+            ) return failed();
             const watermark = snapshotWatermark.current;
             if (
                 watermark
@@ -651,6 +663,10 @@ export function useAiAssistantChat({
                     )
                 )
             ) return 'ignored';
+            if (typeof snapshot.temporaryConversation === 'boolean') {
+                temporaryConversationRef.current = snapshot.temporaryConversation;
+                setTemporaryConversation(snapshot.temporaryConversation);
+            }
             snapshotWatermark.current = {
                 conversationId: expectedConversationId,
                 sessionId: snapshot.sessionId,
@@ -659,6 +675,7 @@ export function useAiAssistantChat({
                 inputRevision: snapshot.inputRevision,
                 controlRevision: snapshot.controlRevision,
             };
+            setHistoryRestoreFailed(false);
             setStopConfirmation(current => current && (current.session !== snapshot.sessionId
                 || current.inputRevision !== snapshot.inputRevision || current.controlRevision !== snapshot.controlRevision)
                 ? null : current);
@@ -688,7 +705,7 @@ export function useAiAssistantChat({
             const expanded = previous?.conversationId === expectedConversationId
                 && previous.sessionId === snapshot.sessionId && previous.expanded;
             const windowMessages = expanded
-                ? mergePersistedMessages(previous.messages, projected.messages) : projected.messages;
+                ? mergeAssistantMessages(previous.messages, projected.messages) : projected.messages;
             const windowTools = expanded
                 ? projected.tools.reduce((items, tool) => upsertTool(items, tool), previous.tools) : projected.tools;
             const page = expanded ? previous.page : {
@@ -777,10 +794,7 @@ export function useAiAssistantChat({
             return 'ready';
         } catch {
             // A transient poll failure must not erase the last durable view.
-            if (reportFailure && snapshotEpoch.current === expectedEpoch && conversationId.current === expectedConversationId) {
-                setError('history_restore_failed');
-            }
-            return 'failed';
+            return failed();
         } finally {
             window.clearTimeout(timeout);
             if (
@@ -833,10 +847,10 @@ export function useAiAssistantChat({
             };
             historyWindow.current = {
                 ...current, expanded: true, page,
-                messages: mergePersistedMessages(projected.messages, current.messages),
+                messages: mergeAssistantMessages(projected.messages, current.messages),
                 tools: current.tools.reduce((items, tool) => upsertTool(items, tool), projected.tools),
             };
-            setMessages((messages) => mergePersistedMessages(projected.messages, messages));
+            setMessages((messages) => mergeAssistantMessages(projected.messages, messages));
             setTools((tools) => tools.reduce((items, tool) => upsertTool(items, tool), projected.tools));
             setMessagePage(page);
         } finally {
@@ -864,6 +878,8 @@ export function useAiAssistantChat({
         setDeliveryState(null);
         setAcceptedInput(null);
         conversationId.current = stored;
+        temporaryConversationRef.current = false;
+        setTemporaryConversation(false);
         currentTurnId.current = null;
         rehearsalSent.current = false;
         setMessages([]);
@@ -872,6 +888,7 @@ export function useAiAssistantChat({
         setPartial('');
         setStatus('idle');
         setError(null);
+        setHistoryRestoreFailed(false);
         setAttachments([]);
         setFileScope({ revision: 0, directories: [] });
         directorySelectors.current = null;
@@ -964,6 +981,8 @@ export function useAiAssistantChat({
             setMessagePage({ hasMore: false, nextBeforeMessageId: null });
             setLoadingOlderMessages(false);
             conversationId.current = event.newValue;
+            temporaryConversationRef.current = false;
+            setTemporaryConversation(false);
             currentTurnId.current = null;
             lastSeq.current = -1;
             previewArgs.current.clear();
@@ -972,6 +991,7 @@ export function useAiAssistantChat({
             setDraft(null);
             setPartial('');
             setError(null);
+            setHistoryRestoreFailed(false);
             setAttachments([]);
             setFileScope({ revision: 0, directories: [] });
             directorySelectors.current = null;
@@ -1364,7 +1384,7 @@ export function useAiAssistantChat({
         // A follow-up is durable input, not a second foreground workflow. Replace
         // the locally observed request stream with the newest request; the server
         // supersedes the older model turn under its input-revision fence.
-        if (!trimmed || hydrating || approvalInitializing || contextRequest.current || !sessionTargetReady) return false;
+        if (!trimmed || hydrating || historyRestoreFailed || approvalInitializing || contextRequest.current || !sessionTargetReady) return false;
         const selectedObjects = attachments.filter(attachment => attachment.state === 'active' && attachment.kind !== 'interactive_session');
         if (selectedObjects.some(attachment => attachment.expiresAtUnixMs <= Date.now())) {
             deliveryFailure.current = 'selected_context_expired';
@@ -1395,7 +1415,9 @@ export function useAiAssistantChat({
         const requestId = v4();
         const payload = {
                 question: trimmed,
+                temporary_conversation: rehearsal ? undefined : temporaryConversationRef.current,
                 client_message_id: clientMessageId,
+                client_timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
                 conversation_id: conversationId.current,
                 locale: rehearsal ? rehearsal.locale ?? undefined : locale,
                 selected_capability_ids: [...selectedCapabilityIds],
@@ -1416,7 +1438,7 @@ export function useAiAssistantChat({
             setDeliveryState('unconfirmed');
         }
         return true;
-    }, [attachments, deskId, ensureConversation, sendMessage, sessionTargetReady, hydrating, approvalInitializing, rehearsal]);
+    }, [attachments, deskId, ensureConversation, sendMessage, sessionTargetReady, hydrating, historyRestoreFailed, approvalInitializing, rehearsal]);
 
     const retryDelivery = useCallback(async () => {
         const pending = pendingDelivery.current;
@@ -1784,8 +1806,10 @@ export function useAiAssistantChat({
         ? submitStop(stopConfirmation, includeSubagents ? 'include_sub_agents' : 'main_only')
         : Promise.resolve(false), [stopConfirmation, submitStop]);
 
-    const reset = useCallback(() => {
+    const reset = useCallback((temporary = false) => {
         if (rehearsal) return;
+        temporaryConversationRef.current = temporary;
+        setTemporaryConversation(temporary);
         pendingDelivery.current = null;
         deliveryFailure.current = null;
         setDeliveryState(null);
@@ -1810,6 +1834,8 @@ export function useAiAssistantChat({
         setPartial('');
         setStatus('idle');
         setError(null);
+        setHydrating(false);
+        setHistoryRestoreFailed(false);
         setAttachments([]);
         setFileScope({ revision: 0, directories: [] });
         directorySelectors.current = null;
@@ -1874,6 +1900,7 @@ export function useAiAssistantChat({
     }, [loadSnapshot]);
 
     return {
+        temporaryConversation,
         conversationId: conversationId.current,
         sessionId: snapshotWatermark.current?.conversationId === conversationId.current ? snapshotWatermark.current.sessionId : undefined,
         inputRevision: snapshotWatermark.current?.conversationId === conversationId.current ? snapshotWatermark.current.inputRevision : undefined,
@@ -1887,7 +1914,8 @@ export function useAiAssistantChat({
         draft,
         partial,
         status,
-        error,
+        error: historyRestoreFailed ? 'history_restore_failed' : error,
+        historyRestoreFailed,
         attachments,
         fileScope,
         updateDirectory,

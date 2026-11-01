@@ -14,7 +14,11 @@ pub(crate) async fn augment_owner_attention_on<
     devices: Option<&HashSet<String>>,
     items: &mut Vec<AiAssistantAttentionItemDto>,
 ) -> Result<(), DbErr> {
-    let mut query = session_row::Entity::find().filter(session_row::Column::ActorId.eq(actor));
+    let mut query = session_row::Entity::find()
+        .filter(session_row::Column::ActorId.eq(actor))
+        .filter(session_row::Column::ConversationSchemaVersion.eq(i32::from(
+            desk_diagnose_core::session::CONVERSATION_SCHEMA_VERSION,
+        )));
 
     if let Some(devices) = devices {
         if devices.is_empty() {
@@ -24,7 +28,14 @@ pub(crate) async fn augment_owner_attention_on<
     }
     let mut sessions = HashMap::new();
     for row in query.all(db).await? {
-        let session = PersistedAgentSession::decode_json(&row.state_json).map_err(|_| invalid())?;
+        let Ok(session) = PersistedAgentSession::decode_json(&row.state_json) else {
+            // Invalid current-format data must not block unrelated conversations.
+            log::debug!(
+                "Skipping invalid current-format assistant snapshot in batch scan: {}",
+                row.id
+            );
+            continue;
+        };
         if session.surface == AgentSessionSurface::AiAssistant
             && session.actor_id == actor
             && session.device_id == row.device_id

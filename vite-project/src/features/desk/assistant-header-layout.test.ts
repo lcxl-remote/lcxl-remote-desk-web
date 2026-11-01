@@ -41,7 +41,7 @@ it('keeps the context trigger below the input beside send or stop', () => {
 
 it('keeps standalone back navigation beside the conversation heading without the outer title or width cap', () => {
     const page = readFileSync('src/features/desk/ai-assistant-page.tsx', 'utf8');
-    const standalone = page.slice(page.indexOf('export default function AiAssistantPage'));
+    const standalone = page.slice(page.indexOf('function AiAssistantDevicePage'));
     expect(standalone).not.toContain("t('pages.aiAssistant.title')");
     expect(standalone).not.toContain("t('pages.aiAssistant.subtitle')");
     expect(page).not.toContain('max-w-4xl');

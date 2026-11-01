@@ -34,12 +34,13 @@ async fn candidate(db: &DatabaseConnection, id: i64) -> Result<Option<Candidate>
     }) else {
         return Ok(None);
     };
-    let (original, work, payload) = crate::capability_grant_store::computer_binding::original_on(
+    let computer_original = crate::capability_grant_store::computer_binding::original_on(
         &txn,
         &row.execution_generation,
     )
     .await
     .map_err(|_| unavailable())?;
+    let (original, work, payload) = computer_original.as_ref();
     let origin = payload.command_origin.as_ref().ok_or_else(unavailable)?;
     origin.validate().map_err(|_| unavailable())?;
     if original.payload_schema_version != 1
@@ -69,8 +70,8 @@ async fn candidate(db: &DatabaseConnection, id: i64) -> Result<Option<Candidate>
         id: row.id,
         generation: row.execution_generation,
         target_connection_id: row.target_connection_id,
-        actor_id: work.actor_id,
-        audience: work.target_device_id,
+        actor_id: work.actor_id.clone(),
+        audience: work.target_device_id.clone(),
         origin: origin.clone(),
         requested_at: row.cancel_requested_at.ok_or_else(unavailable)?,
     };

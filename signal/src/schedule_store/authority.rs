@@ -274,6 +274,7 @@ impl ScheduleStore {
                         || work.lease_epoch != lease_epoch
                         || work.lease_deadline.is_some()
                 }
+
                 AuthorityPurpose::Delegation(source) => {
                     work.conversation_id != work.run_id
                         || work.turn_id != format!("{}-turn", work.run_id)
@@ -294,6 +295,7 @@ impl ScheduleStore {
         {
             return Err(ScheduleStoreError::Conflict);
         }
+        Self::retrieval_consent(&task)?;
         let snapshot: entity::Model = serde_json::from_str(&work.task_snapshot_json)
             .map_err(|_| ScheduleStoreError::Invalid)?;
         if snapshot.schedule_id != task.schedule_id
@@ -301,6 +303,8 @@ impl ScheduleStore {
             || snapshot.target_device_id != device
             || snapshot.kind != task.kind
             || snapshot.task_revision != task.task_revision
+            || snapshot.retrieval_consent_json != task.retrieval_consent_json
+            || snapshot.prompt_retention_json != task.prompt_retention_json
             || snapshot.prompt != task.prompt
             || snapshot.model_id != task.model_id
             || snapshot.locale != task.locale

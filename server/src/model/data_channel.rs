@@ -1,14 +1,6 @@
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-pub const DATA_CHANNEL_LABEL_MOUSE_EVENT: &str = "mouse_event";
-pub const DATA_CHANNEL_LABEL_MOUSE_MOVE_EVENT: &str = "mouse_move_event";
-pub const DATA_CHANNEL_LABEL_KEYBOARD_EVENT: &str = "keyboard_event";
-pub const DATA_CHANNEL_LABEL_CLIPBOARD_EVENT: &str = "clipboard_event";
-pub const DATA_CHANNEL_LABEL_FILE_TRANSFER_EVENT: &str = "file_transfer_event";
-pub const DATA_CHANNEL_LABEL_WHITEBOARD_EVENT: &str = "whiteboard_event";
-pub const DATA_CHANNEL_LABEL_CURSOR_SYNC_EVENT: &str = "cursor_sync_event";
-
 /// Cursor sync data structure
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema, Default)]
 #[serde(default)]

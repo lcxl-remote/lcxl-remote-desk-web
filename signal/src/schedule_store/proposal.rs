@@ -22,7 +22,12 @@ impl ScheduleStore {
             .map_err(|_| ScheduleStoreError::Invalid)?;
         let action =
             desk_diagnose_core::schedule::management_tools::parse(session, call, observation)
-                .map_err(|_| ScheduleStoreError::Invalid)?;
+                .map_err(|message| match message {
+                    "schedule management is unavailable" | "schedule proposal is unavailable" => {
+                        ScheduleStoreError::Invalid
+                    }
+                    message => ScheduleStoreError::ToolInput(message),
+                })?;
         let txn = crate::db::begin_write(&self.db, crate::entity::agent_schedule::Entity).await?;
         if owner != crate::control_authorizer::SINGLE_ACCOUNT_USER_ID {
             return Err(ScheduleStoreError::NotFound);
@@ -114,7 +119,14 @@ impl ScheduleStore {
                         })?;
                 }
                 observation.stage(Stage::Preflight, StageOutcome::Passed);
-                let task = Self::create_draft_on(&txn, owner, &draft, now).await?;
+                let mut task = desk_diagnose_core::future::send_phase(|| {
+                    Self::create_draft_on(&txn, owner, &draft, now, Some(session))
+                })
+                .await?;
+                desk_diagnose_core::future::send_phase(|| {
+                    Self::record_prompt_retention_on(&txn, &mut task, session, parents[0])
+                })
+                .await?;
                 if task.kind == "conversation_resume" {
                     awaiting_review = Some(task.schedule_id.clone());
                 }

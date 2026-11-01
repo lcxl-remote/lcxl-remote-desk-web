@@ -5,6 +5,14 @@ use std::cell::Cell;
 struct PreclaimedStore<'a>(&'a MemSession);
 #[async_trait(?Send)]
 impl SessionSeam for PreclaimedStore<'_> {
+    async fn assistant_data_access(
+        &self,
+        session: &PersistedAgentSession,
+        now: u64,
+    ) -> Result<Option<crate::ai_assistant::data_access::AssistantDataToolAccess>, AgentError> {
+        self.0.assistant_data_access(session, now).await
+    }
+
     async fn claim_turn(&self, _: ClaimTurnParams) -> Result<PersistedAgentSession, ClaimError> {
         panic!("scheduled execution must not claim the session again");
     }
@@ -671,6 +679,7 @@ async fn fresh_task_turn_rejects_extra_state_and_drives_without_reclaiming() {
             &contract,
             &creation,
             "schedule-run-first",
+            None,
             &mut sink
         )
         .await
@@ -698,9 +707,11 @@ async fn fresh_task_turn_rejects_extra_state_and_drives_without_reclaiming() {
             _ => unreachable!(),
         }
         assert!(
-            resume_claimed_fresh_task_turn(&deps, changed, &contract, &creation, run, &mut sink)
-                .await
-                .is_err(),
+            resume_claimed_fresh_task_turn(
+                &deps, changed, &contract, &creation, run, None, &mut sink
+            )
+            .await
+            .is_err(),
             "{change}"
         );
     }
@@ -713,6 +724,7 @@ async fn fresh_task_turn_rejects_extra_state_and_drives_without_reclaiming() {
         &contract,
         &creation,
         "schedule-run-first",
+        None,
         &mut sink,
     )
     .await

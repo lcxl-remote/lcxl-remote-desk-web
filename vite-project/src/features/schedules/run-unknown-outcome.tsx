@@ -25,7 +25,7 @@ export function RunUnknownOutcome({ client, scheduleId, runId, snapshot, connect
     }, [scheduleId, runId, snapshot, connected]);
     const dispose = async () => {
         const outcome = snapshot.unresolvedOutcome;
-        if (!outcome || !connected || loading || !checked || !note.trim() || new TextEncoder().encode(note).length > 2048 || inFlight.current) return;
+        if (!outcome || !connected || loading || !checked || !note.trim() || inFlight.current) return;
         const current = epoch.current;
         inFlight.current = true; setBusy(true); setFailed(false);
         try {
@@ -56,9 +56,9 @@ export function RunUnknownOutcome({ client, scheduleId, runId, snapshot, connect
         </label>
         <label className="block text-sm">{t('schedules.review.description')}
             <Textarea className="mt-1 block w-full rounded border bg-background p-2" value={note}
-                disabled={!connected || busy || loading} maxLength={2048} onChange={event => setNote(event.target.value)} />
+                disabled={!connected || busy || loading} onChange={event => setNote(event.target.value)} />
         </label>
         {failed && <p role="alert">{t('schedules.unknown.failed')}</p>}
-        <Button disabled={!connected || loading || busy || !checked || !note.trim() || new TextEncoder().encode(note).length > 2048} onClick={() => void dispose()}>{t('schedules.unknown.dispose')}</Button>
+        <Button disabled={!connected || loading || busy || !checked || !note.trim()} onClick={() => void dispose()}>{t('schedules.unknown.dispose')}</Button>
     </section>;
 }

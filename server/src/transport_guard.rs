@@ -96,6 +96,7 @@ impl TransportGuardResolver {
         }
     }
 
+    #[cfg(test)]
     /// Build a guard over an injected resolver (tests).
     pub fn with_resolver(resolver: Rc<dyn HostResolver>, policy: TransportPolicy) -> Self {
         Self { resolver, policy }

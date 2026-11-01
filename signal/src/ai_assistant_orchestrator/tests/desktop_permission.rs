@@ -266,7 +266,7 @@ async fn run_desktop_history_case(
         .connect()
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(5), notified.notified())
+    tokio::time::timeout(MODEL_IO_TIMEOUT, notified.notified())
         .await
         .unwrap();
 
@@ -330,6 +330,8 @@ async fn run_desktop_history_case(
         1,
         "device".into(),
         AiAssistantAsk {
+            client_timezone: "UTC".into(),
+            temporary_conversation: None,
             question: "Inspect the desktop session".into(),
             start_goal: goal_route,
             client_message_id: "input".into(),
@@ -431,6 +433,8 @@ async fn run_desktop_history_case(
                     1,
                     "device".into(),
                     AiAssistantAsk {
+                        client_timezone: "UTC".into(),
+                        temporary_conversation: None,
                         question: "Continue inspecting".into(),
                         client_message_id: "followup".into(),
                         conversation_id: Some(client_id.into()),
@@ -450,6 +454,8 @@ async fn run_desktop_history_case(
                     run_id.clone(),
                     permission_id,
                     AiAssistantAsk {
+                        client_timezone: "UTC".into(),
+                        temporary_conversation: None,
                         question: "Inspect the desktop session".into(),
                         client_message_id: "resume".into(),
                         conversation_id: Some(client_id.into()),
@@ -464,7 +470,7 @@ async fn run_desktop_history_case(
         })
     };
     if !approve {
-        tokio::time::timeout(Duration::from_secs(10), resume)
+        tokio::time::timeout(MODEL_IO_TIMEOUT, resume)
             .await
             .unwrap()
             .unwrap();
@@ -473,7 +479,7 @@ async fn run_desktop_history_case(
                 .await
                 .is_err()
         );
-        let bodies = tokio::time::timeout(Duration::from_secs(5), capture)
+        let bodies = tokio::time::timeout(MODEL_IO_TIMEOUT, capture)
             .await
             .unwrap()
             .unwrap();
@@ -572,10 +578,8 @@ async fn run_desktop_history_case(
                 .unwrap();
         }
     };
-    let completed = tokio::time::timeout(Duration::from_secs(15), async {
-        tokio::join!(resume, peer)
-    })
-    .await;
+    let completed =
+        tokio::time::timeout(SCENARIO_TIMEOUT, async { tokio::join!(resume, peer) }).await;
     assert!(
         completed.is_ok(),
         "desktop resume failed: {:?}",
@@ -633,6 +637,8 @@ async fn run_desktop_history_case(
                 resume_run_id.clone(),
                 ui_permission_id,
                 AiAssistantAsk {
+                    client_timezone: "UTC".into(),
+                    temporary_conversation: None,
                     question: "Inspect the desktop session".into(),
                     client_message_id: "ui-resume".into(),
                     conversation_id: Some(client_id.into()),
@@ -717,7 +723,7 @@ async fn run_desktop_history_case(
                     .unwrap();
             }
         };
-        let finished = tokio::time::timeout(Duration::from_secs(15), async {
+        let finished = tokio::time::timeout(SCENARIO_TIMEOUT, async {
             tokio::join!(
                 async {
                     ui_resume.await.unwrap();
@@ -731,7 +737,7 @@ async fn run_desktop_history_case(
             "concrete dispatch failed: {:?}",
             sessions.read_snapshot(&run_id).await.unwrap()
         );
-        let reviewed = tokio::time::timeout(Duration::from_secs(3), review).await;
+        let reviewed = tokio::time::timeout(MODEL_IO_TIMEOUT, review).await;
         assert!(
             reviewed.is_ok(),
             "missing concrete review: {:?}",
@@ -783,7 +789,7 @@ async fn run_desktop_history_case(
             "no additional UI operation may be dispatched"
         );
     }
-    let bodies = tokio::time::timeout(Duration::from_secs(5), capture)
+    let bodies = tokio::time::timeout(MODEL_IO_TIMEOUT, capture)
         .await
         .unwrap()
         .unwrap();
@@ -993,7 +999,7 @@ async fn approve_with_independent_model(
         .unwrap();
         assert!(claim.delegation_call.is_some());
         let response = tokio::time::timeout(
-            Duration::from_secs(10),
+            MODEL_IO_TIMEOUT,
             crate::approval_reviewer::call_claimed_permission_review(db, candidate, &claim),
         )
         .await
@@ -1032,6 +1038,14 @@ async fn approve_with_independent_model(
         );
         assert_eq!(attempts[0].usage_settlement_state.as_deref(), Some("known"));
         assert!(
+            !attempts
+                .iter()
+                .find(|attempt| attempt.attempt_index == 1)
+                .unwrap()
+                .response_complete,
+            "a valid response is committed with review settlement, not a separate write"
+        );
+        assert!(
             response.decision.is_some(),
             "the complete review must produce a decision"
         );
@@ -1057,6 +1071,23 @@ async fn approve_with_independent_model(
             .unwrap();
         assert!(row.provider_started_at_ms.is_some());
         assert!(row.provider_receipt_id.is_some());
+        let recorded = crate::entity::agent_approval_attempt::Entity::find()
+            .filter(
+                crate::entity::agent_approval_attempt::Column::CandidateId
+                    .eq(&candidate.candidate_id),
+            )
+            .filter(crate::entity::agent_approval_attempt::Column::AttemptIndex.eq(1))
+            .one(db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(recorded.response_complete);
+        let statistics: desk_diagnose_core::approval_observation::ReviewTracking =
+            serde_json::from_str(row.statistics_json.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            statistics.snapshot.provider_started_at_ms,
+            row.provider_started_at_ms
+        );
     }
     db.config_context()
         .update::<_, sea_orm::DbErr, _>(|file| {

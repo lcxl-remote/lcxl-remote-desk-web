@@ -1,14 +1,26 @@
 import { describe, expect, it } from 'vitest';
 
 import {
-    OSS_AI_ASSISTANT_FEATURES,
     hasAiAssistantBrowserEntry,
 } from './ai-assistant-features';
+
+const features = {
+    schema_version: 1,
+    turn_stream: true,
+    capability_inventory: true,
+    full_session_snapshot: true,
+    permission_decision: true,
+    approval_delegation: true,
+    grant_revoke: true,
+    background_task_cancel: true,
+    object_context: true,
+    exec_pty: true,
+};
 
 describe('AI Assistant feature profile', () => {
     it('keeps the Manager browser entry while independently gating unfinished controls', () => {
         const manager = {
-            ...OSS_AI_ASSISTANT_FEATURES,
+            ...features,
             permission_decision: false,
             grant_revoke: false,
             background_task_cancel: false,
@@ -25,7 +37,7 @@ describe('AI Assistant feature profile', () => {
     it('requires the complete minimum read-turn contract', () => {
         expect(hasAiAssistantBrowserEntry(null)).toBe(false);
         expect(hasAiAssistantBrowserEntry({
-            ...OSS_AI_ASSISTANT_FEATURES,
+            ...features,
             full_session_snapshot: false,
         })).toBe(false);
     });

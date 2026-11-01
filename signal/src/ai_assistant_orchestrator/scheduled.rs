@@ -46,6 +46,7 @@ pub async fn resume_scheduled_turn(
         }
     }
     let ask = AiAssistantAsk {
+        temporary_conversation: None,
         question: desk_diagnose_core::permission_resume::latest_user_requirement(
             &session.conversation,
         )

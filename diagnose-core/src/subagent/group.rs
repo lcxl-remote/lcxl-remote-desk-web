@@ -176,6 +176,7 @@ impl DelegationGroup {
             && self.parent_control_revision == parent_control_revision
     }
 
+    #[cfg(test)]
     pub fn required_dependencies_terminal(&self, tasks: &[(String, super::SubAgentState)]) -> bool {
         self.required_task_ids.iter().all(|id| {
             tasks

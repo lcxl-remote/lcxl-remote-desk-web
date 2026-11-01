@@ -335,6 +335,7 @@ pub async fn decide_ai_assistant_goal_open(
         ("conversation" = Option<String>, Query, description = "Client conversation intent"),
         ("session" = Option<String>, Query, description = "Opaque session id from history list"),
         ("message_before" = Option<String>, Query, description = "Exclusive older-message cursor"),
+        ("message_around" = Option<String>, Query, description = "Original message anchor; excludes message_before"),
         ("message_limit" = Option<usize>, Query, description = "Message page size, 1 through 100"),
     ),
     responses((status = 200, description = "Conversation snapshot, or a uniform \
@@ -458,16 +459,57 @@ pub async fn get_ai_assistant_session(
                 &snapshot.visual_evidence,
                 u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0),
             );
-            let message_page = project_snapshot_message_page(
+            let assistant_policy = crate::assistant_data_config::policy(crate::db::get_db()).await;
+            let conversation_limits = assistant_policy.limits.conversation.clone();
+            let mut message_page = project_snapshot_message_window(
                 snapshot.messages,
                 query.message_before.as_deref(),
+                query.message_around.as_deref(),
                 query.message_limit,
+                conversation_limits.page_bytes as usize,
             )
             .map_err(|message| {
                 DeskSignalError::new_custom_error(DeskErrorCode::INVALID_PARAMS, message)
             })?;
+            let answers = message_page
+                .messages
+                .iter()
+                .filter(|message| message.role == "assistant")
+                .map(|message| (message.id.clone(), message.text.clone()))
+                .collect::<Vec<_>>();
+            let citations = match crate::assistant_data_store::load_citations_on(
+                crate::db::get_db(),
+                &actor_id,
+                &session_id,
+                &answers,
+                u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0),
+                &assistant_policy,
+            )
+            .await
+            {
+                Ok(value) => value,
+                Err(_) => {
+                    log::warn!("assistant snapshot retained without optional citation metadata");
+                    for message in &mut message_page.messages {
+                        if message.role == "assistant" {
+                            message.citations_incomplete = true;
+                        }
+                    }
+                    Default::default()
+                }
+            };
+            let message_page = message_page
+                .with_citations(
+                    citations,
+                    conversation_limits.page_bytes as usize,
+                    query.message_around.as_deref(),
+                )
+                .map_err(|message| {
+                    DeskSignalError::new_custom_error(DeskErrorCode::SYSTEM_ERROR, message)
+                })?;
             Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(
                 AiAssistantSessionSnapshotDto {
+                    temporary_conversation: snapshot.temporary_conversation,
                     control_revision: snapshot.control_revision,
                     main_stopped: snapshot.main_stopped,
                     subagents: snapshot.subagents,
@@ -486,6 +528,7 @@ pub async fn get_ai_assistant_session(
                         reason: approval_reason,
                     },
                     session_id: session_id.clone(),
+
                     context_usage: snapshot.context_usage.map(Into::into),
                     seq: snapshot.seq,
                     active: snapshot.active,
@@ -896,6 +939,8 @@ pub(crate) async fn decide_permission_on(
             .and_then(|(creation, _)| creation.response_locale.clone());
         let resume_request_id = format!("permission-resume-{}", body.request_id);
         let resume_ask = AiAssistantAsk {
+            client_timezone: String::new(),
+            temporary_conversation: None,
             question,
             client_message_id: resume_request_id.clone(),
             conversation_id: snapshot.client_conversation_id,
@@ -1063,7 +1108,7 @@ pub async fn list_ai_assistant_sessions(
         .map(|summary| AiAssistantSessionSummaryDto {
             session_id: summary.session_id,
             conversation_id: summary.client_conversation_id,
-            first_question: summary.first_question,
+            title: summary.title,
             created_at: summary.created_at,
             updated_at: summary.updated_at,
             active: summary.active,
@@ -1087,15 +1132,23 @@ pub async fn delete_ai_assistant_session(
 ) -> Result<HttpResponse, DeskSignalError> {
     use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
     let actor_id = SINGLE_ACCOUNT_USER_ID.to_string();
-    let Some(row) = crate::entity::agent_session::Entity::find()
+    let target_audience = if let Some(row) = crate::entity::agent_session::Entity::find()
         .filter(crate::entity::agent_session::Column::ConversationId.eq(&query.session))
         .filter(crate::entity::agent_session::Column::ActorId.eq(&actor_id))
         .one(crate::db::get_db())
         .await?
-    else {
+    {
+        row.device_id
+    } else if let Some(marker) =
+        crate::entity::agent_file_recovery_cleanup::Entity::find_by_id(&query.session)
+            .filter(crate::entity::agent_file_recovery_cleanup::Column::ActorId.eq(&actor_id))
+            .one(crate::db::get_db())
+            .await?
+    {
+        marker.device_id
+    } else {
         return Ok(not_accessible());
     };
-    let target_audience = row.device_id;
     let deleted = SignalAgentSessionStore::new(crate::db::get_db().clone())
         .delete_for_subject(&query.session, &actor_id, &target_audience)
         .await;

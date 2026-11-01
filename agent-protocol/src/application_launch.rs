@@ -6,9 +6,6 @@ use sha2::{Digest, Sha256};
 use utoipa::ToSchema;
 use wincode::{SchemaRead, SchemaWrite};
 
-pub const LIST_APPLICATIONS_TOOL: &str = "list_applications";
-pub const LAUNCH_APPLICATION_TOOL: &str = "launch_application";
-
 /// Host-authored identity facts; never accepted as model launch arguments.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaRead, SchemaWrite, ToSchema,

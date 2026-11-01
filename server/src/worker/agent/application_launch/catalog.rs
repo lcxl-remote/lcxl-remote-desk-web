@@ -1,5 +1,6 @@
 //! Bounded discovery from platform application directories, never a disk scan.
 use desk_agent_protocol::application_launch::ApplicationCatalogEntry;
+#[cfg(any(windows, target_os = "linux"))]
 use std::path::{Path, PathBuf};
 
 #[cfg(target_os = "linux")]
@@ -69,6 +70,7 @@ impl CatalogCollection {
 }
 
 /// Missing standard directories are normal; unreadable/truncated sources are not.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 pub(crate) fn collect_files(
     root: &Path,
     extension: &str,

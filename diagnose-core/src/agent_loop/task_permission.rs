@@ -15,8 +15,8 @@ pub(super) async fn pause<F: FnMut() -> String>(
 ) -> Result<LoopOutcome, AgentError> {
     // Publish from a staged copy. Validation or persistence failure must not
     // leave an in-memory pending request for the outer error path to save.
-    let mut staged = held_session.clone();
-    let session = &mut staged;
+    let mut staged = held_session.clone_boxed();
+    let session = &mut *staged;
     let invalid = || AgentError {
         kind: AgentErrorKind::Internal,
         message: "invalid exact permission candidate".into(),
@@ -25,6 +25,28 @@ pub(super) async fn pause<F: FnMut() -> String>(
         error_code: None,
     };
     request.validate().map_err(|_| invalid())?;
+    let mut originals = session.conversation.iter().flat_map(|message| {
+        message
+            .tool_calls
+            .iter()
+            .filter(|original| original.id == call.id)
+            .map(move |original| (message, original))
+    });
+    let (parent, original) = originals.next().ok_or_else(invalid)?;
+    if parent.role != ChatRole::Assistant
+        || originals.next().is_some()
+        || original.name != call.name
+        || !crate::ui_model_ids::same_call_input_with_references(
+            &call.name,
+            &original.arguments_json,
+            &call.arguments_json,
+            Some(&session.ui_references),
+            &crate::result_model_ids::locators(&session.conversation),
+        )
+    {
+        return Err(invalid());
+    }
+    let parent = parent.data_envelope.clone();
     let canonical = crate::permission_tools::canonical_tool_permission_input_json(
         &call.name,
         serde_json::from_str(&call.arguments_json).map_err(|_| invalid())?,
@@ -38,22 +60,10 @@ pub(super) async fn pause<F: FnMut() -> String>(
         || request.items[0].tool_name != call.name
         || request.items[0].suggested_max_uses != 1
         || request.items[0].canonical_input_json.as_deref() != Some(canonical.as_str())
-        || !crate::schedule::contract::exception::unique_original_call(&session.conversation, call)
         || !session.unclosed_tool_call_ids().contains(&call.id)
     {
         return Err(invalid());
     }
-    let parent = session
-        .conversation
-        .iter()
-        .find(|message| {
-            message.role == ChatRole::Assistant
-                && message
-                    .tool_calls
-                    .iter()
-                    .any(|original| original == &call.to_ref())
-        })
-        .and_then(|message| message.data_envelope.clone());
     let content =
         serde_json::json!({ "status": "pending_user_decision", "request_id": request.request_id,
         "item_count": 1, "authority": "none", "executed": false })
@@ -119,7 +129,7 @@ pub(super) async fn pause<F: FnMut() -> String>(
     observation.permission(crate::model_observability::PermissionOutcome::Waiting);
     finish_tool(session, &call.id, true, sink);
     sink.on_permission_requested(&request.request_id, 1);
-    *held_session = staged;
+    std::mem::swap(held_session, &mut staged);
     Ok(LoopOutcome::PermissionRequested {
         request_id: request.request_id,
     })

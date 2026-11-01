@@ -12,7 +12,11 @@
 
 ## Agent 执行栈约束
 
-修改 AI 编排、工具、审批、预算或会话 decode 时，必须运行适用的单帧门禁与小栈组合回归，参见 `scripts/agent-stack/README.md`。不得靠扩大线程栈、删历史/校验、优化等级或新增生产任务边界通过。准备、模型、工具和收尾使用有明确所有权的阶段；原始 future、编译单帧和组合峰值分别检查。阶段原始 future 目标 16 KiB，最终单帧硬上限 64 KiB；允许在已登记调用族内重新分配单函数预算，重新分配时调用族总预算必须下降且保留历史来源，不要求族内每个生成函数逐字节下降。调用族不得重叠、混用构建配置或借用无关模块额度；族外函数仍保留原逐函数棘轮。显式 1 MiB / 2 MiB 小栈组合回归必须通过，调用族合计不能代替实际峰值验证。事务内解码复用必须保留每次原 SELECT、主体/version/lease 围栏和原始 JSON 比较，不能将同一事务当成同一快照，也不能改变既有 `Send`、取消或锁顺序契约。
+本次 AI 助手记忆任务的执行顺序：先完成主链路开发，期间允许快速编译和必要的小范围功能测试；编译单帧采样、原始 future 与小栈组合门禁统一留到主链路开发完成后执行，不在开发中反复运行。以下限制值及最终验收要求保持。
+
+现行限制：单帧硬上限 128 KiB，阶段原始 future 上限 16 KiB，默认线程栈维持 2 MiB，显式 1 MiB/2 MiB 小栈组合回归必须通过。不要求新代码的栈用量低于旧代码，不再执行单函数、调用族、历史基线或 HEAD 的相对预算比较；历史测量仅供分析。
+
+修改 AI 编排、工具、审批、预算或会话 decode 时，必须运行适用的单帧门禁与小栈组合回归，参见 `scripts/agent-stack/README.md`。不得靠扩大线程栈、删减会话内容或业务校验、改变优化等级或新增生产任务边界通过。准备、模型、工具和收尾使用有明确所有权的阶段；原始 future、编译单帧和组合峰值分别检查。事务内解码复用必须保留每次原 SELECT、主体/version/lease 围栏和原始 JSON 比较，不能将同一事务当成同一快照，也不能改变既有 `Send`、取消或锁顺序契约。
 
 ## 构建与运行
 
@@ -69,6 +73,7 @@ sudo apt install -y build-essential pkg-config libssl-dev libasound2-dev \
 | `tauri-app/` | Tauri 壳程序，用于在被控机本地渲染防窥屏/白板功能 |
 | `agent-protocol/` | 设备能力协议（`desk-agent-protocol`）：AI 调用的 wire 类型 + `DeviceAgent` trait + 审计 / 诊断 / exec 协议。纯协议、无平台实现；**服务端是所有受信字段的唯一可信源** |
 | `mcp-server/` | 只读 MCP 服务（`desk-mcp-server`）：基于官方 `rmcp` SDK + stdio，暴露只读工具静态白名单（无 exec/write/control 工具）。具体读 agent 与诊断编排器由 `server` 注入 |
+| `assistant-data-store/` | 个人 AI 助手共用的 SeaORM 实体、快照、检索和存储规则；宿主保留事务、配置、权限和计费 |
 | `signal-facade/` | 共享的信令协议模型 (供 `signal` 和 `manager` 使用) |
 | `capture-engine/`| 屏幕/音频捕获与编码逻辑 |
 | `input-injection/`| 鼠标/键盘输入注入与剪贴板控制 |
@@ -121,6 +126,8 @@ sudo apt install -y build-essential pkg-config libssl-dev libasound2-dev \
 
 ## 前端规则
 
+- **界面表达：** 避免不必要的辅助标签和说明，让布局本身传达用法。
+- **主题样式：** 网页元素统一使用主题样式；下拉框等交互控件复用项目现有的主题组件，不直接呈现浏览器原生样式。
 - **国际化 i18n (强制):** 所有用户可见的文本必须使用 `useTranslation()` / `t()` — 禁止硬编码字符串。每个新键必须同时添加到 `vite-project/src/locales/zh-CN/pages.ts` **和** `vite-project/src/locales/en-US/pages.ts`。
 - **自动生成代码:** `vite-project/src/services/` 下的文件（Kubb 输出）是自动生成的 — 请勿手动修改。
 - **Tauri IPC:** 通过外部 HTTP URL 加载的 Windows 失去 `__TAURI_INTERNALS__`。绝不能从前端页面调用 `invoke()` 或 `listen()`。前端调用 Rust 请使用 REST API；Rust 触发前端事件请使用 `window.eval()` + `dispatchEvent`。使用原生的 `window.addEventListener` 进行监听。
@@ -129,11 +136,11 @@ sudo apt install -y build-essential pkg-config libssl-dev libasound2-dev \
 
 **OSS 全局配置存储（强制）**：OSS 中全局配置类数据必须保存到实际 `--config-file-path` 指向的 `config.toml`，包括全局服务连接与凭据、功能开关、平台策略、预算上限、保留期限和指标设置。网页/API 修改必须写回同一文件并复用现有设置提交与原子保存机制，不得仅保存在 SQLite，也不得以文件作为初始种子后仅更新数据库。同表混存配置和运行状态时须拆分：会话、用户任务、授权/撤销、探测、审计、已用预算、计数和清理水位等运行数据仍留在数据库。设计与评审须验证重建运行库后无需重新填写全局配置。此规则仅适用于 OSS，不改变 Manager 的共享存储和多实例要求。
 
-1. **工作语言规则：所有回复、思考过程及任务清单，均须使用中文。**
+1. **工作语言规则：所有回复及任务清单，均须使用中文。**
 2. **Rust:** 使用 `rustfmt` 格式化（工具链由 `rust-toolchain.toml` 钉死 1.90.0、`rustfmt.toml` 设 `edition = "2024"`，全仓已建立基线且 `cargo fmt --all --check` 全绿；提交前 `cargo fmt --all` 即可，无版本漂移，裸 `rustfmt <file>` 也无需 `--edition`）。函数/模块名使用 `snake_case`，类型名使用 `PascalCase`，常量使用 `SCREAMING_SNAKE_CASE`。
 3. **TypeScript/React:** 4 个空格缩进，组件名使用 `PascalCase`，钩子名使用 `useXxx`，`src/components/ui` 中的文件名使用 `kebab-case`。
 4. **代码注释**必须使用**英文 (English)**。
 5. **注释只描述当前代码 (CRITICAL)**：注释只能说明代码**当前**的行为、意图与约束，**禁止保留开发阶段标记**——例如 `PR-A` / `PR 6` / `cut 4` / `Cut 5` / `phase-1` / `Arch III` / `Arch IV` / `batch 2` 这类指代某次 PR、某个开发阶段或某代架构的字样。这些标记对读代码的人毫无意义、只会造成困惑。改写时把"曾经如何、某阶段会做什么"重述为对现状的客观描述（如需保留历史背景，用 "previously" / "legacy" / "an earlier design" 等中性措辞，不要带阶段代号）。**例外**：描述算法/状态机当前运行步骤的 "Phase 1/2/3"、"Step N" 属于对当前逻辑的说明，可保留。
 6. **Git 提交信息**必须使用**英文 (English)**，并遵循 Conventional Commits 规范 (`feat:`, `fix:`, `chore:`)。
-7. **测试用例 (CRITICAL)**：更改代码必须要增加测试用例。
+7. **测试用例 (CRITICAL)**：代码变更必须有测试用例覆盖，并能真实验证代码行为。已有测试满足时可复用，不足时新增或调整；测试须实际执行被测逻辑并断言可观察结果。
 8. **代码改动须同步核实文档 (CRITICAL)**：任何改变**用户可见行为**的代码改动（功能、启动模式、配置参数、API / 信令语义、AI 诊断 / MCP、安全模型等），**完成后必须核实文档站 `docs/`（VitePress）是否需要同步更新，保证代码与文档一致**。该站点是**双语**（英文为默认 root，中文在 `docs/zh/`），改动须**中英两版同步**；仅当确认无需改文档时才算完成，判断“是否需要”时宁可多核实一遍。

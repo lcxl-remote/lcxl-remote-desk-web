@@ -159,6 +159,7 @@ pub(super) fn observe_interactive_desktop() -> Result<ObservedDesktop, AgentErro
     })
 }
 
+#[cfg(test)]
 pub(super) fn collect_foreground(
     expected_process_id: u32,
     expected_image_path: &str,
@@ -183,6 +184,7 @@ pub(super) fn collect_foreground(
     )
 }
 
+#[cfg(test)]
 pub(super) fn collect_application(
     expected_process_id: u32,
     expected_image_path: &str,
@@ -200,6 +202,7 @@ pub(super) fn collect_application(
     )
 }
 
+#[cfg(test)]
 pub(super) fn collect_application_with_scope(
     expected_process_id: u32,
     expected_image_path: &str,
@@ -219,6 +222,7 @@ pub(super) fn collect_application_with_scope(
     )
 }
 
+#[cfg(test)]
 pub(super) fn collect_application_with_window_scope(
     expected_process_id: u32,
     expected_image_path: &str,

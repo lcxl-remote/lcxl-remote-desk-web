@@ -60,11 +60,18 @@ describe('scheduled task management page', () => {
         expect(operations()).toEqual(kind === 'conversation_resume' ? ['search', 'search'] : ['search']);
     });
 
-    it('creates an enabled conversation timer with one submission', async () => {
+    it.each(['unchanged', 'reordered', 'changed'])('creates an enabled conversation timer with %s preview', async (preview) => {
         storedTasks = [];
+        let conversions = 0;
         transport.send.mockImplementation((request: SendTrackedOptions) => {
             if (request.data.operation === 'search') queueMicrotask(() => respond(request, { result: 'search_results', tasks: storedTasks, next_cursor: null }));
-            if (request.data.operation === 'convert_time') queueMicrotask(() => respond(request, { result: 'converted_time', upcoming_runs: ['2027-01-01T22:00:00Z'], conversion: { conversion_version: '1', offset_seconds: -28800, spec: { schema_version: 1, rule: { kind: 'once', at: '2027-01-01T22:00:00Z' } } } }));
+            if (request.data.operation === 'convert_time') {
+                conversions += 1;
+                const at = preview === 'changed' && conversions > 1 ? '2027-01-01T23:00:00Z' : '2027-01-01T22:00:00Z';
+                const spec = preview === 'reordered' && conversions > 1 ? { rule: { at, kind: 'once' }, schema_version: 1 }
+                    : { schema_version: 1, rule: { kind: 'once', at } };
+                queueMicrotask(() => respond(request, { result: 'converted_time', upcoming_runs: ['2027-01-01T22:00:00Z'], conversion: { conversion_version: '1', offset_seconds: -28800, spec } }));
+            }
             if (request.data.operation === 'create_draft') queueMicrotask(() => respond(request, { result: 'task', task: { ...task, kind: 'conversation_resume', title: 'Continue report', status: 'active', revision: 3 } }));
             if (request.data.operation === 'activate_conversation_resume') queueMicrotask(() => respond(request, { result: 'task', task: { ...task, kind: 'conversation_resume', title: 'Continue report', status: 'active', revision: 4 } }));
             return { requestId: request.requestId!, disposition: 'sent' };
@@ -80,8 +87,14 @@ describe('scheduled task management page', () => {
         await waitFor(() => expect(screen.getByRole('button', { name: 'Preview time' })).toBeEnabled());
         fireEvent.click(screen.getByRole('button', { name: 'Preview time' }));
         fireEvent.click(await screen.findByRole('button', { name: 'Confirm time and save' }));
+        if (preview === 'changed') {
+            await screen.findByRole('alert');
+            expect(operations().filter(operation => operation !== 'search')).toEqual(['convert_time', 'convert_time']);
+            fireEvent.click(screen.getByRole('button', { name: 'Confirm time and save' }));
+        }
         await waitFor(() => expect(operations()).toContain('create_draft'));
-        expect(operations().filter(operation => operation !== 'search')).toEqual(['convert_time', 'convert_time', 'create_draft']);
+        expect(operations().filter(operation => operation !== 'search')).toEqual(preview === 'changed'
+            ? ['convert_time', 'convert_time', 'convert_time', 'create_draft'] : ['convert_time', 'convert_time', 'create_draft']);
         expect(transport.send.mock.calls.find(([request]) => request.data.operation === 'create_draft')![0].data.draft).toMatchObject({ kind: 'conversation_resume', target_device_id: 'device-1', source_conversation_id: 'chat-1', requirement_revision: 7, spec: { rule: { kind: 'once' } } });
         await waitFor(() => expect(screen.queryByRole('button', { name: 'Enable scheduled continuation' })).not.toBeInTheDocument());
     });
@@ -156,10 +169,13 @@ describe('scheduled task management page', () => {
         fireEvent.click(screen.getByRole('button', { name: 'More actions' }));
         expect(screen.getByRole('button', { name: 'Change time' })).toBeEnabled();
         fireEvent.click(screen.getByRole('button', { name: 'Rename' }));
-        fireEvent.change(within(screen.getByRole('dialog')).getByLabelText('Task name'), { target: { value: 'New title' } });
+        const longTitle = '中'.repeat(1000);
+        expect(within(screen.getByRole('dialog')).getByLabelText('Task name')).not.toHaveAttribute('maxLength');
+        fireEvent.change(within(screen.getByRole('dialog')).getByLabelText('Task name'), { target: { value: longTitle } });
         fireEvent.click(screen.getByRole('button', { name: 'Save' }));
         await waitFor(() => expect(operations()).toEqual(['search', 'rename']));
         const request = transport.send.mock.calls[1][0];
+        expect(request.data.title).toBe(longTitle);
         await act(async () => transport.subscriber({ signaling_type: 646, request_id: request.requestId, response_state: { error_code: deskErrorCodeEnum.PRECONDITION_FAILED, message: 'Task changed; refresh before editing.' } }));
         expect(within(screen.getByRole('dialog')).getByRole('alert')).toHaveTextContent('Task changed; refresh before editing.');
         expect(within(screen.getByRole('dialog')).getByLabelText('Task name')).toBeDisabled();

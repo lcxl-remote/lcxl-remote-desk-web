@@ -119,6 +119,7 @@ export default {
     "modelMetrics.value.purpose.approval": "AI 审批",
     "modelMetrics.value.purpose.completion": "补全",
     "modelMetrics.value.purpose.context_compression": "上下文压缩",
+    "modelMetrics.value.purpose.conversation_title": "会话标题",
     "modelMetrics.value.purpose.safety": "内容安全",
     "modelMetrics.value.purpose.probe": "模型探测",
     "modelMetrics.value.purpose.fleet_natural_language": "Fleet 自然语言解析",

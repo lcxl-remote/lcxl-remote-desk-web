@@ -773,10 +773,6 @@ export type AiAssistantSessionSummaryDto = {
     */
     createdAt: string;
     /**
-     * @type string,null
-    */
-    firstQuestion?: string | null;
-    /**
      * @minLength 0
      * @type integer
     */
@@ -786,6 +782,10 @@ export type AiAssistantSessionSummaryDto = {
      * @type string
     */
     sessionId: string;
+    /**
+     * @type string,null
+    */
+    title?: string | null;
     /**
      * @type string
     */
@@ -1433,6 +1433,47 @@ export type SnapshotMessagePageDto = {
     nextBeforeMessageId?: string | null;
 };
 
+export type AssistantSourceDevice = {
+    /**
+     * @type string,null
+    */
+    current_name?: string | null;
+    /**
+     * @type string
+    */
+    device_ref: string;
+    /**
+     * @type boolean
+    */
+    historical: boolean;
+    /**
+     * @type string,null
+    */
+    recorded_name?: string | null;
+};
+
+export type AssistantCitation = {
+    /**
+     * @type string
+    */
+    answer_message_id: string;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    answer_revision: number;
+    source_device?: (null | AssistantSourceDevice);
+    /**
+     * @type string
+    */
+    source_id: string;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    source_revision: number;
+};
+
 export type SnapshotToolCallDto = {
     /**
      * @type string
@@ -1454,6 +1495,14 @@ export type SnapshotMessageDto = {
      * @type string,null
     */
     backgroundTaskId?: string | null;
+    /**
+     * @type array | undefined
+    */
+    citations?: AssistantCitation[];
+    /**
+     * @type boolean | undefined
+    */
+    citationsIncomplete?: boolean;
     /**
      * @description Stable message id used to key and deduplicate rendered turns.
      * @type string
@@ -2701,6 +2750,11 @@ export type AiAssistantSessionSnapshotDto = {
     */
     subagents: AiAssistantDelegationSnapshot;
     taskStatusProjection?: (null | TaskStatusProjectionDto);
+    /**
+     * @description None until the first owner input freezes this conversation\'s mode.
+     * @type boolean,null
+    */
+    temporaryConversation?: boolean | null;
     terminalError?: (null | AgentError);
     unresolvedOutcome?: (null | UnknownOutcomeDto);
     /**
@@ -2829,6 +2883,10 @@ export type SubAgentControlAction = ({
     */
     kind: SubAgentControlActionKindEnumKey;
 } | {
+    /**
+     * @type string
+    */
+    client_timezone: string;
     /**
      * @type string
     */
@@ -3849,9 +3907,879 @@ export type ApprovalTraceSettings = {
 };
 
 /**
+ * @description Input admission and answer-reference projection, separate from stored quotas.
+*/
+export type AssistantConversationLimits = {
+    /**
+     * @minLength 0
+     * @default 8192
+     * @type integer | undefined, int32
+    */
+    citation_bytes?: number;
+    /**
+     * @minLength 0
+     * @default 100
+     * @type integer | undefined, int32
+    */
+    citation_page_answers?: number;
+    /**
+     * @minLength 0
+     * @default 64
+     * @type integer | undefined, int32
+    */
+    citations?: number;
+    /**
+     * @description Owner-facing page target; one indivisible entry may exceed this value.
+     * @minLength 0
+     * @default 262144
+     * @type integer | undefined, int32
+    */
+    page_bytes?: number;
+    /**
+     * @minLength 0
+     * @default 16384
+     * @type integer | undefined, int32
+    */
+    question_bytes?: number;
+};
+
+export const dataControlOutcomeEnum = {
+    applied: "applied",
+    already_applied: "already_applied",
+    stale_target: "stale_target"
+} as const;
+
+export type DataControlOutcomeEnumKey = (typeof dataControlOutcomeEnum)[keyof typeof dataControlOutcomeEnum];
+
+export type DataControlOutcome = DataControlOutcomeEnumKey;
+
+export const dataControlReasonEnum = {
+    memory_forget: "memory_forget",
+    memory_clear: "memory_clear",
+    history_restricted: "history_restricted"
+} as const;
+
+export type DataControlReasonEnumKey = (typeof dataControlReasonEnum)[keyof typeof dataControlReasonEnum];
+
+export type DataControlReason = DataControlReasonEnumKey;
+
+export type AssistantDataControlReceipt = {
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    affected_count: number;
+    /**
+     * @type boolean
+    */
+    cleanup_pending: boolean;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    control_generation: number;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    memory_state_generation: number;
+    /**
+     * @type string
+    */
+    operation_id: string;
+    /**
+     * @type string
+    */
+    outcome: DataControlOutcome;
+    /**
+     * @type string
+    */
+    reason: DataControlReason;
+};
+
+export type AssistantMemoryLimits = {
+    /**
+     * @minLength 0
+     * @default 8
+     * @type integer | undefined, int32
+    */
+    current_facts?: number;
+    /**
+     * @minLength 0
+     * @default 2048
+     * @type integer | undefined, int32
+    */
+    draft_bytes?: number;
+    /**
+     * @minLength 0
+     * @default 8
+     * @type integer | undefined, int32
+    */
+    source_refs?: number;
+    /**
+     * @minLength 0
+     * @default 8192
+     * @type integer | undefined, int32
+    */
+    user_instructions_bytes?: number;
+};
+
+/**
+ * @description Working batches and background cadence, independent of stored-content quotas.
+*/
+export type AssistantProcessingLimits = {
+    /**
+     * @minLength 0
+     * @default 64
+     * @type integer | undefined, int32
+    */
+    current_memory_page_size?: number;
+    /**
+     * @minLength 0
+     * @default 64
+     * @type integer | undefined, int32
+    */
+    history_capture_batch_size?: number;
+    /**
+     * @minLength 0
+     * @default 128
+     * @type integer | undefined, int32
+    */
+    history_scan_page_size?: number;
+    /**
+     * @minLength 0
+     * @default 64
+     * @type integer | undefined, int32
+    */
+    native_retention_page_size?: number;
+    /**
+     * @minLength 0
+     * @default 24
+     * @type integer | undefined, int32
+    */
+    native_status_items?: number;
+    /**
+     * @minLength 0
+     * @default 3
+     * @type integer | undefined, int32
+    */
+    native_status_model_items?: number;
+    /**
+     * @minLength 0
+     * @default 25
+     * @type integer | undefined, int32
+    */
+    native_status_rows?: number;
+    /**
+     * @minLength 0
+     * @default 4
+     * @type integer | undefined, int32
+    */
+    native_status_source_refs?: number;
+    /**
+     * @minLength 0
+     * @default 32
+     * @type integer | undefined, int32
+    */
+    output_gc_actor_batch_size?: number;
+    /**
+     * @minLength 0
+     * @default 64
+     * @type integer | undefined, int32
+    */
+    output_gc_batch_size?: number;
+    /**
+     * @minLength 0
+     * @default 300000
+     * @type integer | undefined, int64
+    */
+    output_gc_interval_ms?: number;
+    /**
+     * @minLength 0
+     * @default 50
+     * @type integer | undefined, int32
+    */
+    status_coverage?: number;
+};
+
+export type RetrievalEpisodeLimits = {
+    /**
+     * @minLength 0
+     * @default 32
+     * @type integer | undefined, int32
+    */
+    query_cursors?: number;
+    /**
+     * @minLength 0
+     * @default 32
+     * @type integer | undefined, int32
+    */
+    query_delivered_calls?: number;
+    /**
+     * @minLength 0
+     * @default 10000
+     * @type integer | undefined, int32
+    */
+    query_devices?: number;
+    /**
+     * @minLength 0
+     * @default 500
+     * @type integer | undefined, int32
+    */
+    query_seen_sources?: number;
+    /**
+     * @minLength 0
+     * @default 1048576
+     * @type integer | undefined, int32
+    */
+    query_state_bytes?: number;
+    /**
+     * @minLength 0
+     * @default 1800000
+     * @type integer | undefined, int64
+    */
+    query_ttl_ms?: number;
+    /**
+     * @minLength 0
+     * @default 131072
+     * @type integer | undefined, int64
+    */
+    read_bytes?: number;
+    /**
+     * @minLength 0
+     * @default 8
+     * @type integer | undefined, int32
+    */
+    read_calls?: number;
+    /**
+     * @minLength 0
+     * @default 4
+     * @type integer | undefined, int32
+    */
+    relevance_calls?: number;
+    /**
+     * @minLength 0
+     * @default 32768
+     * @type integer | undefined, int32
+    */
+    response_bytes?: number;
+    /**
+     * @minLength 0
+     * @default 10
+     * @type integer | undefined, int32
+    */
+    time_pages?: number;
+    /**
+     * @minLength 0
+     * @default 1800000
+     * @type integer | undefined, int64
+    */
+    unused_projection_ttl_ms?: number;
+};
+
+export type AssistantRetrievalLimits = {
+    /**
+     * @minLength 0
+     * @default 3000
+     * @type integer | undefined, int64
+    */
+    current_memory_selection_ms?: number;
+    /**
+     * @default [object Object]
+    */
+    episode?: RetrievalEpisodeLimits;
+    /**
+     * @minLength 0
+     * @default 3
+     * @type integer | undefined, int32
+    */
+    fragments_per_root?: number;
+    /**
+     * @minLength 0
+     * @default 3000
+     * @type integer | undefined, int64
+    */
+    history_keyword_scan_ms?: number;
+    /**
+     * @minLength 0
+     * @default 3000
+     * @type integer | undefined, int64
+    */
+    history_time_scan_ms?: number;
+    /**
+     * @minLength 0
+     * @default 3000
+     * @type integer | undefined, int64
+    */
+    memory_keyword_scan_ms?: number;
+    /**
+     * @minLength 0
+     * @default 128
+     * @type integer | undefined, int32
+    */
+    owner_scan_documents?: number;
+    /**
+     * @minLength 0
+     * @default 3000
+     * @type integer | undefined, int64
+    */
+    owner_scan_ms?: number;
+    /**
+     * @minLength 0
+     * @default 40
+     * @type integer | undefined, int32
+    */
+    query_candidates?: number;
+    /**
+     * @description Unicode scalar values, matching JSON Schema maxLength.
+     * @minLength 0
+     * @default 256
+     * @type integer | undefined, int32
+    */
+    query_chars?: number;
+    /**
+     * @minLength 0
+     * @default 4
+     * @type integer | undefined, int32
+    */
+    query_groups?: number;
+    /**
+     * @minLength 0
+     * @default 20
+     * @type integer | undefined, int32
+    */
+    read_messages?: number;
+    /**
+     * @minLength 0
+     * @default 10
+     * @type integer | undefined, int32
+    */
+    relevance_hits?: number;
+    /**
+     * @minLength 0
+     * @default 20
+     * @type integer | undefined, int32
+    */
+    relevance_roots?: number;
+    /**
+     * @minLength 0
+     * @default 8
+     * @type integer | undefined, int32
+    */
+    search_conversations?: number;
+    /**
+     * @minLength 0
+     * @default 90
+     * @type integer | undefined, int32
+    */
+    search_window_days?: number;
+    /**
+     * @minLength 0
+     * @default 512
+     * @type integer | undefined, int32
+    */
+    snippet_bytes?: number;
+    /**
+     * @minLength 0
+     * @default 50
+     * @type integer | undefined, int32
+    */
+    time_hits?: number;
+};
+
+export type AssistantDataLimits = {
+    /**
+     * @default [object Object]
+    */
+    conversation?: AssistantConversationLimits;
+    /**
+     * @default [object Object]
+    */
+    memory?: AssistantMemoryLimits;
+    /**
+     * @default [object Object]
+    */
+    processing?: AssistantProcessingLimits;
+    /**
+     * @default [object Object]
+    */
+    retrieval?: AssistantRetrievalLimits;
+};
+
+export type AssistantDataPolicy = {
+    /**
+     * @description Presentation policy stays outside persisted execution limits.
+     * @minLength 0
+     * @type integer | undefined, int32
+    */
+    conversation_title_max_chars?: number;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    history_retention_days: number;
+    /**
+     * @type object | undefined
+    */
+    limits?: AssistantDataLimits;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    max_history_body_bytes: number;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    max_history_records: number;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    max_memory_body_bytes: number;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    max_memory_records: number;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    max_memory_revisions_per_fact: number;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    max_metadata_bytes: number;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    max_retrieval_document_visits: number;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    max_term_records: number;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    old_memory_revision_days: number;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    revision: number;
+};
+
+export type AssistantDataPolicyUpdate = {
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    expected_revision: number;
+    /**
+     * @type object
+    */
+    policy: AssistantDataPolicy;
+};
+
+export type AssistantDataSettings = {
+    /**
+     * @type boolean
+    */
+    automatic_memory_enabled: boolean;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    explanation_version: number;
+    /**
+     * @type boolean
+    */
+    model_history_search_enabled: boolean;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    revision: number;
+};
+
+export type AssistantDataSettingsUpdate = {
+    /**
+     * @type boolean
+    */
+    automatic_memory_enabled: boolean;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    expected_revision: number;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    explanation_version: number;
+    /**
+     * @type boolean
+    */
+    model_history_search_enabled: boolean;
+};
+
+export type AssistantDataSettingsView = {
+    /**
+     * @type object
+    */
+    policy: AssistantDataPolicy;
+    /**
+     * @type object
+    */
+    settings: AssistantDataSettings;
+};
+
+export const sourceAvailabilityEnum = {
+    available: "available",
+    evidence_only: "evidence_only",
+    partial: "partial",
+    redacted: "redacted",
+    unavailable: "unavailable"
+} as const;
+
+export type SourceAvailabilityEnumKey = (typeof sourceAvailabilityEnum)[keyof typeof sourceAvailabilityEnum];
+
+export type SourceAvailability = SourceAvailabilityEnumKey;
+
+export type AssistantSourceLocator = {
+    /**
+     * @type string,null
+    */
+    action_id?: string | null;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    byte_end: number;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    byte_start: number;
+    /**
+     * @type string
+    */
+    content_sha256: string;
+    /**
+     * @type string
+    */
+    conversation_id: string;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    fragment_index: number;
+    /**
+     * @type string,null
+    */
+    input_event_id?: string | null;
+    /**
+     * @type string,null
+    */
+    message_id?: string | null;
+    /**
+     * @type string,null
+    */
+    result_id?: string | null;
+    /**
+     * @type string
+    */
+    root_conversation_id: string;
+};
+
+export type AssistantSourceResolution = {
+    /**
+     * @type string
+    */
+    availability: SourceAvailability;
+    /**
+     * @type string,null
+    */
+    content?: string | null;
+    locator?: (null | AssistantSourceLocator);
+    /**
+     * @type string,null
+    */
+    notice?: string | null;
+    /**
+     * @minLength 0
+     * @type integer,null, int64
+    */
+    recorded_at_unix_ms?: number | null;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    revision: number;
+    source_device?: (null | AssistantSourceDevice);
+    /**
+     * @type string
+    */
+    source_id: string;
+    /**
+     * @type string,null
+    */
+    statement_timezone?: string | null;
+};
+
+export type AssistantHistoryConversation = {
+    /**
+     * @type boolean
+    */
+    active: boolean;
+    /**
+     * @type string
+    */
+    conversation_id: string;
+    /**
+     * @type boolean
+    */
+    execution_available: boolean;
+    /**
+     * @type object
+    */
+    source: AssistantSourceResolution;
+};
+
+export type AssistantHistoryConversations = {
+    /**
+     * @type array
+    */
+    conversations: AssistantHistoryConversation[];
+    /**
+     * @type string,null
+    */
+    next_cursor?: string | null;
+    /**
+     * @type boolean
+    */
+    partial: boolean;
+};
+
+export type AssistantHistoryCoverageStatus = {
+    /**
+     * @type string,null
+    */
+    conversation_id?: string | null;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    first_recorded_at_unix_ms: number;
+    /**
+     * @minLength 0
+     * @type integer,null, int64
+    */
+    indexed_through_unix_ms?: number | null;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    last_recorded_at_unix_ms: number;
+    /**
+     * @type string
+    */
+    reason: string;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    source_count: number;
+};
+
+export const assistantSourceKindEnum = {
+    input: "input",
+    assistant_message: "assistant_message",
+    receipt: "receipt",
+    native_status: "native_status",
+    previous_memory: "previous_memory"
+} as const;
+
+export type AssistantSourceKindEnumKey = (typeof assistantSourceKindEnum)[keyof typeof assistantSourceKindEnum];
+
+export type AssistantSourceKind = AssistantSourceKindEnumKey;
+
+export type AssistantHistoryFragment = {
+    /**
+     * @type string
+    */
+    kind: AssistantSourceKind;
+    /**
+     * @type string
+    */
+    role: string;
+    /**
+     * @type object
+    */
+    source: AssistantSourceResolution;
+};
+
+export const historySortEnum = {
+    relevance: "relevance",
+    time: "time"
+} as const;
+
+export type HistorySortEnumKey = (typeof historySortEnum)[keyof typeof historySortEnum];
+
+export type HistorySort = HistorySortEnumKey;
+
+export type HistoryTimeRange = {
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    from_unix_ms: number;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    until_unix_ms: number;
+};
+
+export type AssistantHistorySearchRequest = {
+    /**
+     * @type string,null
+    */
+    conversation_id?: string | null;
+    /**
+     * @type string,null
+    */
+    cursor?: string | null;
+    /**
+     * @type string,null
+    */
+    device_ref?: string | null;
+    /**
+     * @minLength 0
+     * @type integer | undefined, int32
+    */
+    limit?: number;
+    /**
+     * @type array | undefined
+    */
+    queries?: string[];
+    /**
+     * @type string | undefined
+    */
+    sort?: HistorySort;
+    /**
+     * @type array | undefined
+    */
+    source_kinds?: AssistantSourceKind[];
+    time_range?: (null | HistoryTimeRange);
+};
+
+export type AssistantHistorySearchResult = {
+    /**
+     * @type array
+    */
+    fragments: AssistantHistoryFragment[];
+    /**
+     * @type string,null
+    */
+    next_cursor?: string | null;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    observed_through_generation: number;
+    /**
+     * @type boolean
+    */
+    partial: boolean;
+    /**
+     * @type array
+    */
+    reasons: string[];
+};
+
+export type AssistantHistoryWindow = {
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    anchor_revision: number;
+    /**
+     * @type string
+    */
+    anchor_source_id: string;
+    /**
+     * @type string
+    */
+    conversation_id: string;
+    /**
+     * @type array
+    */
+    fragments: AssistantHistoryFragment[];
+    /**
+     * @type string,null
+    */
+    next_cursor?: string | null;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    observed_through_generation: number;
+    /**
+     * @type boolean
+    */
+    partial: boolean;
+    /**
+     * @type string,null
+    */
+    previous_cursor?: string | null;
+};
+
+/**
  * @description Raw image response; the HTTP body contains bytes rather than a JSON array.
 */
 export type AssistantImageBytes = Blob;
+
+export type AssistantProcessingStatus = {
+    /**
+     * @type array
+    */
+    coverage: AssistantHistoryCoverageStatus[];
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    history_generation: number;
+    /**
+     * @minLength 0
+     * @type integer, int32
+    */
+    history_retention_days: number;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    indexed_terms: number;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    observed_at_unix_ms: number;
+    /**
+     * @type boolean
+    */
+    partial: boolean;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    stored_history_fragments: number;
+};
 
 export const associationGapKindEnum = {
     attribution: "attribution",
@@ -5118,6 +6046,7 @@ export const deskErrorCodeEnum = {
     SHARED_STORE_UNAVAILABLE: 109,
     AI_APPROVAL_PROBE_OUTPUT_TRUNCATED: 110,
     AI_CONTEXT_SUMMARY_OUTPUT_TRUNCATED: 111,
+    AI_ASSISTANT_DATA_CHANGED: 112,
     ACTION_NEED_RETRY: 1001,
     REMOTE_DESK_OFFLINE: 10003,
     TIMEOUT: 10004,
@@ -6866,6 +7795,128 @@ export type MediaPipelineStateData = {
     source_resolution?: (null | Resolution);
 };
 
+export type MemoryClearRequest = {
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    expected_memory_state_generation: number;
+    /**
+     * @type string
+    */
+    operation_id: string;
+};
+
+export type MemoryDeleteRequest = {
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    expected_revision: number;
+    /**
+     * @type string
+    */
+    memory_id: string;
+    /**
+     * @type string
+    */
+    operation_id: string;
+};
+
+export const memoryScopeEnum = {
+    personal: "personal",
+    device: "device"
+} as const;
+
+export type MemoryScopeEnumKey = (typeof memoryScopeEnum)[keyof typeof memoryScopeEnum];
+
+export type MemoryScope = MemoryScopeEnumKey;
+
+export const memoryStatusEnum = {
+    active: "active",
+    pending_conflict: "pending_conflict",
+    superseded: "superseded",
+    forgotten: "forgotten"
+} as const;
+
+export type MemoryStatusEnumKey = (typeof memoryStatusEnum)[keyof typeof memoryStatusEnum];
+
+export type MemoryStatus = MemoryStatusEnumKey;
+
+export type MemoryRecord = {
+    /**
+     * @type string
+    */
+    content: string;
+    /**
+     * @type string,null
+    */
+    context?: string | null;
+    /**
+     * @type string
+    */
+    memory_id: string;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    observed_at_unix_ms: number;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    revision: number;
+    /**
+     * @type string
+    */
+    scope: MemoryScope;
+    source_device?: (null | AssistantSourceDevice);
+    /**
+     * @type array
+    */
+    source_ids: string[];
+    /**
+     * @type string
+    */
+    status: MemoryStatus;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    updated_at_unix_ms: number;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    valid_from_unix_ms: number;
+    /**
+     * @minLength 0
+     * @type integer,null, int64
+    */
+    valid_until_unix_ms?: number | null;
+};
+
+export type MemoryListResult = {
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    control_generation: number;
+    /**
+     * @type array
+    */
+    memories: MemoryRecord[];
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    memory_state_generation: number;
+    /**
+     * @type string,null
+    */
+    next_cursor?: string | null;
+};
+
 export type MetricAssociatedModel = {
     /**
      * @type string
@@ -8296,6 +9347,90 @@ export type PhysicalDisplayCapability = {
     reason?: string | null;
 };
 
+export const policyIssueCodeEnum = {
+    value_out_of_range: "value_out_of_range",
+    default_exceeds_maximum: "default_exceeds_maximum",
+    point_accounting_unavailable: "point_accounting_unavailable",
+    duplicate_fact_types: "duplicate_fact_types",
+    response_too_small: "response_too_small",
+    relevance_page_limited: "relevance_page_limited",
+    history_candidates_limited: "history_candidates_limited",
+    native_summary_limited: "native_summary_limited",
+    owner_scan_limited: "owner_scan_limited",
+    current_memories_limited: "current_memories_limited",
+    revision_mismatch: "revision_mismatch"
+} as const;
+
+export type PolicyIssueCodeEnumKey = (typeof policyIssueCodeEnum)[keyof typeof policyIssueCodeEnum];
+
+export type PolicyIssueCode = PolicyIssueCodeEnumKey;
+
+export const policyIssueLevelEnum = {
+    error: "error",
+    warning: "warning"
+} as const;
+
+export type PolicyIssueLevelEnumKey = (typeof policyIssueLevelEnum)[keyof typeof policyIssueLevelEnum];
+
+export type PolicyIssueLevel = PolicyIssueLevelEnumKey;
+
+export type PolicyIssue = {
+    /**
+     * @type string
+    */
+    code: PolicyIssueCode;
+    /**
+     * @minLength 0
+     * @type integer,null, int64
+    */
+    effective_limit?: number | null;
+    /**
+     * @type array
+    */
+    fields: string[];
+    /**
+     * @type string
+    */
+    level: PolicyIssueLevel;
+    /**
+     * @type string
+    */
+    message: string;
+};
+
+export type PolicyAssessment = {
+    /**
+     * @type array
+    */
+    issues: PolicyIssue[];
+};
+
+export type PolicyCheck = {
+    /**
+     * @type object
+    */
+    policy: AssistantDataPolicy;
+};
+
+export type PolicyView = {
+    /**
+     * @type array
+    */
+    issues: PolicyIssue[];
+    /**
+     * @type object
+    */
+    policy: AssistantDataPolicy;
+};
+
+export type PolicyWriteData = (PolicyView | PolicyAssessment | {
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    current_revision: number;
+});
+
 /**
  * @description Result of a successful provider connectivity test. The `api_key` stays\nserver-side; only latency and a bounded reply snippet are returned.
 */
@@ -9448,6 +10583,11 @@ export type RestResponseAiAssistantSessionSnapshotDto = {
         */
         subagents: AiAssistantDelegationSnapshot;
         taskStatusProjection?: (null | TaskStatusProjectionDto);
+        /**
+         * @description None until the first owner input freezes this conversation\'s mode.
+         * @type boolean,null
+        */
+        temporaryConversation?: boolean | null;
         terminalError?: (null | AgentError);
         unresolvedOutcome?: (null | UnknownOutcomeDto);
         /**
@@ -10214,6 +11354,317 @@ export type RestResponseApprovalTraceSettings = {
          * @type string
         */
         storage_budget_bytes: string;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponseAssistantDataControlReceipt = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @minLength 0
+         * @type integer, int32
+        */
+        affected_count: number;
+        /**
+         * @type boolean
+        */
+        cleanup_pending: boolean;
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        control_generation: number;
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        memory_state_generation: number;
+        /**
+         * @type string
+        */
+        operation_id: string;
+        /**
+         * @type string
+        */
+        outcome: DataControlOutcome;
+        /**
+         * @type string
+        */
+        reason: DataControlReason;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponseAssistantDataSettingsView = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @type object
+        */
+        policy: AssistantDataPolicy;
+        /**
+         * @type object
+        */
+        settings: AssistantDataSettings;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponseAssistantHistoryConversations = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @type array
+        */
+        conversations: AssistantHistoryConversation[];
+        /**
+         * @type string,null
+        */
+        next_cursor?: string | null;
+        /**
+         * @type boolean
+        */
+        partial: boolean;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponseAssistantHistorySearchResult = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @type array
+        */
+        fragments: AssistantHistoryFragment[];
+        /**
+         * @type string,null
+        */
+        next_cursor?: string | null;
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        observed_through_generation: number;
+        /**
+         * @type boolean
+        */
+        partial: boolean;
+        /**
+         * @type array
+        */
+        reasons: string[];
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponseAssistantHistoryWindow = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        anchor_revision: number;
+        /**
+         * @type string
+        */
+        anchor_source_id: string;
+        /**
+         * @type string
+        */
+        conversation_id: string;
+        /**
+         * @type array
+        */
+        fragments: AssistantHistoryFragment[];
+        /**
+         * @type string,null
+        */
+        next_cursor?: string | null;
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        observed_through_generation: number;
+        /**
+         * @type boolean
+        */
+        partial: boolean;
+        /**
+         * @type string,null
+        */
+        previous_cursor?: string | null;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponseAssistantProcessingStatus = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @type array
+        */
+        coverage: AssistantHistoryCoverageStatus[];
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        history_generation: number;
+        /**
+         * @minLength 0
+         * @type integer, int32
+        */
+        history_retention_days: number;
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        indexed_terms: number;
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        observed_at_unix_ms: number;
+        /**
+         * @type boolean
+        */
+        partial: boolean;
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        stored_history_fragments: number;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponseAssistantSourceResolution = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @type string
+        */
+        availability: SourceAvailability;
+        /**
+         * @type string,null
+        */
+        content?: string | null;
+        locator?: (null | AssistantSourceLocator);
+        /**
+         * @type string,null
+        */
+        notice?: string | null;
+        /**
+         * @minLength 0
+         * @type integer,null, int64
+        */
+        recorded_at_unix_ms?: number | null;
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        revision: number;
+        source_device?: (null | AssistantSourceDevice);
+        /**
+         * @type string
+        */
+        source_id: string;
+        /**
+         * @type string,null
+        */
+        statement_timezone?: string | null;
     };
     /**
      * @type string,null
@@ -11321,6 +12772,44 @@ export type RestResponseManagerLinkStatus = {
     success: boolean;
 };
 
+export type RestResponseMemoryListResult = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        control_generation: number;
+        /**
+         * @type array
+        */
+        memories: MemoryRecord[];
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        memory_state_generation: number;
+        /**
+         * @type string,null
+        */
+        next_cursor?: string | null;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
 export type RestResponseMetricsCallDetail = {
     /**
      * @type integer, int32
@@ -11878,6 +13367,80 @@ export type RestResponsePermissionDecisionResponse = {
         */
         state: PermissionRequestStateDto;
     };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponsePolicyAssessment = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @type array
+        */
+        issues: PolicyIssue[];
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponsePolicyView = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @type array
+        */
+        issues: PolicyIssue[];
+        /**
+         * @type object
+        */
+        policy: AssistantDataPolicy;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponsePolicyWriteData = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    data?: (PolicyView | PolicyAssessment | {
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        current_revision: number;
+    });
     /**
      * @type string,null
     */
@@ -13097,6 +14660,35 @@ export type RestResponseUsageRetentionConfig = {
          * @type integer, int32
         */
         turn_days: number;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponseUserInstructions = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @type string
+        */
+        content: string;
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        revision: number;
     };
     /**
      * @type string,null
@@ -16035,6 +17627,30 @@ export type UsageRetentionConfig = {
     turn_days: number;
 };
 
+export type UserInstructions = {
+    /**
+     * @type string
+    */
+    content: string;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    revision: number;
+};
+
+export type UserInstructionsUpdate = {
+    /**
+     * @type string
+    */
+    content: string;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    expected_revision: number;
+};
+
 /**
  * @description Driver-side state surfaced to the UI. `installed`/`installed_oem_infs`\nare `Option`s — `None` means \"could not determine\" (typical when the\ndaemon is running without admin and neither `Get-WindowsDriver` nor\n`pnputil` returned data); the UI must treat that as \"show a retry\nhint\", not \"definitely not installed\".
 */
@@ -16146,6 +17762,39 @@ export type UpdateApprovalTraceSettingsMutationResponse = UpdateApprovalTraceSet
 export type UpdateApprovalTraceSettingsMutation = {
     Response: UpdateApprovalTraceSettings200;
     Request: UpdateApprovalTraceSettingsMutationRequest;
+    Errors: any;
+};
+
+export type GetAssistantDataPolicy200 = RestResponsePolicyView;
+
+export type GetAssistantDataPolicyQueryResponse = GetAssistantDataPolicy200;
+
+export type GetAssistantDataPolicyQuery = {
+    Response: GetAssistantDataPolicy200;
+    Errors: any;
+};
+
+export type UpdateAssistantDataPolicy200 = RestResponsePolicyWriteData;
+
+export type UpdateAssistantDataPolicyMutationRequest = AssistantDataPolicyUpdate;
+
+export type UpdateAssistantDataPolicyMutationResponse = UpdateAssistantDataPolicy200;
+
+export type UpdateAssistantDataPolicyMutation = {
+    Response: UpdateAssistantDataPolicy200;
+    Request: UpdateAssistantDataPolicyMutationRequest;
+    Errors: any;
+};
+
+export type ValidateAssistantDataPolicy200 = RestResponsePolicyAssessment;
+
+export type ValidateAssistantDataPolicyMutationRequest = PolicyCheck;
+
+export type ValidateAssistantDataPolicyMutationResponse = ValidateAssistantDataPolicy200;
+
+export type ValidateAssistantDataPolicyMutation = {
+    Response: ValidateAssistantDataPolicy200;
+    Request: ValidateAssistantDataPolicyMutationRequest;
     Errors: any;
 };
 
@@ -18267,6 +19916,143 @@ export type ListAiAssistantAttentionQuery = {
     Errors: any;
 };
 
+export type ListRetainedAssistantConversationsQueryParams = {
+    /**
+     * @minLength 0
+     * @type integer | undefined, int32
+    */
+    limit?: number;
+    /**
+     * @type string | undefined
+    */
+    cursor?: string;
+};
+
+export type ListRetainedAssistantConversations200 = RestResponseAssistantHistoryConversations;
+
+export type ListRetainedAssistantConversationsQueryResponse = ListRetainedAssistantConversations200;
+
+export type ListRetainedAssistantConversationsQuery = {
+    Response: ListRetainedAssistantConversations200;
+    QueryParams: ListRetainedAssistantConversationsQueryParams;
+    Errors: any;
+};
+
+export type SearchAssistantHistory200 = RestResponseAssistantHistorySearchResult;
+
+export type SearchAssistantHistoryMutationRequest = AssistantHistorySearchRequest;
+
+export type SearchAssistantHistoryMutationResponse = SearchAssistantHistory200;
+
+export type SearchAssistantHistoryMutation = {
+    Response: SearchAssistantHistory200;
+    Request: SearchAssistantHistoryMutationRequest;
+    Errors: any;
+};
+
+export type GetAssistantHistoryWindowQueryParams = {
+    /**
+     * @type string
+    */
+    source_id: string;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    revision: number;
+    /**
+     * @type string | undefined
+    */
+    view?: string;
+    /**
+     * @type string | undefined
+    */
+    cursor?: string;
+};
+
+export type GetAssistantHistoryWindow200 = RestResponseAssistantHistoryWindow;
+
+export type GetAssistantHistoryWindowQueryResponse = GetAssistantHistoryWindow200;
+
+export type GetAssistantHistoryWindowQuery = {
+    Response: GetAssistantHistoryWindow200;
+    QueryParams: GetAssistantHistoryWindowQueryParams;
+    Errors: any;
+};
+
+export type GetAssistantMemoriesQueryParams = {
+    /**
+     * @minLength 0
+     * @type integer | undefined, int32
+    */
+    limit?: number;
+    /**
+     * @type string | undefined
+    */
+    scope?: string;
+    /**
+     * @type boolean | undefined
+    */
+    include_superseded?: boolean;
+    /**
+     * @type string | undefined
+    */
+    cursor?: string;
+    /**
+     * @minLength 0
+     * @type integer | undefined, int64
+    */
+    memory_state_generation?: number;
+    /**
+     * @minLength 0
+     * @type integer | undefined, int64
+    */
+    control_generation?: number;
+};
+
+export type GetAssistantMemories200 = RestResponseMemoryListResult;
+
+export type GetAssistantMemoriesQueryResponse = GetAssistantMemories200;
+
+export type GetAssistantMemoriesQuery = {
+    Response: GetAssistantMemories200;
+    QueryParams: GetAssistantMemoriesQueryParams;
+    Errors: any;
+};
+
+export type ClearAssistantMemories200 = RestResponseAssistantDataControlReceipt;
+
+export type ClearAssistantMemoriesMutationRequest = MemoryClearRequest;
+
+export type ClearAssistantMemoriesMutationResponse = ClearAssistantMemories200;
+
+export type ClearAssistantMemoriesMutation = {
+    Response: ClearAssistantMemories200;
+    Request: ClearAssistantMemoriesMutationRequest;
+    Errors: any;
+};
+
+export type DeleteAssistantMemory200 = RestResponseAssistantDataControlReceipt;
+
+export type DeleteAssistantMemoryMutationRequest = MemoryDeleteRequest;
+
+export type DeleteAssistantMemoryMutationResponse = DeleteAssistantMemory200;
+
+export type DeleteAssistantMemoryMutation = {
+    Response: DeleteAssistantMemory200;
+    Request: DeleteAssistantMemoryMutationRequest;
+    Errors: any;
+};
+
+export type GetAssistantProcessing200 = RestResponseAssistantProcessingStatus;
+
+export type GetAssistantProcessingQueryResponse = GetAssistantProcessing200;
+
+export type GetAssistantProcessingQuery = {
+    Response: GetAssistantProcessing200;
+    Errors: any;
+};
+
 export type GetAiAssistantSessionQueryParams = {
     /**
      * @description Target connection id
@@ -18298,6 +20084,11 @@ export type GetAiAssistantSessionQueryParams = {
      * @type string | undefined
     */
     message_before?: string;
+    /**
+     * @description Original message anchor; excludes message_before
+     * @type string | undefined
+    */
+    message_around?: string;
     /**
      * @description Message page size, 1 through 100
      * @minLength 0
@@ -18841,6 +20632,65 @@ export type ListAiAssistantSessionsQueryResponse = ListAiAssistantSessions200;
 export type ListAiAssistantSessionsQuery = {
     Response: ListAiAssistantSessions200;
     QueryParams: ListAiAssistantSessionsQueryParams;
+    Errors: any;
+};
+
+export type GetAssistantDataSettings200 = RestResponseAssistantDataSettingsView;
+
+export type GetAssistantDataSettingsQueryResponse = GetAssistantDataSettings200;
+
+export type GetAssistantDataSettingsQuery = {
+    Response: GetAssistantDataSettings200;
+    Errors: any;
+};
+
+export type UpdateAssistantDataSettings200 = RestResponseAssistantDataSettingsView;
+
+export type UpdateAssistantDataSettingsMutationRequest = AssistantDataSettingsUpdate;
+
+export type UpdateAssistantDataSettingsMutationResponse = UpdateAssistantDataSettings200;
+
+export type UpdateAssistantDataSettingsMutation = {
+    Response: UpdateAssistantDataSettings200;
+    Request: UpdateAssistantDataSettingsMutationRequest;
+    Errors: any;
+};
+
+export type GetAssistantSourceQueryParams = {
+    /**
+     * @type string
+    */
+    source_id: string;
+};
+
+export type GetAssistantSource200 = RestResponseAssistantSourceResolution;
+
+export type GetAssistantSourceQueryResponse = GetAssistantSource200;
+
+export type GetAssistantSourceQuery = {
+    Response: GetAssistantSource200;
+    QueryParams: GetAssistantSourceQueryParams;
+    Errors: any;
+};
+
+export type GetAssistantUserInstructions200 = RestResponseUserInstructions;
+
+export type GetAssistantUserInstructionsQueryResponse = GetAssistantUserInstructions200;
+
+export type GetAssistantUserInstructionsQuery = {
+    Response: GetAssistantUserInstructions200;
+    Errors: any;
+};
+
+export type UpdateAssistantUserInstructions200 = RestResponseUserInstructions;
+
+export type UpdateAssistantUserInstructionsMutationRequest = UserInstructionsUpdate;
+
+export type UpdateAssistantUserInstructionsMutationResponse = UpdateAssistantUserInstructions200;
+
+export type UpdateAssistantUserInstructionsMutation = {
+    Response: UpdateAssistantUserInstructions200;
+    Request: UpdateAssistantUserInstructionsMutationRequest;
     Errors: any;
 };
 

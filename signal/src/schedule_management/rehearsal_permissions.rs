@@ -7,7 +7,7 @@ pub(crate) async fn read(
     owner: i32,
     rehearsal_id: &str,
 ) -> Result<Response, ScheduleStoreError> {
-    let txn = crate::db::begin_write(&db, crate::entity::agent_schedule::Entity).await?;
+    let txn = crate::db::begin_write(db, crate::entity::agent_schedule::Entity).await?;
     let reads = ScheduleStore::read_rehearsal_reads_on(&txn, owner, rehearsal_id).await?;
     let mut observations = Vec::new();
     let mut confirmed = BTreeSet::new();

@@ -36,115 +36,11 @@ async fn reconcile_inner_on(
     now_ms: u64,
     history: Option<&crate::schedule_store::TaskReceiptContext>,
 ) -> Result<(String, ActionIdentity, bool), DbErr> {
+    let call = desk_diagnose_core::future::send_phase(|| {
+        validate_command_origin_on(txn, session, outbox, work, payload, history)
+    })
+    .await?;
     let origin = payload.command_origin.as_ref().ok_or_else(invalid)?;
-    origin.validate().map_err(|_| invalid())?;
-    if outbox.computer_binding_json.is_some()
-        || payload.tool_name != desk_diagnose_core::command_confirmation::COMMAND_TOOL
-        || origin.tool_name != payload.tool_name
-        || origin.provider_id != payload.provider_id
-        || (history.is_none()
-            && session.agent_role.is_main()
-            && AssistantTurnFence::from_session(session)
-                .map_err(|_| invalid())?
-                .as_ref()
-                != Some(&origin.turn_fence))
-    {
-        return Err(invalid());
-    }
-    if let Some(context) = history {
-        let fence = &origin.turn_fence;
-        if !session.agent_role.is_main()
-            || session.trigger_origin != TriggerOrigin::ScheduledTask
-            || session.conversation_id != context.run_id()
-            || fence.delegation.is_some()
-            || fence.conversation_id != session.conversation_id
-            || fence.actor_id != session.actor_id
-            || fence.device_id != session.device_id
-            || fence.input_revision != session.input_revision
-            || fence.input_revision != 1
-            || session.current_turn_id.as_deref() != Some(fence.turn_id.as_str())
-            || fence.lease_token > session.lease_token
-            || fence.control_revision > session.control_revision
-            || work.actor_id != session.actor_id
-            || work.target_device_id != session.device_id
-            || work.conversation_id != session.conversation_id
-            || work.turn_id != fence.turn_id
-            || work.manual_resolved_at.is_some()
-        {
-            return Err(invalid());
-        }
-        SignalCapabilityGrantStore::validate_task_dispatch_history_on(
-            txn,
-            &payload.dispatch_id,
-            context.provenance(),
-        )
-        .await?;
-    }
-    let proposals: Vec<_> = session
-        .conversation
-        .iter()
-        .filter(|m| {
-            m.role == ChatRole::Assistant && m.turn_id.as_deref() == Some(work.turn_id.as_str())
-        })
-        .flat_map(|m| m.tool_calls.iter())
-        .filter(|call| call.id == origin.tool_call_id)
-        .collect();
-    if proposals.len() != 1 {
-        return Err(invalid());
-    }
-    let proposal = proposals[0];
-    let call = ToolCall {
-        id: proposal.id.clone(),
-        name: proposal.name.clone(),
-        arguments_json: proposal.arguments_json.clone(),
-    };
-    let canonical = desk_diagnose_core::permission_tools::canonical_tool_permission_input_json(
-        &call.name,
-        serde_json::from_str(&call.arguments_json).map_err(|_| invalid())?,
-    )
-    .map_err(|_| invalid())?;
-    if call.name != payload.tool_name || canonical != payload.canonical_input_json {
-        return Err(invalid());
-    }
-    if history.is_some()
-        && !session.conversation.iter().any(|message| {
-            message.role == ChatRole::Assistant
-                && message.turn_id.as_deref() == Some(work.turn_id.as_str())
-                && message
-                    .tool_calls
-                    .iter()
-                    .any(|proposal| proposal.id == call.id)
-                && message.data_envelope.as_ref().is_some_and(|envelope| {
-                    envelope.validate().is_ok()
-                        && origin.source_envelope_ids.contains(&envelope.envelope_id)
-                })
-        })
-    {
-        return Err(invalid());
-    }
-    if session.agent_role.binding().is_some() {
-        desk_diagnose_core::subagent::facts::validate_origin(session, origin)
-            .map_err(|_| invalid())?;
-    } else if history.is_none() {
-        let mut expected = ActionResultOrigin::capture(
-            &desk_diagnose_core::ai_assistant::ai_assistant_provider_registry(),
-            session,
-            &call,
-        )
-        .map_err(|_| invalid())?;
-        let context = origin.command_completion.as_ref().ok_or_else(invalid)?;
-        if context.context_sha256
-            != desk_diagnose_core::command_completion::context_digest(session)
-                .map_err(|_| invalid())?
-        {
-            return Err(invalid());
-        }
-        expected.retention.expires_at_unix_ms = Some(context.expires_at_unix_ms);
-        expected.command_completion = Some(context.clone());
-        if &expected != origin {
-            return Err(invalid());
-        }
-    }
     let task = agent_exec_task::Entity::find()
         .filter(agent_exec_task::Column::ExecutionGeneration.eq(&payload.dispatch_id))
         .one(txn)
@@ -395,4 +291,124 @@ async fn reconcile_inner_on(
         }
     });
     Ok((call.id, action, true))
+}
+
+async fn validate_command_origin_on(
+    txn: &DatabaseTransaction,
+    session: &PersistedAgentSession,
+    outbox: &agent_capability_dispatch_outbox::Model,
+    work: &agent_action_item::Model,
+    payload: &CapabilityDispatchPayload,
+    history: Option<&crate::schedule_store::TaskReceiptContext>,
+) -> Result<ToolCall, DbErr> {
+    let origin = payload.command_origin.as_ref().ok_or_else(invalid)?;
+    origin.validate().map_err(|_| invalid())?;
+    if outbox.computer_binding_json.is_some()
+        || payload.tool_name != desk_diagnose_core::command_confirmation::COMMAND_TOOL
+        || origin.tool_name != payload.tool_name
+        || origin.provider_id != payload.provider_id
+        || (history.is_none()
+            && session.agent_role.is_main()
+            && AssistantTurnFence::from_session(session)
+                .map_err(|_| invalid())?
+                .as_ref()
+                != Some(&origin.turn_fence))
+    {
+        return Err(invalid());
+    }
+    if let Some(context) = history {
+        let fence = &origin.turn_fence;
+        if !session.agent_role.is_main()
+            || session.trigger_origin != TriggerOrigin::ScheduledTask
+            || session.conversation_id != context.run_id()
+            || fence.delegation.is_some()
+            || fence.conversation_id != session.conversation_id
+            || fence.actor_id != session.actor_id
+            || fence.device_id != session.device_id
+            || fence.input_revision != session.input_revision
+            || fence.input_revision != 1
+            || session.current_turn_id.as_deref() != Some(fence.turn_id.as_str())
+            || fence.lease_token > session.lease_token
+            || fence.control_revision > session.control_revision
+            || work.actor_id != session.actor_id
+            || work.target_device_id != session.device_id
+            || work.conversation_id != session.conversation_id
+            || work.turn_id != fence.turn_id
+            || work.manual_resolved_at.is_some()
+        {
+            return Err(invalid());
+        }
+        SignalCapabilityGrantStore::validate_task_dispatch_history_on(
+            txn,
+            &payload.dispatch_id,
+            context.provenance(),
+        )
+        .await?;
+    }
+    let proposals: Vec<_> = session
+        .conversation
+        .iter()
+        .filter(|m| {
+            m.role == ChatRole::Assistant && m.turn_id.as_deref() == Some(work.turn_id.as_str())
+        })
+        .flat_map(|m| m.tool_calls.iter())
+        .filter(|call| call.id == origin.tool_call_id)
+        .collect();
+    if proposals.len() != 1 {
+        return Err(invalid());
+    }
+    let proposal = proposals[0];
+    let call = ToolCall {
+        id: proposal.id.clone(),
+        name: proposal.name.clone(),
+        arguments_json: proposal.arguments_json.clone(),
+    };
+    let canonical = desk_diagnose_core::permission_tools::canonical_tool_permission_input_json(
+        &call.name,
+        serde_json::from_str(&call.arguments_json).map_err(|_| invalid())?,
+    )
+    .map_err(|_| invalid())?;
+    if call.name != payload.tool_name || canonical != payload.canonical_input_json {
+        return Err(invalid());
+    }
+    if history.is_some()
+        && !session.conversation.iter().any(|message| {
+            message.role == ChatRole::Assistant
+                && message.turn_id.as_deref() == Some(work.turn_id.as_str())
+                && message
+                    .tool_calls
+                    .iter()
+                    .any(|proposal| proposal.id == call.id)
+                && message.data_envelope.as_ref().is_some_and(|envelope| {
+                    envelope.validate().is_ok()
+                        && origin.source_envelope_ids.contains(&envelope.envelope_id)
+                })
+        })
+    {
+        return Err(invalid());
+    }
+    if session.agent_role.binding().is_some() {
+        desk_diagnose_core::subagent::facts::validate_origin(session, origin)
+            .map_err(|_| invalid())?;
+    } else if history.is_none() {
+        let mut expected = ActionResultOrigin::capture(
+            &desk_diagnose_core::ai_assistant::ai_assistant_provider_registry(),
+            session,
+            &call,
+        )
+        .map_err(|_| invalid())?;
+        let context = origin.command_completion.as_ref().ok_or_else(invalid)?;
+        if context.context_sha256
+            != desk_diagnose_core::command_completion::context_digest(session)
+                .map_err(|_| invalid())?
+        {
+            return Err(invalid());
+        }
+        expected.retention.expires_at_unix_ms = Some(context.expires_at_unix_ms);
+        expected.command_completion = Some(context.clone());
+        if &expected != origin {
+            return Err(invalid());
+        }
+    }
+    Ok(call)
 }

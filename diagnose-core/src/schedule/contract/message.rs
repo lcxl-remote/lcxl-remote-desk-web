@@ -56,6 +56,7 @@ impl ValidatedTaskContract {
         )
     }
 
+    #[cfg(test)]
     pub fn verify_generated_send_snapshot(
         &self,
         target: &TaskMessageTarget<'_>,
@@ -188,6 +189,7 @@ impl ValidatedTaskContract {
 }
 
 impl ValidatedTaskContract {
+    #[cfg(test)]
     /// Historical coverage only. The caller verifies the original owner-bound
     /// dispatch/grant and resolves sources from the model proposal's successful
     /// receipt. Current provider readiness, policy and publication remain separate.
@@ -263,6 +265,7 @@ impl ValidatedTaskContract {
         )
     }
 
+    #[cfg(test)]
     /// A prepared draft can cover only WriteExternalDraft, never SendExternal.
     pub fn observed_generated_draft_step(
         &self,
@@ -410,16 +413,6 @@ impl ValidatedTaskContract {
         page: &desk_agent_protocol::browser_control::BrowserPageRef,
     ) -> Result<&TaskMessageDestination, TaskContractError> {
         self.verify_generated_gmail_draft_inner(target, step_id, "", None, input, page, true)
-    }
-
-    pub fn verify_generated_gmail_draft(
-        &self,
-        target: &TaskMessageTarget<'_>,
-        step_id: &str,
-        input: &desk_agent_protocol::communication::GmailWebDraftHandoffInput,
-        page: &desk_agent_protocol::browser_control::BrowserPageRef,
-    ) -> Result<&TaskMessageDestination, TaskContractError> {
-        self.verify_generated_gmail_draft_inner(target, step_id, "", None, input, page, false)
     }
 
     pub fn verify_generated_gmail_draft_with_attachments(

@@ -38,7 +38,7 @@ impl SignalCapabilityGrantStore {
     pub(crate) async fn observe_completed_provider_on(
         txn: &DatabaseTransaction,
         generation: &str,
-    ) -> Result<Option<ObservedProviderAction>, DbErr> {
+    ) -> Result<Option<Box<ObservedProviderAction>>, DbErr> {
         Self::observe_provider_with_parent_on(txn, generation, None).await
     }
 
@@ -46,7 +46,7 @@ impl SignalCapabilityGrantStore {
         txn: &DatabaseTransaction,
         generation: &str,
         parent: &desk_agent_protocol::capability_grant::TaskGrantProvenance,
-    ) -> Result<Option<ObservedProviderAction>, DbErr> {
+    ) -> Result<Option<Box<ObservedProviderAction>>, DbErr> {
         Self::observe_provider_with_parent_on(txn, generation, Some(parent)).await
     }
 
@@ -57,18 +57,19 @@ impl SignalCapabilityGrantStore {
         generation: &str,
         parent: &desk_agent_protocol::capability_grant::TaskGrantProvenance,
     ) -> Result<Option<OriginalResult>, DbErr> {
-        let (outbox, work, payload) = original_on(txn, generation).await?;
+        let computer_original = original_on(txn, generation).await?;
+        let (outbox, work, payload) = computer_original.as_ref();
         if work.manual_resolved_at.is_some() {
             return Err(invalid());
         }
-        let Some(original) = terminal_result(&outbox, work.clone(), &payload)? else {
+        let Some(original) = terminal_result(outbox, work.clone(), payload)? else {
             return Ok(None);
         };
         Self::validate_original_authority_on(
             txn,
-            &work,
-            &outbox,
-            &payload,
+            work,
+            outbox,
+            payload,
             Some(parent),
             Some(original.receipt.received_at_unix_ms),
         )
@@ -82,8 +83,9 @@ impl SignalCapabilityGrantStore {
         generation: &str,
         parent: &desk_agent_protocol::capability_grant::TaskGrantProvenance,
     ) -> Result<(), DbErr> {
-        let (outbox, work, payload) = original_on(txn, generation).await?;
-        Self::validate_original_authority_on(txn, &work, &outbox, &payload, Some(parent), None)
+        let computer_original = original_on(txn, generation).await?;
+        let (outbox, work, payload) = computer_original.as_ref();
+        Self::validate_original_authority_on(txn, work, outbox, payload, Some(parent), None)
             .await?;
         Ok(())
     }
@@ -149,18 +151,19 @@ impl SignalCapabilityGrantStore {
         txn: &DatabaseTransaction,
         generation: &str,
         parent: Option<&desk_agent_protocol::capability_grant::TaskGrantProvenance>,
-    ) -> Result<Option<ObservedProviderAction>, DbErr> {
-        let (outbox, work, payload) =
+    ) -> Result<Option<Box<ObservedProviderAction>>, DbErr> {
+        let computer_original =
             desk_diagnose_core::future::boxed(|| async { original_on(txn, generation).await })
                 .await?;
+        let (outbox, work, payload) = computer_original.as_ref();
         if work.manual_resolved_at.is_some() {
             return Err(invalid());
         }
-        let bound = binding(&outbox, &work, &payload)?;
+        let bound = binding(outbox, work, payload)?;
         if work.result_json.is_none() {
             return Ok(None);
         }
-        let Some(terminal) = decode(&outbox, &work, &payload, &bound)?.terminal else {
+        let Some(terminal) = decode(outbox, work, payload, &bound)?.terminal else {
             return Ok(None);
         };
         if terminal.observation.native.result != ComputerActionResultClass::Verified {
@@ -169,9 +172,9 @@ impl SignalCapabilityGrantStore {
         let issued = desk_diagnose_core::future::boxed(|| async {
             Self::validate_original_authority_on(
                 txn,
-                &work,
-                &outbox,
-                &payload,
+                work,
+                outbox,
+                payload,
                 parent,
                 Some(terminal.receipt.received_at_unix_ms),
             )
@@ -211,7 +214,7 @@ impl SignalCapabilityGrantStore {
                 &terminal.observation.native,
             )
             .map_err(|_| invalid())?;
-        Ok(Some(ObservedProviderAction {
+        Ok(Some(Box::new(ObservedProviderAction {
             work_id: work.id,
             browser_page: match &terminal.observation.native.output {
                 Some(desk_agent_protocol::computer_use::ComputerActionOutput::Browser(result)) => {
@@ -221,7 +224,7 @@ impl SignalCapabilityGrantStore {
             },
             grant_id: issued.grant_id,
             origin: bound.origin,
-            authority: payload.observed_authority,
+            authority: payload.observed_authority.clone(),
             issued_by: issued.issued_by,
             completed_at: terminal.receipt.received_at_unix_ms,
             completion_sha256: format!(
@@ -253,6 +256,6 @@ impl SignalCapabilityGrantStore {
                 _ => None,
             },
             prepared_message,
-        }))
+        })))
     }
 }

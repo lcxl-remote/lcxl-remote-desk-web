@@ -85,62 +85,90 @@ impl ScheduleStore {
         Ok(report)
     }
 
-    pub async fn scan_children_wait_settlement_once(
-        &self,
+    pub fn scan_children_wait_settlement_once<'a>(
+        &'a self,
         after_id: i64,
-    ) -> Result<ScheduleScanReport, ScheduleStoreError> {
-        let candidates = self.children_wait_candidates(after_id, BATCH_SIZE).await?;
-        let mut report = ScheduleScanReport {
-            scanned: candidates.len(),
-            next_cursor: (candidates.len() == BATCH_SIZE as usize)
-                .then(|| candidates.last().unwrap().id),
-            ..Default::default()
-        };
-        for candidate in candidates {
-            match self.settle_fresh_children_wait(&candidate.run_id).await {
-                Ok(true) => report.expired += 1,
-                Ok(false) | Err(ScheduleStoreError::Conflict | ScheduleStoreError::NotFound) => {
-                    report.deferred += 1
-                }
-                Err(_) => report.failed += 1,
-            }
-        }
-        Ok(report)
-    }
-
-    pub async fn scan_approval_expiry_once(
-        &self,
-        after_id: i64,
-    ) -> Result<ScheduleScanReport, ScheduleStoreError> {
-        let candidates = self.approval_wait_candidates(after_id, BATCH_SIZE).await?;
-        let mut report = ScheduleScanReport {
-            scanned: candidates.len(),
-            next_cursor: (candidates.len() == BATCH_SIZE as usize)
-                .then(|| candidates.last().unwrap().id),
-            ..Default::default()
-        };
-        for candidate in candidates {
-            let result = if candidate.cancel_requested_at.is_some() {
-                match self.cancel_continuation_wait(&candidate.run_id).await {
-                    Ok(true) => Ok(true),
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<ScheduleScanReport, ScheduleStoreError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        desk_diagnose_core::future::send_phase(|| async move {
+            let candidates = self.children_wait_candidates(after_id, BATCH_SIZE).await?;
+            let mut report = ScheduleScanReport {
+                scanned: candidates.len(),
+                next_cursor: (candidates.len() == BATCH_SIZE as usize)
+                    .then(|| candidates.last().unwrap().id),
+                ..Default::default()
+            };
+            for candidate in candidates {
+                match self.settle_fresh_children_wait(&candidate.run_id).await {
+                    Ok(true) => report.expired += 1,
                     Ok(false)
                     | Err(ScheduleStoreError::Conflict | ScheduleStoreError::NotFound) => {
-                        self.expire_fresh_approval_wait(&candidate.run_id).await
+                        report.deferred += 1
                     }
-                    Err(error) => Err(error),
+                    Err(_) => report.failed += 1,
                 }
-            } else {
-                self.expire_fresh_approval_wait(&candidate.run_id).await
-            };
-            match result {
-                Ok(true) => report.expired += 1,
-                Ok(false) | Err(ScheduleStoreError::Conflict | ScheduleStoreError::NotFound) => {
-                    report.deferred += 1
-                }
-                Err(_) => report.failed += 1,
             }
-        }
-        Ok(report)
+            Ok(report)
+        })
+    }
+
+    pub fn scan_wait_expiry_once<'a>(
+        &'a self,
+        after_id: i64,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<ScheduleScanReport, ScheduleStoreError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        desk_diagnose_core::future::send_phase(|| async move {
+            let candidates = self.wait_expiry_candidates(after_id, BATCH_SIZE).await?;
+            let mut report = ScheduleScanReport {
+                scanned: candidates.len(),
+                next_cursor: (candidates.len() == BATCH_SIZE as usize)
+                    .then(|| candidates.last().unwrap().id),
+                ..Default::default()
+            };
+            for candidate in candidates {
+                let result = if candidate.cancel_requested_at.is_some() {
+                    match desk_diagnose_core::future::send_phase(|| {
+                        self.cancel_continuation_wait(&candidate.run_id)
+                    })
+                    .await
+                    {
+                        Ok(true) => Ok(true),
+                        Ok(false)
+                        | Err(ScheduleStoreError::Conflict | ScheduleStoreError::NotFound) => {
+                            desk_diagnose_core::future::send_phase(|| {
+                                self.expire_fresh_approval_wait(&candidate.run_id)
+                            })
+                            .await
+                        }
+                        Err(error) => Err(error),
+                    }
+                } else {
+                    desk_diagnose_core::future::send_phase(|| {
+                        self.expire_fresh_approval_wait(&candidate.run_id)
+                    })
+                    .await
+                };
+                match result {
+                    Ok(true) => report.expired += 1,
+                    Ok(false)
+                    | Err(ScheduleStoreError::Conflict | ScheduleStoreError::NotFound) => {
+                        report.deferred += 1
+                    }
+                    Err(_) => report.failed += 1,
+                }
+            }
+            Ok(report)
+        })
     }
 
     /// Reconcile durable results and action-free interrupted turns. Unfinished
@@ -232,7 +260,7 @@ impl ScheduleStore {
     pub async fn run_calendar_materializer(self) {
         let mut cursor = 0;
         let mut expiry_cursor = 0;
-        let mut approval_cursor = 0;
+        let mut wait_cursor = 0;
         let mut children_wait_cursor = 0;
         let mut recovery_cursor = 0;
         let mut fresh_recovery_cursor = 0;
@@ -308,19 +336,19 @@ impl ScheduleStore {
                     log::warn!("[schedule] child wait settlement unavailable; retrying");
                 }
             }
-            match self.scan_approval_expiry_once(approval_cursor).await {
+            match self.scan_wait_expiry_once(wait_cursor).await {
                 Ok(report) => {
-                    approval_cursor = report.next_cursor.unwrap_or(0);
+                    wait_cursor = report.next_cursor.unwrap_or(0);
                     if report.failed > 0 {
                         log::warn!(
-                            "[schedule] {} approval waits could not be expired",
+                            "[schedule] {} waiting runs could not be expired",
                             report.failed
                         );
                     }
                 }
                 Err(_) => {
-                    approval_cursor = 0;
-                    log::warn!("[schedule] approval expiry scan unavailable; retrying");
+                    wait_cursor = 0;
+                    log::warn!("[schedule] wait expiry scan unavailable; retrying");
                 }
             }
             match self.scan_committed_recovery_once(recovery_cursor).await {

@@ -106,7 +106,7 @@ impl FileRecoveryScopeStore {
         let locked = agent_session::Entity::update_many()
             .col_expr(
                 agent_session::Column::Version,
-                Expr::col(agent_session::Column::Version).into(),
+                Expr::col(agent_session::Column::Version),
             )
             .filter(agent_session::Column::ConversationId.eq(conversation))
             .filter(agent_session::Column::ActorId.eq(actor))

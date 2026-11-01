@@ -134,6 +134,7 @@ impl ScheduleStore {
         let txn = crate::db::begin_write(&self.db, crate::entity::agent_schedule::Entity).await?;
         let now = database_now(&txn).await?;
         let task = owned(&txn, owner, &input.schedule_id).await?;
+        Self::retrieval_consent(&task)?;
         if task.revision != expected_revision
             || task.active_run_id.is_some()
             || !matches!(
@@ -235,6 +236,7 @@ impl ScheduleStore {
         verifier.lock_subject(&txn, &locator).await?;
         // A subject lock may have waited while another request edited the task.
         let task = owned(&txn, owner, &input.schedule_id).await?;
+        Self::retrieval_consent(&task)?;
         if task.id != locator.id || task.target_device_id != locator.target_device_id {
             return Err(ScheduleStoreError::Conflict);
         }

@@ -17,6 +17,7 @@ pub struct PresentationReadBinding {
 
 pub use desk_agent_protocol::computer_use::office_batch::PPTX_MEDIA_TYPE;
 
+#[cfg(test)]
 /// File-only batch receipts carry the actual artifact, never a synthetic native
 /// validation export. Correlation and dispatch admission remain host checks.
 pub fn validate_pptx_completion(

@@ -158,6 +158,7 @@ pub fn resolve_template_containment(
     (wall, snapshot)
 }
 
+#[cfg(any(test, feature = "test-support"))]
 /// Build the immutable [`ExecPlanDraft`] for an exact-argv operator template.
 ///
 /// The template's `argv[0]` is the program and the rest are its arguments,
@@ -543,6 +544,7 @@ pub fn privilege_trampoline(command: &str) -> bool {
         })
 }
 
+#[cfg(test)]
 /// Returns the prohibited category a **raw command string** matches, or `None`.
 /// Used on the single-device confirm path, where the input is a free-form
 /// command before tokenization (so metacharacter-bearing payloads are seen).

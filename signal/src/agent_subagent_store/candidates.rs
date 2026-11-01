@@ -1,6 +1,9 @@
 //! Bounded scan positions are hints; execution always takes a fresh fenced claim.
 use super::*;
 use desk_diagnose_core::subagent::{creation::TaskCreationEnvelope, runtime::RuntimeTurn};
+use sea_orm::{ExprTrait, QueryTrait};
+
+type RootWaitPage = (Vec<group_row::Model>, Option<i64>);
 
 impl SubAgentStore {
     pub async fn queued_task_candidates(
@@ -11,7 +14,10 @@ impl SubAgentStore {
         if !(1..=32).contains(&limit) {
             return Err(invalid());
         }
+        let compatible = compatible_sessions();
         run_row::Entity::find()
+            .filter(run_row::Column::RootConversationId.in_subquery(compatible.clone()))
+            .filter(run_row::Column::ChildConversationId.in_subquery(compatible))
             .filter(run_row::Column::Id.gt(after_id))
             .filter(run_row::Column::State.is_in(["queued", "waiting_resource"]))
             .filter(run_row::Column::NextAttemptAtMs.lte(chrono::Utc::now().timestamp_millis()))
@@ -21,22 +27,82 @@ impl SubAgentStore {
             .await
     }
 
-    pub async fn root_wait_candidates(
+    /// Read-only scheduling hints. Claims still recheck the current locked session.
+    pub fn root_wait_candidates(
         &self,
         after_id: i64,
         limit: u64,
-    ) -> Result<Vec<group_row::Model>, DbErr> {
-        if !(1..=32).contains(&limit) {
-            return Err(invalid());
-        }
-        group_row::Entity::find()
-            .filter(group_row::Column::Id.gt(after_id))
-            .filter(group_row::Column::ParentActive.eq(true))
-            .filter(group_row::Column::SourceAdmission.eq("open"))
-            .order_by_asc(group_row::Column::Id)
-            .limit(limit)
-            .all(&self.db)
-            .await
+    ) -> futures_util::future::BoxFuture<'_, Result<RootWaitPage, DbErr>> {
+        desk_diagnose_core::future::send_phase(|| async move {
+            if !(1..=32).contains(&limit) {
+                return Err(invalid());
+            }
+            let compatible = compatible_sessions();
+            let children = sea_orm::sea_query::Query::select()
+                .expr(sea_orm::sea_query::Expr::val(1))
+                .from(run_row::Entity)
+                .and_where(
+                    sea_orm::sea_query::Expr::col((run_row::Entity, run_row::Column::GroupId))
+                        .equals((group_row::Entity, group_row::Column::GroupId)),
+                )
+                .to_owned();
+            let rows = group_row::Entity::find()
+                .filter(group_row::Column::RootConversationId.in_subquery(compatible))
+                .filter(sea_orm::sea_query::Expr::exists(children))
+                .filter(group_row::Column::Id.gt(after_id))
+                .filter(group_row::Column::ParentActive.eq(true))
+                .filter(group_row::Column::SourceAdmission.eq("open"))
+                .order_by_asc(group_row::Column::Id)
+                .limit(limit)
+                .all(&self.db)
+                .await?;
+            // Cursor progress comes from the raw page, including skipped records.
+            let next = (rows.len() == limit as usize).then(|| rows.last().unwrap().id);
+            if rows.is_empty() {
+                return Ok((Vec::new(), next));
+            }
+            let parents = session_row::Entity::find()
+                .filter(
+                    session_row::Column::ConversationId
+                        .is_in(rows.iter().map(|row| row.root_conversation_id.as_str())),
+                )
+                .filter(session_row::Column::ConversationSchemaVersion.eq(i32::from(
+                    desk_diagnose_core::session::CONVERSATION_SCHEMA_VERSION,
+                )))
+                .all(&self.db)
+                .await?;
+            let mut seen = std::collections::BTreeSet::new();
+            let mut candidates = Vec::new();
+            for row in rows {
+                let subject = (
+                    row.root_conversation_id.clone(),
+                    row.actor_id.clone(),
+                    row.device_id.clone(),
+                );
+                if !seen.insert(subject) {
+                    continue;
+                }
+                let Some(parent) = parents.iter().find(|parent| {
+                    parent.conversation_id == row.root_conversation_id
+                        && parent.actor_id == row.actor_id
+                        && parent.device_id == row.device_id
+                }) else {
+                    continue;
+                };
+                let Ok(session) = PersistedAgentSession::decode_json(&parent.state_json) else {
+                    continue;
+                };
+                if session.surface == AgentSessionSurface::AiAssistant
+                    && session.agent_role.is_main()
+                    && session.check_subject(&row.actor_id, &row.device_id).is_ok()
+                    && !session.turn_state.is_active()
+                    && (session.subagent_wait.is_some() || session.ready_subagent_wait.is_some())
+                {
+                    candidates.push(row);
+                }
+            }
+            Ok((candidates, next))
+        })
     }
 
     pub async fn child_runtime_candidate(
@@ -112,7 +178,7 @@ impl SubAgentStore {
         device: &str,
     ) -> Result<Option<RuntimeTurn>, DbErr> {
         let txn = crate::db::begin_write(&self.db, session_row::Entity).await?;
-        let mut session = parent_on(&txn, root, actor, device).await?;
+        let session = parent_on(&txn, root, actor, device).await?;
         if session.turn_state.is_active()
             || session.turn_state == desk_diagnose_core::session::TurnState::Cancelled
         {
@@ -121,7 +187,10 @@ impl SubAgentStore {
         if session.trigger_origin == desk_diagnose_core::session::TriggerOrigin::ScheduledTask {
             return Ok(None);
         }
-        super::notification::prepare_notification_on(&txn, &mut session).await?;
+        if session.ready_subagent_wait.is_none() || session.terminal_permission_request_id.is_some()
+        {
+            return Ok(None);
+        }
         let Some((group, source)) =
             super::parent_wait::ready_parent_source_on(&txn, &session).await?
         else {
@@ -134,9 +203,22 @@ impl SubAgentStore {
         ) {
             return Ok(None);
         }
-        let candidate = RuntimeTurn::ParentCompletion { session, source };
+        let candidate = RuntimeTurn::ParentCompletion {
+            session: *session,
+            source,
+        };
         candidate.validate().map_err(|_| invalid())?;
         txn.commit().await?;
         Ok(Some(candidate))
     }
+}
+
+fn compatible_sessions() -> sea_orm::sea_query::SelectStatement {
+    let compatible = session_row::Entity::find()
+        .select_only()
+        .column(session_row::Column::ConversationId)
+        .filter(session_row::Column::ConversationSchemaVersion.eq(i32::from(
+            desk_diagnose_core::session::CONVERSATION_SCHEMA_VERSION,
+        )));
+    compatible.into_query()
 }

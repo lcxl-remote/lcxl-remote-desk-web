@@ -255,7 +255,10 @@ pub struct AiAssistantSubAgentControl {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SubAgentControlAction {
     Cancel,
-    Adjust { message: String },
+    Adjust {
+        message: String,
+        client_timezone: String,
+    },
 }
 
 #[derive(

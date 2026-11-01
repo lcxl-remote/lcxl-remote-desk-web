@@ -53,6 +53,7 @@ pub const TOOL_NETWORK_PORTS: &str = "lcxl_network_ports";
 /// Tool name for the recent-logs read (gated by the `allow_logs` policy).
 pub const TOOL_RECENT_LOGS: &str = "lcxl_recent_logs";
 
+#[cfg(test)]
 /// The complete, static set of exposed tool names. The list is fixed — there is
 /// deliberately no exec / write / control tool, and no AI diagnosis (that is
 /// orchestrated centrally, not exposed as an MCP tool).

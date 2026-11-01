@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const GOAL_SCHEMA_VERSION: u16 = 3;
+pub const GOAL_SCHEMA_VERSION: u16 = 4;
 pub const DEFAULT_MODEL_TOKENS: u64 = 10_000_000;
 pub const DEFAULT_MODEL_CALLS: u32 = 160;
 pub const DEFAULT_TOOL_CALLS: u32 = 200;
@@ -1020,11 +1020,11 @@ pub struct GoalRun {
     pub budget_reservations: BTreeMap<String, GoalUsage>,
     /// Idempotent settlement identities; only usage counters are retained.
     pub budget_settlements: BTreeMap<String, GoalUsage>,
-    /// Source-group calls share this goal's cumulative usage but are independent
-    /// of the current main segment lease. Unknown calls remain reserved after a
-    /// segment settles, source pause, cancellation, or main-only stop.
-    pub delegation_reservations: BTreeMap<String, GoalUsage>,
-    pub delegation_settlements: BTreeMap<String, GoalUsage>,
+    /// Delegated calls share this goal's cumulative usage independently of
+    /// the current main segment lease. Unknown calls
+    /// remain reserved after a segment settles, cancellation or main-only stop.
+    pub independent_reservations: BTreeMap<String, GoalUsage>,
+    pub independent_settlements: BTreeMap<String, GoalUsage>,
     /// Digests of distinct, server-observed successful tool results. This keeps
     /// repeated reads from resetting the stalled-segment guard after compaction.
     pub seen_result_fingerprints: BTreeSet<String>,
@@ -1153,31 +1153,32 @@ impl GoalRun {
         }
         if self.budget_reservations.len()
             + self.budget_settlements.len()
-            + self.delegation_reservations.len()
-            + self.delegation_settlements.len()
+            + self.independent_reservations.len()
+            + self.independent_settlements.len()
             > MAX_BUDGET_LEDGER_ENTRIES
         {
             return Err(GoalError::InvalidState);
         }
         for (id, usage) in self
-            .delegation_reservations
+            .independent_reservations
             .iter()
-            .chain(&self.delegation_settlements)
+            .chain(&self.independent_settlements)
         {
             valid_id(id)?;
             if usage.slices != 0
-                || (self.delegation_reservations.contains_key(id) && *usage == GoalUsage::default())
+                || (self.independent_reservations.contains_key(id)
+                    && *usage == GoalUsage::default())
                 || self.budget_reservations.contains_key(id)
                 || self.budget_settlements.contains_key(id)
-                || (self.delegation_reservations.contains_key(id)
-                    && self.delegation_settlements.contains_key(id))
+                || (self.independent_reservations.contains_key(id)
+                    && self.independent_settlements.contains_key(id))
             {
                 return Err(GoalError::InvalidState);
             }
         }
         self.used
             .checked_add(self.reserved)
-            .and_then(|usage| usage.checked_add(self.delegation_reserved_usage().ok()?))
+            .and_then(|usage| usage.checked_add(self.independent_reserved_usage().ok()?))
             .ok_or(GoalError::ArithmeticOverflow)?;
         if self
             .device_unavailable_since_unix_ms
@@ -1321,8 +1322,8 @@ impl GoalRun {
             reserved: GoalUsage::default(),
             budget_reservations: BTreeMap::new(),
             budget_settlements: BTreeMap::new(),
-            delegation_reservations: BTreeMap::new(),
-            delegation_settlements: BTreeMap::new(),
+            independent_reservations: BTreeMap::new(),
+            independent_settlements: BTreeMap::new(),
             seen_result_fingerprints: BTreeSet::new(),
             stalled_slices: 0,
             created_at_unix_ms,
@@ -1362,7 +1363,7 @@ impl GoalRun {
         let projected = self
             .used
             .checked_add(self.reserved)
-            .and_then(|usage| usage.checked_add(self.delegation_reserved_usage().ok()?))
+            .and_then(|usage| usage.checked_add(self.independent_reserved_usage().ok()?))
             .and_then(|total| total.checked_add(delta))
             .ok_or(GoalError::ArithmeticOverflow)?;
         if projected.fits(self.limits) {
@@ -1380,7 +1381,7 @@ impl GoalRun {
         let projected = self
             .used
             .checked_add(self.reserved)
-            .and_then(|usage| usage.checked_add(self.delegation_reserved_usage().ok()?))
+            .and_then(|usage| usage.checked_add(self.independent_reserved_usage().ok()?))
             .and_then(|usage| usage.checked_add(delta))
             .ok_or(GoalError::ArithmeticOverflow)?;
         Ok(if projected.active_time_ms > self.limits.active_time_ms {
@@ -1452,8 +1453,8 @@ impl GoalRun {
             || now_unix_ms >= self.deadline_unix_ms
             || delta.slices != 0
             || delta == GoalUsage::default()
-            || self.delegation_reservations.contains_key(id)
-            || self.delegation_settlements.contains_key(id)
+            || self.independent_reservations.contains_key(id)
+            || self.independent_settlements.contains_key(id)
         {
             return Err(GoalError::InvalidState);
         }
@@ -1471,8 +1472,8 @@ impl GoalRun {
         // the segment can still settle, recover or be cancelled.
         if self.budget_reservations.len()
             + self.budget_settlements.len()
-            + self.delegation_reservations.len()
-            + self.delegation_settlements.len()
+            + self.independent_reservations.len()
+            + self.independent_settlements.len()
             >= MAX_BUDGET_LEDGER_ENTRIES
         {
             return Err(GoalError::BudgetExceeded);
@@ -1491,17 +1492,18 @@ impl GoalRun {
         Ok(true)
     }
 
-    fn delegation_reserved_usage(&self) -> Result<GoalUsage, GoalError> {
-        self.delegation_reservations
+    fn independent_reserved_usage(&self) -> Result<GoalUsage, GoalError> {
+        self.independent_reservations
             .values()
             .try_fold(GoalUsage::default(), |sum, usage| {
                 sum.checked_add(*usage).ok_or(GoalError::ArithmeticOverflow)
             })
     }
 
-    /// The host proves the live source-group admission in the same transaction.
-    /// A waiting main segment does not own or gate a finite child's planner.
-    pub fn reserve_delegation_with_id(
+    /// The host proves current source admission in the same transaction.
+    /// Original allocation authority, not the current main segment lease,
+    /// determines whether an independent call may reserve this shared budget.
+    pub fn reserve_independent_with_id(
         &mut self,
         id: &str,
         upper: GoalUsage,
@@ -1520,20 +1522,20 @@ impl GoalRun {
         {
             return Err(GoalError::InvalidState);
         }
-        if let Some(existing) = self.delegation_reservations.get(id) {
+        if let Some(existing) = self.independent_reservations.get(id) {
             return if *existing == upper {
                 Ok(false)
             } else {
                 Err(GoalError::InvalidState)
             };
         }
-        if self.delegation_settlements.contains_key(id) {
+        if self.independent_settlements.contains_key(id) {
             return Err(GoalError::InvalidState);
         }
         if self.budget_reservations.len()
             + self.budget_settlements.len()
-            + self.delegation_reservations.len()
-            + self.delegation_settlements.len()
+            + self.independent_reservations.len()
+            + self.independent_settlements.len()
             >= MAX_BUDGET_LEDGER_ENTRIES
         {
             return Err(GoalError::BudgetExceeded);
@@ -1543,7 +1545,7 @@ impl GoalRun {
             .state_version
             .checked_add(1)
             .ok_or(GoalError::ArithmeticOverflow)?;
-        self.delegation_reservations.insert(id.to_owned(), upper);
+        self.independent_reservations.insert(id.to_owned(), upper);
         self.state_version = version;
         self.updated_at_unix_ms = now_unix_ms;
         Ok(true)
@@ -1551,26 +1553,26 @@ impl GoalRun {
 
     /// Known physical usage may arrive after the source closes and may exceed an
     /// estimate. Keep the incurred facts; subsequent reservations fail on totals.
-    pub fn settle_delegation_with_id(
+    pub fn settle_independent_with_id(
         &mut self,
         id: &str,
         actual: GoalUsage,
         now_unix_ms: u64,
     ) -> Result<bool, GoalError> {
-        self.settle_delegation_fact(id, actual, now_unix_ms, false)
+        self.settle_independent_fact(id, actual, now_unix_ms, false)
     }
 
     /// The host proves there is no durable provider-start boundary under the
     /// original root/control locks. This refunds only an unstarted model call.
-    pub fn release_unstarted_delegation_model_with_id(
+    pub fn release_unstarted_independent_model_with_id(
         &mut self,
         id: &str,
         now_unix_ms: u64,
     ) -> Result<bool, GoalError> {
-        self.settle_delegation_fact(id, GoalUsage::default(), now_unix_ms, true)
+        self.settle_independent_fact(id, GoalUsage::default(), now_unix_ms, true)
     }
 
-    fn settle_delegation_fact(
+    fn settle_independent_fact(
         &mut self,
         id: &str,
         actual: GoalUsage,
@@ -1578,7 +1580,7 @@ impl GoalRun {
         unstarted_model: bool,
     ) -> Result<bool, GoalError> {
         valid_id(id)?;
-        if let Some(existing) = self.delegation_settlements.get(id) {
+        if let Some(existing) = self.independent_settlements.get(id) {
             return if *existing == actual {
                 Ok(false)
             } else {
@@ -1586,7 +1588,7 @@ impl GoalRun {
             };
         }
         let upper = self
-            .delegation_reservations
+            .independent_reservations
             .get(id)
             .ok_or(GoalError::InvalidState)?;
         if now_unix_ms < self.updated_at_unix_ms
@@ -1607,8 +1609,8 @@ impl GoalRun {
             .state_version
             .checked_add(1)
             .ok_or(GoalError::ArithmeticOverflow)?;
-        self.delegation_reservations.remove(id);
-        self.delegation_settlements.insert(id.to_owned(), actual);
+        self.independent_reservations.remove(id);
+        self.independent_settlements.insert(id.to_owned(), actual);
         self.used = used;
         self.state_version = version;
         self.updated_at_unix_ms = now_unix_ms;
@@ -2946,7 +2948,7 @@ mod tests {
             model_calls: 1,
             ..GoalUsage::default()
         };
-        goal.reserve_delegation_with_id("child-call", upper, 1_002)
+        goal.reserve_independent_with_id("child-call", upper, 1_002)
             .unwrap();
         let lease = goal.lease_epoch;
         goal.finish_slice(
@@ -2966,10 +2968,16 @@ mod tests {
         .unwrap();
         assert_eq!(goal.state, GoalState::Queued);
         assert_eq!(goal.reserved, GoalUsage::default());
-        assert_eq!(goal.delegation_reservations.get("child-call"), Some(&upper));
+        assert_eq!(
+            goal.independent_reservations.get("child-call"),
+            Some(&upper)
+        );
         goal.validate().unwrap();
         goal.claim_slice(1_004).unwrap();
-        assert_eq!(goal.delegation_reservations.get("child-call"), Some(&upper));
+        assert_eq!(
+            goal.independent_reservations.get("child-call"),
+            Some(&upper)
+        );
     }
 
     #[test]
@@ -2980,12 +2988,15 @@ mod tests {
             model_calls: 1,
             ..GoalUsage::default()
         };
-        goal.reserve_delegation_with_id("child-call", upper, 1_001)
+        goal.reserve_independent_with_id("child-call", upper, 1_001)
             .unwrap();
         goal.state = GoalState::Paused(GoalPauseReason::Owner);
         goal.updated_at_unix_ms = 1_002;
         goal.cancel_settled(1_003).unwrap();
-        assert_eq!(goal.delegation_reservations.get("child-call"), Some(&upper));
+        assert_eq!(
+            goal.independent_reservations.get("child-call"),
+            Some(&upper)
+        );
         let actual = GoalUsage {
             input_tokens: 20,
             output_tokens: 10,
@@ -2994,22 +3005,22 @@ mod tests {
             ..GoalUsage::default()
         };
         assert!(
-            goal.settle_delegation_with_id("child-call", actual, 1_004)
+            goal.settle_independent_with_id("child-call", actual, 1_004)
                 .unwrap()
         );
         assert!(
             !goal
-                .settle_delegation_with_id("child-call", actual, 1_005)
+                .settle_independent_with_id("child-call", actual, 1_005)
                 .unwrap()
         );
         assert_eq!(goal.used, actual);
         assert_eq!(goal.state, GoalState::Cancelled);
         assert!(
-            goal.reserve_delegation_with_id("new-call", upper, 1_006)
+            goal.reserve_independent_with_id("new-call", upper, 1_006)
                 .is_err()
         );
         assert!(
-            goal.settle_delegation_with_id("child-call", upper, 1_006)
+            goal.settle_independent_with_id("child-call", upper, 1_006)
                 .is_err()
         );
         goal.validate().unwrap();
@@ -3023,26 +3034,26 @@ mod tests {
             model_calls: 1,
             ..GoalUsage::default()
         };
-        goal.reserve_delegation_with_id("not-sent", upper, 1_001)
+        goal.reserve_independent_with_id("not-sent", upper, 1_001)
             .unwrap();
-        goal.reserve_delegation_with_id("native", tool_call(), 1_001)
+        goal.reserve_independent_with_id("native", tool_call(), 1_001)
             .unwrap();
         goal.state = GoalState::Paused(GoalPauseReason::Owner);
         assert!(
-            goal.release_unstarted_delegation_model_with_id("not-sent", 1_002)
+            goal.release_unstarted_independent_model_with_id("not-sent", 1_002)
                 .unwrap()
         );
         assert!(
             !goal
-                .release_unstarted_delegation_model_with_id("not-sent", 1_003)
+                .release_unstarted_independent_model_with_id("not-sent", 1_003)
                 .unwrap()
         );
         assert!(
-            goal.release_unstarted_delegation_model_with_id("native", 1_003)
+            goal.release_unstarted_independent_model_with_id("native", 1_003)
                 .is_err()
         );
         assert!(
-            goal.settle_delegation_with_id("not-sent", upper, 1_003)
+            goal.settle_independent_with_id("not-sent", upper, 1_003)
                 .is_err()
         );
         assert_eq!(goal.used, GoalUsage::default());
@@ -3052,7 +3063,7 @@ mod tests {
         let decoded: GoalRun = serde_json::from_str(&encoded).unwrap();
         decoded.validate().unwrap();
         assert_eq!(
-            decoded.delegation_settlements.get("not-sent"),
+            decoded.independent_settlements.get("not-sent"),
             Some(&GoalUsage::default())
         );
     }
@@ -3068,7 +3079,7 @@ mod tests {
         };
         // The host's source-group gate distinguishes main-only stop from owner
         // source pause. This allocation cannot claim or resume the main planner.
-        goal.reserve_delegation_with_id("child-call", upper, 1_001)
+        goal.reserve_independent_with_id("child-call", upper, 1_001)
             .unwrap();
         assert_eq!(goal.state, GoalState::Paused(GoalPauseReason::Recovery));
         assert_eq!(goal.slice_seq, 0);
@@ -3085,24 +3096,24 @@ mod tests {
             input_tokens: 80,
             ..GoalUsage::default()
         };
-        goal.reserve_delegation_with_id("child-call", upper, 1_001)
+        goal.reserve_independent_with_id("child-call", upper, 1_001)
             .unwrap();
         let actual = GoalUsage {
             model_calls: 1,
             input_tokens: 120,
             ..GoalUsage::default()
         };
-        goal.settle_delegation_with_id("child-call", actual, 1_002)
+        goal.settle_independent_with_id("child-call", actual, 1_002)
             .unwrap();
         assert_eq!(goal.used, actual);
-        assert!(goal.delegation_reservations.is_empty());
+        assert!(goal.independent_reservations.is_empty());
         assert_eq!(
-            goal.reserve_delegation_with_id("retry", upper, 1_003),
+            goal.reserve_independent_with_id("retry", upper, 1_003),
             Err(GoalError::BudgetExceeded)
         );
         assert!(
             !goal
-                .settle_delegation_with_id("child-call", actual, 1_004)
+                .settle_independent_with_id("child-call", actual, 1_004)
                 .unwrap()
         );
         goal.validate().unwrap();

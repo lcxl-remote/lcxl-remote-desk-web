@@ -162,12 +162,23 @@ async fn run_case_with_live_inner(change: Option<&str>, mode: ResumeMode, live: 
     ) {
         replies[2] = replies[2].replace("object-read-complete", "object-read-unavailable");
     }
+    let expect_title = !matches!(
+        mode,
+        ResumeMode::Scheduled | ResumeMode::ScheduledScan | ResumeMode::ScheduledLoop
+    );
     let capture = actix_web::rt::spawn(async move {
         let mut bodies = Vec::new();
-        for reply in replies {
-            bodies.push(capture_one_openai_request_with_sse(&listener, &reply).await);
+        let mut title = None;
+        for (index, reply) in replies.into_iter().enumerate() {
+            if index == 2 && expect_title {
+                let (answer, naming) = capture_openai_answer_with_title(&listener, &reply).await;
+                bodies.push(answer);
+                title = Some(naming);
+            } else {
+                bodies.push(capture_one_openai_request_with_sse(&listener, &reply).await);
+            }
         }
-        bodies
+        (bodies, title)
     });
     let map = Arc::new(SharedConnectionMap::new());
     let pending = crate::remote_tool_edge::global_remote_tool_pending();
@@ -249,7 +260,7 @@ async fn run_case_with_live_inner(change: Option<&str>, mode: ResumeMode, live: 
         .connect()
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(5), notified.notified())
+    tokio::time::timeout(MODEL_IO_TIMEOUT, notified.notified())
         .await
         .unwrap();
 
@@ -361,7 +372,7 @@ async fn run_case_with_live_inner(change: Option<&str>, mode: ResumeMode, live: 
     // The real input controller starts an independent task. Keep this large
     // multi-phase fixture off the production input driver's poll stack too.
     let initial = tokio::time::timeout(
-        Duration::from_secs(10),
+        MODEL_IO_TIMEOUT,
         actix_web::rt::spawn(run_turn_inner(
             connections.clone(),
             db.clone(),
@@ -371,6 +382,8 @@ async fn run_case_with_live_inner(change: Option<&str>, mode: ResumeMode, live: 
             1,
             "device".into(),
             AiAssistantAsk {
+                client_timezone: "UTC".into(),
+                temporary_conversation: None,
                 question: "Inspect only my selected file".into(),
                 client_message_id: "original-user".into(),
                 conversation_id: Some(client_id.into()),
@@ -532,7 +545,7 @@ async fn run_case_with_live_inner(change: Option<&str>, mode: ResumeMode, live: 
                     );
                     if mode == ResumeMode::ScheduledLoop {
                         let runner = actix_web::rt::spawn(executor.clone().run());
-                        let completed = tokio::time::timeout(Duration::from_secs(12), async {
+                        let completed = tokio::time::timeout(SCENARIO_TIMEOUT, async {
                             loop {
                                 let work = crate::entity::agent_schedule_run::Entity::find()
                                     .filter(
@@ -680,7 +693,7 @@ async fn run_case_with_live_inner(change: Option<&str>, mode: ResumeMode, live: 
             }
             if mode == ResumeMode::Loop {
                 let runner = actix_web::rt::spawn(executor.clone().run());
-                let settled = tokio::time::timeout(Duration::from_secs(12), async {
+                let settled = tokio::time::timeout(SCENARIO_TIMEOUT, async {
                     loop {
                         let row = crate::entity::agent_permission_resume::Entity::find()
                             .one(&db)
@@ -727,6 +740,8 @@ async fn run_case_with_live_inner(change: Option<&str>, mode: ResumeMode, live: 
                     request.request_id.clone()
                 },
                 AiAssistantAsk {
+                    client_timezone: "UTC".into(),
+                    temporary_conversation: None,
                     question: "UNTRUSTED REPLAY TEXT".into(),
                     client_message_id: "unused".into(),
                     // Exercise the mobile session-only continuation and do not supply current selections.
@@ -760,14 +775,15 @@ async fn run_case_with_live_inner(change: Option<&str>, mode: ResumeMode, live: 
             row.payload_schema_version = Set(1);
             row.update(&db).await.unwrap();
         }
-        tokio::time::timeout(Duration::from_secs(10), resume())
+        tokio::time::timeout(MODEL_IO_TIMEOUT, resume())
             .await
             .unwrap();
-        let bodies = tokio::time::timeout(Duration::from_secs(5), capture)
+        let (bodies, title) = tokio::time::timeout(MODEL_IO_TIMEOUT, capture)
             .await
             .unwrap()
             .unwrap();
         assert_eq!(bodies.len(), 3);
+        assert_eq!(title.is_some(), expect_title);
         assert!(!String::from_utf8_lossy(&bodies[2]).contains("synthetic-original-marker"));
         assert!(
             tokio::time::timeout(Duration::from_millis(25), socket.next())
@@ -793,7 +809,7 @@ async fn run_case_with_live_inner(change: Option<&str>, mode: ResumeMode, live: 
         return;
     }
     if change == Some("scheduled_revoke") {
-        tokio::time::timeout(Duration::from_secs(10), resume())
+        tokio::time::timeout(MODEL_IO_TIMEOUT, resume())
             .await
             .unwrap();
         assert!(
@@ -801,11 +817,12 @@ async fn run_case_with_live_inner(change: Option<&str>, mode: ResumeMode, live: 
                 .await
                 .is_err()
         );
-        let bodies = tokio::time::timeout(Duration::from_secs(5), capture)
+        let (bodies, title) = tokio::time::timeout(MODEL_IO_TIMEOUT, capture)
             .await
             .unwrap()
             .unwrap();
         assert_eq!(bodies.len(), 3);
+        assert!(title.is_none());
         assert!(
             bodies
                 .iter()
@@ -893,8 +910,10 @@ async fn run_case_with_live_inner(change: Option<&str>, mode: ResumeMode, live: 
                     .unwrap()
                     .destination_identity()
                     .unwrap();
-                crate::agent_run_event_store::SignalAgentRunEventStore::new(db.clone()).append_user_followup(
+                crate::agent_run_event_store::SignalAgentRunEventStore::new(db.clone()).append_user_followup(&
                     crate::agent_run_event_store::AppendUserFollowupParams {
+                        client_timezone: "UTC".into(),
+                        temporary_conversation: None,
                         event_id:"new-input".into(), run_id:run_id.clone(), client_conversation_id:Some(client_id.into()),
                         actor_id:"1".into(), device_id:"device".into(), surface:AgentSessionSurface::AiAssistant,
                         policy_revision:desk_diagnose_core::assistant_policy::PERSONAL_ASSISTANT_POLICY_REVISION,
@@ -913,7 +932,7 @@ async fn run_case_with_live_inner(change: Option<&str>, mode: ResumeMode, live: 
             .await
             .unwrap()
             .unwrap();
-        tokio::time::timeout(Duration::from_secs(5), resume())
+        tokio::time::timeout(MODEL_IO_TIMEOUT, resume())
             .await
             .unwrap();
         assert!(
@@ -933,13 +952,18 @@ async fn run_case_with_live_inner(change: Option<&str>, mode: ResumeMode, live: 
             .unwrap()
             .unwrap();
         if change == "live_target" {
-            assert_eq!(receipt_count, 3, "{change}: stale grant flow changed");
             assert_ne!(after, before, "{change}: stale status was not reported");
-            let bodies = tokio::time::timeout(Duration::from_secs(5), capture)
+            let (bodies, title) = tokio::time::timeout(MODEL_IO_TIMEOUT, capture)
                 .await
                 .unwrap()
                 .unwrap();
             assert_eq!(bodies.len(), 3);
+            assert!(title.is_some());
+            assert_eq!(
+                receipt_count,
+                bodies.len() + usize::from(title.is_some()),
+                "{change}: stale grant flow changed"
+            );
             assert!(
                 bodies.iter().all(
                     |body| !String::from_utf8_lossy(body).contains("synthetic-original-marker")
@@ -1072,10 +1096,8 @@ async fn run_case_with_live_inner(change: Option<&str>, mode: ResumeMode, live: 
                 .unwrap();
         }
     };
-    let completed = tokio::time::timeout(Duration::from_secs(15), async {
-        tokio::join!(resume(), peer)
-    })
-    .await;
+    let completed =
+        tokio::time::timeout(SCENARIO_TIMEOUT, async { tokio::join!(resume(), peer) }).await;
     assert!(
         completed.is_ok(),
         "resume/read timed out: {:?}",
@@ -1085,11 +1107,12 @@ async fn run_case_with_live_inner(change: Option<&str>, mode: ResumeMode, live: 
             .map(|m| (m.role, m.text))
             .collect::<Vec<_>>())
     );
-    let bodies = tokio::time::timeout(Duration::from_secs(5), capture)
+    let (bodies, title) = tokio::time::timeout(MODEL_IO_TIMEOUT, capture)
         .await
         .unwrap()
         .unwrap();
     assert_eq!(bodies.len(), 3);
+    assert_eq!(title.is_some(), expect_title);
     assert_eq!(
         String::from_utf8_lossy(&bodies[2]).contains("synthetic-original-marker"),
         change != Some("live_after")
@@ -1146,7 +1169,8 @@ async fn run_case_with_live_inner(change: Option<&str>, mode: ResumeMode, live: 
             .all(&db)
             .await
             .unwrap();
-        assert_eq!(before.len(), 3);
+        assert_eq!(before.len(), bodies.len() + usize::from(title.is_some()));
+        assert!(before.iter().all(|call| call.state == "succeeded"));
         assert_eq!(executor.scan_once(0).await.unwrap().scanned, 0);
         assert_eq!(
             crate::entity::model_egress_receipt::Entity::find()

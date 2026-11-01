@@ -226,6 +226,7 @@ pub fn prepare_text(kind: ContentKind, content: String) -> Result<PreparedText, 
     })
 }
 
+#[cfg(test)]
 /// Select without mutation. The storage transaction applies this plan only when
 /// the complete incoming batch is ready to commit under the conversation fence.
 pub fn eviction_candidates(

@@ -31,7 +31,7 @@ pub(crate) struct SignalStoreHeartbeat {
 
 impl LeaseHeartbeat for SignalStoreHeartbeat {
     fn start(&self, conversation_id: String, lease_token: u64) -> Box<dyn HeartbeatGuard> {
-        let store = self.store.clone();
+        let store = Box::new(self.store.clone());
         let handle = actix_web::rt::spawn(async move {
             loop {
                 tokio::time::sleep(AGENT_HEARTBEAT_INTERVAL).await;

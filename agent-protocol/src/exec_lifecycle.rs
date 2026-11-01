@@ -129,6 +129,7 @@ impl ExecState {
     }
 
     /// Position in the lifecycle order, used to fence late frames.
+    #[cfg(test)]
     fn rank(self) -> Option<u8> {
         match self {
             ExecState::Reserved => Some(0),
@@ -139,6 +140,7 @@ impl ExecState {
         }
     }
 
+    #[cfg(test)]
     /// Whether a receiver holding `previous` should adopt `self`.
     ///
     /// This is what makes sequence numbers unnecessary: an execution only ever

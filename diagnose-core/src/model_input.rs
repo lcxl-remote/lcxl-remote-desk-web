@@ -823,7 +823,7 @@ fn check_at(
                 Issue::Length,
                 schema_path,
                 format!(
-                    "Invalid input at {path}: bounds {min}={}, {max}={}",
+                    "Invalid input at {path}: bounds {min}={}, {max}={}; observed {n}",
                     schema[min], schema[max]
                 ),
             ));
@@ -890,6 +890,33 @@ pub fn describe_error_with_schema(name: &str, schema: &Value, reason: &str) -> S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounds_feedback_reports_observed_size_instead_of_input_contents() {
+        let schema = json!({"type":"object","properties":{"queries":{"type":"array","minItems":1,"maxItems":2},"text":{"type":"string","maxLength":3},"limit":{"type":"integer","maximum":5}}});
+        for (input, path, bound, observed) in [
+            (
+                json!({"queries":["PRIVATE_VALUE","b","c"]}),
+                "$.queries",
+                "maxItems=2",
+                "observed 3",
+            ),
+            (
+                json!({"text":"中文🙂a"}),
+                "$.text",
+                "maxLength=3",
+                "observed 4",
+            ),
+            (json!({"limit":6}), "$.limit", "maximum=5", "observed 6"),
+        ] {
+            let error = validate_format_reported("sample", &schema, &input).unwrap_err();
+            for expected in [path, bound, observed] {
+                assert!(error.message.contains(expected), "{}", error.message);
+            }
+            assert!(!error.message.contains("PRIVATE_VALUE"));
+            assert!(!error.message.contains("中文🙂a"));
+        }
+    }
 
     #[test]
     fn final_schemas_hide_derived_fields_and_keep_business_identifiers() {

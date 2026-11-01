@@ -92,10 +92,9 @@ pub(crate) async fn ready_parent_source_on(
     txn: &crate::config::connection::DatabaseTransaction,
     parent: &PersistedAgentSession,
 ) -> Result<Option<(DelegationGroup, CreationEnvelope)>, DbErr> {
-    if let Some((_, group, source)) = ready_wait_source_on(txn, parent).await? {
-        return Ok(Some((group, source)));
-    }
-    super::notification::ready_notification_source_on(txn, parent).await
+    Ok(ready_wait_source_on(txn, parent)
+        .await?
+        .map(|(_, group, source)| (group, source)))
 }
 
 pub(crate) async fn goal_wait_ready_on(
@@ -253,8 +252,8 @@ impl SubAgentStore {
         Ok(ParentWaitResolution::Ready(wait))
     }
 
-    /// Ordinary user-source delivery gets a bounded interpretation claim. Goal
-    /// and schedule sources return to their existing coordinators instead.
+    /// An explicit wait resumes the original owner task. Goal and schedule
+    /// dependencies return to their existing source coordinators instead.
     pub async fn claim_parent_completion(
         &self,
         params: &ClaimTurnParams,
@@ -286,6 +285,8 @@ impl SubAgentStore {
         if !parent.turn_state.can_claim()
             || parent.turn_state == TurnState::Cancelled
             || parent.subagent_wait.is_some()
+            || parent.ready_subagent_wait.is_none()
+            || parent.terminal_permission_request_id.is_some()
             || !parent.unclosed_tool_call_ids().is_empty()
             || parent.execution_state.has_unresolved_outcome()
             || !parent.execution_state.tasks().is_empty()
@@ -333,10 +334,6 @@ impl SubAgentStore {
             )
             .map_err(|_| invalid())?;
         parent.adopt_trigger(TriggerOrigin::SubAgentCompletion, &params.turn_id);
-        desk_diagnose_core::future::boxed(|| async {
-            super::notification::mark_notification_attempt_on(&txn, &parent).await
-        })
-        .await?;
         let old_lease = parent.lease_token.checked_sub(1).ok_or_else(invalid)?;
         let version = parent.version.checked_add(1).ok_or_else(invalid)?;
         parent.version = version;
@@ -365,7 +362,7 @@ impl SubAgentStore {
         }
         desk_diagnose_core::future::boxed(|| async { txn.commit().await }).await?;
         Ok(Some(ClaimedParentCompletion {
-            session: parent,
+            session: *parent,
             source,
         }))
     }

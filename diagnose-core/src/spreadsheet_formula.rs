@@ -186,6 +186,7 @@ fn all_explicit_sheets_allowed(expr: &FormulaExpr, allowed: &BTreeSet<String>) -
     }
 }
 
+#[cfg(test)]
 /// Neutralize a CSV field that spreadsheet applications may interpret as a
 /// formula. The returned boolean is suitable for transformation lineage.
 pub fn escape_csv_formula_injection(value: &str) -> (String, bool) {

@@ -175,6 +175,7 @@ impl ImageAttachment {
     }
 }
 
+#[cfg(test)]
 pub fn authorize_read(
     message: &ChatMessage,
     policy: Option<&ModelEgressPolicy>,

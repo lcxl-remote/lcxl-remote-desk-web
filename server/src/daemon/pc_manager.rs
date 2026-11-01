@@ -1250,19 +1250,6 @@ impl PcRegistry {
             .map(|record| record.class.clone())
     }
 
-    pub async fn manager_credential_connections(
-        &self,
-        fingerprint: &CredentialFingerprint,
-    ) -> Vec<String> {
-        self.admissions
-            .read()
-            .await
-            .by_manager_credential
-            .get(fingerprint)
-            .map(|connections| connections.iter().cloned().collect())
-            .unwrap_or_default()
-    }
-
     /// Drop `connection_id`'s admission record. Called only when the signaling
     /// connection truly ends (`ConnectionRemoved`) or its grant is revoked — never
     /// on a `CloseRemoteSession` PC teardown, so a capped connection stays classified as

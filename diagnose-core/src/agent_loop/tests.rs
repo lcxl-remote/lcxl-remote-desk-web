@@ -1,4 +1,5 @@
 mod context_boundaries;
+mod data_input_errors;
 mod goal_continuation;
 mod grant_exposure;
 mod schedule_review;
@@ -18,9 +19,11 @@ use std::rc::Rc;
 
 mod background_receipts;
 mod command_completion;
+mod conversation_title;
 mod delegation_budget;
 mod egress;
 mod original_results;
+mod retrieval_accounting;
 mod subagents;
 mod tool_input_metrics;
 mod version_handoff;
@@ -247,10 +250,54 @@ fn interactive_home_is_a_short_lived_sensitive_model_projection() {
     );
     assert_eq!(envelope.retention.expires_at_unix_ms, Some(310_000));
     assert!(envelope.retention.delete_with_run);
-    assert!(matches!(
-        envelope.content,
-        ContentRef::EphemeralObservation { .. }
-    ));
+    let registration = crate::ai_assistant::source_registry::registered_leaf(
+        &envelope,
+        1,
+        crate::ai_assistant::source_registry::SOURCE_CONTRACT_REVISION,
+    )
+    .unwrap()
+    .expect("native home guidance must permit retaining the resulting visible answer");
+    let answer_policy = crate::ai_assistant::source::derive_visible_text_policy(
+        std::slice::from_ref(&registration.policy),
+        1,
+    )
+    .unwrap();
+    assert!(answer_policy.history_retention_allowed);
+    assert!(answer_policy.content_hard_expires_at_unix_ms.is_none());
+    assert_eq!(
+        registration.policy.reference_fresh_until_unix_ms,
+        Some(310_000)
+    );
+    assert!(!registration.policy.history_retention_allowed);
+    assert!(!registration.policy.independent_fact_allowed);
+    for case in 0..5 {
+        let mut changed = envelope.clone();
+        match case {
+            0 => changed.sensitivity = Sensitivity::Secret,
+            1 => changed.provenance.source_provider_id = "unregistered-worker".into(),
+            2 => changed.provenance.source_object_id = None,
+            3 => {
+                if let ContentRef::ImmutableBlob { blob_id, .. } = &mut changed.content {
+                    *blob_id = "unrelated-snapshot".into();
+                }
+            }
+            _ => {
+                changed.content = ContentRef::EphemeralObservation {
+                    observation_id: "unregistered-live-observation".into(),
+                    size_bytes: message.text.len() as u64,
+                    expires_at_unix_ms: 310_000,
+                }
+            }
+        }
+        let policy = crate::ai_assistant::source_registry::registered_leaf(
+            &changed,
+            1,
+            crate::ai_assistant::source_registry::SOURCE_CONTRACT_REVISION,
+        )
+        .unwrap();
+        assert!(policy.is_none_or(|value| !value.policy.derived_visible_text_allowed));
+    }
+    assert!(matches!(envelope.content, ContentRef::ImmutableBlob { .. }));
 }
 
 #[test]
@@ -355,6 +402,9 @@ fn selected_object_lineage_keeps_explicit_sources_without_later_context_expansio
 /// An in-memory session store: one session, claimed via the pure transition.
 #[derive(Default)]
 struct MemSession {
+    title_limit: Option<usize>,
+    title: RefCell<Option<String>>,
+    data_access: Option<crate::ai_assistant::data_access::AssistantDataToolAccess>,
     allow_permission_renewal: bool,
     inner: RefCell<Option<PersistedAgentSession>>,
     latest_revision: Rc<RefCell<Option<u64>>>,
@@ -371,6 +421,44 @@ struct MemSession {
 }
 #[async_trait(?Send)]
 impl SessionSeam for MemSession {
+    async fn conversation_title_limit(
+        &self,
+        _: &PersistedAgentSession,
+    ) -> Result<Option<usize>, AgentError> {
+        Ok(self
+            .title
+            .borrow()
+            .is_none()
+            .then_some(self.title_limit)
+            .flatten())
+    }
+    async fn save_conversation_title(
+        &self,
+        _: &PersistedAgentSession,
+        title: &str,
+    ) -> Result<(), AgentError> {
+        // The main answer must already be durable when naming is published.
+        assert!(
+            self.inner
+                .borrow()
+                .as_ref()
+                .unwrap()
+                .conversation
+                .iter()
+                .any(|message| message.role == ChatRole::Assistant)
+        );
+        *self.title.borrow_mut() = Some(title.into());
+        Ok(())
+    }
+
+    async fn assistant_data_access(
+        &self,
+        _: &PersistedAgentSession,
+        _: u64,
+    ) -> Result<Option<crate::ai_assistant::data_access::AssistantDataToolAccess>, AgentError> {
+        Ok(self.data_access.clone())
+    }
+
     async fn load_claimed_goal(
         &self,
         _session: &PersistedAgentSession,
@@ -939,7 +1027,7 @@ fn read_tool(name: &str, cap: Capability) -> RegisteredTool {
             description: "read".into(),
             parameters_schema: serde_json::json!({"type":"object"}),
         },
-        required_capability: cap,
+        required_device_capability: Some(cap),
         effect: ToolEffect::ReadOnly,
     }
 }
@@ -1535,7 +1623,11 @@ async fn capability_discovery_explicitly_replaces_working_set_without_persisting
         "device",
         1,
         AgentScope {
-            granted: vec![target.required_capability],
+            granted: vec![
+                target
+                    .required_device_capability
+                    .expect("system info requires a device capability"),
+            ],
             mode: ExecutionMode::ReadOnly,
             expires_at: None,
             policy_name: None,
@@ -4150,7 +4242,8 @@ async fn trims_history_to_budget() {
     .await
     .unwrap();
     let reqs = model.requests.borrow();
-    let msgs = &reqs[0].messages;
+    let request = crate::ui_model_ids::project_request(&reqs[0]);
+    let msgs = &request.messages;
     assert_eq!(msgs[0].role, ChatRole::System);
     assert!(
         msgs.iter().all(|m| !m.text.contains(&"x".repeat(100))),
@@ -4175,7 +4268,7 @@ async fn trims_history_to_budget() {
     );
     assert_eq!(
         budget.tool_definitions_bytes,
-        serde_json::to_vec(&reqs[0].tools).unwrap().len()
+        serde_json::to_vec(&request.tools).unwrap().len()
     );
     assert_eq!(budget.other_overhead_bytes, 0);
     assert_eq!(budget.total_bytes, TEST_MODEL_CONTEXT_BYTES);
@@ -4210,7 +4303,7 @@ async fn projection_metrics_preserve_history_and_keep_capability_catalog_bounded
     registry.extend(crate::task_status_tools::task_status_tool_registry());
     let mut granted = provider_tools
         .iter()
-        .map(|tool| tool.required_capability)
+        .filter_map(|tool| tool.required_device_capability)
         .collect::<Vec<_>>();
     granted.sort_by_key(|capability| *capability as u16);
     granted.dedup();
@@ -4550,7 +4643,7 @@ fn mutating_tool(name: &str, cap: Capability) -> RegisteredTool {
             description: "exec".into(),
             parameters_schema: serde_json::json!({"type":"object"}),
         },
-        required_capability: cap,
+        required_device_capability: Some(cap),
         effect: ToolEffect::Mutating,
     }
 }
@@ -5218,7 +5311,7 @@ async fn ai_assistant_retries_one_malformed_permission_plan_after_tool_result() 
                 description: "request permission".into(),
                 parameters_schema: serde_json::json!({"type": "object"}),
             },
-            required_capability: Capability::SystemInfo,
+            required_device_capability: None,
             effect: ToolEffect::RunProjection,
         },
     ];
@@ -8501,10 +8594,8 @@ fn permission_resume_projection_restores_only_bounded_reusable_references() {
             .get("page_incarnation")
             .is_none()
     );
-    assert_eq!(
-        projected_value["result_summary"]["output_type"],
-        "BrowserActionResult / ComputerActionCompleted<BrowserActionResult>"
-    );
+    assert!(projected_value.get("result_summary").is_none());
+    assert_eq!(projected_value["outcome"], "snapshot_captured");
     let projection = reusable_provider_result_projection(&conversation, "projection", 9_000, None)
         .unwrap()
         .unwrap();
@@ -8984,7 +9075,7 @@ async fn stage5_fake_same_run_composes_research_artifacts_and_manual_handoffs_wi
                 description: "read".into(),
                 parameters_schema: serde_json::json!({"type":"object"}),
             },
-            required_capability: Capability::SystemInfo,
+            required_device_capability: Some(Capability::SystemInfo),
             effect: ToolEffect::ReadOnly,
         }
     }
@@ -9110,8 +9201,25 @@ async fn stage5_fake_same_run_composes_research_artifacts_and_manual_handoffs_wi
     assert_eq!(stored.conversation_id, "conv");
 }
 
-#[tokio::test]
-async fn scheduled_permission_pause_saves_exact_request_without_executing_remaining_calls() {
+#[test]
+fn scheduled_permission_pause_saves_exact_request_without_executing_remaining_calls() {
+    for bytes in [1024 * 1024, 2 * 1024 * 1024] {
+        std::thread::Builder::new()
+            .stack_size(bytes)
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(exercise_scheduled_permission_pause());
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+}
+
+async fn exercise_scheduled_permission_pause() {
     use crate::dynamic_run::{
         GrantRequestItem, PERMISSION_REQUEST_SCHEMA_VERSION, PermissionRequest,
         PermissionRequestState,
@@ -9135,7 +9243,7 @@ async fn scheduled_permission_pause_saves_exact_request_without_executing_remain
     let original = ToolCall {
         id: "first".into(),
         name: "read_system_info".into(),
-        arguments_json: "{}".into(),
+        arguments_json: "{ \n }".into(),
     };
     let remaining = ToolCall {
         id: "second".into(),
@@ -9144,6 +9252,10 @@ async fn scheduled_permission_pause_saves_exact_request_without_executing_remain
     let mut proposal = ChatMessage::text("proposal", ChatRole::Assistant, "");
     proposal.tool_calls = vec![original.to_ref(), remaining.to_ref()];
     session.conversation.push(proposal);
+    let resolved =
+        crate::ui_model_ids::resolve_session_call_with_context(&original, &session, 0, None)
+            .unwrap();
+    assert_ne!(original.arguments_json, resolved.arguments_json);
     let request = PermissionRequest {
         schema_version: PERMISSION_REQUEST_SCHEMA_VERSION,
         request_id: "request-1".into(),
@@ -9180,23 +9292,27 @@ async fn scheduled_permission_pause_saves_exact_request_without_executing_remain
     );
     let observation = observation_batch.input(0);
     let initial_events = recorder.0.lock().unwrap().len();
-    for mode in 0..4 {
+    for mode in 0..7 {
         let mut invalid_session = session.clone();
         let mut invalid_request = request.clone();
+        let mut invalid_call = resolved.clone();
         match mode {
             0 => invalid_session
                 .conversation
                 .push(invalid_session.conversation[0].clone()),
             1 => invalid_request.input_revision += 1,
             2 => invalid_request.items[0].suggested_max_uses = 2,
-            _ => invalid_session.permission_requests.push(request.clone()),
+            3 => invalid_session.permission_requests.push(request.clone()),
+            4 => invalid_call.arguments_json = r#"{"changed":true}"#.into(),
+            5 => invalid_call.name = "read_process_list".into(),
+            _ => invalid_session.conversation[0].role = ChatRole::User,
         }
         let before = invalid_session.clone();
         assert!(
             task_permission::pause(
                 &loop_deps,
                 &mut invalid_session,
-                &original,
+                &invalid_call,
                 &[],
                 invalid_request,
                 &mut mint,
@@ -9221,7 +9337,7 @@ async fn scheduled_permission_pause_saves_exact_request_without_executing_remain
         task_permission::pause(
             &failed_deps,
             &mut unsaved,
-            &original,
+            &resolved,
             &[],
             request.clone(),
             &mut mint,
@@ -9237,7 +9353,7 @@ async fn scheduled_permission_pause_saves_exact_request_without_executing_remain
     let outcome = task_permission::pause(
         &loop_deps,
         &mut session,
-        &original,
+        &resolved,
         &[remaining],
         request.clone(),
         &mut mint,
@@ -9252,6 +9368,14 @@ async fn scheduled_permission_pause_saves_exact_request_without_executing_remain
     assert_eq!(
         crate::schedule::permission_wait::unfinished_pause(&session).as_deref(),
         Some("request-1")
+    );
+    assert_eq!(
+        session.conversation[0].tool_calls[0].arguments_json,
+        original.arguments_json
+    );
+    assert_eq!(
+        store.inner.borrow().as_ref().unwrap().conversation[0].tool_calls[0].arguments_json,
+        original.arguments_json
     );
     let mut changed = session.clone();
     changed.permission_requests[0].items[0].suggested_max_uses = 2;
@@ -9562,3 +9686,67 @@ async fn unknown_outcome_allows_requesting_a_new_authorized_mutation() {
 }
 
 mod ui_model_ids;
+
+#[tokio::test]
+async fn personal_assistant_rejects_a_mixed_forget_batch_before_dispatching_its_other_tools() {
+    let store = MemSession {
+        data_access: Some(crate::ai_assistant::data_access::AssistantDataToolAccess {
+            settings: Default::default(),
+            policy_revision: 1,
+            memory_state_generation: 1,
+            control_generation: 1,
+        }),
+        ..Default::default()
+    };
+    let params = claim();
+    let mut session = crate::ai_assistant::test_support::personal_session(
+        &params.actor_id,
+        &params.conversation_id,
+        &params.device_id,
+    );
+    session.scope_snapshot = params.current_pdp_scope.clone();
+    *store.inner.borrow_mut() = Some(session);
+    let mut batch = tool_use_args(
+        "forget-call",
+        crate::ai_assistant::data_tools::MANAGE_MEMORIES,
+        r#"{"operation":"forget","memory_id":"memory-1","expected_revision":1}"#,
+    );
+    batch.tool_calls.push(ToolCall {
+        id: "ordinary-read".into(),
+        name: "sysinfo".into(),
+        arguments_json: "{}".into(),
+    });
+    let model = ScriptModel {
+        turns: RefCell::new([batch, answer("rejected together")].into()),
+        requests: Rc::new(RefCell::new(Vec::new())),
+    };
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    let tools = RecordingTools {
+        calls: calls.clone(),
+        reply: "unused".into(),
+    };
+    let registry = vec![read_tool("sysinfo", Capability::SystemInfo)];
+    let clock = || "2026-10-22T00:00:01Z".into();
+    let result = run_agent_turn(
+        &deps(&store, &model, &tools, &registry, &clock),
+        params,
+        ChatMessage::text("owner-input", ChatRole::User, "forget the saved preference"),
+        &mut NullTurnSink,
+    )
+    .await
+    .unwrap();
+    assert_eq!(result, LoopOutcome::Answered("rejected together".into()));
+    assert!(calls.borrow().is_empty());
+    let persisted = store.inner.borrow();
+    let persisted = persisted.as_ref().unwrap();
+    assert!(persisted.unclosed_tool_call_ids().is_empty());
+    for id in ["forget-call", "ordinary-read"] {
+        let result = persisted
+            .conversation
+            .iter()
+            .find(|message| message.tool_call_id.as_deref() == Some(id))
+            .unwrap();
+        assert_eq!(result.tool_ok, Some(false));
+        assert!(result.text.contains("Forget must be the only operation"));
+    }
+}

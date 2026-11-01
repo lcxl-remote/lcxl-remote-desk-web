@@ -180,7 +180,7 @@ export function useDeskClipboard({ clipboardChannel, hasControl, isActive }: Use
                             }
                             clearAssembler();
                         }
-                    } catch (assembleErr) {
+                    } catch {
                         showErr('Failed to assemble or decode remote image.');
                         clearAssembler();
                     }

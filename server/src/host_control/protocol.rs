@@ -343,6 +343,7 @@ pub enum HostControlMessage {
 }
 
 impl HostControlMessage {
+    #[cfg(test)]
     /// True if this variant is a command / request that should be cached for replay
     /// when a Tauri client connects after the message was originally produced.
     ///

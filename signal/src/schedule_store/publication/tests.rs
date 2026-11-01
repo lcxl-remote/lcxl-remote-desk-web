@@ -90,7 +90,28 @@ pub(crate) async fn fixture_on_for_device(
     contract_row::Model,
     PublishTask,
 ) {
+    fixture_for_requirement(db, device, 1, None).await
+}
+
+pub(crate) async fn fixture_for_requirement(
+    db: crate::config::connection::DatabaseConnection,
+    device: Option<&str>,
+    owner: i32,
+    source: Option<&desk_diagnose_core::session::PersistedAgentSession>,
+) -> (
+    ScheduleStore,
+    entity::Model,
+    contract_row::Model,
+    PublishTask,
+) {
     let schema = Schema::new(db.get_database_backend());
+    db.execute(
+        schema
+            .create_table_from_entity(crate::entity::agent_assistant_runtime::Entity)
+            .if_not_exists(),
+    )
+    .await
+    .unwrap();
     for mut table in [
         schema.create_table_from_entity(entity::Entity),
         schema.create_table_from_entity(contract_row::Entity),
@@ -118,12 +139,23 @@ pub(crate) async fn fixture_on_for_device(
     if let Some(device) = device {
         draft.target_device_id = device.into();
     }
-    let task = store.create_draft(1, &draft, now).await.unwrap();
+    let task = if let Some(source) = source {
+        let txn = crate::db::begin_write(&store.db, entity::Entity)
+            .await
+            .unwrap();
+        let task = ScheduleStore::create_draft_on(&txn, owner, &draft, now, Some(source))
+            .await
+            .unwrap();
+        txn.commit().await.unwrap();
+        task
+    } else {
+        store.create_draft(owner, &draft, now).await.unwrap()
+    };
     let contract = store
-        .save_contract(1, task.revision, &definition(&task))
+        .save_contract(owner, task.revision, &definition(&task))
         .await
         .unwrap();
-    let task = store.read(1, &task.schedule_id).await.unwrap();
+    let task = store.read(owner, &task.schedule_id).await.unwrap();
     let input = PublishTask {
         schedule_id: task.schedule_id.clone(),
         expected_revision: task.revision,

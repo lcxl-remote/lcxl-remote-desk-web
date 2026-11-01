@@ -14,7 +14,7 @@ export type MetricsQuery = GetModelMetricsOverviewQueryParams;
 
 const CLOSED_FILTERS = {
     surface: ['assistant', 'diagnose', 'terminal', 'fleet', 'support', 'safety', 'probe', 'platform'],
-    purpose: ['agent', 'approval', 'completion', 'context_compression', 'safety', 'probe', 'fleet_natural_language', 'support'],
+    purpose: ['agent', 'approval', 'completion', 'context_compression', 'conversation_title', 'safety', 'probe', 'fleet_natural_language', 'support'],
     origin: ['user', 'permission_resume', 'work_completion', 'subagent', 'goal_continuation', 'scheduled_task', 'system', 'unknown'],
 } as const;
 

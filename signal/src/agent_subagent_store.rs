@@ -19,11 +19,12 @@ pub(crate) use observation::{acknowledge_results_on, save_main_delegation_sessio
 pub use parent_wait::{ClaimedParentCompletion, ParentWaitResolution};
 pub(crate) use parent_wait::{goal_wait_ready_on, ready_wait_source_on};
 mod native_cancel;
+pub(crate) use native_cancel::cancel_native_actions_for_subject_on;
 mod retention;
 mod task_control;
 pub(crate) use retention::{
-    close_root_on, deleted_on, pinned_conversation_ids, pinned_goal_ids, purge_authority,
-    purge_groups, reclaim_condition, redact_deleted_content, tombstone_on,
+    close_root_for_subject_on, close_root_on, deleted_on, pinned_conversation_ids, pinned_goal_ids,
+    purge_authority, purge_groups, reclaim_condition, redact_deleted_content, tombstone_on,
 };
 mod main_stop;
 pub use main_stop::MainStopOutcome;
@@ -190,8 +191,9 @@ fn parent_on<'a, C: ConnectionTrait + crate::config::ConfigConnection + 'a>(
     root: &'a str,
     actor: &'a str,
     device: &'a str,
-) -> std::pin::Pin<Box<impl std::future::Future<Output = Result<PersistedAgentSession, DbErr>> + 'a>>
-{
+) -> std::pin::Pin<
+    Box<impl std::future::Future<Output = Result<Box<PersistedAgentSession>, DbErr>> + 'a>,
+> {
     Box::pin(parent_on_inner(db, root, actor, device))
 }
 
@@ -200,7 +202,7 @@ async fn parent_on_inner<C: ConnectionTrait + crate::config::ConfigConnection>(
     root: &str,
     actor: &str,
     device: &str,
-) -> Result<PersistedAgentSession, DbErr> {
+) -> Result<Box<PersistedAgentSession>, DbErr> {
     let row = session_row::Entity::find()
         .filter(session_row::Column::ConversationId.eq(root))
         .filter(session_row::Column::ActorId.eq(actor))
@@ -208,7 +210,8 @@ async fn parent_on_inner<C: ConnectionTrait + crate::config::ConfigConnection>(
         .one(db)
         .await?
         .ok_or_else(invalid)?;
-    let session = PersistedAgentSession::decode_json(&row.state_json).map_err(|_| invalid())?;
+    let session =
+        Box::new(PersistedAgentSession::decode_json(&row.state_json).map_err(|_| invalid())?);
     if !session.agent_role.is_main()
         || session.surface != AgentSessionSurface::AiAssistant
         || session.conversation_id != root

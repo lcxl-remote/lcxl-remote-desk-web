@@ -1,9 +1,7 @@
 //! Provider-neutral content-safety seam and request contracts.
 
 use async_trait::async_trait;
-use desk_agent_protocol::content_safety::{
-    ContentSafetyStage, ContentSafetySurface, ContentSafetyVerdict,
-};
+use desk_agent_protocol::content_safety::{ContentSafetySurface, ContentSafetyVerdict};
 use desk_agent_protocol::{AgentError, AgentErrorKind};
 use desk_utils::error::DeskErrorCode;
 use serde::{Deserialize, Serialize};
@@ -113,11 +111,6 @@ pub fn content_blocked_error() -> AgentError {
         safe_for_model: false,
         error_code: Some(DeskErrorCode::AI_CONTENT_BLOCKED.code()),
     }
-}
-
-/// Expected stage helper used by parser call sites.
-pub const fn input_stage() -> ContentSafetyStage {
-    ContentSafetyStage::Input
 }
 
 /// Closed runtime mode. OSS signal and an explicitly disabled manager pass

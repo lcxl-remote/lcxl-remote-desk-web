@@ -49,7 +49,6 @@ pub use cancel::SignalCommandCancelDispatcher;
 struct ApprovalPending {
     browser_connection_id: String,
     target_connection_id: String,
-    diagnose_request_id: String,
     requires_live_carrier: bool,
     tx: oneshot::Sender<ResolveExecData>,
 }
@@ -81,7 +80,6 @@ impl SignalAgentExecPending {
         request_id: String,
         browser_connection_id: String,
         target_connection_id: String,
-        diagnose_request_id: String,
         requires_live_carrier: bool,
     ) -> Option<oneshot::Receiver<ResolveExecData>> {
         let (tx, rx) = oneshot::channel();
@@ -94,7 +92,6 @@ impl SignalAgentExecPending {
             ApprovalPending {
                 browser_connection_id,
                 target_connection_id,
-                diagnose_request_id,
                 requires_live_carrier,
                 tx,
             },
@@ -172,30 +169,6 @@ impl SignalAgentExecPending {
         let ids: Vec<String> = pending
             .iter()
             .filter(|(_, entry)| entry.browser_connection_id == browser_connection_id)
-            .map(|(id, _)| id.clone())
-            .collect();
-        for id in &ids {
-            pending.remove(id);
-        }
-        ids.len()
-    }
-
-    /// Cancel only approvals owned by one diagnose request on one browser.
-    ///
-    /// A stale cancellation from an older diagnosis must not cancel a newer
-    /// turn's approval on the same signaling connection.
-    pub fn cancel_approvals_for_diagnosis(
-        &self,
-        browser_connection_id: &str,
-        diagnose_request_id: &str,
-    ) -> usize {
-        let mut pending = self.approvals.lock().expect("approval pending lock");
-        let ids: Vec<String> = pending
-            .iter()
-            .filter(|(_, entry)| {
-                entry.browser_connection_id == browser_connection_id
-                    && entry.diagnose_request_id == diagnose_request_id
-            })
             .map(|(id, _)| id.clone())
             .collect();
         for id in &ids {
@@ -416,6 +389,7 @@ async fn send_frame(target: &ConnectionState, frame: &SignalingModel) -> Result<
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_exec_frame(
     target: &ConnectionState,
     target_connection_id: &str,
@@ -492,7 +466,6 @@ pub struct SignalAgentTools {
     connections: Arc<SharedConnectionMap>,
     pending: Arc<SignalAgentExecPending>,
     target_connection_id: String,
-    diagnose_request_id: String,
     snapshot: EvidenceSnapshot,
     admission_policy: ExecAdmissionPolicy,
     max_risk: RiskLevel,
@@ -519,12 +492,12 @@ impl SignalAgentTools {
         self.observation.get(call)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         db: DatabaseConnection,
         connections: Arc<SharedConnectionMap>,
         pending: Arc<SignalAgentExecPending>,
         target_connection_id: String,
-        diagnose_request_id: String,
         snapshot: EvidenceSnapshot,
         admission_policy: ExecAdmissionPolicy,
         max_risk: RiskLevel,
@@ -536,7 +509,6 @@ impl SignalAgentTools {
             connections,
             pending,
             target_connection_id,
-            diagnose_request_id,
             snapshot,
             admission_policy,
             max_risk,
@@ -613,6 +585,7 @@ impl SignalAgentTools {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn dispatch(
         &self,
         actor_user_id: i32,
@@ -777,6 +750,7 @@ impl SignalAgentTools {
     /// execution-mode ceiling, verified shell availability, owner-policy
     /// classification, immutable plan sealing, daemon re-classification, durable
     /// task tracking and OutcomeUnknown handling.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn execute_preapproved(
         &self,
         mut validation_input: ExecInput,
@@ -1116,7 +1090,6 @@ impl ToolSeam for SignalAgentTools {
             exec_request_id.0.clone(),
             browser_connection_id.to_string(),
             self.target_connection_id.clone(),
-            self.diagnose_request_id.clone(),
             draft.io_mode.is_pty(),
         ) else {
             return Err(safe(
@@ -1469,13 +1442,7 @@ mod tests {
     async fn approval_is_bound_to_the_originating_browser_and_one_shot() {
         let pending = SignalAgentExecPending::new();
         let rx = pending
-            .register_approval(
-                "e1".into(),
-                "browser-a".into(),
-                "target-a".into(),
-                "diagnose-a".into(),
-                false,
-            )
+            .register_approval("e1".into(), "browser-a".into(), "target-a".into(), false)
             .unwrap();
         assert!(!pending.resolve("browser-b", &resolve("e1", ApprovalDecision::Approve)));
         assert!(pending.resolve("browser-a", &resolve("e1", ApprovalDecision::Approve)));
@@ -1487,59 +1454,16 @@ mod tests {
     async fn browser_disconnect_cancels_only_its_pending_approvals() {
         let pending = SignalAgentExecPending::new();
         let a = pending
-            .register_approval(
-                "a".into(),
-                "browser-a".into(),
-                "target-a".into(),
-                "diagnose-a".into(),
-                false,
-            )
+            .register_approval("a".into(), "browser-a".into(), "target-a".into(), false)
             .unwrap();
         let b = pending
-            .register_approval(
-                "b".into(),
-                "browser-b".into(),
-                "target-b".into(),
-                "diagnose-b".into(),
-                false,
-            )
+            .register_approval("b".into(), "browser-b".into(), "target-b".into(), false)
             .unwrap();
 
         assert_eq!(pending.cancel_approvals_for_browser("browser-a"), 1);
         assert!(a.await.is_err());
         assert!(pending.resolve("browser-b", &resolve("b", ApprovalDecision::Approve),));
         assert_eq!(b.await.unwrap().decision, ApprovalDecision::Approve);
-    }
-
-    #[tokio::test]
-    async fn diagnose_cancel_is_request_scoped_on_the_same_browser() {
-        let pending = SignalAgentExecPending::new();
-        let old = pending
-            .register_approval(
-                "old".into(),
-                "browser-a".into(),
-                "target-a".into(),
-                "diagnose-old".into(),
-                false,
-            )
-            .unwrap();
-        let current = pending
-            .register_approval(
-                "current".into(),
-                "browser-a".into(),
-                "target-a".into(),
-                "diagnose-current".into(),
-                false,
-            )
-            .unwrap();
-
-        assert_eq!(
-            pending.cancel_approvals_for_diagnosis("browser-a", "diagnose-old"),
-            1
-        );
-        assert!(old.await.is_err());
-        assert!(pending.resolve("browser-a", &resolve("current", ApprovalDecision::Approve)));
-        assert_eq!(current.await.unwrap().decision, ApprovalDecision::Approve);
     }
 
     #[tokio::test]

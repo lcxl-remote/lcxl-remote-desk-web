@@ -23,11 +23,11 @@ function failureMessage(output: string | null): string | null {
     }
 }
 
-export function AssistantToolGroup({ messages, tools, renderMessage, displayNameForTool }: {
+export function AssistantToolGroup({ messages, tools, renderMessage, displayNameForTool, focused = false }: {
     messages: AiAssistantMessage[];
     tools: AiAssistantToolActivity[];
     renderMessage: (message: AiAssistantMessage) => ReactNode;
-    displayNameForTool?: (name: string) => string;
+    displayNameForTool?: (name: string) => string; focused?: boolean;
 }) {
     const { t } = useTranslation();
     const callIds = [...new Set(messages.map(message => message.toolCallId).filter((id): id is string => Boolean(id)))];
@@ -38,7 +38,7 @@ export function AssistantToolGroup({ messages, tools, renderMessage, displayName
     const firstFailureMessage = failureMessage(failed[0]?.output ?? null);
     const succeeded = known.filter(tool => tool.status === 'ok' && !isConfirmedNotSent(tool.name, tool.output)).length;
     const returned = known.filter(tool => tool.status === 'returned' || (tool.status === 'ok' && isConfirmedNotSent(tool.name, tool.output))).length;
-    return <Disclosure className="w-full max-w-full rounded-md border bg-muted/30 px-3 py-2 sm:max-w-[90%]"
+    return <Disclosure defaultOpen={focused} className="w-full max-w-full rounded-md border bg-muted/30 px-3 py-2 sm:max-w-[90%]"
         summaryClassName="cursor-pointer text-sm" title={<span className="space-y-1">
             <span className="block font-medium">{t('pages.aiAssistant.workspace.toolGroup', { count: callIds.length })}</span>
             {(succeeded > 0 || returned > 0) && <span className="block text-xs text-muted-foreground">

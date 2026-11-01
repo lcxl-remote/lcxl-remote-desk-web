@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use desk_utils::error::{CustomDeskError, DeskErrorCode};
+use desk_utils::error::DeskErrorCode;
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
@@ -149,23 +149,6 @@ impl SignalingModel {
             to_connection_id,
             None,
             error_data,
-        )
-    }
-
-    pub fn custom_desk_error(
-        request_id: &str,
-        signaling_type: SignalingType,
-        from_connection_id: Option<String>,
-        to_connection_id: Option<String>,
-        error: CustomDeskError,
-    ) -> Result<Self, DeskSignalFacadeError> {
-        Self::error(
-            request_id,
-            signaling_type,
-            from_connection_id,
-            to_connection_id,
-            error.error_code,
-            &error.message,
         )
     }
 

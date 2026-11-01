@@ -1,0 +1,1 @@
+{"type":"string","enum":["available","evidence_only","partial","redacted","unavailable"],"x-readme-ref-name":"SourceAvailability"}

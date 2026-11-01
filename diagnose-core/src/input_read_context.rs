@@ -40,7 +40,7 @@ impl ReadContextSelection {
                 .iter()
                 .filter(|tool| {
                     tool.effect == ToolEffect::ReadOnly
-                        && scope.granted.contains(&tool.required_capability)
+                        && tool.has_device_capability(&scope.granted)
                 })
                 .map(|tool| tool.name().to_string())
                 .collect::<std::collections::BTreeSet<_>>()

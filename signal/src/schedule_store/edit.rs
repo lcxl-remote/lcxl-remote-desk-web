@@ -260,11 +260,38 @@ impl ScheduleStore {
             patch.next_run_at = Set(None);
         }
         if let Some(prompt) = prompt {
+            let prompt_actor = owner.to_string();
             patch.prompt = Set(prompt.into());
-            patch.task_revision = Set(row
+            patch.prompt_retention_json = Set(if row.kind == "fresh_task" {
+                Some(
+                    desk_diagnose_core::future::send_phase(|| {
+                        Self::owner_prompt_retention_on(
+                            &txn,
+                            &prompt_actor,
+                            &row.target_device_id,
+                            prompt,
+                        )
+                    })
+                    .await?,
+                )
+            } else {
+                None
+            });
+            let task_revision = row
                 .task_revision
                 .checked_add(1)
-                .ok_or(ScheduleStoreError::Invalid)?);
+                .ok_or(ScheduleStoreError::Invalid)?;
+            patch.task_revision = Set(task_revision);
+            if let Some(mut consent) = Self::retrieval_consent(&row)? {
+                // Editing a requirement keeps its original narrower consent.
+                // It cannot pick up scopes enabled after task creation.
+                consent.task_revision = task_revision
+                    .try_into()
+                    .map_err(|_| ScheduleStoreError::Invalid)?;
+                patch.retrieval_consent_json = Set(Some(
+                    consent.encode().map_err(|_| ScheduleStoreError::Invalid)?,
+                ));
+            }
             let failures: desk_diagnose_core::schedule::lifecycle::FailureState =
                 serde_json::from_str(&row.failure_state_json)
                     .map_err(|_| ScheduleStoreError::Invalid)?;

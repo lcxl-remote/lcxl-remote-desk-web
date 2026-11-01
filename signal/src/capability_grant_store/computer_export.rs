@@ -153,10 +153,11 @@ impl SignalCapabilityGrantStore {
             .ok_or_else(invalid)?;
         let txn = self.db.begin().await?;
         let result = async {
-            let (_, work, payload) = original_on(&txn, &pending.execution_id).await?;
-            let origin = payload.command_origin.ok_or_else(invalid)?;
+            let computer_original = original_on(&txn, &pending.execution_id).await?;
+            let (_, work, payload) = computer_original.as_ref();
+            let origin = payload.command_origin.as_ref().ok_or_else(invalid)?;
             origin.validate().map_err(|_| invalid())?;
-            let export = payload.command_export.ok_or_else(invalid)?;
+            let export = payload.command_export.clone().ok_or_else(invalid)?;
             export.validate()?;
             if let Some(completion) = &origin.command_completion {
                 completion
@@ -181,7 +182,7 @@ impl SignalCapabilityGrantStore {
             if grant.status != GRANT_STATUS_ACTIVE {
                 return Err(invalid());
             }
-            let receipt = payload.command_receipt.ok_or_else(invalid)?;
+            let receipt = payload.command_receipt.as_ref().ok_or_else(invalid)?;
             let output = desk_diagnose_core::seam::ToolRunOutput {
                 format: crate::agent_exec_store::output_format(&task),
                 content: task.result_text.clone().ok_or_else(invalid)?,
@@ -190,7 +191,7 @@ impl SignalCapabilityGrantStore {
             };
             receipt
                 .validate_for(
-                    &origin,
+                    origin,
                     desk_diagnose_core::session::ActionIdentity::agent_exec(
                         task.id,
                         &task.exec_request_id,
@@ -258,8 +259,9 @@ impl SignalCapabilityGrantStore {
         }
         let txn = self.db.begin().await?;
         let result = async {
-            let (outbox, work, payload) = original_on(&txn, &pending.execution_id).await?;
-            let binding = bound(&outbox, &work, &payload)?;
+            let computer_original = original_on(&txn, &pending.execution_id).await?;
+            let (outbox, work, payload) = computer_original.as_ref();
+            let binding = bound(outbox, work, payload)?;
             if work.id != pending.work_id
                 || work.conversation_id != session.conversation_id
                 || work.actor_id != session.actor_id
@@ -287,8 +289,9 @@ impl SignalCapabilityGrantStore {
             {
                 return Err(invalid());
             }
-            let original = super::computer_completion::terminal_result(&outbox, work, &payload)?
-                .ok_or_else(invalid)?;
+            let original =
+                super::computer_completion::terminal_result(outbox, work.clone(), payload)?
+                    .ok_or_else(invalid)?;
             super::computer_delivery::validate_destination(session, &original)?;
             if !session
                 .conversation

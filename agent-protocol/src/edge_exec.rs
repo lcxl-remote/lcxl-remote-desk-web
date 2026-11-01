@@ -176,6 +176,7 @@ impl EdgeExecDisposition {
         }
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     /// Whether this disposition *proves* the change was not executed. Only the
     /// pre-dispatch variants do; `Executed` ran and `ExecutionStateUnknown` is, by
     /// definition, uncertain.

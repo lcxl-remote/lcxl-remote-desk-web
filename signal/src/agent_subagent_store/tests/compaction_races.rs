@@ -180,6 +180,7 @@ async fn adjustment_between_child_checkpoint_plan_and_save_rejects_old_summary_a
                 expected_control_revision: binding.control_revision,
                 action:
                     desk_agent_protocol::ai_assistant::subagent::SubAgentControlAction::Adjust {
+                        client_timezone: "UTC".into(),
                         message: "Investigate the revised symptom".into(),
                     },
             },

@@ -1,3 +1,4 @@
+import { sameJsonValue } from './json-value';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
 import { SelectItem } from '@/components/ui/select';
@@ -49,7 +50,7 @@ export function ContractEditor({ client, review, connected, onSaved, onClose }: 
             || !ceiling.resources.length || !ceiling.operations.length
             || automatic.resources.some(value => !ceiling.resources.includes(value))
             || automatic.operations.some(value => !ceiling.operations.includes(value))
-            || automatic.export_destinations.some(value => !ceiling.export_destinations.some(target => JSON.stringify(target) === JSON.stringify(value)))
+            || automatic.export_destinations.some(value => !ceiling.export_destinations.some(target => sameJsonValue(target, value)))
             || (Object.keys(automatic.limits) as (keyof typeof automatic.limits)[]).some(key => automatic.limits[key] > ceiling.limits[key])
             || ceiling.limits.max_calls > draft.budget.max_calls_per_run;
     });
@@ -96,11 +97,11 @@ export function ContractEditor({ client, review, connected, onSaved, onClose }: 
                         {review.contract!.permissions.find(original => original.rule_id === rule.rule_id)![kind].export_destinations.map(destination => {
                             const identity = JSON.stringify(destination);
                             return <label className="flex items-center gap-2 break-all" key={identity}>
-                                <Checkbox  disabled={rule.input.kind === 'generated_message'} checked={rule[kind].export_destinations.some(value => JSON.stringify(value) === identity)} onCheckedChange={nextChecked => {
+                                <Checkbox  disabled={rule.input.kind === 'generated_message'} checked={rule[kind].export_destinations.some(value => sameJsonValue(value, destination))} onCheckedChange={nextChecked => {
                                     const checked = (nextChecked === true);
                                     setDraft(current => ({ ...current, permissions: current.permissions.map(item => item.rule_id !== rule.rule_id ? item : {
                                         ...item, [kind]: { ...item[kind], export_destinations: checked ? [...item[kind].export_destinations, destination]
-                                            : item[kind].export_destinations.filter(value => JSON.stringify(value) !== identity) },
+                                            : item[kind].export_destinations.filter(value => !sameJsonValue(value, destination)) },
                                     }) }));
                                 }} />{Object.values(destination).join(' · ')}
                             </label>;

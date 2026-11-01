@@ -134,6 +134,7 @@ impl RehearsalSourceGraph {
     }
 }
 
+#[cfg(test)]
 pub fn resolve_rehearsal_model_sources(
     session: &PersistedAgentSession,
     original_input_id: &str,
@@ -343,6 +344,7 @@ pub fn build_rehearsal_source_graph(
 }
 
 impl RehearsalSourceGraph {
+    #[cfg(test)]
     /// Resolve a specific authenticated artifact receipt using the same verified
     /// model, read and compression evidence as the generated message proposal.
     pub fn resolve_attachment(

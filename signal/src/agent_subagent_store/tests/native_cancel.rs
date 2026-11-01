@@ -50,7 +50,7 @@ fn assert_stop_only(before: &command::Model, after: &command::Model) {
 
 #[tokio::test]
 async fn source_pause_keeps_native_work_and_cancel_intent_rolls_back_with_source_control() {
-    let db = database().await;
+    let db = source_isolation_database().await;
     seed_parent(&db).await;
     let task = seed_task(&db, "source", "goal-source").await;
     let sibling = seed_task(&db, "sibling", "goal-sibling").await;

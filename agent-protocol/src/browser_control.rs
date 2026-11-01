@@ -21,7 +21,7 @@ use crate::{
 pub const BROWSER_CONTROL_SCHEMA_VERSION: u16 = 1;
 pub const MAX_BROWSER_ID_BYTES: usize = 256;
 pub const MAX_BROWSER_VERSION_BYTES: usize = 64;
-pub const MAX_BROWSER_REASON_BYTES: usize = 512;
+
 pub const MAX_BROWSER_ELEMENTS: usize = 512;
 pub const MAX_ACCESSIBLE_NAME_BYTES: usize = 1024;
 pub const MAX_BROWSER_URL_BYTES: usize = 4096;

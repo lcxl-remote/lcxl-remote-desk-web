@@ -11,11 +11,11 @@ pub async fn list_assistant_attachments(
 ) -> Result<HttpResponse, DeskSignalError> {
     let db = crate::db::get_db();
     let actor = SINGLE_ACCOUNT_USER_ID.to_string();
-    let rows = match store::list(&db, &query.session, &actor, query.before.as_deref()).await {
+    let rows = match store::list(db, &query.session, &actor, query.before.as_deref()).await {
         Ok(rows) => rows,
         Err(_) => return Ok(not_accessible()),
     };
-    let used_bytes = match store::usage(&db, &query.session, &actor).await {
+    let used_bytes = match store::usage(db, &query.session, &actor).await {
         Ok(used) => used,
         Err(_) => return Ok(not_accessible()),
     };
@@ -42,7 +42,7 @@ pub async fn get_assistant_attachment(
     let Some(id) = query.attachment.as_deref() else {
         return Ok(not_accessible());
     };
-    match store::read(&db, &query.session, &actor, id, true).await {
+    match store::read(db, &query.session, &actor, id, true).await {
         Ok(part) => {
             let extension = match part.metadata.kind {
                 desk_diagnose_core::conversation_attachment::ContentKind::Json => "json",
@@ -73,7 +73,7 @@ pub async fn delete_assistant_attachments(
 ) -> Result<HttpResponse, DeskSignalError> {
     let db = crate::db::get_db();
     let actor = SINGLE_ACCOUNT_USER_ID.to_string();
-    match store::delete(&db, &body.session, &actor, &body.attachment_ids).await {
+    match store::delete(db, &body.session, &actor, &body.attachment_ids).await {
         Ok(()) => Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(true))),
         Err(_) => Ok(not_accessible()),
     }
@@ -87,7 +87,7 @@ pub async fn read_assistant_attachment(
 ) -> Result<HttpResponse, DeskSignalError> {
     let db = crate::db::get_db();
     let actor = SINGLE_ACCOUNT_USER_ID.to_string();
-    let part = match store::read(&db, &body.session, &actor, &body.attachment_id, false).await {
+    let part = match store::read(db, &body.session, &actor, &body.attachment_id, false).await {
         Ok(part) => part,
         Err(_) => return Ok(not_accessible()),
     };
@@ -111,7 +111,7 @@ pub async fn read_assistant_attachment(
         }
     };
     // Invalid queries never count as successful content access.
-    if store::read(&db, &body.session, &actor, &body.attachment_id, true)
+    if store::read(db, &body.session, &actor, &body.attachment_id, true)
         .await
         .is_err()
     {

@@ -86,4 +86,6 @@ describe('AssistantGoalPanel', () => {
         }
         expect(goalProgressMessage({ state: 'waiting_approval', checkpointSummary: 'Waiting for request-id' })).toBeNull();
     });
+
+
 });

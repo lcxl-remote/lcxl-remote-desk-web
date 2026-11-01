@@ -1,9 +1,6 @@
 //! Internal output catalog. Input ToolSpec remains model-protocol compatible;
 //! this table documents the business payload and delivery possibilities.
 
-use crate::chat::{ChatMessage, ChatRole};
-use serde_json::{Value, json};
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeliveryShape {
     Inline,
@@ -69,6 +66,12 @@ catalog!(
     ("describe_tools", "ToolDescriptionList", Inline),
     ("read_conversation_attachment", "ReadPage", Inline),
     ("load_conversation_history", "HistoryPage", Inline),
+    ("search_memories", "MemorySearchResult", Inline),
+    ("read_memory_history", "MemoryHistoryResult", Inline),
+    ("manage_memories", "MemoryWriteResult", Inline),
+    ("read_memory_source", "AssistantSourceResolution", Inline),
+    ("search_conversations", "ConversationSearchResult", Inline),
+    ("read_conversation", "ConversationReadResult", Inline),
     (
         "wait_for_task",
         "TaskWaitReceipt + original typed result",
@@ -256,22 +259,22 @@ catalog!(
     ),
     (
         "inspect_office_selection",
-        "ReadContext.OfficeInspect",
+        "ReadContext.OfficeDocumentInspect",
         InlineOrAttachment
     ),
     (
         "inspect_live_spreadsheet",
-        "ReadContext.LiveDocumentInspect",
+        "ReadContext.SpreadsheetLiveInspect",
         InlineOrAttachment
     ),
     (
         "inspect_live_document",
-        "ReadContext.LiveDocumentInspect",
+        "ReadContext.DocumentLiveInspect",
         InlineOrAttachment
     ),
     (
         "inspect_live_presentation",
-        "ReadContext.LiveDocumentInspect",
+        "ReadContext.PresentationLiveInspect",
         InlineOrAttachment
     ),
     (
@@ -291,17 +294,17 @@ catalog!(
     ),
     (
         "inspect_numbers_file",
-        "ReadContext.LiveDocumentInspect",
+        "ReadContext.SpreadsheetLiveInspect",
         InlineOrAttachment
     ),
     (
         "inspect_pages_file",
-        "ReadContext.LiveDocumentInspect",
+        "ReadContext.DocumentLiveInspect",
         InlineOrAttachment
     ),
     (
         "inspect_keynote_file",
-        "ReadContext.LiveDocumentInspect",
+        "ReadContext.PresentationLiveInspect",
         InlineOrAttachment
     ),
     (
@@ -321,17 +324,17 @@ catalog!(
     ),
     (
         "inspect_excel_cell",
-        "ReadContext.LiveDocumentInspect",
+        "ReadContext.SpreadsheetLiveInspect",
         InlineOrAttachment
     ),
     (
         "inspect_word_file",
-        "ReadContext.LiveDocumentInspect",
+        "ReadContext.DocumentLiveInspect",
         InlineOrAttachment
     ),
     (
         "inspect_powerpoint_file",
-        "ReadContext.LiveDocumentInspect",
+        "ReadContext.PresentationLiveInspect",
         InlineOrAttachment
     ),
     (
@@ -387,58 +390,9 @@ pub fn for_tool(name: &str) -> Option<&'static OutputContract> {
     ALL.iter().find(|entry| entry.tool == name)
 }
 
-/// This is a model-only hint; durable typed results remain unchanged. A
-/// returned tool message or valid receipt never proves the user's goal.
-pub(crate) fn project_status(message: &mut ChatMessage) {
-    if message.role != ChatRole::Tool {
-        return;
-    }
-    let Some(contract) = message
-        .data_envelope
-        .as_ref()
-        .and_then(|envelope| for_tool(&envelope.provenance.source_tool_name))
-    else {
-        return;
-    };
-    // These entire receipts are copied verbatim into a later exact-send input.
-    // Adding an unknown member would invalidate that typed handoff.
-    if matches!(
-        contract.tool,
-        "prepare_outlook_draft" | "prepare_gmail_draft" | "prepare_slack_message"
-    ) {
-        return;
-    }
-    let Ok(mut payload) = serde_json::from_str::<Value>(&message.text) else {
-        return;
-    };
-    let Some(object) = payload.as_object_mut() else {
-        return;
-    };
-    if object.contains_key("result_summary") {
-        return;
-    }
-    let result_status = object
-        .get("result")
-        .and_then(Value::as_str)
-        .or_else(|| object.get("status").and_then(Value::as_str))
-        .map(str::to_owned);
-    let business_effect = object
-        .get("business_effect")
-        .and_then(Value::as_str)
-        .map(str::to_owned);
-    object.insert("result_summary".into(), json!({
-        "output_type": contract.business_type,
-        "contract_version": contract.contract_version,
-        "tool_call_status": match message.tool_ok { Some(true) => "returned_ok", Some(false) => "returned_error", None => "returned_unclassified" },
-        "result_status": result_status,
-        "business_effect": business_effect,
-    }));
-    message.text = payload.to_string();
-}
-
 pub fn markdown() -> String {
     let mut document = String::from(
-        "# AI Assistant output contracts\n\nGenerated from `diagnose-core/src/output_contracts.rs`. Catalog version describes this mapping, not a payload schema field. All errors may instead be returned as safe text; an externalized attachment must be read before interpreting its business payload.\n\n`read_subagent_result` returns `SubAgentModelResult`: the full answer, frozen acceptance criteria, task identity and state revision, and nonempty runtime facts or references. It omits UI metadata and empty optional fields. `include_task=true` adds the original task instructions; owner views keep the full stored result.\n\n| Tool | Business output type | Catalog version | Possible delivery |\n|---|---|---:|---|\n",
+        "# AI Assistant output contracts\n\nGenerated from `diagnose-core/src/output_contracts.rs`. Catalog version describes this mapping, not a payload schema field. All errors may instead be returned as safe text; an externalized attachment must be read before interpreting its business payload.\n\n`read_subagent_result` returns `SubAgentModelResult`: the full answer, frozen acceptance criteria, task identity, and nonempty runtime facts or references. It omits UI metadata and empty optional fields. `include_task=true` adds the original task instructions; owner views keep the full stored result.\n\nModel results retain business text, outcomes, times, coverage and usable references. Internal source locators, verification hashes, idempotency keys and control generations stay in the original stored result. History uses conversation aliases such as `cv1`; source IDs remain readable, and memory update/forget keeps the memory revision. Live document references and JSON attachment pages use the same view as inline results. A successful tool return does not by itself prove that an action completed or was verified.\n\n| Tool | Business output type | Catalog version | Possible delivery |\n|---|---|---:|---|\n",
     );
     for contract in ALL {
         document.push_str(&format!(
@@ -452,9 +406,10 @@ pub fn markdown() -> String {
     document
 }
 
+#[cfg(test)]
 pub fn markdown_zh() -> String {
     let mut document = String::from(
-        "# AI 助手出参契约目录\n\n由 `diagnose-core/src/output_contracts.rs` 生成。目录版本是映射版本，并不表示每个业务对象都有 `schema_version` 字段。错误可能以安全文本返回；结果外置时须先读取附件，再判断业务内容。\n\n`read_subagent_result` 返回 `SubAgentModelResult`：完整答复、冻结完成标准、任务身份和状态版本，以及非空运行事实或引用；省略 UI 元数据和空可选字段。`include_task=true` 补回冻结的原任务说明；用户界面仍保留完整存储结果。\n\n| 工具 | 业务出参类型 | 目录版本 | 可能的投递形态 |\n|---|---|---:|---|\n",
+        "# AI 助手出参契约目录\n\n由 `diagnose-core/src/output_contracts.rs` 生成。目录版本是映射版本，并不表示每个业务对象都有 `schema_version` 字段。错误可能以安全文本返回；结果外置时须先读取附件，再判断业务内容。\n\n`read_subagent_result` 返回 `SubAgentModelResult`：完整答复、冻结完成标准、任务身份，以及非空运行事实或引用；省略 UI 元数据和空可选字段。`include_task=true` 补回冻结的原任务说明；用户界面仍保留完整存储结果。\n\n模型结果保留业务正文、结果、时间、覆盖范围和可用引用。内部来源定位、校验摘要、幂等键和控制代次保存在原始结果中。历史会话使用 `cv1` 等别名；来源 ID 可继续读取，更新和遗忘记忆仍保留记忆版本。实时文档引用、JSON 附件分页与内联结果使用相同视图。工具正常返回本身不代表动作已完成或验证成功。\n\n| 工具 | 业务出参类型 | 目录版本 | 可能的投递形态 |\n|---|---|---:|---|\n",
     );
     for contract in ALL {
         document.push_str(&format!(
@@ -501,11 +456,17 @@ mod tests {
             "describe_tools",
             "read_conversation_attachment",
             "load_conversation_history",
+            "search_memories",
+            "read_memory_history",
+            "manage_memories",
+            "read_memory_source",
+            "search_conversations",
+            "read_conversation",
             "wait_for_task",
         ] {
             assert!(for_tool(builtin).is_some());
         }
-        assert_eq!(ALL.len(), 82);
+        assert_eq!(ALL.len(), 88);
     }
 
     #[test]

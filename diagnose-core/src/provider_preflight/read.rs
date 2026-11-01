@@ -352,12 +352,44 @@ impl ReadCallPreflight {
 mod tests;
 
 /// Bind an observed result to the original tool and exact input without retaining content.
-pub fn output_digest(call: &crate::chat::ToolCall, output: &crate::seam::ToolRunOutput) -> String {
+pub fn output_digest(
+    call: &crate::chat::ToolCall,
+    output: &crate::seam::ToolRunOutput,
+) -> Result<String, AgentError> {
+    let canonical = canonical_tool_permission_input_json(
+        &call.name,
+        serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?,
+    )
+    .map_err(|_| unavailable())?;
+    Ok(bound_output_digest(
+        "read_result",
+        &call.name,
+        &canonical,
+        output,
+    ))
+}
+
+/// Failed calls retain their raw input, including malformed JSON, without
+/// creating a successful read receipt or discarding the original input error.
+pub fn error_output_digest(
+    call: &crate::chat::ToolCall,
+    output: &crate::seam::ToolRunOutput,
+) -> String {
+    bound_output_digest("read_error", &call.name, &call.arguments_json, output)
+}
+
+fn bound_output_digest(
+    domain: &str,
+    tool_name: &str,
+    arguments: &str,
+    output: &crate::seam::ToolRunOutput,
+) -> String {
     use sha2::{Digest, Sha256};
     let mut hash = Sha256::new();
     for value in [
-        &call.name,
-        &call.arguments_json,
+        domain,
+        tool_name,
+        arguments,
         &output.content,
         output.image_data_url.as_deref().unwrap_or(""),
     ] {

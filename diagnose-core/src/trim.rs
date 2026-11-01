@@ -90,6 +90,7 @@ pub fn model_context_cost(msg: &ChatMessage) -> usize {
     )
 }
 
+#[cfg(test)]
 /// Return the trailing window of `messages` that fits `max_bytes`, never starting
 /// with an orphaned tool result.
 ///

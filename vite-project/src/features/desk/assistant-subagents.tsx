@@ -83,7 +83,7 @@ export function AssistantSubagents({ agents, connected, canDecide, interactive, 
     const { t } = useTranslation();
     const [localAdjustment, setLocalAdjustment] = useState('');
     const adjustment = externalAdjustment ?? localAdjustment;
-    const validAdjustment = adjustment.trim().length > 0 && new TextEncoder().encode(adjustment.trim()).length <= 16_384;
+    const validAdjustment = adjustment.trim().length > 0;
     const sendDisabled = !validAdjustment || !canDecide || !connected || agents.updating;
     const setAdjustment = onAdjustmentChange ?? setLocalAdjustment;
     const [localPanel, setLocalPanel] = useState<AssistantSubagentPanel | null>(null);
@@ -209,7 +209,7 @@ export function AssistantSubagents({ agents, connected, canDecide, interactive, 
             <AssistantSubagentApprovalNotice agents={agents} />
             {!subagentIsTerminal(task) && <AssistantComposerInput sendDisabled={sendDisabled}
                 aria-label={t('pages.aiAssistant.subagents.adjustMessage')} placeholder={t('pages.aiAssistant.subagents.adjustMessage')}
-                value={adjustment} maxLength={16_384} disabled={!canDecide || !connected || agents.updating}
+                value={adjustment} disabled={!canDecide || !connected || agents.updating}
                 onChange={event => setAdjustment(event.target.value)} className="min-h-16 max-h-40 resize-y" />}
             <div className="flex flex-wrap items-center justify-between gap-2">
                 <div className="flex min-w-0 flex-wrap items-center gap-1">

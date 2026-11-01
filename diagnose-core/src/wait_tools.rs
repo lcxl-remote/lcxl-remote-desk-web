@@ -8,7 +8,7 @@
 //! [`ToolSeam::wait_for_task`](crate::seam::ToolSeam::wait_for_task), so a control
 //! end can never steer it at another session's work.
 
-use desk_agent_protocol::{AgentError, AgentErrorKind, Capability};
+use desk_agent_protocol::{AgentError, AgentErrorKind};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -42,10 +42,7 @@ fn bad_arguments(detail: impl std::fmt::Display) -> AgentError {
     }
 }
 
-/// The wait tool registry (one tool). Its `required_capability` is unused — the
-/// registry exposes [`ToolEffect::WaitTask`] purely on the presence of an in-flight
-/// task (see [`is_exposed`](crate::registry::is_exposed)) — but the field is
-/// required, so a harmless read capability stands in.
+/// Waiting is internal session state and requires no device capability.
 pub fn wait_tool_registry() -> Vec<RegisteredTool> {
     vec![RegisteredTool {
         spec: ToolSpec {
@@ -72,8 +69,7 @@ pub fn wait_tool_registry() -> Vec<RegisteredTool> {
                 "additionalProperties": false
             }),
         },
-        // Unused for WaitTask exposure; a benign placeholder.
-        required_capability: Capability::SystemInfo,
+        required_device_capability: None,
         effect: ToolEffect::WaitTask,
     }]
 }

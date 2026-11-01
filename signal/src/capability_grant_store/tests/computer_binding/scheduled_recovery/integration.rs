@@ -13,6 +13,60 @@ use desk_diagnose_core::{
 
 mod commands;
 
+/// Accept the original requirement through the native input ledger before
+/// claiming its owner turn. Fixtures cannot acquire assistant data by changing
+/// an already accepted source's counters or by copying its scope labels.
+pub(in crate::capability_grant_store::tests::computer_binding) async fn owner_session(
+    db: &DatabaseConnection,
+    user: ChatMessage,
+) -> PersistedAgentSession {
+    use crate::agent_run_event_store::{AppendUserFollowupParams, SignalAgentRunEventStore};
+    use desk_diagnose_core::seam::ClaimTurnParams;
+    use desk_diagnose_core::session::TriggerOrigin;
+    let policy_revision = desk_diagnose_core::assistant_policy::PERSONAL_ASSISTANT_POLICY_REVISION;
+    let scope = desk_agent_protocol::AgentScope {
+        granted: vec![],
+        mode: desk_agent_protocol::ExecutionMode::SuggestOnly,
+        expires_at: None,
+        policy_name: None,
+    };
+    let now = Utc::now().to_rfc3339();
+    SignalAgentRunEventStore::new(db.clone())
+        .append_user_followup(&AppendUserFollowupParams {
+            client_timezone: "UTC".into(),
+            temporary_conversation: None,
+            event_id: "original-owner-input".into(),
+            run_id: "run-1".into(),
+            client_conversation_id: None,
+            actor_id: "1".into(),
+            device_id: "device-1".into(),
+            surface: AgentSessionSurface::AiAssistant,
+            policy_revision,
+            current_scope: scope.clone(),
+            read_context: None,
+            message: user,
+            created_at: now.clone(),
+        })
+        .await
+        .unwrap();
+    crate::agent_session_store::SignalAgentSessionStore::new(db.clone())
+        .with_client_metadata(None, AgentSessionSurface::AiAssistant)
+        .claim_turn(ClaimTurnParams {
+            conversation_id: "run-1".into(),
+            actor_id: "1".into(),
+            device_id: "device-1".into(),
+            policy_revision,
+            current_pdp_scope: scope,
+            turn_id: "turn-1".into(),
+            request_id: None,
+            connection_id: None,
+            trigger_origin: TriggerOrigin::User,
+            now,
+        })
+        .await
+        .unwrap()
+}
+
 pub(in crate::capability_grant_store::tests::computer_binding) async fn claim_original(
     db: &DatabaseConnection,
     session: &mut PersistedAgentSession,

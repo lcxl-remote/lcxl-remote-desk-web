@@ -25,7 +25,7 @@ fn live_input() -> AppendUserFollowupParams {
 #[tokio::test]
 async fn live_input_without_a_durable_selection_is_rejected_at_intake() {
     let store = setup("sqlite::memory:").await;
-    assert!(store.append_user_followup(live_input()).await.is_err());
+    assert!(store.append_user_followup(&live_input()).await.is_err());
     assert!(
         agent_session::Entity::find()
             .one(&store.db)
@@ -47,7 +47,7 @@ async fn original_live_target_receipt_is_immutable_even_after_expiry() {
     let store = setup("sqlite::memory:").await;
     select_live_document(&store).await;
     let params = live_input();
-    let first = store.append_user_followup(params.clone()).await.unwrap();
+    let first = store.append_user_followup(&params).await.unwrap();
     let row = agent_run_event::Entity::find()
         .filter(agent_run_event::Column::Kind.eq(AgentRunEventKind::UserFollowup.as_str()))
         .one(&store.db)
@@ -67,7 +67,7 @@ async fn original_live_target_receipt_is_immutable_even_after_expiry() {
         .unwrap();
     let mut retry = params.clone();
     retry.created_at = (Utc::now() + chrono::Duration::minutes(5)).to_rfc3339();
-    let repeated = store.append_user_followup(retry).await.unwrap();
+    let repeated = store.append_user_followup(&retry).await.unwrap();
     assert_eq!(repeated.event_seq, first.event_seq);
     assert!(!repeated.newly_appended);
     for variant in 0..4 {
@@ -79,7 +79,7 @@ async fn original_live_target_receipt_is_immutable_even_after_expiry() {
             2 => target.readiness_expires_at_unix_ms += 1,
             _ => target.object_ref.snapshot_id = "other-snapshot".into(),
         }
-        assert!(store.append_user_followup(changed).await.is_err());
+        assert!(store.append_user_followup(&changed).await.is_err());
     }
     let deadline =
         params.read_context.as_ref().unwrap().live_targets[0].readiness_expires_at_unix_ms;
@@ -134,7 +134,7 @@ async fn expired_live_input_rolls_back_and_corrupt_versions_cannot_replay() {
     let before = state(&store).await;
     let mut expired = params.clone();
     expired.read_context.as_mut().unwrap().live_targets[0].readiness_expires_at_unix_ms = 1;
-    assert!(store.append_user_followup(expired).await.is_err());
+    assert!(store.append_user_followup(&expired).await.is_err());
     assert_eq!(state(&store).await, before);
     assert_eq!(
         agent_run_event::Entity::find()
@@ -143,7 +143,7 @@ async fn expired_live_input_rolls_back_and_corrupt_versions_cannot_replay() {
             .unwrap(),
         1
     );
-    let receipt = store.append_user_followup(params.clone()).await.unwrap();
+    let receipt = store.append_user_followup(&params).await.unwrap();
     agent_run_event::Entity::update_many()
         .col_expr(
             agent_run_event::Column::PayloadSchemaVersion,
@@ -153,7 +153,7 @@ async fn expired_live_input_rolls_back_and_corrupt_versions_cannot_replay() {
         .exec(&store.db)
         .await
         .unwrap();
-    assert!(store.append_user_followup(params.clone()).await.is_err());
+    assert!(store.append_user_followup(&params).await.is_err());
     assert!(
         validate(&store, &params, receipt.input_revision)
             .await
@@ -169,7 +169,7 @@ async fn live_target_survives_sqlite_reopen_and_new_input_supersedes_it() {
     let store = setup(&url).await;
     select_live_document(&store).await;
     let params = live_input();
-    let receipt = store.append_user_followup(params.clone()).await.unwrap();
+    let receipt = store.append_user_followup(&params).await.unwrap();
     store.db.close().await.unwrap();
     let reopened = setup(&url).await;
     assert_eq!(
@@ -189,7 +189,7 @@ async fn live_target_survives_sqlite_reopen_and_new_input_supersedes_it() {
     .unwrap();
     next.read_context.as_mut().unwrap().tool_names.clear();
     next.read_context.as_mut().unwrap().live_targets.clear();
-    reopened.append_user_followup(next).await.unwrap();
+    reopened.append_user_followup(&next).await.unwrap();
     assert!(
         validate(&reopened, &params, receipt.input_revision)
             .await

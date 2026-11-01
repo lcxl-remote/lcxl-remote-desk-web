@@ -478,6 +478,14 @@ pub(crate) async fn decide_on(
     if let Some(goal) = goal.as_mut() {
         goal.apply_budget_policy(&budget_policy)
             .map_err(|_| invalid())?;
+        if session.assistant_data.is_some() {
+            desk_diagnose_core::ai_assistant::data_access::bind_opened_task(
+                &mut session,
+                &goal.goal_id,
+                goal.deadline_unix_ms,
+            )
+            .map_err(|_| invalid())?;
+        }
     }
     session.last_event_seq = session.last_event_seq.checked_add(1).ok_or_else(invalid)?;
     let mut decision = GoalOpenRequestEvent::new(

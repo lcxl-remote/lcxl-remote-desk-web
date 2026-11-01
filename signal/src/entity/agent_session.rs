@@ -11,6 +11,11 @@ pub struct Model {
     pub conversation_id: String,
     pub actor_id: String,
     pub device_id: String,
+    /// Indexed execution format; unclassified records remain manageable.
+    #[sea_orm(indexed)]
+    pub conversation_schema_version: Option<i32>,
+    /// Optional presentation metadata, independent of the execution snapshot.
+    pub title: Option<String>,
     pub state_json: String,
     pub version: i64,
     pub lease_token: i64,

@@ -2,7 +2,9 @@
 
 由 `diagnose-core/src/output_contracts.rs` 生成。目录版本是映射版本，并不表示每个业务对象都有 `schema_version` 字段。错误可能以安全文本返回；结果外置时须先读取附件，再判断业务内容。
 
-`read_subagent_result` 返回 `SubAgentModelResult`：完整答复、冻结完成标准、任务身份和状态版本，以及非空运行事实或引用；省略 UI 元数据和空可选字段。`include_task=true` 补回冻结的原任务说明；用户界面仍保留完整存储结果。
+`read_subagent_result` 返回 `SubAgentModelResult`：完整答复、冻结完成标准、任务身份，以及非空运行事实或引用；省略 UI 元数据和空可选字段。`include_task=true` 补回冻结的原任务说明；用户界面仍保留完整存储结果。
+
+模型结果保留业务正文、结果、时间、覆盖范围和可用引用。内部来源定位、校验摘要、幂等键和控制代次保存在原始结果中。历史会话使用 `cv1` 等别名；来源 ID 可继续读取，更新和遗忘记忆仍保留记忆版本。实时文档引用、JSON 附件分页与内联结果使用相同视图。工具正常返回本身不代表动作已完成或验证成功。
 
 | 工具 | 业务出参类型 | 目录版本 | 可能的投递形态 |
 |---|---|---:|---|
@@ -24,6 +26,12 @@
 | `describe_tools` | `ToolDescriptionList` | 1 | inline |
 | `read_conversation_attachment` | `ReadPage` | 1 | inline |
 | `load_conversation_history` | `HistoryPage` | 1 | inline |
+| `search_memories` | `MemorySearchResult` | 1 | inline |
+| `read_memory_history` | `MemoryHistoryResult` | 1 | inline |
+| `manage_memories` | `MemoryWriteResult` | 1 | inline |
+| `read_memory_source` | `AssistantSourceResolution` | 1 | inline |
+| `search_conversations` | `ConversationSearchResult` | 1 | inline |
+| `read_conversation` | `ConversationReadResult` | 1 | inline |
 | `wait_for_task` | `TaskWaitReceipt + original typed result` | 1 | inline | externalized_attachment |
 | `read_system_info` | `ReadContext.SystemInfo` | 1 | inline | externalized_attachment |
 | `read_process_list` | `ReadContext.ProcessList` | 1 | inline | externalized_attachment |
@@ -61,22 +69,22 @@
 | `create_word_report` | `ComputerActionCompleted<CreatedFileArtifactOutput>` | 1 | inline | background_completion | externalized_attachment |
 | `preview_document` | `ReadContext.DocumentPreview` | 1 | inline | externalized_attachment |
 | `convert_document` | `ComputerActionCompleted<DocumentArtifactOutput>` | 1 | inline | background_completion | externalized_attachment |
-| `inspect_office_selection` | `ReadContext.OfficeInspect` | 1 | inline | externalized_attachment |
-| `inspect_live_spreadsheet` | `ReadContext.LiveDocumentInspect` | 1 | inline | externalized_attachment |
-| `inspect_live_document` | `ReadContext.LiveDocumentInspect` | 1 | inline | externalized_attachment |
-| `inspect_live_presentation` | `ReadContext.LiveDocumentInspect` | 1 | inline | externalized_attachment |
+| `inspect_office_selection` | `ReadContext.OfficeDocumentInspect` | 1 | inline | externalized_attachment |
+| `inspect_live_spreadsheet` | `ReadContext.SpreadsheetLiveInspect` | 1 | inline | externalized_attachment |
+| `inspect_live_document` | `ReadContext.DocumentLiveInspect` | 1 | inline | externalized_attachment |
+| `inspect_live_presentation` | `ReadContext.PresentationLiveInspect` | 1 | inline | externalized_attachment |
 | `patch_live_spreadsheet_cell` | `ComputerActionCompleted` | 1 | inline | background_completion | externalized_attachment |
 | `replace_live_document_body` | `ComputerActionCompleted` | 1 | inline | background_completion | externalized_attachment |
 | `patch_live_presentation_slide` | `ComputerActionCompleted` | 1 | inline | background_completion | externalized_attachment |
-| `inspect_numbers_file` | `ReadContext.LiveDocumentInspect` | 1 | inline | externalized_attachment |
-| `inspect_pages_file` | `ReadContext.LiveDocumentInspect` | 1 | inline | externalized_attachment |
-| `inspect_keynote_file` | `ReadContext.LiveDocumentInspect` | 1 | inline | externalized_attachment |
+| `inspect_numbers_file` | `ReadContext.SpreadsheetLiveInspect` | 1 | inline | externalized_attachment |
+| `inspect_pages_file` | `ReadContext.DocumentLiveInspect` | 1 | inline | externalized_attachment |
+| `inspect_keynote_file` | `ReadContext.PresentationLiveInspect` | 1 | inline | externalized_attachment |
 | `patch_numbers_copy` | `ComputerActionCompleted<BatchDocumentArtifact>` | 1 | inline | background_completion | externalized_attachment |
 | `replace_pages_copy_body` | `ComputerActionCompleted<BatchDocumentArtifact>` | 1 | inline | background_completion | externalized_attachment |
 | `patch_keynote_copy` | `ComputerActionCompleted<BatchDocumentArtifact>` | 1 | inline | background_completion | externalized_attachment |
-| `inspect_excel_cell` | `ReadContext.LiveDocumentInspect` | 1 | inline | externalized_attachment |
-| `inspect_word_file` | `ReadContext.LiveDocumentInspect` | 1 | inline | externalized_attachment |
-| `inspect_powerpoint_file` | `ReadContext.LiveDocumentInspect` | 1 | inline | externalized_attachment |
+| `inspect_excel_cell` | `ReadContext.SpreadsheetLiveInspect` | 1 | inline | externalized_attachment |
+| `inspect_word_file` | `ReadContext.DocumentLiveInspect` | 1 | inline | externalized_attachment |
+| `inspect_powerpoint_file` | `ReadContext.PresentationLiveInspect` | 1 | inline | externalized_attachment |
 | `patch_excel_copy` | `ComputerActionCompleted<BatchDocumentArtifact>` | 1 | inline | background_completion | externalized_attachment |
 | `replace_word_copy_body` | `ComputerActionCompleted<BatchDocumentArtifact>` | 1 | inline | background_completion | externalized_attachment |
 | `patch_powerpoint_copy` | `ComputerActionCompleted<BatchDocumentArtifact>` | 1 | inline | background_completion | externalized_attachment |

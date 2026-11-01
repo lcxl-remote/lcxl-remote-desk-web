@@ -10,7 +10,7 @@ import {
     sentSignalingOfType,
     StubPeerConnection,
     type SignalingGlobals,
-} from './file-transfer-test-harness';
+} from './__tests__/harness';
 
 // ICE giving up used to be a `console.warn` and nothing else, so a connection
 // that had definitively failed still sat there until the page's own timeout
@@ -20,7 +20,7 @@ import {
 // evidence that distinguishes it from a stalled gathering: candidates were
 // gathered and complete, and connectivity still could not be established. One
 // comprehensive `renderHook` test per file: see the note in
-// `file-transfer-test-harness.ts`.
+// `__tests__/harness.ts`.
 
 const LIST_FILES = 10005;
 const FILES_LISTED = 10015;

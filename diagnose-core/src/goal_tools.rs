@@ -1,6 +1,6 @@
 //! Built-in planning control for one claimed AI Assistant goal segment.
 
-use desk_agent_protocol::{AgentError, AgentErrorKind, Capability};
+use desk_agent_protocol::{AgentError, AgentErrorKind};
 use serde_json::json;
 
 use crate::chat::{ToolCall, ToolSpec};
@@ -74,7 +74,7 @@ pub fn open_registry() -> Vec<RegisteredTool> {
                 "additionalProperties": false
             }),
         },
-        required_capability: Capability::SystemInfo,
+        required_device_capability: None,
         effect: ToolEffect::GoalOpenPlanning,
     }]
 }
@@ -120,7 +120,7 @@ pub fn registry() -> Vec<RegisteredTool> {
                 "additionalProperties": false
             }),
         },
-        required_capability: Capability::SystemInfo,
+        required_device_capability: None,
         effect: ToolEffect::GoalControl,
     }]
 }

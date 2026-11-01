@@ -25,13 +25,16 @@ use crate::{
     usage_retention::UsageRetentionConfig,
 };
 
-pub const SECTION_NAMES: [&str; 13] = [
+pub const SECTION_NAMES: [&str; 16] = [
     "ai_gateway",
     "approval_gateway",
     "approval_trace",
     "approval_runtime",
     "web_search",
     "context_management",
+    "assistant_data_policy",
+    "assistant_data_settings",
+    "assistant_user_instructions",
     "terminal_completion",
     "subagent_policy",
     "goal_budget_policy",
@@ -57,6 +60,12 @@ pub struct GlobalConfig {
     pub approval_runtime: desk_signal_facade::model::approval_runtime::ApprovalRuntimeSettings,
     pub web_search: SearchConfig,
     pub context_management: PlatformContextPolicy,
+    pub assistant_data_policy:
+        desk_agent_protocol::ai_assistant::user_instructions::AssistantDataPolicy,
+    pub assistant_data_settings:
+        desk_agent_protocol::ai_assistant::user_instructions::AssistantDataSettings,
+    pub assistant_user_instructions:
+        desk_agent_protocol::ai_assistant::user_instructions::UserInstructions,
     pub terminal_completion:
         desk_diagnose_core::terminal_completion_policy::TerminalCompletionPolicy,
     pub subagent_policy: SubAgentPolicy,
@@ -77,6 +86,12 @@ impl Default for GlobalConfig {
             approval_runtime: Default::default(),
             web_search: SearchConfig::default(),
             context_management: PlatformContextPolicy::default(),
+            assistant_data_policy:
+                desk_agent_protocol::ai_assistant::user_instructions::AssistantDataPolicy::default(),
+            assistant_data_settings:
+                desk_agent_protocol::ai_assistant::user_instructions::AssistantDataSettings::default(
+                ),
+            assistant_user_instructions: Default::default(),
             terminal_completion: Default::default(),
             subagent_policy: desk_diagnose_core::subagent::policy::initial(),
             goal_budget_policy: desk_diagnose_core::goal_budget::initial(),
@@ -113,6 +128,39 @@ impl GlobalConfig {
         self.context_management
             .validate()
             .map_err(|_| invalid("context_management"))?;
+        desk_diagnose_core::ai_assistant::settings::validate(
+            &self.assistant_data_policy,
+            &self.assistant_data_settings,
+            &self.assistant_user_instructions,
+        )
+        .map_err(|_| {
+            let report =
+                desk_diagnose_core::ai_assistant::policy::assess(&self.assistant_data_policy);
+            let fields = report
+                .issues
+                .iter()
+                .filter(|issue| {
+                    issue.level
+                        == desk_agent_protocol::ai_assistant::policy::PolicyIssueLevel::Error
+                })
+                .flat_map(|issue| issue.fields.iter().map(String::as_str))
+                .collect::<Vec<_>>();
+            if fields.is_empty() {
+                invalid("assistant_data")
+            } else {
+                invalid(&fields.join(", "))
+            }
+        })?;
+        if let Some(issue) =
+            desk_diagnose_core::ai_assistant::policy::response_issue(&self.assistant_data_policy)
+        {
+            return Err(DbErr::Custom(format!(
+                "invalid OSS configuration field {}: {}",
+                issue.fields.join(", "),
+                issue.message
+            )));
+        }
+
         self.terminal_completion
             .validate()
             .map_err(|_| invalid("terminal_completion"))?;
@@ -268,6 +316,9 @@ impl ConfigContext {
         if initial.metadata.instance.is_empty() {
             return Err(invalid("oss_config_metadata.instance"));
         }
+        crate::assistant_data_config::log_warnings(
+            &desk_diagnose_core::ai_assistant::policy::warnings(&initial.assistant_data_policy),
+        );
         Ok(Arc::new(Self {
             state: Arc::new(RwLock::new(initial)),
             persistence,

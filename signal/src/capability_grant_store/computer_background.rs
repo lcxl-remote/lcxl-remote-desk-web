@@ -34,8 +34,8 @@ pub(super) fn bound(
     outbox: &agent_capability_dispatch_outbox::Model,
     work: &agent_action_item::Model,
     payload: &CapabilityDispatchPayload,
-) -> Result<ComputerBinding, DbErr> {
-    let binding = serde_json::from_str(
+) -> Result<Box<ComputerBinding>, DbErr> {
+    let binding: Box<ComputerBinding> = serde_json::from_str(
         outbox
             .computer_binding_json
             .as_deref()
@@ -118,16 +118,17 @@ pub(crate) async fn task_on<C: sea_orm::ConnectionTrait + crate::config::ConfigC
     let Some(json) = &outbox.computer_background_json else {
         return Ok(None);
     };
-    let (outbox, original, payload) = original_on(txn, &outbox.dispatch_id).await?;
-    if original != *work {
+    let computer_original = original_on(txn, &outbox.dispatch_id).await?;
+    let (outbox, original, payload) = computer_original.as_ref();
+    if original != work {
         return Err(invalid());
     }
-    let binding = bound(&outbox, work, &payload)?;
+    let binding = bound(outbox, work, payload)?;
     let execution = binding.execution.as_ref().ok_or_else(invalid)?;
-    let accepted = acceptance(&outbox, &binding)?.ok_or_else(invalid)?;
+    let accepted = acceptance(outbox, &binding)?.ok_or_else(invalid)?;
     let promotion: Promotion = serde_json::from_str(json).map_err(|_| invalid())?;
     super::computer_cancel::validate_intent(&promotion.cancel, work, &promotion)?;
-    let (foreground, hard) = deadlines(&outbox, &binding)?;
+    let (foreground, hard) = deadlines(outbox, &binding)?;
     if promotion.schema_version != 1
         || promotion.binding_sha256 != accepted.binding_sha256
         || promotion.acceptance_sha256
@@ -172,7 +173,7 @@ pub(crate) async fn task_on<C: sea_orm::ConnectionTrait + crate::config::ConfigC
         cancel_request_id: None,
         result_envelope_ids: vec![],
     };
-    if let Some(result) = terminal_result(&outbox, original, &payload)? {
+    if let Some(result) = terminal_result(outbox, original.clone(), payload)? {
         record.state = match result.outcome {
             CapabilityDispatchOutcome::Succeeded => BackgroundTaskState::Succeeded,
             CapabilityDispatchOutcome::Failed
@@ -238,22 +239,23 @@ impl SignalCapabilityGrantStore {
     ) -> Result<bool, DbErr> {
         let txn = crate::db::begin_write(&self.db, crate::entity::agent_session::Entity).await?;
         let result = async {
-            let (outbox, work, payload) = original_on(&txn, generation).await?;
+            let computer_original = original_on(&txn, generation).await?;
+            let (outbox, work, payload) = computer_original.as_ref();
             if work.conversation_id != run
                 || work.actor_id != actor
                 || work.target_device_id != device
             {
                 return Err(invalid());
             }
-            let binding = bound(&outbox, &work, &payload)?;
+            let binding = bound(outbox, work, payload)?;
             if binding.execution.is_none() {
                 return Ok(false);
             }
-            let Some(accepted) = acceptance(&outbox, &binding)? else {
+            let Some(accepted) = acceptance(outbox, &binding)? else {
                 return Ok(false);
             };
             let now = u64::try_from(Utc::now().timestamp_millis()).map_err(|_| invalid())?;
-            let (foreground, hard) = deadlines(&outbox, &binding)?;
+            let (foreground, hard) = deadlines(outbox, &binding)?;
             if outbox.state != DISPATCH_OUTBOX_SENDING
                 || work.status != CAPABILITY_WORK_DISPATCHING
                 || work.result_json.is_some()
@@ -265,7 +267,7 @@ impl SignalCapabilityGrantStore {
                 return Ok(false);
             }
             if outbox.computer_background_json.is_some() {
-                task_on(&txn, &work, now).await?.ok_or_else(invalid)?;
+                task_on(&txn, work, now).await?.ok_or_else(invalid)?;
             } else {
                 let promotion = Promotion {
                     schema_version: 1,
@@ -315,9 +317,10 @@ impl SignalCapabilityGrantStore {
     ) -> Result<std::time::Duration, DbErr> {
         let txn = self.db.begin().await?;
         let result = async {
-            let (outbox, work, payload) = original_on(&txn, generation).await?;
-            let binding = bound(&outbox, &work, &payload)?;
-            let deadline = deadlines(&outbox, &binding)?.0;
+            let computer_original = original_on(&txn, generation).await?;
+            let (outbox, work, payload) = computer_original.as_ref();
+            let binding = bound(outbox, work, payload)?;
+            let deadline = deadlines(outbox, &binding)?.0;
             let now = u64::try_from(Utc::now().timestamp_millis()).map_err(|_| invalid())?;
             Ok(std::time::Duration::from_millis(
                 deadline.saturating_sub(now),

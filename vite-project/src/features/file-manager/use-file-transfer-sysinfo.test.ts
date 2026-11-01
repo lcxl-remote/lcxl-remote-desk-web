@@ -11,7 +11,7 @@ import {
     StubPeerConnection,
     StubWebSocket,
     type SignalingGlobals,
-} from './file-transfer-test-harness';
+} from './__tests__/harness';
 import { deskErrorCodeEnum } from '@/services/types';
 
 // `querySystemInfo` asks the *host* what it is. The browser cannot read this
@@ -21,7 +21,7 @@ import { deskErrorCodeEnum } from '@/services/types';
 // `GetSystemInfo` (10003) and its `SystemInfoRetrieved` response are matched by request id —
 // so that is what this asserts. It rides the signaling session alone, which is
 // why the handshake here stops before any data channel. One comprehensive
-// `renderHook` test per file: see the note in `file-transfer-test-harness.ts`.
+// `renderHook` test per file: see the note in `__tests__/harness.ts`.
 
 const GET_SYSTEM_INFO = 10003;
 const SYSTEM_INFO_RETRIEVED = 10004;

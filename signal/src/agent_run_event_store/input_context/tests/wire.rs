@@ -43,14 +43,14 @@ async fn real_object_read_transport_keeps_original_refs_bounds_and_lineage_and_r
         let mut params = input("message", vec![object.clone()]);
         params.current_scope.granted = vec![Capability::FileMetadataRead];
         params.read_context.as_mut().unwrap().tool_names = vec!["inspect_files".into()];
-        let receipt = store.append_user_followup(params.clone()).await.unwrap();
+        let receipt = store.append_user_followup(&params).await.unwrap();
         let later = attach(&store, "not-selected", ObjectKind::File).await;
         let turn = "original-turn";
         sessions(&store)
             .with_expected_input_revision(receipt.input_revision)
             .claim_turn(ClaimTurnParams {
                 conversation_id: "run".into(),
-                actor_id: "7".into(),
+                actor_id: "1".into(),
                 device_id: "device".into(),
                 policy_revision: params.policy_revision,
                 current_pdp_scope: params.current_scope.clone(),
@@ -184,7 +184,7 @@ async fn real_object_read_transport_keeps_original_refs_bounds_and_lineage_and_r
             pending,
             host,
             "device".into(),
-            "7".into(),
+            "1".into(),
             None,
             None,
             None,
@@ -245,7 +245,7 @@ async fn real_object_read_transport_keeps_original_refs_bounds_and_lineage_and_r
             .issue(&CapabilityGrant {
                 schema_version: CAPABILITY_GRANT_SCHEMA_VERSION,
                 grant_id: "owner-approved-metadata-read".into(),
-                actor_id: "7".into(),
+                actor_id: "1".into(),
                 run_id: "run".into(),
                 input_revision: receipt.input_revision,
                 surface: desk_agent_protocol::capability_provider::ProductSurface::OssPersonalOwner,
@@ -324,7 +324,7 @@ async fn real_object_read_transport_keeps_original_refs_bounds_and_lineage_and_r
             );
             if supersede {
                 store
-                    .append_user_followup(input("new-requirement", vec![]))
+                    .append_user_followup(&input("new-requirement", vec![]))
                     .await
                     .unwrap();
             }

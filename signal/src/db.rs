@@ -157,6 +157,25 @@ fn validate_signal_db_location_platform(_path: &Path) -> Result<(), DbErr> {
     Ok(())
 }
 
+/// One pooled connection serializes this instance's SQLite writers before a
+/// read snapshot is opened. It also covers SeaORM autocommit/RETURNING writes.
+fn sqlite_connection_options(url: String) -> ConnectOptions {
+    let mut options = ConnectOptions::new(url);
+    options
+        .max_connections(1)
+        .min_connections(1)
+        .connect_timeout(Duration::from_secs(8))
+        .sqlx_logging(false);
+    options.map_sqlx_sqlite_opts(|options| {
+        options
+            .journal_mode(SqliteJournalMode::Wal)
+            .synchronous(SqliteSynchronous::Full)
+            .foreign_keys(true)
+            .busy_timeout(Duration::from_secs(5))
+    });
+    options
+}
+
 /// Initialize database connection and return it.
 pub async fn init_db(
     config_dir: &str,
@@ -170,20 +189,7 @@ pub async fn init_db(
             let db_url = path_to_sqlite_url(&db_path);
             log::info!("Connecting to SQLite database at {}", db_url);
 
-            let mut opt = ConnectOptions::new(db_url);
-            opt.max_connections(100)
-                .min_connections(5)
-                .connect_timeout(Duration::from_secs(8))
-                .idle_timeout(Duration::from_secs(8))
-                .max_lifetime(Duration::from_secs(8))
-                .sqlx_logging(false); // Optional: enable/disable query logging
-            opt.map_sqlx_sqlite_opts(|options| {
-                options
-                    .journal_mode(SqliteJournalMode::Wal)
-                    .synchronous(SqliteSynchronous::Full)
-                    .foreign_keys(true)
-                    .busy_timeout(Duration::from_secs(5))
-            });
+            let opt = sqlite_connection_options(db_url);
 
             let db = DatabaseConnection::new(Database::connect(opt).await?, configuration);
             verify_sqlite_durability(&db).await?;
@@ -217,7 +223,7 @@ pub async fn init_db(
         .await
 }
 
-const SIGNAL_SCHEMA_VERSION: i32 = 29;
+const SIGNAL_SCHEMA_VERSION: i32 = 50;
 const SCHEMA_LOCK_TABLE: &str = "signal_schema_init_lock";
 
 #[derive(Debug, FromQueryResult)]
@@ -276,6 +282,97 @@ async fn create_latest_schema<C: ConnectionTrait + crate::config::ConfigConnecti
     create_entity(db, &schema, approval_review_secret::Entity).await?;
     create_entity(db, &schema, host_remote_access_state::Entity).await?;
     create_entity(db, &schema, agent_session::Entity).await?;
+    create_entity(db, &schema, crate::entity::agent_assistant_origin::Entity).await?;
+    create_entity(db, &schema, crate::entity::agent_assistant_history::Entity).await?;
+    create_entity(
+        db,
+        &schema,
+        crate::entity::agent_assistant_history_conversation::Entity,
+    )
+    .await?;
+    create_entity(
+        db,
+        &schema,
+        crate::entity::agent_assistant_history_coverage::Entity,
+    )
+    .await?;
+    create_entity(db, &schema, crate::entity::agent_memory::Entity).await?;
+    create_entity(db, &schema, crate::entity::agent_memory_source::Entity).await?;
+    create_entity(db, &schema, crate::entity::agent_memory_revision::Entity).await?;
+    create_entity(db, &schema, crate::entity::agent_memory_use::Entity).await?;
+
+    create_entity(db, &schema, crate::entity::agent_memory_commit::Entity).await?;
+
+    create_entity(db, &schema, crate::entity::agent_memory_tombstone::Entity).await?;
+    create_entity(
+        db,
+        &schema,
+        crate::entity::agent_assistant_search_document::Entity,
+    )
+    .await?;
+    create_entity(
+        db,
+        &schema,
+        crate::entity::agent_assistant_search_term::Entity,
+    )
+    .await?;
+    create_entity(
+        db,
+        &schema,
+        crate::entity::agent_assistant_source_use::Entity,
+    )
+    .await?;
+    create_entity(db, &schema, crate::entity::agent_assistant_citation::Entity).await?;
+    create_entity(db, &schema, crate::entity::agent_assistant_quota::Entity).await?;
+    create_entity(db, &schema, crate::entity::agent_assistant_runtime::Entity).await?;
+    create_entity(
+        db,
+        &schema,
+        crate::entity::agent_assistant_retrieval_query::Entity,
+    )
+    .await?;
+    create_entity(
+        db,
+        &schema,
+        crate::entity::agent_assistant_read_projection::Entity,
+    )
+    .await?;
+    create_entity(
+        db,
+        &schema,
+        crate::entity::agent_assistant_data_authorization::Entity,
+    )
+    .await?;
+    create_entity(
+        db,
+        &schema,
+        crate::entity::agent_assistant_source_suppression::Entity,
+    )
+    .await?;
+    create_entity(
+        db,
+        &schema,
+        crate::entity::agent_assistant_model_output::Entity,
+    )
+    .await?;
+    create_entity(
+        db,
+        &schema,
+        crate::entity::agent_assistant_model_parent::Entity,
+    )
+    .await?;
+    create_entity(
+        db,
+        &schema,
+        crate::entity::agent_assistant_control_receipt::Entity,
+    )
+    .await?;
+    create_entity(
+        db,
+        &schema,
+        crate::entity::agent_assistant_device_binding::Entity,
+    )
+    .await?;
     create_entity(db, &schema, crate::entity::agent_delegation_group::Entity).await?;
     create_entity(db, &schema, crate::entity::agent_subagent_run::Entity).await?;
     create_entity(db, &schema, crate::entity::agent_subagent_inbox::Entity).await?;
@@ -314,6 +411,8 @@ async fn create_latest_schema<C: ConnectionTrait + crate::config::ConfigConnecti
     create_entity(db, &schema, model_egress_receipt::Entity).await?;
     create_entity(db, &schema, agent_run_event::Entity).await?;
     create_entity(db, &schema, crate::entity::agent_permission_resume::Entity).await?;
+    // Cross-table assistant indexes require the native receipt table above.
+    create_assistant_data_indexes(db).await?;
 
     for index in [
         Index::create()
@@ -602,6 +701,30 @@ async fn validate_latest_schema<C: ConnectionTrait + crate::config::ConfigConnec
     check_entity!(approval_review_secret);
     check_entity!(host_remote_access_state);
     check_entity!(agent_session);
+    check_entity!(agent_assistant_origin);
+    check_entity!(agent_assistant_history);
+    check_entity!(agent_assistant_history_conversation);
+    check_entity!(agent_assistant_history_coverage);
+    check_entity!(agent_memory);
+    check_entity!(agent_memory_source);
+    check_entity!(agent_memory_revision);
+    check_entity!(agent_memory_use);
+    check_entity!(agent_memory_commit);
+    check_entity!(agent_memory_tombstone);
+    check_entity!(agent_assistant_search_document);
+    check_entity!(agent_assistant_search_term);
+    check_entity!(agent_assistant_source_use);
+    check_entity!(agent_assistant_citation);
+    check_entity!(agent_assistant_quota);
+    check_entity!(agent_assistant_runtime);
+    check_entity!(agent_assistant_retrieval_query);
+    check_entity!(agent_assistant_read_projection);
+    check_entity!(agent_assistant_data_authorization);
+    check_entity!(agent_assistant_source_suppression);
+    check_entity!(agent_assistant_model_output);
+    check_entity!(agent_assistant_model_parent);
+    check_entity!(agent_assistant_control_receipt);
+    check_entity!(agent_assistant_device_binding);
     check_entity!(agent_delegation_group);
     check_entity!(agent_subagent_run);
     check_entity!(agent_subagent_inbox);
@@ -921,21 +1044,25 @@ mod tests {
 
     #[tokio::test]
     async fn latest_missing_acceptance_column_fails_without_silent_repair() {
-        let db = crate::config::test_support::Database::connect("sqlite::memory:")
-            .await
-            .unwrap();
-        initialize_schema(&db).await.unwrap();
-        db.execute_unprepared(
-            "ALTER TABLE agent_capability_dispatch_outbox DROP COLUMN computer_acceptance_json",
-        )
-        .await
-        .unwrap();
-        let error = initialize_schema(&db).await.unwrap_err().to_string();
-        assert!(error.contains("computer_acceptance_json"), "{error}");
-        assert_eq!(
-            query_user_version(&db).await.unwrap(),
-            SIGNAL_SCHEMA_VERSION
-        );
+        {
+            let (table, column) = (
+                "agent_capability_dispatch_outbox",
+                "computer_acceptance_json",
+            );
+            let db = crate::config::test_support::Database::connect("sqlite::memory:")
+                .await
+                .unwrap();
+            initialize_schema(&db).await.unwrap();
+            db.execute_unprepared(&format!("ALTER TABLE {table} DROP COLUMN {column}"))
+                .await
+                .unwrap();
+            let error = initialize_schema(&db).await.unwrap_err().to_string();
+            assert!(error.contains(column), "{error}");
+            assert_eq!(
+                query_user_version(&db).await.unwrap(),
+                SIGNAL_SCHEMA_VERSION
+            );
+        }
     }
 
     #[tokio::test]
@@ -1053,4 +1180,54 @@ pub(crate) async fn ensure_lifecycle_tables(db: &DatabaseConnection) {
     ] {
         db.execute(statement.if_not_exists()).await.unwrap();
     }
+}
+
+async fn create_assistant_data_indexes<C: ConnectionTrait>(db: &C) -> Result<(), DbErr> {
+    for ddl in [
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_assistant_history_native ON agent_assistant_history (actor_id, conversation_id, native_id, kind, fragment_index)",
+        "CREATE INDEX IF NOT EXISTS idx_assistant_history_scope_time ON agent_assistant_history (actor_id, device_ref, recorded_at_ms, source_id)",
+        "CREATE INDEX IF NOT EXISTS idx_assistant_history_actor_time ON agent_assistant_history (actor_id, recorded_at_ms, source_id)",
+        "CREATE INDEX IF NOT EXISTS idx_assistant_history_native_time ON agent_assistant_history (actor_id, (COALESCE(native_action_at_ms, native_action_from_ms)), source_id)",
+        "CREATE INDEX IF NOT EXISTS idx_assistant_history_window ON agent_assistant_history (actor_id, conversation_id, admitted_generation, fragment_index, source_id)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_assistant_origin_native ON agent_assistant_origin (actor_id, conversation_id, native_id, kind)",
+        "CREATE INDEX IF NOT EXISTS idx_assistant_origin_input ON agent_assistant_origin (actor_id, accepted_input_seq, id)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_assistant_coverage_slot ON agent_assistant_history_coverage (actor_id, conversation_id, day_bucket, reason)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_assistant_memory_revision ON agent_memory_revision (memory_id, revision)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_assistant_memory_write ON agent_memory_revision (actor_id, producer_call_id, tool_call_id)",
+        "CREATE INDEX IF NOT EXISTS idx_assistant_memory_sources ON agent_memory_source (actor_id, memory_id, memory_revision, source_id)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_assistant_memory_use ON agent_memory_use (actor_id, authorization_id, memory_id, memory_revision, purpose)",
+        "CREATE INDEX IF NOT EXISTS idx_assistant_memory_commit_gc ON agent_memory_commit (actor_id, expires_at_ms, id)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_assistant_memory_forget ON agent_memory_tombstone (actor_id, operation_id, memory_id)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_assistant_search_source ON agent_assistant_search_document (source_kind, source_id, source_revision, fragment_index)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_assistant_term_document ON agent_assistant_search_term (document_id, term)",
+        "CREATE INDEX IF NOT EXISTS idx_assistant_term_lookup ON agent_assistant_search_term (actor_id, term, document_id)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_assistant_source_use ON agent_assistant_source_use (actor_id, authorization_id, source_id, source_revision, purpose)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_assistant_citation ON agent_assistant_citation (actor_id, answer_message_id, answer_revision)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_assistant_control_operation ON agent_assistant_control_receipt (actor_id, operation_id)",
+        "CREATE INDEX IF NOT EXISTS idx_assistant_retrieval_expiry ON agent_assistant_retrieval_query (actor_id, expires_at_ms, id)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_assistant_projection_call ON agent_assistant_read_projection (actor_id, root_conversation_id, retrieval_episode_id, logical_call_id)",
+        "CREATE INDEX IF NOT EXISTS idx_assistant_projection_envelope ON agent_assistant_read_projection (actor_id, source_envelope_id)",
+        "CREATE INDEX IF NOT EXISTS idx_assistant_projection_unused ON agent_assistant_read_projection (actor_id, unused_until_ms, id) WHERE first_consumed_at_ms IS NULL",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_assistant_data_authorization ON agent_assistant_data_authorization (actor_id, physical_call_id, projection_id, purpose)",
+        "CREATE INDEX IF NOT EXISTS idx_assistant_authorization_projection ON agent_assistant_data_authorization (actor_id, projection_id, id)",
+        "CREATE INDEX IF NOT EXISTS idx_assistant_authorization_call ON agent_assistant_data_authorization (actor_id, physical_call_id, id)",
+        "CREATE INDEX IF NOT EXISTS idx_assistant_authorization_consumer ON agent_assistant_data_authorization (actor_id, consumer_conversation_id, id)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_assistant_source_suppression ON agent_assistant_source_suppression (actor_id, source_id, source_revision, origin_id, content_sha256)",
+        "CREATE INDEX IF NOT EXISTS idx_assistant_suppression_cutoff ON agent_assistant_source_suppression (actor_id, cutoff_input_seq, id)",
+        "CREATE INDEX IF NOT EXISTS idx_assistant_native_model_output ON model_egress_receipt (context_conversation_id, model_output_envelope_id, model_output_digest_sha256)",
+        "CREATE INDEX IF NOT EXISTS idx_assistant_archived_output ON agent_assistant_model_output (conversation_id, output_envelope_id, output_digest_sha256)",
+        "CREATE INDEX IF NOT EXISTS idx_assistant_archived_output_actor ON agent_assistant_model_output (actor_id, completed_at_ms, id)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_assistant_model_parent ON agent_assistant_model_parent (actor_id, consumer_call_id, parent_call_id)",
+        "CREATE INDEX IF NOT EXISTS idx_assistant_parent_pin ON agent_assistant_model_parent (actor_id, parent_call_id)",
+        "CREATE INDEX IF NOT EXISTS idx_assistant_output_gc_due ON agent_assistant_quota (output_gc_next_scan_at_ms, id)",
+        "CREATE INDEX IF NOT EXISTS idx_assistant_memory_producer_pin ON agent_memory_revision (actor_id, producer_call_id, status)",
+        "CREATE INDEX IF NOT EXISTS idx_assistant_source_use_source ON agent_assistant_source_use (actor_id, source_id, source_revision, id)",
+        "CREATE INDEX IF NOT EXISTS idx_assistant_source_use_call ON agent_assistant_source_use (actor_id, physical_call_id, id)",
+        "CREATE INDEX IF NOT EXISTS idx_assistant_memory_use_memory ON agent_memory_use (actor_id, memory_id, memory_revision, id)",
+        "CREATE INDEX IF NOT EXISTS idx_assistant_memory_use_call ON agent_memory_use (actor_id, physical_call_id, id)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_assistant_source_audience ON agent_assistant_device_binding (instance_id, audience)",
+    ] {
+        db.execute_unprepared(ddl).await?;
+    }
+    Ok(())
 }

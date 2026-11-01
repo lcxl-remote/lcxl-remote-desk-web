@@ -51,6 +51,7 @@ impl Drop for CancelOnDrop {
 }
 
 impl PortalInputSender {
+    #[cfg(test)]
     /// The authority callback rechecks the caller's lease and session generation
     /// immediately before dispatch. It must be bounded and must not block.
     /// Single events cannot leave a key or button held; use a balanced batch for

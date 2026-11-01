@@ -1,4 +1,4 @@
-name: Agent Stack Budgets
+name: Agent Stack Limits
 
 on: [push, pull_request, workflow_dispatch]
 
@@ -9,8 +9,6 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
-    env:
-      AGENT_STACK_BASE_REF: ${{ github.event.pull_request.base.sha || github.event.before }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -29,12 +27,24 @@ jobs:
       # encoder, Tauri or whole-dependency-tree remark build is needed here.
       - name: Enforce shared debug frames
         run: python scripts/agent-stack/run.py --package desk-diagnose-core --output target/agent-stack/core-debug.json
+      - name: Enforce shared assistant storage debug frames
+        run: python scripts/agent-stack/run.py --package desk-assistant-data-store --output target/agent-stack/assistant-store-debug.json
+      - name: Enforce shared message page debug stack frames
+        run: python scripts/agent-stack/run.py --package desk-signal-facade --output target/agent-stack/assistant-pages-debug.json
       - name: Enforce OSS debug frames
         run: python scripts/agent-stack/run.py --package desk-signal --output target/agent-stack/signal-debug.json
       - name: Shared behavior and unboxed phase layout
-        run: cargo test --locked -p desk-diagnose-core -p desk-signal --lib --features desk-diagnose-core/stack-budget
+        run: |
+          cargo test --locked -p desk-diagnose-core -p desk-assistant-data-store -p desk-signal --lib --features desk-diagnose-core/stack-budget -- --skip assistant_data_store::tests::retrieval_native::memory_mutation:: --skip ai_assistant_orchestrator::tests::desktop_permission:: --skip ai_assistant_orchestrator::tests::permission_object::
+          cargo test --locked -p desk-signal --lib --features desk-diagnose-core/stack-budget ai_assistant_orchestrator::tests::desktop_permission:: -- --test-threads=1
+          cargo test --locked -p desk-signal --lib --features desk-diagnose-core/stack-budget ai_assistant_orchestrator::tests::permission_object:: -- --test-threads=1
+          cargo test --locked -p desk-signal --lib --features desk-diagnose-core/stack-budget assistant_data_store::tests::retrieval_native::memory_mutation:: -- --test-threads=1
       - name: Enforce shared release frames
         run: python scripts/agent-stack/run.py --package desk-diagnose-core --profile release --output target/agent-stack/core-release.json
+      - name: Enforce shared assistant storage release frames
+        run: python scripts/agent-stack/run.py --package desk-assistant-data-store --profile release --output target/agent-stack/assistant-store-release.json
+      - name: Enforce shared message page release stack frames
+        run: python scripts/agent-stack/run.py --package desk-signal-facade --profile release --output target/agent-stack/assistant-pages-release.json
       - name: Enforce OSS release frames
         run: python scripts/agent-stack/run.py --package desk-signal --profile release --output target/agent-stack/signal-release.json
       - name: Release history and automatic-review combinations

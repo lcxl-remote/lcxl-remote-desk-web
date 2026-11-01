@@ -208,7 +208,9 @@ fn source_types_are_restored_from_verified_results_and_hidden_in_all_views() {
             args["source"] = json!({"file_result_call_id":"receipt"});
         }
         let original = call(tool, args.clone());
-        let resolved = crate::ui_model_ids::resolve_session_call(&original, &session, NOW).unwrap();
+        let resolved =
+            crate::ui_model_ids::resolve_session_call_with_context(&original, &session, NOW, None)
+                .unwrap();
         let value: Value = serde_json::from_str(&resolved.arguments_json).unwrap();
         let source = if args.get("sources").is_some() {
             &value["sources"][0]
@@ -259,31 +261,34 @@ fn omitted_child_never_guesses_in_incomplete_or_ambiguous_directory_results() {
         (vec![], false),
     ] {
         let session = metadata_session(&files, truncated);
-        let error = crate::ui_model_ids::resolve_session_call(
+        let error = crate::ui_model_ids::resolve_session_call_with_context(
             &call("read_text_file", json!({"file_result_call_id":"receipt"})),
             &session,
             NOW,
+            None,
         )
         .unwrap_err();
         assert!(error.message.contains("entry_name is required"));
     }
     let session = metadata_session(&["a.txt", "b.txt"], false);
     assert!(
-        crate::ui_model_ids::resolve_session_call(
+        crate::ui_model_ids::resolve_session_call_with_context(
             &call(
                 "read_text_file",
                 json!({"file_result_call_id":"receipt","entry_name":"b.txt"})
             ),
             &session,
-            NOW
+            NOW,
+            None
         )
         .is_ok()
     );
     assert!(
-        crate::ui_model_ids::resolve_session_call(
+        crate::ui_model_ids::resolve_session_call_with_context(
             &call("read_text_file", json!({"file_result_call_id":"unknown"})),
             &session,
-            NOW
+            NOW,
+            None
         )
         .is_err()
     );
@@ -296,7 +301,9 @@ fn directory_and_created_content_freeze_before_human_or_ai_review() {
         "create_text_file",
         json!({"file_name":"notes.txt","content_utf8":""}),
     );
-    let frozen = crate::ui_model_ids::resolve_session_call(&original, &session, NOW).unwrap();
+    let frozen =
+        crate::ui_model_ids::resolve_session_call_with_context(&original, &session, NOW, None)
+            .unwrap();
     let value: Value = serde_json::from_str(&frozen.arguments_json).unwrap();
     assert_eq!(value["directory_request_id"], "directory");
     assert_eq!(value["content_utf8"], "");
@@ -323,7 +330,10 @@ fn directory_and_created_content_freeze_before_human_or_ai_review() {
         .unwrap();
         assert_eq!(before.canonical_input_json(), after.canonical_input_json());
         assert_eq!(before.target(), after.target());
-        assert!(crate::ui_model_ids::resolve_session_call(&original, &session, NOW).is_err());
+        assert!(
+            crate::ui_model_ids::resolve_session_call_with_context(&original, &session, NOW, None)
+                .is_err()
+        );
     }
     let mut changed = value;
     changed["content_utf8"] = json!("different");
@@ -358,12 +368,15 @@ fn missing_creation_business_fields_are_explained_before_permission_creation() {
         "request_permissions",
         json!({"items":[{"tool_name":"request_permissions","reason":"invalid nested request","exact_input":{"items":[]}}]}),
     );
-    assert!(crate::ui_model_ids::resolve_session_call(&nested, &session, NOW).is_err());
+    assert!(
+        crate::ui_model_ids::resolve_session_call_with_context(&nested, &session, NOW, None)
+            .is_err()
+    );
     for input in [
         json!({"file_name":"notes.txt"}),
         json!({"content_utf8":"text"}),
     ] {
-        let error = crate::ui_model_ids::resolve_session_call(&call("request_permissions", json!({"items":[{"tool_name":"create_text_file","reason":"create","exact_input":input}]})), &session, NOW).unwrap_err();
+        let error = crate::ui_model_ids::resolve_session_call_with_context(&call("request_permissions", json!({"items":[{"tool_name":"create_text_file","reason":"create","exact_input":input}]})), &session, NOW, None).unwrap_err();
         assert!(error.message.contains(if input.get("file_name").is_some() {
             "content_utf8"
         } else {
@@ -376,13 +389,17 @@ fn missing_creation_business_fields_are_explained_before_permission_creation() {
 fn metadata_root_is_recovered_from_original_result_after_more_directories_are_approved() {
     let mut session = metadata_session(&["notes.txt"], false);
     let original = call("read_text_file", json!({"file_result_call_id":"receipt"}));
-    let frozen = crate::ui_model_ids::resolve_session_call(&original, &session, NOW).unwrap();
+    let frozen =
+        crate::ui_model_ids::resolve_session_call_with_context(&original, &session, NOW, None)
+            .unwrap();
     approve_directory(&mut session, "second");
     let conversion = call(
         "convert_document",
         json!({"source":{"file_result_call_id":"receipt"},"output_name":"notes.pdf","conversion":{"kind":"text_to_pdf"}}),
     );
-    let converted = crate::ui_model_ids::resolve_session_call(&conversion, &session, NOW).unwrap();
+    let converted =
+        crate::ui_model_ids::resolve_session_call_with_context(&conversion, &session, NOW, None)
+            .unwrap();
     let converted: Value = serde_json::from_str(&converted.arguments_json).unwrap();
     assert_eq!(converted["directory_request_id"], "directory");
     let [destination] = session.conversation[0]
@@ -418,7 +435,10 @@ fn metadata_root_is_recovered_from_original_result_after_more_directories_are_ap
         )
         .is_err()
     );
-    assert!(crate::ui_model_ids::resolve_session_call(&conversion, &session, NOW).is_err());
+    assert!(
+        crate::ui_model_ids::resolve_session_call_with_context(&conversion, &session, NOW, None)
+            .is_err()
+    );
 }
 
 #[test]

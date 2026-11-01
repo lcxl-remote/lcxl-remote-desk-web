@@ -9,8 +9,8 @@ import { Disclosure } from '@/components/ui/disclosure';
 import { deleteAssistantImage, getAssistantImage, listAssistantImages } from '@/services/clients';
 import type { AiAssistantVisualEvidence } from './ai-assistant-event';
 
-function StoredImage({ frame, onDelete, autoLoad = false }: {
-    frame: AiAssistantVisualEvidence; onDelete: (id: string) => void; autoLoad?: boolean;
+function StoredImage({ frame, onDelete, autoLoad = false, readOnly = false }: {
+    frame: AiAssistantVisualEvidence; onDelete: (id: string) => void; autoLoad?: boolean; readOnly?: boolean;
 }) {
     const { t } = useTranslation();
     const { confirm, dialog } = useConfirm();
@@ -62,7 +62,7 @@ function StoredImage({ frame, onDelete, autoLoad = false }: {
                 <div className="text-muted-foreground">{hasRecordedTime
                     ? t('pages.aiAssistant.imageRecordedAt', { time: recordedAt.toLocaleString() })
                     : t('pages.aiAssistant.imageTimeUnrecorded')}</div></div>
-            {durable && <Button type="button" size="sm" variant="ghost" disabled={deleting} onClick={() => void remove()}>{t('pages.aiAssistant.imageDelete')}</Button>}
+            {durable && !readOnly && <Button type="button" size="sm" variant="ghost" disabled={deleting} onClick={() => void remove()}>{t('pages.aiAssistant.imageDelete')}</Button>}
         </div>
         <Dialog open={open} onOpenChange={setOpen}><DialogContent className="max-w-[95vw] sm:max-w-[90vw]">
             <DialogTitle>{t('pages.aiAssistant.visualEvidenceAlt')}</DialogTitle>
@@ -71,11 +71,11 @@ function StoredImage({ frame, onDelete, autoLoad = false }: {
     </div>;
 }
 
-function ActivityGroup({ count, hasImages, children }: { count: number; hasImages: boolean; children: ReactNode }) {
+function ActivityGroup({ count, hasImages, focused, children }: { count: number; hasImages: boolean; focused?: boolean; children: ReactNode }) {
     const { t } = useTranslation();
     // Follow asynchronously loaded screenshots until the user chooses a state.
     const [expanded, setExpanded] = useState<boolean | null>(null);
-    return <Disclosure open={expanded ?? hasImages} onOpenChange={setExpanded}
+    return <Disclosure open={expanded ?? (hasImages || focused)} onOpenChange={setExpanded}
         title={t('pages.aiAssistant.activityGroup', { count })}
         className="w-full max-w-full rounded-lg border bg-muted/30 px-3 py-2 text-sm sm:max-w-[90%]"
         summaryClassName="text-muted-foreground">
@@ -83,13 +83,14 @@ function ActivityGroup({ count, hasImages, children }: { count: number; hasImage
     </Disclosure>;
 }
 
-export function AssistantImages({ sessionId, evidence, messages, renderMessage, renderReasoning, renderToolGroup }: {
+export function AssistantImages({ sessionId, evidence, messages, renderMessage, renderReasoning, renderToolGroup, readOnly = false, focusedMessageId }: {
     sessionId?: string;
     evidence: AiAssistantVisualEvidence[];
     messages?: AiAssistantMessage[];
     renderMessage?: (message: AiAssistantMessage) => ReactNode;
     renderReasoning?: (message: AiAssistantMessage) => ReactNode;
     renderToolGroup?: (messages: AiAssistantMessage[]) => ReactNode;
+    readOnly?: boolean; focusedMessageId?: string;
 }) {
     const { t } = useTranslation();
     const [stored, setStored] = useState<AiAssistantVisualEvidence[]>([]);
@@ -138,7 +139,7 @@ export function AssistantImages({ sessionId, evidence, messages, renderMessage, 
     };
     const renderImages = (items: AiAssistantVisualEvidence[], autoLoad = false) => items.length > 0 ? (
         <div data-testid="ai-assistant-visual-evidence" className="grid w-full max-w-full gap-3 sm:max-w-[90%] sm:grid-cols-2">
-            {items.map((frame) => <StoredImage key={frame.evidence_id} frame={frame} autoLoad={autoLoad}
+            {items.map((frame) => <StoredImage key={frame.evidence_id} frame={frame} autoLoad={autoLoad} readOnly={readOnly}
                 onDelete={(id) => setDeleted((previous) => new Set([...previous, id]))} />)}
         </div>
     ) : null;
@@ -163,7 +164,7 @@ export function AssistantImages({ sessionId, evidence, messages, renderMessage, 
             const index = anchorFor(frame);
             if (index !== undefined) byMessage.set(index, [...(byMessage.get(index) ?? []), frame]);
         }
-        type TimelineEntry = { key: string; kind: 'body' | 'boundary' | 'activity'; count: number; hasImages?: boolean; content: ReactNode };
+        type TimelineEntry = { key: string; kind: 'body' | 'boundary' | 'activity'; count: number; hasImages?: boolean; focused?: boolean; content: ReactNode };
         const timeline: TimelineEntry[] = [];
         let group: AiAssistantMessage[] = [];
         let groupEnd = -1;
@@ -174,6 +175,7 @@ export function AssistantImages({ sessionId, evidence, messages, renderMessage, 
             timeline.push({
                 key: `tool-group:${members[0].id}`,
                 kind: 'activity',
+                focused: members.some(message => message.id === focusedMessageId),
                 hasImages: byMessage.has(end),
                 count: new Set(members.map(item => item.toolCallId).filter(Boolean)).size
                     || members.filter(item => item.role === 'tool_call').length || members.length,
@@ -208,6 +210,7 @@ export function AssistantImages({ sessionId, evidence, messages, renderMessage, 
                     kind: message.role === 'assistant' && message.text.trim() ? 'body'
                         : message.role === 'user' || message.role === 'goal_decision' ? 'boundary' : 'activity',
                     count: message.role === 'tool_call' ? 1 : 0,
+                    focused: message.id === focusedMessageId,
                     hasImages: byMessage.has(index),
                     content: <>{renderMessage(message)}{renderImages(byMessage.get(index) ?? [], true)}</> });
             }
@@ -221,7 +224,7 @@ export function AssistantImages({ sessionId, evidence, messages, renderMessage, 
             const count = pending.reduce((sum, entry) => sum + entry.count, 0);
             if (previousBody && closedByBody && count > 1) {
                 folded.push(<ActivityGroup key={`activity:${pending[0].key}`} count={count}
-                    hasImages={pending.some(entry => entry.hasImages)}>
+                    hasImages={pending.some(entry => entry.hasImages)} focused={pending.some(entry => entry.focused)}>
                     {pending.map(entry => <Fragment key={entry.key}>{entry.content}</Fragment>)}
                 </ActivityGroup>);
             } else {

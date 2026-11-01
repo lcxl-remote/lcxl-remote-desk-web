@@ -20,6 +20,41 @@ pub(super) async fn add_input_tables(db: &DatabaseConnection) {
     }
 }
 
+pub(super) async fn first_input(
+    db: &DatabaseConnection,
+    message: ChatMessage,
+    now: chrono::DateTime<chrono::Utc>,
+) -> PersistedAgentSession {
+    use crate::agent_run_event_store::{AppendUserFollowupParams, SignalAgentRunEventStore};
+    let input = AppendUserFollowupParams {
+        client_timezone: "UTC".into(),
+        temporary_conversation: None,
+        event_id: "original-owner-input".into(),
+        run_id: "root".into(),
+        actor_id: "1".into(),
+        device_id: "1".into(),
+        client_conversation_id: None,
+        surface: AgentSessionSurface::AiAssistant,
+        policy_revision: 1,
+        current_scope: scope(),
+        read_context: None,
+        message,
+        created_at: now.to_rfc3339(),
+    };
+    assert!(
+        SignalAgentRunEventStore::new(db.clone())
+            .append_user_followup(&input)
+            .await
+            .unwrap()
+            .newly_appended
+    );
+    let accepted = root(db).await;
+    assert_eq!(accepted.input_revision, 1);
+    assert_eq!(accepted.latest_input_seq, 1);
+    assert!(accepted.assistant_data.is_some());
+    accepted
+}
+
 async fn root(db: &DatabaseConnection) -> PersistedAgentSession {
     let row = session_row::Entity::find()
         .filter(session_row::Column::ConversationId.eq("root"))
@@ -77,6 +112,8 @@ pub(super) async fn append_input(db: &DatabaseConnection, start: bool, id: &str)
         AppendUserFollowupParams, SignalAgentRunEventStore, StartUserGoal,
     };
     let params = AppendUserFollowupParams {
+        client_timezone: "UTC".into(),
+        temporary_conversation: None,
         event_id: format!("input-{id}"),
         run_id: "root".into(),
         actor_id: "1".into(),
@@ -93,7 +130,7 @@ pub(super) async fn append_input(db: &DatabaseConnection, start: bool, id: &str)
     if start {
         inputs
             .append_user_goal(
-                params,
+                &params,
                 StartUserGoal {
                     goal_id: "new-goal".into(),
                     previous_completed_goal_id: None,
@@ -103,7 +140,7 @@ pub(super) async fn append_input(db: &DatabaseConnection, start: bool, id: &str)
             .await
             .unwrap();
     } else {
-        inputs.append_user_followup(params).await.unwrap();
+        inputs.append_user_followup(&params).await.unwrap();
     }
 }
 
@@ -301,7 +338,7 @@ async fn new_goal_and_later_input_preserve_old_child_sources_and_pause_only_the_
         panic!("the old child keeps its original finite budget");
     };
     assert!(receipt.source_goal_upper.is_none());
-    assert!(goal(&db).await.delegation_reservations.is_empty());
+    assert!(goal(&db).await.independent_reservations.is_empty());
     store
         .settle_runtime_call(&receipt, None, chrono::Utc::now().timestamp_millis())
         .await

@@ -52,6 +52,7 @@ impl Statistics {
         self.by_connection.clone()
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     /// The `connection_id` currently bound to `addr`, if any. Primarily for
     /// diagnostics and tests asserting the auth handler bound the right key.
     pub fn connection_of(&self, addr: &std::net::SocketAddr) -> Option<&str> {

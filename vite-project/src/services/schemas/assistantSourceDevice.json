@@ -1,0 +1,1 @@
+{"type":"object","required":["device_ref","historical"],"properties":{"current_name":{"type":["string","null"]},"device_ref":{"type":"string"},"historical":{"type":"boolean"},"recorded_name":{"type":["string","null"]}},"additionalProperties":false,"x-readme-ref-name":"AssistantSourceDevice"}

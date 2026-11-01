@@ -238,6 +238,7 @@ impl SessionFileScope {
         &self.records
     }
 
+    #[cfg(test)]
     /// Call only in the transaction that retains the immutable operation ledger.
     /// Hosts must replay that ledger before applying an incoming request, so
     /// pruning metadata cannot make an old proposal a new authorization.

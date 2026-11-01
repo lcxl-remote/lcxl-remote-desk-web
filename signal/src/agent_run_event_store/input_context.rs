@@ -145,6 +145,7 @@ pub(super) fn validate_replay(
     if row.event_id != params.event_id
         || event.event.run_id != params.run_id
         || event.actor_id != params.actor_id
+        || event.client_timezone != params.client_timezone
         || session.device_id != params.device_id
         || session.actor_id != params.actor_id
         || session.conversation_id != params.run_id
@@ -218,6 +219,63 @@ pub(super) fn validate_selection(
 }
 
 impl SignalAgentRunEventStore {
+    /// Read only the result bound to this accepted input. No model or task is
+    /// started, and later owner inputs cannot replace its original completion.
+    pub(crate) async fn handled_outcome(
+        &self,
+        params: &AppendUserFollowupParams,
+        accepted: &UserFollowupAck,
+    ) -> Result<Option<desk_diagnose_core::agent_loop::LoopOutcome>, AgentError> {
+        validate_append_params(params)?;
+        let subject = InputSubject::from(params);
+        let txn = self
+            .db
+            .begin()
+            .await
+            .map_err(|_| internal("input outcome storage unavailable"))?;
+        if crate::agent_subagent_store::deleted_on(&txn, subject.run_id)
+            .await
+            .map_err(|_| internal("input outcome deletion state unavailable"))?
+        {
+            return Err(internal("input outcome conversation was deleted"));
+        }
+        let row = agent_session::Entity::find()
+            .filter(agent_session::Column::ConversationId.eq(subject.run_id))
+            .one(&txn)
+            .await
+            .map_err(|_| internal("input outcome session unavailable"))?
+            .ok_or_else(|| internal("input outcome session expired"))?;
+        let session = decode_session(&row, subject)?;
+        let event = agent_run_event::Entity::find()
+            .filter(agent_run_event::Column::EventId.eq(&accepted.event_id))
+            .one(&txn)
+            .await
+            .map_err(|_| internal("input outcome receipt unavailable"))?
+            .ok_or_else(|| internal("input outcome receipt missing"))?;
+        let actual = super::ack_from_existing(&event, params, &session)?;
+        if actual.event_seq != accepted.event_seq
+            || actual.input_seq != accepted.input_seq
+            || actual.input_revision != accepted.input_revision
+        {
+            return Err(internal("input outcome receipt changed"));
+        }
+        let outcome = if actual.already_handled {
+            Some(
+                desk_diagnose_core::agent_loop::committed_input_outcome(
+                    &session,
+                    &params.message.message_id,
+                )
+                .ok_or_else(|| internal("accepted input settled without its committed result"))?,
+            )
+        } else {
+            None
+        };
+        txn.commit()
+            .await
+            .map_err(|_| internal("input outcome storage unavailable"))?;
+        Ok(outcome)
+    }
+
     pub async fn select_objects(
         &self,
         subject: InputSubject<'_>,
@@ -365,6 +423,8 @@ async fn original_with_time_on(
         client_conversation_id: session.client_conversation_id.as_deref(),
     };
     let params = AppendUserFollowupParams {
+        client_timezone: event.client_timezone,
+        temporary_conversation: None,
         event_id: row.event_id.clone(),
         run_id: subject.run_id.into(),
         client_conversation_id: subject.client_conversation_id.map(str::to_string),

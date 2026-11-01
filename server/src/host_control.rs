@@ -965,15 +965,6 @@ impl HostControlHub {
             .insert(session_id, tx);
     }
 
-    /// Aggregator-only: drop the outbound mpsc for a disconnecting forwarder.
-    pub fn unregister_forwarder_session(&self, session_id: UpstreamSessionId) {
-        self.inner
-            .forwarder_sessions
-            .lock()
-            .unwrap()
-            .remove(&session_id);
-    }
-
     /// Aggregator-only: send a single host-control message to the forwarder
     /// identified by `session_id`. Returns `false` if the session is not (or
     /// no longer) registered, or if the mpsc receiver has been dropped.

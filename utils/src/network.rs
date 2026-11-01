@@ -1,14 +1,6 @@
-use std::{
-    net::{IpAddr, UdpSocket},
-    str::FromStr,
-};
+use std::net::UdpSocket;
 
 use log::warn;
-
-pub fn _check_ipv6_available() -> bool {
-    let addr = "::1"; // Loopback IPv6 address
-    matches!(IpAddr::from_str(addr), Ok(IpAddr::V6(_)))
-}
 
 pub fn check_ipv6_available() -> bool {
     let sender_socket_result = UdpSocket::bind("[::]:0");

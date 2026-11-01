@@ -4,7 +4,7 @@
 //! UX state. It is not a Provider capability, cannot authorize or dispatch work,
 //! and is exposed independently of device grants.
 
-use desk_agent_protocol::{AgentError, AgentErrorKind, Capability};
+use desk_agent_protocol::{AgentError, AgentErrorKind};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -73,7 +73,7 @@ pub fn task_status_tool_registry() -> Vec<RegisteredTool> {
                 "additionalProperties": false
             }),
         },
-        required_capability: Capability::SystemInfo,
+        required_device_capability: None,
         effect: ToolEffect::RunProjection,
     }]
 }

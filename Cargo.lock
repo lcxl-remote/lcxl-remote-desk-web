@@ -2786,6 +2786,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "desk-assistant-data-store"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "desk-agent-protocol",
+ "desk-diagnose-core",
+ "sea-orm",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+]
+
+[[package]]
 name = "desk-capture-engine"
 version = "0.1.0"
 dependencies = [
@@ -2853,6 +2868,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tokio",
+ "unicode-normalization",
  "url",
 ]
 
@@ -2988,6 +3004,7 @@ dependencies = [
  "bytestring",
  "chrono",
  "desk-agent-protocol",
+ "desk-assistant-data-store",
  "desk-diagnose-core",
  "desk-server-user",
  "desk-server-version",

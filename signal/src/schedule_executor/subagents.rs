@@ -149,12 +149,8 @@ impl SignalScheduleExecutor {
         loop {
             if self.gate.is_enabled() {
                 match store.root_wait_candidates(cursor, BATCH_SIZE).await {
-                    Ok(candidates) => {
-                        cursor = if candidates.len() == BATCH_SIZE as usize {
-                            candidates.last().map_or(0, |row| row.id)
-                        } else {
-                            0
-                        };
+                    Ok((candidates, next_cursor)) => {
+                        cursor = next_cursor.unwrap_or(0);
                         let mut tasks = stream::iter(candidates.into_iter().map(|row| {
                             let store = &store;
                             let executor = &self;

@@ -1,6 +1,9 @@
 //! Independent file-side comparison with a trusted calculation result.
 //! A cache match alone never proves that Excel recalculated or that publication succeeded.
-use crate::{ooxml_package::PackageResult, xlsx_cells};
+use crate::ooxml_package::PackageResult;
+#[cfg(test)]
+use crate::xlsx_cells;
+#[cfg(test)]
 use desk_diagnose_core::spreadsheet_formula::{FORMULA_LOCALE_V1, validate_formula_patch};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -18,6 +21,7 @@ pub struct CacheMatch {
     pub value: Scalar,
 }
 
+#[cfg(test)]
 /// Expected value must originate from trusted calculation/readback, never from
 /// model assertions. The caller still proves current-run completion, exact file
 /// identity, source preservation and write-lease validity before issuing a receipt.

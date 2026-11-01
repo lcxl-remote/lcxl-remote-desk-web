@@ -168,7 +168,7 @@ impl SubAgentStore {
         now_ms: i64,
     ) -> Result<(), DbErr> {
         reservation.validate().map_err(|_| invalid())?;
-        if reservation.kind == DelegationCallKind::Tool
+        if matches!(reservation.kind, DelegationCallKind::Tool)
             || provider_receipt_id.is_empty()
             || provider_receipt_id.len() > 256
             || now_ms <= 0
@@ -190,7 +190,7 @@ impl SubAgentStore {
         now_ms: i64,
     ) -> Result<(), DbErr> {
         reservation.validate().map_err(|_| invalid())?;
-        if reservation.kind == DelegationCallKind::Tool
+        if matches!(reservation.kind, DelegationCallKind::Tool)
             || provider_receipt_id.is_empty()
             || provider_receipt_id.len() > 256
             || now_ms <= 0
@@ -262,7 +262,7 @@ impl SubAgentStore {
         reservation: &DelegationCallReservation,
         now_ms: i64,
     ) -> Result<bool, DbErr> {
-        if reservation.kind == DelegationCallKind::Tool {
+        if matches!(reservation.kind, DelegationCallKind::Tool) {
             return Ok(false);
         }
         let txn = crate::db::begin_write(&self.db, session_row::Entity).await?;

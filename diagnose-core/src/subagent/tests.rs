@@ -322,8 +322,8 @@ fn scheduled_child_permission_resume_does_not_gain_ai_review() {
     assert!(!session.allows_delegated_review());
     session.trigger_origin = TriggerOrigin::DelegatedTask;
     assert!(!session.allows_delegated_review());
-    assert!(!TriggerOrigin::SubAgentCompletion.allows_new_mutation());
-    assert!(!TriggerOrigin::SubAgentCompletion.allows_delegated_review());
+    assert!(TriggerOrigin::SubAgentCompletion.allows_new_mutation());
+    assert!(TriggerOrigin::SubAgentCompletion.allows_delegated_review());
 }
 
 #[test]
@@ -815,9 +815,23 @@ fn adjusted_task_projection_retains_source_labels_locale_and_current_objective()
     .data_envelope
     .unwrap();
     let adjusted = context
-        .adjusted(&changed, adjustment, "child-session")
+        .adjusted(
+            &changed,
+            adjustment,
+            "child-session",
+            Some((1_000, "Asia/Shanghai")),
+        )
         .unwrap();
     adjusted.validate_task(&changed).unwrap();
+    let projection: serde_json::Value = serde_json::from_str(&adjusted.instruction.text).unwrap();
+    assert_eq!(
+        projection["runtime_delegation_state"]["adjustment_input_time"]["timezone"],
+        "Asia/Shanghai"
+    );
+    assert_eq!(
+        projection["runtime_delegation_state"]["adjustment_input_time"]["recorded_at_unix_ms"],
+        1_000
+    );
     assert!(adjusted.validate_task(&task).is_err());
     assert_eq!(adjusted.source, source);
     assert_eq!(adjusted.response_locale.as_deref(), Some("zh-CN"));
@@ -1303,7 +1317,9 @@ fn published_result_authority_survives_notice_consumption_and_dependency_waits()
                 description: "test".into(),
                 parameters_schema: serde_json::json!({"type":"object"}),
             },
-            required_capability: desk_agent_protocol::Capability::SystemInfo,
+            required_device_capability: effect
+                .requires_device_capability()
+                .then_some(desk_agent_protocol::Capability::SystemInfo),
             effect,
         });
     }
@@ -1350,6 +1366,14 @@ fn published_result_authority_survives_notice_consumption_and_dependency_waits()
     assert!(!parent.subagent_result_only);
     assert!(parent.allows_new_mutation());
     assert!(lookup_for_session(&catalog, tools::SPAWN, &parent).is_some());
+    parent.adopt_trigger(TriggerOrigin::SubAgentCompletion, "explicit-wait-resume");
+    assert!(!parent.is_subagent_result_turn());
+    assert!(parent.allows_new_mutation());
+    assert!(lookup_for_session(&catalog, "device_read", &parent).is_some());
+    assert!(lookup_for_session(&catalog, "device_write", &parent).is_some());
+    assert!(lookup_for_session(&catalog, "permissions", &parent).is_some());
+    parent.scope_snapshot.granted.clear();
+    assert!(lookup_for_session(&catalog, "device_write", &parent).is_none());
 }
 
 #[test]

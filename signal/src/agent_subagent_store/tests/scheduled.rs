@@ -157,7 +157,7 @@ async fn published_parent_on(
             .await
             .is_err()
     );
-    (db, schedule, store, parent, source)
+    (db, schedule, store, *parent, source)
 }
 
 pub(super) fn command_fixture_input() -> String {
@@ -342,9 +342,15 @@ pub(crate) async fn answered_children_fixture_at(
         chrono::Utc::now().to_rfc3339(),
     );
     parent.handled_input_seq = parent.latest_input_seq;
-    save_main_delegation_session(&db, &mut parent)
-        .await
-        .unwrap();
+    let txn = db.begin().await.unwrap();
+    super::super::super::agent_subagent_store::write_child_session_on(
+        &txn,
+        &parent,
+        chrono::Utc::now(),
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
     let waiting = schedule
         .finish_answered_fresh_task(
             super::super::super::schedule_store::FreshTaskLease {
@@ -485,7 +491,7 @@ async fn source_initialization_is_fenced_and_keeps_one_original_group() {
         .initialize_scheduled_source(&parent, "source-node", 1, &super::creation::destination())
         .await
         .unwrap();
-    assert_eq!(same, parent);
+    assert_eq!(*same, parent);
     assert_eq!(creation, source);
     assert_eq!(group_row::Entity::find().count(&db).await.unwrap(), 1);
     let mut changed = super::creation::destination();

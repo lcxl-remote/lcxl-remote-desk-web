@@ -10,7 +10,7 @@ import {
     sentSignalingOfType,
     StubPeerConnection,
     type SignalingGlobals,
-} from './file-transfer-test-harness';
+} from './__tests__/harness';
 
 // The degradation contract: when the data channel cannot be established, the
 // signaling session survives it and everything that rides the session keeps
@@ -20,7 +20,7 @@ import {
 // unusable" into "you can browse but not transfer", so it is asserted on both
 // sides: the channel fails and reports a relay-shaped diagnosis, and a listing
 // issued *after* that failure still completes. One comprehensive `renderHook`
-// test per file: see the note in `file-transfer-test-harness.ts`.
+// test per file: see the note in `__tests__/harness.ts`.
 
 const LIST_FILES = 10005;
 const FILES_LISTED = 10015;

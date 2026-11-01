@@ -6,7 +6,9 @@ use desk_diagnose_core::{
 
 pub(super) struct FreshContext {
     pub contract: ValidatedTaskContract,
-    pub approval_reference: Option<String>,
+    pub initial_assistant_data:
+        Option<Box<desk_diagnose_core::ai_assistant::data_control::AssistantDataSession>>,
+    pub resume_reference: Option<String>,
     pub children_wait_id: Option<String>,
     pub children_notification_id: Option<String>,
     pub creation: Option<desk_diagnose_core::subagent::creation::CreationEnvelope>,
@@ -90,7 +92,7 @@ pub async fn resume_fresh_task(
         .filter(|value| value.starts_with("answer-children:"))
         .and(current.ready_subagent_notification.as_ref())
         .map(|notice| notice.message_id.clone());
-    let approval_reference = if children_wait_id.is_some() || children_notification_id.is_some() {
+    let resume_reference = if children_wait_id.is_some() || children_notification_id.is_some() {
         None
     } else if current.version == 1 {
         if current.conversation.len() != 1 || authority.run().result_ref.is_some() {
@@ -103,12 +105,17 @@ pub async fn resume_fresh_task(
                 .run()
                 .result_ref
                 .as_deref()
-                .filter(|value| value.starts_with("permission:") || value.starts_with("directory:"))
+                .filter(|value| {
+                    value.starts_with("permission:")
+                        || value.starts_with("directory:")
+                        || value.starts_with("assistant-context:")
+                })
                 .filter(|id| !id.is_empty())
                 .ok_or_else(|| transport_error("missing task approval claim"))?
                 .to_owned(),
         )
     };
+    let initial_assistant_data = current.assistant_data.clone();
     let prepared = super::scheduled::PreparedResume {
         claimed: crate::schedule_store::ClaimedContinuation {
             run: authority.run().clone(),
@@ -119,7 +126,8 @@ pub async fn resume_fresh_task(
         permission_request_id: None,
         fresh: Some(FreshContext {
             contract: authority.contract().clone(),
-            approval_reference,
+            initial_assistant_data,
+            resume_reference,
             children_wait_id,
             children_notification_id,
             creation: None,
@@ -130,6 +138,7 @@ pub async fn resume_fresh_task(
         .await
         .map_err(|_| transport_error("task storage unavailable"))?;
     let ask = AiAssistantAsk {
+        temporary_conversation: None,
         question: claimed.conversation[0].text.clone(),
         client_message_id: claimed.conversation_id.clone(),
         locale: claimed.response_locale.clone(),

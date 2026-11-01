@@ -319,6 +319,15 @@ impl SubAgentStore {
             begin_main_tool(self, held, call, &operation, input_observation).await
         })
         .await?;
+        let history = desk_diagnose_core::future::boxed(|| {
+            crate::assistant_data_store::native_scope_on(
+                &txn,
+                &held.actor_id,
+                &held.device_id,
+                &held.conversation_id,
+            )
+        })
+        .await?;
         let now = chrono::Utc::now();
         let parent = desk_diagnose_core::future::boxed(|| async {
             parent_planning_on(&txn, held, now.timestamp_millis()).await
@@ -366,6 +375,9 @@ impl SubAgentStore {
                 payload: serde_json::from_str(&result.text).map_err(|_| invalid())?,
                 result_message_id: result.message_id.clone(),
             };
+            if let Some(history) = &history {
+                desk_diagnose_core::future::boxed(|| history.capture_on(&txn)).await?;
+            }
             desk_diagnose_core::future::boxed(|| async { txn.commit().await }).await?;
             return Ok(receipt);
         }

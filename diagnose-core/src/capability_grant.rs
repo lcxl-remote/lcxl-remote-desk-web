@@ -568,7 +568,7 @@ mod tests {
         let current = call(&resources, &operations, &envelopes, &digests, &canonical);
         let mut approved = grant();
         assert!(
-            unavailable_grant_message(&[approved.clone()], &current)
+            unavailable_grant_message(std::slice::from_ref(&approved), &current)
                 .starts_with("approved_input_mismatch:")
         );
         assert_eq!(

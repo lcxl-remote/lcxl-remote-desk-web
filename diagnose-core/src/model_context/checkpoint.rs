@@ -153,6 +153,26 @@ pub struct ContextProtectionSet {
 }
 
 impl ContextProtectionSet {
+    pub fn validate_references(
+        &self,
+        conversation: &[ChatMessage],
+    ) -> Result<(), ModelContextError> {
+        for id in &self.protected_message_ids {
+            if !conversation.iter().any(|message| &message.message_id == id) {
+                return Err(ModelContextError::InvalidProtectionReference(id.clone()));
+            }
+        }
+        for id in &self.protected_tool_call_ids {
+            if !conversation.iter().any(|message| {
+                message.tool_call_id.as_deref() == Some(id)
+                    || message.tool_calls.iter().any(|call| &call.id == id)
+            }) {
+                return Err(ModelContextError::InvalidProtectionReference(id.clone()));
+            }
+        }
+        Ok(())
+    }
+
     #[inline(never)]
     pub fn protect_message(&mut self, id: impl Into<String>) {
         self.protected_message_ids.insert(id.into());
@@ -1223,19 +1243,7 @@ fn protected_group_indices(
     groups: &[MessageGroup],
     protection: &ContextProtectionSet,
 ) -> Result<BTreeSet<usize>, ModelContextError> {
-    for id in &protection.protected_message_ids {
-        if !conversation.iter().any(|message| &message.message_id == id) {
-            return Err(ModelContextError::InvalidProtectionReference(id.clone()));
-        }
-    }
-    for id in &protection.protected_tool_call_ids {
-        if !conversation.iter().any(|message| {
-            message.tool_call_id.as_deref() == Some(id)
-                || message.tool_calls.iter().any(|call| &call.id == id)
-        }) {
-            return Err(ModelContextError::InvalidProtectionReference(id.clone()));
-        }
-    }
+    protection.validate_references(conversation)?;
     let mut protected = BTreeSet::new();
     for (index, group) in groups.iter().enumerate() {
         let messages = &conversation[group.start..group.end];

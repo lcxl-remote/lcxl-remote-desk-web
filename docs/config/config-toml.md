@@ -274,3 +274,103 @@ max_output_tokens = 512
 ### Thinking request profile
 
 The current profile schema is `2`. Set `reasoning_contract` explicitly to `conservative`, `openai_chat`, `deepseek_chat` or `anthropic_messages`, matching `wire_protocol`. `anthropic_prefix_binding` defaults to `false`; enable it only for an Anthropic endpoint that binds signed thinking to the request prefix. Thinking effort and optional native clearing remain inside `request_options_json`; see [AI diagnostics](../features/ai-diagnostics.md#thinking-replay-clearing-and-short-references). Both the main and approval gateways use these fields.
+
+Assistant data policy files use the same field checks as the management API. Invalid values report their fields; startup and successful policy updates log only matching warnings. See [AI Assistant memory and history policy](#assistant-data-policy) for draft checking, warning semantics and shared read budgets.
+
+## AI Assistant memory and history policy {#assistant-data-policy}
+
+`AssistantDataPolicy.limits` controls memory content and retrieval work. After signing in with the open-source Signal management account, `GET /api/admin/system/ai-assistant-data` returns `data.policy` and `data.issues`. Submit the edited complete policy with `expected_revision` and `policy` using `POST`, keeping the revision that was read. A successful save returns the committed policy and its matching issues. Reload after a revision conflict. Signal atomically saves the active `config.toml`.
+
+Check a draft with `POST /api/admin/system/ai-assistant-data/validate`, sending `{ "policy": <complete policy> }` and reading `data.issues`. This operation does not save, advance a revision or access policy storage. Saving independently checks the submitted policy and revision. These endpoints require the current open-source service management account.
+
+Valid configurations return an empty `issues` list. Each issue contains `level` (`error` or `warning`), a stable `code`, related configuration `fields`, a fallback `message`, and `effective_limit` when applicable. Hard errors use HTTP 200 with `success=false` and `INVALID_PARAMS`, without applying the save. Warnings retain `success=true` and allow saving. Revision conflicts keep `REVISION_CONFLICT` and `current_revision`.
+
+Warnings cover only limits proven by the configuration: relevance page size exceeding candidates, history candidates exceeding conversations multiplied by fragments per conversation, model status summaries exceeding retained items, owner history scans exceeding the document budget, and current-memory selection exceeding its storage or scan ceiling. Actual body, index, query-state and metadata sizes depend on content and do not produce estimated capacity warnings. Invalid OSS file settings identify their fields. Startup and successful policy updates log only matching warnings.
+
+New reads stop when the episode has zero remaining bytes. Positive allowances use the smaller of the per-response cap and the remaining total. Actual JSON and tool-message framing determine whether required metadata and whole sources fit. Call counts, actual settlement and original-call replay retain their existing budgets. History, memory and retained versions simultaneously consume their count, body, index and metadata quotas. Reaching the retained-version count limit still blocks updates until version cleanup frees capacity.
+
+Chat, subassistant and manually scheduled task text is submitted intact. The server validates text size, memory counts and data-result quotas. All three clients display server-provided memory, history, citations and processing status while checking types, identities, versions, source bindings, duplicates and cursor consistency. Personalization and keyword prechecks read the current server policy, and ordinary lists keep their chosen page sizes. A refused submission reports the failure and preserves the editable draft; chat input clears after acceptance is confirmed.
+
+
+Ordinary chat input, citations and status display use the same platform policy. Paths below are relative to `policy.limits`:
+
+| Configuration path | Default | Purpose |
+|---|---|---|
+| `conversation.question_bytes` | 16 KiB | UTF-8 admission size for ordinary chat text |
+| `conversation.page_bytes` | 256 KiB | Shared page target for owner history search, retained conversations, source windows and chat messages |
+| `conversation.citations` / `citation_bytes` / `citation_page_answers` | 64 / 8 KiB / 100 | Citations per answer, encoded reference capacity and citation loading batch |
+| `retrieval.snippet_bytes` | 512 bytes | Search snippets, truncated only at UTF-8 character boundaries |
+| `retrieval.episode.query_devices` / `query_cursors` | 10,000 / 32 | Device scope and continuation tokens for a frozen query |
+| `retrieval.episode.query_state_bytes` / `query_seen_sources` / `query_delivered_calls` | 1 MiB / 500 / 32 | Query encoding, source deduplication and delivered-call ledger |
+| `processing.status_coverage` | 50 | History coverage records |
+| `processing.native_status_rows` / `native_status_items` / `native_status_model_items` / `native_status_source_refs` | 25 / 24 / 3 / 4 | Native rows per category, snapshot items, model-summary items and summary sources |
+
+Maintenance uses its original source-manifest policy; query capacities are frozen with the original retrieval budget and remain unchanged on retries and pagination. Lower citation limits apply to new answers while existing references remain readable; the loading batch controls database work per step. Internal source ledgers, read projections, export groups and fact commits use the original request budgets, account record quota and actual metadata quota instead of separate arbitrary collection caps. Actual authorization deadlines, source bindings, native receipts and transactional version checks remain in force. Clients display service-provided proposals, previews and attachment policies, and submit complete scheduled-task text, disposition notes and directory-purpose text; the service reports quota failures through the existing business-error response.
+
+The top-level platform field `policy.max_memory_records` limits stored memory records to 1,000 per account by default, shared across personal and device scopes. Each independent memory record counts once; revisions and idempotent replays do not add a record. Retained pending, superseded and forgotten records also occupy storage slots. New records fail and roll back at the limit; updates continue within the existing body and metadata quotas. Lowering the limit preserves existing records, and raising it permits further additions. Save this field through the complete policy endpoint above; it sits alongside `policy.limits`.
+
+`conversation.page_bytes` is the shared page target for owner history search, retained conversation lists, retained source windows and ordinary or source-focused chat pages. Pages preserve complete fragments, native tool groups, reasoning and citations. One indivisible entry or group may exceed the target and is returned intact; neighboring content is paginated. Existing item-count and access rules remain. This target does not reject accepted message bodies. Owner search uses `retrieval.query_candidates`, encodes cursors within `retrieval.episode.query_state_bytes`, and loads matching terms from the actual query term set. Source discovery uses the existing document, scan-page and time budgets. Owner search cursors remain bound to their original policy revision; restart the search after a policy change. Retained memory sources remain readable and forgettable when `memory.source_refs` is lowered; that limit applies to new admission.
+
+Owner retained-history windows return up to 20 complete fragments per page, with cursors for earlier or newer content and total window size determined by the actual content. Model tools continue to use `retrieval.episode.response_bytes` for each reply.
+
+Each keyword group defaults to 256 Unicode scalar values. A Chinese character or a single-code-point emoji counts as one; combining scalars count separately. Group count and characters per group are separate settings. All five retrieval scan time limits default to three seconds. Content, context, evidence, and personalization capacities use UTF-8 bytes. Omitted configuration fields use their defaults.
+
+`retrieval.read_messages` controls conversation messages or memory versions per read, defaulting to 20. `retrieval.episode.response_bytes` sets one complete reply budget for memory search, history search and content reads, defaulting to 32 KiB including JSON and tool-message framing. Content reads also use the episode’s remaining `read_bytes`. New episodes freeze these settings; retries and pagination keep the original reservations and spending.
+
+Memory revision reads also share `retrieval.query_candidates` for bounded scanning and `retrieval.memory_keyword_scan_ms` for scan time. Budget limits can produce further pages, reported gaps or an insufficient-budget result.
+
+Platform context, individual tool-response capacity, source authorization and actual storage quotas still apply. Lower content limits constrain later writes; existing content remains readable under its original identity and digest.
+
+New ordinary-input and task retrieval episodes freeze their allowances. Approval, recovery and pagination retain spending. Model tool schemas, Web and mobile input controls use the policy limits.
+
+Query snapshots/cursors (`retrieval.episode.query_ttl_ms`) and unused read results (`retrieval.episode.unused_projection_ttl_ms`) each default to 1,800,000 ms (30 minutes). Positive durations freeze with the original retrieval episode; new ordinary inputs or a task occurrence’s first claim read the current policy. Recovery, approval and Goal corrections keep the original values. Query and tool-result deadlines start at the original reservation, while an automatically injected memory block starts at preparation; earlier task, source and execution-lease deadlines still apply. Pagination and retries retain the stored absolute deadline. Results saved in the current conversation follow that conversation’s lifecycle; temporary current-memory blocks retain per-request authorization checks. Policy revision checks continue to apply.
+
+```toml
+[assistant_data_policy.limits.memory]
+user_instructions_bytes = 16384
+source_refs = 12
+
+[assistant_data_policy.limits.retrieval]
+query_groups = 6
+query_chars = 512
+search_window_days = 120
+history_keyword_scan_ms = 5000
+owner_scan_documents = 256
+
+[assistant_data_policy.limits.retrieval.episode]
+relevance_calls = 6
+time_pages = 12
+read_calls = 10
+read_bytes = 262144
+query_ttl_ms = 1800000
+unused_projection_ttl_ms = 1800000
+```
+
+### Memory writes
+
+The conversation model submits complete content and optional context. One transaction saves the current memory, version, source snapshots, index and commit receipt. Current context, memory-count, body, index and metadata quotas apply. Capacity failures roll back the write while preserving existing memories. Normal conversation output and accounting limits apply.
+
+### Background processing policy
+
+GC intervals and working batches are configured through `policy.limits.processing`. Manager reads the shared database policy; OSS reads its active config.toml. Background loops read settings on their next wake-up; retained retrieval episodes keep their frozen policy and authorization. The existing retention loop drives GC every five minutes by default, using the same interval for per-account claims. Other usage, session and call retention remains hourly. Scan pages bound database work per pass; the capture batch limits each history submission. Existing leases, call identities, native receipts, policy revisions and accounting rules still apply.
+
+| Path relative to `policy.limits` | Default | Meaning |
+|---|---|---|
+| `processing.output_gc_interval_ms` | 300000 | GC wake-up and per-account rescan interval, ms |
+| `processing.output_gc_actor_batch_size` | 32 | Accounts per GC pass; OSS scans only its local account |
+| `processing.output_gc_batch_size` | 64 | Output-proof and commit-receipt batch per account |
+| `processing.native_retention_page_size` | 64 | Native-receipt retention page |
+| `processing.history_capture_batch_size` | 64 | Captures per history submission |
+| `processing.history_scan_page_size` | 128 | Database page for history time/window scans |
+| `processing.current_memory_page_size` | 64 | Database page for current-memory selection |
+
+```toml
+[assistant_data_policy.limits.processing]
+output_gc_interval_ms = 300000
+output_gc_actor_batch_size = 32
+output_gc_batch_size = 64
+native_retention_page_size = 64
+history_capture_batch_size = 64
+history_scan_page_size = 128
+current_memory_page_size = 64
+```

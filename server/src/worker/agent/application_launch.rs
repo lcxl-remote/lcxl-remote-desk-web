@@ -23,7 +23,9 @@ pub(crate) async fn resolve(
     desk_agent_protocol::application_launch::ResolvedApplicationIdentity,
     desk_agent_protocol::application_launch::LaunchError,
 > {
-    use desk_agent_protocol::application_launch::{ApplicationTargetKind, LaunchFailureReason};
+    #[cfg(target_os = "windows")]
+    use desk_agent_protocol::application_launch::ApplicationTargetKind;
+    use desk_agent_protocol::application_launch::LaunchFailureReason;
     request
         .validate()
         .map_err(|_| LaunchFailureReason::InvalidTarget)?;

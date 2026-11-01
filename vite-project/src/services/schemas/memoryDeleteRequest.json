@@ -1,0 +1,1 @@
+{"type":"object","required":["memory_id","expected_revision","operation_id"],"properties":{"expected_revision":{"type":"integer","format":"int64","minimum":0},"memory_id":{"type":"string"},"operation_id":{"type":"string"}},"additionalProperties":false,"x-readme-ref-name":"MemoryDeleteRequest"}

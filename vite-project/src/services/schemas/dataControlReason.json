@@ -1,0 +1,1 @@
+{"type":"string","enum":["memory_forget","memory_clear","history_restricted"],"x-readme-ref-name":"DataControlReason"}

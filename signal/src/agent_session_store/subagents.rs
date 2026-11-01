@@ -10,12 +10,11 @@ use desk_diagnose_core::{
 };
 
 fn delegation_storage(error: sea_orm::DbErr) -> AgentError {
-    if let sea_orm::DbErr::Custom(message) = &error {
-        if let Some(refusal) = desk_diagnose_core::subagent::capacity_error(message)
+    if let sea_orm::DbErr::Custom(message) = &error
+        && let Some(refusal) = desk_diagnose_core::subagent::capacity_error(message)
             .or_else(|| desk_diagnose_core::subagent::control_observation_error(message))
-        {
-            return refusal;
-        }
+    {
+        return refusal;
     }
     AgentError {
         kind: AgentErrorKind::Internal,
@@ -27,6 +26,7 @@ fn delegation_storage(error: sea_orm::DbErr) -> AgentError {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
 

@@ -73,6 +73,15 @@ impl SubAgentStore {
             .await
         })
         .await?;
+        let history = desk_diagnose_core::future::boxed(|| {
+            crate::assistant_data_store::native_scope_on(
+                &txn,
+                &params.actor_id,
+                &params.device_id,
+                &selected.root_conversation_id,
+            )
+        })
+        .await?;
         let row = desk_diagnose_core::future::boxed(|| async {
             run_row::Entity::find()
                 .filter(run_row::Column::TaskId.eq(task_id))
@@ -163,6 +172,9 @@ impl SubAgentStore {
                     append_state_event_on(&txn, &group, &run, now.timestamp_millis()).await
                 })
                 .await?;
+                if let Some(history) = &history {
+                    desk_diagnose_core::future::boxed(|| history.capture_on(&txn)).await?;
+                }
                 desk_diagnose_core::future::boxed(|| async { txn.commit().await }).await?;
                 permission_ends.submit(
                     now.timestamp_millis(),
@@ -269,6 +281,9 @@ impl SubAgentStore {
                 append_state_event_on(&txn, &group, &run, now.timestamp_millis()).await
             })
             .await?;
+            if let Some(history) = &history {
+                desk_diagnose_core::future::boxed(|| history.capture_on(&txn)).await?;
+            }
             desk_diagnose_core::future::boxed(|| async { txn.commit().await }).await?;
             Ok(SubAgentClaimOutcome::Claimed(Box::new(
                 ClaimedSubAgentTurn { session, creation },

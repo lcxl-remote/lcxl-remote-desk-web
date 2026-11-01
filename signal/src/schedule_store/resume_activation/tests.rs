@@ -604,7 +604,7 @@ async fn activation_rejects_a_continuation_past_the_session_retention_window() {
     let (store, task, _, _) = fixture().await;
     let mut config = crate::usage_retention::load(&store.db).await.unwrap();
     config.agent_session_days = 1;
-    crate::usage_retention::save(&store.db, config.clone())
+    crate::usage_retention::save(&store.db, config)
         .await
         .unwrap();
     // The fixture runs two days out; a one-day window accepts at most one day

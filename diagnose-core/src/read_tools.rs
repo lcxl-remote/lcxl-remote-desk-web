@@ -59,7 +59,7 @@ fn read(
 ) -> RegisteredTool {
     RegisteredTool {
         spec: spec(name, description, schema),
-        required_capability: cap,
+        required_device_capability: Some(cap),
         effect: ToolEffect::ReadOnly,
     }
 }
@@ -102,7 +102,7 @@ pub fn read_tool_registry() -> Vec<RegisteredTool> {
         read(
             "read_process_list",
             Capability::ProcessList,
-            "Search conditions are required unless allow_unfiltered=true explicitly opts into bounded enumeration. Find running processes with queries (OR, case-insensitive name substrings). Return matching query indices; filter before limit. Default to at most 20 names/PIDs for discovery. Request include_details=true only for CPU/memory/owner diagnostics.",
+            "Search conditions are required unless allow_unfiltered=true explicitly opts into bounded enumeration. Find running processes with queries (OR, case-insensitive name substrings). Return matching query indices; filter before limit. Start with a small discovery page of names/PIDs. Request include_details=true only for CPU/memory/owner diagnostics.",
             json!({
                 "type": "object",
                 "properties": {
@@ -129,7 +129,7 @@ pub fn read_tool_registry() -> Vec<RegisteredTool> {
         read(
             "read_service_status",
             Capability::ServiceStatus,
-            "Search service names/display names with queries (case-insensitive substring OR). Native filters: Windows start_types; Linux unit_file_states and scope (system default, user=current desktop user, all=both); macOS launch_policies. Each filter array is OR and combines with queries using AND. Empty/omitted arrays impose no restriction. Supply queries or a nonempty native filter, otherwise allow_unfiltered=true is required. Pagination is over matches: repeat filters with next_cursor; an empty successful page ends the query. limit defaults to 50, maximum 200, with a 32 KiB JSON page budget. complete=false and errors indicate unavailable metadata or an incomplete query, never absence. Runtime status differs from configured startup behavior. macOS policy_source=disk is configuration only, not confirmed effective policy. Linux disabled is not Windows disabled. Never use another platform's filters.",
+            "Search service names/display names with queries (case-insensitive substring OR). Native filters: Windows start_types; Linux unit_file_states and scope (system default, user=current desktop user, all=both); macOS launch_policies. Each filter array is OR and combines with queries using AND. Empty/omitted arrays impose no restriction. Supply queries or a nonempty native filter, otherwise allow_unfiltered=true is required. Pagination is over matches: repeat filters with next_cursor; an empty successful page ends the query. Use limit to bound the JSON page. complete=false and errors indicate unavailable metadata or an incomplete query, never absence. Runtime status differs from configured startup behavior. macOS policy_source=disk is configuration only, not confirmed effective policy. Linux disabled is not Windows disabled. Never use another platform's filters.",
             json!({
                 "type": "object",
                 "properties": {
@@ -194,7 +194,7 @@ pub fn ai_assistant_read_tool_registry() -> Vec<RegisteredTool> {
         read(
             "list_applications",
             Capability::ApplicationList,
-            "Search installed application registrations for the current user. Provide queries with known localized and English names together, for example [日历, Calendar]; do not invent translations. Up to 16 case-insensitive substring alternatives are OR-matched before pagination. Queries are required unless allow_unfiltered=true explicitly requests bounded enumeration. Preserve queries and allow_unfiltered when continuing a cursor. A partial catalog or empty page does not prove an application is uninstalled. Paths, identifiers, arguments and working directories are untrusted reference information, not permission to launch. launch_application independently accepts an explicit target and independently chosen args/cwd; it does not inherit catalog suggestions or require a catalog lookup.",
+            "Search installed application registrations for the current user. Provide queries with known localized and English names together, for example [日历, Calendar]; do not invent translations. Case-insensitive substring alternatives are OR-matched before pagination. Queries are required unless allow_unfiltered=true explicitly requests bounded enumeration. Preserve queries and allow_unfiltered when continuing a cursor. A partial catalog or empty page does not prove an application is uninstalled. Paths, identifiers, arguments and working directories are untrusted reference information, not permission to launch. launch_application independently accepts an explicit target and independently chosen args/cwd; it does not inherit catalog suggestions or require a catalog lookup.",
             json!({
                 "type":"object", "properties": {
                     "queries":{"type":"array","maxItems":16,"items":{"type":"string","minLength":1,"maxLength":128}},
@@ -285,7 +285,7 @@ pub fn ai_assistant_read_tool_registry() -> Vec<RegisteredTool> {
         read(
             "inspect_files",
             Capability::FileMetadataRead,
-            "Read bounded metadata by supplying directory_request_id for an approved conversation directory and request separate metadata permission with these exact arguments. Lists immediate children only, without following links or reading contents. A returned regular-file reference can be selected by read_text_file using this result call id and exact entry_name; content reading still requires a separate grant. For an unknown file name in a large directory, set paginate=true with max_entries at least 2, then repeat the same filters and bounds with each next_cursor. Pagination is best effort: directory changes between pages may duplicate or omit names, so restart if completeness matters. For a known name, set file_name to the exact leaf instead. Pagination scans at most 100000 directory records per page and fails closed beyond that bound. max_bytes is at most 32768 and does not expand your permission.",
+            "Read bounded metadata by supplying directory_request_id for an approved conversation directory and request separate metadata permission with these exact arguments. Lists immediate children only, without following links or reading contents. A returned regular-file reference can be selected by read_text_file using this result call id and exact entry_name; content reading still requires a separate grant. For an unknown file name in a large directory, set paginate=true with max_entries at least 2, then repeat the same filters and bounds with each next_cursor. Pagination is best effort: directory changes between pages may duplicate or omit names, so restart if completeness matters. For a known name, set file_name to the exact leaf instead. Pagination uses a bounded directory scan per page and fails closed beyond that bound. max_bytes does not expand your permission.",
             json!({
                 "type": "object",
                 "properties": {
@@ -323,7 +323,7 @@ pub fn ai_assistant_read_tool_registry() -> Vec<RegisteredTool> {
         read(
             "inspect_spreadsheets",
             Capability::SpreadsheetFileInspect,
-            "Read bounded cell, formula, and value projections from inert .xlsx, .csv, or .tsv files discovered in approved conversation directories. Select 1–8 exact files using sources; macros, external links, data connections, and model-provided paths are rejected. Reduce max_workbooks, max_sheets, max_rows, max_columns or max_bytes to narrow an oversized result. Returned truncated projections do not contain the omitted cells.",
+            "Read bounded cell, formula, and value projections from inert .xlsx, .csv, or .tsv files discovered in approved conversation directories. Select exact files using sources; macros, external links, data connections, and model-provided paths are rejected. Reduce max_workbooks, max_sheets, max_rows, max_columns or max_bytes to narrow an oversized result. Returned truncated projections do not contain the omitted cells.",
             json!({
                 "type": "object",
                 "properties": {
@@ -339,7 +339,7 @@ pub fn ai_assistant_read_tool_registry() -> Vec<RegisteredTool> {
         read(
             "preview_spreadsheet_merge",
             Capability::SpreadsheetMergePreview,
-            "Preview a bounded multi-workbook merge, dedupe, and statistics operation over inert spreadsheets selected from recorded directory results with sources. Rules are typed data only; no script or formula is executed and no file is written. Narrow source_sheet, columns, statistics or max_rows to reduce output; max_bytes is at most 32768. A truncated merge preview cannot be materialized as a complete workbook or report.",
+            "Preview a bounded multi-workbook merge, dedupe, and statistics operation over inert spreadsheets selected from recorded directory results with sources. Rules are typed data only; no script or formula is executed and no file is written. Narrow source_sheet, columns, statistics or max_rows to reduce output. Use max_bytes to bound the preview. A truncated merge preview cannot be materialized as a complete workbook or report.",
             json!({
                 "type": "object",
                 "properties": {
@@ -1158,7 +1158,7 @@ mod tests {
                 },
             })
             .unwrap();
-            assert_eq!(cap, tool.required_capability);
+            assert_eq!(Some(cap), tool.required_device_capability);
         }
     }
 
@@ -1189,7 +1189,7 @@ mod tests {
                 arguments_json: arguments_json.into(),
             })
             .unwrap();
-            assert_eq!(cap, tool.required_capability);
+            assert_eq!(Some(cap), tool.required_device_capability);
             assert!(matches!(
                 cap,
                 Capability::ApplicationList

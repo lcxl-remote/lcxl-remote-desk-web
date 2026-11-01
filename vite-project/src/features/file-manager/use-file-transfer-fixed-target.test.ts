@@ -1,7 +1,7 @@
 import { act, cleanup, renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it } from 'vitest';
 import { useFileTransfer } from './use-file-transfer';
-import { installSignalingStubs, restoreSignalingStubs, latestSocket, deliverSignaling, sentSignalingOfType, flush, type SignalingGlobals } from './file-transfer-test-harness';
+import { installSignalingStubs, restoreSignalingStubs, latestSocket, deliverSignaling, sentSignalingOfType, flush, type SignalingGlobals } from './__tests__/harness';
 import { SIGNALING_TYPE_CODE_REQUEST_REMOTE_ACCESS, SIGNALING_TYPE_CODE_LIST_FILES, SIGNALING_TYPE_CODE_REMOTE_ACCESS_INITIALIZED } from '@/features/desk/constants';
 import { deskErrorCodeEnum } from '@/services/types';
 

@@ -293,6 +293,7 @@ pub(crate) async fn save_main_delegation_session(
         crate::goal_work::rebase_background_events_on(&txn, &current, held).await
     })
     .await?
+        || (current.assistant_data.is_some() && held.assistant_data.is_none())
         || current.lease_token != held.lease_token
         || current.input_revision != held.input_revision
         || current.control_revision != held.control_revision
@@ -302,15 +303,109 @@ pub(crate) async fn save_main_delegation_session(
         return Err(invalid());
     }
     let now = chrono::Utc::now();
-    desk_diagnose_core::future::boxed(|| async {
-        acknowledge_results_on(&txn, &current, held, now.timestamp_millis()).await
-    })
-    .await?;
-    let version = desk_diagnose_core::future::boxed(|| async {
-        write_child_session_on(&txn, held, now).await
-    })
-    .await?;
+    let version = if held.surface == desk_diagnose_core::session::AgentSessionSurface::AiAssistant
+        && held.assistant_data.is_some()
+    {
+        desk_diagnose_core::future::send_phase(|| save_main_history_on(&txn, &current, held, now))
+            .await?
+    } else {
+        desk_diagnose_core::future::boxed(|| async {
+            acknowledge_results_on(&txn, &current, held, now.timestamp_millis()).await
+        })
+        .await?;
+        desk_diagnose_core::future::boxed(|| async {
+            write_child_session_on(&txn, held, now).await
+        })
+        .await?
+    };
     desk_diagnose_core::future::boxed(|| async { txn.commit().await }).await?;
     held.version = version;
     Ok(())
+}
+
+async fn save_main_history_on(
+    txn: &DatabaseTransaction,
+    current: &PersistedAgentSession,
+    held: &PersistedAgentSession,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<i64, DbErr> {
+    use super::super::{agent_session_store::history_save, assistant_data_store};
+    use desk_agent_protocol::ai_assistant::history::HistoryAdmission;
+
+    let mut prepared = desk_diagnose_core::future::send_phase(|| {
+        assistant_data_store::prepare_visible_history_on(txn, held)
+    })
+    .await
+    .map_err(history_error)?;
+    // Keep child observation and the original session update in this same
+    // transaction. No native/source read follows the final history quota phase.
+    desk_diagnose_core::future::send_phase(|| {
+        acknowledge_results_on(txn, current, held, now.timestamp_millis())
+    })
+    .await?;
+    desk_diagnose_core::future::send_phase(|| prepared.observe_native_status_on(txn))
+        .await
+        .map_err(history_error)?;
+    let captures = prepared.captures();
+    let requests = prepared.requests(&captures).map_err(history_error)?;
+    let deadlines = prepared.deadlines().map_err(history_error)?;
+    let pending = desk_diagnose_core::future::send_phase(|| {
+        assistant_data_store::history::staged::prepare_requests_on(txn, &requests, &prepared.policy)
+    })
+    .await
+    .map_err(history_error)?;
+
+    let held_until = desk_diagnose_core::future::send_phase(|| prepared.finish_preparation_on(txn))
+        .await
+        .map_err(history_error)?;
+    let version = held.version.checked_add(1).ok_or_else(invalid)?;
+    let state_json = {
+        let mut stored = Box::new(held.clone());
+        desk_diagnose_core::image_input::retain_latest_session_image(&mut stored.conversation)
+            .map_err(|_| invalid())?;
+        desk_diagnose_core::image_input::strip_session_images(&mut stored.conversation);
+        stored.version = version;
+        stored.encode_json_for_storage().map_err(|_| invalid())?
+    };
+    let deadline = held
+        .turn_state
+        .is_active()
+        .then_some(now + chrono::Duration::seconds(90));
+    let changed = history_save::persist_on(
+        txn,
+        held,
+        &state_json,
+        version,
+        now,
+        deadline,
+        Some(prepared.original.as_ref()),
+    )
+    .await?;
+    if changed.rows_affected != 1 {
+        return Err(invalid());
+    }
+
+    let outcomes = desk_diagnose_core::future::send_phase(|| pending.finalize_on())
+        .await
+        .map_err(history_error)?;
+    let completed = u64::try_from(chrono::Utc::now().timestamp_millis()).map_err(|_| invalid())?;
+    if outcomes.len() != deadlines.len()
+        || held_until.is_some_and(|until| until <= completed)
+        || outcomes.iter().zip(deadlines).any(|(outcome, deadline)| {
+            matches!(
+                outcome.admission,
+                HistoryAdmission::Indexed | HistoryAdmission::Redacted
+            ) && deadline.is_some_and(|until| until <= completed)
+        })
+    {
+        return Err(invalid());
+    }
+    Ok(version)
+}
+
+fn history_error(error: super::super::assistant_data_store::AssistantStoreError) -> DbErr {
+    match error {
+        super::super::assistant_data_store::AssistantStoreError::Backend(error) => error,
+        _ => invalid(),
+    }
 }

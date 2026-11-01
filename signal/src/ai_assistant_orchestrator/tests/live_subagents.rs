@@ -151,6 +151,8 @@ async fn formatted_delegation_scenario() {
         1,
         "device".into(),
         AiAssistantAsk {
+            client_timezone: "UTC".into(),
+            temporary_conversation: None,
             question: "Delegate two optional independent analyses".into(),
             client_message_id: "original-message".into(),
             conversation_id: Some("formatted-delegation".into()),
@@ -159,7 +161,7 @@ async fn formatted_delegation_scenario() {
         None,
     )
     .await;
-    tokio::time::timeout(Duration::from_secs(10), capture)
+    tokio::time::timeout(MODEL_IO_TIMEOUT, capture)
         .await
         .unwrap()
         .unwrap();
@@ -462,6 +464,8 @@ async fn sample(
                 1,
                 "device".into(),
                 AiAssistantAsk {
+                    client_timezone: "UTC".into(),
+                    temporary_conversation: None,
                     question: prompt,
                     client_message_id: "original-message".into(),
                     conversation_id: Some(client.clone()),

@@ -3,9 +3,7 @@ use crate::entity::agent_subagent_inbox as inbox;
 use desk_diagnose_core::{
     chat::{ChatMessage, ChatRole, ModelTurn, StopReason},
     model_egress::ModelEgressPolicy,
-    seam::ClaimTurnParams,
-    session::{TriggerOrigin, TurnState},
-    subagent::runtime::RuntimeTurn,
+    session::TurnState,
 };
 
 pub(super) async fn release_parent(db: &DatabaseConnection, parent: &mut PersistedAgentSession) {
@@ -34,21 +32,6 @@ pub(super) async fn release_parent(db: &DatabaseConnection, parent: &mut Persist
     }
     parent.finish_turn(TurnState::Idle, chrono::Utc::now().to_rfc3339());
     save_main_delegation_session(db, parent).await.unwrap();
-}
-
-fn params(parent: &PersistedAgentSession) -> ClaimTurnParams {
-    ClaimTurnParams {
-        conversation_id: parent.conversation_id.clone(),
-        actor_id: parent.actor_id.clone(),
-        device_id: parent.device_id.clone(),
-        policy_revision: 2,
-        current_pdp_scope: scope(),
-        turn_id: "notice-turn".into(),
-        request_id: Some("notice-request".into()),
-        connection_id: None,
-        trigger_origin: TriggerOrigin::SubAgentCompletion,
-        now: chrono::Utc::now().to_rfc3339(),
-    }
 }
 
 async fn completed_without_wait(db: &DatabaseConnection) -> (PersistedAgentSession, String) {
@@ -115,193 +98,117 @@ pub(super) async fn answer(
 }
 
 #[tokio::test]
-async fn completion_without_explicit_wait_claims_one_real_server_notice_and_requires_provider_evidence()
- {
+async fn completion_updates_the_original_projection_without_claiming_a_new_turn() {
     let db = database().await;
-    let (_, task) = completed_without_wait(&db).await;
+    let (mut parent, calls) = super::creation::runnable_parent(&db).await;
     let store = SubAgentStore::new(db.clone());
-    let RuntimeTurn::ParentCompletion { session, .. } = store
-        .parent_runtime_candidate("root", "1", "1")
+    let task = store
+        .spawn_for_turn(&parent, &calls[0], &super::creation::spawn_request())
         .await
-        .unwrap()
-        .unwrap()
-    else {
-        panic!("original user source");
-    };
-    assert!(session.subagent_wait.is_none());
-    assert!(session.ready_subagent_wait.is_none());
-    let notification = session.ready_subagent_notification.as_ref().unwrap();
-    notification.validate().unwrap();
-    assert_eq!(notification.events[0].task_id, task);
-    let message = session
-        .conversation
-        .iter()
-        .find(|message| message.message_id == notification.message_id)
         .unwrap();
-    assert_eq!(message.role, ChatRole::SystemEvent);
-    assert!(message.tool_calls.is_empty());
-    assert!(message.tool_call_id.is_none());
-    assert!(
-        session
-            .context_protection_set()
-            .protected_message_ids
-            .contains(&message.message_id)
-    );
-    let again = store
-        .parent_runtime_candidate("root", "1", "1")
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        again.session().ready_subagent_notification,
-        session.ready_subagent_notification
-    );
-    let mut wrong = super::creation::destination();
-    if let desk_agent_protocol::data_lineage::DestinationIdentity::Model {
-        connection_revision,
-        ..
-    } = &mut wrong
-    {
-        *connection_revision += 1;
-    }
-    assert!(
-        store
-            .claim_parent_completion(&params(&session), &wrong)
-            .await
-            .unwrap()
-            .is_none()
-    );
-    let mut claimed = store
-        .claim_parent_completion(&params(&session), &super::creation::destination())
-        .await
-        .unwrap()
-        .unwrap()
-        .session;
-    assert!(!claimed.trigger_origin.allows_new_mutation());
-    assert!(!claimed.trigger_origin.allows_delegated_review());
-    assert!(
-        store
-            .claim_parent_completion(&params(&session), &super::creation::destination())
-            .await
-            .unwrap()
-            .is_none()
-    );
-    let current = claimed.clone();
-    answer(&db, &mut claimed, false).await;
-    assert!(
-        save_main_delegation_session(&db, &mut claimed)
-            .await
-            .is_err()
-    );
-    let event = inbox::Entity::find()
-        .filter(inbox::Column::TaskId.eq(&task))
-        .filter(inbox::Column::EventKind.eq("completed"))
+    super::main_tools::complete_child(&db, &task.task_id).await;
+    let before = session_row::Entity::find()
+        .filter(session_row::Column::ConversationId.eq("root"))
         .one(&db)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(
-        event.notification_attempted_turn_id.as_deref(),
-        Some("notice-turn")
+    let projection = store.main_projection_for_turn(&parent).await.unwrap();
+    let payload: serde_json::Value = serde_json::from_str(&projection.text).unwrap();
+    assert!(
+        payload["runtime_delegation_state"]["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value["task"]["task_id"] == task.task_id
+                && value["task"]["state"] == "completed")
     );
-    assert!(event.model_notified_at_ms.is_none());
-    assert!(event.model_observed_at_ms.is_none());
-    assert!(event.interpreted_at_ms.is_none());
-    claimed = current;
-    answer(&db, &mut claimed, true).await;
-    save_main_delegation_session(&db, &mut claimed)
-        .await
-        .unwrap();
-    let delivered = inbox::Entity::find_by_id(event.id)
-        .one(&db)
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(delivered.model_notified_at_ms.is_some());
-    assert!(delivered.model_observed_at_ms.is_none());
-    assert!(delivered.interpreted_at_ms.is_none());
-    assert!(delivered.ui_read_at_ms.is_none());
-    claimed.ready_subagent_notification = None;
-    claimed.finish_turn(TurnState::Idle, chrono::Utc::now().to_rfc3339());
-    save_main_delegation_session(&db, &mut claimed)
-        .await
-        .unwrap();
     assert!(
         store
             .parent_runtime_candidate("root", "1", "1")
             .await
             .unwrap()
             .is_none()
+    );
+    let after = session_row::Entity::find_by_id(before.id)
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(before, after);
+    release_parent(&db, &mut parent).await;
+    let before = session_row::Entity::find_by_id(before.id)
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    for _ in 0..3 {
+        assert!(
+            store
+                .parent_runtime_candidate("root", "1", "1")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .root_wait_candidates(0, 32)
+                .await
+                .unwrap()
+                .0
+                .is_empty()
+        );
+    }
+    let after = session_row::Entity::find_by_id(before.id)
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(before, after);
+    assert!(parent.ready_subagent_notification.is_none());
+    assert!(
+        inbox::Entity::find()
+            .all(&db)
+            .await
+            .unwrap()
+            .iter()
+            .all(|event| event.model_notified_at_ms.is_none())
     );
 }
 
 #[tokio::test]
-async fn notification_and_session_save_roll_back_together_and_retry_wait_does_not_consume_the_inbox()
- {
+async fn failed_main_without_an_explicit_wait_is_not_rescheduled_by_child_notifications() {
     let db = database().await;
-    completed_without_wait(&db).await;
-    let store = SubAgentStore::new(db.clone());
-    let runtime = store
-        .parent_runtime_candidate("root", "1", "1")
-        .await
-        .unwrap()
-        .unwrap();
-    let mut parent = store
-        .claim_parent_completion(&params(runtime.session()), &super::creation::destination())
-        .await
-        .unwrap()
-        .unwrap()
-        .session;
-    let current = parent.clone();
-    answer(&db, &mut parent, true).await;
-    let txn = db.begin().await.unwrap();
-    acknowledge_results_on(
-        &txn,
-        &current,
-        &parent,
-        chrono::Utc::now().timestamp_millis(),
-    )
-    .await
-    .unwrap();
-    parent.version += 100;
-    assert!(
-        write_child_session_on(&txn, &parent, chrono::Utc::now())
-            .await
-            .is_err()
-    );
-    txn.rollback().await.unwrap();
-    assert!(
-        inbox::Entity::find()
-            .all(&db)
-            .await
-            .unwrap()
-            .iter()
-            .all(|event| event.model_notified_at_ms.is_none())
-    );
-    parent = current;
-    parent
-        .ready_subagent_notification
-        .as_mut()
-        .unwrap()
-        .retry_after_ms = Some(chrono::Utc::now().timestamp_millis() + 30_000);
-    parent.finish_turn(TurnState::Failed, chrono::Utc::now().to_rfc3339());
+    let (mut parent, _) = completed_without_wait(&db).await;
+    parent.turn_state = TurnState::Failed;
     save_main_delegation_session(&db, &mut parent)
         .await
         .unwrap();
-    assert!(
-        store
-            .parent_runtime_candidate("root", "1", "1")
-            .await
-            .unwrap()
-            .is_none()
-    );
+    let store = SubAgentStore::new(db.clone());
+    for _ in 0..3 {
+        assert!(
+            store
+                .parent_runtime_candidate("root", "1", "1")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .root_wait_candidates(0, 32)
+                .await
+                .unwrap()
+                .0
+                .is_empty()
+        );
+    }
     assert!(
         inbox::Entity::find()
             .all(&db)
             .await
             .unwrap()
             .iter()
-            .all(|event| event.model_notified_at_ms.is_none())
+            .all(|event| event.notification_attempted_turn_id.is_none())
     );
 }
 

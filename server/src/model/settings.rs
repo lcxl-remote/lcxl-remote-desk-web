@@ -267,6 +267,7 @@ impl Settings {
         Ok(settings)
     }
 
+    #[cfg(test)]
     /// Load settings from the config file **without** the token-generation /
     /// save side effects of [`Settings::new`]. Used where a fresh read of the
     /// persisted policy is needed (e.g. the MCP server re-checking live

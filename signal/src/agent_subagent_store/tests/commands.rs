@@ -415,6 +415,7 @@ async fn adjusting_approved_child_before_dispatch_rejects_the_old_input() {
                 expected_input_revision: run.binding.input_revision,
                 expected_control_revision: run.binding.control_revision,
                 action: SubAgentControlAction::Adjust {
+                    client_timezone: "UTC".into(),
                     message: "Inspect the new symptom instead".into(),
                 },
             },

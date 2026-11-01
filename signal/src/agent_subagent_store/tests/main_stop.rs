@@ -253,7 +253,7 @@ async fn no_children_stop_fences_generation_and_a_new_owner_input_can_start_agai
 
 #[tokio::test]
 async fn retained_children_do_not_fill_the_main_conversation_history_page() {
-    let db = database().await;
+    let db = source_isolation_database().await;
     seed_parent(&db).await;
     for index in 0..12 {
         let group = format!("history-group-{index}");

@@ -94,6 +94,7 @@ fn prepare_iteration_phase<'a, 'd: 'a, M: FnMut() -> String + 'a>(
     })
 }
 
+#[allow(clippy::type_complexity)]
 async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
     inputs: Box<(
         &'a LoopDeps<'d>,
@@ -149,6 +150,10 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
             previous_input_revision: session.input_revision,
             current_input_revision,
         })));
+    }
+
+    if crate::ai_assistant::data_access::retained_context_eligible(session) {
+        assistant_data::fresh_access(deps, session, current_unix_ms(deps.clock)?).await?;
     }
 
     let disclosure_enabled = session.surface == AgentSessionSurface::AiAssistant
@@ -227,7 +232,35 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
     } else {
         None
     };
-    let mut exposed = exposed_for_session(deps.registry, session);
+
+    let data_access = if crate::ai_assistant::data_access::eligible_origin(session) {
+        deps.session_seam
+            .assistant_data_access(session, current_unix_ms(deps.clock)?)
+            .await?
+    } else {
+        None
+    };
+    let mut callable_registry = deps
+        .registry
+        .iter()
+        .filter(|tool| {
+            !crate::ai_assistant::data_tools::is_data_tool(tool.name())
+                && !crate::ai_assistant::data_tools::is_data_effect(tool.effect)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if let Some(access) = &data_access {
+        access.validate().map_err(crate::subagent::invalid)?;
+        callable_registry.extend(crate::ai_assistant::data_tools::for_session(
+            session,
+            &access.settings,
+            deps.session_seam.memory().is_some(),
+            deps.session_seam.memory_mutation().is_some(),
+            deps.session_seam.conversation_search().is_some(),
+            current_unix_ms(deps.clock)?,
+        ));
+    }
+    let mut exposed = exposed_for_session(&callable_registry, session);
     if deps.session_seam.subagents(session).is_none() {
         exposed.retain(|tool| crate::subagent::tools::effect(tool.name()).is_none());
     }
@@ -251,9 +284,7 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                                 capability.wire.effect,
                                 &capability.wire.data_policy,
                             ) == desk_agent_protocol::capability_grant::CapabilityRiskTier::R0
-                                || snapshot
-                                    .policy_read_capabilities
-                                    .contains(&tool.required_capability)
+                                || tool.has_device_capability(&snapshot.policy_read_capabilities)
                         })
             })
             .map(|tool| tool.name().to_string())
@@ -272,9 +303,7 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
             if capability.wire.execution_locality
                 != desk_agent_protocol::capability_provider::ExecutionLocality::Central
                 && !authority.as_ref().is_some_and(|snapshot| {
-                    snapshot
-                        .ready_capabilities
-                        .contains(&tool.required_capability)
+                    tool.has_device_capability(&snapshot.ready_capabilities)
                 })
             {
                 return false;
@@ -301,6 +330,9 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                 tool.effect,
                 ToolEffect::GoalOpenPlanning
                     | ToolEffect::ConversationHistory
+                    | ToolEffect::AssistantHistory
+                    | ToolEffect::MemoryQuery
+                    | ToolEffect::MemoryWrite
                     | ToolEffect::RunProjection
             )
         });
@@ -372,7 +404,10 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                 deps,
                 session,
                 event_id,
-                ModelRequest::text_only(Vec::new(), deps.response_format.clone()),
+                Box::new(ModelRequest::text_only(
+                    Vec::new(),
+                    deps.response_format.clone(),
+                )),
             )
             .await?
             .messages,
@@ -384,11 +419,11 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
         tool_requirements.union(crate::model_capability::ModelRequirements::for_messages(
             completion_messages
                 .as_deref()
-                .unwrap_or(&session.conversation),
+                .unwrap_or(&session.model_conversation()),
         ));
     let mut pinned_context = deps.model.context_policy(request_requirements).await?;
     pinned_context.preserve_history = session.surface == AgentSessionSurface::AiAssistant;
-    let mut definition_registry = deps.registry.to_vec();
+    let mut definition_registry = callable_registry.clone();
     if disclosure_enabled && let Some(providers) = deps.provider_registry {
         for name in &session.capability_disclosure.advertised_tool_names {
             if definition_registry
@@ -455,10 +490,14 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                 tool.effect,
                 ToolEffect::GoalOpenPlanning
                     | ToolEffect::ConversationHistory
+                    | ToolEffect::AssistantHistory
+                    | ToolEffect::MemoryQuery
+                    | ToolEffect::MemoryWrite
                     | ToolEffect::RunProjection
             )
         });
     }
+
     // Approval cannot override execution-state or scope restrictions. Keep
     // recovery tools available if none of the approved tools can run.
     let permission_continuation_blocked = state.permission_continuation_pending
@@ -483,7 +522,7 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
     let prompt: PromptPhase<'a> = crate::future::phase(|| async move {
         let exposed = owned_exposed.iter().collect::<Vec<_>>();
         let permission_candidates = owned_permission_candidates.as_slice();
-        let mut stable_system = deps.system_prompt.clone();
+        let mut stable_system = Box::new(deps.system_prompt.clone());
         let disclosed_provider_tools = exposed
             .iter()
             .filter(|tool| {
@@ -508,10 +547,11 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
         }
         let split_runtime = session.surface == AgentSessionSurface::AiAssistant;
         let mut system_prompt = if split_runtime {
-            crate::runtime_context::take(&mut stable_system)
+            Box::new(crate::runtime_context::take(&mut stable_system))
         } else {
             stable_system.clone()
         };
+
         if let Some((snapshot, grants)) = authority.as_ref().zip(authority_grants.as_ref()) {
             let fresh = crate::permission_tools::capability_authorization_prompt(
                 grants,
@@ -549,11 +589,13 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                         error_code: None,
                     })?
                     .destination;
-                system_prompt = crate::permission_resume::bind_exact_authorization_system_message(
-                    system_prompt,
-                    destination,
-                    expiry,
-                )?;
+                system_prompt = Box::new(
+                    crate::permission_resume::bind_exact_authorization_system_message(
+                        *system_prompt,
+                        destination,
+                        expiry,
+                    )?,
+                );
             }
         }
         if !policy_read_names.is_empty() {
@@ -672,10 +714,13 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                     && envelope.provenance.source_tool_name == "capability-authorization"
             })
         {
-            system_prompt =
-                crate::permission_resume::rebind_exact_authorization_system_message(system_prompt)?;
+            system_prompt = Box::new(
+                crate::permission_resume::rebind_exact_authorization_system_message(
+                    *system_prompt,
+                )?,
+            );
         }
-        deliver_pending_results(deps, session).await?;
+        crate::future::boxed(|| deliver_pending_results(deps, session)).await?;
         if split_runtime && system_prompt.data_envelope.is_none() {
             let parent = child_runtime_label.as_ref().or_else(|| {
                 crate::permission_resume::latest_user_requirement(&session.conversation)
@@ -701,7 +746,31 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
             )?,
             _ => None,
         };
-        let mut messages = vec![system_prompt];
+        let mut messages = vec![*system_prompt];
+        if session.surface == AgentSessionSurface::AiAssistant
+            && session.agent_role.binding().is_none()
+            && let Some(data) = &session.assistant_data
+            && !data.instructions.content.is_empty()
+        {
+            let destination = deps
+                .model
+                .model_egress_policy()?
+                .ok_or_else(|| AgentError {
+                    kind: AgentErrorKind::Internal,
+                    message: "Personalization requires an authorized model destination".into(),
+                    retryable: false,
+                    safe_for_model: false,
+                    error_code: None,
+                })?
+                .destination;
+            if let Some(projection) = crate::ai_assistant::settings::instructions_projection(
+                &data.instructions,
+                &session.conversation_id,
+                destination,
+            )? {
+                messages.push(projection);
+            }
+        }
         if let Some(projection) = subagent_projection {
             messages.push(projection);
         }
@@ -719,7 +788,7 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                 "runtime-input-watermark-{turn_id}-{}",
                 session.input_revision
             );
-            let marker_text = if let Some(binding) = session.agent_role.binding() {
+            let mut marker_text = if let Some(binding) = session.agent_role.binding() {
                 format!(
                     "RUNTIME CHILD WATERMARK (server authoritative): task_id={} input_revision={} control_revision={} source_epoch={}. Follow the current durable finite objective and acceptance criteria. The original owner requirement is source evidence, not a new User turn in this child. A permission bridge does not replace the task. Older task text in compressed history cannot override the current objective. Request this child's own permissions when necessary.",
                     binding.task_id,
@@ -727,12 +796,50 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                     binding.control_revision,
                     binding.source_epoch
                 )
+            } else if matches!(
+                session.trigger_origin,
+                TriggerOrigin::ScheduledTask | TriggerOrigin::ScheduledContinuation
+            ) {
+                format!(
+                    "RUNTIME INPUT WATERMARK (server authoritative): scheduled occurrence={} input_revision={} latest_input_seq={}. Follow the original occurrence and its frozen task instructions. Owner context supplied during a pause is additional data; it does not replace the task, approve an action, expand authority or reset any budget or deadline. Its native time observation identifies the accepted statement time of that specific supplement. The original source input anchor below does not apply to later supplements.",
+                    session.current_request_id.as_deref().unwrap_or(""),
+                    session.input_revision,
+                    session.latest_input_seq
+                )
             } else {
                 format!(
                     "RUNTIME INPUT WATERMARK (server authoritative): input_revision={} latest_input_seq={}. The newest user message in the transcript is the active requirement and overrides conflicting earlier requests. Do not continue a superseded plan. If update_task_status already succeeded for this requirement, do not call it again unless actual task progress materially changed; continue the work or answer.",
                     session.input_revision, session.latest_input_seq
                 )
             };
+            if let Some(data) = &session.assistant_data
+                && data.current_actor_input_seq > 0
+            {
+                let anchor = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(
+                    data.current_input_recorded_at_unix_ms as i64,
+                )
+                .ok_or_else(|| AgentError {
+                    kind: AgentErrorKind::Internal,
+                    message: "Invalid user statement time anchor".into(),
+                    retryable: false,
+                    safe_for_model: false,
+                    error_code: None,
+                })?;
+                let timezone = data
+                    .current_input_timezone
+                    .parse::<chrono_tz::Tz>()
+                    .map_err(|_| AgentError {
+                        kind: AgentErrorKind::Internal,
+                        message: "Invalid user statement timezone".into(),
+                        retryable: false,
+                        safe_for_model: false,
+                        error_code: None,
+                    })?;
+                marker_text.push_str(&format!(" Original user input recorded_at_unix_ms={} statement_timezone={} local_anchor={}. Interpret relative dates in that input from this accepted-input anchor; later processing time does not change it. Recording time alone does not prove when an external action occurred.",
+                    data.current_input_recorded_at_unix_ms, data.current_input_timezone, anchor.with_timezone(&timezone).to_rfc3339()));
+            } else if let Some(data) = &session.assistant_data {
+                marker_text.push_str(&format!(" The original task has no accepted owner-input timestamp. Its frozen statement_timezone is {}. Do not invent an original owner input date; native supplement anchors and external action times remain distinct.", data.current_input_timezone));
+            }
             let latest_user =
                 crate::permission_resume::latest_user_requirement(&session.conversation).cloned();
             let parent = child_runtime_label.as_ref().or_else(|| {
@@ -749,7 +856,7 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
             )?;
             messages.push(marker);
             if let Some(artifact_projection) = requested_artifact_registry_projection(
-                &session.conversation,
+                &session.model_conversation(),
                 &format!(
                     "runtime-requested-artifacts-{turn_id}-{}",
                     session.input_revision
@@ -762,7 +869,7 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                 deps.session_seam.save(session).await?;
             }
             if let Some(result_projection) = reusable_provider_result_projection(
-                &session.conversation,
+                &session.model_conversation(),
                 &format!(
                     "runtime-reusable-results-{turn_id}-{}",
                     session.input_revision
@@ -991,18 +1098,18 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
             deps.session_seam.save(session).await?;
         }
         let runtime: RuntimePhase<'a> = crate::future::phase(|| async move {
-            let mut overhead_request = ModelRequest::text_only(
+            let mut overhead_request = Box::new(ModelRequest::text_only(
                 messages
                     .iter()
                     .cloned()
-                    .chain(split_runtime.then_some(stable_system.clone()))
+                    .chain(split_runtime.then(|| (*stable_system).clone()))
                     .collect(),
                 deps.response_format.clone(),
-            );
+            ));
             overhead_request.tools = specs.clone();
             overhead_request.ui_references = Some(session.ui_references.clone());
             overhead_request.result_locators =
-                crate::result_model_ids::locators(&session.conversation);
+                crate::result_model_ids::locators(&session.model_conversation());
             let overhead_request = crate::ui_model_ids::project_request(&overhead_request);
             let tool_spec_bytes = serde_json::to_vec(&overhead_request.tools)
                 .map_err(|_| {
@@ -1058,7 +1165,7 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
             if session.ui_references.observe(&session.conversation)? {
                 deps.session_seam.save(session).await?;
             }
-            let result_locators = crate::result_model_ids::locators(&session.conversation);
+            let result_locators = crate::result_model_ids::locators(&session.model_conversation());
             for source in &mut session.conversation {
                 let mut projected = source.clone();
                 projected.prepared_context_cost.0 = None;
@@ -1091,7 +1198,7 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
             let runtime_messages = messages;
             let mut messages = Vec::with_capacity(runtime_messages.len() + 1);
             if split_runtime {
-                messages.push(stable_system);
+                messages.push(*stable_system);
             }
             messages.extend(runtime_messages);
             if session.trigger_origin == TriggerOrigin::GoalContinuation {
@@ -1234,7 +1341,7 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
             // message is in this request is cleared once the model reacts to it (the
             // assistant answer / tool-call save below), so it never fires an automation
             // turn for a result the model already handled.
-            let mut request = ModelRequest {
+            let mut request = Box::new(ModelRequest {
                 observation: deps.model.observation_context(
                     crate::model_profile::ModelUseCase::Agent,
                     crate::model_observability::Origin::from(session.trigger_origin),
@@ -1260,13 +1367,14 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                 context_conversation_id: Some(session.conversation_id.clone()),
                 pinned_source_context_key: Some(pinned_context.source_context_key.clone()),
                 ui_references: Some(session.ui_references.clone()),
-                result_locators: crate::result_model_ids::locators(&session.conversation),
+                result_locators: crate::result_model_ids::locators(&session.model_conversation()),
                 previous_cache_projection: session.cache_projection.clone(),
                 delegation_call: None,
                 preparation: None,
+                assistant_data: None,
                 compression_identity: None,
                 caller_output_hard_cap: None,
-            };
+            });
             if session.surface == crate::session::AgentSessionSurface::TerminalAiAssistant
                 && let Some(context) = &mut request.observation
             {
@@ -1302,6 +1410,19 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                 if deps.model.command_completion_event_id().is_none() {
                     request = assemble_context_request(&request, &context_view, session)?;
                 }
+                let current_memory_bytes = crate::future::boxed(|| {
+                    assistant_data::current::prepare(deps, session, &mut request, turn_id)
+                })
+                .await?;
+                let mut usage_policy = history_policy.clone();
+                usage_policy.request_overhead_bytes = usage_policy
+                    .request_overhead_bytes
+                    .checked_add(current_memory_bytes)
+                    .ok_or_else(|| {
+                        model_context_error(
+                            crate::model_context::ModelContextError::ContextCostOverflow,
+                        )
+                    })?;
                 let preparation = deps.model.prepare_request(&request)?;
                 if let Some(prepared) = &preparation {
                     prepared.require_fit()?;
@@ -1344,10 +1465,10 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                     let mut basis = crate::context_usage::ContextUsageBasis::observe(
                         &session.conversation,
                         &projected_history,
-                        &history_policy,
+                        &usage_policy,
                     );
                     if let Some(prepared) = &preparation {
-                        let overhead = history_policy.request_overhead_bytes;
+                        let overhead = usage_policy.request_overhead_bytes;
                         let base = base_preparation.as_ref().unwrap_or(prepared);
                         let system_bytes = base.system_prompt_bytes;
                         let tool_bytes = base.tool_definitions_bytes;
@@ -1484,7 +1605,6 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                 state.projection_rebuilds = 0;
                 // Interpretation is published only after protocol and safety validation.
 
-                let mut request = Box::new(request);
                 let model: ModelPhase<'a> = crate::future::phase(|| async move {
                     let exposed = owned_exposed.iter().collect::<Vec<_>>();
                     let completion_only = deps.model.command_completion_event_id().is_some();
@@ -1493,6 +1613,10 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                             crate::subagent::invalid("physical model attempt counter exhausted")
                         })?;
                     let identity = format!("model:{turn_id}:{}", state.physical_model_attempt);
+                    crate::future::boxed(|| {
+                        assistant_data::prepare_request(deps, session, &mut request)
+                    })
+                    .await?;
                     let budget = match call_budget::reserve_model(
                         deps,
                         session,
@@ -1954,7 +2078,9 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                             );
                         }
                         append_refusal_placeholder(session, &mut (state.mint), safety_decision);
+
                         session.clear_reacted_auto_triggers(&request_message_ids);
+
                         deps.session_seam.save(session).await?;
                         sink.on_turn_retracted(
                             retraction_reason(safety_decision),
@@ -2102,6 +2228,7 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                                     sink.on_partial_committed();
                                     return Ok(None);
                                 }
+                                title::generate(deps, session).await;
                                 if terminal_answer && let Some(context) = observation.clone() {
                                     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
                                         || sink.on_answer_observation(context),
@@ -2151,16 +2278,20 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                                 }
                                 let response_message_id = message.message_id.clone();
                                 session.conversation.push(message);
+
                                 stage_subagent_observations(
                                     session,
                                     &request_message_ids,
                                     &response_message_id,
                                     false,
                                 )?;
+
                                 // The model reacted to this request (with tool calls); drop any
                                 // pending auto-trigger whose completion it saw here. Persisted with
                                 // the tool results at the save below.
+
                                 session.clear_reacted_auto_triggers(&request_message_ids);
+
                                 // Persist every assistant tool-call and its replay disposition
                                 // before any tool lifecycle event or external action.
                                 deps.session_seam.save(session).await?;
@@ -2194,6 +2325,66 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                                         finish_tool(session, &call.id, false, sink);
                                     }
                                     return Err(error);
+                                }
+
+                                let forget_targets = if session.surface
+                                    == AgentSessionSurface::AiAssistant
+                                    && session.agent_role.is_main()
+                                {
+                                    match crate::ai_assistant::data_tools::prepare_memory_batch(
+                                        &turn.tool_calls,
+                                    ) {
+                                        Ok(targets) => targets,
+                                        Err(error) => {
+                                            for call in &turn.tool_calls {
+                                                append_internal_tool_result(
+                                                    session,
+                                                    turn.provider_meta.data_envelope.as_ref(),
+                                                    (state.mint)(),
+                                                    &call.id,
+                                                    error.message.clone(),
+                                                    "memory_batch_rejected",
+                                                )?;
+                                            }
+                                            deps.session_seam.save(session).await?;
+                                            for call in &turn.tool_calls {
+                                                finish_tool(session, &call.id, false, sink);
+                                            }
+                                            return Ok(None);
+                                        }
+                                    }
+                                } else {
+                                    None
+                                };
+
+                                if let Some(targets) = forget_targets {
+                                    let count = state
+                                        .same_tool
+                                        .entry(
+                                            crate::ai_assistant::data_tools::MANAGE_MEMORIES.into(),
+                                        )
+                                        .or_insert(0);
+                                    let prior_invocations = *count;
+                                    *count = count.saturating_add(
+                                        u32::try_from(turn.tool_calls.len()).unwrap_or(u32::MAX),
+                                    );
+                                    let originally_exposed = exposed.iter().any(|tool| {
+                                        tool.name()
+                                            == crate::ai_assistant::data_tools::MANAGE_MEMORIES
+                                    });
+                                    return crate::future::phase(|| {
+                                        assistant_data::dispatch_forget(
+                                            deps,
+                                            session,
+                                            &turn.tool_calls,
+                                            &targets,
+                                            &response_message_id,
+                                            originally_exposed,
+                                            prior_invocations,
+                                            sink,
+                                        )
+                                    })
+                                    .await;
                                 }
 
                                 if turn.tool_calls.len() != 1
@@ -2361,7 +2552,7 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                                     // becomes an error tool-result so the conversation stays
                                     // well-formed and the model can adjust.
                                     let Some(tool) =
-                                        lookup_for_session(deps.registry, &call.name, session)
+                                        lookup_for_session(&owned_exposed, &call.name, session)
                                     else {
                                         append_internal_tool_result(
                                             session,
@@ -2552,18 +2743,16 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                                         );
                                         let ready = capability.wire.execution_locality
                             == desk_agent_protocol::capability_provider::ExecutionLocality::Central
-                            || snapshot
-                                .ready_capabilities
-                                .contains(&tool.required_capability);
+                            || tool.has_device_capability(&snapshot
+                                .ready_capabilities);
                                         let policy_read = tool.effect == ToolEffect::ReadOnly
                                 && (crate::capability_risk::classify_provider_descriptor_floor(
                                     capability.wire.effect,
                                     &capability.wire.data_policy,
                                 )
                                     == desk_agent_protocol::capability_grant::CapabilityRiskTier::R0
-                                    || snapshot
-                                        .policy_read_capabilities
-                                        .contains(&tool.required_capability));
+                                    || tool.has_device_capability(&snapshot
+                                        .policy_read_capabilities));
                                         let denial = if ready
                                             && session.trigger_origin
                                                 != crate::session::TriggerOrigin::ScheduledTask
@@ -2653,6 +2842,56 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                                         },
                                     ));
                                     let action: ToolPhase<'_> = match tool.effect {
+                                        ToolEffect::MemoryQuery
+                                        | ToolEffect::MemoryWrite
+                                        | ToolEffect::AssistantHistory => {
+                                            crate::future::phase(|| async {
+                                                sink.on_tool_started(
+                                                    &call.name,
+                                                    &call.id,
+                                                    &call.arguments_json,
+                                                );
+                                                let result_id = (state.mint)();
+                                                let result = crate::future::boxed(|| {
+                                                    assistant_data::dispatch(
+                                                        deps,
+                                                        session,
+                                                        call,
+                                                        &response_message_id,
+                                                        result_id.clone(),
+                                                        turn.provider_meta.data_envelope.as_ref(),
+                                                    )
+                                                })
+                                                .await;
+                                                let (message, ok, replayed) = match result {
+                                                    Ok(result) => (
+                                                        *result.message,
+                                                        result.ok,
+                                                        result.replayed,
+                                                    ),
+                                                    Err(error) if error.safe_for_model => {
+                                                        let content =
+                                                            crate::model_input::describe_error(
+                                                                &call.name,
+                                                                &error.message,
+                                                            );
+                                                        let mut message = ChatMessage::tool_result(
+                                                            result_id, &call.id, content,
+                                                        );
+                                                        message.data_envelope = crate::model_message_labels::internal_tool_result_envelope(
+                                                            turn.provider_meta.data_envelope.as_ref(), &call.id, &message.text, &call.name)?;
+                                                        (message, false, false)
+                                                    }
+                                                    Err(error) => return Err(error),
+                                                };
+                                                if !replayed {
+                                                    session.conversation.push(message);
+                                                }
+                                                deps.session_seam.save(session).await?;
+                                                finish_tool(session, &call.id, ok, sink);
+                                                Ok(None)
+                                            })
+                                        }
                                         ToolEffect::SubAgentPlanning
                                         | ToolEffect::SubAgentControl
                                         | ToolEffect::SubAgentQuery
@@ -3463,7 +3702,7 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                                             crate::model_observability::Stage::Preflight,
                                             crate::model_observability::StageOutcome::Passed,
                                         );
-                                                        let before = session.clone();
+                                                        let mut before = session.clone_boxed();
                                                         let content = serde_json::json!({
                                         "status": "pending_approval",
                                         "request_id": &event.request.request_id,
@@ -3506,7 +3745,10 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                                                             ));
                                                             }
                                                             Err(error) => {
-                                                                *session = before;
+                                                                std::mem::swap(
+                                                                    session,
+                                                                    &mut before,
+                                                                );
                                                                 append_internal_tool_result(
                                                                 session,
                                                                 turn.provider_meta
@@ -4333,104 +4575,28 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                                                     &call.id,
                                                     &call.arguments_json,
                                                 );
-                                                if call.name
-                                            == crate::conversation_attachment::READ_ATTACHMENT_TOOL
-                                        {
-                                            let result = Box::pin(read_conversation_attachment(
-                                                deps,
-                                                session,
-                                                call,
-                                                turn.provider_meta.data_envelope.as_ref(),
-                                                &mut attachment_read_budget,
-                                                &tool_observation,
-                                            ))
-                                            .await;
-                                            let (message, ok) = match result {
-                                                Ok(mut message) => {
-                                                    message.message_id = (state.mint)();
-                                                    message.tool_call_id = Some(call.id.clone());
-                                                    message.turn_id =
-                                                        session.current_turn_id.clone();
-                                                    (message, true)
-                                                }
-                                                Err(error) => {
-                                                    let content =
-                                                        crate::model_input::describe_error(
-                                                            &call.name,
-                                                            &error.message,
-                                                        );
-                                                    let envelope = crate::model_message_labels::conversation_history_result_envelope(
-                                            turn.provider_meta.data_envelope.as_ref(), &[], &call.id, &content)?;
-                                                    let mut message = ChatMessage::tool_result(
-                                                        (state.mint)(),
-                                                        &call.id,
-                                                        content,
-                                                    );
-                                                    message.data_envelope = envelope;
-                                                    (message, false)
-                                                }
-                                            };
-                                            session.conversation.push(message);
-                                            retain_latest_session_image(session)?;
-                                            deps.session_seam.save(session).await?;
-                                            finish_tool(session, &call.id, ok, sink);
-                                            return Ok(None);
-                                        }
-                                                let result =
-                                                    crate::conversation_history::load_history_page(
+                                                let result = crate::future::boxed(|| {
+                                                    retrieval_accounting::dispatch_legacy(
+                                                        deps,
+                                                        session,
                                                         call,
-                                                        &session.conversation,
-                                                        deps.model.model_egress_policy()?.as_ref(),
-                                                        current_unix_ms(deps.clock)?,
+                                                        &response_message_id,
+                                                        (state.mint)(),
+                                                        turn.provider_meta.data_envelope.as_ref(),
+                                                        &mut attachment_read_budget,
+                                                        &tool_observation,
                                                     )
-                                                    .and_then(|result| {
-                                                        session
-                                                            .focus_epoch
-                                                            .record_history_result(
-                                                                result.content.len(),
-                                                            )
-                                                            .map_err(|message| AgentError {
-                                                                kind: AgentErrorKind::InvalidInput,
-                                                                message: message.into(),
-                                                                retryable: false,
-                                                                safe_for_model: true,
-                                                                error_code: None,
-                                                            })?;
-                                                        Ok(result)
-                                                    });
-                                                tool_observation.preflight_result(&result);
-                                                let (content, source_messages, ok) = match result {
-                                                    Ok(result) => (
-                                                        result.content,
-                                                        result.source_messages,
-                                                        true,
-                                                    ),
-                                                    Err(error) => (
-                                                        crate::model_input::describe_error(
-                                                            &call.name,
-                                                            &error.message,
-                                                        ),
-                                                        Vec::new(),
-                                                        false,
-                                                    ),
-                                                };
-                                                let envelope =
-                                crate::model_message_labels::conversation_history_result_envelope(
-                                    turn.provider_meta.data_envelope.as_ref(),
-                                    &source_messages,
-                                    &call.id,
-                                    &content,
-                                )?;
-                                                let mut message = ChatMessage::tool_result(
-                                                    (state.mint)(),
-                                                    &call.id,
-                                                    content,
-                                                );
-                                                message.data_envelope = envelope;
-                                                session.conversation.push(message);
+                                                })
+                                                .await?;
+                                                let ok = result.ok;
+                                                if !result.replayed {
+                                                    session.conversation.push(*result.message);
+                                                }
+                                                if call.name == crate::conversation_attachment::READ_ATTACHMENT_TOOL {
+                                                    retain_latest_session_image(session)?;
+                                                }
                                                 deps.session_seam.save(session).await?;
                                                 finish_tool(session, &call.id, ok, sink);
-
                                                 Ok(None)
                                             })
                                         }
@@ -4459,7 +4625,7 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
 
 // Move the owned request into the existing model future outside the driver frame.
 #[inline(never)]
-fn dial_request<'a>(
+pub(super) fn dial_request<'a>(
     model: &'a dyn ModelSeam,
     request: Box<ModelRequest>,
     sink: &'a mut dyn TurnSink,

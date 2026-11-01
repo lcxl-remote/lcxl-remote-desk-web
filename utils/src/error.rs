@@ -527,6 +527,8 @@ desk_error_codes! {
     /// A checkpoint summary ended at its configured model output limit. No
     /// incomplete checkpoint is committed; the original history is retained.
     AI_CONTEXT_SUMMARY_OUTPUT_TRUNCATED = 111,
+    /// Memory or cross-conversation context requires a fresh source projection.
+    AI_ASSISTANT_DATA_CHANGED = 112,
 
     ACTION_NEED_RETRY = 1001,
 

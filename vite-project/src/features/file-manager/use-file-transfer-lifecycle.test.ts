@@ -9,7 +9,7 @@ import {
     StubPeerConnection,
     StubWebSocket,
     type SignalingGlobals,
-} from './file-transfer-test-harness';
+} from './__tests__/harness';
 
 // Connection ownership rules, asserted where they used to be violated.
 //
@@ -20,7 +20,7 @@ import {
 // channel now having separate lifetimes there are more replacements, not fewer,
 // so the rules are worth pinning down: one socket for the page, and every
 // replaced peer connection closed. One comprehensive `renderHook` test per file:
-// see the note in `file-transfer-test-harness.ts`.
+// see the note in `__tests__/harness.ts`.
 
 describe('useFileTransfer connection ownership', () => {
     let saved: SignalingGlobals;

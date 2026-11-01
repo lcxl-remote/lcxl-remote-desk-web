@@ -11,7 +11,7 @@ import {
     StubDataChannel,
     StubPeerConnection,
     type SignalingGlobals,
-} from './file-transfer-test-harness';
+} from './__tests__/harness';
 
 // Regression test for the production failure this whole split came from.
 //
@@ -25,7 +25,7 @@ import {
 // The stall itself is reproduced exactly (gathering never completes). What must
 // no longer follow from it: the offer must already be out, and the listing must
 // complete on the signaling session alone. One comprehensive `renderHook` test
-// per file: see the note in `file-transfer-test-harness.ts`.
+// per file: see the note in `__tests__/harness.ts`.
 
 const OFFER = 102;
 const LIST_FILES = 10005;

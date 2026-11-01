@@ -16,6 +16,7 @@ members = [
     "virtual-display-driver-ops",
     "agent-protocol",
     "diagnose-core",
+    "assistant-data-store",
     "file-recovery",
     "office-batch",
     "mcp-server",
@@ -51,6 +52,7 @@ desk-virtual-display = { path = "virtual-display" }
 desk-virtual-display-driver-ops = { path = "virtual-display-driver-ops" }
 desk-agent-protocol = { path = "agent-protocol" }
 desk-diagnose-core = { path = "diagnose-core" }
+desk-assistant-data-store = { path = "assistant-data-store" }
 desk-file-recovery = { path = "file-recovery" }
 desk-office-batch = { path = "office-batch" }
 desk-mcp-server = { path = "mcp-server" }

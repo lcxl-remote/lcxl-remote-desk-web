@@ -397,6 +397,22 @@ pub fn configure_api_surface(
             })
             .configure(move |cfg| {
                 if opts.has_signal_db {
+                    cfg.service(desk_signal::controller::assistant_data::get_assistant_data_settings);
+                    cfg.service(desk_signal::controller::assistant_data::update_assistant_data_settings);
+                    cfg.service(desk_signal::controller::assistant_data::get_assistant_user_instructions);
+                    cfg.service(desk_signal::controller::assistant_data::update_assistant_user_instructions);
+                    cfg.service(desk_signal::controller::assistant_data::get_assistant_memories);
+                    cfg.service(desk_signal::controller::assistant_data::delete_assistant_memory);
+                    cfg.service(desk_signal::controller::assistant_data::clear_assistant_memories);
+                    cfg.service(desk_signal::controller::assistant_data::get_assistant_source);
+                    cfg.service(desk_signal::controller::assistant_data::get_assistant_history_window)
+                    .service(desk_signal::controller::assistant_data::search_assistant_history)
+                    .service(desk_signal::controller::assistant_data::list_retained_assistant_conversations)
+                    .service(desk_signal::controller::assistant_data::get_assistant_processing)
+                    ;
+                    cfg.service(desk_signal::controller::assistant_data::get_assistant_data_policy);
+                    cfg.service(desk_signal::controller::assistant_data::update_assistant_data_policy);
+                    cfg.service(desk_signal::controller::assistant_data::validate_assistant_data_policy);
                     cfg.service(desk_signal::controller::approval_trace::list_approval_reviews);
                     cfg.service(desk_signal::controller::approval_trace::get_approval_review);
                     cfg.service(desk_signal::controller::approval_trace::get_approval_review_parts);

@@ -200,11 +200,6 @@ impl SnapshotReassembler {
         }
     }
 
-    /// Whether the final chunk has been accepted.
-    pub fn is_complete(&self) -> bool {
-        self.seen_final
-    }
-
     /// Accept one chunk. Chunks must arrive in `seq` order starting at 0.
     pub fn push(&mut self, chunk: &CollectResponseChunk) -> Result<(), ChunkError> {
         if self.seen_final {
@@ -376,11 +371,6 @@ impl ByteReassembler {
             seen_final: false,
             max_total_bytes,
         }
-    }
-
-    /// Whether the final chunk has been accepted.
-    pub fn is_complete(&self) -> bool {
-        self.seen_final
     }
 
     /// Accept one chunk, validating all framing invariants. Chunks must arrive in

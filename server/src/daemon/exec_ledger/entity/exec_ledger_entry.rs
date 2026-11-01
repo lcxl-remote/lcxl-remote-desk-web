@@ -79,12 +79,4 @@ impl State {
             _ => None,
         }
     }
-
-    /// Whether no further transition is possible from this state.
-    pub fn is_final(self) -> bool {
-        matches!(
-            self,
-            State::Terminal | State::Indeterminate | State::SpawnFailed
-        )
-    }
 }

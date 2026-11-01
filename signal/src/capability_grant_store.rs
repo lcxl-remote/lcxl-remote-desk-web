@@ -938,6 +938,7 @@ impl SignalCapabilityGrantStore {
 
     /// The original exec task and the irreversible send claim commit together.
     /// A crash cannot leave a claimed command with a fabricated recovery id.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn claim_command_dispatch(
         &self,
         dispatch_id: &str,
@@ -1991,21 +1992,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let schema = Schema::new(db.get_database_backend());
-        for statement in [
-            schema.create_table_from_entity(agent_capability_grant::Entity),
-            schema.create_table_from_entity(agent_grant_reservation::Entity),
-            schema.create_table_from_entity(agent_capability_dispatch_outbox::Entity),
-            schema.create_table_from_entity(agent_action_item::Entity),
-            schema.create_table_from_entity(agent_session::Entity),
-            schema.create_table_from_entity(crate::entity::agent_goal_run::Entity),
-            schema.create_table_from_entity(crate::entity::agent_goal_open_request::Entity),
-            schema.create_table_from_entity(crate::entity::agent_approval_review::Entity),
-            schema.create_table_from_entity(crate::entity::agent_approval_attempt::Entity),
-        ] {
-            db.execute(&statement).await.unwrap();
-        }
-        crate::db::ensure_lifecycle_tables(&db).await;
+        crate::db::initialize_schema(&db).await.unwrap();
         db
     }
 

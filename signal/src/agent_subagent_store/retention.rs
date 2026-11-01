@@ -30,6 +30,7 @@ pub(crate) async fn tombstone_on<C: ConnectionTrait + crate::config::ConfigConne
         actor_id: Set(actor.into()),
         device_id: Set(device.into()),
         created_at_unix_ms: Set(now_ms),
+        history_deleted_at_unix_ms: Set(None),
         next_attempt_at_unix_ms: Set(now_ms),
         attempts: Set(0),
         lease_id: Set(None),
@@ -65,20 +66,20 @@ pub(crate) async fn close_root_on(
     if !parent.agent_role.is_main() {
         return Err(invalid());
     }
-    desk_diagnose_core::future::boxed(|| async {
-        tombstone_on(
-            db,
-            &parent.conversation_id,
-            &parent.actor_id,
-            &parent.device_id,
-            now_ms,
-        )
-        .await
-    })
-    .await?;
     // Diagnostic and terminal sessions have no delegation authority or native
     // assistant execution identity; retain their existing lifecycle.
     if parent.surface != AgentSessionSurface::AiAssistant {
+        desk_diagnose_core::future::boxed(|| async {
+            tombstone_on(
+                db,
+                &parent.conversation_id,
+                &parent.actor_id,
+                &parent.device_id,
+                now_ms,
+            )
+            .await
+        })
+        .await?;
         return Ok(Default::default());
     }
     let mut permission_ends =
@@ -86,6 +87,30 @@ pub(crate) async fn close_root_on(
             parent,
             desk_diagnose_core::model_observability::PermissionOutcome::Cancelled,
         );
+    permission_ends.extend(
+        close_root_for_subject_on(
+            db,
+            &parent.conversation_id,
+            &parent.actor_id,
+            &parent.device_id,
+            now_ms,
+        )
+        .await?,
+    );
+    Ok(permission_ends)
+}
+
+/// Removal uses durable subject and task records even when a snapshot cannot execute.
+pub(crate) async fn close_root_for_subject_on(
+    db: &DatabaseTransaction,
+    conversation: &str,
+    actor: &str,
+    device: &str,
+    now_ms: i64,
+) -> Result<desk_diagnose_core::model_observability::permission::PendingEnds, DbErr> {
+    tombstone_on(db, conversation, actor, device, now_ms).await?;
+    let mut permission_ends =
+        desk_diagnose_core::model_observability::permission::PendingEnds::default();
     let now = chrono::DateTime::from_timestamp_millis(now_ms)
         .ok_or_else(invalid)?
         .to_rfc3339();
@@ -93,9 +118,9 @@ pub(crate) async fn close_root_on(
     loop {
         let rows = desk_diagnose_core::future::boxed(|| async {
             group_row::Entity::find()
-                .filter(group_row::Column::RootConversationId.eq(&parent.conversation_id))
-                .filter(group_row::Column::ActorId.eq(&parent.actor_id))
-                .filter(group_row::Column::DeviceId.eq(&parent.device_id))
+                .filter(group_row::Column::RootConversationId.eq(conversation))
+                .filter(group_row::Column::ActorId.eq(actor))
+                .filter(group_row::Column::DeviceId.eq(device))
                 .filter(group_row::Column::Id.gt(after))
                 .order_by_asc(group_row::Column::Id)
                 .limit(100)
@@ -122,9 +147,9 @@ pub(crate) async fn close_root_on(
             let children = desk_diagnose_core::future::boxed(|| async {
                 run_row::Entity::find()
                     .filter(run_row::Column::GroupId.eq(&group.group_id))
-                    .filter(run_row::Column::RootConversationId.eq(&parent.conversation_id))
-                    .filter(run_row::Column::ActorId.eq(&parent.actor_id))
-                    .filter(run_row::Column::DeviceId.eq(&parent.device_id))
+                    .filter(run_row::Column::RootConversationId.eq(conversation))
+                    .filter(run_row::Column::ActorId.eq(actor))
+                    .filter(run_row::Column::DeviceId.eq(device))
                     .order_by_asc(run_row::Column::Id)
                     .all(db)
                     .await
@@ -133,14 +158,7 @@ pub(crate) async fn close_root_on(
             for child in children {
                 let mut run = decode_run(&child)?;
                 desk_diagnose_core::future::boxed(|| async {
-                    tombstone_on(
-                        db,
-                        &run.child_conversation_id,
-                        &parent.actor_id,
-                        &parent.device_id,
-                        now_ms,
-                    )
-                    .await
+                    tombstone_on(db, &run.child_conversation_id, actor, device, now_ms).await
                 })
                 .await?;
                 if run.state.is_terminal() {
@@ -156,7 +174,7 @@ pub(crate) async fn close_root_on(
                 .await?;
                 permission_ends.extend(
                     desk_diagnose_core::future::boxed(|| async {
-                        synchronize_control_on(db, &run, now_ms, false).await
+                        close_child_on(db, &run, now_ms).await
                     })
                     .await?,
                 );
@@ -168,11 +186,84 @@ pub(crate) async fn close_root_on(
         }
     }
     desk_diagnose_core::future::boxed(|| async {
-        super::native_cancel::cancel_native_actions_on(db, parent, "conversation_removed", now_ms)
-            .await
+        super::native_cancel::cancel_native_actions_for_subject_on(
+            db,
+            conversation,
+            actor,
+            device,
+            "conversation_removed",
+            now_ms,
+        )
+        .await
     })
     .await?;
     Ok(permission_ends)
+}
+
+/// A removed child keeps its original JSON and native receipts. Only its lease is fenced.
+fn close_child_on<'a>(
+    db: &'a DatabaseTransaction,
+    run: &'a SubAgentRun,
+    now_ms: i64,
+) -> std::pin::Pin<
+    Box<
+        dyn std::future::Future<
+                Output = Result<
+                    desk_diagnose_core::model_observability::permission::PendingEnds,
+                    DbErr,
+                >,
+            > + Send
+            + 'a,
+    >,
+> {
+    desk_diagnose_core::future::send_phase(|| async move {
+        let row = session_row::Entity::find()
+            .filter(session_row::Column::ConversationId.eq(&run.child_conversation_id))
+            .filter(session_row::Column::ActorId.eq(&run.actor_id))
+            .filter(session_row::Column::DeviceId.eq(&run.device_id))
+            .one(db)
+            .await?;
+        let Some(row) = row else {
+            return Ok(Default::default());
+        };
+        if row.conversation_schema_version
+            == Some(i32::from(
+                desk_diagnose_core::session::CONVERSATION_SCHEMA_VERSION,
+            ))
+        {
+            return desk_diagnose_core::future::boxed(|| {
+                synchronize_control_on(db, run, now_ms, false)
+            })
+            .await;
+        }
+        super::native_cancel::cancel_native_actions_for_subject_on(
+            db,
+            &run.child_conversation_id,
+            &run.actor_id,
+            &run.device_id,
+            "conversation_removed",
+            now_ms,
+        )
+        .await?;
+        let changed = session_row::Entity::update_many()
+            .set(session_row::ActiveModel {
+                version: Set(row.version.checked_add(1).ok_or_else(invalid)?),
+                lease_token: Set(row.lease_token.checked_add(1).ok_or_else(invalid)?),
+                lease_deadline: Set(None),
+
+                ..Default::default()
+            })
+            .filter(session_row::Column::Id.eq(row.id))
+            .filter(session_row::Column::Version.eq(row.version))
+            .filter(session_row::Column::LeaseToken.eq(row.lease_token))
+            .filter(session_row::Column::StateJson.eq(&row.state_json))
+            .exec(db)
+            .await?;
+        if changed.rows_affected != 1 {
+            return Err(invalid());
+        }
+        Ok(Default::default())
+    })
 }
 
 /// Filter before LIMIT and recheck under control locks. A parent's idle state
@@ -580,9 +671,16 @@ pub(crate) async fn redact_deleted_content(
                 .filter(session_row::Column::DeviceId.eq(&run.device_id))
                 .one(&txn)
                 .await?;
-            if let Some(child) = child {
+            if let Some(child) = child.filter(|row| {
+                row.conversation_schema_version
+                    == Some(i32::from(
+                        desk_diagnose_core::session::CONVERSATION_SCHEMA_VERSION,
+                    ))
+            }) {
                 let mut session =
-                    PersistedAgentSession::decode_json(&child.state_json).map_err(|_| invalid())?;
+                    PersistedAgentSession::decode_json(&child.state_json).map_err(|error| {
+                        DbErr::Custom(format!("invalid current child snapshot: {error}"))
+                    })?;
                 if session.turn_state.is_active() || session.agent_role.binding().is_none() {
                     return Err(invalid());
                 }

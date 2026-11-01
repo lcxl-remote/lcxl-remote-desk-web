@@ -9,6 +9,7 @@ use desk_agent_protocol::computer_use::{
 pub const UPDATE_TEXT_TOOL: &str = "update_text_file";
 pub const DELETE_TEXT_TOOL: &str = "delete_text_file";
 
+#[cfg(test)]
 /// Owner-only recovery projection. This is evidence, not a terminal result or
 /// model input, and must never release the unknown-outcome execution barrier.
 pub fn unknown_text_recovery_receipt(json: &str) -> Option<String> {
@@ -70,13 +71,13 @@ pub fn registered_tools() -> Vec<crate::registry::RegisteredTool> {
             spec: ToolSpec {
                 name: if delete { DELETE_TEXT_TOOL } else { UPDATE_TEXT_TOOL }.into(),
                 description: if delete {
-                    "Delete exactly one verified text file on the controlled device after saving its previous content in device-private backup storage. Requires a currently approved conversation directory and one exact server approval, from the owner or a valid delegated approval AI decision. Reuse a verified creation/read/update result and its file_version_id; a separate read is not required just to obtain a version. Text files only (UTF-8, at most 64 KiB), not installers or arbitrary binary files. Never recursive, never permanent deletion. Preserve the recovery receipt; an unknown result must not be retried."
+                    "Delete exactly one verified text file on the controlled device after saving its previous content in device-private backup storage. Requires a currently approved conversation directory and one exact server approval, from the owner or a valid delegated approval AI decision. Reuse a verified creation/read/update result and its file_version_id; a separate read is not required just to obtain a version. Bounded UTF-8 text files only, not installers or arbitrary binary files. Never recursive, never permanent deletion. Preserve the recovery receipt; an unknown result must not be retried."
                 } else {
                     "Update exactly one verified UTF-8 text file on the controlled device using full replacement or exactly one unambiguous text match, within 64 KiB. Requires a currently approved conversation directory and one exact server approval, from the owner or a valid delegated approval AI decision. Reuse a verified creation/read/update result: use its file_version_id; the server binds the original file identity and content digest. If the content needed for the edit is already known, request this update directly; do not list the directory or read again merely to obtain a version. The device checks the original identity and full SHA-256, retains recovery material and reports the filesystem operation result without rereading the written bytes. Conflict means read again and request new approval, never retry automatically."
                 }.into(),
                 parameters_schema: serde_json::json!({"type":"object","properties":properties,"required":required,"additionalProperties":false}),
             },
-            required_capability: if delete { Capability::FileDeleteConfirmed } else { Capability::FilePatchConfirmed },
+            required_device_capability: Some(if delete { Capability::FileDeleteConfirmed } else { Capability::FilePatchConfirmed }),
             effect: ToolEffect::Mutating,
         }
     }).collect()
@@ -496,6 +497,7 @@ pub fn validate_mutation_permission_input(
     TextMutationPreflight::build(session, &call, &evidence, now).map(|_| ())
 }
 
+#[cfg(test)]
 /// Read approvals also require resolvable sources before displaying a card.
 pub fn validate_read_permission_input(
     session: &crate::session::PersistedAgentSession,

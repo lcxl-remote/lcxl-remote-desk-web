@@ -28,7 +28,7 @@ async fn observed_scope_stays_exact_through_prepare_intent_completion_and_reopen
         .unwrap()
         .unwrap();
     let mut session = PersistedAgentSession::decode_json(&row.state_json).unwrap();
-    session.append_event_if_absent("large-evidence", &"x".repeat(320 * 1024), "t1");
+    session.append_event_if_absent("large-evidence", "x".repeat(320 * 1024), "t1");
     let mut active: agent_session::ActiveModel = row.into();
     active.state_json = Set(session.encode_json_for_storage().unwrap());
     active.update(&db).await.unwrap();

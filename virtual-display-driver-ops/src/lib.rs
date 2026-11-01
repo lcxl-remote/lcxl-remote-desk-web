@@ -10,7 +10,9 @@
 
 use std::path::{Path, PathBuf};
 
+#[cfg(any(target_os = "windows", test))]
 mod oem;
+#[cfg(any(target_os = "windows", test))]
 mod parser;
 
 #[cfg(target_os = "windows")]
@@ -30,8 +32,6 @@ pub const DRIVER_DLL_BASENAME: &str = "LcxlVirtualDisplay.dll";
 /// expected to be present in the staging dir; the WDK build copies it
 /// as `WUDFRD.dll` (upper-case), so the basename must match exactly.
 pub const DRIVER_WUDFRD_BASENAME: &str = "WUDFRD.dll";
-/// Sub-directory under `<exe_dir>/` where the staging files live.
-pub const DRIVER_DIR_NAME: &str = "drivers/LcxlVirtualDisplay";
 
 /// Locations of the four files that make up a stageable driver.
 ///
@@ -98,19 +98,6 @@ pub enum InstallerError {
     },
     #[error("parse error: {0}")]
     Parse(String),
-}
-
-/// Looks for the driver files next to the current executable —
-/// the production layout `<exe_dir>/drivers/LcxlVirtualDisplay/`.
-///
-/// Returns `Ok(None)` when one or more files are missing; returns an
-/// error only for true I/O failures (permission denied, etc.).
-pub fn discover_driver_files() -> Result<Option<DriverFiles>, InstallerError> {
-    let exe = std::env::current_exe()?;
-    let parent = exe.parent().ok_or_else(|| {
-        InstallerError::Parse(format!("current_exe has no parent: {}", exe.display()))
-    })?;
-    discover_driver_files_in(parent)
 }
 
 /// Looks for the driver files under `<base_dir>/drivers/LcxlVirtualDisplay/`.

@@ -70,6 +70,7 @@ impl ScheduleStore {
             .await?
             .ok_or(ScheduleStoreError::NotFound)?;
         let target_connection_id = target(connections, &task.target_device_id).await?;
+
         if pending.status == "awaiting_children" {
             let session = Self::claim_fresh_children_on(&txn, input).await?;
             if target(connections, &task.target_device_id).await? != target_connection_id

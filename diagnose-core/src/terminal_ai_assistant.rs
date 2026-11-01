@@ -29,6 +29,7 @@ use crate::text_parse::{ParseOutcome, extract_json_object, truncate_on_char_boun
 /// The manager treats this as the fallback when its platform-configured limit
 /// (`ai.terminal_ai_assistant.max_steps_per_turn`) is absent or unparseable.
 pub const AI_ASSISTANT_MAX_STEPS_PER_TURN: u32 = crate::MAX_STEPS_PER_TURN;
+#[cfg(test)]
 /// Semantic version of the shared Terminal AI Assistant system prompt. Bump whenever
 /// `build_assistant_system_message` changes.
 pub const AI_ASSISTANT_PROMPT_VERSION: &str = "assistant-v2";
@@ -533,6 +534,7 @@ impl<S: AssistantFrameSink> AssistantStreamSink<S> {
         self.terminated = true;
     }
 
+    #[cfg(test)]
     /// Whether a terminal frame (final or error) has been emitted.
     pub fn is_terminated(&self) -> bool {
         self.terminated

@@ -143,9 +143,10 @@ impl ModelSeam for MeteredModel {
 
     async fn call(
         &self,
-        mut request: ModelRequest,
+        request: ModelRequest,
         sink: &mut dyn TurnSink,
     ) -> Result<desk_diagnose_core::chat::ModelTurn, AgentError> {
+        let mut request = Box::new(request);
         if request.observation.is_none() {
             request.observation = self.observation_context(
                 request.use_case,
@@ -177,10 +178,10 @@ impl ModelSeam for MeteredModel {
         let policy = self
             .model_egress_policy()?
             .ok_or_else(|| transport_error("AI assistant model egress policy is unavailable"))?;
-        let authorized = policy.authorize_request(request).map_err(|error| {
+        let authorized = Box::new(policy.authorize_request(*request).map_err(|error| {
             log::warn!("[ai-assistant] model egress denied: {error}");
             error.agent_error()
-        })?;
+        })?);
         if let Some(prepared) = self.inner.prepare_request(&authorized.request)? {
             prepared.verify_request(&authorized.request)?;
         }
@@ -188,19 +189,25 @@ impl ModelSeam for MeteredModel {
             .model_call_ordinal
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             .saturating_add(1);
-        let physical_identity = authorized.request.delegation_call.as_ref().map_or_else(
-            || {
-                authorized
-                    .request
-                    .compression_identity
-                    .as_ref()
-                    .map_or_else(
-                        || format!("ordinal:{model_call_ordinal}"),
-                        |identity| format!("compression:{identity}"),
-                    )
-            },
-            |reservation| format!("delegation:{}", reservation.reservation_id),
-        );
+        let physical_identity = if let Some(identity) =
+            desk_diagnose_core::conversation_title::call_identity(&authorized.request)
+        {
+            format!("title:{identity}")
+        } else {
+            authorized.request.delegation_call.as_ref().map_or_else(
+                || {
+                    authorized
+                        .request
+                        .compression_identity
+                        .as_ref()
+                        .map_or_else(
+                            || format!("ordinal:{model_call_ordinal}"),
+                            |identity| format!("compression:{identity}"),
+                        )
+                },
+                |reservation| format!("delegation:{}", reservation.reservation_id),
+            )
+        };
         let ordinary_receipt_id = format!(
             "model-egress-{:x}",
             Sha256::digest(
@@ -209,18 +216,17 @@ impl ModelSeam for MeteredModel {
         );
         let egress_store = crate::model_egress_store::SignalModelEgressStore::new(self.db.clone());
         preflight.reason(desk_diagnose_core::model_observability::NotStartedReason::Unknown);
-        let receipt_id = desk_diagnose_core::future::boxed(|| async {
+        let dispatch = desk_diagnose_core::future::boxed(|| async {
             self.record_dispatch(&authorized, model_call_ordinal, ordinary_receipt_id)
                 .await
         })
         .await
         .map_err(|error| {
-            if matches!(
-                &error,
-                desk_diagnose_core::schedule::model_admission::ModelAdmissionError::BudgetExceeded
-            ) {
-                preflight.reason(desk_diagnose_core::model_observability::NotStartedReason::Budget);
-            }
+            preflight.reason(match &error {
+                desk_diagnose_core::schedule::model_admission::ModelAdmissionError::BudgetExceeded => desk_diagnose_core::model_observability::NotStartedReason::Budget,
+                desk_diagnose_core::schedule::model_admission::ModelAdmissionError::AssistantDataChanged => desk_diagnose_core::model_observability::NotStartedReason::Permission,
+                desk_diagnose_core::schedule::model_admission::ModelAdmissionError::Backend(_) => desk_diagnose_core::model_observability::NotStartedReason::Unknown,
+            });
             error.into_agent_error(|error| {
                 log::warn!("[ai-assistant] failed to persist model egress: {error}");
                 AgentError {
@@ -232,17 +238,7 @@ impl ModelSeam for MeteredModel {
                 }
             })
         })?;
-        if authorized.request.use_case == desk_diagnose_core::model_profile::ModelUseCase::Agent
-            && let Some(conversation_id) = &authorized.request.context_conversation_id
-        {
-            desk_diagnose_core::future::boxed(|| async {
-                egress_store
-                    .link_context_dispatch(&receipt_id, conversation_id)
-                    .await
-            })
-            .await
-            .map_err(|_| transport_error("Model context dispatch could not be recorded"))?;
-        }
+        let receipt_id = dispatch.receipt_id;
         log::info!(
             "[ai-assistant] authorized model egress receipt_id={} destination={:?} envelopes={:?} digests={:?} total_bytes={}",
             receipt_id,
@@ -255,7 +251,12 @@ impl ModelSeam for MeteredModel {
         let compression_identity = authorized.request.compression_identity.clone();
         let mut turn = match desk_diagnose_core::future::boxed(|| async {
             self.inner
-                .call_admitted(authorized.request, sink, permit)
+                .call_admitted_until(
+                    &authorized.request,
+                    sink,
+                    permit,
+                    dispatch.assistant_data_deadline,
+                )
                 .await
         })
         .await
@@ -287,7 +288,12 @@ impl ModelSeam for MeteredModel {
                 .await
         })
         .await
-        .map_err(|_| transport_error("The AI model usage could not be recorded safely."))?;
+        .map_err(|error| {
+            log::warn!(
+                "[ai-assistant] model usage write failed: receipt_id={receipt_id}, error={error}"
+            );
+            transport_error("The AI model usage could not be recorded safely.")
+        })?;
         desk_diagnose_core::future::boxed(|| async {
             self.settle_task_dispatch(
                 model_call_ordinal,
@@ -299,27 +305,25 @@ impl ModelSeam for MeteredModel {
         })
         .await?;
         if turn.text.trim().is_empty() && turn.tool_calls.is_empty() {
-            // There is no model output content to label or export. Close this
-            // audited provider call as unusable, then let the pure agent loop
-            // apply its single bounded empty-EndTurn recovery. Returning the
-            // empty turn is safe: it carries no bytes and is never persisted as
-            // an assistant message.
+            // Reject unusable output after recording actual usage. Only empty
+            // turns return to the agent loop's bounded empty-EndTurn recovery.
             desk_diagnose_core::future::boxed(|| async { egress_store
                 .mark_failed(&receipt_id)
                 .await }).await
                 .map_err(|error| {
                     log::warn!(
-                        "[ai-assistant] failed to close empty model egress receipt_id={receipt_id}: {error}"
+                        "[ai-assistant] failed to close unusable model egress receipt_id={receipt_id}: {error}"
                     );
                     AgentError {
                         kind: AgentErrorKind::Internal,
-                        message: "The empty AI model response could not be audited safely.".into(),
+                        message: "The AI model response could not be audited safely.".into(),
                         retryable: false,
                         safe_for_model: true,
                         error_code: None,
                     }
                 })?;
             crate::agent_runtime::record_metered(observation.as_ref());
+
             return Ok(turn);
         }
         // A provider call may outlive an ephemeral input that was valid at
@@ -358,24 +362,29 @@ impl ModelSeam for MeteredModel {
                 });
             }
         };
-        desk_diagnose_core::future::boxed(|| async {
+        let acceptance = desk_diagnose_core::future::boxed(|| async {
             egress_store
                 .mark_succeeded(&receipt_id, &output_envelope)
                 .await
         })
-        .await
-        .map_err(|error| {
+        .await;
+        if let Err(error) = acceptance {
             log::warn!(
                 "[ai-assistant] failed to complete model egress receipt_id={receipt_id}: {error}"
             );
-            AgentError {
+            if matches!(&error, desk_diagnose_core::schedule::model_admission::ModelAdmissionError::AssistantDataChanged) {
+                // Actual usage remains recorded even when its output is rejected.
+                let _ = desk_diagnose_core::future::boxed(|| async { egress_store.mark_failed(&receipt_id).await }).await;
+            }
+            crate::agent_runtime::record_metered(observation.as_ref());
+            return Err(error.into_agent_error(|_| AgentError {
                 kind: AgentErrorKind::Internal,
                 message: "The AI model response could not be audited safely.".into(),
                 retryable: false,
                 safe_for_model: true,
                 error_code: None,
-            }
-        })?;
+            }));
+        }
         if is_compression {
             *self.completed_compression_receipt.borrow_mut() = Some(receipt_id);
         }

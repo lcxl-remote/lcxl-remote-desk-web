@@ -15,7 +15,7 @@ describe('assistant background tasks', () => {
         const onTasks = vi.fn(); const onSubmit = vi.fn();
         render(<form onSubmit={onSubmit}><AssistantComposerTools meter={null} onDetails={vi.fn()}
             onPermissionHistory={vi.fn()} onTasks={onTasks} runningTaskCount={2} /></form>);
-        const button = screen.getByRole('button', { name: 'pages.aiAssistant.tasks.title' });
+        const button = screen.getByRole('button', { name: 'pages.aiAssistant.tasks.title (2)' });
         expect(button.textContent).toContain('(2)');
         fireEvent.click(button);
         expect(onTasks).toHaveBeenCalledOnce(); expect(onSubmit).not.toHaveBeenCalled();

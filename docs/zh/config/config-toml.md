@@ -220,3 +220,103 @@ max_output_tokens = 512
 ### 思考请求配置
 
 当前 profile schema 为 `2`。`reasoning_contract` 显式选择 `conservative`、`openai_chat`、`deepseek_chat` 或 `anthropic_messages`，并与 `wire_protocol` 匹配。`anthropic_prefix_binding` 默认 `false`，只在端点将签名思考绑定到请求前缀时启用。思考强度和可选原生清理保存在 `request_options_json`；详见 [AI 诊断](../features/ai-diagnostics.md)。主模型与审批模型使用相同字段。
+
+AI 助手资料策略文件与管理 API 使用相同字段规则。无效值会指出字段；启动与成功保存策略时仅记录实际命中的提示。草稿检查、提示语义及共享读取预算见[AI 助手记忆与历史策略](#assistant-data-policy)。
+
+## AI 助手记忆与历史策略 {#assistant-data-policy}
+
+平台通过 `AssistantDataPolicy.limits` 配置记忆内容与检索工作量。登录当前开源 Signal 的管理账号后，`GET /api/admin/system/ai-assistant-data` 返回 `data.policy` 与 `data.issues`。修改完整策略后，以 `expected_revision` 和 `policy` 提交 `POST`，保留读取时的 `policy.revision`；成功后返回实际保存的策略及本次命中的问题。版本冲突时重新读取。配置原子写回实际使用的 `config.toml`。
+
+草稿检查使用 `POST /api/admin/system/ai-assistant-data/validate`，请求为 `{ "policy": 完整策略 }`，返回 `data.issues`；该操作不保存、不推进版本，也不访问策略存储。保存时仍独立检查提交内容及版本。接口使用当前开源服务的管理账号鉴权。
+
+正常配置的 `issues` 为空。每个问题包含 `level`（`error` 或 `warning`）、稳定 `code`、相关配置字段 `fields`、兜底说明 `message`，以及适用时的 `effective_limit`。硬错误使用 HTTP 200、`success=false` 和 `INVALID_PARAMS`，保存不生效；仅有提示时 `success=true`，保存照常完成。版本冲突继续使用 `REVISION_CONFLICT` 与 `current_revision`。
+
+提示仅覆盖能从配置直接确定的限制：相关性结果条数超过候选数、历史候选数超过会话数乘每会话片段数、模型状态摘要数超过保留项目数、本人历史扫描数超过总扫描预算，以及当前记忆选取数超过存储或扫描上界。正文、索引、查询状态与元数据的实际占用取决于内容，不根据估算返回容量不足提示。OSS 文件加载遇到硬错误会指出字段；启动与成功保存策略时仅记录实际命中的提示。
+
+本轮读取剩余额度为零时停止新的读取；正数额度按单次响应上限与剩余总量的较小值尝试。是否装得下必要元数据和完整来源，由实际 JSON 与工具消息封装容量检查决定。调用次数、实际结算及原调用重放继续受原预算约束。历史、记忆及旧版本的数量、正文、索引与元数据配额同时生效；旧版本数量达到上限时，更新仍会返回容量不足，直至版本清理释放容量。
+
+聊天、子助手和手动定时任务的正文按原文提交；正文容量、记忆总数及资料结果的业务额度由服务端统一校验。三端按服务端结果展示记忆、历史、引用和处理状态，保留类型、身份、版本、来源对应、去重与游标一致性校验。个性化与关键词的界面预检读取当前服务端策略，普通列表仍按界面选定的数量分页。服务端拒绝提交时显示错误并保留可编辑草稿；发送中的聊天输入在确认接纳后清空。
+
+
+普通聊天输入、引用和状态展示也由同一平台策略配置，路径相对于 `policy.limits`：
+
+| 配置路径 | 默认值 | 用途 |
+|---|---|---|
+| `conversation.question_bytes` | 16 KiB | 普通聊天正文的 UTF-8 字节准入 |
+| `conversation.page_bytes` | 256 KiB | 本人历史搜索、留存会话列表、来源窗口及聊天记录的统一分页目标 |
+| `conversation.citations` / `citation_bytes` / `citation_page_answers` | 64 / 8 KiB / 100 | 每回答引用数量、引用编码容量及引用读取批次 |
+| `retrieval.snippet_bytes` | 512 字节 | 搜索结果摘要，按完整 UTF-8 字符截取 |
+| `retrieval.episode.query_devices` / `query_cursors` | 10,000 / 32 | 冻结查询的设备范围与续页游标 |
+| `retrieval.episode.query_state_bytes` / `query_seen_sources` / `query_delivered_calls` | 1 MiB / 500 / 32 | 查询状态编码、来源去重与已交付调用账本 |
+| `processing.status_coverage` | 50 | 历史覆盖记录展示 |
+| `processing.native_status_rows` / `native_status_items` / `native_status_model_items` / `native_status_source_refs` | 25 / 24 / 3 / 4 | 每类原生状态读取数、快照项数、模型摘要项数及摘要来源数 |
+
+查询状态沿原检索预算冻结容量；重试与翻页保持原值。调低新回答的引用容量保留已有引用，读取批次决定分批加载的工作量。内部来源账本、读取投影、导出组和事实提交沿原请求预算、账号记录总量及实际元数据配额，不再分别施加任意集合容量；真实授权截止、来源绑定、原生回执与事务版本核验继续生效。客户端按服务端结果展示任务提案、执行预览和附件策略，完整提交定时任务正文、处理备注与目录用途说明；超限由服务端返回业务错误。
+
+记忆总数通过平台策略顶层的 `policy.max_memory_records` 配置，默认每账号 1,000 条，个人与各设备范围共用。独立记忆记录各计一条，同一记忆的修订与幂等重放不重复计数；仍保留的待确认、被替代和遗忘记录也占用存储条数。达到上限时，新记录写入失败并回滚；更新已有记录继续按原正文及元数据配额处理。调低上限保留已有记录，调高后可继续新增。配置沿上述完整策略接口保存，该字段与 `policy.limits` 同级。
+
+本人打开来源后的留存历史窗口每页最多 20 个完整片段，按游标加载更早或更新的内容，窗口总大小随实际内容返回。模型工具的单次回复继续使用 `retrieval.episode.response_bytes` 配置。
+
+`conversation.page_bytes` 统一本人历史搜索、留存会话列表、留存来源窗口与普通/来源定位聊天页的分页目标。页面保留完整片段、原生工具消息组、思考和引用；单个完整条目或消息组超过目标时仍完整返回，其余内容通过分页读取。条数与权限规则沿用原接口；这不是正文准入上限。本人搜索候选使用 `retrieval.query_candidates`，游标编码复用 `retrieval.episode.query_state_bytes`，命中词项按实际查询词集合读取；来源查找使用已有文档、扫描页和时间预算。本人搜索游标继续绑定原策略 revision，策略改变后重新搜索。已经保存的记忆来源可完整读取与遗忘，降低 `memory.source_refs` 只影响新准入。
+
+默认每组关键词允许 256 个 Unicode 字符（按标量值计数），中文和单个 emoji 码点各计一个；组合字符分别计数。关键词组数与每组字符数分别配置。五项检索扫描时限均默认 3 秒。正文、背景、依据及个性化容量使用 UTF-8 字节单位；未指定的配置沿用默认值。
+
+`retrieval.read_messages` 配置单次读取的会话消息或记忆版本条数，默认 20；`retrieval.episode.response_bytes` 统一配置记忆搜索、历史搜索及正文读取的单次完整回复容量，默认 32 KiB（包含 JSON 和工具消息框架）。正文读取还受本轮剩余 `read_bytes` 额度约束。新轮次冻结配置；重试和续页使用原预留及已消费额度。
+
+记忆历史版本查询还复用 `retrieval.query_candidates` 的单次扫描条数和 `retrieval.memory_keyword_scan_ms` 的扫描耗时预算。预算受限时，结果会提供后续页、标记缺口或返回预算不足。
+
+结构化类型配置是已有规范化类型的启用列表：`response_language`、`preferred_programming_language`、`preferred_tool`、`project_directory`。其余稳定事实使用自由文本。平台整体上下文、单次工具响应、来源权限与实际存储配额继续生效。已保存内容按原身份与摘要读取，调低正文容量只约束后续新写入。
+
+普通输入及任务创建的新检索 episode 冻结其额度，审批、恢复和翻页保留已用量。模型工具 schema、Web 和移动端输入控件读取策略中的限制。
+
+查询快照/游标（`retrieval.episode.query_ttl_ms`）与未使用读取结果（`retrieval.episode.unused_projection_ttl_ms`）均默认 1,800,000 毫秒（30 分钟），可设为正整数。时限随原检索批次冻结，普通新输入或任务实例首次领取读取当前策略，恢复、审批及 Goal 纠正沿用原值。查询与工具结果从原预留时刻计时，自动注入的记忆块从准备时计时；更早的任务、来源和执行租约截止继续生效。翻页和重试沿用已保存的绝对截止时间；已保存到当前会话的结果随该会话保留；临时注入的当前记忆继续按本轮授权处理，原策略版本检查继续生效。
+
+```toml
+[assistant_data_policy.limits.memory]
+user_instructions_bytes = 16384
+source_refs = 12
+
+[assistant_data_policy.limits.retrieval]
+query_groups = 6
+query_chars = 512
+search_window_days = 120
+history_keyword_scan_ms = 5000
+owner_scan_documents = 256
+
+[assistant_data_policy.limits.retrieval.episode]
+relevance_calls = 6
+time_pages = 12
+read_calls = 10
+read_bytes = 262144
+query_ttl_ms = 1800000
+unused_projection_ttl_ms = 1800000
+```
+
+### 记忆写入
+
+对话模型提交完整正文及可选背景，平台在一次事务中保存当前记忆、版本、来源快照、检索索引及提交回执。写入受当前上下文、记忆数量、正文、索引和元数据总配额约束。容量不足时本次写入回滚，已有记忆保留。正常对话模型的输出额度与计费规则适用。
+
+### 后台处理策略
+
+GC 周期及处理批次通过 `policy.limits.processing` 配置。Manager 使用共享数据库中的最新策略，OSS 从实际 config.toml 读取。后台在下一次唤醒时读取配置；已保存的检索批次仍遵守原冻结策略与授权。GC 默认每 5 分钟由既有留存循环驱动，同账号的扫描领取采用相同周期；其他统计、会话及调用留存继续按一小时运行。扫描页控制单轮数据库工作量，历史捕获批次是单次提交上限。原租约、调用身份、真实回执、策略版本及计费规则继续生效。
+
+| 配置路径（相对于 `policy.limits`） | 默认值 | 含义 |
+|---|---|---|
+| `processing.output_gc_interval_ms` | 300000 | GC 唤醒与同账号重扫周期，毫秒 |
+| `processing.output_gc_actor_batch_size` | 32 | 每轮 GC 账号数；OSS 范围为本机唯一账号 |
+| `processing.output_gc_batch_size` | 64 | 每账号输出证明及提交回执扫描批次 |
+| `processing.native_retention_page_size` | 64 | 原生回执留存扫描页 |
+| `processing.history_capture_batch_size` | 64 | 历史捕获单次提交上限 |
+| `processing.history_scan_page_size` | 128 | 历史时间/窗口查询的数据库扫描页 |
+| `processing.current_memory_page_size` | 64 | 当前记忆选择的数据库扫描页 |
+
+```toml
+[assistant_data_policy.limits.processing]
+output_gc_interval_ms = 300000
+output_gc_actor_batch_size = 32
+output_gc_batch_size = 64
+native_retention_page_size = 64
+history_capture_batch_size = 64
+history_scan_page_size = 128
+current_memory_page_size = 64
+```

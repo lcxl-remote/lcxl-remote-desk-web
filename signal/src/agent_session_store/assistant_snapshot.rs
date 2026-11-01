@@ -54,7 +54,10 @@ impl SignalAgentSessionStore {
     ) -> Result<Option<AssistantSnapshot>, AgentError> {
         let txn = crate::db::begin_write(&self.db, crate::entity::agent_session::Entity)
             .await
-            .map_err(|_| internal("begin Assistant snapshot failed"))?;
+            .map_err(|error| {
+                log::warn!("[assistant-snapshot] storage failed: phase=begin, error={error}");
+                internal("begin Assistant snapshot failed")
+            })?;
         let result = async {
             // Reserve the SQLite writer before reading so a concurrent session,
             // grant, completion or cancellation cannot split this snapshot.
@@ -160,8 +163,7 @@ impl SignalAgentSessionStore {
                     .exec(&txn)
                     .await?;
             }
-            let mut snapshot = snapshot_from_row(row)
-                .map_err(|_| sea_orm::DbErr::Custom("invalid Assistant snapshot".into()))?;
+            let mut snapshot = snapshot_from_session(row, session);
             snapshot.seq = seq;
             snapshot.subagents = subagents;
             Ok(Some(AssistantSnapshot {

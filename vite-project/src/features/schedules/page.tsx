@@ -1,3 +1,4 @@
+import { sameJsonValue } from './json-value';
 import { ChevronDown, Plus, RefreshCw } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -146,7 +147,7 @@ export default function SchedulePage({ devices, loadingDevices = false }: { devi
         {error && <p role="alert" className="text-destructive">{error}</p>}
         <div className="grid gap-3 sm:grid-cols-3">
             <label className="space-y-1">{t('schedules.filters.name')}
-                <Input value={filterTitle} maxLength={256} onChange={event => setFilterTitle(event.target.value)} />
+                <Input value={filterTitle} onChange={event => setFilterTitle(event.target.value)} />
             </label>
             <label className="space-y-1">{t('schedules.filters.device')}
                 <ScheduleSelect className={selectClass} value={filterDevice} onValueChange={value => setFilterDevice(value)}>
@@ -300,11 +301,11 @@ function ScheduleEditor({ editor, devices, zone, disabled, client, submit, repor
                 if (!alive.current) return;
                 if (converted.result !== 'converted_time') throw new ScheduleRequestError('invalid');
                 const spec = converted.conversion.spec;
-                if (spec.rule.kind !== kind || !Array.isArray(converted.upcoming_runs) || converted.upcoming_runs.length > 5) throw new ScheduleRequestError('invalid');
+                if (spec.rule.kind !== kind || !Array.isArray(converted.upcoming_runs)) throw new ScheduleRequestError('invalid');
                 if (latestTimeKey.current !== timeKey) return;
                 const nextPreview = { key: timeKey, spec, version: converted.conversion.conversion_version, offset: converted.conversion.offset_seconds, upcoming: converted.upcoming_runs };
                 if (!nextPreview.version || !Number.isInteger(nextPreview.offset)) throw new ScheduleRequestError('invalid');
-                if (!previewMatches || !timePreview || timePreview.version !== nextPreview.version || timePreview.offset !== nextPreview.offset || JSON.stringify(timePreview.spec) !== JSON.stringify(spec)) {
+                if (!previewMatches || !timePreview || timePreview.version !== nextPreview.version || timePreview.offset !== nextPreview.offset || !sameJsonValue(timePreview.spec, spec)) {
                     setTimePreview(nextPreview);
                     if (previewMatches) setError(t('schedules.timePreview.changed'));
                     return;
@@ -325,10 +326,10 @@ function ScheduleEditor({ editor, devices, zone, disabled, client, submit, repor
     const locked = disabled || saving || !!frozen.current;
     return <form onSubmit={event => void onSubmit(event)} className="space-y-3">
         {editor.kind === 'revoke' ? <p>{t('schedules.revokeConfirm', { title: editor.task?.title })}</p> : editor.kind === 'delete' ? <p>{t('schedules.deleteConfirm', { title: editor.task?.title })}</p> : <fieldset disabled={locked} className="space-y-3">
-            {['create', 'rename'].includes(editor.kind) && <div><Label htmlFor="schedule-title">{t('schedules.name')}</Label><Input id="schedule-title" required maxLength={240} value={title} onChange={e => setTitle(e.target.value)} /></div>}
+            {['create', 'rename'].includes(editor.kind) && <div><Label htmlFor="schedule-title">{t('schedules.name')}</Label><Input id="schedule-title" required value={title} onChange={e => setTitle(e.target.value)} /></div>}
             {editor.kind === 'create' && <>
                 <div><Label htmlFor="schedule-device">{t('schedules.device')}</Label><ScheduleSelect id="schedule-device" disabled={!!editor.resume} className={selectClass} value={device} onValueChange={value => setDevice(value)}>{devices.map(d => <SelectItem key={d.id} value={d.id}>{d.name}</SelectItem>)}</ScheduleSelect></div>
-                <div><Label htmlFor="schedule-prompt">{t('schedules.prompt')}</Label><Textarea id="schedule-prompt" required maxLength={32768} className="min-h-24 w-full rounded-md border bg-background p-2" value={prompt} onChange={e => setPrompt(e.target.value)} /></div>
+                <div><Label htmlFor="schedule-prompt">{t('schedules.prompt')}</Label><Textarea id="schedule-prompt" required className="min-h-24 w-full rounded-md border bg-background p-2" value={prompt} onChange={e => setPrompt(e.target.value)} /></div>
             </>}
             {editor.kind === 'failureThreshold' && <>
                 <p>{t('schedules.failureThresholdNote')}</p>
@@ -338,7 +339,7 @@ function ScheduleEditor({ editor, devices, zone, disabled, client, submit, repor
             {editor.kind === 'editPrompt' && <>
                 <p>{t(editor.task?.kind === 'conversation_resume' ? 'schedules.editPromptResumeNote' : 'schedules.editPromptFreshNote')}</p>
                 <Label htmlFor="schedule-prompt">{t('schedules.prompt')}</Label>
-                <Textarea id="schedule-prompt" required maxLength={16384} className="min-h-32 w-full rounded-md border bg-background p-2" value={prompt} onChange={e => setPrompt(e.target.value)} />
+                <Textarea id="schedule-prompt" required className="min-h-32 w-full rounded-md border bg-background p-2" value={prompt} onChange={e => setPrompt(e.target.value)} />
             </>}
             {timeForm && <>
                 <div><Label htmlFor="schedule-rule">{t('schedules.frequency')}</Label><ScheduleSelect id="schedule-rule" className={selectClass} value={kind} onValueChange={value => setKind(value as typeof kind)}>{(editor.resume || editor.task?.kind === 'conversation_resume' ? ['once'] as const : ['once', 'daily', 'weekly', 'interval'] as const).map(value => <SelectItem key={value} value={value}>{t(`schedules.rule.${value}`)}</SelectItem>)}</ScheduleSelect></div>

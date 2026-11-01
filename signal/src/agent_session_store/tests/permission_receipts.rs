@@ -13,7 +13,7 @@ async fn seed(db: DatabaseConnection) -> (SignalAgentSessionStore, Vec<Permissio
         AgentSessionSurface::AiAssistant,
     );
     SignalAgentRunEventStore::new(store.db.clone())
-        .append_user_followup(followup("input-1", "user-1", "inspect the target"))
+        .append_user_followup(&followup("input-1", "user-1", "inspect the target"))
         .await
         .unwrap();
     let mut session = store.claim_turn(claim("permission-turn")).await.unwrap();
@@ -238,7 +238,7 @@ async fn decision_expected_request_rejects_stale_runs_without_writes() {
             .newly_recorded
     );
     SignalAgentRunEventStore::new(store.db.clone())
-        .append_user_followup(followup("input-2", "user-2", "do something else"))
+        .append_user_followup(&followup("input-2", "user-2", "do something else"))
         .await
         .unwrap();
     store.claim_turn(claim("new-turn")).await.unwrap();
@@ -279,7 +279,7 @@ async fn original_decision_replays_after_revoke_expiry_new_input_and_active_turn
         .await
         .unwrap();
     SignalAgentRunEventStore::new(store.db.clone())
-        .append_user_followup(followup("input-2", "user-2", "do something else"))
+        .append_user_followup(&followup("input-2", "user-2", "do something else"))
         .await
         .unwrap();
     store.claim_turn(claim("new-turn")).await.unwrap();

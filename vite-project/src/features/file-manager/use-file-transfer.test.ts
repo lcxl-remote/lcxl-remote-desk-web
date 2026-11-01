@@ -11,13 +11,13 @@ import {
     restoreSignalingStubs,
     flush,
     type SignalingGlobals,
-} from './file-transfer-test-harness';
+} from './__tests__/harness';
 
 // Hook-level wiring for the W1/W7 upload fixes. The data channel is
 // stubbed and we assert on the *frames written to it* — uploads must
 // not push any binary chunk until the host accepts, and an accepted
 // upload must stop when the host reports an error. One comprehensive
-// test per file: see the note in `file-transfer-test-harness.ts`.
+// test per file: see the note in `__tests__/harness.ts`.
 
 describe('useFileTransfer upload accept gating (W1/W7)', () => {
     let saved: SignalingGlobals;

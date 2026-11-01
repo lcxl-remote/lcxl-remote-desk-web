@@ -3,3 +3,9 @@ export function assistantMessageId(bytes = crypto.getRandomValues(new Uint8Array
     if (bytes.length !== 16) throw new Error('A native message identity requires 16 bytes');
     return `m_${btoa(String.fromCharCode(...bytes)).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '')}`;
 }
+
+/** Independent owner control identity, retained across retries of the same request. */
+export function assistantDataControlId(bytes = crypto.getRandomValues(new Uint8Array(16))): string {
+    if (bytes.length !== 16) throw new Error('A native control identity requires 16 bytes');
+    return `dc_${btoa(String.fromCharCode(...bytes)).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '')}`;
+}

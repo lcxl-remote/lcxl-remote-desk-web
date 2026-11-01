@@ -329,12 +329,6 @@ pub fn source_review_candidate_id(
     Ok(format!("approval-source-{:x}", Sha256::digest(encoded)))
 }
 
-pub fn has_complete_approval_probe(capabilities: &serde_json::Value) -> bool {
-    REQUIRED_APPROVAL_PROBES
-        .iter()
-        .all(|key| capabilities.get(key).and_then(serde_json::Value::as_bool) == Some(true))
-}
-
 /// The reviewer receives no device tools. Its JSON is a proposed decision,
 /// never an authorization; the caller must still validate and commit against
 /// the current permission/work ledger.
@@ -3368,8 +3362,8 @@ mod tests {
             &session,
             &request,
             &delegation,
-            &[candidate.clone()],
-            &[review.clone()],
+            std::slice::from_ref(&candidate),
+            std::slice::from_ref(&review),
             &[],
             &revisions,
         )
@@ -3918,7 +3912,7 @@ mod tests {
                 "device",
                 &request,
                 Some(&decision),
-                &[grant.clone()],
+                std::slice::from_ref(&grant),
                 10,
                 1,
             )

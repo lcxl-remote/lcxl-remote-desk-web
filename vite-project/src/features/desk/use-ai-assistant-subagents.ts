@@ -227,14 +227,15 @@ export function useAiAssistantSubagents({ connection, conversation, session, sna
         return () => { cancelled = true; };
     }, [snapshot, session, page, olderTasks, listUrl, scope]);
 
-    const control = useCallback(async (task: AiAssistantSubAgentSummary, action: AiAssistantSubAgentControl['action']) => {
+    const control = useCallback(async (task: AiAssistantSubAgentSummary, action: { kind: 'cancel' } | { kind: 'adjust'; message: string }) => {
         if (!session || currentScope.current !== scope || dataScope !== scope || operation.current || subagentIsTerminal(task)) return false;
         const epoch = selectionEpoch.current;
         const token = {}; operation.current = token; setUpdating(true); setError(null);
         const isCurrent = () => currentScope.current === scope && operation.current === token && selectionEpoch.current === epoch;
         try {
             const value: AiAssistantSubAgentControl = { task_id: task.task_id, client_request_id: v4(),
-                expected_input_revision: task.input_revision, expected_control_revision: task.control_revision, action };
+                expected_input_revision: task.input_revision, expected_control_revision: task.control_revision,
+                action: action.kind === 'adjust' ? { ...action, client_timezone: Intl.DateTimeFormat().resolvedOptions().timeZone } : action };
             const next = await request<AiAssistantSubAgentSummary>('/api/my/ai-assistant-session/subagents/control',
                 { connection, conversation, session, control: value });
             if (!isCurrent()) return false;
@@ -308,8 +309,7 @@ export function useAiAssistantSubagents({ connection, conversation, session, sna
             || action.expected_revision !== detail.session.fileScope?.revision) return false;
         if (action.kind === 'select_directory') {
             if (!connected || detail.session.active || subagentIsTerminal(detail.result.task) || !action.path.trim()
-                || new TextEncoder().encode(action.path).length > 4096 || !action.purpose.trim()
-                || new TextEncoder().encode(action.purpose).length > 2048 || /[\u0000-\u001f\u007f-\u009f]/.test(action.path + action.purpose)) return false;
+                || !action.purpose.trim() || /[\u0000-\u001f\u007f-\u009f]/.test(action.path + action.purpose)) return false;
         } else if (!detail.session.fileScope.directories.some(item => item.requestId === action.directory_request_id)) return false;
         if (action.kind === 'decide_directory' && action.approve && (!connected || detail.session.active || subagentIsTerminal(detail.result.task))) return false;
         void mutateChild('directory-control', { connection, session: detail.session.sessionId,

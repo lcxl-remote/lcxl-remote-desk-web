@@ -57,7 +57,7 @@ pub struct SignalScheduleExecutor {
     approval_cursor: Arc<AtomicI64>,
     /// Instance-local position in the runnable goal FIFO. Only rotates which
     /// candidates are read next; claims are still decided under the write lock.
-    goal_cursor: Arc<std::sync::Mutex<Option<crate::agent_goal_store::QueuedCursor>>>,
+    goal_cursor: Arc<std::sync::Mutex<Option<crate::agent_goal_store::ContinuationCursor>>>,
 }
 
 enum DispatchResult {
@@ -131,7 +131,7 @@ impl SignalScheduleExecutor {
             .lock()
             .map(|cursor| cursor.clone())
             .unwrap_or_default();
-        let mut goal_candidates = crate::agent_goal_store::queued_candidates(
+        let mut goal_candidates = crate::agent_goal_store::continuation_candidates(
             &self.db,
             u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0),
             BATCH_SIZE,
@@ -217,6 +217,7 @@ impl SignalScheduleExecutor {
                 crate::agent_goal_store::wake_model_due(&self.db, &goal, chrono::Utc::now()).await;
             return false;
         }
+
         let target = {
             let map = self.connections.read().await;
             let mut targets = map.values().filter(|target| {
@@ -340,6 +341,7 @@ impl SignalScheduleExecutor {
         let store = ScheduleStore::new(self.db.clone());
         let Some(target) = target else {
             let _ = store.wait_for_device(&candidate.run_id).await;
+
             return None;
         };
         crate::computer_use_readiness::global_computer_use_readiness_cache()
@@ -347,6 +349,7 @@ impl SignalScheduleExecutor {
         let config = crate::model_provider::load(&self.db).await.ok()?;
         crate::model_dial::SignalModelSeam::from_config(&config).ok()?;
         config.destination_identity().ok()?;
+
         if !self.gate.is_enabled() {
             return None;
         }
@@ -357,17 +360,21 @@ impl SignalScheduleExecutor {
             .mode
             .restrict_to(config.execution_mode)
             .restrict_to(desk_agent_protocol::ExecutionMode::ConfirmEachAction);
+        let input = ContinuationClaim {
+            owner,
+            run_id: &candidate.run_id,
+            node_id: NODE,
+            lease_seconds: LEASE_SECONDS,
+            policy_revision:
+                desk_diagnose_core::assistant_policy::PERSONAL_ASSISTANT_POLICY_REVISION,
+            scope,
+        };
         let claimed = store
-            .claim_conversation_resume(ContinuationClaim {
-                owner,
-                run_id: &candidate.run_id,
-                node_id: NODE,
-                lease_seconds: LEASE_SECONDS,
-                policy_revision:
-                    desk_diagnose_core::assistant_policy::PERSONAL_ASSISTANT_POLICY_REVISION,
-                scope,
-            })
+            .claim_conversation_resume(input)
             .await
+            .inspect_err(|error| {
+                log::debug!("[schedule-executor] continuation claim deferred: {error:?}");
+            })
             .ok()?;
         Some((target, claimed))
     }

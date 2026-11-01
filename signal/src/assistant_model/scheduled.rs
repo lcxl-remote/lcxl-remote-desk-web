@@ -1,5 +1,6 @@
 //! Fresh-task admission on the audited model dispatch path.
 use super::*;
+use crate::assistant_data_store::model_gate;
 use crate::{
     ai_assistant_gate::AiAssistantGate,
     control_authorizer::SINGLE_ACCOUNT_USER_ID,
@@ -13,6 +14,11 @@ use desk_signal_facade::model::{
 };
 use sea_orm::{ColumnTrait, DbErr, EntityTrait, QueryFilter};
 use std::sync::Arc;
+
+pub(super) struct DispatchReceipt {
+    pub receipt_id: String,
+    pub assistant_data_deadline: Option<u64>,
+}
 
 pub(crate) struct FreshTaskModelContext {
     pub run_id: String,
@@ -54,7 +60,8 @@ impl MeteredModel {
         authorized: &AuthorizedModelRequest,
         ordinal: u64,
         ordinary_id: String,
-    ) -> Result<String, ModelAdmissionError<DbErr>> {
+    ) -> Result<DispatchReceipt, ModelAdmissionError<DbErr>> {
+        let input_snapshot = authorized.input_snapshot().map_err(|_| denied())?;
         if let Some(reservation) = authorized.request.delegation_call.as_ref() {
             let (_, units) = self
                 .inner
@@ -74,6 +81,11 @@ impl MeteredModel {
                 crate::db::begin_write(&self.db, crate::entity::agent_session::Entity).await
             })
             .await?;
+            let assistant_data = desk_diagnose_core::future::boxed(|| {
+                model_gate::prepare_on(&txn, &authorized.request)
+            })
+            .await
+            .map_err(model_gate::admission_error)?;
             desk_diagnose_core::future::boxed(|| async {
                 self.inner.validate_current_on(&txn).await
             })
@@ -92,22 +104,38 @@ impl MeteredModel {
                 .await?;
             }
             desk_diagnose_core::future::boxed(|| async {
-                crate::model_egress_store::SignalModelEgressStore::record_dispatch_intent_on(
+                crate::model_egress_store::SignalModelEgressStore::record_snapshot_intent_on(
                     &txn,
                     ordinary_id.clone(),
                     self.export_authorization_id.clone(),
                     ordinal,
-                    &authorized.audit,
-                    &authorized.input_envelopes,
+                    &input_snapshot,
                 )
                 .await
             })
             .await?;
+            desk_diagnose_core::future::boxed(|| {
+                link_dispatch_context_on(&txn, &authorized.request, &ordinary_id)
+            })
+            .await?;
+            let assistant_data_deadline = desk_diagnose_core::future::boxed(|| {
+                model_gate::authorize_on(
+                    &txn,
+                    assistant_data.as_deref(),
+                    &authorized.request,
+                    &ordinary_id,
+                )
+            })
+            .await
+            .map_err(model_gate::admission_error)?;
             if self.inner.dispatch_cancelled() || gate.snapshot() != settings {
                 return Err(denied().into());
             }
             desk_diagnose_core::future::boxed(|| async { txn.commit().await }).await?;
-            return Ok(ordinary_id);
+            return Ok(DispatchReceipt {
+                receipt_id: ordinary_id,
+                assistant_data_deadline,
+            });
         };
         let settings = task.gate.snapshot();
         if !settings.enabled || task.run_epoch <= 0 || task.session_token == 0 {
@@ -122,6 +150,10 @@ impl MeteredModel {
             crate::db::begin_write(&self.db, crate::entity::agent_session::Entity).await
         })
         .await?;
+        let assistant_data =
+            desk_diagnose_core::future::boxed(|| model_gate::prepare_on(&txn, &authorized.request))
+                .await
+                .map_err(model_gate::admission_error)?;
         desk_diagnose_core::future::boxed(|| async {
             ScheduleStore::lock_run_authority(
                 &txn,
@@ -145,7 +177,8 @@ impl MeteredModel {
         })
         .await?
         .ok_or_else(denied)?;
-        let held = PersistedAgentSession::decode_json(&row.state_json).map_err(|_| denied())?;
+        let held =
+            PersistedAgentSession::decode_boxed_json(&row.state_json).map_err(|_| denied())?;
         if held.lease_token != task.session_token
             || self.export_authorization_id
                 != model_export_id(
@@ -175,13 +208,12 @@ impl MeteredModel {
             })
             .await?;
             desk_diagnose_core::future::boxed(|| async {
-                crate::model_egress_store::SignalModelEgressStore::record_dispatch_intent_on(
+                crate::model_egress_store::SignalModelEgressStore::record_snapshot_intent_on(
                     &txn,
                     ordinary_id.clone(),
                     self.export_authorization_id.clone(),
                     ordinal,
-                    &authorized.audit,
-                    &authorized.input_envelopes,
+                    &input_snapshot,
                 )
                 .await
             })
@@ -210,8 +242,7 @@ impl MeteredModel {
                     &self.export_authorization_id,
                     ordinal,
                     authorized.request.compression_identity.as_deref(),
-                    &authorized.audit,
-                    &authorized.input_envelopes,
+                    &input_snapshot,
                 )
                 .await
             })
@@ -225,12 +256,29 @@ impl MeteredModel {
             .receipt
             .receipt_id
         };
+        desk_diagnose_core::future::boxed(|| {
+            link_dispatch_context_on(&txn, &authorized.request, &receipt_id)
+        })
+        .await?;
+        let assistant_data_deadline = desk_diagnose_core::future::boxed(|| {
+            model_gate::authorize_on(
+                &txn,
+                assistant_data.as_deref(),
+                &authorized.request,
+                &receipt_id,
+            )
+        })
+        .await
+        .map_err(model_gate::admission_error)?;
         desk_diagnose_core::future::boxed(|| async { task.validate_target().await }).await?;
         if self.inner.dispatch_cancelled() || task.gate.snapshot() != settings {
             return Err(denied().into());
         }
         desk_diagnose_core::future::boxed(|| async { txn.commit().await }).await?;
-        Ok(receipt_id)
+        Ok(DispatchReceipt {
+            receipt_id,
+            assistant_data_deadline,
+        })
     }
 
     pub(super) async fn settle_task_dispatch(
@@ -270,4 +318,26 @@ impl MeteredModel {
         }
         Ok(())
     }
+}
+
+async fn link_dispatch_context_on(
+    txn: &crate::config::connection::DatabaseTransaction,
+    request: &desk_diagnose_core::seam::ModelRequest,
+    receipt_id: &str,
+) -> Result<(), DbErr> {
+    if request.assistant_data.is_some() && request.context_conversation_id.is_none() {
+        return Err(denied());
+    }
+    if (request.use_case == desk_diagnose_core::model_profile::ModelUseCase::Agent
+        || request.assistant_data.is_some())
+        && let Some(conversation) = &request.context_conversation_id
+    {
+        crate::model_egress_store::SignalModelEgressStore::link_context_dispatch_on(
+            txn,
+            receipt_id,
+            conversation,
+        )
+        .await?;
+    }
+    Ok(())
 }

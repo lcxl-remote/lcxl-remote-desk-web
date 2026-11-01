@@ -66,7 +66,7 @@ async fn event_row(
     Ok(rows.pop())
 }
 
-fn validate_event(
+pub(crate) fn validate_event(
     row: &agent_run_event::Model,
     event: &AgentRunEvent,
     session: &PersistedAgentSession,
@@ -142,7 +142,19 @@ pub(super) async fn decided_on(
         serde_json::from_str(&row.payload_json).map_err(|_| invalid())?;
     event.validate().map_err(|_| invalid())?;
     validate_event(&row, &event.event, session, request_id)?;
-    let mut requested = requested_on(db, session, request_id).await?;
+    let requested = requested_on(db, session, request_id).await?;
+    validate_decision_record(&row, session, &requested, &event)?;
+    Ok(Some(event))
+}
+
+pub(crate) fn validate_decision_record(
+    row: &agent_run_event::Model,
+    session: &PersistedAgentSession,
+    original: &PermissionRequestedEvent,
+    event: &PermissionDecidedEvent,
+) -> Result<(), AgentError> {
+    let request_id = original.request.request_id.as_str();
+    let mut requested = original.clone();
     if requested.request.input_revision != event.request_input_revision
         || requested.event.event_seq >= event.event.event_seq
         || requested
@@ -161,7 +173,7 @@ pub(super) async fn decided_on(
     {
         return Err(invalid());
     }
-    Ok(Some(event))
+    Ok(())
 }
 
 pub(super) async fn replay_on(
@@ -209,6 +221,7 @@ impl SignalAgentSessionStore {
         decided_on(&self.db, &session, request_id).await
     }
 
+    #[cfg(test)]
     /// Current caller/target authorization is the caller's responsibility. This
     /// reads an immutable receipt, not renewed authority or a new resume trigger.
     pub async fn replay_permission_decision(

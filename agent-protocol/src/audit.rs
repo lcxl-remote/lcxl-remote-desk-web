@@ -411,6 +411,7 @@ impl AuditEvent {
         event
     }
 
+    #[cfg(test)]
     /// `ai.task.cancelled` — the diagnose task was abandoned by the operator.
     pub fn task_cancelled(event_id: String, occurred_at: String, request_id: &str) -> Self {
         let mut event = Self::task_scoped(

@@ -27,6 +27,33 @@ use desk_agent_protocol::{
 };
 use sha2::{Digest, Sha256};
 
+/// A completed model verdict cannot authorize an obsolete command plan. Persist
+/// that definite platform refusal instead of retrying the approved verdict forever.
+pub fn apply_automatic_grant_failure(
+    decisions: &mut [crate::dynamic_run::PermissionDecisionItem],
+    source: &mut crate::dynamic_run::PermissionDecisionSource,
+    error: &AgentError,
+) -> bool {
+    use crate::dynamic_run::{PermissionDecisionSource, PermissionItemDecision};
+    if !matches!(source, PermissionDecisionSource::AutomaticReview { .. })
+        || error.kind != AgentErrorKind::PermissionDenied
+        || error.retryable
+    {
+        return false;
+    }
+    for item in decisions {
+        item.decision = PermissionItemDecision::Deny;
+    }
+    let (reason_code, reason) = crate::approval_review::system_review_reason(
+        crate::approval_observation::ReviewReason::SourceChanged,
+    );
+    *source = PermissionDecisionSource::SystemDecision {
+        reason_code: reason_code.into(),
+        reason: reason.into(),
+    };
+    true
+}
+
 /// Bind grants compiled from a complete AI-reviewed permission decision to the
 /// current owner delegation. The caller must commit the decision, review rows,
 /// grants and resume in one fenced transaction. The generic grant matcher will

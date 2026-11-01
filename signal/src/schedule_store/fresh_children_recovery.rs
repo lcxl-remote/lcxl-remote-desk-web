@@ -133,9 +133,11 @@ pub(super) async fn recover(
             return Ok(false);
         }
         let tasks = children::group_children_on(&txn, &group).await?;
+
         if tasks.is_empty() {
             return Ok(false);
         }
+
         for task in tasks {
             children::decode_run(&task)?;
         }

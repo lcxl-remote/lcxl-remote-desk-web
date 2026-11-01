@@ -22,10 +22,18 @@ use crate::sink_authorizer::{
 };
 
 mod lineage;
+pub(crate) use lineage::is_public_system_prompt;
+mod input_snapshot;
+mod native_output;
+pub use input_snapshot::{NativeModelInputExport, NativeModelInputSnapshot};
 pub use lineage::{
     InvalidModelInputLineage, ModelInputLineage, is_audited_public_system_prompt,
     model_output_message_envelope, project_model_input_lineage, validate_model_input_lineage,
     validate_model_output_lineage,
+};
+pub use native_output::{
+    NativeModelOutputEvidence, NativeModelOutputSources, model_input_lineage_sha256,
+    model_output_label_sha256, sink_metadata_sha256, sink_metadata_size,
 };
 
 const MODEL_EXPORT_AUTHORIZATION_TTL_MS: u64 = 5 * 60 * 1000;
@@ -47,10 +55,23 @@ pub struct ModelEgressPolicy {
 
 #[derive(Debug, Clone)]
 pub struct AuthorizedModelRequest {
+    /// The original request and source labels. Provider dialects serialize its
+    /// unchanged payload; actual admitted sink labels are recorded separately.
     pub request: ModelRequest,
     pub audit: SinkProjectionAudit,
     /// Exact projected inputs used to preserve output sensitivity and provenance.
     pub input_envelopes: Vec<DataEnvelope>,
+    pub input_exports: Vec<NativeModelInputExport>,
+}
+
+impl AuthorizedModelRequest {
+    pub fn input_snapshot(&self) -> Result<NativeModelInputSnapshot, &'static str> {
+        NativeModelInputSnapshot::capture_with_exports(
+            &self.audit,
+            &self.input_envelopes,
+            &self.input_exports,
+        )
+    }
 }
 
 impl ModelEgressPolicy {
@@ -168,13 +189,14 @@ impl ModelEgressPolicy {
             .messages
             .retain(|message| retained.contains(&message.message_id));
         let mut projected_envelopes = Vec::with_capacity(request.messages.len());
+        let mut input_exports = Vec::new();
         let mut payloads = Vec::with_capacity(request.messages.len());
-        for message in &mut request.messages {
+        for message in &request.messages {
             let bytes = message_content_bytes(message)?;
             let source = match message.data_envelope.clone() {
                 Some(envelope) => envelope,
                 None if message.role == ChatRole::System => {
-                    self.public_system_envelope(&message.message_id, &bytes)?
+                    Self::public_system_envelope(&self.destination, &message.message_id, &bytes)?
                 }
                 None => {
                     return Err(ModelEgressError::MissingEnvelope {
@@ -233,6 +255,11 @@ impl ModelEgressPolicy {
                 let (mut exported, transformation) =
                     authorize_export(&source, &exported_id, &authorization, self.now_unix_ms)
                         .map_err(ModelEgressError::Sink)?;
+                input_exports.push(NativeModelInputExport {
+                    source_message_id: message.message_id.clone(),
+                    source: source.clone(),
+                    transformation: transformation.clone(),
+                });
                 // Persist the identity-preserving export edge in the projected
                 // label; the original source retains its own ancestry.
                 exported.provenance.source_envelope_ids = transformation.input_envelope_ids;
@@ -241,7 +268,6 @@ impl ModelEgressPolicy {
                     .map_err(|error| ModelEgressError::InvalidDerivedEnvelope(error.to_string()))?;
                 exported
             };
-            message.data_envelope = Some(projected.clone());
             projected_envelopes.push(projected);
             payloads.push(bytes);
         }
@@ -266,6 +292,7 @@ impl ModelEgressPolicy {
             request,
             audit: projection.audit,
             input_envelopes: projected_envelopes,
+            input_exports,
         })
     }
 
@@ -355,8 +382,8 @@ impl ModelEgressPolicy {
         Ok(envelope)
     }
 
-    fn public_system_envelope(
-        &self,
+    pub(crate) fn public_system_envelope(
+        destination: &DestinationIdentity,
         message_id: &str,
         bytes: &[u8],
     ) -> Result<DataEnvelope, ModelEgressError> {
@@ -386,7 +413,7 @@ impl ModelEgressPolicy {
             },
             digest_sha256,
             sensitivity: Sensitivity::Public,
-            allowed_destinations: vec![self.destination.clone()],
+            allowed_destinations: vec![destination.clone()],
             retention: RetentionBoundary {
                 expires_at_unix_ms: None,
                 delete_with_run: false,
@@ -827,11 +854,11 @@ mod tests {
         );
         assert_eq!(authorized.request.messages[0].text, output.text);
         assert_eq!(
-            authorized.request.messages[0]
-                .data_envelope
-                .as_ref()
-                .unwrap()
-                .allowed_destinations,
+            authorized.request.messages[0].data_envelope,
+            output.data_envelope
+        );
+        assert_eq!(
+            authorized.input_envelopes[0].allowed_destinations,
             vec![destination()]
         );
         assert!(
@@ -997,12 +1024,24 @@ mod tests {
             None
         );
         assert_eq!(
+            authorized.input_envelopes[2].allowed_destinations,
+            vec![destination.clone()]
+        );
+        assert_eq!(
             authorized.request.messages[2]
                 .data_envelope
                 .as_ref()
                 .unwrap()
-                .allowed_destinations,
-            vec![destination.clone()]
+                .envelope_id,
+            "read-envelope"
+        );
+        assert!(
+            authorized.request.messages[2]
+                .data_envelope
+                .as_ref()
+                .unwrap()
+                .allowed_destinations
+                .is_empty()
         );
 
         let turn = ModelTurn {

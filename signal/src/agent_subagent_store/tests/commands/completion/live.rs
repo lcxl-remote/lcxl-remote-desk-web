@@ -349,8 +349,8 @@ async fn live_project_model_subagent_concise_result() {
             ModelRequest::text_only(
                 vec![
                     system,
-                    ChatMessage::text("child-input", ChatRole::User, &input.to_string()),
-                    ChatMessage::system_event("completion-fixture", &completion.to_string()),
+                    ChatMessage::text("child-input", ChatRole::User, input.to_string()),
+                    ChatMessage::system_event("completion-fixture", completion.to_string()),
                 ],
                 ResponseFormatSpec::None,
             ),

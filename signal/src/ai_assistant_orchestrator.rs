@@ -33,6 +33,7 @@ use desk_diagnose_core::capability_availability::{
 };
 #[cfg(test)]
 use desk_diagnose_core::chat::ChatMessage;
+#[cfg(test)]
 use desk_diagnose_core::chat::ChatRole;
 use desk_diagnose_core::context_attachment::ContextAttachmentKind;
 use desk_diagnose_core::conversation_key::{
@@ -127,6 +128,7 @@ fn has_active_resume_desktop_read_grant(
         })
 }
 
+#[cfg(test)]
 fn latest_committed_answer(
     snapshot: &crate::agent_session_store::SessionSnapshot,
 ) -> Option<String> {
@@ -250,6 +252,7 @@ fn prepare_live_targets(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn context_selection_claim(
     registry: &desk_diagnose_core::provider_registry::ProviderRegistry,
     inventory: &[CapabilityAvailability],
@@ -349,12 +352,14 @@ pub async fn send_capability_inventory(
             image_input: config.supports_image_input,
         })
         .unwrap_or_default();
-    let (registry, inventory, generated_at_unix_ms, _) = current_capability_projection(
-        &db,
-        connections.as_ref(),
-        &target_connection_id,
-        model_capabilities,
-    )
+    let (registry, inventory, generated_at_unix_ms, _) = desk_diagnose_core::future::boxed(|| {
+        current_capability_projection(
+            &db,
+            connections.as_ref(),
+            &target_connection_id,
+            model_capabilities,
+        )
+    })
     .await;
     let snapshot = inventory_snapshot(
         &registry,
@@ -396,22 +401,30 @@ pub async fn render_document_preview_page(
 ) {
     use desk_agent_protocol::document_conversion::DocumentPreviewPageResponse;
     let actor_id = actor_user_id.to_string();
-    let accessible = crate::agent_session_store::SignalAgentSessionStore::new(db)
-        .read_assistant_snapshot_for_subject(&request.conversation_id, &actor_id, &target_device_id)
-        .await
-        .ok()
-        .flatten()
-        .is_some();
-    let result = if accessible {
-        crate::remote_tool_edge::document_preview::render_page(
-            connections.as_ref(),
-            &target_connection_id,
+    let store = crate::agent_session_store::SignalAgentSessionStore::new(db);
+    let accessible = desk_diagnose_core::future::boxed(|| {
+        store.read_assistant_snapshot_for_subject(
+            &request.conversation_id,
             &actor_id,
             &target_device_id,
-            &request.conversation_id,
-            &request.preview_id,
-            request.page,
         )
+    })
+    .await
+    .ok()
+    .flatten()
+    .is_some();
+    let result = if accessible {
+        desk_diagnose_core::future::boxed(|| {
+            crate::remote_tool_edge::document_preview::render_page(
+                connections.as_ref(),
+                &target_connection_id,
+                &actor_id,
+                &target_device_id,
+                &request.conversation_id,
+                &request.preview_id,
+                request.page,
+            )
+        })
         .await
     } else {
         Err(transport_error("Document preview is unavailable"))
@@ -462,7 +475,7 @@ pub async fn update_context(
             actor_id: actor_id.clone(), device_id: target_device_id.clone(), update: update.clone(),
             selection: None, created_at: chrono::Utc::now().to_rfc3339(),
         };
-        if let Some(changed) = store.replay_live_context(&params).await? {
+        if let Some(changed) = desk_diagnose_core::future::boxed(|| store.replay_live_context(&params)).await? {
             return Ok(changed);
         }
         if update.selected_capability_ids.is_empty() {
@@ -471,7 +484,7 @@ pub async fn update_context(
                 now_unix_ms: chrono::Utc::now().timestamp_millis() as u64,
             });
             params.created_at = chrono::Utc::now().to_rfc3339();
-            return store.update_live_context(&params).await;
+            return desk_diagnose_core::future::boxed(|| store.update_live_context(&params)).await;
         }
         let config = crate::model_provider::load(&db).await.map_err(|error| {
             transport_error(format!("failed to load model provider config: {error}"))
@@ -480,14 +493,14 @@ pub async fn update_context(
             transport_error(format!("failed to resolve model destination: {error}"))
         })?;
         let (registry, inventory, now_unix_ms, readiness) =
-            current_capability_projection(
+            desk_diagnose_core::future::boxed(|| current_capability_projection(
                 &db,
                 connections.as_ref(),
                 &target_connection_id,
                 ModelCapabilities {
                     image_input: config.supports_image_input,
                 },
-            )
+            ))
             .await;
         if update.selected_capability_ids.iter().any(|capability_id| {
             capability_id
@@ -510,7 +523,7 @@ pub async fn update_context(
         )?;
         params.selection = Some(selection);
         params.created_at = chrono::Utc::now().to_rfc3339();
-        store.update_live_context(&params).await
+        desk_diagnose_core::future::boxed(|| store.update_live_context(&params)).await
     }
     .await;
 
@@ -616,9 +629,10 @@ pub(crate) async fn apply_object_context_update(
         .await?
         .changed);
     }
-    if let Some(changed) =
-        desk_diagnose_core::future::boxed(|| async { store.replay_object_context(&params).await })
-            .await?
+    if let Some(changed) = desk_diagnose_core::future::boxed(|| async {
+        desk_diagnose_core::future::boxed(|| store.replay_object_context(&params)).await
+    })
+    .await?
     {
         return Ok(changed);
     }
@@ -636,7 +650,10 @@ pub(crate) async fn apply_object_context_update(
                 .map_err(|_| transport_error("failed to resolve model destination"))?,
         );
     }
-    desk_diagnose_core::future::boxed(|| async { store.update_object_context(&params).await }).await
+    desk_diagnose_core::future::boxed(|| async {
+        desk_diagnose_core::future::boxed(|| store.update_object_context(&params)).await
+    })
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -710,22 +727,28 @@ impl LeaseHeartbeat for SignalStoreHeartbeat {
         !self.cancel.is_cancelled()
     }
     fn start(&self, conversation_id: String, lease_token: u64) -> Box<dyn HeartbeatGuard> {
-        let store = self.store.clone();
+        let store = Box::new(self.store.clone());
+        let cancel = self.cancel.clone();
         let handle = actix_web::rt::spawn(async move {
-            loop {
-                tokio::time::sleep(HEARTBEAT_INTERVAL).await;
-                if store
-                    .heartbeat(
-                        &conversation_id,
-                        lease_token,
-                        &chrono::Utc::now().to_rfc3339(),
-                    )
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-            }
+            let error = desk_signal_facade::service::lease_heartbeat::renew_until_lost(
+                HEARTBEAT_INTERVAL,
+                std::time::Duration::from_secs(crate::agent_session_store::LEASE_TTL_SECS as u64),
+                || async {
+                    store
+                        .heartbeat(
+                            &conversation_id,
+                            lease_token,
+                            &chrono::Utc::now().to_rfc3339(),
+                        )
+                        .await
+                },
+            )
+            .await;
+            log::warn!(
+                "[agent-lease] renewal stopped: conversation_id={conversation_id}, kind={:?}",
+                error.kind
+            );
+            cancel.cancel();
         });
         Box::new(SignalHeartbeatGuard(handle))
     }
@@ -1384,14 +1407,16 @@ async fn prepare_composed_turn(
                     let model_name = config.model.clone().unwrap_or_default();
                     let (provider_registry, inventory, _, readiness) =
                         desk_diagnose_core::future::boxed(|| async {
-                            current_capability_projection(
-                                &db,
-                                connections.as_ref(),
-                                &target_connection_id,
-                                ModelCapabilities {
-                                    image_input: config.supports_image_input,
-                                },
-                            )
+                            desk_diagnose_core::future::boxed(|| {
+                                current_capability_projection(
+                                    &db,
+                                    connections.as_ref(),
+                                    &target_connection_id,
+                                    ModelCapabilities {
+                                        image_input: config.supports_image_input,
+                                    },
+                                )
+                            })
                             .await
                         })
                         .await;
@@ -1745,7 +1770,7 @@ async fn prepare_composed_turn(
                         })
                         .await
                         .map_err(|_| transport_error("published task source changed"))?;
-                        resume.claimed.session = session;
+                        resume.claimed.session = *session;
                         fresh.creation = Some(creation);
                     }
                     let model = MeteredModel {
@@ -2569,7 +2594,9 @@ async fn prepare_composed_turn(
                                                             || async {
                                                                 scheduled_dispatch::drive(
                                                                     &deps,
-                                                                    resume.claimed.session,
+                                                                    Box::new(
+                                                                        resume.claimed.session,
+                                                                    ),
                                                                     &resume.claimed.run.run_id,
                                                                     resume
                                                                         .permission_request_id
@@ -2716,7 +2743,9 @@ async fn prepare_composed_turn(
             None
         };
         let goal_id = goal_start.as_ref().map(|goal| goal.goal_id.clone());
-        let input = crate::agent_run_event_store::AppendUserFollowupParams {
+        let input = Box::new(crate::agent_run_event_store::AppendUserFollowupParams {
+            client_timezone: ask.client_timezone,
+            temporary_conversation: ask.temporary_conversation,
             event_id: ask.client_message_id,
             run_id: conversation_id.clone(),
             client_conversation_id: client_conversation_id.clone(),
@@ -2726,17 +2755,17 @@ async fn prepare_composed_turn(
             policy_revision: PERSONAL_ASSISTANT_POLICY_REVISION,
             current_scope: scope.clone(),
             read_context: Some(read_context.clone()),
-            message: (*user).clone(),
+            message: *user,
             created_at: accepted_at.clone(),
-        };
+        });
         let event_store = crate::agent_run_event_store::SignalAgentRunEventStore::new(db.clone());
         let append_result = match goal_start {
             Some(goal) => {
-                desk_diagnose_core::future::boxed(|| event_store.append_user_goal(input, goal))
+                desk_diagnose_core::future::boxed(|| event_store.append_user_goal(&input, goal))
                     .await
             }
             None => {
-                desk_diagnose_core::future::boxed(|| event_store.append_user_followup(input)).await
+                desk_diagnose_core::future::boxed(|| event_store.append_user_followup(&input)).await
             }
         };
         let ack = match append_result {
@@ -2754,7 +2783,7 @@ async fn prepare_composed_turn(
         log::info!(
             "[assistant-input] accepted request_id={} message_id={} conversation_id={} input_seq={} already_handled={}",
             request_id,
-            user.message_id,
+            input.message.message_id,
             conversation_id,
             ack.input_seq,
             ack.already_handled
@@ -2787,29 +2816,34 @@ async fn prepare_composed_turn(
             ..deps
         };
         if ack.already_handled {
-            match desk_diagnose_core::future::boxed(|| async { sessions.read_snapshot(&conversation_id).await }).await {
-                Ok(Some(snapshot)) if snapshot.handled_input_seq >= ack.input_seq => {
-                    if let Some(answer) = latest_committed_answer(&snapshot) {
-                        desk_diagnose_core::future::boxed(|| async { stream_event(
-                            connections.as_ref(),
-                            &browser_connection_id,
-                            &AgentEvent::answer(&request_id, 2, answer),
-                        )
-                        .await }).await;
-                        return Ok(None);
+            let recovered = desk_diagnose_core::future::boxed(|| event_store.handled_outcome(
+                &input,
+                &ack,
+            )).await;
+            let frames = std::cell::RefCell::new(Vec::new());
+            {
+                let mut replay = StreamingTurnSink::starting_at(
+                    |frame| frames.borrow_mut().push(frame), request_id.clone(), 2,
+                );
+                match recovered {
+                    Ok(Some(outcome)) => {
+                        if let LoopOutcome::Answered(answer) = &outcome {
+                            replay.on_answer_committed(answer);
+                        }
+                        replay.finish_outcome(&outcome);
                     }
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    desk_diagnose_core::future::boxed(|| async { stream_event(
-                        connections.as_ref(),
-                        &browser_connection_id,
-                        &AgentEvent::error(&request_id, 2, error),
-                    )
-                    .await }).await;
-                    return Ok(None);
+                    Ok(None) => replay.error(transport_error(
+                        "the accepted input completion is unavailable; synchronize the conversation",
+                    )),
+                    Err(error) => replay.error(error),
                 }
             }
+            for frame in frames.into_inner() {
+                desk_diagnose_core::future::boxed(|| stream_event(
+                    connections.as_ref(), &browser_connection_id, &frame,
+                )).await;
+            }
+            return Ok(None);
         }
         let claim = ClaimTurnParams {
             conversation_id,
@@ -2875,26 +2909,24 @@ async fn prepare_composed_turn(
         }
         loop {
             match desk_diagnose_core::future::boxed(|| {
-                run_agent_turn(&deps, claim.clone(), (*user).clone(), &mut sink)
+                run_agent_turn(&deps, claim.clone(), input.message.clone(), &mut sink)
             })
             .await
             {
                 Ok(LoopOutcome::TurnBusy) => {
-                    match desk_diagnose_core::future::boxed(|| async { sessions.read_snapshot(&claim.conversation_id).await }).await {
-                        Ok(Some(snapshot)) if snapshot.handled_input_seq >= ack.input_seq => {
-                            if let Some(answer) = latest_committed_answer(&snapshot) {
-                                sink.on_answer_committed(&answer);
-                            } else {
-                                sink.error(transport_error(
-                            "the accepted AI Assistant input settled without an answer; send a follow-up to retry",
-                        ));
+                    match desk_diagnose_core::future::boxed(|| event_store.handled_outcome(
+                        &input,
+                        &ack,
+                    )).await {
+                        Ok(Some(outcome)) => {
+                            if let LoopOutcome::Answered(answer) = &outcome {
+                                sink.on_answer_committed(answer);
                             }
+                            sink.finish_outcome(&outcome);
                             break;
                         }
-                        Ok(_) => {
-                            // Another request owns the run. The durable follow-up is
-                            // already ACKed, so wait until that owner either handles it
-                            // or is superseded, then race to claim the newest revision.
+                        Ok(None) => {
+                            // The accepted input remains owned by its existing run.
                             desk_diagnose_core::future::boxed(|| async { tokio::time::sleep(BUSY_FOLLOWUP_RETRY_INTERVAL).await }).await;
                         }
                         Err(error) => {
@@ -2946,12 +2978,15 @@ async fn prepare_composed_turn(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use desk_diagnose_core::test_timing::{MODEL_IO_TIMEOUT, SCENARIO_TIMEOUT};
     mod compaction;
+    mod conversation_title;
     mod desktop_permission;
     mod live_subagents;
     mod original_input;
     mod permission_object;
     mod rehearsal_entry;
+    mod reply_history;
     mod scheduled;
     use desk_agent_protocol::data_lineage::Sensitivity;
     use desk_diagnose_core::seam::NullTurnSink;
@@ -2975,6 +3010,31 @@ mod tests {
         assert!(heartbeat.check_current().await);
         assert!(cancellation::cancel(17, &request_id));
         assert!(!heartbeat.check_current().await);
+    }
+
+    #[actix_web::test]
+    async fn failed_renewal_closes_the_same_cancellation_and_health_state() {
+        let db = crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let store = crate::agent_session_store::SignalAgentSessionStore::new(db.clone());
+        db.close().await.unwrap();
+        let heartbeat = SignalStoreHeartbeat {
+            cancel: tokio_util::sync::CancellationToken::new(),
+            store,
+        };
+        tokio::time::pause();
+        let _guard = heartbeat.start("closed-database".into(), 1);
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_secs(
+            crate::agent_session_store::LEASE_TTL_SECS as u64,
+        ))
+        .await;
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert!(!heartbeat.check_current().await);
+        assert!(heartbeat.cancel.is_cancelled());
     }
 
     #[test]
@@ -3012,7 +3072,8 @@ mod tests {
 
     #[test]
     fn exact_ui_action_remains_in_scope_for_permission_resume() {
-        let mut tools = desk_diagnose_core::ai_assistant::ai_assistant_tool_registry();
+        let mut tools =
+            desk_diagnose_core::ai_assistant::ai_assistant_provider_registry().registered_tools();
         desk_diagnose_core::ai_assistant::retain_selected_context_tools(
             &desk_diagnose_core::ai_assistant::ai_assistant_provider_registry(),
             &mut tools,
@@ -3198,9 +3259,45 @@ mod tests {
         capture_one_openai_request_with_reply(listener, |_| sse.to_owned()).await
     }
 
+    async fn capture_openai_answer_with_title(
+        listener: impl std::borrow::Borrow<TcpListener>,
+        sse: &str,
+    ) -> (Vec<u8>, Vec<u8>) {
+        let answer = capture_one_openai_request_with_sse(listener.borrow(), sse).await;
+        let title = capture_one_openai_request_with_reply(listener.borrow(), |body| {
+            let request: serde_json::Value = serde_json::from_slice(body).unwrap();
+            assert_eq!(
+                request["response_format"]["json_schema"]["name"],
+                "conversation_title"
+            );
+            assert!(
+                request["tools"]
+                    .as_array()
+                    .is_none_or(|tools| tools.is_empty())
+            );
+            original_input::memory_sse(
+                serde_json::json!({"content":r#"{"title":"Synthetic conversation"}"#}),
+                "stop",
+            )
+        })
+        .await;
+        (answer, title)
+    }
+
     async fn capture_one_openai_request_with_reply(
         listener: impl std::borrow::Borrow<TcpListener>,
         reply: impl FnOnce(&[u8]) -> String,
+    ) -> Vec<u8> {
+        capture_one_openai_request_with_reply_paused(listener, reply, None).await
+    }
+
+    async fn capture_one_openai_request_with_reply_paused(
+        listener: impl std::borrow::Borrow<TcpListener>,
+        reply: impl FnOnce(&[u8]) -> String,
+        pause: Option<(
+            tokio::sync::oneshot::Sender<Vec<u8>>,
+            tokio::sync::oneshot::Receiver<()>,
+        )>,
     ) -> Vec<u8> {
         let (mut socket, _) = listener.borrow().accept().await.unwrap();
         let mut request = Vec::new();
@@ -3231,7 +3328,12 @@ mod tests {
             request.extend_from_slice(&buffer[..read]);
         }
 
-        let sse = reply(&request[header_end..header_end + content_length]);
+        let body = &request[header_end..header_end + content_length];
+        if let Some((arrived, release)) = pause {
+            arrived.send(body.to_vec()).unwrap();
+            release.await.unwrap();
+        }
+        let sse = reply(body);
         let response = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{sse}",
             sse.len()

@@ -72,7 +72,7 @@ pub(super) async fn apply_checkpoint(
         Some(policy) => match crate::model_context::authorize_compression_input(
             &policy,
             &plan,
-            &session.conversation,
+            &session.model_conversation(),
         ) {
             Ok(input) => Some(input),
             Err(_) => {
@@ -87,7 +87,7 @@ pub(super) async fn apply_checkpoint(
         },
         None => None,
     };
-    let mut request = ModelRequest {
+    let mut request = Box::new(ModelRequest {
         observation: deps.model.observation_context(
             crate::model_profile::ModelUseCase::ContextCompression,
             crate::model_observability::Origin::System,
@@ -103,16 +103,17 @@ pub(super) async fn apply_checkpoint(
         use_case: crate::model_profile::ModelUseCase::ContextCompression,
         thinking_prefix: None,
         protected_replay_message_ids: Default::default(),
-        context_conversation_id: None,
+        context_conversation_id: Some(session.conversation_id.clone()),
         pinned_source_context_key: None,
         ui_references: None,
         result_locators: Default::default(),
         previous_cache_projection: None,
         delegation_call: None,
         preparation: None,
+        assistant_data: None,
         compression_identity: None,
         caller_output_hard_cap: Some(i64::from(plan.policy.summary_max_output_tokens)),
-    };
+    });
     let _observation_preflight =
         crate::model_observability::PreflightObservation::new(request.observation.clone());
     request.compression_identity = Some(compression_identity.clone());
@@ -121,6 +122,7 @@ pub(super) async fn apply_checkpoint(
         request.preparation = Some(Box::new(prepared));
     }
     let identity = compression_identity;
+    crate::future::boxed(|| assistant_data::prepare_request(deps, session, &mut request)).await?;
     let budget = call_budget::reserve_model(
         deps,
         session,
@@ -131,7 +133,7 @@ pub(super) async fn apply_checkpoint(
     .await?;
     let mut compression_sink = crate::seam::NullTurnSink;
     let compression_observation = request.observation.clone();
-    let dial_result = deps.model.call(request, &mut compression_sink).await;
+    let dial_result = phases::dial_request(deps.model, request, &mut compression_sink).await;
     call_budget::settle_model(deps, session, budget, &dial_result).await?;
     let turn = match dial_result {
         Ok(turn) => turn,
@@ -150,7 +152,7 @@ pub(super) async fn apply_checkpoint(
         tokens: turn.usage,
         reasoning_tokens: turn.provider_meta.reasoning_tokens,
     };
-    session.record_compression_usage(turn.usage);
+    session.record_auxiliary_usage(turn.usage);
     let disposition = match classify_model_turn(&turn) {
         Ok(disposition) => disposition,
         Err(_) => {
@@ -320,7 +322,7 @@ pub(super) async fn apply_checkpoint(
     let (next_state, view) = match crate::model_context::apply_validated_checkpoint(
         &plan,
         validated,
-        &session.conversation,
+        &session.model_conversation(),
         compatible_state,
         session.version,
     ) {

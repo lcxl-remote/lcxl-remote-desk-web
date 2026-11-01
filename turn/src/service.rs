@@ -22,10 +22,6 @@ use crate::{
     relay::FamilyPinnedRelay,
 };
 
-/// `turn 0.17.1` allocates this private `server::INBOUND_MTU` receive buffer.
-/// Keep the version in the name and lock its behavior with an integration test
-/// whenever the dependency is upgraded.
-pub const PINNED_TURN_0_17_INBOUND_MTU_BYTES: usize = 1500;
 #[cfg(test)]
 const STUN_HEADER_SIZE: usize = 20;
 #[cfg(test)]

@@ -1,6 +1,7 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { useAiAssistantChat, type RehearsalConversation } from './use-ai-assistant-chat';
+import { deskErrorCodeEnum } from '@/services/types';
 import { SIGNALING_TYPE_CODE_ASK_AI_ASSISTANT } from './constants';
 
 const intent: RehearsalConversation = {
@@ -16,7 +17,7 @@ afterEach(() => { vi.unstubAllGlobals(); localStorage.clear(); });
 describe('reserved rehearsal conversation', () => {
     it('pins the reserved identity and sends the frozen input once without overwriting normal history', async () => {
         localStorage.setItem('ai-assistant-conversation:device', 'ordinary-conversation');
-        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: null }) }));
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ success: false, code: deskErrorCodeEnum.PERMISSION_ERROR, data: null }) }));
         const sendMessage = vi.fn(() => 'request');
         const { result, unmount } = renderHook(() => useAiAssistantChat({
             deskId: 'device', rehearsal: intent, subscribe, sendMessage,
@@ -36,6 +37,7 @@ describe('reserved rehearsal conversation', () => {
         act(() => { expect(result.current.start(intent.prompt, 'en-US', ['read'])).toBe(true); });
         expect(sendMessage).toHaveBeenCalledExactlyOnceWith(SIGNALING_TYPE_CODE_ASK_AI_ASSISTANT, {
             question: intent.prompt, client_message_id: intent.initial_message_id,
+            client_timezone: expect.any(String), temporary_conversation: undefined,
             conversation_id: intent.client_conversation_id, locale: 'zh-CN',
             selected_capability_ids: ['read'], selected_attachment_ids: [],
             start_goal: false, previous_completed_goal_id: null,
@@ -47,7 +49,7 @@ describe('reserved rehearsal conversation', () => {
     });
 
     it.each(['running', 'completed', 'cancelled', 'failed'] as const)('cannot restart a %s rehearsal', async status => {
-        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: null }) }));
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ success: false, code: deskErrorCodeEnum.PERMISSION_ERROR, data: null }) }));
         const sendMessage = vi.fn(() => 'request');
         const { result, unmount } = renderHook(() => useAiAssistantChat({
             deskId: 'device', rehearsal: { ...intent, status }, subscribe, sendMessage,

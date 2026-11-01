@@ -110,6 +110,7 @@ impl TaskReceiptContext {
         provenance
             .validate()
             .map_err(|_| ScheduleStoreError::Invalid)?;
+
         Ok(Self {
             run_id: work.run_id.clone(),
             contract,

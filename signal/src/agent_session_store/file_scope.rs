@@ -343,6 +343,9 @@ impl SignalAgentSessionStore {
                     conversation_id: Set(update.subject.conversation_id.clone()),
                     actor_id: Set(update.subject.actor_id.clone()),
                     device_id: Set(update.subject.device_id.clone()),
+                    conversation_schema_version: Set(Some(i32::from(
+                        desk_diagnose_core::session::CONVERSATION_SCHEMA_VERSION,
+                    ))),
                     state_json: Set(state),
                     version: Set(session.version),
                     lease_token: Set(0),

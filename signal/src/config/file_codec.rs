@@ -21,6 +21,18 @@ fn raw(config: &GlobalConfig) -> Result<Map<String, Value>, DbErr> {
             "context_management".into(),
             value(&config.context_management)?,
         ),
+        (
+            "assistant_data_policy".into(),
+            value(&config.assistant_data_policy)?,
+        ),
+        (
+            "assistant_data_settings".into(),
+            value(&config.assistant_data_settings)?,
+        ),
+        (
+            "assistant_user_instructions".into(),
+            value(&config.assistant_user_instructions)?,
+        ),
         ("subagent_policy".into(), value(&config.subagent_policy)?),
         (
             "terminal_completion".into(),
@@ -170,6 +182,18 @@ impl<'de> Deserialize<'de> for GlobalConfig {
                 .map_err(serde::de::Error::custom)?,
             web_search: decode(take("web_search"), "web_search")
                 .map_err(serde::de::Error::custom)?,
+            assistant_data_policy: decode(take("assistant_data_policy"), "assistant_data_policy")
+                .map_err(serde::de::Error::custom)?,
+            assistant_data_settings: decode(
+                take("assistant_data_settings"),
+                "assistant_data_settings",
+            )
+            .map_err(serde::de::Error::custom)?,
+            assistant_user_instructions: decode(
+                take("assistant_user_instructions"),
+                "assistant_user_instructions",
+            )
+            .map_err(serde::de::Error::custom)?,
             context_management: decode(take("context_management"), "context_management")
                 .map_err(serde::de::Error::custom)?,
             terminal_completion: decode(take("terminal_completion"), "terminal_completion")
@@ -299,6 +323,9 @@ pub(super) fn revision(config: &GlobalConfig, key: &str) -> String {
         }
         "web_search" => config.web_search.revision.to_string(),
         "context_management" => config.context_management.revision.to_string(),
+        "assistant_data_policy" => config.assistant_data_policy.revision.to_string(),
+        "assistant_data_settings" => config.assistant_data_settings.revision.to_string(),
+        "assistant_user_instructions" => config.assistant_user_instructions.revision.to_string(),
         "terminal_completion" => config.terminal_completion.revision.to_string(),
         "subagent_policy" => config.subagent_policy.revision.to_string(),
         "goal_budget_policy" => config.goal_budget_policy.revision.to_string(),
@@ -363,6 +390,9 @@ pub(super) fn advance_revision(
         match key {
             "web_search" => config.web_search.revision = next,
             "context_management" => config.context_management.revision = next,
+            "assistant_data_policy" => config.assistant_data_policy.revision = next,
+            "assistant_data_settings" => config.assistant_data_settings.revision = next,
+            "assistant_user_instructions" => config.assistant_user_instructions.revision = next,
             "terminal_completion" => config.terminal_completion.revision = next,
             "subagent_policy" => config.subagent_policy.revision = next,
             "goal_budget_policy" => config.goal_budget_policy.revision = next,

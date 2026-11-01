@@ -1,3 +1,6 @@
+import { Link } from "react-router-dom"
+import { useTranslation } from "react-i18next"
+import { assistantSourceHref, assistantSourceIdPattern, remarkAssistantSources } from "./markdown-source-links"
 import ReactMarkdown, { type Components } from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
@@ -77,20 +80,36 @@ const componentsWithoutLinks: Components = {
     a: ({ children }) => <span>{children}</span>,
 }
 
+const componentsWithSources: Components = {
+    ...componentsWithoutLinks,
+    a: ({ children, node }) => {
+        const id = node?.properties?.['data-assistant-source'];
+        const revision = Number(node?.properties?.['data-assistant-source-revision']);
+        return typeof id === 'string' && assistantSourceIdPattern.test(id) && Number.isSafeInteger(revision) && revision > 0
+            ? <Link to={assistantSourceHref(id, revision)} target="_blank" rel="noopener noreferrer"
+                className="break-all text-primary underline underline-offset-2">{children}</Link>
+            : <span>{children}</span>;
+    },
+}
+
 export function MarkdownContent({
     children,
     className = "",
     disableLinks = false,
+    assistantSources,
 }: {
     children: string
     className?: string
     disableLinks?: boolean
+    assistantSources?: readonly { source_id: string; source_revision: number }[]
 }) {
+    const { t } = useTranslation()
     return (
         <div className={`min-w-0 break-words ${className}`}>
             <ReactMarkdown
-                remarkPlugins={[remarkGfm]}
-                components={disableLinks ? componentsWithoutLinks : components}
+                remarkPlugins={assistantSources ? [remarkGfm, [remarkAssistantSources, { sources: assistantSources,
+                    sourceLabel: t('pages.aiAssistant.memory.citationLabel'), unavailableLabel: t('pages.aiAssistant.memory.citationUnavailable') }]] : [remarkGfm]}
+                components={assistantSources ? componentsWithSources : disableLinks ? componentsWithoutLinks : components}
                 skipHtml
             >
                 {children}

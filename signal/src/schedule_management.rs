@@ -126,7 +126,7 @@ pub async fn handle(
                 "task not found or not accessible",
             )
                 .into(),
-            ScheduleStoreError::Invalid => (
+            ScheduleStoreError::Invalid | ScheduleStoreError::ToolInput(_) => (
                 DeskErrorCode::INVALID_PARAMS,
                 "invalid task management request",
             )
@@ -287,6 +287,7 @@ async fn manage_inner(
                 next_cursor: page.next_cursor,
             });
         }
+
         Request::DecideRunDirectory {
             schedule_id,
             run_id,
@@ -394,7 +395,7 @@ async fn manage_inner(
         }
         Request::CancelTaskRun { run_id } => {
             let work =
-                desk_diagnose_core::future::boxed(|| store.cancel_run(owner, &run_id)).await?;
+                desk_diagnose_core::future::send_phase(|| store.cancel_run(owner, &run_id)).await?;
             desk_diagnose_core::future::boxed(|| store.read(owner, &work.schedule_id)).await?
         }
         Request::Get { schedule_id } => {
@@ -1030,6 +1031,11 @@ mod tests {
             .await
             .unwrap();
         let schema = Schema::new(db.get_database_backend());
+        db.execute(
+            &schema.create_table_from_entity(crate::entity::agent_assistant_runtime::Entity),
+        )
+        .await
+        .unwrap();
         db.execute(&schema.create_table_from_entity(row::Entity))
             .await
             .unwrap();

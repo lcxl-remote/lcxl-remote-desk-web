@@ -101,7 +101,7 @@ mod tests {
                 description: "read".into(),
                 parameters_schema: serde_json::json!({"type":"object"}),
             },
-            required_capability: cap,
+            required_device_capability: Some(cap),
             effect: ToolEffect::ReadOnly,
         }
     }

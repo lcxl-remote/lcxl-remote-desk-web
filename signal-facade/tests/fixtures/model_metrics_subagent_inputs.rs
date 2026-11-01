@@ -52,7 +52,7 @@ async fn missing_or_expired_subagent_references_reject_input_without_work_or_bus
         if case == "stale_control" {
             store.control_for_owner("root", "1", "1", &desk_agent_protocol::ai_assistant::subagent::AiAssistantSubAgentControl {
                 client_request_id: "owner-adjustment".into(), task_id: task.task_id.clone(), expected_input_revision: 1, expected_control_revision: 1,
-                action: desk_agent_protocol::ai_assistant::subagent::SubAgentControlAction::Adjust { message: "Check the additional symptom".into() },
+                action: desk_agent_protocol::ai_assistant::subagent::SubAgentControlAction::Adjust { client_timezone: "UTC".into(), message: "Check the additional symptom".into() },
             }).await.unwrap();
         }
         let before=parent.clone();
@@ -157,7 +157,7 @@ async fn prepared_child_controls_end_only_original_waits_after_commit_and_not_on
     use desk_agent_protocol::ai_assistant::subagent::{AiAssistantSubAgentControl,SubAgentControlAction};
     use desk_diagnose_core::model_observability::{ObservationAlias,ObservationRelation};
     for adjust in [false,true] {
-        let db=database().await;
+        let db=source_isolation_database().await;
         seed_parent(&db).await;
         let task=seed_task(&db,"a","goal-a").await;
         let sibling=seed_task(&db,"b","goal-b").await;
@@ -165,7 +165,7 @@ async fn prepared_child_controls_end_only_original_waits_after_commit_and_not_on
         let sibling_session=seed_permission_wait(&db,&sibling.child_conversation_id).await;
         let request=AiAssistantSubAgentControl { client_request_id:"owner-control".into(),task_id:task.binding.task_id.clone(),
             expected_input_revision:task.binding.input_revision,expected_control_revision:task.binding.control_revision,
-            action:if adjust { SubAgentControlAction::Adjust { message:"private-new-objective".into() } } else { SubAgentControlAction::Cancel },
+            action:if adjust { SubAgentControlAction::Adjust { client_timezone: "UTC".into(), message:"private-new-objective".into() } } else { SubAgentControlAction::Cancel },
         };
         let txn=db.begin().await.unwrap();
         let parent=parent_on(&txn,"root","1","1").await.unwrap();
@@ -219,7 +219,7 @@ async fn goal_source_ends_are_transactional_isolated_and_not_inferred_from_a_lat
         (GoalState::Cancelled,100,Some(PermissionOutcome::Cancelled)),
         (GoalState::Failed,100,Some(PermissionOutcome::Cancelled)),
     ] {
-        let db=database().await;
+        let db=source_isolation_database().await;
         seed_parent(&db).await;
         let task=seed_task(&db,"a","goal-a").await;
         let sibling=seed_task(&db,"b","goal-b").await;
@@ -297,7 +297,7 @@ async fn task_failure_and_deadline_settlement_keep_distinct_permission_outcomes(
 #[tokio::test]
 async fn root_removal_captures_only_original_pending_waits_after_the_business_commit() {
     use desk_diagnose_core::{dynamic_run::PermissionRequestState,model_observability::{ObservationAlias,ObservationRelation}};
-    let db=database().await;
+    let db=source_isolation_database().await;
     seed_parent(&db).await;
     let task=seed_task(&db,"a","goal-a").await;
     let sibling=seed_task(&db,"b","goal-b").await;

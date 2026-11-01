@@ -152,11 +152,12 @@ async fn reconcile_inner_on(
             .one(txn)
             .await?
             .ok_or_else(invalid)?;
-        let (outbox, work, payload) =
+        let computer_original =
             super::computer_binding::original_on(txn, &outbox.dispatch_id).await?;
+        let (outbox, work, payload) = computer_original.as_ref();
         if payload.command_origin.is_some() {
             let (call, action, _waiting) =
-                command::reconcile_on(txn, session, &outbox, &work, &payload, now_ms).await?;
+                command::reconcile_on(txn, session, outbox, work, payload, now_ms).await?;
             if !matched.insert(call) {
                 return Err(invalid());
             }
@@ -165,14 +166,14 @@ async fn reconcile_inner_on(
         }
         if outbox.computer_binding_json.is_none() {
             let (call, action) =
-                unbound::reconcile_on(txn, session, &outbox, &work, &payload, now_ms).await?;
+                unbound::reconcile_on(txn, session, outbox, work, payload, now_ms).await?;
             if !matched.insert(call) {
                 return Err(invalid());
             }
             matched_actions.push(action);
             continue;
         }
-        let binding = super::computer_background::bound(&outbox, &work, &payload)?;
+        let binding = super::computer_background::bound(outbox, work, payload)?;
         if !delegated
             && AssistantTurnFence::from_session(session)
                 .map_err(|_| invalid())?
@@ -236,7 +237,7 @@ async fn reconcile_inner_on(
             return Err(invalid());
         }
         if let Some(original) =
-            super::computer_completion::terminal_result(&outbox, work.clone(), &payload)?
+            super::computer_completion::terminal_result(outbox, work.clone(), payload)?
         {
             super::computer_delivery::validate_destination(session, &original)?;
             let present: Vec<_> = session
@@ -282,7 +283,7 @@ async fn reconcile_inner_on(
             ) {
                 return Err(invalid());
             }
-            let running = super::computer_background::task_on(txn, &work, now_ms)
+            let running = super::computer_background::task_on(txn, work, now_ms)
                 .await?
                 .is_some_and(|task| {
                     matches!(

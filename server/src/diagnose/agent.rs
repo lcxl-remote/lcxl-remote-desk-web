@@ -3,8 +3,10 @@
 //! [`agent_tool_registry`] is the read-only tool set plus the mutating
 //! `exec_command` tool, each mapping onto one [`desk_diagnose_core`] tool.
 
+#[cfg(test)]
 use desk_diagnose_core::registry::RegisteredTool;
 
+#[cfg(test)]
 /// The read-only tools plus the mutating exec tool.
 pub fn agent_tool_registry() -> Vec<RegisteredTool> {
     let mut reg = desk_diagnose_core::read_tools::read_tool_registry();

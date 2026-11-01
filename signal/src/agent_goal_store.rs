@@ -1,7 +1,8 @@
 //! SQLite projection and fenced writes for an AI Assistant goal.
 //!
-//! Mutating helpers take an existing transaction so the caller can lock the
-//! session first and commit both rows and the run event together.
+//! Main-segment mutations lock the session first and commit both rows and the
+//! run event together. Independent-call budget updates retain the original
+//! owner/root fences without claiming or reactivating a main planning lease.
 
 use crate::config::connection::{DatabaseConnection, DatabaseTransaction};
 use crate::entity::{
@@ -245,6 +246,7 @@ pub async fn load_latest_completed_for_subject(
 /// Apply an owner action only between segments. The session version and goal
 /// state change together, so a concurrent coordinator claim cannot observe a
 /// paused or cancelled goal with a still-claimable old conversation state.
+#[allow(clippy::too_many_arguments)]
 pub async fn apply_owner_action(
     db: &DatabaseConnection,
     conversation_id: &str,
@@ -257,6 +259,10 @@ pub async fn apply_owner_action(
 ) -> Result<Option<GoalRun>, DbErr> {
     let now_ms = u64::try_from(now.timestamp_millis()).map_err(|_| invalid())?;
     let txn = crate::db::begin_write(db, agent_session::Entity).await?;
+    let history = desk_diagnose_core::future::boxed(|| {
+        crate::assistant_data_store::native_scope_on(&txn, actor_id, device_id, conversation_id)
+    })
+    .await?;
     crate::agent_subagent_store::lock_goal_source_on(
         &txn,
         conversation_id,
@@ -389,6 +395,9 @@ pub async fn apply_owner_action(
     }
     .insert(&txn)
     .await?;
+    if let Some(history) = &history {
+        desk_diagnose_core::future::boxed(|| history.capture_on(&txn)).await?;
+    }
     txn.commit().await?;
     permission_ends.submit(
         now.timestamp_millis(),
@@ -410,6 +419,10 @@ pub async fn wake_for_permission_decision(
 ) -> Result<GoalPermissionWake, DbErr> {
     let now_ms = u64::try_from(now.timestamp_millis()).map_err(|_| invalid())?;
     let txn = crate::db::begin_write(db, agent_session::Entity).await?;
+    let history = desk_diagnose_core::future::boxed(|| {
+        crate::assistant_data_store::native_scope_on(&txn, actor_id, device_id, conversation_id)
+    })
+    .await?;
     let Some(session_row) = agent_session::Entity::find()
         .filter(agent_session::Column::ConversationId.eq(conversation_id))
         .filter(agent_session::Column::ActorId.eq(actor_id))
@@ -572,22 +585,25 @@ pub async fn wake_for_permission_decision(
     if changed.rows_affected != 1 {
         return Err(invalid());
     }
+    if let Some(history) = &history {
+        desk_diagnose_core::future::boxed(|| history.capture_on(&txn)).await?;
+    }
     txn.commit().await?;
     Ok(outcome)
 }
 
 /// Keyset position in the FIFO of runnable goals.
-pub type QueuedCursor = (i64, String);
+pub type ContinuationCursor = (i64, String);
 
 /// Bounded, durable FIFO scan. A candidate is rechecked and fenced by
 /// `claim_slice`; this read by itself never owns a planning turn. `after`
 /// resumes behind the previous page so candidates that keep failing cannot
 /// occupy every page; callers wrap to `None` after a short page.
-pub async fn queued_candidates(
+pub async fn continuation_candidates(
     db: &DatabaseConnection,
     now_unix_ms: u64,
     limit: u64,
-    after: Option<&QueuedCursor>,
+    after: Option<&ContinuationCursor>,
 ) -> Result<Vec<GoalRun>, DbErr> {
     let now = as_i64(now_unix_ms)?;
     let mut query = goal_row::Entity::find()
@@ -719,6 +735,15 @@ async fn expire_settled(
 ) -> Result<Option<GoalRun>, DbErr> {
     let now_ms = u64::try_from(now.timestamp_millis()).map_err(|_| invalid())?;
     let txn = crate::db::begin_write(db, agent_session::Entity).await?;
+    let history = desk_diagnose_core::future::boxed(|| {
+        crate::assistant_data_store::native_scope_on(
+            &txn,
+            &expected.owner_id,
+            &expected.device_id,
+            &expected.conversation_id,
+        )
+    })
+    .await?;
     let Some(row) = goal_row::Entity::find()
         .filter(goal_row::Column::GoalId.eq(&expected.goal_id))
         .one(&txn)
@@ -749,6 +774,9 @@ async fn expire_settled(
             .map_err(|_| invalid())?;
         if !replace_on(&txn, &goal, previous.0, previous.1, None, None).await? {
             return Err(invalid());
+        }
+        if let Some(history) = &history {
+            desk_diagnose_core::future::boxed(|| history.capture_on(&txn)).await?;
         }
         txn.commit().await?;
         return Ok(Some(goal));
@@ -814,6 +842,9 @@ async fn expire_settled(
     }
     .insert(&txn)
     .await?;
+    if let Some(history) = &history {
+        desk_diagnose_core::future::boxed(|| history.capture_on(&txn)).await?;
+    }
     txn.commit().await?;
     Ok(Some(goal))
 }
@@ -947,6 +978,15 @@ async fn scheduler_transition(
 ) -> Result<Option<GoalRun>, DbErr> {
     let now_ms = u64::try_from(now.timestamp_millis()).map_err(|_| invalid())?;
     let txn = crate::db::begin_write(db, agent_session::Entity).await?;
+    let history = desk_diagnose_core::future::boxed(|| {
+        crate::assistant_data_store::native_scope_on(
+            &txn,
+            &expected.owner_id,
+            &expected.device_id,
+            &expected.conversation_id,
+        )
+    })
+    .await?;
     let Some(goal_record) = goal_row::Entity::find()
         .filter(goal_row::Column::GoalId.eq(&expected.goal_id))
         .one(&txn)
@@ -984,11 +1024,15 @@ async fn scheduler_transition(
         if !replace_on(&txn, &goal, previous.0, previous.1, None, None).await? {
             return Err(invalid());
         }
+        if let Some(history) = &history {
+            desk_diagnose_core::future::boxed(|| history.capture_on(&txn)).await?;
+        }
         txn.commit().await?;
         return Ok(Some(goal));
     };
-    let mut session =
-        PersistedAgentSession::decode_json(&session_row.state_json).map_err(|_| invalid())?;
+    let mut session = Box::new(
+        PersistedAgentSession::decode_json(&session_row.state_json).map_err(|_| invalid())?,
+    );
     if session.actor_id != goal.owner_id
         || session.device_id != goal.device_id
         || session.input_revision != goal.input_revision
@@ -1006,12 +1050,17 @@ async fn scheduler_transition(
         .as_ref()
         .is_some_and(|wait| goal.status_reason.as_deref() == Some(wait.wait_id.as_str()))
     {
-        crate::goal_work::delivered_event_ids_on(&txn, &goal, &session).await?
+        desk_diagnose_core::future::boxed(|| {
+            crate::goal_work::delivered_event_ids_on(&txn, &goal, &session)
+        })
+        .await?
     } else {
         vec![]
     };
-    let subagent_wait_ready =
-        crate::agent_subagent_store::goal_wait_ready_on(&txn, &session, &goal).await?;
+    let subagent_wait_ready = desk_diagnose_core::future::boxed(|| {
+        crate::agent_subagent_store::goal_wait_ready_on(&txn, &session, &goal)
+    })
+    .await?;
     match (goal.state, transition) {
         (GoalState::Waiting(GoalWaitReason::Device), SchedulerTransition::Device(false))
             if goal.device_unavailable_exceeded(policy.device_unavailable_max_ms, now_ms) =>
@@ -1048,7 +1097,10 @@ async fn scheduler_transition(
         (GoalState::Waiting(GoalWaitReason::Work), SchedulerTransition::WorkWake)
             if goal.work_wait.as_ref().is_some_and(|wait| {
                 goal.status_reason.as_deref() == Some(wait.wait_id.as_str())
-            }) && crate::goal_work::unresolved_wait_on(&txn, &goal, &session).await? =>
+            }) && desk_diagnose_core::future::boxed(|| {
+                crate::goal_work::unresolved_wait_on(&txn, &goal, &session)
+            })
+            .await? =>
         {
             goal.pause_settled(GoalPauseReason::Recovery, now_ms)
                 .and_then(|_| {
@@ -1072,12 +1124,18 @@ async fn scheduler_transition(
         }
         (GoalState::Queued, SchedulerTransition::RecoveryPause)
             if desk_diagnose_core::goal_continuation::unresolved_work(&session)
-                || !crate::goal_work::all_tracked_on(&txn, &session).await? =>
+                || !desk_diagnose_core::future::boxed(|| {
+                    crate::goal_work::all_tracked_on(&txn, &session)
+                })
+                .await? =>
         {
             goal.pause_for_unresolved_work(now_ms)
         }
         (GoalState::Queued, SchedulerTransition::AttachmentCheck)
-            if !attachments_available_on(&txn, &goal, &session).await? =>
+            if !desk_diagnose_core::future::boxed(|| {
+                attachments_available_on(&txn, &goal, &session)
+            })
+            .await? =>
         {
             goal.pause_settled(GoalPauseReason::AttachmentMissing, now_ms)
                 .and_then(|_| {
@@ -1098,49 +1156,61 @@ async fn scheduler_transition(
         now.to_rfc3339(),
     )
     .map_err(|_| invalid())?;
-    let changed = agent_session::Entity::update_many()
-        .set(agent_session::ActiveModel {
-            state_json: Set(session.encode_json_for_storage().map_err(|_| invalid())?),
-            version: Set(session.version),
-            updated_at: Set(now),
-            ..Default::default()
-        })
-        .filter(agent_session::Column::Id.eq(session_row.id))
-        .filter(agent_session::Column::Version.eq(session_row.version))
-        .filter(agent_session::Column::LeaseToken.eq(session_row.lease_token))
-        .exec(&txn)
-        .await?;
-    if changed.rows_affected != 1
-        || !replace_on(
-            &txn,
-            &goal,
-            previous_state_version,
-            previous_lease_epoch,
-            None,
-            None,
-        )
-        .await?
-    {
-        return Err(invalid());
-    }
-    agent_run_event::ActiveModel {
-        event_id: Set(ledger.event.event_id.clone()),
-        run_id: Set(goal.conversation_id.clone()),
-        event_seq: Set(as_i64(event_seq)?),
-        input_revision: Set(as_i64(goal.input_revision)?),
-        kind: Set(ledger.event.kind.as_str().into()),
-        correlation_id: Set(Some(goal.goal_id.clone())),
-        input_seq: Set(None),
-        actor_id: Set(Some(goal.owner_id.clone())),
-        source_envelope_ids_json: Set("[]".into()),
-        result_envelope_ids_json: Set("[]".into()),
-        payload_json: Set(serde_json::to_string(&ledger).map_err(|_| invalid())?),
-        payload_schema_version: Set(i32::from(AGENT_RUN_EVENT_SCHEMA_VERSION)),
-        created_at: Set(now),
-        ..Default::default()
-    }
-    .insert(&txn)
+    desk_diagnose_core::future::send_phase(|| async {
+        let changed = agent_session::Entity::update_many()
+            .set(agent_session::ActiveModel {
+                state_json: Set(session.encode_json_for_storage().map_err(|_| invalid())?),
+                version: Set(session.version),
+                updated_at: Set(now),
+                ..Default::default()
+            })
+            .filter(agent_session::Column::Id.eq(session_row.id))
+            .filter(agent_session::Column::Version.eq(session_row.version))
+            .filter(agent_session::Column::StateJson.eq(&session_row.state_json))
+            .filter(agent_session::Column::LeaseToken.eq(session_row.lease_token))
+            .exec(&txn)
+            .await?;
+        if changed.rows_affected != 1
+            || !replace_on(
+                &txn,
+                &goal,
+                previous_state_version,
+                previous_lease_epoch,
+                None,
+                None,
+            )
+            .await?
+        {
+            return Err(invalid());
+        }
+        Ok::<(), DbErr>(())
+    })
     .await?;
+    desk_diagnose_core::future::send_phase(|| async {
+        agent_run_event::ActiveModel {
+            event_id: Set(ledger.event.event_id.clone()),
+            run_id: Set(goal.conversation_id.clone()),
+            event_seq: Set(as_i64(event_seq)?),
+            input_revision: Set(as_i64(goal.input_revision)?),
+            kind: Set(ledger.event.kind.as_str().into()),
+            correlation_id: Set(Some(goal.goal_id.clone())),
+            input_seq: Set(None),
+            actor_id: Set(Some(goal.owner_id.clone())),
+            source_envelope_ids_json: Set("[]".into()),
+            result_envelope_ids_json: Set("[]".into()),
+            payload_json: Set(serde_json::to_string(&ledger).map_err(|_| invalid())?),
+            payload_schema_version: Set(i32::from(AGENT_RUN_EVENT_SCHEMA_VERSION)),
+            created_at: Set(now),
+            ..Default::default()
+        }
+        .insert(&txn)
+        .await?;
+        Ok::<(), DbErr>(())
+    })
+    .await?;
+    if let Some(history) = &history {
+        desk_diagnose_core::future::boxed(|| history.capture_on(&txn)).await?;
+    }
     txn.commit().await?;
     Ok(Some(goal))
 }
@@ -1301,41 +1371,222 @@ pub struct ClaimedGoalSlice {
 /// Claim both leases in one SQLite write transaction. A busy conversation is
 /// left untouched; orphan recovery is performed by the existing session/work
 /// reconciler before the coordinator tries another claim.
-pub async fn claim_slice(
-    db: &DatabaseConnection,
+pub fn claim_slice<'a>(
+    db: &'a DatabaseConnection,
+    params: &'a ClaimTurnParams,
+    expected_goal_id: &'a str,
+    expected_state_version: Option<u64>,
+    coordinator_id: &'a str,
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<Option<ClaimedGoalSlice>, DbErr>> + Send + 'a>,
+> {
+    desk_diagnose_core::future::send_phase(|| async move {
+        if params.trigger_origin != TriggerOrigin::GoalContinuation
+            || expected_goal_id.is_empty()
+            || coordinator_id.is_empty()
+        {
+            return Err(invalid());
+        }
+        let now = DateTime::parse_from_rfc3339(&params.now)
+            .map_err(|_| invalid())?
+            .with_timezone(&Utc);
+        let now_ms = u64::try_from(now.timestamp_millis()).map_err(|_| invalid())?;
+        let txn = crate::db::begin_write(db, agent_session::Entity).await?;
+        let history = desk_diagnose_core::future::boxed(|| {
+            crate::assistant_data_store::native_scope_on(
+                &txn,
+                &params.actor_id,
+                &params.device_id,
+                &params.conversation_id,
+            )
+        })
+        .await?;
+        let Some(mut prepared) = desk_diagnose_core::future::send_phase(|| {
+            claim_slice_source_on(&txn, params, expected_goal_id, expected_state_version, now)
+        })
+        .await?
+        else {
+            return Ok(None);
+        };
+        if !desk_diagnose_core::future::send_phase(|| {
+            claim_slice_readiness_on(&txn, &mut prepared, now_ms)
+        })
+        .await?
+        {
+            return Ok(None);
+        }
+        let PreparedGoalClaim {
+            session_row,
+            mut session,
+            mut goal,
+            original_goal_version: previous_state_version,
+            original_goal_epoch: previous_lease_epoch,
+        } = *prepared;
+        if !goal.next_slice_budget_available() {
+            txn.rollback().await?;
+            desk_diagnose_core::future::boxed(|| {
+                scheduler_transition(db, &goal, SchedulerTransition::BudgetPause, now)
+            })
+            .await?;
+            return Ok(None);
+        }
+        desk_diagnose_core::future::send_phase(|| async {
+            crate::agent_subagent_store::initialize_goal_group_on(
+                &txn,
+                &mut session,
+                &goal,
+                now_ms as i64,
+            )
+            .await?;
+            if session.ready_subagent_wait.is_some() {
+                let (_, group, _) = desk_diagnose_core::future::boxed(|| {
+                    crate::agent_subagent_store::ready_wait_source_on(&txn, &session)
+                })
+                .await?
+                .ok_or_else(invalid)?;
+                if group.source.goal_id() != Some(goal.goal_id.as_str()) {
+                    return Err(invalid());
+                }
+                session.ready_subagent_wait = None;
+                session.ready_subagent_notification = None;
+            }
+            let (slice_seq, _) = goal.claim_slice(now_ms).map_err(|_| invalid())?;
+            session
+                .begin_goal_segment(
+                    &goal.goal_id,
+                    &goal.source_message_id,
+                    slice_seq,
+                    goal.goal_revision,
+                    goal.lease_epoch,
+                )
+                .map_err(|_| invalid())?;
+            session
+                .begin_turn(
+                    params.turn_id.clone(),
+                    params.request_id.clone(),
+                    params.connection_id.clone(),
+                    params.policy_revision,
+                    params.current_pdp_scope.clone(),
+                    params.now.clone(),
+                )
+                .map_err(|_| invalid())?;
+            session.adopt_trigger(TriggerOrigin::GoalContinuation, &params.turn_id);
+            session.last_event_seq = session.last_event_seq.checked_add(1).ok_or_else(invalid)?;
+            Ok::<(), DbErr>(())
+        })
+        .await?;
+        let mut ledger = GoalLedgerEvent::new(
+            &goal,
+            AgentRunEventKind::GoalSliceClaimed,
+            session.last_event_seq,
+            params.now.clone(),
+        )
+        .map_err(|_| invalid())?;
+        ledger.bind_claim(&goal, &session).map_err(|_| invalid())?;
+        session.version = session_row.version.checked_add(1).ok_or_else(invalid)?;
+        let session_state = session.encode_json_for_storage().map_err(|_| invalid())?;
+        let deadline = now + Duration::seconds(90);
+        desk_diagnose_core::future::send_phase(|| async {
+            let changed = agent_session::Entity::update_many()
+                .set(agent_session::ActiveModel {
+                    state_json: Set(session_state),
+                    version: Set(session.version),
+                    lease_token: Set(as_i64(session.lease_token)?),
+                    lease_deadline: Set(Some(deadline)),
+                    updated_at: Set(now),
+                    ..Default::default()
+                })
+                .filter(agent_session::Column::Id.eq(session_row.id))
+                .filter(agent_session::Column::Version.eq(session_row.version))
+                .filter(agent_session::Column::StateJson.eq(&session_row.state_json))
+                .filter(agent_session::Column::LeaseToken.eq(session_row.lease_token))
+                .exec(&txn)
+                .await?;
+            if changed.rows_affected != 1
+                || !replace_on(
+                    &txn,
+                    &goal,
+                    previous_state_version,
+                    previous_lease_epoch,
+                    Some(coordinator_id),
+                    Some(u64::try_from(deadline.timestamp_millis()).map_err(|_| invalid())?),
+                )
+                .await?
+            {
+                return Err(invalid());
+            }
+            Ok::<(), DbErr>(())
+        })
+        .await?;
+        desk_diagnose_core::future::send_phase(|| async {
+            agent_run_event::ActiveModel {
+                event_id: Set(ledger.event.event_id.clone()),
+                run_id: Set(goal.conversation_id.clone()),
+                event_seq: Set(as_i64(ledger.event.event_seq)?),
+                input_revision: Set(as_i64(goal.input_revision)?),
+                kind: Set(ledger.event.kind.as_str().into()),
+                correlation_id: Set(Some(goal.goal_id.clone())),
+                input_seq: Set(None),
+                actor_id: Set(Some(goal.owner_id.clone())),
+                source_envelope_ids_json: Set("[]".into()),
+                result_envelope_ids_json: Set("[]".into()),
+                payload_json: Set(serde_json::to_string(&ledger).map_err(|_| invalid())?),
+                payload_schema_version: Set(i32::from(AGENT_RUN_EVENT_SCHEMA_VERSION)),
+                created_at: Set(now),
+                ..Default::default()
+            }
+            .insert(&txn)
+            .await?;
+            Ok::<(), DbErr>(())
+        })
+        .await?;
+        if let Some(history) = &history {
+            desk_diagnose_core::future::boxed(|| history.capture_on(&txn)).await?;
+        }
+        txn.commit().await?;
+        Ok(Some(ClaimedGoalSlice {
+            goal,
+            session: *session,
+        }))
+    })
+}
+
+struct PreparedGoalClaim {
+    session_row: agent_session::Model,
+    session: Box<PersistedAgentSession>,
+    goal: GoalRun,
+    original_goal_version: u64,
+    original_goal_epoch: u64,
+}
+
+// Each stage borrows the original transaction. Original selectors, complete
+// decodes and the final raw-row CAS retain their original order and ownership.
+async fn claim_slice_source_on(
+    txn: &DatabaseTransaction,
     params: &ClaimTurnParams,
     expected_goal_id: &str,
     expected_state_version: Option<u64>,
-    coordinator_id: &str,
-) -> Result<Option<ClaimedGoalSlice>, DbErr> {
-    if params.trigger_origin != TriggerOrigin::GoalContinuation
-        || expected_goal_id.is_empty()
-        || coordinator_id.is_empty()
-    {
-        return Err(invalid());
-    }
-    let now = DateTime::parse_from_rfc3339(&params.now)
-        .map_err(|_| invalid())?
-        .with_timezone(&Utc);
-    let now_ms = u64::try_from(now.timestamp_millis()).map_err(|_| invalid())?;
-    let txn = crate::db::begin_write(db, agent_session::Entity).await?;
+    now: DateTime<Utc>,
+) -> Result<Option<Box<PreparedGoalClaim>>, DbErr> {
     let Some(session_row) = agent_session::Entity::find()
         .filter(agent_session::Column::ConversationId.eq(&params.conversation_id))
         .filter(agent_session::Column::ActorId.eq(&params.actor_id))
         .filter(agent_session::Column::DeviceId.eq(&params.device_id))
-        .one(&txn)
+        .one(txn)
         .await?
     else {
         return Ok(None);
     };
-    let mut session =
-        PersistedAgentSession::decode_json(&session_row.state_json).map_err(|_| invalid())?;
+    let session = Box::new(
+        PersistedAgentSession::decode_json(&session_row.state_json).map_err(|_| invalid())?,
+    );
     if !session.agent_role.is_main()
         || session.surface != AgentSessionSurface::AiAssistant
         || !session.turn_state.can_claim()
         || desk_diagnose_core::goal_continuation::unresolved_work(&session)
         || desk_diagnose_core::goal_continuation::pending_approval(&session)
-        || !crate::goal_work::all_tracked_on(&txn, &session).await?
+        || !desk_diagnose_core::future::boxed(|| crate::goal_work::all_tracked_on(txn, &session))
+            .await?
         || session_row
             .lease_deadline
             .as_ref()
@@ -1353,12 +1604,12 @@ pub async fn claim_slice(
         .filter(goal_row::Column::GoalId.eq(expected_goal_id))
         .filter(goal_row::Column::ConversationId.eq(&params.conversation_id))
         .filter(goal_row::Column::Status.eq("queued"))
-        .one(&txn)
+        .one(txn)
         .await?
     else {
         return Ok(None);
     };
-    let mut goal = decode(&row)?;
+    let goal = decode(&row)?;
     if expected_state_version.is_some_and(|version| goal.state_version != version) {
         return Ok(None);
     }
@@ -1368,8 +1619,24 @@ pub async fn claim_slice(
     {
         return Err(invalid());
     }
-    if !attachments_available_on(&txn, &goal, &session).await? {
-        return Ok(None);
+    Ok(Some(Box::new(PreparedGoalClaim {
+        original_goal_version: goal.state_version,
+        original_goal_epoch: goal.lease_epoch,
+        session_row,
+        session,
+        goal,
+    })))
+}
+
+async fn claim_slice_readiness_on(
+    txn: &DatabaseTransaction,
+    prepared: &mut PreparedGoalClaim,
+    now_ms: u64,
+) -> Result<bool, DbErr> {
+    let session = &prepared.session;
+    let goal = &mut prepared.goal;
+    if !desk_diagnose_core::future::boxed(|| attachments_available_on(txn, goal, session)).await? {
+        return Ok(false);
     }
     if goal_row::Entity::find()
         .filter(goal_row::Column::Status.eq("running"))
@@ -1378,116 +1645,18 @@ pub async fn claim_slice(
                 .add(goal_row::Column::ActorId.eq(&goal.owner_id))
                 .add(goal_row::Column::DeviceId.eq(&goal.device_id)),
         )
-        .one(&txn)
+        .one(txn)
         .await?
         .is_some()
     {
-        return Ok(None);
+        return Ok(false);
     }
-    let previous_state_version = goal.state_version;
-    let previous_lease_epoch = goal.lease_epoch;
-    goal.apply_budget_policy(&crate::goal_budget_policy::read(&txn).await?)
+    goal.apply_budget_policy(&crate::goal_budget_policy::read(txn).await?)
         .map_err(|_| invalid())?;
     if now_ms >= goal.deadline_unix_ms {
-        return Ok(None);
+        return Ok(false);
     }
-    if !goal.next_slice_budget_available() {
-        txn.rollback().await?;
-        scheduler_transition(db, &goal, SchedulerTransition::BudgetPause, now).await?;
-        return Ok(None);
-    }
-    crate::agent_subagent_store::initialize_goal_group_on(&txn, &mut session, &goal, now_ms as i64)
-        .await?;
-    if session.ready_subagent_wait.is_some() {
-        let (_, group, _) = crate::agent_subagent_store::ready_wait_source_on(&txn, &session)
-            .await?
-            .ok_or_else(invalid)?;
-        if group.source.goal_id() != Some(goal.goal_id.as_str()) {
-            return Err(invalid());
-        }
-        session.ready_subagent_wait = None;
-        session.ready_subagent_notification = None;
-    }
-    let (slice_seq, _) = goal.claim_slice(now_ms).map_err(|_| invalid())?;
-    session
-        .begin_goal_segment(
-            &goal.goal_id,
-            &goal.source_message_id,
-            slice_seq,
-            goal.goal_revision,
-            goal.lease_epoch,
-        )
-        .map_err(|_| invalid())?;
-    session
-        .begin_turn(
-            params.turn_id.clone(),
-            params.request_id.clone(),
-            params.connection_id.clone(),
-            params.policy_revision,
-            params.current_pdp_scope.clone(),
-            params.now.clone(),
-        )
-        .map_err(|_| invalid())?;
-    session.adopt_trigger(TriggerOrigin::GoalContinuation, &params.turn_id);
-    session.last_event_seq = session.last_event_seq.checked_add(1).ok_or_else(invalid)?;
-    let mut ledger = GoalLedgerEvent::new(
-        &goal,
-        AgentRunEventKind::GoalSliceClaimed,
-        session.last_event_seq,
-        params.now.clone(),
-    )
-    .map_err(|_| invalid())?;
-    ledger.bind_claim(&goal, &session).map_err(|_| invalid())?;
-    session.version = session_row.version.checked_add(1).ok_or_else(invalid)?;
-    let session_state = session.encode_json_for_storage().map_err(|_| invalid())?;
-    let deadline = now + Duration::seconds(90);
-    let changed = agent_session::Entity::update_many()
-        .set(agent_session::ActiveModel {
-            state_json: Set(session_state),
-            version: Set(session.version),
-            lease_token: Set(as_i64(session.lease_token)?),
-            lease_deadline: Set(Some(deadline)),
-            updated_at: Set(now),
-            ..Default::default()
-        })
-        .filter(agent_session::Column::Id.eq(session_row.id))
-        .filter(agent_session::Column::Version.eq(session_row.version))
-        .filter(agent_session::Column::LeaseToken.eq(session_row.lease_token))
-        .exec(&txn)
-        .await?;
-    if changed.rows_affected != 1
-        || !replace_on(
-            &txn,
-            &goal,
-            previous_state_version,
-            previous_lease_epoch,
-            Some(coordinator_id),
-            Some(u64::try_from(deadline.timestamp_millis()).map_err(|_| invalid())?),
-        )
-        .await?
-    {
-        return Err(invalid());
-    }
-    agent_run_event::ActiveModel {
-        event_id: Set(ledger.event.event_id.clone()),
-        run_id: Set(goal.conversation_id.clone()),
-        event_seq: Set(as_i64(ledger.event.event_seq)?),
-        input_revision: Set(as_i64(goal.input_revision)?),
-        kind: Set(ledger.event.kind.as_str().into()),
-        correlation_id: Set(Some(goal.goal_id.clone())),
-        input_seq: Set(None),
-        actor_id: Set(Some(goal.owner_id.clone())),
-        source_envelope_ids_json: Set("[]".into()),
-        result_envelope_ids_json: Set("[]".into()),
-        payload_json: Set(serde_json::to_string(&ledger).map_err(|_| invalid())?),
-        payload_schema_version: Set(i32::from(AGENT_RUN_EVENT_SCHEMA_VERSION)),
-        created_at: Set(now),
-        ..Default::default()
-    }
-    .insert(&txn)
-    .await?;
-    txn.commit().await?;
-    Ok(Some(ClaimedGoalSlice { goal, session }))
+    Ok(true)
 }
 
 /// Renew the goal and session deadlines together. `None` means this is an
@@ -1633,6 +1802,22 @@ pub async fn settle_slice(
     result_fingerprints: &[String],
     now: DateTime<Utc>,
 ) -> Result<GoalRun, DbErr> {
+    let mut updated = session.clone_boxed();
+    let goal = desk_diagnose_core::future::send_phase(|| {
+        settle_slice_afterimage(db, &mut updated, end, result_fingerprints, now)
+    })
+    .await?;
+    *session = *updated;
+    Ok(goal)
+}
+
+async fn settle_slice_afterimage(
+    db: &DatabaseConnection,
+    session: &mut PersistedAgentSession,
+    end: &GoalSegmentEnd,
+    result_fingerprints: &[String],
+    now: DateTime<Utc>,
+) -> Result<GoalRun, DbErr> {
     let segment = session
         .focus_epoch
         .goal_segment
@@ -1646,6 +1831,16 @@ pub async fn settle_slice(
         return Err(invalid());
     }
     let txn = crate::db::begin_write(db, agent_session::Entity).await?;
+    let history = desk_diagnose_core::future::boxed(|| {
+        crate::assistant_data_store::native_scope_on(
+            &txn,
+            &session.actor_id,
+            &session.device_id,
+            &session.conversation_id,
+        )
+    })
+    .await?;
+
     let Some(session_row) = agent_session::Entity::find()
         .filter(agent_session::Column::ConversationId.eq(&session.conversation_id))
         .one(&txn)
@@ -1656,34 +1851,10 @@ pub async fn settle_slice(
     if let Ok(goal) = settled_by_removal(&txn, &segment.goal_id).await {
         return Ok(goal);
     }
-    let persisted =
-        PersistedAgentSession::decode_json(&session_row.state_json).map_err(|_| invalid())?;
-    if !crate::goal_work::rebase_background_events_on(&txn, &persisted, session).await?
-        || session_row.lease_token != as_i64(session.lease_token)?
-        || session_row
-            .lease_deadline
-            .is_none_or(|deadline| deadline < now)
-    {
-        return Err(invalid());
-    }
-    if !persisted.turn_state.is_active()
-        || persisted.input_revision != session.input_revision
-        || persisted.focus_epoch.goal_segment.as_ref() != Some(&segment)
-    {
-        return Err(invalid());
-    }
-    crate::agent_subagent_store::acknowledge_results_on(
-        &txn,
-        &persisted,
-        session,
-        now.timestamp_millis(),
-    )
+    desk_diagnose_core::future::send_phase(|| {
+        validate_slice_session_on(&txn, session, &session_row, &segment, end, now)
+    })
     .await?;
-    if matches!(end, GoalSegmentEnd::Control(GoalControl::Complete { .. }))
-        && !crate::agent_subagent_store::required_children_complete_on(&txn, session).await?
-    {
-        return Err(invalid());
-    }
     let goal_record = goal_row::Entity::find()
         .filter(goal_row::Column::GoalId.eq(&segment.goal_id))
         .one(&txn)
@@ -1709,6 +1880,7 @@ pub async fn settle_slice(
     {
         return Err(invalid());
     }
+
     let previous_state_version = goal.state_version;
     let previous_lease_epoch = goal.lease_epoch;
     goal.apply_budget_policy(&crate::goal_budget_policy::read(&txn).await?)
@@ -1790,10 +1962,80 @@ pub async fn settle_slice(
     }
     .map_err(|_| invalid())?;
     session.last_event_seq = event_seq;
+    desk_diagnose_core::future::send_phase(|| {
+        persist_slice_on(
+            &txn,
+            session,
+            &session_row,
+            &goal,
+            previous_state_version,
+            previous_lease_epoch,
+            now,
+        )
+    })
+    .await?;
+    if let Some(history) = &history {
+        desk_diagnose_core::future::boxed(|| history.capture_on(&txn)).await?;
+    }
+    txn.commit().await?;
+    Ok(goal)
+}
+
+/// Validate the original root snapshot and acknowledge only its accepted observations.
+async fn validate_slice_session_on(
+    txn: &DatabaseTransaction,
+    session: &mut PersistedAgentSession,
+    session_row: &agent_session::Model,
+    segment: &desk_diagnose_core::focus_epoch::GoalSegmentIdentity,
+    end: &GoalSegmentEnd,
+    now: DateTime<Utc>,
+) -> Result<Box<PersistedAgentSession>, DbErr> {
+    let persisted = Box::new(
+        PersistedAgentSession::decode_json(&session_row.state_json).map_err(|_| invalid())?,
+    );
+    if !crate::goal_work::rebase_background_events_on(txn, &persisted, session).await?
+        || session_row.lease_token != as_i64(session.lease_token)?
+        || session_row
+            .lease_deadline
+            .is_none_or(|deadline| deadline < now)
+    {
+        return Err(invalid());
+    }
+    if !persisted.turn_state.is_active()
+        || persisted.input_revision != session.input_revision
+        || persisted.focus_epoch.goal_segment.as_ref() != Some(segment)
+    {
+        return Err(invalid());
+    }
+    crate::agent_subagent_store::acknowledge_results_on(
+        txn,
+        &persisted,
+        session,
+        now.timestamp_millis(),
+    )
+    .await?;
+    if matches!(end, GoalSegmentEnd::Control(GoalControl::Complete { .. }))
+        && !crate::agent_subagent_store::required_children_complete_on(txn, session).await?
+    {
+        return Err(invalid());
+    }
+    Ok(persisted)
+}
+
+/// Persist all slice projections under the caller's original transaction and row fence.
+async fn persist_slice_on(
+    txn: &DatabaseTransaction,
+    session: &mut PersistedAgentSession,
+    session_row: &agent_session::Model,
+    goal: &GoalRun,
+    previous_state_version: u64,
+    previous_lease_epoch: u64,
+    now: DateTime<Utc>,
+) -> Result<(), DbErr> {
     let ledger = GoalLedgerEvent::new(
-        &goal,
+        goal,
         AgentRunEventKind::GoalSliceSettled,
-        event_seq,
+        session.last_event_seq,
         now.to_rfc3339(),
     )
     .map_err(|_| invalid())?;
@@ -1808,13 +2050,14 @@ pub async fn settle_slice(
         })
         .filter(agent_session::Column::Id.eq(session_row.id))
         .filter(agent_session::Column::Version.eq(session_row.version))
+        .filter(agent_session::Column::StateJson.eq(&session_row.state_json))
         .filter(agent_session::Column::LeaseToken.eq(as_i64(session.lease_token)?))
-        .exec(&txn)
+        .exec(txn)
         .await?;
     if changed.rows_affected != 1
         || !replace_on(
-            &txn,
-            &goal,
+            txn,
+            goal,
             previous_state_version,
             previous_lease_epoch,
             None,
@@ -1827,7 +2070,7 @@ pub async fn settle_slice(
     agent_run_event::ActiveModel {
         event_id: Set(ledger.event.event_id.clone()),
         run_id: Set(goal.conversation_id.clone()),
-        event_seq: Set(as_i64(event_seq)?),
+        event_seq: Set(as_i64(session.last_event_seq)?),
         input_revision: Set(as_i64(goal.input_revision)?),
         kind: Set(ledger.event.kind.as_str().into()),
         correlation_id: Set(Some(goal.goal_id.clone())),
@@ -1840,10 +2083,9 @@ pub async fn settle_slice(
         created_at: Set(now),
         ..Default::default()
     }
-    .insert(&txn)
+    .insert(txn)
     .await?;
-    txn.commit().await?;
-    Ok(goal)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1923,6 +2165,155 @@ mod lifecycle_tests {
     }
 
     #[tokio::test]
+    async fn native_inventory_owner_goal_transition_commits_without_a_model_or_optional_history_capacity()
+     {
+        use crate::assistant_data_store as data;
+        use crate::entity::{agent_assistant_history as history, agent_assistant_quota as quota};
+        use sea_orm::PaginatorTrait;
+        for mode in 0..3 {
+            let db = db().await;
+            seed_session(&db, "native-status-direct").await;
+            let original = agent_session::Entity::find()
+                .one(&db)
+                .await
+                .unwrap()
+                .unwrap();
+            let mut session = PersistedAgentSession::decode_json(&original.state_json).unwrap();
+            let now = Utc::now();
+            let task = goal("native-status-direct", now.timestamp_millis() as u64);
+            let txn = crate::db::begin_write(&db, agent_session::Entity)
+                .await
+                .unwrap();
+
+            let policy = {
+                use crate::config::ConfigConnection;
+                txn.config_read().await.assistant_data_policy.clone()
+            };
+            data::accept_input_on(
+                &txn,
+                &mut session,
+                "UTC",
+                Some(mode == 2),
+                now.timestamp_millis() as u64,
+            )
+            .await
+            .unwrap();
+            session.latest_input_seq = 1;
+            session.conversation.push(
+                desk_diagnose_core::model_message_labels::model_bound_user_message(
+                    "message-1".into(),
+                    "Finish the report".into(),
+                    desk_agent_protocol::data_lineage::DestinationIdentity::Model {
+                        connection_id: task.model_binding.connection_id.clone(),
+                        connection_revision: task.model_binding.connection_revision,
+                        model_id: task.model_binding.model_id.clone(),
+                        profile_revision: task.model_binding.profile_revision as i64,
+                    },
+                )
+                .unwrap(),
+            );
+            if mode != 2 {
+                desk_diagnose_core::ai_assistant::data_access::bind_opened_task(
+                    &mut session,
+                    &task.goal_id,
+                    task.deadline_unix_ms,
+                )
+                .unwrap();
+            }
+            agent_session::Entity::update_many()
+                .col_expr(
+                    agent_session::Column::StateJson,
+                    Expr::value(session.encode_json_for_storage().unwrap()),
+                )
+                .filter(agent_session::Column::Id.eq(original.id))
+                .filter(agent_session::Column::Version.eq(original.version))
+                .exec(&txn)
+                .await
+                .unwrap();
+            data::history::capture_user_input_on(
+                &txn,
+                &session,
+                &session.conversation[0],
+                now.timestamp_millis() as u64,
+            )
+            .await
+            .unwrap();
+            data::ensure_quota_on(&txn, "1").await.unwrap();
+            if mode == 1 {
+                quota::Entity::update_many()
+                    .col_expr(
+                        quota::Column::MetadataBytes,
+                        Expr::value(policy.max_metadata_bytes as i64),
+                    )
+                    .filter(quota::Column::ActorId.eq("1"))
+                    .exec(&txn)
+                    .await
+                    .unwrap();
+            }
+            txn.commit().await.unwrap();
+            insert(&db, &task).await;
+            let transcript = session.conversation;
+            let ended = apply_owner_action(
+                &db,
+                &task.conversation_id,
+                "1",
+                "device-1",
+                &task.goal_id,
+                task.state_version,
+                GoalOwnerAction::Cancel,
+                Utc::now(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(ended.state, GoalState::Cancelled);
+            assert_eq!(
+                crate::entity::model_egress_receipt::Entity::find()
+                    .count(&db)
+                    .await
+                    .unwrap(),
+                0
+            );
+            let saved = agent_session::Entity::find()
+                .one(&db)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                PersistedAgentSession::decode_json(&saved.state_json)
+                    .unwrap()
+                    .conversation,
+                transcript
+            );
+            let rows = history::Entity::find()
+                .filter(history::Column::Kind.eq("native_status"))
+                .all(&db)
+                .await
+                .unwrap();
+            if mode == 0 {
+                assert_eq!(rows.len(), 1);
+                let proof = serde_json::from_str(&rows[0].retention_proof_json).unwrap();
+                let snapshot = data::read_native_history(&rows[0], &proof)
+                    .unwrap()
+                    .unwrap()
+                    .status_snapshot
+                    .unwrap();
+                assert!(
+                    snapshot
+                        .items
+                        .iter()
+                        .any(|item| item.native_id == task.goal_id
+                            && item.state == "cancelled"
+                            && item.revision == Some(ended.state_version))
+                );
+                assert!(!rows[0].content.contains("Finish the report"));
+            } else {
+                assert!(rows.is_empty());
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn orphan_goal_is_cancelled_instead_of_holding_the_queue() {
         let db = db().await;
         let now = Utc::now();
@@ -1938,7 +2329,7 @@ mod lifecycle_tests {
             Some("conversation_removed")
         );
         assert!(
-            queued_candidates(&db, now.timestamp_millis() as u64, 8, None)
+            continuation_candidates(&db, now.timestamp_millis() as u64, 8, None)
                 .await
                 .unwrap()
                 .is_empty()

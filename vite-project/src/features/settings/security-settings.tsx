@@ -97,7 +97,7 @@ export function SecuritySettings() {
                 title: t('pages.system.security.success'),
                 description: t('pages.system.security.updateSucceedMessage'),
             })
-        } catch (error) {
+        } catch {
             toast({
                 variant: "destructive",
                 title: t('pages.system.security.error'),

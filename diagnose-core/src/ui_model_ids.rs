@@ -157,13 +157,41 @@ fn resolve_call_with_references(
     resolve_single_call_with_references(call, history, now_ms, expected)
 }
 
-/// Resolve IDs and directory consent from the same authoritative session.
-pub fn resolve_session_call(
+/// Restore recorded selectors for receipt comparison, without selecting a new
+/// directory or re-authorizing a historical call. The caller owns the frozen
+/// session and independently verifies its original receipt and source policy.
+#[inline(never)]
+pub fn resolve_recorded_call(
     call: &ToolCall,
     session: &crate::session::PersistedAgentSession,
-    now_ms: u64,
 ) -> Result<ToolCall, AgentError> {
-    resolve_session_call_with_context(call, session, now_ms, None)
+    let mut value: Value = serde_json::from_str(&call.arguments_json)
+        .map_err(|_| invalid("Recorded tool arguments must be JSON."))?;
+    let mut expected = Vec::new();
+    session
+        .ui_references
+        .expand_arguments(&call.name, &mut value, &mut expected)?;
+    let expanded = ToolCall {
+        arguments_json: value.to_string(),
+        ..call.clone()
+    };
+    if expected.is_empty() {
+        return Ok(expanded);
+    }
+    // Later observations belong to later calls, even when a native ID is reused.
+    let history = session
+        .conversation
+        .iter()
+        .position(|message| {
+            message
+                .tool_calls
+                .iter()
+                .any(|original| original.id == call.id)
+        })
+        .map_or(session.conversation.as_slice(), |index| {
+            &session.conversation[..=index]
+        });
+    resolve_call_with_references(&expanded, history, 0, &expected)
 }
 
 pub fn resolve_session_call_with_context(
@@ -173,6 +201,18 @@ pub fn resolve_session_call_with_context(
     original: Option<&crate::input_read_context::ReadContextSelection>,
 ) -> Result<ToolCall, AgentError> {
     crate::model_input::validate_server_metadata(call)?;
+    // Data and schedule tools have no desktop/file IDs to expand. Their admission
+    // binds the exact model argument bytes, including JSON formatting.
+    if crate::ai_assistant::data_tools::is_data_tool(&call.name)
+        || matches!(
+            call.name.as_str(),
+            crate::schedule::proposal::REQUEST_SCHEDULE
+                | crate::schedule::management_tools::LIST
+                | crate::schedule::management_tools::CANCEL
+        )
+    {
+        return Ok(call.clone());
+    }
     let mut prepared = call.clone();
     if call.name == "request_permissions" {
         let mut value: Value = serde_json::from_str(&call.arguments_json)
@@ -584,6 +624,7 @@ fn project_scope(value: &mut Value) {
     }
 }
 
+#[cfg(test)]
 /// Compare a server-resolved call with the original ID-only model proposal.
 /// All non-reference inputs, including the action, must still match exactly.
 pub fn same_call_input(tool: &str, original: &str, resolved: &str) -> bool {
@@ -671,7 +712,8 @@ pub(crate) fn project_tool_message(message: &mut ChatMessage) {
     crate::browser_model_ids::project_result_message(message);
     crate::document_model_ids::project_result_message(message);
     crate::result_model_ids::project_result_message(message);
-    crate::output_contracts::project_status(message);
+    crate::assistant_data_model::project_message(message);
+    project_tool_status(message);
     if message.role == ChatRole::Tool
         && let Ok(mut value) = serde_json::from_str::<Value>(&message.text)
         && (value.pointer("/ReadContext/DesktopUiInspect").is_some()
@@ -738,6 +780,34 @@ pub(crate) fn project_tool_message(message: &mut ChatMessage) {
     }
 }
 
+/// Preserve call failure even when the business payload has its own outcome.
+fn project_tool_status(message: &mut ChatMessage) {
+    if message.role != ChatRole::Tool || message.attachment_read.is_some() {
+        return;
+    }
+    let Some(tool) = message
+        .data_envelope
+        .as_ref()
+        .map(|e| e.provenance.source_tool_name.as_str())
+    else {
+        return;
+    };
+    if crate::output_contracts::for_tool(tool).is_none() {
+        return;
+    }
+    let Ok(mut value) = serde_json::from_str::<Value>(&message.text) else {
+        return;
+    };
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    let failed = message.tool_ok == Some(false);
+    if failed {
+        object.insert("tool_call_status".into(), json!("returned_error"));
+        message.text = value.to_string();
+    }
+}
+
 /// A reducing wire projection after the original messages passed model-egress
 /// checks. Durable messages/envelopes remain unchanged and retain exact lineage.
 pub fn project_request(request: &crate::seam::ModelRequest) -> crate::seam::ModelRequest {
@@ -796,16 +866,13 @@ pub(crate) fn project_model_message(
     if use_case == crate::model_profile::ModelUseCase::Approval {
         project_review_message(message, references, locators);
     }
-    crate::model_controls::project_message(message);
-    project_tool_message(message);
-    if let Some(references) = references {
-        references.project_message(message);
-    }
+    project_result_view(message, references);
     crate::result_model_ids::project_runtime_registry(message, locators);
     for call in &mut message.tool_calls {
         if let Ok(mut value) = serde_json::from_str::<Value>(&call.arguments_json) {
             if let Some(references) = references {
                 references.alias_native_arguments(&mut value);
+                references.alias_conversation_arguments(&call.name, &mut value);
             }
             project_arguments(&call.name, &mut value, locators);
             crate::model_input::project_protocol_versions(&call.name, &mut value);
@@ -858,6 +925,18 @@ pub(crate) fn project_model_message(
                     .replace_range(start..end, &serde_json::to_string(&entries).unwrap());
             }
         }
+    }
+}
+
+/// Shared reducing view for inline delivery and complete JSON before paging.
+pub(crate) fn project_result_view(
+    message: &mut ChatMessage,
+    references: Option<&crate::ui_references::UiReferenceState>,
+) {
+    crate::model_controls::project_message(message);
+    project_tool_message(message);
+    if let Some(references) = references {
+        references.project_message(message);
     }
 }
 
@@ -960,6 +1039,7 @@ pub fn project_tool(tool: &mut crate::chat::ToolSpec) {
             .pointer("/properties/steps")
             .is_some()
     {
+        crate::model_constraints::project(tool);
         return;
     }
     crate::browser_model_ids::project_tool(tool);
@@ -1015,16 +1095,19 @@ pub fn project_tool(tool: &mut crate::chat::ToolSpec) {
         schema["properties"]["action"]["required"] = json!(["step"]);
     }
     match tool.name.as_str() {
-        "inspect_desktop_ui" => tool.description = "Read UI using optional root_id (desktop session, application, window or control). For macOS app tasks, first search running apps using the session root and localized/English queries, then use the returned application ID as root_id to read controls or discover windows with queries=[窗口, window]. The application catalog does not inspect windows; missing window entries do not mean capture is unavailable. Use owner_selectable_windows[].object_ref.id as the screenshot window_id. If a complete app search has no match, launch through an authorized tool and search again; increasing UI depth cannot find a non-running app. Application entries expose application_state=foreground/background/hidden when known and omit matched_queries. Without root_id, observe the foreground application. Supply queries or element_id. Queries are substring OR matches, up to 16 alternatives. First locate the target window and, when available, its dialog/popover/editor; search inside that observed root using task-specific localized/English labels or native_id (e.g. 标题, title-field, 完成, Done). Group needed controls together. If no separate container exists, use the window root. Only after targeted misses add control types such as AXTextField/input. Broad text/date/time queries are fallbacks: text can match every AXStaticText date and weekday. Use element_only=true only for a known result control itself, without queries; it never searches descendants. To find descendants use root_id for the smallest relevant observed region with targeted queries. When truncated=true, narrow the root first when possible; increase depth/node/byte bounds only as needed to complete that search. Only explicitly use allow_unfiltered=true when targeted searches are insufficient. Use scope=menus for menus only. Returned object_ref contains only id and kind. Control location.status is available, hidden, outside_visible_area or unavailable. Available location.bounds gives visible x/y/width/height in original window screenshot pixels relative to the top-left (0,0) of location.window.id (the same pixel space as background input, not percentages or normalized coordinates). Non-available locations omit bounds and do not imply that semantic ID-based actions are unsupported. Match the name, role and position to the intended region; AXScrollArea alone does not identify the main content. If ambiguous, inspect a current window screenshot and target coordinates in the intended region. Re-read after input; if unchanged, reconsider the target instead of repeating larger scrolls or claiming success. The server validates IDs and reports invalidated objects; element_id can locate a known control. Reads require permission and never grant actions.".into(),
+        "inspect_desktop_ui" => tool.description = "Read UI using optional root_id (desktop session, application, window or control). For macOS app tasks, first search running apps using the session root and localized/English queries, then use the returned application ID as root_id to read controls or discover windows with queries=[窗口, window]. The application catalog does not inspect windows; missing window entries do not mean capture is unavailable. Use owner_selectable_windows[].object_ref.id as the screenshot window_id. If a complete app search has no match, launch through an authorized tool and search again; increasing UI depth cannot find a non-running app. Application entries expose application_state=foreground/background/hidden when known and omit matched_queries. Without root_id, observe the foreground application. Supply queries or element_id. Queries are substring OR matches. First locate the target window and, when available, its dialog/popover/editor; search inside that observed root using task-specific localized/English labels or native_id (e.g. 标题, title-field, 完成, Done). Group needed controls together. If no separate container exists, use the window root. Only after targeted misses add control types such as AXTextField/input. Broad text/date/time queries are fallbacks: text can match every AXStaticText date and weekday. Use element_only=true only for a known result control itself, without queries; it never searches descendants. To find descendants use root_id for the smallest relevant observed region with targeted queries. When truncated=true, narrow the root first when possible; increase depth/node/byte bounds only as needed to complete that search. Only explicitly use allow_unfiltered=true when targeted searches are insufficient. Use scope=menus for menus only. Returned object_ref contains only id and kind. Control location.status is available, hidden, outside_visible_area or unavailable. Available location.bounds gives visible x/y/width/height in original window screenshot pixels relative to the top-left (0,0) of location.window.id (the same pixel space as background input, not percentages or normalized coordinates). Non-available locations omit bounds and do not imply that semantic ID-based actions are unsupported. Match the name, role and position to the intended region; AXScrollArea alone does not identify the main content. If ambiguous, inspect a current window screenshot and target coordinates in the intended region. Re-read after input; if unchanged, reconsider the target instead of repeating larger scrolls or claiming success. The server validates IDs and reports invalidated objects; element_id can locate a known control. Reads require permission and never grant actions.".into(),
         "send_raw_input" => tool.description = "Execute one last-resort typed mouse/keyboard step using the observed foreground application_id. Requires an exact-input one-use grant for application_id, screen geometry and action. The server resolves the reference and checks native object lifetime and authorization. Do not provide reference metadata.".into(),
         "read_current_screen" => tool.description = "Capture one whole display, or use window_id for an independent Windows/macOS window. For full-display capture display is optional: the server automatically selects the only currently attached display. A scope permission request does not require display discovery or a concrete display parameter. If multiple displays are attached, inspect_desktop_session and choose the one matching the task before the actual call. When choosing explicitly, copy its opaque displays[].display ID into the exact permission input and this call; never construct a native display name or escape the ID yourself. If no display was specified, execution only auto-selects when exactly one display is currently attached; multiple displays return a selection-required error. Do not use saved remote-desktop settings as the choice. Window capture needs no display discovery; never combine window_id and display. To obtain window_id: inspect_desktop_session -> inspect_desktop_ui(root_id=session ID, queries=[localized app name, English app name]) -> inspect_desktop_ui(root_id=returned application ID, queries=[窗口, window]) -> read_current_screen(window_id=owner_selectable_windows[].object_ref.id). The application catalog does not query windows; never infer capture is unsupported from missing window entries there. Do not pass an application ID as window_id. Requires screen capture authorization. The server resolves the window reference and checks native object lifetime. Minimized windows require restoration before capture. Returned width/height are original image pixel dimensions. For window screenshots, background position and UI bounds use these pixel coordinates with top-left origin (0,0); do not convert to percentages.".into(),
-        "execute_wayland_output_input" => tool.description = "Perform one explicitly approved input step on the entire observed Wayland output. Use output_id from a read_current_screen observation and action.step. The server supplies the original frame and geometry; latest_observed is accepted only as best-effort evidence, with an original device receipt at most 30 seconds old at submission. Never claim the frame is new or unchanged. Expired evidence requires a new observation and exact grant. Coordinates use the returned original image width/height, not a resized preview. Whole-screen authority is separate from application permission. Never replay an unknown outcome.".into(),
+        "execute_wayland_output_input" => tool.description = "Perform one explicitly approved input step on the entire observed Wayland output. Use output_id from a read_current_screen observation and action.step. The server supplies the original frame and geometry; latest_observed is accepted only as best-effort evidence, with an unexpired original device receipt at submission. Never claim the frame is new or unchanged. Expired evidence requires a new observation and exact grant. Coordinates use the returned original image width/height, not a resized preview. Whole-screen authority is separate from application permission. Never replay an unknown outcome.".into(),
         _ => {}
     }
     crate::application_batch::project_schema(tool);
     crate::model_actions::project_tool(tool);
     crate::model_constraints::project(tool);
 }
+
+#[cfg(test)]
+mod output_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1066,8 +1149,40 @@ mod tests {
     }
 
     #[test]
+    fn scheduled_calls_preserve_original_json_bytes_without_desktop_resolution() {
+        let session =
+            crate::ai_assistant::test_support::personal_session("owner", "chat", "device");
+        for (name, arguments) in [
+            (
+                crate::schedule::management_tools::LIST,
+                r#"{ "limit": 20 }"#,
+            ),
+            (
+                crate::schedule::management_tools::CANCEL,
+                r#"{
+  "schedule_id": "sc_abcdefghijklmnopqrstuv"
+}"#,
+            ),
+            (
+                crate::schedule::proposal::REQUEST_SCHEDULE,
+                r#"{ "kind": "fresh_task", "title": "每日任务", "prompt": "Report", "rule": { "kind": "daily", "utc_time": "08:30:00" } }"#,
+            ),
+        ] {
+            serde_json::from_str::<Value>(arguments).unwrap();
+            let original = crate::chat::ToolCall {
+                id: "call".into(),
+                name: name.into(),
+                arguments_json: arguments.into(),
+            };
+            let resolved = resolve_session_call_with_context(&original, &session, 1, None).unwrap();
+            assert_eq!(resolved, original);
+        }
+    }
+
+    #[test]
     fn model_tool_contracts_never_require_internal_snapshot_metadata() {
-        let tools = crate::ai_assistant::ai_assistant_tool_registry()
+        let tools = crate::ai_assistant::ai_assistant_provider_registry()
+            .registered_tools()
             .into_iter()
             .chain(crate::permission_tools::permission_planning_tool_registry());
         for registration in tools {
@@ -1435,7 +1550,8 @@ mod tests {
         let original = serde_json::to_string(&messages).unwrap();
         let mut request =
             crate::seam::ModelRequest::text_only(messages, crate::prompt::ResponseFormatSpec::None);
-        request.tools = crate::ai_assistant::ai_assistant_tool_registry()
+        request.tools = crate::ai_assistant::ai_assistant_provider_registry()
+            .registered_tools()
             .into_iter()
             .map(|t| t.spec)
             .collect();

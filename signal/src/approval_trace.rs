@@ -47,7 +47,7 @@ impl Store {
         &self,
         candidate: &ApprovalReviewCandidate,
         claim: &crate::agent_approval_store::ClaimedPermissionReview,
-    ) -> ApprovalTraceSink {
+    ) -> Box<ApprovalTraceSink> {
         let settings = tokio::time::timeout(
             std::time::Duration::from_millis(150),
             load_settings(&self.db),
@@ -73,7 +73,7 @@ impl Store {
                 ("manager_command", work_id.to_string())
             }
         };
-        let mut sink = ApprovalTraceSink::start(
+        let mut sink = Box::new(ApprovalTraceSink::start(
             Arc::new(self.clone()),
             TraceIdentity {
                 id: candidate.candidate_id.clone(),
@@ -88,7 +88,7 @@ impl Store {
                 created_at_ms: chrono::Utc::now().timestamp_millis(),
             },
             settings,
-        );
+        ));
         if unavailable {
             sink.storage_unavailable();
         }
@@ -593,17 +593,15 @@ impl Store {
                 .and_then(|t| t.snapshot.reason)
                 .map(|r| {
                     if r == desk_diagnose_core::approval_observation::ReviewReason::InvalidDecision
-                    {
-                        if let Some(reason) = record
+                        && let Some(reason) = record
                             .as_ref()
                             .and_then(|record| record.failure_reason.as_deref())
                             .filter(|reason| {
                                 reason.starts_with("format_retries_exhausted:")
                                     || *reason == "retry_unavailable"
                             })
-                        {
-                            return reason.to_owned();
-                        }
+                    {
+                        return reason.to_owned();
                     }
                     desk_signal_facade::service::model_metrics::tag(&r)
                 })

@@ -6,7 +6,7 @@ use crate::{
 use desk_agent_protocol::Capability;
 use serde_json::json;
 
-pub const GUIDANCE: &str = "Use send_background_input with application_id, window_id and 1–20 steps. Prefer execute_ui_actions; use background input only when semantic UI is impractical, combining it with a current application-window screenshot. Steps are sequential, stop at first failure and never roll back or automatically retry. No fixed inter-step delay; if a step depends on asynchronous UI changes, end the batch and read UI before continuing. Reuse application_scope for all background actions in the batch. Scroll requires an explicit position in current window screenshot pixels; element_id is not accepted. Choose a point inside the intended content, avoiding sidebars, toolbars and dividers. Native dispatch success is not application-state verification. Read the target UI/window screenshot afterward. Never activate the app or move the real cursor. TextEdit background Command+A is known ineffective; choose an alternative. Private mouse routing is experimental.";
+pub const GUIDANCE: &str = "Use send_background_input with application_id, window_id and steps. Prefer execute_ui_actions; use background input only when semantic UI is impractical, combining it with a current application-window screenshot. Steps are sequential, stop at first failure and never roll back or automatically retry. No fixed inter-step delay; if a step depends on asynchronous UI changes, end the batch and read UI before continuing. Reuse application_scope for all background actions in the batch. Scroll requires an explicit position in current window screenshot pixels; element_id is not accepted. Choose a point inside the intended content, avoiding sidebars, toolbars and dividers. Native dispatch success is not application-state verification. Read the target UI/window screenshot afterward. Never activate the app or move the real cursor. TextEdit background Command+A is known ineffective; choose an alternative. Private mouse routing is experimental.";
 
 pub fn tool() -> RegisteredTool {
     let object = |kind: &str| json!({"type":"object","properties":{"token":{"type":"string"},"snapshot_id":{"type":"string"},"object_kind":{"const":kind},"expires_at":{"type":"string"}},"required":["token","snapshot_id","object_kind","expires_at"],"additionalProperties":false});
@@ -35,7 +35,7 @@ pub fn tool() -> RegisteredTool {
             description: GUIDANCE.trim().into(),
             parameters_schema: json!({"type":"object","properties":{"application":object("application"),"target":object("window"),"action":{"oneOf":actions}},"required":["application","target","action"],"additionalProperties":false}),
         },
-        required_capability: Capability::DesktopBackgroundInputConfirmed,
+        required_device_capability: Some(Capability::DesktopBackgroundInputConfirmed),
         effect: ToolEffect::Mutating,
     }
 }

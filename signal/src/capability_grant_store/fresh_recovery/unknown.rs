@@ -26,12 +26,13 @@ pub(super) async fn restore(
         .one(txn)
         .await?
         .ok_or_else(invalid)?;
-    let (outbox, work, payload) =
+    let computer_original =
         super::super::computer_binding::original_on(txn, &outbox.dispatch_id).await?;
+    let (outbox, work, payload) = computer_original.as_ref();
     if outbox.state != DISPATCH_OUTBOX_OUTCOME_UNKNOWN {
         return Err(invalid());
     }
-    let binding = super::super::computer_background::bound(&outbox, &work, &payload)?;
+    let binding = super::super::computer_background::bound(outbox, work, payload)?;
     SignalCapabilityGrantStore::validate_task_dispatch_history_on(
         txn,
         &outbox.dispatch_id,

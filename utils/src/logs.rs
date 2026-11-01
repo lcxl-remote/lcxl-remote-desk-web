@@ -1,5 +1,3 @@
-use std::str::FromStr;
-
 use log::LevelFilter;
 
 use crate::error::DeskUtilsError;
@@ -18,8 +16,4 @@ pub fn init_logs(log_level: LevelFilter) -> Result<(), DeskUtilsError> {
         return Err(DeskUtilsError::from(error));
     }
     Ok(())
-}
-
-pub fn init_logs_by_str(log_level: &str) -> Result<(), DeskUtilsError> {
-    init_logs(LevelFilter::from_str(log_level)?)
 }

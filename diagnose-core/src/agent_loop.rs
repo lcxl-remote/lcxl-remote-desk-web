@@ -26,6 +26,7 @@
 
 mod compression;
 mod phases;
+mod title;
 
 use desk_agent_protocol::browser_control::{
     BrowserActionResult, BrowserElementRef, BrowserElementRole, BrowserPageRef,
@@ -322,6 +323,37 @@ pub enum LoopOutcome {
     DelegationSourcePaused,
 }
 
+/// Recover only the accepted input's first handling turn. The host must first
+/// validate its durable input receipt, owner scope and handled input sequence.
+pub fn committed_input_outcome(
+    session: &PersistedAgentSession,
+    message_id: &str,
+) -> Option<LoopOutcome> {
+    let index = session.conversation.iter().position(|message| {
+        message.message_id == message_id
+            && message.role == ChatRole::User
+            && !crate::permission_resume::is_resume_control_message(message)
+    })?;
+    // Queued inputs may share the first later owner input's handling turn.
+    let turn_id = session.conversation[index..]
+        .iter()
+        .filter(|message| {
+            message.role == ChatRole::User
+                && !crate::permission_resume::is_resume_control_message(message)
+        })
+        .find_map(|message| message.turn_id.as_ref())?;
+    session
+        .conversation
+        .iter()
+        .rev()
+        .find(|message| {
+            message.role == ChatRole::Assistant
+                && message.turn_id.as_ref() == Some(turn_id)
+                && message.tool_calls.is_empty()
+        })
+        .map(|message| LoopOutcome::Answered(message.text.clone()))
+}
+
 /// The seams + config the loop runs over, borrowed for one turn.
 pub struct LoopDeps<'a> {
     pub session_seam: &'a dyn SessionSeam,
@@ -406,9 +438,11 @@ pub async fn resume_agent_turn(
 }
 
 mod artifact_registry;
+mod assistant_data;
 mod call_budget;
 mod fresh_task;
 mod goal_control;
+mod retrieval_accounting;
 pub use fresh_task::{
     resume_claimed_fresh_task_children_turn, resume_claimed_fresh_task_notification_turn,
     resume_claimed_fresh_task_permission_turn, resume_claimed_fresh_task_turn,
@@ -517,9 +551,22 @@ async fn resume_claimed_scheduled(
             message.role = ChatRole::User;
             message
         });
+    // Rebuild the same protocol bridge from the original requirement. Owner
+    // supplements after its first publication are data for this occurrence;
+    // they must not replace the source of a durable bridge with the same id.
+    let scheduled_bridge_id = format!("scheduled-resume-{turn_id}");
+    let original_prefix = session
+        .conversation
+        .iter()
+        .position(|message| message.message_id == scheduled_bridge_id)
+        .unwrap_or(session.conversation.len());
     let original = task_input
         .as_ref()
-        .or_else(|| crate::permission_resume::latest_user_requirement(&session.conversation))
+        .or_else(|| {
+            crate::permission_resume::latest_user_requirement(
+                &session.conversation[..original_prefix],
+            )
+        })
         .ok_or_else(denied)?;
     let bridge = if permission_request_id.is_some() {
         crate::permission_resume::authorized_permission_resume_message(
@@ -529,7 +576,7 @@ async fn resume_claimed_scheduled(
         )?
     } else {
         crate::permission_resume::authorized_scheduled_resume_message(
-            format!("scheduled-resume-{turn_id}"),
+            scheduled_bridge_id,
             &policy,
             original,
         )?
@@ -648,8 +695,8 @@ pub async fn run_preclaimed_child_completion(
     drive_claimed(deps, session, turn_id, None, sink).await
 }
 
-/// Result interpretation is claimed by the durable root coordinator. It does
-/// not recreate the original User trigger or start a new mutation chain.
+/// Resume an explicit dependency wait under its original owner task and budget.
+/// The coordinator binds the claim to the original input and control revisions.
 pub async fn run_preclaimed_subagent_completion(
     deps: &LoopDeps<'_>,
     session: PersistedAgentSession,
@@ -659,7 +706,7 @@ pub async fn run_preclaimed_subagent_completion(
         || session.trigger_origin != TriggerOrigin::SubAgentCompletion
         || session.surface != AgentSessionSurface::AiAssistant
         || !session.turn_state.is_active()
-        || (session.ready_subagent_wait.is_none() && session.ready_subagent_notification.is_none())
+        || session.ready_subagent_wait.is_none()
         || session.subagent_wait.is_some()
         || session.lease_token == 0
         || deps.heartbeat.is_none()
@@ -746,9 +793,13 @@ async fn drive_claimed_inner(
             newer_user_inputs_after_request = session.conversation[position + 1..]
                 .iter()
                 .filter(|message| {
-                    message.role == ChatRole::User
-                        && !crate::permission_resume::is_permission_resume_message(message)
-                        && !crate::permission_resume::is_scheduled_resume_message(message)
+                    if message.role != ChatRole::User {
+                        return false;
+                    }
+                    let continuation =
+                        crate::permission_resume::is_permission_resume_message(message)
+                            || crate::permission_resume::is_scheduled_resume_message(message);
+                    !continuation
                 })
                 .count() as u64;
         }
@@ -844,7 +895,9 @@ async fn drive_claimed_inner(
         crate::conversation_attachment::model_read::release_consumed(&mut session.conversation)?;
     }
     let settled_at = (deps.clock)();
-    if session.is_subagent_result_turn() {
+    if session.is_subagent_result_turn()
+        || session.trigger_origin == TriggerOrigin::SubAgentCompletion
+    {
         if matches!(&result, Err(error) if error.kind == AgentErrorKind::ModelUnavailable && error.retryable)
             && session.unclosed_tool_call_ids().is_empty()
             && session.execution_state.states().is_empty()
@@ -889,7 +942,9 @@ async fn drive_claimed_inner(
         // subagent_wait and is acknowledged by the original occurrence coordinator.
         session.ready_subagent_wait = None;
     }
+
     session.finish_turn(terminal, settled_at.clone());
+
     session.terminal_permission_request_id = match &result {
         Ok(LoopOutcome::PermissionRequested { request_id }) => Some(request_id.clone()),
         _ => None,
@@ -1290,7 +1345,7 @@ fn append_reviewed_tool_result<'a, 'd: 'a>(
     Box<dyn std::future::Future<Output = Result<Option<ToolOutputSafetyFailure>, AgentError>> + 'a>,
 > {
     Box::pin(async move {
-        let before = session.clone();
+        let mut before = session.clone_boxed();
         let capacity_receipt =
             (session.trigger_origin == TriggerOrigin::GoalContinuation).then(|| {
                 (
@@ -1312,7 +1367,7 @@ fn append_reviewed_tool_result<'a, 'd: 'a>(
             && error.kind == AgentErrorKind::AttachmentCapacity
             && let Some((receipt_id, parent, digest)) = capacity_receipt
         {
-            *session = before;
+            std::mem::swap(session, &mut before);
             let text = serde_json::json!({
                 "status": "attachment_capacity",
                 "result_stored": false,
@@ -1327,7 +1382,7 @@ fn append_reviewed_tool_result<'a, 'd: 'a>(
             )?;
             session.conversation.push(receipt);
         } else if result.is_err() {
-            *session = before;
+            std::mem::swap(session, &mut before);
         }
         result
     })
@@ -1353,14 +1408,17 @@ async fn append_reviewed_tool_result_inner(
         let mut message = ChatMessage::tool_result(message_id, call_id, content);
         message.data_envelope = data_envelope;
         if session.surface == AgentSessionSurface::AiAssistant {
-            message = match crate::conversation_attachment::delivery::externalize(
-                deps.session_seam,
-                session,
-                message.clone(),
-                format,
-                deps.model.model_egress_policy()?.as_ref(),
-                current_unix_ms(deps.clock),
-            )
+            let policy = deps.model.model_egress_policy()?;
+            message = match crate::future::boxed(|| {
+                crate::conversation_attachment::delivery::externalize(
+                    deps.session_seam,
+                    session,
+                    message.clone(),
+                    format,
+                    policy.as_ref(),
+                    current_unix_ms(deps.clock),
+                )
+            })
             .await
             {
                 Ok(projected) => projected,
@@ -1446,15 +1504,18 @@ async fn append_reviewed_tool_result_inner(
                             body.text.as_bytes(),
                             "image-text",
                         )?;
-                    let mut delivered = crate::conversation_attachment::delivery::externalize_with(
-                        deps.session_seam,
-                        session,
-                        body,
-                        format,
-                        None,
-                        current_unix_ms(deps.clock),
-                        &[image_part],
-                    )
+                    let parts = [image_part];
+                    let mut delivered = crate::future::boxed(|| {
+                        crate::conversation_attachment::delivery::externalize_with(
+                            deps.session_seam,
+                            session,
+                            body,
+                            format,
+                            None,
+                            current_unix_ms(deps.clock),
+                            &parts,
+                        )
+                    })
                     .await?;
                     delivered.image_data_url = Some(image_data_url.clone());
                     *session
@@ -1604,14 +1665,16 @@ async fn deliver_pending_results(
         };
         let mut original = session.conversation[index].clone();
         original.pending_delivery_format = None;
-        let result = crate::conversation_attachment::delivery::externalize(
-            deps.session_seam,
-            session,
-            original.clone(),
-            format,
-            policy.as_ref(),
-            current_unix_ms(deps.clock),
-        )
+        let result = crate::future::boxed(|| {
+            crate::conversation_attachment::delivery::externalize(
+                deps.session_seam,
+                session,
+                original.clone(),
+                format,
+                policy.as_ref(),
+                current_unix_ms(deps.clock),
+            )
+        })
         .await;
         session.conversation[index] = match result {
             Ok(message) => message,
@@ -1632,17 +1695,18 @@ async fn project_command_completion(
     deps: &LoopDeps<'_>,
     session: &PersistedAgentSession,
     event_id: &str,
-    request: ModelRequest,
-) -> Result<ModelRequest, AgentError> {
+    request: Box<ModelRequest>,
+) -> Result<Box<ModelRequest>, AgentError> {
     if session.agent_role.binding().is_some() {
         let seam = deps
             .session_seam
             .subagents(session)
             .ok_or_else(|| crate::subagent::invalid("child runtime seam is unavailable"))?;
         let creation = seam.child_creation_context(session).await?;
-        crate::command_completion::project_child_request(request, session, event_id, &creation)
+        crate::command_completion::project_child_request(*request, session, event_id, &creation)
+            .map(Box::new)
     } else {
-        crate::command_completion::project_request(request, session, event_id)
+        crate::command_completion::project_request(*request, session, event_id).map(Box::new)
     }
 }
 
@@ -1651,7 +1715,7 @@ fn assemble_context_request(
     template: &ModelRequest,
     view: &crate::model_context::ModelContextView,
     session: &crate::session::PersistedAgentSession,
-) -> Result<ModelRequest, AgentError> {
+) -> Result<Box<ModelRequest>, AgentError> {
     let mut request = clone_context_request(template);
     request.preparation = None;
     let anchors = context_request_anchors(view, session);
@@ -1662,7 +1726,7 @@ fn assemble_context_request(
         .map(|message| message.message_id.clone())
         .collect::<HashSet<_>>();
     let mut history = Vec::new();
-    for source in &session.conversation {
+    for source in session.model_conversation().iter() {
         if anchors.contains(&source.message_id)
             && source.role == ChatRole::User
             && !crate::permission_resume::is_resume_control_message(source)
@@ -1673,14 +1737,20 @@ fn assemble_context_request(
     }
     history.extend(view.messages.iter().cloned());
     crate::schedule::review_result::project(&mut history)?;
-    let at = usize::from(
+    let mut at = usize::from(
         request
             .messages
             .first()
             .is_some_and(|message| message.role == ChatRole::System),
     );
+    while request.messages.get(at).is_some_and(|message| {
+        crate::ai_assistant::settings::is_personalization_projection(message)
+            || crate::ai_assistant::current_memory::is_projection(message)
+    }) {
+        at += 1;
+    }
     request.messages.splice(at..at, history);
-    Ok(*request)
+    Ok(request)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1704,7 +1774,10 @@ async fn prepare_model_context(
             deps,
             session,
             event_id,
-            ModelRequest::text_only(Vec::new(), deps.response_format.clone()),
+            Box::new(ModelRequest::text_only(
+                Vec::new(),
+                deps.response_format.clone(),
+            )),
         )
         .await?;
         // This is an ephemeral exact-result view, not a replacement history
@@ -1798,7 +1871,7 @@ async fn prepare_model_context(
         }
         let compatible_state = crate::model_context::adopt_compatible_checkpoint(
             &session.model_context_state,
-            &session.conversation,
+            &session.model_conversation(),
             &planning_policy,
             deps.model.model_egress_policy()?.as_ref(),
         )
@@ -1815,7 +1888,7 @@ async fn prepare_model_context(
             .map(|policy| {
                 crate::model_context::reconcile_context_eligibility(
                     &policy,
-                    &session.conversation,
+                    &session.model_conversation(),
                     &compatible_state,
                     &planning_policy,
                     &protection,
@@ -1828,7 +1901,7 @@ async fn prepare_model_context(
                 Ok(crate::model_context::ContextBuildPlan::NeedsFloorReconciliation(plan))
             }
             Ok(_) => crate::model_context::plan_model_context_with_options(
-                &session.conversation,
+                &session.model_conversation(),
                 &compatible_state,
                 &planning_policy,
                 &protection,
@@ -1876,7 +1949,7 @@ async fn prepare_model_context(
                 &policy,
                 &compatible_state,
                 &planning_policy.key(),
-                &session.conversation,
+                &session.model_conversation(),
             )
             .is_err()
         {
@@ -1977,7 +2050,7 @@ async fn prepare_model_context(
                 let previous_notices = session.context_notices.clone();
                 session.model_context_state = match crate::model_context::apply_floor_reconciliation(
                     &plan,
-                    &session.conversation,
+                    &session.model_conversation(),
                     &compatible_state,
                 ) {
                     Ok(state) => state,
@@ -3207,10 +3280,11 @@ fn interactive_user_home_projection(
     message.data_envelope = Some(DataEnvelope {
         schema_version: DATA_ENVELOPE_SCHEMA_VERSION,
         envelope_id: format!("env-{message_id}"),
-        content: ContentRef::EphemeralObservation {
-            observation_id: format!("interactive-home-{turn_id}"),
+        content: ContentRef::ImmutableBlob {
+            blob_id: format!("interactive-home-snapshot-env-{message_id}"),
+            sha256: digest_sha256.clone(),
             size_bytes: text.len() as u64,
-            expires_at_unix_ms,
+            media_type: "text/plain;charset=utf-8".into(),
         },
         provenance: DataProvenance {
             source_provider_id: "session-worker-runtime".into(),
@@ -4245,9 +4319,10 @@ async fn read_conversation_attachment(
     call: &crate::chat::ToolCall,
     _parent: Option<&desk_agent_protocol::data_lineage::DataEnvelope>,
     remaining_budget: &mut usize,
+    maximum_response_bytes: Option<u32>,
     observation: &crate::model_observability::tool::ToolObservation,
 ) -> Result<ChatMessage, AgentError> {
-    use crate::conversation_attachment::{ContentKind, digest, invalid, model_read};
+    use crate::conversation_attachment::{ContentKind, invalid, model_read};
     use crate::model_observability::{InputIssue, PermissionOutcome, Stage, StageOutcome};
     let input: model_read::Input = serde_json::from_str(&call.arguments_json).map_err(|_| {
         observation.reject(Stage::Preflight, InputIssue::Semantic);
@@ -4257,7 +4332,7 @@ async fn read_conversation_attachment(
         observation.input_error(error);
     })?;
     observation.stage(Stage::Reference, StageOutcome::Attempted);
-    let mut part = deps
+    let part = deps
         .session_seam
         .read_attachment(session, &input.attachment_id, false)
         .await?;
@@ -4316,30 +4391,6 @@ async fn read_conversation_attachment(
         if session.ui_references.observe_attachment(&part)? {
             deps.session_seam.save(session).await?;
         }
-        // Keep original authorization/hash separate from the stable model representation.
-        if part.metadata.kind == ContentKind::Json {
-            let mut projected = ChatMessage::tool_result(
-                &part.metadata.message_id,
-                &part.metadata.tool_call_id,
-                String::from_utf8(part.content.clone())
-                    .map_err(|_| invalid("Invalid attachment encoding"))?,
-            );
-            projected.data_envelope = Some(source_envelope.clone());
-            let mut history = session.conversation.clone();
-            history.push(projected.clone());
-            if session.ui_references.observe(&history)? {
-                deps.session_seam.save(session).await?;
-            }
-            crate::ui_model_ids::project_tool_message(&mut projected);
-            session.ui_references.project_message(&mut projected);
-            part.content = projected.text.into_bytes();
-            part.metadata.size_bytes = part.content.len() as u64;
-            part.metadata.original_bytes = part.metadata.size_bytes;
-            part.metadata.sha256 = digest(&part.content);
-            part.metadata.original_sha256 = part.metadata.sha256.clone();
-            part.metadata.storage_truncated = false;
-            part.metadata.source_envelope = None;
-        }
         let (content, mut receipt) = model_read::text_page_with_references(
             &part,
             &input,
@@ -4371,6 +4422,19 @@ async fn read_conversation_attachment(
     let cost = crate::trim::model_context_cost(&message);
     if cost > *remaining_budget {
         return Err(invalid("Insufficient model context for attachment reading"));
+    }
+    if let Some(maximum) = maximum_response_bytes {
+        let framed = crate::ai_assistant::history::serialized_tool_response_bytes(
+            &call.id,
+            &message.text,
+            message.image_data_url.as_deref(),
+        )
+        .map_err(invalid)?;
+        if framed > maximum {
+            return Err(invalid(
+                "Attachment response exceeds the shared framed byte budget; request a smaller text page",
+            ));
+        }
     }
     session
         .focus_epoch

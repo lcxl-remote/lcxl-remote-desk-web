@@ -1,0 +1,662 @@
+[
+  {
+    "root": "mail-discussion",
+    "text": "Atlas 邮件 李明 liming@example.com 计划发送 mail planned",
+    "question": "之前提到的第1件事，帮我找一下相关聊天。",
+    "queries": [
+      "李明 邮件",
+      "Atlas mail"
+    ],
+    "low_overlap": false,
+    "bilingual": false
+  },
+  {
+    "root": "mail-discussion",
+    "text": "Atlas 邮件 李明 liming@example.com 计划发送 mail planned",
+    "question": "Find the earlier discussion about mail-discussion.",
+    "queries": [
+      "Atlas mail",
+      "liming@example.com"
+    ],
+    "low_overlap": false,
+    "bilingual": true
+  },
+  {
+    "root": "mail-discussion",
+    "text": "Atlas 邮件 李明 liming@example.com 计划发送 mail planned",
+    "question": "之前提到的第1件事，帮我找一下相关聊天。",
+    "queries": [
+      "liming@example.com",
+      "Atlas 计划"
+    ],
+    "low_overlap": false,
+    "bilingual": false
+  },
+  {
+    "root": "mail-discussion",
+    "text": "Atlas 邮件 李明 liming@example.com 计划发送 mail planned",
+    "question": "之前提到的第1件事，帮我找一下相关聊天。",
+    "queries": [
+      "Atlas 计划",
+      "李明 Atlas"
+    ],
+    "low_overlap": true,
+    "bilingual": false
+  },
+  {
+    "root": "mail-discussion",
+    "text": "Atlas 邮件 李明 liming@example.com 计划发送 mail planned",
+    "question": "之前提到的第1件事，帮我找一下相关聊天。",
+    "queries": [
+      "李明 Atlas",
+      "李明 邮件"
+    ],
+    "low_overlap": true,
+    "bilingual": false
+  },
+  {
+    "root": "open-discussion",
+    "text": "Atlas 事项 未处理 跟进 followup pending issue",
+    "question": "之前提到的第2件事，帮我找一下相关聊天。",
+    "queries": [
+      "Atlas 未处理",
+      "Atlas followup"
+    ],
+    "low_overlap": false,
+    "bilingual": false
+  },
+  {
+    "root": "open-discussion",
+    "text": "Atlas 事项 未处理 跟进 followup pending issue",
+    "question": "Find the earlier discussion about open-discussion.",
+    "queries": [
+      "Atlas followup",
+      "pending issue"
+    ],
+    "low_overlap": false,
+    "bilingual": true
+  },
+  {
+    "root": "open-discussion",
+    "text": "Atlas 事项 未处理 跟进 followup pending issue",
+    "question": "之前提到的第2件事，帮我找一下相关聊天。",
+    "queries": [
+      "pending issue",
+      "事项 跟进"
+    ],
+    "low_overlap": false,
+    "bilingual": false
+  },
+  {
+    "root": "open-discussion",
+    "text": "Atlas 事项 未处理 跟进 followup pending issue",
+    "question": "之前提到的第2件事，帮我找一下相关聊天。",
+    "queries": [
+      "事项 跟进",
+      "Atlas pending"
+    ],
+    "low_overlap": true,
+    "bilingual": false
+  },
+  {
+    "root": "open-discussion",
+    "text": "Atlas 事项 未处理 跟进 followup pending issue",
+    "question": "之前提到的第2件事，帮我找一下相关聊天。",
+    "queries": [
+      "Atlas pending",
+      "Atlas 未处理"
+    ],
+    "low_overlap": true,
+    "bilingual": false
+  },
+  {
+    "root": "file-discussion",
+    "text": "文件 邮件 王明 report.pdf 发送 记录 file sent",
+    "question": "之前提到的第3件事，帮我找一下相关聊天。",
+    "queries": [
+      "文件 王明",
+      "邮件 发送"
+    ],
+    "low_overlap": false,
+    "bilingual": false
+  },
+  {
+    "root": "file-discussion",
+    "text": "文件 邮件 王明 report.pdf 发送 记录 file sent",
+    "question": "Find the earlier discussion about file-discussion.",
+    "queries": [
+      "邮件 发送",
+      "report.pdf"
+    ],
+    "low_overlap": false,
+    "bilingual": true
+  },
+  {
+    "root": "file-discussion",
+    "text": "文件 邮件 王明 report.pdf 发送 记录 file sent",
+    "question": "之前提到的第3件事，帮我找一下相关聊天。",
+    "queries": [
+      "report.pdf",
+      "file sent"
+    ],
+    "low_overlap": false,
+    "bilingual": false
+  },
+  {
+    "root": "file-discussion",
+    "text": "文件 邮件 王明 report.pdf 发送 记录 file sent",
+    "question": "之前提到的第3件事，帮我找一下相关聊天。",
+    "queries": [
+      "file sent",
+      "王明 report.pdf"
+    ],
+    "low_overlap": true,
+    "bilingual": false
+  },
+  {
+    "root": "file-discussion",
+    "text": "文件 邮件 王明 report.pdf 发送 记录 file sent",
+    "question": "之前提到的第3件事，帮我找一下相关聊天。",
+    "queries": [
+      "王明 report.pdf",
+      "文件 王明"
+    ],
+    "low_overlap": true,
+    "bilingual": false
+  },
+  {
+    "root": "completion-discussion",
+    "text": "Atlas 验收 完成 确认 acceptance completed",
+    "question": "之前提到的第4件事，帮我找一下相关聊天。",
+    "queries": [
+      "Atlas 验收",
+      "Atlas completed"
+    ],
+    "low_overlap": false,
+    "bilingual": false
+  },
+  {
+    "root": "completion-discussion",
+    "text": "Atlas 验收 完成 确认 acceptance completed",
+    "question": "Find the earlier discussion about completion-discussion.",
+    "queries": [
+      "Atlas completed",
+      "acceptance"
+    ],
+    "low_overlap": false,
+    "bilingual": true
+  },
+  {
+    "root": "completion-discussion",
+    "text": "Atlas 验收 完成 确认 acceptance completed",
+    "question": "之前提到的第4件事，帮我找一下相关聊天。",
+    "queries": [
+      "acceptance",
+      "验收 确认"
+    ],
+    "low_overlap": false,
+    "bilingual": false
+  },
+  {
+    "root": "completion-discussion",
+    "text": "Atlas 验收 完成 确认 acceptance completed",
+    "question": "之前提到的第4件事，帮我找一下相关聊天。",
+    "queries": [
+      "验收 确认",
+      "completed Atlas"
+    ],
+    "low_overlap": true,
+    "bilingual": false
+  },
+  {
+    "root": "completion-discussion",
+    "text": "Atlas 验收 完成 确认 acceptance completed",
+    "question": "之前提到的第4件事，帮我找一下相关聊天。",
+    "queries": [
+      "completed Atlas",
+      "Atlas 验收"
+    ],
+    "low_overlap": true,
+    "bilingual": false
+  },
+  {
+    "root": "research-discussion",
+    "text": "PostgreSQL 索引 调研 结论 Postgres research index",
+    "question": "之前提到的第5件事，帮我找一下相关聊天。",
+    "queries": [
+      "PostgreSQL 索引",
+      "Postgres research"
+    ],
+    "low_overlap": false,
+    "bilingual": false
+  },
+  {
+    "root": "research-discussion",
+    "text": "PostgreSQL 索引 调研 结论 Postgres research index",
+    "question": "Find the earlier discussion about research-discussion.",
+    "queries": [
+      "Postgres research",
+      "research index"
+    ],
+    "low_overlap": false,
+    "bilingual": true
+  },
+  {
+    "root": "research-discussion",
+    "text": "PostgreSQL 索引 调研 结论 Postgres research index",
+    "question": "之前提到的第5件事，帮我找一下相关聊天。",
+    "queries": [
+      "research index",
+      "索引 结论"
+    ],
+    "low_overlap": false,
+    "bilingual": false
+  },
+  {
+    "root": "research-discussion",
+    "text": "PostgreSQL 索引 调研 结论 Postgres research index",
+    "question": "之前提到的第5件事，帮我找一下相关聊天。",
+    "queries": [
+      "索引 结论",
+      "PostgreSQL 调研"
+    ],
+    "low_overlap": true,
+    "bilingual": false
+  },
+  {
+    "root": "research-discussion",
+    "text": "PostgreSQL 索引 调研 结论 Postgres research index",
+    "question": "之前提到的第5件事，帮我找一下相关聊天。",
+    "queries": [
+      "PostgreSQL 调研",
+      "PostgreSQL 索引"
+    ],
+    "low_overlap": true,
+    "bilingual": false
+  },
+  {
+    "root": "invoice-discussion",
+    "text": "Orion 发票 刘洋 liuyang@example.org invoice pending",
+    "question": "之前提到的第6件事，帮我找一下相关聊天。",
+    "queries": [
+      "Orion 发票",
+      "刘洋 发票"
+    ],
+    "low_overlap": false,
+    "bilingual": false
+  },
+  {
+    "root": "invoice-discussion",
+    "text": "Orion 发票 刘洋 liuyang@example.org invoice pending",
+    "question": "Find the earlier discussion about invoice-discussion.",
+    "queries": [
+      "刘洋 发票",
+      "invoice Orion"
+    ],
+    "low_overlap": false,
+    "bilingual": true
+  },
+  {
+    "root": "invoice-discussion",
+    "text": "Orion 发票 刘洋 liuyang@example.org invoice pending",
+    "question": "之前提到的第6件事，帮我找一下相关聊天。",
+    "queries": [
+      "invoice Orion",
+      "liuyang@example.org"
+    ],
+    "low_overlap": false,
+    "bilingual": false
+  },
+  {
+    "root": "invoice-discussion",
+    "text": "Orion 发票 刘洋 liuyang@example.org invoice pending",
+    "question": "之前提到的第6件事，帮我找一下相关聊天。",
+    "queries": [
+      "liuyang@example.org",
+      "Orion pending"
+    ],
+    "low_overlap": true,
+    "bilingual": false
+  },
+  {
+    "root": "invoice-discussion",
+    "text": "Orion 发票 刘洋 liuyang@example.org invoice pending",
+    "question": "之前提到的第6件事，帮我找一下相关聊天。",
+    "queries": [
+      "Orion pending",
+      "Orion 发票"
+    ],
+    "low_overlap": true,
+    "bilingual": false
+  },
+  {
+    "root": "capture-error",
+    "text": "Nova 屏幕采集 错误 0x80070005 capture permission denied",
+    "question": "之前提到的第7件事，帮我找一下相关聊天。",
+    "queries": [
+      "Nova 采集",
+      "0x80070005"
+    ],
+    "low_overlap": false,
+    "bilingual": false
+  },
+  {
+    "root": "capture-error",
+    "text": "Nova 屏幕采集 错误 0x80070005 capture permission denied",
+    "question": "Find the earlier discussion about capture-error.",
+    "queries": [
+      "0x80070005",
+      "capture denied"
+    ],
+    "low_overlap": false,
+    "bilingual": true
+  },
+  {
+    "root": "capture-error",
+    "text": "Nova 屏幕采集 错误 0x80070005 capture permission denied",
+    "question": "之前提到的第7件事，帮我找一下相关聊天。",
+    "queries": [
+      "capture denied",
+      "Nova permission"
+    ],
+    "low_overlap": false,
+    "bilingual": false
+  },
+  {
+    "root": "capture-error",
+    "text": "Nova 屏幕采集 错误 0x80070005 capture permission denied",
+    "question": "之前提到的第7件事，帮我找一下相关聊天。",
+    "queries": [
+      "Nova permission",
+      "屏幕采集 错误"
+    ],
+    "low_overlap": true,
+    "bilingual": false
+  },
+  {
+    "root": "capture-error",
+    "text": "Nova 屏幕采集 错误 0x80070005 capture permission denied",
+    "question": "之前提到的第7件事，帮我找一下相关聊天。",
+    "queries": [
+      "屏幕采集 错误",
+      "Nova 采集"
+    ],
+    "low_overlap": true,
+    "bilingual": false
+  },
+  {
+    "root": "codec-research",
+    "text": "H264 编码器 延迟 对比 encoder latency benchmark",
+    "question": "之前提到的第8件事，帮我找一下相关聊天。",
+    "queries": [
+      "H264 延迟",
+      "encoder benchmark"
+    ],
+    "low_overlap": false,
+    "bilingual": false
+  },
+  {
+    "root": "codec-research",
+    "text": "H264 编码器 延迟 对比 encoder latency benchmark",
+    "question": "Find the earlier discussion about codec-research.",
+    "queries": [
+      "encoder benchmark",
+      "编码器 对比"
+    ],
+    "low_overlap": false,
+    "bilingual": true
+  },
+  {
+    "root": "codec-research",
+    "text": "H264 编码器 延迟 对比 encoder latency benchmark",
+    "question": "之前提到的第8件事，帮我找一下相关聊天。",
+    "queries": [
+      "编码器 对比",
+      "H264 latency"
+    ],
+    "low_overlap": false,
+    "bilingual": false
+  },
+  {
+    "root": "codec-research",
+    "text": "H264 编码器 延迟 对比 encoder latency benchmark",
+    "question": "之前提到的第8件事，帮我找一下相关聊天。",
+    "queries": [
+      "H264 latency",
+      "latency benchmark"
+    ],
+    "low_overlap": true,
+    "bilingual": false
+  },
+  {
+    "root": "codec-research",
+    "text": "H264 编码器 延迟 对比 encoder latency benchmark",
+    "question": "之前提到的第8件事，帮我找一下相关聊天。",
+    "queries": [
+      "latency benchmark",
+      "H264 延迟"
+    ],
+    "low_overlap": true,
+    "bilingual": false
+  },
+  {
+    "root": "meeting-file",
+    "text": "季度会议 纪要 minutes.docx 陈晨 meeting notes",
+    "question": "之前提到的第9件事，帮我找一下相关聊天。",
+    "queries": [
+      "会议 陈晨",
+      "minutes.docx"
+    ],
+    "low_overlap": false,
+    "bilingual": false
+  },
+  {
+    "root": "meeting-file",
+    "text": "季度会议 纪要 minutes.docx 陈晨 meeting notes",
+    "question": "Find the earlier discussion about meeting-file.",
+    "queries": [
+      "minutes.docx",
+      "meeting notes"
+    ],
+    "low_overlap": false,
+    "bilingual": true
+  },
+  {
+    "root": "meeting-file",
+    "text": "季度会议 纪要 minutes.docx 陈晨 meeting notes",
+    "question": "之前提到的第9件事，帮我找一下相关聊天。",
+    "queries": [
+      "meeting notes",
+      "季度会议 纪要"
+    ],
+    "low_overlap": false,
+    "bilingual": false
+  },
+  {
+    "root": "meeting-file",
+    "text": "季度会议 纪要 minutes.docx 陈晨 meeting notes",
+    "question": "之前提到的第9件事，帮我找一下相关聊天。",
+    "queries": [
+      "季度会议 纪要",
+      "陈晨 纪要"
+    ],
+    "low_overlap": true,
+    "bilingual": false
+  },
+  {
+    "root": "meeting-file",
+    "text": "季度会议 纪要 minutes.docx 陈晨 meeting notes",
+    "question": "之前提到的第9件事，帮我找一下相关聊天。",
+    "queries": [
+      "陈晨 纪要",
+      "会议 陈晨"
+    ],
+    "low_overlap": true,
+    "bilingual": false
+  },
+  {
+    "root": "security-research",
+    "text": "Zephyr 双因素认证 TOTP 安全 调研 authentication security",
+    "question": "之前提到的第10件事，帮我找一下相关聊天。",
+    "queries": [
+      "Zephyr TOTP",
+      "authentication security"
+    ],
+    "low_overlap": false,
+    "bilingual": false
+  },
+  {
+    "root": "security-research",
+    "text": "Zephyr 双因素认证 TOTP 安全 调研 authentication security",
+    "question": "Find the earlier discussion about security-research.",
+    "queries": [
+      "authentication security",
+      "双因素认证 调研"
+    ],
+    "low_overlap": false,
+    "bilingual": true
+  },
+  {
+    "root": "security-research",
+    "text": "Zephyr 双因素认证 TOTP 安全 调研 authentication security",
+    "question": "之前提到的第10件事，帮我找一下相关聊天。",
+    "queries": [
+      "双因素认证 调研",
+      "Zephyr 安全"
+    ],
+    "low_overlap": false,
+    "bilingual": false
+  },
+  {
+    "root": "security-research",
+    "text": "Zephyr 双因素认证 TOTP 安全 调研 authentication security",
+    "question": "之前提到的第10件事，帮我找一下相关聊天。",
+    "queries": [
+      "Zephyr 安全",
+      "TOTP research"
+    ],
+    "low_overlap": true,
+    "bilingual": false
+  },
+  {
+    "root": "security-research",
+    "text": "Zephyr 双因素认证 TOTP 安全 调研 authentication security",
+    "question": "之前提到的第10件事，帮我找一下相关聊天。",
+    "queries": [
+      "TOTP research",
+      "Zephyr TOTP"
+    ],
+    "low_overlap": true,
+    "bilingual": false
+  },
+  {
+    "root": "alex-east",
+    "text": "Alex Chen 华东 公司 east@example.net 文件 east report",
+    "question": "之前提到的第11件事，帮我找一下相关聊天。",
+    "queries": [
+      "east@example.net",
+      "Alex 华东"
+    ],
+    "low_overlap": false,
+    "bilingual": false
+  },
+  {
+    "root": "alex-east",
+    "text": "Alex Chen 华东 公司 east@example.net 文件 east report",
+    "question": "Find the earlier discussion about alex-east.",
+    "queries": [
+      "Alex 华东",
+      "east report"
+    ],
+    "low_overlap": false,
+    "bilingual": true
+  },
+  {
+    "root": "alex-east",
+    "text": "Alex Chen 华东 公司 east@example.net 文件 east report",
+    "question": "之前提到的第11件事，帮我找一下相关聊天。",
+    "queries": [
+      "east report",
+      "华东 公司"
+    ],
+    "low_overlap": false,
+    "bilingual": false
+  },
+  {
+    "root": "alex-east",
+    "text": "Alex Chen 华东 公司 east@example.net 文件 east report",
+    "question": "之前提到的第11件事，帮我找一下相关聊天。",
+    "queries": [
+      "华东 公司",
+      "Chen east"
+    ],
+    "low_overlap": true,
+    "bilingual": false
+  },
+  {
+    "root": "alex-east",
+    "text": "Alex Chen 华东 公司 east@example.net 文件 east report",
+    "question": "之前提到的第11件事，帮我找一下相关聊天。",
+    "queries": [
+      "Chen east",
+      "east@example.net"
+    ],
+    "low_overlap": true,
+    "bilingual": false
+  },
+  {
+    "root": "alex-west",
+    "text": "Alex Chen 华西 公司 west@example.net 文件 west report",
+    "question": "之前提到的第12件事，帮我找一下相关聊天。",
+    "queries": [
+      "west@example.net",
+      "Alex 华西"
+    ],
+    "low_overlap": false,
+    "bilingual": false
+  },
+  {
+    "root": "alex-west",
+    "text": "Alex Chen 华西 公司 west@example.net 文件 west report",
+    "question": "Find the earlier discussion about alex-west.",
+    "queries": [
+      "Alex 华西",
+      "west report"
+    ],
+    "low_overlap": false,
+    "bilingual": true
+  },
+  {
+    "root": "alex-west",
+    "text": "Alex Chen 华西 公司 west@example.net 文件 west report",
+    "question": "之前提到的第12件事，帮我找一下相关聊天。",
+    "queries": [
+      "west report",
+      "华西 公司"
+    ],
+    "low_overlap": false,
+    "bilingual": false
+  },
+  {
+    "root": "alex-west",
+    "text": "Alex Chen 华西 公司 west@example.net 文件 west report",
+    "question": "之前提到的第12件事，帮我找一下相关聊天。",
+    "queries": [
+      "华西 公司",
+      "Chen west"
+    ],
+    "low_overlap": true,
+    "bilingual": false
+  },
+  {
+    "root": "alex-west",
+    "text": "Alex Chen 华西 公司 west@example.net 文件 west report",
+    "question": "之前提到的第12件事，帮我找一下相关聊天。",
+    "queries": [
+      "Chen west",
+      "west@example.net"
+    ],
+    "low_overlap": true,
+    "bilingual": false
+  }
+]

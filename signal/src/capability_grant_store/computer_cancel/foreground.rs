@@ -145,10 +145,11 @@ impl SignalCapabilityGrantStore {
         {
             return Err(invalid());
         }
-        let (outbox, work, payload) = desk_diagnose_core::future::boxed(|| async {
+        let computer_original = desk_diagnose_core::future::boxed(|| async {
             original_on(txn, work.execution_id.as_deref().ok_or_else(invalid)?).await
         })
         .await?;
+        let (outbox, work, payload) = computer_original.as_ref();
         if outbox.computer_background_json.is_some() {
             return desk_diagnose_core::future::boxed(|| async {
                 Self::request_computer_background_cancel_on(
@@ -159,9 +160,9 @@ impl SignalCapabilityGrantStore {
             .await
             .map(|value| value.is_some());
         }
-        bound(&outbox, &work, &payload)?;
+        bound(outbox, work, payload)?;
         let digest = format!("{:x}", Sha256::digest(reason.as_bytes()));
-        if let Some(old) = intent(&outbox, &work)? {
+        if let Some(old) = intent(outbox, work)? {
             if old.request_id != request_id || old.reason_sha256 != digest {
                 return Err(invalid());
             }
@@ -173,7 +174,7 @@ impl SignalCapabilityGrantStore {
                 work.status.as_str(),
                 CAPABILITY_WORK_DISPATCHING | CAPABILITY_WORK_OUTCOME_UNKNOWN
             )
-            || super::super::computer_completion::terminal_result(&outbox, work.clone(), &payload)?
+            || super::super::computer_completion::terminal_result(outbox, work.clone(), payload)?
                 .is_some()
         {
             return Ok(false);
@@ -188,6 +189,7 @@ impl SignalCapabilityGrantStore {
             requested_at_unix_ms: now,
             observed_at_unix_ms: None,
         };
+        let (outbox, work, _) = *computer_original;
         let has_result = work.result_json.is_some();
         let mut active: agent_action_item::ActiveModel = work.into();
         active.cancel_requested_at = Set(Some(timestamp(now)?));

@@ -11,7 +11,7 @@ import {
     sentSignalingOfType,
     StubWebSocket,
     type SignalingGlobals,
-} from './file-transfer-test-harness';
+} from './__tests__/harness';
 import { deskErrorCodeEnum } from '@/services/types';
 
 // A host still waiting for its manager credential proof answers
@@ -23,7 +23,7 @@ import { deskErrorCodeEnum } from '@/services/types';
 // Retrying has to be bounded, or a host stuck in that state would keep the page
 // asking forever, so both halves are asserted: the budget runs out and gives up,
 // and a fresh attempt that gets a real answer succeeds. One comprehensive
-// `renderHook` test per file: see the note in `file-transfer-test-harness.ts`.
+// `renderHook` test per file: see the note in `__tests__/harness.ts`.
 
 const REQUEST_REMOTE_ACCESS = 100;
 const REMOTE_ACCESS_INITIALIZED = 101;

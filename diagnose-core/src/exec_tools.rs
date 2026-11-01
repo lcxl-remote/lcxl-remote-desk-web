@@ -170,7 +170,7 @@ pub fn exec_tool_registry_for_shells_with_timeout(
             }),
         },
         // Exposure gate only; the real authz capability is decided by classification.
-        required_capability: Capability::ShellExecConfirmed,
+        required_device_capability: Some(Capability::ShellExecConfirmed),
         effect: ToolEffect::Mutating,
     }]
 }
@@ -313,7 +313,10 @@ mod tests {
         assert_eq!(reg.len(), 1);
         assert_eq!(reg[0].name(), EXEC_TOOL_NAME);
         assert_eq!(reg[0].effect, ToolEffect::Mutating);
-        assert_eq!(reg[0].required_capability, Capability::ShellExecConfirmed);
+        assert_eq!(
+            reg[0].required_device_capability,
+            Some(Capability::ShellExecConfirmed)
+        );
         assert_eq!(
             reg[0].spec.parameters_schema["properties"]["shell"]["enum"],
             json!(SUPPORTED_EXEC_SHELLS)

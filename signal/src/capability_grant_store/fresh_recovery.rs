@@ -45,7 +45,7 @@ pub(crate) async fn restore_completed_calls(
     }) {
         return Ok(false);
     }
-    let mut next = session.clone();
+    let mut next = session.clone_boxed();
     let now_ms = chrono::DateTime::parse_from_rfc3339(now)
         .ok()
         .and_then(|time| u64::try_from(time.timestamp_millis()).ok())
@@ -60,12 +60,17 @@ pub(crate) async fn restore_completed_calls(
             .one(txn)
             .await?
             .ok_or_else(invalid)?;
-        let (outbox, work, payload) =
-            super::computer_binding::original_on(txn, &outbox.dispatch_id).await?;
+        let computer_original = desk_diagnose_core::future::send_phase(|| {
+            super::computer_binding::original_on(txn, &outbox.dispatch_id)
+        })
+        .await?;
+        let (outbox, work, payload) = computer_original.as_ref();
         if payload.command_origin.is_some() {
-            super::scheduled_recovery::command::reconcile_history_on(
-                txn, &mut next, &outbox, &work, &payload, now_ms, context,
-            )
+            desk_diagnose_core::future::send_phase(|| {
+                super::scheduled_recovery::command::reconcile_history_on(
+                    txn, &mut next, outbox, work, payload, now_ms, context,
+                )
+            })
             .await?;
             command_work.insert(row.id);
         }
@@ -105,13 +110,39 @@ pub(crate) async fn restore_completed_calls(
         {
             return Err(invalid());
         }
-        super::scheduled_recovery::prepared::close_on(txn, &mut next, row, now_ms).await?;
+        desk_diagnose_core::future::send_phase(|| {
+            super::scheduled_recovery::prepared::close_on(txn, &mut next, row, now_ms)
+        })
+        .await?;
     }
     for row in &rows {
         if row.status == CAPABILITY_WORK_OUTCOME_UNKNOWN && !command_work.contains(&row.id) {
-            unknown::restore(txn, &mut next, row, context).await?;
+            desk_diagnose_core::future::send_phase(|| {
+                unknown::restore(txn, &mut next, row, context)
+            })
+            .await?;
         }
     }
+    if !desk_diagnose_core::future::send_phase(|| {
+        restore_computer_results_on(txn, session, &mut next, &rows, &command_work, context, now)
+    })
+    .await?
+    {
+        return Ok(false);
+    }
+    *session = *next;
+    Ok(true)
+}
+
+async fn restore_computer_results_on(
+    txn: &DatabaseTransaction,
+    session: &PersistedAgentSession,
+    next: &mut PersistedAgentSession,
+    rows: &[agent_action_item::Model],
+    command_work: &std::collections::BTreeSet<i64>,
+    context: &crate::schedule_store::TaskReceiptContext,
+    now: &str,
+) -> Result<bool, DbErr> {
     let mut calls = next.unclosed_tool_call_ids();
     for action in session
         .execution_state
@@ -133,8 +164,11 @@ pub(crate) async fn restore_completed_calls(
             .one(txn)
             .await?
             .ok_or_else(invalid)?;
-        let (outbox, work, payload) =
-            super::computer_binding::original_on(txn, &outbox.dispatch_id).await?;
+        let computer_original = desk_diagnose_core::future::send_phase(|| {
+            super::computer_binding::original_on(txn, &outbox.dispatch_id)
+        })
+        .await?;
+        let (outbox, work, payload) = computer_original.as_ref();
         let original_action = desk_diagnose_core::session::ActionIdentity::new(
             work.id,
             &payload.call_id,
@@ -147,14 +181,14 @@ pub(crate) async fn restore_completed_calls(
         if outbox.computer_binding_json.is_none() {
             return Ok(false);
         }
-        let binding = super::computer_background::bound(&outbox, &work, &payload)?;
+        let binding = super::computer_background::bound(outbox, work, payload)?;
         if !calls.contains(&binding.origin.tool_call_id) {
             calls.push(binding.origin.tool_call_id.clone());
         }
     }
     for call_id in calls {
         let mut found = None;
-        for row in &rows {
+        for row in rows {
             if command_work.contains(&row.id) {
                 continue;
             }
@@ -180,32 +214,37 @@ pub(crate) async fn restore_completed_calls(
                 .one(txn)
                 .await?
                 .ok_or_else(invalid)?;
-            let (outbox, work, payload) =
-                super::computer_binding::original_on(txn, &outbox.dispatch_id).await?;
+            let computer_original = desk_diagnose_core::future::send_phase(|| {
+                super::computer_binding::original_on(txn, &outbox.dispatch_id)
+            })
+            .await?;
+            let (outbox, work, payload) = computer_original.as_ref();
             if outbox.computer_binding_json.is_none() {
                 return Ok(false);
             }
-            let binding = super::computer_background::bound(&outbox, &work, &payload)?;
+            let binding = super::computer_background::bound(outbox, work, payload)?;
             if binding.origin.tool_call_id != call_id {
                 continue;
             }
             if found.is_some() {
                 return Err(invalid());
             }
-            let original = SignalCapabilityGrantStore::original_task_terminal_on(
-                txn,
-                &outbox.dispatch_id,
-                context.provenance(),
-            )
+            let original = desk_diagnose_core::future::send_phase(|| {
+                SignalCapabilityGrantStore::original_task_terminal_on(
+                    txn,
+                    &outbox.dispatch_id,
+                    context.provenance(),
+                )
+            })
             .await?
             .ok_or_else(invalid)?;
-            super::computer_delivery::validate_destination(&next, &original)?;
+            super::computer_delivery::validate_destination(next, &original)?;
             found = Some(original);
         }
         let Some(original) = found else {
             return Ok(false);
         };
-        let already_present = super::computer_delivery::validate_destination(&next, &original)?;
+        let already_present = super::computer_delivery::validate_destination(next, &original)?;
         if !already_present {
             let content = desk_diagnose_core::image_input::recovered_result_text(
                 &original.output.content,
@@ -231,6 +270,5 @@ pub(crate) async fn restore_completed_calls(
     {
         return Ok(false);
     }
-    *session = next;
     Ok(true)
 }

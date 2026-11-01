@@ -92,7 +92,7 @@ async fn one_call_reserves_both_constraints_and_late_usage_does_not_resume_the_s
     assert_eq!(
         recorded_goal(&db)
             .await
-            .delegation_reservations
+            .independent_reservations
             .get(&receipt.reservation_id),
         Some(&upper)
     );
@@ -164,7 +164,7 @@ async fn one_call_reserves_both_constraints_and_late_usage_does_not_resume_the_s
     let goal = recorded_goal(&db).await;
     assert_eq!(goal.state, GoalState::Paused(GoalPauseReason::Owner));
     assert_eq!(goal.used, actual);
-    assert!(goal.delegation_reservations.is_empty());
+    assert!(goal.independent_reservations.is_empty());
     let row = group_row::Entity::find()
         .filter(group_row::Column::GroupId.eq(parent.delegation_group_id.unwrap()))
         .one(&db)
@@ -242,7 +242,7 @@ async fn source_goal_exhaustion_rolls_back_the_group_reservation() {
             .unwrap(),
         0
     );
-    assert!(recorded_goal(&db).await.delegation_reservations.is_empty());
+    assert!(recorded_goal(&db).await.independent_reservations.is_empty());
 }
 
 #[tokio::test]
@@ -298,7 +298,7 @@ async fn linked_provider_usage_reconciles_after_crash_without_replaying_the_call
     assert!(
         recorded_goal(&db)
             .await
-            .delegation_reservations
+            .independent_reservations
             .contains_key(&receipt.reservation_id)
     );
     insert_provider_usage(&db, &physical_id, now, now + 12).await;
@@ -354,6 +354,7 @@ pub(super) async fn insert_provider_usage(
         envelope_ids_json: Set("[]".into()),
         digests_sha256_json: Set("[]".into()),
         input_lineage_json: Set("[]".into()),
+        input_snapshot_json: Set("{}".into()),
         projection_digest_sha256: Set("digest".into()),
         total_bytes: Set(100),
         state: Set("dispatch_intent".into()),
@@ -517,10 +518,10 @@ async fn unstarted_model_refunds_both_budgets_without_reopening_a_paused_source(
     assert_eq!(goal.state, GoalState::Paused(GoalPauseReason::Owner));
     assert_eq!(goal.used, GoalUsage::default());
     assert_eq!(
-        goal.delegation_settlements.get(&receipt.reservation_id),
+        goal.independent_settlements.get(&receipt.reservation_id),
         Some(&GoalUsage::default())
     );
-    assert!(goal.delegation_reservations.is_empty());
+    assert!(goal.independent_reservations.is_empty());
     goal.validate().unwrap();
     let row = group_row::Entity::find()
         .filter(group_row::Column::GroupId.eq(parent.delegation_group_id.unwrap()))
@@ -576,7 +577,7 @@ async fn crashed_unstarted_call_is_reclaimed_only_after_the_original_lease_expir
             .is_err()
     );
     assert_eq!(recorded_goal(&db).await.used, GoalUsage::default());
-    assert!(recorded_goal(&db).await.delegation_reservations.is_empty());
+    assert!(recorded_goal(&db).await.independent_reservations.is_empty());
 }
 
 #[tokio::test]
@@ -809,7 +810,7 @@ async fn independent_review_reserves_without_planning_and_unstarted_pause_refund
     assert_eq!(
         recorded_goal(&db)
             .await
-            .delegation_reservations
+            .independent_reservations
             .get(&receipt.reservation_id),
         receipt.source_goal_upper.as_ref()
     );
@@ -862,9 +863,9 @@ async fn independent_review_reserves_without_planning_and_unstarted_pause_refund
     let goal = recorded_goal(&db).await;
     assert_eq!(goal.state, GoalState::Paused(GoalPauseReason::Owner));
     assert_eq!(goal.used, GoalUsage::default());
-    assert!(goal.delegation_reservations.is_empty());
+    assert!(goal.independent_reservations.is_empty());
     assert_eq!(
-        goal.delegation_settlements.get(&receipt.reservation_id),
+        goal.independent_settlements.get(&receipt.reservation_id),
         Some(&GoalUsage::default())
     );
 }
@@ -1090,7 +1091,7 @@ async fn late_review_usage_corrects_once_after_pause_and_closed_delegation() {
     assert!(
         recorded_goal(&db)
             .await
-            .delegation_reservations
+            .independent_reservations
             .contains_key(&receipt.reservation_id)
     );
     insert_provider_usage(&db, &provider_id, now, now + 4).await;
@@ -1127,7 +1128,7 @@ async fn late_review_usage_corrects_once_after_pause_and_closed_delegation() {
         }
     );
     assert_eq!(goal.slice_seq, 0);
-    assert!(goal.delegation_reservations.is_empty());
+    assert!(goal.independent_reservations.is_empty());
     let row = session_row::Entity::find()
         .filter(session_row::Column::ConversationId.eq("root"))
         .one(&db)
@@ -1439,5 +1440,5 @@ async fn source_expiry_rejects_new_model_and_review_without_reserving_budget() {
         rejected,
         CallAdmission::Rejected(CallRejection::SourceExpired)
     );
-    assert!(recorded_goal(&db).await.delegation_reservations.is_empty());
+    assert!(recorded_goal(&db).await.independent_reservations.is_empty());
 }

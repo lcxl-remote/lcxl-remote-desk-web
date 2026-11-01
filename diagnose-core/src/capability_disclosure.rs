@@ -6,7 +6,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use desk_agent_protocol::{AgentError, AgentErrorKind, Capability};
+#[cfg(test)]
+use desk_agent_protocol::Capability;
+use desk_agent_protocol::{AgentError, AgentErrorKind};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -568,7 +570,7 @@ pub fn capability_discovery_tool_registry() -> Vec<RegisteredTool> {
                 "additionalProperties": false
             }),
         },
-        required_capability: Capability::SystemInfo,
+        required_device_capability: None,
         effect: ToolEffect::CapabilityDiscovery,
     }]
 }
@@ -877,7 +879,7 @@ mod tests {
                 description: "x".repeat(MAX_ADVERTISED_PROVIDER_TOOL_BYTES),
                 parameters_schema: json!({"type": "object"}),
             },
-            required_capability: Capability::SystemInfo,
+            required_device_capability: Some(Capability::SystemInfo),
             effect: ToolEffect::ReadOnly,
         };
 
@@ -991,7 +993,7 @@ mod tests {
                 description: "x".repeat(70 * 1024),
                 parameters_schema: json!({"type":"object"}),
             },
-            required_capability: Capability::SystemInfo,
+            required_device_capability: Some(Capability::SystemInfo),
             effect: ToolEffect::ReadOnly,
         };
         let tools = [tool("a"), tool("b")];

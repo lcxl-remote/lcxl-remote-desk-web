@@ -115,6 +115,7 @@ impl UpstreamForwarder {
         f
     }
 
+    #[cfg(test)]
     /// Test-only: take the outbound receiver so a test can assert on traffic.
     pub fn test_outbound_rx(&self) -> mpsc::UnboundedReceiver<HostControlMessage> {
         self.take_outbound_rx()

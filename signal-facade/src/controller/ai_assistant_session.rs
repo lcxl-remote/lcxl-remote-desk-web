@@ -17,12 +17,14 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use utoipa::ToSchema;
 
+#[cfg(test)]
+const PAGE_BYTES: usize = 256 * 1024;
+
 const EVIDENCE_SUMMARY_SCHEMA_VERSION: u16 = 1;
 const MAX_EVIDENCE_NODES: usize = 128;
 const MAX_EVIDENCE_RECEIPTS: usize = 32;
 pub const DEFAULT_SNAPSHOT_MESSAGE_PAGE_SIZE: usize = 100;
 pub const MAX_SNAPSHOT_MESSAGE_PAGE_SIZE: usize = 100;
-pub const MAX_SNAPSHOT_MESSAGE_PAGE_BYTES: usize = 256 * 1024;
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct AiAssistantSessionQuery {
@@ -33,6 +35,8 @@ pub struct AiAssistantSessionQuery {
     pub session: Option<String>,
     /// Exclusive message cursor. Omit for the newest page.
     pub message_before: Option<String>,
+    /// Original native message anchor; mutually exclusive with message_before.
+    pub message_around: Option<String>,
     pub message_limit: Option<usize>,
 }
 
@@ -255,6 +259,10 @@ pub struct SnapshotMessageDto {
     /// Wire role token. An `assistant` message is AI-generated.
     pub role: String,
     pub text: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub citations: Vec<desk_agent_protocol::ai_assistant::source::AssistantCitation>,
+    #[schema(required = false)]
+    pub citations_incomplete: bool,
     /// Reviewed readable reasoning; no signatures or opaque provider replay.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<String>,
@@ -284,10 +292,73 @@ pub struct SnapshotMessagePageProjection {
     pub page: SnapshotMessagePageDto,
 }
 
+impl SnapshotMessagePageProjection {
+    /// Keep citations and original tool groups whole. Optional neighboring
+    /// groups are paged away; one indivisible group may exceed the page target.
+    pub fn with_citations(
+        mut self,
+        mut projections: std::collections::BTreeMap<
+            String,
+            desk_diagnose_core::ai_assistant::citation::AnswerCitations,
+        >,
+        page_bytes: usize,
+        anchor: Option<&str>,
+    ) -> Result<Self, &'static str> {
+        for message in &mut self.messages {
+            if message.role != "assistant" {
+                continue;
+            }
+            let projection = projections.remove(&message.id).unwrap_or_else(|| {
+                desk_diagnose_core::ai_assistant::citation::for_answer(
+                    &message.id,
+                    &message.text,
+                    &[],
+                    &Default::default(),
+                )
+            });
+            message.citations = projection.citations;
+            message.citations_incomplete |= projection.incomplete;
+        }
+        while serde_json::to_vec(&self.messages)
+            .map_err(|_| "invalid message page")?
+            .len()
+            > page_bytes
+            && !self.messages.is_empty()
+        {
+            let mut first_end = 1;
+            if self.messages[0].role == "assistant" && !self.messages[0].tool_calls.is_empty() {
+                while first_end < self.messages.len() && self.messages[first_end].role == "tool" {
+                    first_end += 1;
+                }
+            }
+            if first_end == self.messages.len() {
+                break;
+            }
+            if anchor.is_some_and(|id| {
+                self.messages[..first_end]
+                    .iter()
+                    .any(|message| message.id == id)
+            }) {
+                self.messages.truncate(first_end);
+                break;
+            }
+            self.messages.drain(..first_end);
+            self.page.has_more = true;
+        }
+        self.page.next_before_message_id = self
+            .page
+            .has_more
+            .then(|| self.messages.first().map(|message| message.id.clone()))
+            .flatten();
+        Ok(self)
+    }
+}
+
 pub fn project_snapshot_message_page(
     messages: Vec<ChatMessage>,
     before_message_id: Option<&str>,
     requested_limit: Option<usize>,
+    page_bytes: usize,
 ) -> Result<SnapshotMessagePageProjection, &'static str> {
     let limit = requested_limit.unwrap_or(DEFAULT_SNAPSHOT_MESSAGE_PAGE_SIZE);
     if limit == 0 || limit > MAX_SNAPSHOT_MESSAGE_PAGE_SIZE {
@@ -295,9 +366,7 @@ pub fn project_snapshot_message_page(
     }
     let visible = messages
         .into_iter()
-        .filter(|message| {
-            !desk_diagnose_core::permission_resume::is_permission_resume_message(message)
-        })
+        .filter(visible_snapshot_message)
         .collect::<Vec<_>>();
     let end = match before_message_id {
         Some(cursor) => visible
@@ -306,22 +375,7 @@ pub fn project_snapshot_message_page(
             .ok_or("invalid message page cursor")?,
         None => visible.len(),
     };
-    let mut groups = Vec::new();
-    let mut index = 0;
-    while index < visible.len() {
-        let start = index;
-        index += 1;
-        if visible[start].role == desk_diagnose_core::chat::ChatRole::Assistant
-            && !visible[start].tool_calls.is_empty()
-        {
-            while index < visible.len()
-                && visible[index].role == desk_diagnose_core::chat::ChatRole::Tool
-            {
-                index += 1;
-            }
-        }
-        groups.push((start, index));
-    }
+    let groups = snapshot_message_groups(&visible);
     if end != visible.len() && !groups.iter().any(|(start, _)| *start == end) {
         return Err("message page cursor is not a group boundary");
     }
@@ -336,39 +390,21 @@ pub fn project_snapshot_message_page(
         .rev()
     {
         let group_count = group_end - group_start;
-        let mut group = visible[group_start..group_end]
+        let group = visible[group_start..group_end]
             .iter()
             .cloned()
             .map(SnapshotMessageDto::from)
             .collect::<Vec<_>>();
-        // Presentation-only reasoning must not make an otherwise readable
-        // original answer/tool group exceed the existing page budget.
-        let mut group_bytes = serde_json::to_vec(&group)
+        let group_bytes = serde_json::to_vec(&group)
             .map_err(|_| "message page projection failed")?
             .len();
-        for index in 0..group.len() {
-            while group_bytes + 2 > MAX_SNAPSHOT_MESSAGE_PAGE_BYTES {
-                let Some(reasoning) = group[index].reasoning.take() else {
-                    break;
-                };
-                let mut end = reasoning.len() / 2;
-                while !reasoning.is_char_boundary(end) {
-                    end -= 1;
-                }
-                if end > 4 {
-                    group[index].reasoning = Some(format!("{}…", &reasoning[..end]));
-                }
-                group_bytes = serde_json::to_vec(&group)
-                    .map_err(|_| "message page projection failed")?
-                    .len();
-            }
-        }
-        if count + group_count > limit
-            || bytes.saturating_add(group_bytes) > MAX_SNAPSHOT_MESSAGE_PAGE_BYTES
-        {
+        if count + group_count > limit {
             if start == end {
-                return Err("one transcript message group exceeds the page budget");
+                return Err("one transcript message group exceeds the page count limit");
             }
+            break;
+        }
+        if start != end && bytes.saturating_add(group_bytes) > page_bytes {
             break;
         }
         start = group_start;
@@ -388,6 +424,121 @@ pub fn project_snapshot_message_page(
     })
 }
 
+fn visible_snapshot_message(message: &ChatMessage) -> bool {
+    if desk_diagnose_core::permission_resume::is_permission_resume_message(message) {
+        return false;
+    }
+    if message.role != desk_diagnose_core::chat::ChatRole::SystemEvent {
+        return true;
+    }
+    !message.data_envelope.as_ref().is_some_and(|envelope| {
+        envelope.provenance.source_provider_id
+            == desk_diagnose_core::dynamic_run::RUN_CONTROL_PROVIDER_ID
+            && envelope.provenance.source_tool_name == "owner_context_time"
+    })
+}
+
+fn snapshot_message_groups(visible: &[ChatMessage]) -> Vec<(usize, usize)> {
+    let mut groups = Vec::new();
+    let mut index = 0;
+    while index < visible.len() {
+        let start = index;
+        index += 1;
+        if visible[start].role == desk_diagnose_core::chat::ChatRole::Assistant
+            && !visible[start].tool_calls.is_empty()
+        {
+            while index < visible.len()
+                && visible[index].role == desk_diagnose_core::chat::ChatRole::Tool
+            {
+                index += 1;
+            }
+        }
+        groups.push((start, index));
+    }
+    groups
+}
+
+/// Locate an original message inside a bounded owner-only history window.
+/// Native tool groups stay whole; surrounding oversized groups are optional.
+/// This projection grants no model read, device connection or tool invocation.
+pub fn project_snapshot_message_window(
+    messages: Vec<ChatMessage>,
+    before_message_id: Option<&str>,
+    around_message_id: Option<&str>,
+    requested_limit: Option<usize>,
+    page_bytes: usize,
+) -> Result<SnapshotMessagePageProjection, &'static str> {
+    let Some(anchor) = around_message_id else {
+        return project_snapshot_message_page(
+            messages,
+            before_message_id,
+            requested_limit,
+            page_bytes,
+        );
+    };
+    let limit = requested_limit.unwrap_or(DEFAULT_SNAPSHOT_MESSAGE_PAGE_SIZE);
+    if before_message_id.is_some() || limit == 0 || limit > MAX_SNAPSHOT_MESSAGE_PAGE_SIZE {
+        return Err("invalid message window selector or limit");
+    }
+    desk_agent_protocol::ai_assistant::source::validate_source_id(anchor)?;
+    let visible = messages
+        .into_iter()
+        .filter(visible_snapshot_message)
+        .collect::<Vec<_>>();
+    let mut found = visible
+        .iter()
+        .enumerate()
+        .filter(|(_, message)| message.message_id == anchor);
+    let target = found
+        .next()
+        .ok_or("message window anchor is unavailable")?
+        .0;
+    if found.next().is_some() {
+        return Err("duplicate message window anchor");
+    }
+    let groups = snapshot_message_groups(&visible);
+    let group = groups
+        .iter()
+        .position(|(start, end)| *start <= target && target < *end)
+        .unwrap();
+    let (mut left, end) = groups[group];
+    let mut count = end - left;
+    if count > limit {
+        return Err("message window anchor group exceeds its limit");
+    }
+    for (start, end) in groups[..group].iter().copied().rev() {
+        if count + end - start > limit {
+            break;
+        }
+        left = start;
+        count += end - start;
+    }
+    let mut page =
+        project_snapshot_message_page(visible[left..end].to_vec(), None, Some(limit), page_bytes)?;
+    let mut following = 0;
+    for (start, end) in groups[group + 1..].iter().copied() {
+        if following + end - start > limit / 2 {
+            break;
+        }
+        let Ok(next) = project_snapshot_message_page(
+            visible[left..end].to_vec(),
+            None,
+            Some(limit),
+            page_bytes,
+        ) else {
+            break;
+        };
+        if !next.messages.iter().any(|message| message.id == anchor) {
+            break;
+        }
+        page = next;
+        following += end - start;
+    }
+    page.page.has_more |= left > 0;
+    page.page.next_before_message_id = page.page.has_more.then(|| page.messages[0].id.clone());
+    Ok(page)
+}
+
 impl From<ChatMessage> for SnapshotMessageDto {
     fn from(message: ChatMessage) -> Self {
         Self {
@@ -400,6 +551,8 @@ impl From<ChatMessage> for SnapshotMessageDto {
                 None
             },
             text: message.text,
+            citations: Vec::new(),
+            citations_incomplete: false,
             tool_calls: message
                 .tool_calls
                 .into_iter()
@@ -553,6 +706,9 @@ fn stale_reason_name(reason: AttachmentStaleReason) -> &'static str {
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AiAssistantSessionSnapshotDto {
+    /// None until the first owner input freezes this conversation's mode.
+    #[schema(required = false)]
+    pub temporary_conversation: Option<bool>,
     pub control_revision: u64,
     pub main_stopped: bool,
     pub subagents: desk_agent_protocol::ai_assistant::subagent::AiAssistantDelegationSnapshot,
@@ -568,6 +724,7 @@ pub struct AiAssistantSessionSnapshotDto {
     /// Current/latest owner delegation; it does not grant any tool authority.
     pub approval_delegation: Option<ApprovalDelegationDto>,
     pub approval_model_readiness: ApprovalModelReadinessDto,
+
     pub context_usage: Option<ContextUsageDto>,
     /// Opaque recovery selector; ownership is rechecked on every read or stop.
     pub session_id: String,
@@ -1847,7 +2004,7 @@ pub struct AiAssistantSessionSummaryDto {
     pub session_id: String,
     /// Validated client continuation intent.
     pub conversation_id: Option<String>,
-    pub first_question: Option<String>,
+    pub title: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub active: bool,
@@ -2152,6 +2309,65 @@ mod tests {
     }
 
     #[test]
+    fn owner_context_time_is_model_metadata_and_does_not_hide_owner_text_or_other_events() {
+        use desk_diagnose_core::chat::ChatMessage;
+        let destination = desk_agent_protocol::data_lineage::DestinationIdentity::Model {
+            connection_id: "gateway".into(),
+            connection_revision: 1,
+            model_id: "model".into(),
+            profile_revision: 1,
+        };
+        let owner = desk_diagnose_core::model_message_labels::model_bound_user_message(
+            "owner-context".into(),
+            "The August report".into(),
+            destination.clone(),
+        )
+        .unwrap();
+        let mut native = ChatMessage::system_event(
+            "owner-time",
+            r#"{"native_control":"owner_context_supplied","recorded_at_unix_ms":1792713602000}"#,
+        );
+        native.data_envelope =
+            desk_diagnose_core::model_message_labels::internal_tool_result_envelope(
+                owner.data_envelope.as_ref(),
+                "owner-time",
+                &native.text,
+                "owner_context_time",
+            )
+            .unwrap();
+        let literal = desk_diagnose_core::model_message_labels::model_bound_user_message(
+            "literal-json".into(),
+            native.text.clone(),
+            destination,
+        )
+        .unwrap();
+        let page = project_snapshot_message_page(
+            vec![owner.clone(), native.clone(), literal.clone()],
+            None,
+            Some(100),
+            PAGE_BYTES,
+        )
+        .unwrap();
+        assert_eq!(
+            page.messages
+                .iter()
+                .map(|message| message.id.as_str())
+                .collect::<Vec<_>>(),
+            ["owner-context", "literal-json"]
+        );
+        assert!(!page.page.has_more);
+        assert!(
+            project_snapshot_message_page(
+                vec![owner, native, literal],
+                Some("owner-time"),
+                Some(100),
+                PAGE_BYTES
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn context_usage_exposes_only_budget_metadata() {
         let dto = ContextUsageDto::from(desk_diagnose_core::context_usage::ContextUsage {
             prepared_request_bytes: None,
@@ -2416,13 +2632,15 @@ mod tests {
         let mut before = None;
         let mut recovered = Vec::new();
         loop {
-            let projection =
-                project_snapshot_message_page(messages.clone(), before.as_deref(), None).unwrap();
+            let projection = project_snapshot_message_page(
+                messages.clone(),
+                before.as_deref(),
+                None,
+                PAGE_BYTES,
+            )
+            .unwrap();
             assert!(projection.messages.len() <= MAX_SNAPSHOT_MESSAGE_PAGE_SIZE);
-            assert!(
-                serde_json::to_vec(&projection.messages).unwrap().len()
-                    <= MAX_SNAPSHOT_MESSAGE_PAGE_BYTES
-            );
+            assert!(serde_json::to_vec(&projection.messages).unwrap().len() <= PAGE_BYTES);
             recovered.splice(
                 0..0,
                 projection.messages.iter().map(|message| message.id.clone()),
@@ -2435,7 +2653,7 @@ mod tests {
         assert_eq!(recovered.len(), 1_000);
         assert_eq!(recovered.first().map(String::as_str), Some("message-0000"));
         assert_eq!(recovered.last().map(String::as_str), Some("message-0999"));
-        assert!(project_snapshot_message_page(Vec::new(), None, Some(101)).is_err());
+        assert!(project_snapshot_message_page(Vec::new(), None, Some(101), PAGE_BYTES).is_err());
     }
 }
 
@@ -2558,18 +2776,20 @@ mod reasoning_display_tests {
     use super::*;
     #[test]
     fn reasoning_display_never_makes_an_existing_answer_unreadable() {
-        let original = "x".repeat(MAX_SNAPSHOT_MESSAGE_PAGE_BYTES - 1024);
+        let original = "x".repeat(PAGE_BYTES - 1024);
         let mut message = ChatMessage::text(
             "answer",
             desk_diagnose_core::chat::ChatRole::Assistant,
             original.clone(),
         );
         message.reasoning = Some("思考".repeat(10_000));
-        let page = project_snapshot_message_page(vec![message], None, None).unwrap();
+        let page = project_snapshot_message_page(vec![message], None, None, PAGE_BYTES).unwrap();
         assert_eq!(page.messages[0].text, original);
-        assert!(
-            serde_json::to_vec(&page.messages).unwrap().len() <= MAX_SNAPSHOT_MESSAGE_PAGE_BYTES
+        assert_eq!(
+            page.messages[0].reasoning.as_deref(),
+            Some("思考".repeat(10_000).as_str())
         );
+        assert!(serde_json::to_vec(&page.messages).unwrap().len() > PAGE_BYTES);
     }
 
     #[test]
@@ -2697,5 +2917,284 @@ mod goal_time_contract_tests {
                 assert!(AiAssistantAttentionItemDto::for_goal(&goal, 1000).is_empty());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod source_window_tests {
+    use super::*;
+    use desk_diagnose_core::chat::{ChatRole, ToolCall};
+
+    #[test]
+    fn one_original_answer_keeps_every_citation_when_it_exceeds_the_page_target() {
+        use desk_diagnose_core::{
+            ai_assistant::{citation::AnswerCitations, seam::AssistantReadRoot},
+            native_ids::{self, Kind},
+        };
+        let text = "x".repeat(PAGE_BYTES - 300);
+        let page = project_snapshot_message_page(
+            vec![ChatMessage::text("answer", ChatRole::Assistant, &text)],
+            None,
+            None,
+            PAGE_BYTES,
+        )
+        .unwrap();
+        let roots = (0..20)
+            .map(|value| AssistantReadRoot {
+                source_id: native_ids::stable(Kind::AssistantSource, &value),
+                source_revision: 1,
+            })
+            .collect::<Vec<_>>();
+        let citations = roots
+            .iter()
+            .map(
+                |root| desk_agent_protocol::ai_assistant::source::AssistantCitation {
+                    answer_message_id: "answer".into(),
+                    answer_revision: 1,
+                    source_id: root.source_id.clone(),
+                    source_revision: 1,
+                    source_device: None,
+                },
+            )
+            .collect::<Vec<_>>();
+        let expected = citations.len();
+        let page = page
+            .with_citations(
+                std::collections::BTreeMap::from([(
+                    "answer".into(),
+                    AnswerCitations {
+                        citations,
+                        incomplete: false,
+                    },
+                )]),
+                PAGE_BYTES,
+                None,
+            )
+            .unwrap();
+        assert_eq!(page.messages.len(), 1);
+        assert_eq!(page.messages[0].text, text);
+        assert_eq!(page.messages[0].citations.len(), expected);
+        assert!(!page.messages[0].citations_incomplete);
+        assert!(serde_json::to_vec(&page.messages).unwrap().len() > PAGE_BYTES);
+    }
+
+    #[test]
+    fn source_window_locates_old_messages_and_keeps_the_original_older_cursor() {
+        let messages = (0..1000)
+            .map(|index| {
+                ChatMessage::text(
+                    format!("message-{index:04}"),
+                    ChatRole::User,
+                    format!("原文 {index}"),
+                )
+            })
+            .collect();
+        let page = project_snapshot_message_window(
+            messages,
+            None,
+            Some("message-0500"),
+            Some(10),
+            PAGE_BYTES,
+        )
+        .unwrap();
+        assert_eq!(page.messages.len(), 10);
+        assert_eq!(page.messages.first().unwrap().id, "message-0496");
+        assert_eq!(page.messages.last().unwrap().id, "message-0505");
+        assert_eq!(page.messages[4].text, "原文 500");
+        assert!(page.page.has_more);
+        assert_eq!(
+            page.page.next_before_message_id.as_deref(),
+            Some("message-0496")
+        );
+    }
+
+    #[test]
+    fn source_window_keeps_the_complete_native_group_and_rejects_bad_selectors() {
+        let messages = vec![
+            ChatMessage::text("input", ChatRole::User, "original requirement"),
+            ChatMessage::assistant_tool_calls(
+                "producer",
+                "",
+                vec![
+                    ToolCall {
+                        id: "native-call".into(),
+                        name: "read_system_info".into(),
+                        arguments_json: "{}".into(),
+                    }
+                    .to_ref(),
+                ],
+            ),
+            ChatMessage::tool_result("native-result", "native-call", "original native result"),
+            ChatMessage::text("answer", ChatRole::Assistant, "later answer"),
+        ];
+        let page = project_snapshot_message_window(
+            messages.clone(),
+            None,
+            Some("native-result"),
+            Some(3),
+            PAGE_BYTES,
+        )
+        .unwrap();
+        assert_eq!(
+            page.messages
+                .iter()
+                .map(|message| message.id.as_str())
+                .collect::<Vec<_>>(),
+            ["producer", "native-result", "answer"]
+        );
+        assert_eq!(
+            page.page.next_before_message_id.as_deref(),
+            Some("producer")
+        );
+        assert!(
+            project_snapshot_message_window(
+                messages.clone(),
+                Some("input"),
+                Some("native-result"),
+                None,
+                PAGE_BYTES
+            )
+            .is_err()
+        );
+        assert!(
+            project_snapshot_message_window(
+                messages.clone(),
+                None,
+                Some("native-result"),
+                Some(1),
+                PAGE_BYTES
+            )
+            .is_err()
+        );
+        assert!(
+            project_snapshot_message_window(
+                messages.clone(),
+                None,
+                Some("unknown"),
+                None,
+                PAGE_BYTES
+            )
+            .is_err()
+        );
+        assert!(
+            project_snapshot_message_window(messages, None, Some(""), None, PAGE_BYTES).is_err()
+        );
+    }
+
+    #[test]
+    fn oversized_following_content_cannot_displace_the_requested_source() {
+        let messages = vec![
+            ChatMessage::text("source", ChatRole::Assistant, "requested original"),
+            ChatMessage::text("large", ChatRole::User, "x".repeat(PAGE_BYTES + 1)),
+        ];
+        let page =
+            project_snapshot_message_window(messages, None, Some("source"), Some(10), PAGE_BYTES)
+                .unwrap();
+        assert_eq!(page.messages.len(), 1);
+        assert_eq!(page.messages[0].id, "source");
+        assert!(!page.page.has_more);
+    }
+}
+
+#[cfg(test)]
+mod configured_page_budget_tests {
+    use super::*;
+    use desk_diagnose_core::ai_assistant::citation::AnswerCitations;
+    use desk_diagnose_core::chat::{ChatRole, ToolCall};
+
+    fn messages() -> Vec<ChatMessage> {
+        let mut producer = ChatMessage::text("producer", ChatRole::Assistant, "working");
+        producer.tool_calls = vec![
+            ToolCall {
+                id: "tool-call".into(),
+                name: "read".into(),
+                arguments_json: "{}".into(),
+            }
+            .to_ref(),
+        ];
+        let mut output = ChatMessage::text("output", ChatRole::Tool, "原文".repeat(60000));
+        output.tool_call_id = Some("tool-call".into());
+        vec![
+            ChatMessage::text("earlier", ChatRole::User, "earlier input"),
+            producer,
+            output,
+        ]
+    }
+
+    #[test]
+    fn one_large_native_group_is_whole_and_previous_pages_make_progress() {
+        let original = messages();
+        let page = project_snapshot_message_page(original.clone(), None, None, 1024).unwrap();
+        assert_eq!(
+            page.messages
+                .iter()
+                .map(|m| m.id.as_str())
+                .collect::<Vec<_>>(),
+            ["producer", "output"]
+        );
+        assert_eq!(page.messages[1].text, original[2].text);
+        assert_eq!(
+            page.page.next_before_message_id.as_deref(),
+            Some("producer")
+        );
+        let previous =
+            project_snapshot_message_page(original, Some("producer"), None, 1024).unwrap();
+        assert_eq!(previous.messages[0].id, "earlier");
+        assert!(!previous.page.has_more);
+    }
+
+    #[test]
+    fn citations_page_whole_neighbors_without_removing_the_requested_source_group() {
+        let original = vec![
+            ChatMessage::text("older", ChatRole::User, "older"),
+            ChatMessage::text("anchor", ChatRole::Assistant, "source"),
+            ChatMessage::text("following", ChatRole::User, "later"),
+        ];
+        let page =
+            project_snapshot_message_window(original, None, Some("anchor"), None, 4096).unwrap();
+        let citation = desk_agent_protocol::ai_assistant::source::AssistantCitation {
+            answer_message_id: "anchor".into(),
+            answer_revision: 1,
+            source_id: "source".repeat(500),
+            source_revision: 1,
+            source_device: None,
+        };
+        let page = page
+            .with_citations(
+                std::collections::BTreeMap::from([(
+                    "anchor".into(),
+                    AnswerCitations {
+                        citations: vec![citation],
+                        incomplete: false,
+                    },
+                )]),
+                512,
+                Some("anchor"),
+            )
+            .unwrap();
+        assert_eq!(page.messages.len(), 1);
+        assert_eq!(page.messages[0].id, "anchor");
+        assert_eq!(page.messages[0].citations.len(), 1);
+        assert!(!page.messages[0].citations_incomplete);
+        assert_eq!(page.page.next_before_message_id.as_deref(), Some("anchor"));
+    }
+
+    #[test]
+    fn a_nondefault_page_target_changes_paging_without_truncating_answers() {
+        let original = (0..6)
+            .map(|i| {
+                ChatMessage::text(
+                    format!("message-{i}"),
+                    ChatRole::Assistant,
+                    "x".repeat(2000),
+                )
+            })
+            .collect::<Vec<_>>();
+        let small = project_snapshot_message_page(original.clone(), None, None, 5000).unwrap();
+        let large = project_snapshot_message_page(original, None, None, 20000).unwrap();
+        assert_eq!(small.messages.len(), 2);
+        assert_eq!(large.messages.len(), 6);
+        assert!(small.messages.iter().all(|m| m.text.len() == 2000));
+        assert!(small.page.has_more);
     }
 }

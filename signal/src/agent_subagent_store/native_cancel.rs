@@ -14,11 +14,32 @@ pub(crate) async fn cancel_native_actions_on<
     operation: &str,
     now_ms: i64,
 ) -> Result<(), DbErr> {
+    cancel_native_actions_for_subject_on(
+        txn,
+        &session.conversation_id,
+        &session.actor_id,
+        &session.device_id,
+        operation,
+        now_ms,
+    )
+    .await
+}
+
+pub(crate) async fn cancel_native_actions_for_subject_on<
+    C: ConnectionTrait + crate::config::ConfigConnection,
+>(
+    txn: &C,
+    conversation: &str,
+    actor: &str,
+    device: &str,
+    operation: &str,
+    now_ms: i64,
+) -> Result<(), DbErr> {
     let now = chrono::DateTime::from_timestamp_millis(now_ms).ok_or_else(invalid)?;
     let rows = work::Entity::find()
-        .filter(work::Column::ConversationId.eq(&session.conversation_id))
-        .filter(work::Column::ActorId.eq(&session.actor_id))
-        .filter(work::Column::TargetDeviceId.eq(&session.device_id))
+        .filter(work::Column::ConversationId.eq(conversation))
+        .filter(work::Column::ActorId.eq(actor))
+        .filter(work::Column::TargetDeviceId.eq(device))
         .filter(
             sea_orm::Condition::any()
                 .add(work::Column::ResultJson.is_null())
@@ -51,7 +72,7 @@ pub(crate) async fn cancel_native_actions_on<
             if original.computer_binding_json.is_some() {
                 let key = format!("owner-stop:{operation}:{}", row.id);
                 crate::capability_grant_store::SignalCapabilityGrantStore::request_computer_execution_cancel_on(
-                    txn, &row.action_request_id, &session.conversation_id, &session.actor_id, &session.device_id,
+                    txn, &row.action_request_id, conversation, actor, device,
                     &key, "Owner stopped this task").await?;
                 continue;
             }
@@ -61,12 +82,12 @@ pub(crate) async fn cancel_native_actions_on<
         let generation = row.execution_id.clone();
         let mut active: work::ActiveModel = row.into();
         active.cancel_requested_at = Set(Some(now));
-        active.cancel_requested_by = Set(Some(session.actor_id.clone()));
+        active.cancel_requested_by = Set(Some(actor.to_owned()));
         active.cancel_generation = Set(generation);
         active.update(txn).await?;
     }
     let commands = command::Entity::find()
-        .filter(command::Column::ConversationId.eq(&session.conversation_id))
+        .filter(command::Column::ConversationId.eq(conversation))
         .filter(command::Column::Status.is_in(["dispatching", "running", "unknown"]))
         .filter(command::Column::CancelRequestedAt.is_null())
         .order_by_asc(command::Column::Id)
@@ -84,7 +105,7 @@ pub(crate) async fn cancel_native_actions_on<
         }
         let mut active: command::ActiveModel = row.into();
         active.cancel_requested_at = Set(Some(now));
-        active.cancel_requested_by = Set(Some(session.actor_id.clone()));
+        active.cancel_requested_by = Set(Some(actor.to_owned()));
         active.update(txn).await?;
     }
     Ok(())

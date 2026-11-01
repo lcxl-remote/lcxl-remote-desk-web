@@ -203,6 +203,7 @@ pub async fn serve(_endpoint: PathBuf, service: Arc<LocalAccessControlService>) 
     }
 }
 
+#[cfg(any(target_os = "windows", test))]
 fn choose_local_access_user_sid(
     session_sid: Option<String>,
     daemon_sid: Option<String>,

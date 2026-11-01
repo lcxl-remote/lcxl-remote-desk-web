@@ -13,6 +13,7 @@ use std::collections::BTreeSet;
 pub use desk_diagnose_core::schedule::rehearsal::{ObservedRehearsalRead, RehearsalReadReport};
 
 impl ScheduleStore {
+    #[cfg(test)]
     pub async fn read_rehearsal_reads(
         &self,
         owner: i32,
@@ -127,7 +128,16 @@ impl ScheduleStore {
             if proposals.len() != 1 {
                 return Err(ScheduleStoreError::Conflict);
             }
-            let call = proposals[0];
+            let recorded = proposals[0];
+            let call = desk_diagnose_core::ui_model_ids::resolve_recorded_call(
+                &desk_diagnose_core::chat::ToolCall {
+                    id: recorded.id.clone(),
+                    name: recorded.name.clone(),
+                    arguments_json: recorded.arguments_json.clone(),
+                },
+                &session,
+            )
+            .map_err(|_| ScheduleStoreError::Invalid)?;
             let canonical =
                 desk_diagnose_core::permission_tools::canonical_tool_permission_input_json(
                     &call.name,

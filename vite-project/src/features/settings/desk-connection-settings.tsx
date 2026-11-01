@@ -240,7 +240,7 @@ export function DeskConnectionSettings() {
                 title: t('pages.system.settings.success'),
                 description: t('pages.system.settings.updateSucceedMessage'),
             })
-        } catch (error) {
+        } catch {
             toast({
                 variant: "destructive",
                 title: t('pages.system.settings.error'),

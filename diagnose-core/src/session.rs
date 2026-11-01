@@ -18,6 +18,7 @@
 
 mod envelope_probe;
 mod executions;
+pub mod management;
 pub use executions::{BackgroundExecution, UnknownExecution};
 
 use std::collections::HashSet;
@@ -27,14 +28,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::chat::{ChatMessage, ChatRole, TokenUsage};
 use crate::context_attachment::{
-    AttachmentRuntimeBinding, AttachmentStaleReason, AttachmentState, ContextAttachment,
-    ContextAttachmentError, ContextAttachmentEvent, revalidate_attachments,
+    AttachmentStaleReason, AttachmentState, ContextAttachment, ContextAttachmentError,
     validate_attachment_set, validate_attachment_subject,
 };
 use crate::model_context::{ContextNotice, MAX_CONTEXT_NOTICES, ModelContextState};
 use crate::replay::{ReplayDisposition, ReplayUnavailableReason};
 
-pub const CONVERSATION_SCHEMA_VERSION: u16 = 8;
+pub const CONVERSATION_SCHEMA_VERSION: u16 = 18;
 /// Opaque replay is bounded independently from visible transcript text.
 pub const MAX_REPLAY_ENVELOPE_BYTES: usize = 256 * 1024;
 pub const MAX_SESSION_REPLAY_BYTES: usize = 2 * 1024 * 1024;
@@ -396,8 +396,8 @@ pub enum TriggerOrigin {
     /// A finite child task claimed by the trusted delegation coordinator.
     /// Source, budget and review eligibility remain bound by its persisted role.
     DelegatedTask,
-    /// A durable child-result dependency woke its original main wait. This
-    /// origin can inspect existing results but cannot spawn new executable work.
+    /// An explicit child-result wait resumes its original finite owner task.
+    /// Current source controls, budgets and operation grants still apply.
     SubAgentCompletion,
     /// A manager-fired automation turn reacting to a completed background command.
     /// Retained only to deserialize sessions written before generic work origins.
@@ -430,6 +430,7 @@ impl TriggerOrigin {
                 | TriggerOrigin::PermissionDecision
                 | TriggerOrigin::GoalContinuation
                 | TriggerOrigin::DelegatedTask
+                | TriggerOrigin::SubAgentCompletion
         )
     }
 
@@ -446,6 +447,7 @@ impl TriggerOrigin {
                 | TriggerOrigin::ScheduledTask
                 | TriggerOrigin::GoalContinuation
                 | TriggerOrigin::DelegatedTask
+                | TriggerOrigin::SubAgentCompletion
         )
     }
 }
@@ -531,6 +533,8 @@ pub struct PersistedAgentSession {
     #[serde(default)]
     pub conversation_schema_version: u16,
     pub conversation: Vec<crate::chat::ChatMessage>,
+    /// Personal assistant data state, frozen only when its first input commits.
+    pub assistant_data: Option<Box<crate::ai_assistant::data_control::AssistantDataSession>>,
     /// Session-local model aliases; deleted with this session.
     pub ui_references: crate::ui_references::UiReferenceState,
     pub thinking_prefix: crate::thinking_context::ThinkingPrefixState,
@@ -706,6 +710,12 @@ pub enum SubjectMismatch {
 }
 
 impl PersistedAgentSession {
+    /// Own a complete rollback snapshot without copying it through the caller's frame.
+    #[inline(never)]
+    pub fn clone_boxed(&self) -> Box<Self> {
+        Box::new(self.clone())
+    }
+
     /// Replace oversized/old opaque replay payloads with fail-closed tombstones.
     /// Visible transcript fields and tool grouping are never removed.
     pub fn enforce_replay_storage_limits(&mut self) {
@@ -780,6 +790,13 @@ impl PersistedAgentSession {
     /// Decode the persisted envelope with an explicit legacy-v0 upgrade. Unknown
     /// versions fail closed instead of being partially interpreted by serde.
     pub fn decode_json(input: &str) -> Result<Self, SessionDecodeError> {
+        let session = Self::decode_boxed_json(input)?;
+        Ok(*session)
+    }
+
+    /// Validate the complete stored envelope while retaining one heap owner.
+    #[inline(never)]
+    pub fn decode_boxed_json(input: &str) -> Result<Box<Self>, SessionDecodeError> {
         let envelope: envelope_probe::EnvelopeProbe = serde_json::from_str(input)?;
         let version = envelope.version;
         if version > u64::from(CONVERSATION_SCHEMA_VERSION) {
@@ -794,17 +811,43 @@ impl PersistedAgentSession {
         } = envelope;
         // Decode the typed session directly from JSON. Deserializing the owned
         // Value adds large nested visitor frames to approval/execution polls.
-        let mut session: Self = serde_json::from_str(input)?;
-        if session.surface == AgentSessionSurface::AiAssistant
-            && (version < u64::from(CONVERSATION_SCHEMA_VERSION)
-                || !has_disclosure
+        let mut session: Box<Self> = serde_json::from_str(input)?;
+        if session.surface == AgentSessionSurface::AiAssistant {
+            if version < u64::from(CONVERSATION_SCHEMA_VERSION) {
+                return Err(SessionDecodeError::UnsupportedVersion(version));
+            }
+            if !has_disclosure
                 || !has_focus_epoch
                 || !has_visual_evidence
-                || !has_visual_verification)
-        {
-            // AI Assistant has not shipped with this persisted schema. Do
-            // not infer a working set or re-enable the old full catalog.
-            return Err(SessionDecodeError::UnsupportedVersion(version));
+                || !has_visual_verification
+            {
+                return Err(SessionDecodeError::InvalidExecutionState(
+                    "current AI Assistant snapshot is missing required execution fields".into(),
+                ));
+            }
+        }
+        if let Some(data) = &session.assistant_data {
+            if session.surface != AgentSessionSurface::AiAssistant
+                || session.agent_role.binding().is_some()
+                || (data.instructions.accepted_input_seq == 0
+                    && !session.conversation_id.starts_with("schedule-run-"))
+                || (data.current_actor_input_seq == 0
+                    && data.retrieval_task_id.as_deref() != Some(session.conversation_id.as_str()))
+            {
+                return Err(SessionDecodeError::InvalidDynamicRun(
+                    "assistant data outside a personal main session".into(),
+                ));
+            }
+            data.validate()
+                .map_err(|error| SessionDecodeError::InvalidDynamicRun(error.into()))?;
+            if data.history_access_scope.as_ref().is_some_and(|scope| {
+                scope.actor_id != session.actor_id
+                    || scope.root_conversation_id != session.conversation_id
+            }) {
+                return Err(SessionDecodeError::InvalidDynamicRun(
+                    "assistant history scope subject changed".into(),
+                ));
+            }
         }
         if session.control_revision == 0
             || session
@@ -1188,6 +1231,7 @@ impl PersistedAgentSession {
             surface: AgentSessionSurface::Unknown,
             conversation_schema_version: CONVERSATION_SCHEMA_VERSION,
             conversation: Vec::new(),
+            assistant_data: None,
             focus_epoch: crate::focus_epoch::FocusEpochState::default(),
             capability_disclosure: crate::capability_disclosure::CapabilityDisclosureState::default(
             ),
@@ -1272,13 +1316,12 @@ impl PersistedAgentSession {
         Ok(session)
     }
 
-    /// Published result delivery retains its original scheduled provenance but
-    /// has only the authority to interpret existing child facts.
+    /// Published result delivery retains its original scheduled provenance and
+    /// the report-only authority frozen in that published occurrence.
     pub fn is_subagent_result_turn(&self) -> bool {
         self.agent_role.is_main()
-            && (self.trigger_origin == TriggerOrigin::SubAgentCompletion
-                || (self.trigger_origin == TriggerOrigin::ScheduledTask
-                    && (self.subagent_result_only || self.ready_subagent_notification.is_some())))
+            && self.trigger_origin == TriggerOrigin::ScheduledTask
+            && (self.subagent_result_only || self.ready_subagent_notification.is_some())
     }
 
     pub fn allows_new_mutation(&self) -> bool {
@@ -1643,33 +1686,12 @@ impl PersistedAgentSession {
         Ok(true)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn active_context(&self, now_unix_ms: u64) -> Vec<&ContextAttachment> {
         self.context_attachments
             .iter()
             .filter(|attachment| attachment.is_active_at(now_unix_ms))
             .collect()
-    }
-
-    pub fn revalidate_context(
-        &mut self,
-        now_unix_ms: u64,
-        bindings: &[AttachmentRuntimeBinding],
-    ) -> Vec<ContextAttachmentEvent> {
-        let events = revalidate_attachments(&mut self.context_attachments, now_unix_ms, bindings);
-        self.retain_active_focus_attachments();
-        events
-    }
-
-    pub fn mark_context_stale(&mut self, reason: AttachmentStaleReason) {
-        for attachment in &mut self.context_attachments {
-            if matches!(
-                attachment.state,
-                crate::context_attachment::AttachmentState::Active
-            ) {
-                attachment.mark_stale(reason);
-            }
-        }
-        self.retain_active_focus_attachments();
     }
 
     fn retain_active_focus_attachments(&mut self) {
@@ -1750,6 +1772,7 @@ impl PersistedAgentSession {
         Ok(())
     }
 
+    #[cfg(test)]
     /// Apply a mid-turn policy change: narrow the effective scope to
     /// `turn_start_scope ∩ latest` (a running turn may only lose authority, never
     /// gain it). Updates `policy_revision` to the observed latest.
@@ -1772,10 +1795,10 @@ impl PersistedAgentSession {
         }
     }
 
-    /// Record a provider-backed context-compression call without consuming one
-    /// model→tool iteration. Compression usage is still part of the authoritative
+    /// Record a provider-backed auxiliary call without consuming one
+    /// model→tool iteration. Auxiliary usage is still part of the authoritative
     /// turn/lifetime token totals and billing surfaces.
-    pub fn record_compression_usage(&mut self, usage: TokenUsage) {
+    pub fn record_auxiliary_usage(&mut self, usage: TokenUsage) {
         add_usage(&mut self.current_turn_tokens, usage);
         add_usage(&mut self.lifetime_tokens, usage);
         if self.surface == AgentSessionSurface::AiAssistant
@@ -1788,10 +1811,13 @@ impl PersistedAgentSession {
     /// Build the authoritative raw-history protection snapshot used by context
     /// planning. A checkpoint source id is never a substitute for one of these
     /// live message/tool ids.
+    pub fn model_conversation(&self) -> std::borrow::Cow<'_, [ChatMessage]> {
+        std::borrow::Cow::Borrowed(&self.conversation)
+    }
+
     pub fn context_protection_set(&self) -> crate::model_context::ContextProtectionSet {
-        let mut protection = crate::model_context::ContextProtectionSet::default();
-        // The most recent assistant batch has not yet received an accepted model
-        // response to its results. Its entire call/result group must stay intact.
+        let mut protection = self.native_context_protection_set();
+        // The latest tool batch stays intact until a model consumes its results.
         if let Some(message) = self
             .conversation
             .iter()
@@ -1802,6 +1828,12 @@ impl PersistedAgentSession {
                 protection.protect_tool_call(call.id.clone());
             }
         }
+        protection
+    }
+
+    /// Native work remains protected independently of a model tool-group proof.
+    pub fn native_context_protection_set(&self) -> crate::model_context::ContextProtectionSet {
+        let mut protection = crate::model_context::ContextProtectionSet::default();
         for result in &self.observed_subagent_results {
             if result.parent_input_revision == self.input_revision
                 && result.parent_control_revision == self.control_revision
@@ -2651,10 +2683,41 @@ pub fn narrow_scope(start: &AgentScope, latest: &AgentScope) -> AgentScope {
     }
 }
 
+// Keep the initial scope clone outside the session construction frame.
+#[inline(never)]
+fn clone_initial_scope(scope: &AgentScope) -> AgentScope {
+    scope.clone()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::chat::ChatMessage;
+    #[test]
+    fn boxed_decode_preserves_full_validation_and_the_exact_stored_state() {
+        let original = session();
+        let json = original.encode_json_for_storage().unwrap();
+        let owned = PersistedAgentSession::decode_boxed_json(&json).unwrap();
+        assert_eq!(*owned, PersistedAgentSession::decode_json(&json).unwrap());
+        assert_eq!(*owned, original);
+        let mut invalid: serde_json::Value = serde_json::from_str(&json).unwrap();
+        invalid["conversation_schema_version"] = serde_json::json!(u64::MAX);
+        assert!(PersistedAgentSession::decode_boxed_json(&invalid.to_string()).is_err());
+    }
+
+    #[test]
+    fn boxed_snapshot_preserves_full_state_and_owns_independent_messages() {
+        let mut original = session();
+        original
+            .conversation
+            .push(ChatMessage::text("owner", ChatRole::User, "original"));
+        let mut snapshot = original.clone_boxed();
+        assert_eq!(*snapshot, original);
+        snapshot.conversation[0].text.push_str(" changed");
+        snapshot.version += 1;
+        assert_eq!(original.conversation[0].text, "original");
+        assert_ne!(snapshot.version, original.version);
+    }
     #[test]
     fn context_notice_keeps_original_time_and_boundary_across_retries_and_restore() {
         let mut state = session();
@@ -4052,6 +4115,27 @@ mod tests {
     }
 
     #[test]
+    fn current_ai_assistant_missing_fields_are_invalid_data_not_an_old_format() {
+        for field in [
+            "capability_disclosure",
+            "focus_epoch",
+            "visual_evidence",
+            "pending_visual_verification",
+        ] {
+            let mut value = serde_json::to_value(session()).unwrap();
+            value["surface"] = serde_json::json!("ai_assistant");
+            value.as_object_mut().unwrap().remove(field);
+            assert!(
+                matches!(
+                    PersistedAgentSession::decode_json(&value.to_string()),
+                    Err(SessionDecodeError::InvalidExecutionState(_))
+                ),
+                "{field}"
+            );
+        }
+    }
+
+    #[test]
     fn old_ai_assistant_schema_is_rejected_instead_of_inferred() {
         let mut value = serde_json::to_value(session()).unwrap();
         value["surface"] = serde_json::json!("ai_assistant");
@@ -4335,10 +4419,4 @@ mod tests {
         assert!(!replay.contains("assistant-0"));
         assert!(replay.contains("assistant-1"));
     }
-}
-
-// Keep the initial scope clone outside the session construction frame.
-#[inline(never)]
-fn clone_initial_scope(scope: &AgentScope) -> AgentScope {
-    scope.clone()
 }

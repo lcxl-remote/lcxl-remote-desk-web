@@ -8,7 +8,7 @@ use std::{future::Future, pin::Pin};
 #[inline(never)]
 pub(super) fn drive<'a>(
     deps: &'a LoopDeps<'a>,
-    session: PersistedAgentSession,
+    session: Box<PersistedAgentSession>,
     run_id: &'a str,
     permission_request_id: Option<&'a str>,
     fresh: Option<&'a fresh::FreshContext>,
@@ -25,7 +25,7 @@ pub(super) fn drive<'a>(
             desk_diagnose_core::future::boxed(|| {
                 resume_claimed_fresh_task_children_turn(
                     deps,
-                    session,
+                    *session,
                     &fresh.contract,
                     creation,
                     run_id,
@@ -37,7 +37,7 @@ pub(super) fn drive<'a>(
             desk_diagnose_core::future::boxed(|| {
                 resume_claimed_fresh_task_notification_turn(
                     deps,
-                    session,
+                    *session,
                     &fresh.contract,
                     creation,
                     run_id,
@@ -45,11 +45,11 @@ pub(super) fn drive<'a>(
                     sink,
                 )
             })
-        } else if let Some(request_id) = fresh.approval_reference.as_deref() {
+        } else if let Some(request_id) = fresh.resume_reference.as_deref() {
             desk_diagnose_core::future::boxed(|| {
                 resume_claimed_fresh_task_permission_turn(
                     deps,
-                    session,
+                    *session,
                     &fresh.contract,
                     creation,
                     run_id,
@@ -61,21 +61,22 @@ pub(super) fn drive<'a>(
             desk_diagnose_core::future::boxed(|| {
                 resume_claimed_fresh_task_turn(
                     deps,
-                    session,
+                    *session,
                     &fresh.contract,
                     creation,
                     run_id,
+                    fresh.initial_assistant_data.as_deref(),
                     sink,
                 )
             })
         }
     } else if let Some(request_id) = permission_request_id {
         desk_diagnose_core::future::boxed(|| {
-            resume_claimed_scheduled_permission_turn(deps, session, run_id, request_id, sink)
+            resume_claimed_scheduled_permission_turn(deps, *session, run_id, request_id, sink)
         })
     } else {
         desk_diagnose_core::future::boxed(|| {
-            resume_claimed_scheduled_turn(deps, session, run_id, sink)
+            resume_claimed_scheduled_turn(deps, *session, run_id, sink)
         })
     }
 }

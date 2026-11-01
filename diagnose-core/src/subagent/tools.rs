@@ -1,6 +1,6 @@
 //! Main-only delegation tools. Parsers bind all authority to the current session.
 
-use desk_agent_protocol::{AgentError, Capability};
+use desk_agent_protocol::AgentError;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -141,7 +141,7 @@ pub fn registry() -> Vec<RegisteredTool> {
                 description: description.into(),
                 parameters_schema: schema,
             },
-            required_capability: Capability::SystemInfo,
+            required_device_capability: None,
             effect: effect(name).expect("registered delegation tool"),
         }
     }

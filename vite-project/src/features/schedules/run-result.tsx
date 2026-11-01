@@ -17,6 +17,7 @@ export function RunResult({ scheduleId, runId, connected, onBack, client, connec
     const [cursor, setCursor] = useState<string | null>(null);
     const [busy, setBusy] = useState(false);
     const [failed, setFailed] = useState(false);
+
     const epoch = useRef(0);
     const abort = useRef<AbortController | null>(null);
     const watermark = useRef<{ session: string; seq: number } | null>(null);

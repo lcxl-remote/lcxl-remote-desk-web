@@ -75,6 +75,7 @@ closed_enum!(Purpose {
     Approval,
     Completion,
     ContextCompression,
+    ConversationTitle,
     Safety,
     Probe,
     FleetNaturalLanguage,
@@ -265,6 +266,7 @@ impl From<ModelUseCase> for Purpose {
             ModelUseCase::Completion => Self::Completion,
             ModelUseCase::FleetNaturalLanguage => Self::FleetNaturalLanguage,
             ModelUseCase::ContextCompression => Self::ContextCompression,
+            ModelUseCase::ConversationTitle => Self::ConversationTitle,
         }
     }
 }

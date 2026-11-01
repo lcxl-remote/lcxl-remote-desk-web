@@ -85,7 +85,7 @@ pub fn apply_model_compatibility(
 }
 
 fn tool_requires_image_input(tool: &RegisteredTool) -> bool {
-    tool.required_capability == Capability::ScreenCaptureCurrent
+    tool.required_device_capability == Some(Capability::ScreenCaptureCurrent)
 }
 
 #[cfg(test)]
@@ -139,7 +139,7 @@ mod tests {
     fn tool_requirements_follow_capability_not_tool_name() {
         let mut screen = read_tool_registry()
             .into_iter()
-            .find(|tool| tool.required_capability == Capability::ScreenCaptureCurrent)
+            .find(|tool| tool.required_device_capability == Some(Capability::ScreenCaptureCurrent))
             .unwrap();
         screen.spec.name = "renamed_screen_reader".into();
 

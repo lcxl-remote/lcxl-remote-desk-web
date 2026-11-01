@@ -236,6 +236,7 @@ struct RawCompletion {
     note: String,
 }
 
+#[cfg(test)]
 /// Parse the model's answer into completion candidates, computing the
 /// server-authoritative `risk` / `decision` for each over the full command line.
 ///

@@ -40,10 +40,47 @@ pub(super) async fn enable(db: &DatabaseConnection, id: &str) -> ApprovalDelegat
     value
 }
 
+fn stale_command_policy() -> desk_diagnose_core::command_confirmation::CommandPolicyContext {
+    desk_diagnose_core::command_confirmation::CommandPolicyContext {
+        actor_id: "1".into(),
+        target_device_id: "1".into(),
+        target_session_id: "original-host:desktop".into(),
+        policy_revision: 1,
+        admission_policy: desk_agent_protocol::authz::ExecAdmissionPolicy::OwnerInteractive,
+        execution_mode: desk_agent_protocol::ExecutionMode::ConfirmEachAction,
+        max_risk: desk_agent_protocol::RiskLevel::Critical,
+        available_shells: vec!["bash".into()],
+        max_runtime_ms: 600000,
+        operator_templates: vec![],
+        effective_blocklist: desk_agent_protocol::exec_policy::builtin_blocklist().to_vec(),
+        policy_version: "owner-policy".into(),
+        exec_pty: false,
+        exec_pty_elevation: false,
+    }
+}
+
+fn command_item(item: &mut desk_diagnose_core::dynamic_run::GrantRequestItem, input_revision: u64) {
+    let canonical = serde_json::json!({"schema_version":1,"shell":"bash","command":"printf healthy","timeout_ms":1000}).to_string();
+    let confirmation = stale_command_policy()
+        .prepare(&canonical, input_revision)
+        .unwrap();
+    item.provider_id = "system.command".into();
+    item.tool_name = "exec_command".into();
+    item.expected_effect =
+        desk_agent_protocol::capability_provider::CapabilityEffect::ExecuteCommand;
+    item.resource_scope = confirmation.resource_scope().unwrap();
+    item.operation_scope = vec!["exec_command".into()];
+    item.canonical_input_json = Some(canonical);
+    item.canonical_input_digest_sha256 = Some(confirmation.canonical_input_digest_sha256.clone());
+    item.command_confirmation = Some(confirmation);
+    item.suggested_max_uses = 1;
+}
+
 async fn child(
     db: &DatabaseConnection,
     parent: &PersistedAgentSession,
     call: &desk_diagnose_core::chat::ToolCall,
+    command: bool,
 ) -> PersistedAgentSession {
     let task = SubAgentStore::new(db.clone())
         .spawn_for_turn(parent, call, &super::creation::spawn_request())
@@ -70,6 +107,9 @@ async fn child(
     event.request.request_id = format!("request-{}", task.task_id);
     event.event.event_id = format!("requested-{}", task.task_id);
     event.event.correlation_id = Some(event.request.request_id.clone());
+    if command {
+        command_item(&mut event.request.items[0], session.input_revision);
+    }
     session.permission_requests[0] = event.request.clone();
     let source = session
         .delegated_owner_requirement
@@ -123,7 +163,23 @@ async fn root_switch_discovers_existing_and_future_children_while_main_is_runnin
         Sensitivity::Sensitive,
     )
     .await;
-    let first = child(&db, &parent, &calls[0]).await;
+    let unreadable = seed_unreadable_session(&db).await;
+    let mut stale = enable(&db, "unreadable-review").await;
+    stale.conversation_id = unreadable.conversation_id.clone();
+    ledger::Entity::update_many()
+        .col_expr(
+            ledger::Column::ConversationId,
+            sea_orm::sea_query::Expr::value(&stale.conversation_id),
+        )
+        .col_expr(
+            ledger::Column::StateJson,
+            sea_orm::sea_query::Expr::value(serde_json::to_string(&stale).unwrap()),
+        )
+        .filter(ledger::Column::DelegationId.eq(&stale.delegation_id))
+        .exec(&db)
+        .await
+        .unwrap();
+    let first = child(&db, &parent, &calls[0], false).await;
     assert!(
         approval::pending_permission_reviews(
             &db,
@@ -137,7 +193,7 @@ async fn root_switch_discovers_existing_and_future_children_while_main_is_runnin
         .is_empty()
     );
     let delegation = enable(&db, "root-review").await;
-    let second = child(&db, &parent, &calls[1]).await;
+    let second = child(&db, &parent, &calls[1], false).await;
     let pending = approval::pending_permission_reviews(
         &db,
         0,
@@ -148,6 +204,25 @@ async fn root_switch_discovers_existing_and_future_children_while_main_is_runnin
     .unwrap()
     .0;
     assert_eq!(pending.len(), 2);
+    let now = chrono::Utc::now().timestamp_millis() as u64;
+    let scan = approval::pending_permission_reviews(&db, 0, 1, now);
+    assert!(std::mem::size_of_val(&scan) <= 16 * 1024);
+    let (empty_page, next) = scan.await.unwrap();
+    assert!(empty_page.is_empty());
+    let (next_page, _) = approval::pending_permission_reviews(&db, next.unwrap(), 1, now)
+        .await
+        .unwrap();
+    assert_eq!(next_page.len(), 2);
+    assert_eq!(
+        session_row::Entity::find_by_id(unreadable.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap()
+            .state_json,
+        unreadable.state_json
+    );
+
     assert!(
         pending
             .iter()
@@ -172,7 +247,15 @@ async fn root_switch_discovers_existing_and_future_children_while_main_is_runnin
                 .contains(&desk_agent_protocol::Capability::ShellExecConfirmed)
         );
     }
-    assert_eq!(ledger::Entity::find().count(&db).await.unwrap(), 1);
+    assert_eq!(
+        ledger::Entity::find()
+            .filter(ledger::Column::ConversationId.eq("root"))
+            .count(&db)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(ledger::Entity::find().count(&db).await.unwrap(), 2);
     let mut closed = delegation.clone();
     closed
         .close(desk_diagnose_core::approval_delegation::ApprovalDelegationStatus::Closed)
@@ -242,7 +325,7 @@ async fn shared_review_validates_the_frozen_child_relationship_and_open_source()
         Sensitivity::Sensitive,
     )
     .await;
-    let child = child(&db, &parent, &calls[0]).await;
+    let child = child(&db, &parent, &calls[0], false).await;
     let now = chrono::Utc::now().timestamp_millis();
     assert!(shared_approval_current_on(&db, &child, now).await.unwrap());
     for invalid in 0..4 {
@@ -294,12 +377,14 @@ async fn shared_review_validates_the_frozen_child_relationship_and_open_source()
     assert!(!shared_approval_current_on(&db, &child, now).await.unwrap());
 }
 
-async fn review_child_fixture() -> (
+async fn review_child_fixture(
+    db: DatabaseConnection,
+    command: bool,
+) -> (
     DatabaseConnection,
     PersistedAgentSession,
     ApprovalDelegation,
 ) {
-    let db = database().await;
     let schema = Schema::new(db.get_database_backend());
     for mut table in [
         schema.create_table_from_entity(crate::entity::approval_review_secret::Entity),
@@ -314,7 +399,7 @@ async fn review_child_fixture() -> (
         Sensitivity::Sensitive,
     )
     .await;
-    let child = child(&db, &parent, &calls[0]).await;
+    let child = child(&db, &parent, &calls[0], command).await;
     db.config_context()
         .update::<_, DbErr, _>(|file| {
             file.approval_gateway.enabled = true;
@@ -337,7 +422,7 @@ async fn review_child_fixture() -> (
 async fn active_child_directory_is_claimed_once_and_fault_ends_only_directory_consent() {
     use desk_agent_protocol::capability_provider::ProductSurface;
     use desk_diagnose_core::file_scope::transaction::{self, FileScopeMutation, FileScopeUpdate};
-    let (db, mut session, _) = review_child_fixture().await;
+    let (db, mut session, _) = review_child_fixture(database().await, false).await;
     let now = chrono::Utc::now();
     session.turn_state = desk_diagnose_core::session::TurnState::Running;
     session.current_turn_id = Some("directory-child-turn".into());
@@ -526,7 +611,7 @@ async fn active_child_directory_is_claimed_once_and_fault_ends_only_directory_co
 #[actix_web::test]
 async fn closed_child_claim_releases_the_root_reservation_without_dialing() {
     use desk_agent_protocol::capability_provider::ProductSurface;
-    let (db, child, mut delegation) = review_child_fixture().await;
+    let (db, child, mut delegation) = review_child_fixture(database().await, false).await;
     let registry = desk_diagnose_core::ai_assistant::ai_assistant_provider_registry();
     let now = chrono::Utc::now().timestamp_millis() as u64;
     let candidates = approval::prepare_permission_review_batch(
@@ -646,11 +731,32 @@ async fn closed_child_claim_releases_the_root_reservation_without_dialing() {
 
 #[tokio::test]
 async fn approved_child_review_keeps_its_grant_and_audit_in_the_child_and_usage_in_the_root() {
+    reviewed_child_permission(false, None).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stale_command_review_finishes_as_system_denial_on_small_stacks() {
+    for bytes in [1024 * 1024, 2 * 1024 * 1024] {
+        reviewed_child_permission(true, Some(bytes)).await;
+    }
+}
+
+async fn reviewed_child_permission(command: bool, stack: Option<usize>) {
     use crate::model_egress_store::SignalModelEgressStore;
     use desk_agent_protocol::capability_provider::ProductSurface;
     use desk_diagnose_core::approval_review::{ApprovalReviewDecision, ApprovalVerdict};
-    let (db, child, delegation) = review_child_fixture().await;
+    let directory = tempfile::tempdir().unwrap();
+    let url = format!(
+        "sqlite://{}?mode=rwc",
+        directory.path().join("review.sqlite").display()
+    );
+    let (db, child, delegation) = review_child_fixture(database_at(&url).await, command).await;
     let registry = desk_diagnose_core::ai_assistant::ai_assistant_provider_registry();
+    let registry = if command {
+        registry.with_command_policy(stale_command_policy())
+    } else {
+        registry
+    };
     let now = chrono::Utc::now().timestamp_millis() as u64;
     let request_id = &child.permission_requests[0].request_id;
     let candidates = approval::prepare_permission_review_batch(
@@ -746,11 +852,17 @@ async fn approved_child_review_keeps_its_grant_and_audit_in_the_child_and_usage_
         .unwrap(),
         "approved"
     );
+    let item = &child.permission_requests[0].items[0];
     let inventory = vec![
         desk_diagnose_core::capability_availability::CapabilityAvailability {
-            provider_id: "desktop.session".into(),
-            capability_id: "desktop.session.inspect".into(),
-            tool_name: "inspect_desktop_session".into(),
+            provider_id: item.provider_id.clone(),
+            capability_id: registry
+                .capability_for_tool(&item.tool_name)
+                .unwrap()
+                .wire
+                .capability_id
+                .clone(),
+            tool_name: item.tool_name.clone(),
             compiled: true,
             enabled: true,
             connected: true,
@@ -758,26 +870,58 @@ async fn approved_child_review_keeps_its_grant_and_audit_in_the_child_and_usage_
             reason: None,
         },
     ];
-    crate::agent_session_store::SignalAgentSessionStore::new(db.clone())
-        .decide_permission_request_by_ai(
-            crate::agent_session_store::PermissionDecisionSubject {
-                conversation_id: &child.conversation_id,
-                actor_id: "1",
-                device_id: "1",
-            },
-            request_id,
-            &candidates,
-            &[],
-            crate::agent_session_store::PermissionGrantIssuanceContext {
-                surface: ProductSurface::OssPersonalOwner,
-                registry: &registry,
-                inventory: &inventory,
-                readiness_revision: 1,
-                now_unix_ms: chrono::Utc::now().timestamp_millis() as u64,
-                implicit_fresh_object_refs: &[],
-            },
-            &chrono::Utc::now().to_rfc3339(),
-        )
+    let registry = if command {
+        let mut policy = stale_command_policy();
+        policy.target_session_id.push_str("-reconnected");
+        registry.with_command_policy(policy)
+    } else {
+        registry
+    };
+    let store = crate::agent_session_store::SignalAgentSessionStore::new(db.clone());
+    let decide = || async {
+        store
+            .decide_permission_request_by_ai(
+                crate::agent_session_store::PermissionDecisionSubject {
+                    conversation_id: &child.conversation_id,
+                    actor_id: "1",
+                    device_id: "1",
+                },
+                request_id,
+                &candidates,
+                &[],
+                crate::agent_session_store::PermissionGrantIssuanceContext {
+                    surface: ProductSurface::OssPersonalOwner,
+                    registry: &registry,
+                    inventory: &inventory,
+                    readiness_revision: 1,
+                    now_unix_ms: chrono::Utc::now().timestamp_millis() as u64,
+                    implicit_fresh_object_refs: &[],
+                },
+                &chrono::Utc::now().to_rfc3339(),
+            )
+            .await
+            .unwrap();
+    };
+    if let Some(bytes) = stack {
+        std::thread::scope(|scope| {
+            std::thread::Builder::new()
+                .stack_size(bytes)
+                .spawn_scoped(scope, || {
+                    tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap()
+                        .block_on(desk_diagnose_core::future::boxed(decide));
+                })
+                .unwrap()
+                .join()
+                .unwrap()
+        });
+    } else {
+        decide().await;
+    }
+    // Verify the committed decision through a fresh pool after child-runtime exit.
+    let db = crate::config::test_support::Database::connect(&url)
         .await
         .unwrap();
     let child = super::paused_permission::session(&db, &child.conversation_id).await;
@@ -785,6 +929,45 @@ async fn approved_child_review_keeps_its_grant_and_audit_in_the_child_and_usage_
         .list_for_subject(&child.conversation_id, "1", "1")
         .await
         .unwrap();
+    if command {
+        use desk_diagnose_core::dynamic_run::{PermissionDecisionActor, PermissionRequestState};
+        assert!(grants.is_empty());
+        assert_eq!(
+            child.permission_requests[0].state,
+            PermissionRequestState::Denied
+        );
+        assert_eq!(
+            child.permission_decisions.last().unwrap().actor,
+            PermissionDecisionActor::System
+        );
+        let total = approval::load_latest_for_subject(&db, "root", "1", "1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(total.usage.reviews_used, 1);
+        assert_eq!(total.usage.tokens_used, 120);
+        assert_eq!(total.usage.reviews_reserved, 0);
+        let rows = crate::entity::agent_approval_review::Entity::find()
+            .all(&db)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].status, "approved");
+        assert!(rows[0].decision_json.is_some());
+        assert!(
+            approval::pending_permission_reviews(
+                &db,
+                0,
+                64,
+                chrono::Utc::now().timestamp_millis() as u64
+            )
+            .await
+            .unwrap()
+            .0
+            .is_empty()
+        );
+        return;
+    }
     assert_eq!(grants.len(), 1);
     assert_eq!(grants[0].run_id, child.conversation_id);
     let txn = db.begin().await.unwrap();
@@ -819,4 +1002,16 @@ async fn approved_child_review_keeps_its_grant_and_audit_in_the_child_and_usage_
         child.permission_requests[0].state,
         desk_diagnose_core::dynamic_run::PermissionRequestState::Approved
     );
+}
+
+#[test]
+fn unreadable_snapshot_approval_scans_fit_small_stacks() {
+    for bytes in [1024 * 1024, 2 * 1024 * 1024] {
+        std::thread::Builder::new()
+            .stack_size(bytes)
+            .spawn(root_switch_discovers_existing_and_future_children_while_main_is_running)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
 }

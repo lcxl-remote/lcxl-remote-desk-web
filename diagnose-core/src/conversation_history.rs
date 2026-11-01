@@ -7,7 +7,7 @@
 
 use std::collections::BTreeSet;
 
-use desk_agent_protocol::{AgentError, AgentErrorKind, Capability};
+use desk_agent_protocol::{AgentError, AgentErrorKind};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -75,7 +75,7 @@ pub fn conversation_history_tool_registry() -> Vec<RegisteredTool> {
                 "max_bytes":{"type":"integer","minimum":4,"maximum":32768,"default":32768}},
                 "additionalProperties":false}),
         },
-        required_capability: Capability::SystemInfo,
+        required_device_capability: None,
         effect: ToolEffect::ConversationHistory,
     }, RegisteredTool {
         spec: ToolSpec {
@@ -99,7 +99,7 @@ pub fn conversation_history_tool_registry() -> Vec<RegisteredTool> {
                 "additionalProperties": false
             }),
         },
-        required_capability: Capability::SystemInfo,
+        required_device_capability: None,
         effect: ToolEffect::ConversationHistory,
     }]
 }

@@ -171,6 +171,7 @@ impl DeviceQuota {
         })
     }
 }
+#[cfg(test)]
 fn validate_limit(max_bytes: u64) -> io::Result<()> {
     super::Policy {
         retention_days: 7,
@@ -306,6 +307,7 @@ impl LockedDeviceQuota {
         self.ledger = next;
         Ok(())
     }
+    #[cfg(test)]
     /// Lower limits stop new reservations; existing backup materials are retained.
     pub fn set_limit(&mut self, max_bytes: u64) -> io::Result<()> {
         validate_limit(max_bytes)?;

@@ -7,6 +7,7 @@ use desk_diagnose_core::schedule::lifecycle::FailureState;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, Set};
 
 impl ScheduleStore {
+    #[cfg(test)]
     pub async fn read_authorization(
         &self,
         owner: i32,
@@ -20,6 +21,7 @@ impl ScheduleStore {
             .ok_or(ScheduleStoreError::NotFound)
     }
 
+    #[cfg(test)]
     pub async fn revoke_task_authorization(
         &self,
         owner: i32,

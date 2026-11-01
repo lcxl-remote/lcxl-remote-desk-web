@@ -19,10 +19,6 @@ pub fn goal_status_protects_session(status_code: &str) -> bool {
     !TERMINAL_GOAL_STATUS_CODES.contains(&status_code)
 }
 
-/// Terminal state written to a conversation timer when its source session is
-/// reclaimed, and the reason recorded with it.
-pub const SOURCE_SESSION_EXPIRED: &str = "source_session_expired";
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionReclaimBlocker {
     /// Dispatched or unreconciled work still needs its session as evidence.

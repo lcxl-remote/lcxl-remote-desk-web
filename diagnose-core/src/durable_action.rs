@@ -12,6 +12,14 @@ use serde_json::Value;
 
 use crate::session::WorkKind;
 
+/// Advance a claim counter within an optional stage limit. Callers keep their
+/// own eligibility, transaction and dispatch fencing rules.
+pub fn next_claim_attempt(current: i32, maximum: Option<i32>) -> Option<i32> {
+    current
+        .checked_add(1)
+        .filter(|next| maximum.is_none_or(|limit| *next <= limit))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClaimedAction {
     pub work_id: i64,
@@ -97,4 +105,18 @@ pub trait DurableActionLifecycle<E>: Send + Sync {
         requested_by: &str,
         cancelled_result_json: &str,
     ) -> Result<CancelRequestOutcome, E>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn claim_attempt_limits_include_the_first_claim_and_preserve_unbounded_actions() {
+        assert_eq!(next_claim_attempt(0, Some(3)), Some(1));
+        assert_eq!(next_claim_attempt(2, Some(3)), Some(3));
+        assert_eq!(next_claim_attempt(3, Some(3)), None);
+        assert_eq!(next_claim_attempt(3, None), Some(4));
+        assert_eq!(next_claim_attempt(i32::MAX - 1, None), Some(i32::MAX));
+        assert_eq!(next_claim_attempt(i32::MAX, None), None);
+    }
 }

@@ -1,7 +1,7 @@
 import { act, cleanup, renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { useFileTransfer } from './use-file-transfer';
-import { installSignalingStubs, restoreSignalingStubs, openSession, deliverSignaling, sentSignalingOfType, flush, type SignalingGlobals } from './file-transfer-test-harness';
+import { installSignalingStubs, restoreSignalingStubs, openSession, deliverSignaling, sentSignalingOfType, flush, type SignalingGlobals } from './__tests__/harness';
 import { SIGNALING_TYPE_CODE_REQUEST_REMOTE_ACCESS, SIGNALING_TYPE_CODE_LIST_FILES, SIGNALING_TYPE_CODE_FILES_LISTED, SIGNALING_TYPE_CODE_OFFER, SIGNALING_TYPE_CODE_ICE_CANDIDATE } from '@/features/desk/constants';
 
 let saved: SignalingGlobals;

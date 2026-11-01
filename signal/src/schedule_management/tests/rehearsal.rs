@@ -149,6 +149,8 @@ async fn rehearsal_management_scenario() {
             .is_none()
     );
     let ask = AiAssistantAsk {
+        client_timezone: "UTC".into(),
+        temporary_conversation: None,
         question: rehearsal.prompt.clone(),
         conversation_id: Some(rehearsal.client_conversation_id.clone()),
         client_message_id: rehearsal.initial_message_id.clone(),

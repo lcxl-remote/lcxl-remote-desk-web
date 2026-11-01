@@ -2,7 +2,9 @@
 
 Generated from `diagnose-core/src/output_contracts.rs`. Catalog version describes this mapping, not a payload schema field. All errors may instead be returned as safe text; an externalized attachment must be read before interpreting its business payload.
 
-`read_subagent_result` returns `SubAgentModelResult`: the full answer, frozen acceptance criteria, task identity and state revision, and nonempty runtime facts or references. It omits UI metadata and empty optional fields. `include_task=true` adds the original task instructions; owner views keep the full stored result.
+`read_subagent_result` returns `SubAgentModelResult`: the full answer, frozen acceptance criteria, task identity, and nonempty runtime facts or references. It omits UI metadata and empty optional fields. `include_task=true` adds the original task instructions; owner views keep the full stored result.
+
+Model results retain business text, outcomes, times, coverage and usable references. Internal source locators, verification hashes, idempotency keys and control generations stay in the original stored result. History uses conversation aliases such as `cv1`; source IDs remain readable, and memory update/forget keeps the memory revision. Live document references and JSON attachment pages use the same view as inline results. A successful tool return does not by itself prove that an action completed or was verified.
 
 | Tool | Business output type | Catalog version | Possible delivery |
 |---|---|---:|---|
@@ -24,6 +26,12 @@ Generated from `diagnose-core/src/output_contracts.rs`. Catalog version describe
 | `describe_tools` | `ToolDescriptionList` | 1 | inline |
 | `read_conversation_attachment` | `ReadPage` | 1 | inline |
 | `load_conversation_history` | `HistoryPage` | 1 | inline |
+| `search_memories` | `MemorySearchResult` | 1 | inline |
+| `read_memory_history` | `MemoryHistoryResult` | 1 | inline |
+| `manage_memories` | `MemoryWriteResult` | 1 | inline |
+| `read_memory_source` | `AssistantSourceResolution` | 1 | inline |
+| `search_conversations` | `ConversationSearchResult` | 1 | inline |
+| `read_conversation` | `ConversationReadResult` | 1 | inline |
 | `wait_for_task` | `TaskWaitReceipt + original typed result` | 1 | inline | externalized_attachment |
 | `read_system_info` | `ReadContext.SystemInfo` | 1 | inline | externalized_attachment |
 | `read_process_list` | `ReadContext.ProcessList` | 1 | inline | externalized_attachment |
@@ -61,22 +69,22 @@ Generated from `diagnose-core/src/output_contracts.rs`. Catalog version describe
 | `create_word_report` | `ComputerActionCompleted<CreatedFileArtifactOutput>` | 1 | inline | background_completion | externalized_attachment |
 | `preview_document` | `ReadContext.DocumentPreview` | 1 | inline | externalized_attachment |
 | `convert_document` | `ComputerActionCompleted<DocumentArtifactOutput>` | 1 | inline | background_completion | externalized_attachment |
-| `inspect_office_selection` | `ReadContext.OfficeInspect` | 1 | inline | externalized_attachment |
-| `inspect_live_spreadsheet` | `ReadContext.LiveDocumentInspect` | 1 | inline | externalized_attachment |
-| `inspect_live_document` | `ReadContext.LiveDocumentInspect` | 1 | inline | externalized_attachment |
-| `inspect_live_presentation` | `ReadContext.LiveDocumentInspect` | 1 | inline | externalized_attachment |
+| `inspect_office_selection` | `ReadContext.OfficeDocumentInspect` | 1 | inline | externalized_attachment |
+| `inspect_live_spreadsheet` | `ReadContext.SpreadsheetLiveInspect` | 1 | inline | externalized_attachment |
+| `inspect_live_document` | `ReadContext.DocumentLiveInspect` | 1 | inline | externalized_attachment |
+| `inspect_live_presentation` | `ReadContext.PresentationLiveInspect` | 1 | inline | externalized_attachment |
 | `patch_live_spreadsheet_cell` | `ComputerActionCompleted` | 1 | inline | background_completion | externalized_attachment |
 | `replace_live_document_body` | `ComputerActionCompleted` | 1 | inline | background_completion | externalized_attachment |
 | `patch_live_presentation_slide` | `ComputerActionCompleted` | 1 | inline | background_completion | externalized_attachment |
-| `inspect_numbers_file` | `ReadContext.LiveDocumentInspect` | 1 | inline | externalized_attachment |
-| `inspect_pages_file` | `ReadContext.LiveDocumentInspect` | 1 | inline | externalized_attachment |
-| `inspect_keynote_file` | `ReadContext.LiveDocumentInspect` | 1 | inline | externalized_attachment |
+| `inspect_numbers_file` | `ReadContext.SpreadsheetLiveInspect` | 1 | inline | externalized_attachment |
+| `inspect_pages_file` | `ReadContext.DocumentLiveInspect` | 1 | inline | externalized_attachment |
+| `inspect_keynote_file` | `ReadContext.PresentationLiveInspect` | 1 | inline | externalized_attachment |
 | `patch_numbers_copy` | `ComputerActionCompleted<BatchDocumentArtifact>` | 1 | inline | background_completion | externalized_attachment |
 | `replace_pages_copy_body` | `ComputerActionCompleted<BatchDocumentArtifact>` | 1 | inline | background_completion | externalized_attachment |
 | `patch_keynote_copy` | `ComputerActionCompleted<BatchDocumentArtifact>` | 1 | inline | background_completion | externalized_attachment |
-| `inspect_excel_cell` | `ReadContext.LiveDocumentInspect` | 1 | inline | externalized_attachment |
-| `inspect_word_file` | `ReadContext.LiveDocumentInspect` | 1 | inline | externalized_attachment |
-| `inspect_powerpoint_file` | `ReadContext.LiveDocumentInspect` | 1 | inline | externalized_attachment |
+| `inspect_excel_cell` | `ReadContext.SpreadsheetLiveInspect` | 1 | inline | externalized_attachment |
+| `inspect_word_file` | `ReadContext.DocumentLiveInspect` | 1 | inline | externalized_attachment |
+| `inspect_powerpoint_file` | `ReadContext.PresentationLiveInspect` | 1 | inline | externalized_attachment |
 | `patch_excel_copy` | `ComputerActionCompleted<BatchDocumentArtifact>` | 1 | inline | background_completion | externalized_attachment |
 | `replace_word_copy_body` | `ComputerActionCompleted<BatchDocumentArtifact>` | 1 | inline | background_completion | externalized_attachment |
 | `patch_powerpoint_copy` | `ComputerActionCompleted<BatchDocumentArtifact>` | 1 | inline | background_completion | externalized_attachment |

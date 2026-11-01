@@ -297,19 +297,6 @@ pub fn list_desktop_geometry() -> Vec<DisplayInfo> {
     }
 }
 
-pub async fn list_image_capture_async() -> BTreeMap<String, Vec<DisplayInfo>> {
-    match tokio::task::spawn_blocking(list_image_capture).await {
-        Ok(result) => result,
-        Err(err) => {
-            log::error!(
-                "Failed to list image capture backends in blocking task: {}",
-                err
-            );
-            BTreeMap::new()
-        }
-    }
-}
-
 pub fn list_image_output(
     image_capture_type: ImageCaptureType,
 ) -> Result<Vec<DisplayInfo>, CaptureError> {

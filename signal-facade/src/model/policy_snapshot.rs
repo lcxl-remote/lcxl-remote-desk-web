@@ -169,6 +169,7 @@ impl PolicySnapshot {
         true
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     /// Set one capability, as a remembered approval does.
     ///
     /// Returns whether the value changed.
@@ -182,6 +183,7 @@ impl PolicySnapshot {
         self.set(security)
     }
 
+    #[cfg(test)]
     /// The capabilities whose value differs from `previous`, by comparing when
     /// each was last changed. A copy uses this to decide which cached approvals
     /// an arriving policy invalidates, without having to hold the old policy.

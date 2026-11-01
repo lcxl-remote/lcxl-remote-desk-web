@@ -44,6 +44,7 @@ pub async fn resume_claimed_fresh_task_turn(
     contract: &ValidatedTaskContract,
     source: &CreationEnvelope,
     run_id: &str,
+    initial_assistant_data: Option<&crate::ai_assistant::data_control::AssistantDataSession>,
     sink: &mut dyn TurnSink,
 ) -> Result<LoopOutcome, AgentError> {
     let denied = || AgentError {
@@ -76,6 +77,15 @@ pub async fn resume_claimed_fresh_task_turn(
     expected.updated_at = session.updated_at.clone();
     expected.delegation_group_id = session.delegation_group_id.clone();
     expected.conversation[0] = source.owner_requirement.clone();
+    // This is the native claim's frozen snapshot, captured before publication
+    // labels were attached. Never derive it from the candidate being checked.
+    if let Some(data) = initial_assistant_data {
+        data.validate().map_err(|_| denied())?;
+        if data.retrieval_task_id.as_deref() != Some(run_id) {
+            return Err(denied());
+        }
+        expected.assistant_data = Some(Box::new(data.clone()));
+    }
     if session != expected {
         return Err(denied());
     }

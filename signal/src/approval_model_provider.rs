@@ -31,10 +31,12 @@ pub struct ApprovalModelConfig {
 
 impl Default for ApprovalModelConfig {
     fn default() -> Self {
-        let mut gateway = ModelProviderConfig::default();
-        gateway.execution_mode = ExecutionMode::SuggestOnly;
-        gateway.supports_image_input = false;
-        gateway.max_context_bytes = Some(131_072);
+        let gateway = ModelProviderConfig {
+            execution_mode: ExecutionMode::SuggestOnly,
+            supports_image_input: false,
+            max_context_bytes: Some(131_072),
+            ..Default::default()
+        };
         Self {
             enabled: false,
             configuration_revision: 1,
@@ -491,7 +493,9 @@ mod tests {
         )
         .unwrap();
         crate::agent_run_event_store::SignalAgentRunEventStore::new(db.clone())
-            .append_user_followup(crate::agent_run_event_store::AppendUserFollowupParams {
+            .append_user_followup(&crate::agent_run_event_store::AppendUserFollowupParams {
+                client_timezone: "UTC".into(),
+                temporary_conversation: None,
                 event_id: "first-input-event".into(),
                 run_id: "conversation".into(),
                 client_conversation_id: Some("empty-client-conversation".into()),

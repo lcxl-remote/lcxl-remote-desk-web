@@ -16,6 +16,7 @@
 //!
 //! The companion measurement harness lives in [`measure`].
 
+#[cfg(test)]
 pub mod measure;
 
 use desk_agent_protocol::{
@@ -191,6 +192,7 @@ pub fn scenario_container_failure() -> EvidenceSnapshot {
     )
 }
 
+#[cfg(test)]
 /// All three acceptance scenarios.
 pub fn all_scenarios() -> Vec<EvidenceSnapshot> {
     vec![

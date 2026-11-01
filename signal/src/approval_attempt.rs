@@ -20,6 +20,14 @@ pub(crate) fn authority(row: &review::Model) -> Result<ReviewCallAuthority, DbEr
 }
 pub(crate) async fn sync_on<C: ConnectionTrait>(db: &C, row: &review::Model) -> Result<(), DbErr> {
     let a = authority(row)?;
+    sync_with_authority_on(db, row, &a).await
+}
+
+async fn sync_with_authority_on<C: ConnectionTrait>(
+    db: &C,
+    row: &review::Model,
+    a: &ReviewCallAuthority,
+) -> Result<(), DbErr> {
     let mut snapshot = row.clone();
     snapshot.decision_json = None;
     attempt::Entity::insert(attempt::ActiveModel {
@@ -82,23 +90,44 @@ pub(crate) async fn record_response(
     if row.status != "reviewing" || authority(&row)? != *a || row.provider_receipt_id.is_none() {
         return Err(invalid());
     }
-    sync_on(&txn, &row).await?;
+    record_response_on(&txn, &row, complete, issue).await?;
+    txn.commit().await?;
+    Ok(())
+}
+
+/// Complete response facts share the authoritative review-settlement transaction.
+pub(crate) async fn record_response_on<C: ConnectionTrait>(
+    db: &C,
+    row: &review::Model,
+    complete: bool,
+    issue: Option<ReviewFormatIssue>,
+) -> Result<(), DbErr> {
+    let a = authority(row)?;
+    sync_with_authority_on(db, row, &a).await?;
+    let issue_json = issue
+        .map(|value| serde_json::to_string(&value))
+        .transpose()
+        .map_err(|_| invalid())?;
+    let call_id = a.attempt.call_id(&a.candidate_id);
     let result = attempt::Entity::update_many()
         .set(attempt::ActiveModel {
             response_complete: Set(complete),
-            format_issue_json: Set(issue
-                .map(|v| serde_json::to_string(&v))
-                .transpose()
-                .map_err(|_| invalid())?),
+            format_issue_json: Set(issue_json.clone()),
             ..Default::default()
         })
-        .filter(attempt::Column::CallId.eq(a.attempt.call_id(&a.candidate_id)))
+        .filter(attempt::Column::CallId.eq(&call_id))
         .filter(attempt::Column::ResponseComplete.eq(false))
-        .exec(&txn)
+        .exec(db)
         .await?;
     if result.rows_affected != 1 {
-        return Err(invalid());
+        let recorded = attempt::Entity::find()
+            .filter(attempt::Column::CallId.eq(call_id))
+            .one(db)
+            .await?
+            .ok_or_else(invalid)?;
+        if recorded.response_complete != complete || recorded.format_issue_json != issue_json {
+            return Err(invalid());
+        }
     }
-    txn.commit().await?;
     Ok(())
 }

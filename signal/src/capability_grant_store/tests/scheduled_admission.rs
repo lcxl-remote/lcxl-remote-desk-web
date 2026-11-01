@@ -6,10 +6,6 @@ async fn missing_scheduled_occurrence_blocks_each_dispatch_boundary_without_adva
     for boundary in 0..3 {
         let directory = tempfile::tempdir().unwrap();
         let db = file_db(&directory.path().join("scheduled.db")).await;
-        let schema = Schema::new(db.get_database_backend());
-        db.execute(&schema.create_table_from_entity(crate::entity::agent_schedule_run::Entity))
-            .await
-            .unwrap();
         insert_session(&db, 1, 1).await;
         let store = SignalCapabilityGrantStore::new(db.clone());
         store.issue(&grant(1)).await.unwrap();

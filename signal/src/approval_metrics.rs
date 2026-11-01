@@ -63,10 +63,13 @@ pub fn settled_json(
     now: i64,
 ) -> Option<String> {
     let original: ReviewTracking = serde_json::from_str(row.statistics_json.as_deref()?).ok()?;
-    let value = tracking
+    let mut value = tracking
         .filter(|v| v.object_id == original.object_id)
-        .unwrap_or(original)
-        .settled(status, reason, now);
+        .unwrap_or(original);
+    if value.snapshot.provider_started_at_ms.is_none() {
+        value.snapshot.provider_started_at_ms = row.provider_started_at_ms;
+    }
+    let value = value.settled(status, reason, now);
     serde_json::to_string(&value).ok()
 }
 

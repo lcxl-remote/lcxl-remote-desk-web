@@ -108,7 +108,7 @@ async fn deliver_fixture(
         &format!("call-{}", action.action_request_id),
         &action.action_request_id,
         "verified result",
-        &now.to_rfc3339()
+        now.to_rfc3339()
     ));
     assert!(
         session.add_pending_auto_trigger(desk_diagnose_core::session::PendingAutoTrigger {
