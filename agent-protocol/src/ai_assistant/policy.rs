@@ -65,12 +65,6 @@ impl PolicyAssessment {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
-pub struct PolicyCheck {
-    pub policy: AssistantDataPolicy,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-#[serde(deny_unknown_fields)]
 pub struct PolicyView {
     pub policy: AssistantDataPolicy,
     pub issues: Vec<PolicyIssue>,

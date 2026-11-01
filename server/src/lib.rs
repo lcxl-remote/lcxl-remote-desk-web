@@ -412,7 +412,6 @@ pub fn configure_api_surface(
                     ;
                     cfg.service(desk_signal::controller::assistant_data::get_assistant_data_policy);
                     cfg.service(desk_signal::controller::assistant_data::update_assistant_data_policy);
-                    cfg.service(desk_signal::controller::assistant_data::validate_assistant_data_policy);
                     cfg.service(desk_signal::controller::approval_trace::list_approval_reviews);
                     cfg.service(desk_signal::controller::approval_trace::get_approval_review);
                     cfg.service(desk_signal::controller::approval_trace::get_approval_review_parts);

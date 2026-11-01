@@ -221,13 +221,11 @@ max_output_tokens = 512
 
 当前 profile schema 为 `2`。`reasoning_contract` 显式选择 `conservative`、`openai_chat`、`deepseek_chat` 或 `anthropic_messages`，并与 `wire_protocol` 匹配。`anthropic_prefix_binding` 默认 `false`，只在端点将签名思考绑定到请求前缀时启用。思考强度和可选原生清理保存在 `request_options_json`；详见 [AI 诊断](../features/ai-diagnostics.md)。主模型与审批模型使用相同字段。
 
-AI 助手资料策略文件与管理 API 使用相同字段规则。无效值会指出字段；启动与成功保存策略时仅记录实际命中的提示。草稿检查、提示语义及共享读取预算见[AI 助手记忆与历史策略](#assistant-data-policy)。
+AI 助手资料策略文件与管理 API 使用相同字段规则。无效值会指出字段；启动与成功保存策略时仅记录实际命中的提示。提示语义及共享读取预算见[AI 助手记忆与历史策略](#assistant-data-policy)。
 
 ## AI 助手记忆与历史策略 {#assistant-data-policy}
 
 平台通过 `AssistantDataPolicy.limits` 配置记忆内容与检索工作量。登录当前开源 Signal 的管理账号后，`GET /api/admin/system/ai-assistant-data` 返回 `data.policy` 与 `data.issues`。修改完整策略后，以 `expected_revision` 和 `policy` 提交 `POST`，保留读取时的 `policy.revision`；成功后返回实际保存的策略及本次命中的问题。版本冲突时重新读取。配置原子写回实际使用的 `config.toml`。
-
-草稿检查使用 `POST /api/admin/system/ai-assistant-data/validate`，请求为 `{ "policy": 完整策略 }`，返回 `data.issues`；该操作不保存、不推进版本，也不访问策略存储。保存时仍独立检查提交内容及版本。接口使用当前开源服务的管理账号鉴权。
 
 正常配置的 `issues` 为空。每个问题包含 `level`（`error` 或 `warning`）、稳定 `code`、相关配置字段 `fields`、兜底说明 `message`，以及适用时的 `effective_limit`。硬错误使用 HTTP 200、`success=false` 和 `INVALID_PARAMS`，保存不生效；仅有提示时 `success=true`，保存照常完成。版本冲突继续使用 `REVISION_CONFLICT` 与 `current_revision`。
 

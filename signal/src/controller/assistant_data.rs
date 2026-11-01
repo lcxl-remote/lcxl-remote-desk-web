@@ -9,9 +9,7 @@ use desk_agent_protocol::ai_assistant::memory::{
     AssistantDataControlReceipt, MemoryClearRequest, MemoryDeleteRequest, MemoryListRequest,
     MemoryListResult,
 };
-use desk_agent_protocol::ai_assistant::policy::{
-    PolicyAssessment, PolicyCheck, PolicyView, PolicyWriteData,
-};
+use desk_agent_protocol::ai_assistant::policy::{PolicyAssessment, PolicyView, PolicyWriteData};
 use desk_agent_protocol::ai_assistant::source::{
     AssistantSourceReadRequest, AssistantSourceResolution,
 };
@@ -310,14 +308,6 @@ fn policy_assessment(assessment: PolicyAssessment) -> HttpResponse {
     } else {
         reply(assessment)
     }
-}
-
-#[utoipa::path(tag = TAG, request_body = PolicyCheck, responses((status = 200, body = RestResponse<PolicyAssessment>)))]
-#[post("/admin/system/ai-assistant-data/validate")]
-pub async fn validate_assistant_data_policy(
-    body: web::Json<PolicyCheck>,
-) -> Result<HttpResponse, DeskSignalError> {
-    Ok(policy_assessment(policy_rules::assess(&body.policy)))
 }
 
 #[cfg(test)]

@@ -275,13 +275,11 @@ max_output_tokens = 512
 
 The current profile schema is `2`. Set `reasoning_contract` explicitly to `conservative`, `openai_chat`, `deepseek_chat` or `anthropic_messages`, matching `wire_protocol`. `anthropic_prefix_binding` defaults to `false`; enable it only for an Anthropic endpoint that binds signed thinking to the request prefix. Thinking effort and optional native clearing remain inside `request_options_json`; see [AI diagnostics](../features/ai-diagnostics.md#thinking-replay-clearing-and-short-references). Both the main and approval gateways use these fields.
 
-Assistant data policy files use the same field checks as the management API. Invalid values report their fields; startup and successful policy updates log only matching warnings. See [AI Assistant memory and history policy](#assistant-data-policy) for draft checking, warning semantics and shared read budgets.
+Assistant data policy files use the same field checks as the management API. Invalid values report their fields; startup and successful policy updates log only matching warnings. See [AI Assistant memory and history policy](#assistant-data-policy) for warning semantics and shared read budgets.
 
 ## AI Assistant memory and history policy {#assistant-data-policy}
 
 `AssistantDataPolicy.limits` controls memory content and retrieval work. After signing in with the open-source Signal management account, `GET /api/admin/system/ai-assistant-data` returns `data.policy` and `data.issues`. Submit the edited complete policy with `expected_revision` and `policy` using `POST`, keeping the revision that was read. A successful save returns the committed policy and its matching issues. Reload after a revision conflict. Signal atomically saves the active `config.toml`.
-
-Check a draft with `POST /api/admin/system/ai-assistant-data/validate`, sending `{ "policy": <complete policy> }` and reading `data.issues`. This operation does not save, advance a revision or access policy storage. Saving independently checks the submitted policy and revision. These endpoints require the current open-source service management account.
 
 Valid configurations return an empty `issues` list. Each issue contains `level` (`error` or `warning`), a stable `code`, related configuration `fields`, a fallback `message`, and `effective_limit` when applicable. Hard errors use HTTP 200 with `success=false` and `INVALID_PARAMS`, without applying the save. Warnings retain `success=true` and allow saving. Revision conflicts keep `REVISION_CONFLICT` and `current_revision`.
 

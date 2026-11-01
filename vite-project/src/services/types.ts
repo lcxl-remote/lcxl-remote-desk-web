@@ -9405,13 +9405,6 @@ export type PolicyAssessment = {
     issues: PolicyIssue[];
 };
 
-export type PolicyCheck = {
-    /**
-     * @type object
-    */
-    policy: AssistantDataPolicy;
-};
-
 export type PolicyView = {
     /**
      * @type array
@@ -13366,30 +13359,6 @@ export type RestResponsePermissionDecisionResponse = {
          * @type string
         */
         state: PermissionRequestStateDto;
-    };
-    /**
-     * @type string,null
-    */
-    message?: string | null;
-    /**
-     * @type boolean
-    */
-    success: boolean;
-};
-
-export type RestResponsePolicyAssessment = {
-    /**
-     * @type integer, int32
-    */
-    code: number;
-    /**
-     * @type object | undefined
-    */
-    data?: {
-        /**
-         * @type array
-        */
-        issues: PolicyIssue[];
     };
     /**
      * @type string,null
@@ -17783,18 +17752,6 @@ export type UpdateAssistantDataPolicyMutationResponse = UpdateAssistantDataPolic
 export type UpdateAssistantDataPolicyMutation = {
     Response: UpdateAssistantDataPolicy200;
     Request: UpdateAssistantDataPolicyMutationRequest;
-    Errors: any;
-};
-
-export type ValidateAssistantDataPolicy200 = RestResponsePolicyAssessment;
-
-export type ValidateAssistantDataPolicyMutationRequest = PolicyCheck;
-
-export type ValidateAssistantDataPolicyMutationResponse = ValidateAssistantDataPolicy200;
-
-export type ValidateAssistantDataPolicyMutation = {
-    Response: ValidateAssistantDataPolicy200;
-    Request: ValidateAssistantDataPolicyMutationRequest;
     Errors: any;
 };
 

@@ -20,7 +20,6 @@ export type { SearchAssistantHistoryMutationKey } from "./useSearchAssistantHist
 export type { UpdateAssistantDataPolicyMutationKey } from "./useUpdateAssistantDataPolicy.ts";
 export type { UpdateAssistantDataSettingsMutationKey } from "./useUpdateAssistantDataSettings.ts";
 export type { UpdateAssistantUserInstructionsMutationKey } from "./useUpdateAssistantUserInstructions.ts";
-export type { ValidateAssistantDataPolicyMutationKey } from "./useValidateAssistantDataPolicy.ts";
 export { clearAssistantMemoriesMutationKey } from "./useClearAssistantMemories.ts";
 export { clearAssistantMemoriesMutationOptions } from "./useClearAssistantMemories.ts";
 export { useClearAssistantMemories } from "./useClearAssistantMemories.ts";
@@ -87,6 +86,3 @@ export { useUpdateAssistantDataSettings } from "./useUpdateAssistantDataSettings
 export { updateAssistantUserInstructionsMutationKey } from "./useUpdateAssistantUserInstructions.ts";
 export { updateAssistantUserInstructionsMutationOptions } from "./useUpdateAssistantUserInstructions.ts";
 export { useUpdateAssistantUserInstructions } from "./useUpdateAssistantUserInstructions.ts";
-export { useValidateAssistantDataPolicy } from "./useValidateAssistantDataPolicy.ts";
-export { validateAssistantDataPolicyMutationKey } from "./useValidateAssistantDataPolicy.ts";
-export { validateAssistantDataPolicyMutationOptions } from "./useValidateAssistantDataPolicy.ts";

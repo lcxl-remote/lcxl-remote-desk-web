@@ -89,7 +89,6 @@ export type { SearchAssistantHistoryMutationKey } from "./assistantDataControlle
 export type { UpdateAssistantDataPolicyMutationKey } from "./assistantDataController/useUpdateAssistantDataPolicy.ts";
 export type { UpdateAssistantDataSettingsMutationKey } from "./assistantDataController/useUpdateAssistantDataSettings.ts";
 export type { UpdateAssistantUserInstructionsMutationKey } from "./assistantDataController/useUpdateAssistantUserInstructions.ts";
-export type { ValidateAssistantDataPolicyMutationKey } from "./assistantDataController/useValidateAssistantDataPolicy.ts";
 export type { ChangePasswordMutationKey } from "./authController/useChangePassword.ts";
 export type { LoginAccountMutationKey } from "./authController/useLoginAccount.ts";
 export type { LoginTauriMutationKey } from "./authController/useLoginTauri.ts";
@@ -513,9 +512,6 @@ export { useUpdateAssistantDataSettings } from "./assistantDataController/useUpd
 export { updateAssistantUserInstructionsMutationKey } from "./assistantDataController/useUpdateAssistantUserInstructions.ts";
 export { updateAssistantUserInstructionsMutationOptions } from "./assistantDataController/useUpdateAssistantUserInstructions.ts";
 export { useUpdateAssistantUserInstructions } from "./assistantDataController/useUpdateAssistantUserInstructions.ts";
-export { useValidateAssistantDataPolicy } from "./assistantDataController/useValidateAssistantDataPolicy.ts";
-export { validateAssistantDataPolicyMutationKey } from "./assistantDataController/useValidateAssistantDataPolicy.ts";
-export { validateAssistantDataPolicyMutationOptions } from "./assistantDataController/useValidateAssistantDataPolicy.ts";
 export { changePasswordMutationKey } from "./authController/useChangePassword.ts";
 export { changePasswordMutationOptions } from "./authController/useChangePassword.ts";
 export { useChangePassword } from "./authController/useChangePassword.ts";
