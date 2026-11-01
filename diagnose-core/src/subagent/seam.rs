@@ -14,7 +14,6 @@ use crate::{
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ObservedResult {
     pub task_id: String,
     pub state_revision: u64,
@@ -40,7 +39,6 @@ impl ObservedResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct AcceptedResultObservation {
     pub result: ObservedResult,
     pub response_message_id: String,

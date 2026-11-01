@@ -2,7 +2,6 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct NotificationEvent {
     pub event_id: String,
     pub task_id: String,
@@ -10,7 +9,6 @@ pub struct NotificationEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ParentNotification {
     pub message_id: String,
     pub group_id: String,

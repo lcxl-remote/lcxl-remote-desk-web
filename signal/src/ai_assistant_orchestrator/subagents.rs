@@ -9,7 +9,6 @@ pub async fn resume_subagent_turn(
     gate: &crate::ai_assistant_gate::AiAssistantGate,
     runtime: RuntimeTurn,
 ) -> Result<LoopOutcome, AgentError> {
-    runtime.validate()?;
     let session = runtime.session();
     if !gate.is_enabled()
         || session.actor_id.parse::<i32>().ok()

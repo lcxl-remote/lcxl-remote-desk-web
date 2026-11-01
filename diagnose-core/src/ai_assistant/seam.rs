@@ -175,7 +175,6 @@ impl AssistantDataReadUse {
 /// Session cache of a durable proof identity. Complete dependencies and memory
 /// observations are loaded from the native projection store, never from this cache.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct AssistantDataProjectionRef {
     pub projection_id: String,
     pub source_envelope_id: String,

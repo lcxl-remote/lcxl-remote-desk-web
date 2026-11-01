@@ -10,7 +10,6 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ControlObservation {
     pub id: String,
     pub input_revision: u64,

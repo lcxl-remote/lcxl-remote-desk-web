@@ -14,7 +14,6 @@ pub use memory_forget::{
     commit_memory_forget_group, read_memory_forget_group, record_stale_memory_forget,
 };
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct CurrentMemoryUse {
     pub memory_id: String,
     pub revision: u64,
@@ -28,7 +27,6 @@ pub struct CommittedMemoryForgetGroup {
     pub receipt: AssistantDataControlReceipt,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct AssistantDataSession {
     #[serde(default)]
     pub limits: Box<desk_agent_protocol::ai_assistant::limits::AssistantDataLimits>,

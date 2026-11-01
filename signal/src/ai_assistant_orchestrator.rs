@@ -1002,9 +1002,8 @@ async fn prepare_composed_turn(
     goal_resume: Option<desk_diagnose_core::goal::GoalRun>,
     delegated: Option<desk_diagnose_core::subagent::runtime::RuntimeTurn>,
 ) -> Result<PreparationStep, AgentError> {
-    if let Some(runtime) = &delegated {
-        runtime.validate()?;
-        if resume_conversation_id.is_some()
+    if let Some(runtime) = &delegated
+        && (resume_conversation_id.is_some()
             || scheduled.is_some()
             || goal_resume.is_some()
             || ask.start_goal
@@ -1012,10 +1011,9 @@ async fn prepare_composed_turn(
             || target_device_id != runtime.session().device_id
             || ask.question != runtime.source().owner_requirement.text
             || ask.locale != runtime.session().response_locale
-            || !ask.selected_attachment_ids.is_empty()
-        {
-            return Err(transport_error("invalid delegated runtime composition"));
-        }
+            || !ask.selected_attachment_ids.is_empty())
+    {
+        return Err(transport_error("invalid delegated runtime composition"));
     }
     let cancel_registration = cancellation::register(actor_user_id, &request_id);
     desk_diagnose_core::future::boxed(|| async {

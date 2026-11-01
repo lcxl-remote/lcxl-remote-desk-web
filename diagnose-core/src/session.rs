@@ -528,8 +528,9 @@ pub struct PersistedAgentSession {
     #[serde(default)]
     pub surface: AgentSessionSurface,
     /// Version of persisted conversation/replay/context semantics. Fresh
-    /// sessions always write the current schema version. This unreleased
-    /// AI Assistant state intentionally has no legacy compatibility path.
+    /// sessions always write the current schema version. Older versions are
+    /// not executed, so raise this only for an incompatible semantic change:
+    /// an added `#[serde(default)]` field or a removed field stays compatible.
     #[serde(default)]
     pub conversation_schema_version: u16,
     pub conversation: Vec<crate::chat::ChatMessage>,
@@ -4059,6 +4060,23 @@ mod tests {
             "exec_request_id": "exec_old"
         });
         assert!(serde_json::from_value::<ExecutionState>(value).is_err());
+    }
+
+    #[test]
+    fn internal_state_ignores_fields_from_another_build() {
+        let session =
+            crate::ai_assistant::test_support::personal_session("conv", "actor", "device");
+        let mut stored = serde_json::to_value(&session).unwrap();
+        stored["assistant_data"]["field_from_another_build"] = serde_json::json!(true);
+        let decoded = PersistedAgentSession::decode_json(&stored.to_string()).unwrap();
+        assert_eq!(decoded.assistant_data, session.assistant_data);
+        assert_eq!(decoded.conversation_id, session.conversation_id);
+        // Execution-critical versioning stays strict.
+        stored["conversation_schema_version"] = serde_json::json!(1);
+        assert!(matches!(
+            PersistedAgentSession::decode_json(&stored.to_string()),
+            Err(SessionDecodeError::UnsupportedVersion(1))
+        ));
     }
 
     #[test]

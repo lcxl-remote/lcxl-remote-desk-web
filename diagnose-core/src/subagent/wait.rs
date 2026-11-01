@@ -12,7 +12,6 @@ pub enum WaitMode {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct TaskFence {
     pub task_id: String,
     pub input_revision: u64,
@@ -20,7 +19,6 @@ pub struct TaskFence {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ParentWait {
     pub wait_id: String,
     pub tool_call_id: String,

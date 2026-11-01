@@ -105,7 +105,6 @@ impl SubAgentStore {
         else {
             return Ok(false);
         };
-        candidate.validate().map_err(|_| invalid())?;
         if resource.is_some() == terminal_reason.is_some()
             || terminal_reason.is_some_and(|reason| {
                 !matches!(
