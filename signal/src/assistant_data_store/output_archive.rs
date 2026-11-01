@@ -239,7 +239,8 @@ pub(crate) async fn find_reusing_on<C: ConnectionTrait>(
     if &stored.proof.output != output {
         return Err(AssistantStoreError::Inaccessible);
     }
-    parents::verify_on(db, &stored.proof).await?;
+    // Decoding bound this exact row to its fingerprint; keep the link read and comparison.
+    parents::verify_fingerprint_on(db, &stored.proof, &stored.row.proof_sha256).await?;
     Ok(Some(stored))
 }
 

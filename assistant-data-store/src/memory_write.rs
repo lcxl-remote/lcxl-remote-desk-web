@@ -90,6 +90,28 @@ pub async fn replay_on<C: ConnectionTrait>(
 }
 
 /// Called only after the host has completed its final native/source admission reads.
+/// Policy of a draft evidenced only by the owner's own input, or `None` when any source
+/// is something else. Each `(origin kind, policy)` is an already loaded source row.
+pub fn owner_input_policy<'a>(
+    sources: impl Iterator<Item = (&'a str, &'a SourceUsePolicy)>,
+) -> Result<Option<SourceUsePolicy>, &'static str> {
+    let mut policies = Vec::new();
+    for (kind, policy) in sources {
+        if kind != "input" || policy.class != SourcePolicyClass::UserText {
+            return Ok(None);
+        }
+        policies.push(policy.clone());
+    }
+    let Some(first) = policies.first() else {
+        return Ok(None);
+    };
+    desk_diagnose_core::ai_assistant::source::derive_visible_text_policy(
+        &policies,
+        first.policy_revision,
+    )
+    .map(Some)
+}
+
 pub async fn apply_on<C: ConnectionTrait>(
     db: &C,
     write: MemoryWrite<'_>,
@@ -429,4 +451,33 @@ pub fn result(
 }
 fn json<T: serde::Serialize>(value: &T) -> Result<String, AssistantStoreError> {
     serde_json::to_string(value).map_err(|_| AssistantStoreError::Inaccessible)
+}
+
+#[cfg(test)]
+mod owner_input_policy_tests {
+    use super::*;
+    use desk_diagnose_core::ai_assistant::source::owner_text_policy;
+
+    #[test]
+    fn only_owner_input_evidence_supplies_a_policy() {
+        let owner = owner_text_policy(3, false);
+        let policy = owner_input_policy([("input", &owner)].into_iter())
+            .unwrap()
+            .unwrap();
+        assert!(desk_diagnose_core::ai_assistant::memory_evidence::retained_text_policy(&policy));
+        assert_eq!(policy.policy_revision, 3);
+
+        // Assistant text citing mixed sources stays under the whole-context rule.
+        assert_eq!(
+            owner_input_policy([("input", &owner), ("assistant_message", &owner)].into_iter()),
+            Ok(None)
+        );
+        assert_eq!(owner_input_policy(std::iter::empty()), Ok(None));
+        let mut device = owner.clone();
+        device.class = SourcePolicyClass::StructuredObservation;
+        assert_eq!(
+            owner_input_policy([("input", &device)].into_iter()),
+            Ok(None)
+        );
+    }
 }

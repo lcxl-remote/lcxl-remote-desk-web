@@ -83,21 +83,19 @@ async fn write_on(
     } else {
         None
     };
-    let Some(production) = archive
+    let context_policy = archive
         .proof
         .retained_policy
         .as_ref()
         .or_else(|| recovered.as_ref().map(|retained| &retained.policy))
         .filter(|policy| {
             desk_diagnose_core::ai_assistant::memory_evidence::retained_text_policy(policy)
-        })
-    else {
-        return Ok(skipped("content_retention_denied"));
-    };
-    if production
-        .content_hard_expires_at_unix_ms
-        .is_some_and(|until| until <= now)
-    {
+        });
+    if context_policy.is_some_and(|policy| {
+        policy
+            .content_hard_expires_at_unix_ms
+            .is_some_and(|until| until <= now)
+    }) {
         return Ok(skipped("content_expired"));
     }
 
@@ -271,6 +269,22 @@ async fn write_on(
         sources.push(source.snapshot(device, data.current_actor_input_seq));
         originals.push(source);
     }
+    // A draft evidenced only by the owner's own input does not inherit restrictions
+    // from unrelated tool results in the same model context.
+    let owner_policy = (context_policy.is_none() && retained.is_empty())
+        .then(|| {
+            shared::owner_input_policy(
+                originals
+                    .iter()
+                    .map(|source| (source.origin.kind.as_str(), &source.policy)),
+            )
+        })
+        .transpose()
+        .map_err(AssistantStoreError::Invalid)?
+        .flatten();
+    let Some(production) = context_policy.or(owner_policy.as_ref()) else {
+        return Ok(skipped("content_retention_denied"));
+    };
     for source in &originals {
         source.validate_on(db).await?;
     }

@@ -35,7 +35,7 @@ async fn find_parent_reusing_on<C: ConnectionTrait>(
         _ => decode_row(row)?,
     };
     let stored = validated_reference(reference, stored)?;
-    verify_on(db, &stored.proof).await?;
+    verify_fingerprint_on(db, &stored.proof, &stored.row.proof_sha256).await?;
     Ok(stored)
 }
 

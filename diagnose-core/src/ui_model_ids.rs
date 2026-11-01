@@ -917,6 +917,13 @@ pub(crate) fn project_model_message(
                         {
                             project_arguments(&tool, exact, locators);
                         }
+                        if let Some(references) = references {
+                            for (_, field) in fields(&tool) {
+                                if let Some(id) = exact.get_mut(*field) {
+                                    references.alias_native_id(id);
+                                }
+                            }
+                        }
                         crate::model_input::project_protocol_versions(&tool, exact);
                     }
                 }
@@ -1112,6 +1119,52 @@ mod output_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn approved_window_input_shows_the_short_id_the_call_must_use() {
+        let mut references = crate::ui_references::UiReferenceState::default();
+        references
+            .register(
+                &json!({"token":"object-window","snapshot_id":"snapshot","object_kind":"window","expires_at":""}),
+                "source",
+            )
+            .unwrap();
+        let entries = json!([{"tool_name":"read_current_screen","state":"active",
+            "approved_exact_input":{"window_id":"object-window"}},
+            {"tool_name":"exec_command","state":"active",
+            "approved_exact_input":{"command":"echo object-window"}}]);
+        let mut message = ChatMessage::text(
+            "grants",
+            ChatRole::System,
+            format!("<capability_authorization>{entries}</capability_authorization>"),
+        );
+        project_model_message(
+            &mut message,
+            Some(&references),
+            &[],
+            crate::model_profile::ModelUseCase::Agent,
+        );
+        let start = message.text.find('[').unwrap();
+        let grants = serde_json::Deserializer::from_str(&message.text[start..])
+            .into_iter::<Value>()
+            .next()
+            .unwrap()
+            .unwrap();
+        let approved = &grants[0]["approved_exact_input"];
+        assert_eq!(approved["window_id"], "w1");
+        assert_eq!(
+            grants[1]["approved_exact_input"]["command"],
+            "echo object-window"
+        );
+        let call = ToolCall {
+            id: "capture".into(),
+            name: "read_current_screen".into(),
+            arguments_json: approved.to_string(),
+        };
+        let (expanded, _) = references.expand_call(&call).unwrap();
+        let value: Value = serde_json::from_str(&expanded.arguments_json).unwrap();
+        assert_eq!(value["window_id"], "object-window");
+    }
 
     #[test]
     fn permission_history_hides_internal_bindings_but_preserves_real_failures_and_source() {

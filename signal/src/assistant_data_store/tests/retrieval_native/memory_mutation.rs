@@ -326,3 +326,48 @@ async fn commit_gc_waits_for_the_original_output_and_refunds_exact_metadata_once
         0
     );
 }
+
+#[tokio::test]
+async fn owner_evidence_is_saved_when_other_context_cannot_be_retained() {
+    // A control result without a registered leaf leaves the output with no whole-context policy.
+    use crate::entity::agent_assistant_model_output as archived;
+    let frame = write_frame("direct-owner-evidence", true, false, false).await;
+    for row in archived::Entity::find().all(&frame.store.db).await.unwrap() {
+        let mut proof: desk_diagnose_core::ai_assistant::output_archive::ArchivedAssistantOutput =
+            serde_json::from_str(&row.proof_json).unwrap();
+        proof.retained_policy = None;
+        proof
+            .input_policies
+            .leaves
+            .iter_mut()
+            .for_each(|leaf| *leaf = None);
+        proof.input_policies.policies.clear();
+        archived::Entity::update_many()
+            .col_expr(
+                archived::Column::ProofJson,
+                sea_orm::sea_query::Expr::value(serde_json::to_string(&proof).unwrap()),
+            )
+            .col_expr(
+                archived::Column::ProofSha256,
+                sea_orm::sea_query::Expr::value(proof.fingerprint().unwrap()),
+            )
+            .filter(archived::Column::Id.eq(row.id))
+            .exec(&frame.store.db)
+            .await
+            .unwrap();
+    }
+    let result = crate::assistant_data_store::memory_write::write(
+        &frame.store.db,
+        frame.context(),
+        &request(&frame),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        result.result.outcome,
+        MemoryWriteOutcome::Applied,
+        "{:?}",
+        result.result
+    );
+    assert_eq!(result.result.reason.as_deref(), Some("committed"));
+}

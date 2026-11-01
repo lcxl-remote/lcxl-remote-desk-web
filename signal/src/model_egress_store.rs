@@ -498,7 +498,12 @@ impl SignalModelEgressStore {
             return Err(invalid());
         }
         if let Some(row) = rows.first() {
-            let sources = context_sources_from_row(row, conversation, output)?;
+            let sources = context_sources_from_row(
+                row,
+                conversation,
+                output,
+                known.map(|known| &known.proof.sources),
+            )?;
             let archive = if row.assistant_source_set_json.is_some() {
                 let stored = crate::assistant_data_store::find_output_reusing_on(
                     db,
@@ -528,7 +533,8 @@ impl SignalModelEgressStore {
                 .one(db)
                 .await?
         {
-            let sources = context_sources_from_row(&row, conversation, output)?;
+            let sources =
+                context_sources_from_row(&row, conversation, output, Some(&stored.proof.sources))?;
             if sources != stored.proof.sources || row.assistant_source_set_json.as_deref()
                 .map(desk_diagnose_core::ai_assistant::native_export::AssistantNativeSourceSet::decode).transpose().map_err(|_| invalid())?.as_ref()
                 != Some(&stored.proof.source_set) { return Err(invalid()); }
@@ -550,7 +556,7 @@ impl SignalModelEgressStore {
             model_egress_receipt::Entity::find_by_id(&sources.evidence.physical_call_id)
                 .one(db)
                 .await?
-            && (context_sources_from_row(&row, &sources.evidence.context_conversation_id, output)? != *sources
+            && (context_sources_from_row(&row, &sources.evidence.context_conversation_id, output, Some(sources))? != *sources
                 || row.assistant_source_set_json.as_deref().map(desk_diagnose_core::ai_assistant::native_export::AssistantNativeSourceSet::decode)
                     .transpose().map_err(|_| invalid())?.as_ref() != Some(set)) { return Err(invalid()); }
         Ok(())
@@ -721,19 +727,44 @@ fn context_sources_from_row(
     row: &model_egress_receipt::Model,
     conversation: &str,
     output: &desk_agent_protocol::data_lineage::DataEnvelope,
+    archived: Option<&desk_diagnose_core::model_egress::NativeModelOutputSources>,
 ) -> Result<desk_diagnose_core::model_egress::NativeModelOutputSources, DbErr> {
     let invalid = || DbErr::Custom("invalid original accepted model output".into());
     if row.context_conversation_id.as_deref() != Some(conversation) {
         return Err(invalid());
     }
-    let (audit, inputs, input_snapshot) = completed_output_parts(row, output)?;
+    // Raw columns identical to an authenticated archive need no second decode or validation.
+    let archived = archived.filter(|archived| {
+        serde_json::to_string(&archived.inputs).is_ok_and(|raw| raw == row.input_lineage_json)
+            && serde_json::to_string(&archived.input_snapshot)
+                .is_ok_and(|raw| raw == row.input_snapshot_json)
+    });
+    let (audit, inputs, input_snapshot) = completed_output_parts(row, output, archived)?;
+    let started = u64::try_from(row.authorized_at.timestamp_millis()).map_err(|_| invalid())?;
+    let completed = u64::try_from(row.completed_at.ok_or_else(invalid)?.timestamp_millis())
+        .map_err(|_| invalid())?;
+    if let Some(archived) = archived {
+        let evidence = &archived.evidence;
+        if evidence.physical_call_id == row.receipt_id
+            && evidence.context_conversation_id == conversation
+            && evidence.model_export_authorization_id == row.export_authorization_id
+            && evidence.destination == audit.destination
+            && evidence.output_envelope_id == output.envelope_id
+            && evidence.output_digest_sha256 == output.digest_sha256
+            && row.model_output_label_sha256.as_deref()
+                == Some(evidence.output_label_sha256.as_str())
+            && evidence.provider_started_at_unix_ms == started
+            && evidence.completed_at_unix_ms == completed
+        {
+            return Ok(archived.clone());
+        }
+    }
     let evidence = desk_diagnose_core::model_egress::NativeModelOutputEvidence::from_receipt(
         &row.receipt_id,
         conversation,
         &row.export_authorization_id,
-        u64::try_from(row.authorized_at.timestamp_millis()).map_err(|_| invalid())?,
-        u64::try_from(row.completed_at.ok_or_else(invalid)?.timestamp_millis())
-            .map_err(|_| invalid())?,
+        started,
+        completed,
         &audit,
         &inputs,
         &input_snapshot,
@@ -751,12 +782,13 @@ fn completed_output_inputs(
     row: &model_egress_receipt::Model,
     output: &desk_agent_protocol::data_lineage::DataEnvelope,
 ) -> Result<Vec<desk_diagnose_core::model_egress::ModelInputLineage>, DbErr> {
-    Ok(completed_output_parts(row, output)?.1)
+    Ok(completed_output_parts(row, output, None)?.1)
 }
 
 fn completed_output_parts(
     row: &model_egress_receipt::Model,
     output: &desk_agent_protocol::data_lineage::DataEnvelope,
+    archived: Option<&desk_diagnose_core::model_egress::NativeModelOutputSources>,
 ) -> Result<
     (
         SinkProjectionAudit,
@@ -783,7 +815,7 @@ fn completed_output_parts(
     {
         return Err(invalid());
     }
-    let (audit, inputs, input_snapshot) = receipt_inputs(row)?;
+    let (audit, inputs, input_snapshot) = receipt_inputs_reusing(row, archived)?;
     desk_diagnose_core::model_egress::validate_model_output_lineage(&audit, &inputs, output)
         .map_err(|_| invalid())?;
     Ok((audit, inputs, input_snapshot))
@@ -791,6 +823,22 @@ fn completed_output_parts(
 
 pub(crate) fn receipt_inputs(
     row: &model_egress_receipt::Model,
+) -> Result<
+    (
+        SinkProjectionAudit,
+        Vec<desk_diagnose_core::model_egress::ModelInputLineage>,
+        desk_diagnose_core::model_egress::NativeModelInputSnapshot,
+    ),
+    DbErr,
+> {
+    receipt_inputs_reusing(row, None)
+}
+
+/// A snapshot grows with the conversation and is re-read for every prior output on each
+/// model call, so a caller that proved its raw columns equal an archive passes that value.
+fn receipt_inputs_reusing(
+    row: &model_egress_receipt::Model,
+    archived: Option<&desk_diagnose_core::model_egress::NativeModelOutputSources>,
 ) -> Result<
     (
         SinkProjectionAudit,
@@ -818,12 +866,16 @@ pub(crate) fn receipt_inputs(
         digests_sha256: serde_json::from_str(&row.digests_sha256_json).map_err(|_| invalid())?,
         total_bytes: usize::try_from(row.total_bytes).map_err(|_| invalid())?,
     };
-    let inputs = serde_json::from_str::<Vec<desk_diagnose_core::model_egress::ModelInputLineage>>(
-        &row.input_lineage_json,
-    )
-    .map_err(|_| invalid())?;
-    let input_snapshot: desk_diagnose_core::model_egress::NativeModelInputSnapshot =
-        serde_json::from_str(&row.input_snapshot_json).map_err(|_| invalid())?;
+    let (inputs, input_snapshot) = match archived {
+        Some(archived) => (archived.inputs.clone(), archived.input_snapshot.clone()),
+        None => (
+            serde_json::from_str::<Vec<desk_diagnose_core::model_egress::ModelInputLineage>>(
+                &row.input_lineage_json,
+            )
+            .map_err(|_| invalid())?,
+            serde_json::from_str(&row.input_snapshot_json).map_err(|_| invalid())?,
+        ),
+    };
     if row.projection_digest_sha256
         != projection_digest(
             &row.destination_json,
@@ -838,9 +890,11 @@ pub(crate) fn receipt_inputs(
     }
     desk_diagnose_core::model_egress::validate_model_input_lineage(&audit, &inputs)
         .map_err(|_| invalid())?;
-    input_snapshot
-        .validate(&audit, &inputs)
-        .map_err(|_| invalid())?;
+    if archived.is_none() {
+        input_snapshot
+            .validate(&audit, &inputs)
+            .map_err(|_| invalid())?;
+    }
     input_snapshot
         .validate_export_authorization(&row.export_authorization_id)
         .map_err(|_| invalid())?;
@@ -1398,6 +1452,30 @@ mod tests {
             Some("model-output-1")
         );
         assert!(row.completed_at.is_some());
+
+        let mut row = row;
+        row.context_conversation_id = Some("conversation".into());
+        let accepted = output("model-output-1");
+        let sources = context_sources_from_row(&row, "conversation", &accepted, None).unwrap();
+        assert_eq!(
+            context_sources_from_row(&row, "conversation", &accepted, Some(&sources)).unwrap(),
+            sources
+        );
+        // A receipt that disagrees with the archive must never adopt the archived value.
+        let mut later = sources.clone();
+        later.evidence.completed_at_unix_ms += 1;
+        assert_eq!(
+            context_sources_from_row(&row, "conversation", &accepted, Some(&later)).unwrap(),
+            sources
+        );
+        let mut other_input = sources.clone();
+        other_input.input_snapshot.total_bytes += 1;
+        assert_eq!(
+            context_sources_from_row(&row, "conversation", &accepted, Some(&other_input)).unwrap(),
+            sources
+        );
+        row.input_snapshot_json.push(' ');
+        assert!(context_sources_from_row(&row, "conversation", &accepted, Some(&sources)).is_err());
     }
 
     #[tokio::test]
