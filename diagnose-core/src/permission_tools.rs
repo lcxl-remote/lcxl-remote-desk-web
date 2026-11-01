@@ -29,6 +29,7 @@ use crate::registry::{RegisteredTool, ToolEffect};
 pub const REQUEST_CAPABILITY_GRANTS_TOOL_NAME: &str = "request_permissions";
 pub const MAX_REQUEST_TTL_SECONDS: u32 = 3_600;
 pub const MAX_REQUEST_USES: u32 = 16;
+const DEFAULT_SCREEN_CAPTURE_USES: u32 = 3;
 #[cfg(test)]
 pub const MAX_CAPABILITY_CATALOG_PROMPT_BYTES: usize = 16 * 1024;
 
@@ -173,20 +174,23 @@ pub(crate) fn latest_tool_request_denial(
 /// Reject an unchanged AI-denied item even if the model changes item ids,
 /// explanatory prose, or requested grant lifetime. A narrower scope or a
 /// different concrete input is a new action that can receive a new review.
+/// Once one re-review has also been denied, stop repeating the same action on this
+/// input. The first denial can be a reviewer mistake and the retry is reviewed again,
+/// so allowing it grants nothing; it only avoids a dead end.
 pub(crate) fn unchanged_ai_denied_item<'a>(
     requests: &'a [PermissionRequest],
     decisions: &[crate::dynamic_run::PermissionDecisionProjection],
     proposed: &PermissionRequest,
 ) -> Option<(&'a str, &'a str)> {
-    requests
+    let mut denials = requests
         .iter()
         .filter(|request| request.input_revision == proposed.input_revision)
-        .find_map(|request| {
+        .flat_map(|request| {
             let decision = decisions
                 .iter()
-                .find(|decision| decision.request_id == request.request_id)?;
-            request.items.iter().find_map(|old| {
-                let denied = decision.items.iter().any(|item| {
+                .find(|decision| decision.request_id == request.request_id);
+            request.items.iter().filter_map(move |old| {
+                let denied = decision?.items.iter().any(|item| {
                     item.item_id == old.item_id
                         && !item.approved
                         && item.actor == crate::dynamic_run::PermissionDecisionActor::AiApproval
@@ -198,7 +202,9 @@ pub(crate) fn unchanged_ai_denied_item<'a>(
                         .any(|new| same_permission_action(old, new)))
                 .then_some((request.request_id.as_str(), old.item_id.as_str()))
             })
-        })
+        });
+    let first = denials.next()?;
+    denials.next().map(|_| first)
 }
 
 pub fn capability_authorization_prompt(
@@ -825,7 +831,7 @@ pub fn permission_planning_tool_registry() -> Vec<RegisteredTool> {
                                 "application_scope": {"type":"object","description":"Required for every native UI permission in this conversation. Do not supply exact_input. Copy an observed application reference; approved actions are limited to this application and the owner-selected expiry/use count. The server resolves the application name. Actual calls pass application plus the current target and action.","properties":{"application":{"type":"object","properties":{"token":{"type":"string"},"snapshot_id":{"type":"string"},"object_kind":{"const":"application"},"expires_at":{"type":"string"}},"required":["token","snapshot_id","object_kind","expires_at"],"additionalProperties":false},"actions":{"type":"array","minItems":1,"maxItems":6,"uniqueItems":true,"items":{"type":"string","enum":["invoke","select","focus","toggle","set_value","click","double_click","scroll","type_text","key_press"]}}},"required":["application","actions"],"additionalProperties":false},
                                 "exact_input": {"type": "object", "description": "Use the target tool definition (describe_tools if missing) and copy its complete input shape. Do not supply fixed schema_version fields; the server supplies them. Required for write_external_draft, send_external, input_fallback, execute_command, formula-workbook creation, browser navigation, live/batch iWork semantic mutations, and update_text_file/delete_text_file (one exact use). For iWork mutations, first obtain the fresh target and destination references from the matching read tools, then request the mutation separately with the complete tool arguments as exact_input; never batch that mutation permission with its prerequisite read permission. Follow permission_input_mode: contextual_exact_input file reads may omit only choices already bound by the current accepted input (inspect_files also accepts a unique approved directory); keep required worksheet/cell or merge rules. New artifacts require their output name and business content. Metadata and defaults are restored by the server before approval."},
                                 "suggested_ttl_seconds": {"type": "integer", "minimum": 1, "maximum": MAX_REQUEST_TTL_SECONDS, "description":"Optional; uses the server default. The owner can narrow it."},
-                                "suggested_max_uses": {"type": "integer", "minimum": 1, "maximum": MAX_REQUEST_USES, "description":"Optional; read-only device tools default to the maximum and other tools to one use. Exact one-shot actions remain one use regardless of this suggestion."},
+                                "suggested_max_uses": {"type": "integer", "minimum": 1, "maximum": MAX_REQUEST_USES, "description":"Optional; read-only device tools default to the maximum, screen capture to 3 and other tools to one use. Request what the task needs: a native UI action scope should cover its expected batches plus a correction, because every extra use otherwise needs a new approval. Exact one-shot actions remain one use regardless of this suggestion."},
                                 "reason": {"type": "string", "maxLength": MAX_PERMISSION_REASON_BYTES}
                             },
                             "required": ["item_id", "tool_name", "reason"],
@@ -1373,10 +1379,12 @@ pub fn build_permission_request(
             } else {
                 // Observing often takes several reads, and each extra grant interrupts
                 // the task. Anything with a side effect stays one use unless asked.
-                let default_uses = if capability.wire.effect == CapabilityEffect::ReadDevice {
-                    MAX_REQUEST_USES
-                } else {
-                    1
+                let default_uses = match capability.wire.effect {
+                    CapabilityEffect::ReadDevice => MAX_REQUEST_USES,
+                    // Pixels are more sensitive than structured reads, but verifying a
+                    // result usually takes more than one capture.
+                    CapabilityEffect::CaptureScreen => DEFAULT_SCREEN_CAPTURE_USES,
+                    _ => 1,
                 };
                 item.suggested_max_uses
                     .unwrap_or(default_uses)
@@ -1871,12 +1879,25 @@ mod tests {
         retry.items[0].item_id = "renamed".into();
         retry.items[0].reason = "new explanation".into();
         retry.items[0].suggested_ttl_seconds = 60;
+        // The first AI denial may be a reviewer mistake, so one re-review is allowed.
         assert_eq!(
             unchanged_ai_denied_item(
                 std::slice::from_ref(&request),
                 std::slice::from_ref(&decision),
                 &retry
             ),
+            None,
+        );
+        let mut again = request.clone();
+        again.request_id = "permission-again".into();
+        let repeated = |decision: &crate::dynamic_run::PermissionDecisionProjection| {
+            let mut second = decision.clone();
+            second.request_id = "permission-again".into();
+            vec![decision.clone(), second]
+        };
+        let requests = [request.clone(), again];
+        assert_eq!(
+            unchanged_ai_denied_item(&requests, &repeated(&decision), &retry),
             Some(("permission-partial", "second")),
         );
         let mut mixed = decision.clone();
@@ -1884,26 +1905,15 @@ mod tests {
         mixed.items[0].approved = false;
         mixed.items[0].actor = PermissionDecisionActor::System;
         assert_eq!(
-            unchanged_ai_denied_item(
-                std::slice::from_ref(&request),
-                std::slice::from_ref(&mixed),
-                &retry
-            ),
+            unchanged_ai_denied_item(&requests, &repeated(&mixed), &retry),
             Some(("permission-partial", "second"))
         );
         mixed.items[1].actor = PermissionDecisionActor::System;
         mixed.actor = PermissionDecisionActor::System;
-        assert!(
-            unchanged_ai_denied_item(
-                std::slice::from_ref(&request),
-                std::slice::from_ref(&mixed),
-                &retry
-            )
-            .is_none()
-        );
+        assert!(unchanged_ai_denied_item(&requests, &repeated(&mixed), &retry).is_none());
         retry.items[0].resource_scope = vec!["specific-resource".into()];
         assert_eq!(
-            unchanged_ai_denied_item(&[request], &[decision], &retry),
+            unchanged_ai_denied_item(&requests, &repeated(&decision), &retry),
             None
         );
     }
@@ -2079,6 +2089,13 @@ mod tests {
             r#"{"items":[{"item_id":"narrow","tool_name":"inspect_desktop_ui","suggested_max_uses":2,"reason":"Read"}]}"#,
         );
         assert_eq!(narrowed.items[0].suggested_max_uses, 2);
+        let capture = build(
+            r#"{"items":[{"item_id":"shot","tool_name":"read_current_screen","reason":"Shot"}]}"#,
+        );
+        assert_eq!(
+            capture.items[0].suggested_max_uses,
+            DEFAULT_SCREEN_CAPTURE_USES
+        );
         let write = build(
             r#"{"items":[{"item_id":"act","tool_name":"execute_ui_actions","application_scope":{"application":{"token":"app","snapshot_id":"snapshot","object_kind":"application","expires_at":"2099-01-01T00:00:00Z"},"actions":["invoke"]},"reason":"Act"}]}"#,
         );

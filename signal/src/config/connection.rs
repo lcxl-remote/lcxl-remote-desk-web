@@ -19,6 +19,35 @@ pub struct DatabaseTransaction {
     inner: sea_orm::DatabaseTransaction,
     configuration: Arc<ConfigContext>,
     snapshot: ConfigRead,
+    hold: HoldTimer,
+}
+
+/// The production pool has one connection, so a long transaction delays every other
+/// database user. Name the holder to make that queueing attributable.
+#[derive(Debug)]
+struct HoldTimer {
+    began: std::time::Instant,
+    caller: Option<&'static std::panic::Location<'static>>,
+}
+
+const SLOW_HOLD: std::time::Duration = std::time::Duration::from_secs(1);
+
+impl Drop for HoldTimer {
+    fn drop(&mut self) {
+        let held = self.began.elapsed();
+        if held >= SLOW_HOLD {
+            match self.caller {
+                Some(caller) => log::warn!(
+                    "[db] write transaction from {caller} held the connection for {} ms",
+                    held.as_millis()
+                ),
+                None => log::warn!(
+                    "[db] transaction held the connection for {} ms",
+                    held.as_millis()
+                ),
+            }
+        }
+    }
 }
 
 impl DatabaseConnection {
@@ -110,6 +139,10 @@ macro_rules! transactions {
                     inner,
                     configuration: self.configuration.clone(),
                     snapshot,
+                    hold: HoldTimer {
+                        began: std::time::Instant::now(),
+                        caller: None,
+                    },
                 })
             }
             async fn transaction<F, T, E>(&self, callback: F) -> Result<T, TransactionError<E>>
@@ -170,10 +203,20 @@ impl TransactionSession for DatabaseTransaction {
     }
 }
 impl DatabaseTransaction {
+    pub(crate) fn name_holder(&mut self, caller: &'static std::panic::Location<'static>) {
+        self.hold.caller = Some(caller);
+    }
     pub async fn commit(self) -> Result<(), DbErr> {
         TransactionSession::commit(self).await
     }
     pub async fn rollback(self) -> Result<(), DbErr> {
         TransactionSession::rollback(self).await
+    }
+}
+
+#[cfg(test)]
+impl DatabaseTransaction {
+    pub(crate) fn holder(&self) -> Option<&'static std::panic::Location<'static>> {
+        self.hold.caller
     }
 }

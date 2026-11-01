@@ -3000,6 +3000,16 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn write_transaction_names_its_caller() {
+        let owner = store().await;
+        let txn = crate::db::begin_write(&owner.db, agent_session::Entity)
+            .await
+            .unwrap();
+        assert_eq!(txn.holder().unwrap().file(), file!());
+        txn.rollback().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn new_session_records_current_format_for_execution_scans() {
         let owner = store().await;
         let session = owner.claim_turn(claim("format-turn")).await.unwrap();

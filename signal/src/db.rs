@@ -24,9 +24,23 @@ use sea_orm::sqlx::sqlite::{SqliteJournalMode, SqliteSynchronous};
 /// Begin a write-capable SQLite transaction before establishing any read snapshot.
 /// The entity must already exist; no row is changed and row triggers do not fire.
 /// Keep device/network I/O outside the transaction. Pure reads should use begin().
-pub(crate) async fn begin_write<E: EntityTrait>(
+#[track_caller]
+pub(crate) fn begin_write<E: EntityTrait>(
     db: &DatabaseConnection,
     _entity: E,
+) -> impl std::future::Future<Output = Result<crate::config::connection::DatabaseTransaction, DbErr>>
++ Send
++ '_ {
+    let caller = std::panic::Location::caller();
+    async move {
+        let mut txn = reserve_writer::<E>(db).await?;
+        txn.name_holder(caller);
+        Ok(txn)
+    }
+}
+
+async fn reserve_writer<E: EntityTrait>(
+    db: &DatabaseConnection,
 ) -> Result<crate::config::connection::DatabaseTransaction, DbErr> {
     use sea_orm::{Iterable, PrimaryKeyToColumn, QueryFilter};
     let column = E::PrimaryKey::iter()
