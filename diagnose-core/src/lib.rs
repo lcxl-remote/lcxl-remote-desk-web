@@ -110,6 +110,7 @@ pub mod redaction;
 pub mod registry;
 pub mod replay;
 pub mod result_model_ids;
+pub mod retry_backoff;
 pub mod schedule;
 pub mod seam;
 pub mod selection;

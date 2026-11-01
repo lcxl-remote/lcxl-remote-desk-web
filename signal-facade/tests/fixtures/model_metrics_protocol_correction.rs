@@ -6,7 +6,7 @@ fn protocol_source(reason:ProtocolCorrectionReason) -> ObservationEvent {
     call.output=match reason {
         ProtocolCorrectionReason::EmptyResponse=>OutputOutcome::EmptyResponse,
         ProtocolCorrectionReason::TruncatedOutput=>OutputOutcome::OutputTruncated,
-        ProtocolCorrectionReason::CompletionInterpretation | ProtocolCorrectionReason::PermissionPlanProtocol
+        ProtocolCorrectionReason::CompletionInterpretation | ProtocolCorrectionReason::PermissionPlanProtocol | ProtocolCorrectionReason::InvalidToolArguments
             | ProtocolCorrectionReason::PermissionActionMissing=>OutputOutcome::InvalidStructuredOutput,
         ProtocolCorrectionReason::PermissionProtocol=>OutputOutcome::InvalidProtocol,
         ProtocolCorrectionReason::GoalControlMissing=>OutputOutcome::Accepted,
@@ -43,7 +43,7 @@ fn protocol_checked(source:&ObservationEvent,next:&str,fence:Option<CorrectionFe
 async fn protocol_recovery_keeps_calls_and_input_permission_operation_axes_independent() {
     for reason in [ProtocolCorrectionReason::EmptyResponse,ProtocolCorrectionReason::TruncatedOutput,
         ProtocolCorrectionReason::CompletionInterpretation,ProtocolCorrectionReason::PermissionProtocol,
-        ProtocolCorrectionReason::PermissionPlanProtocol,ProtocolCorrectionReason::PermissionActionMissing,
+        ProtocolCorrectionReason::PermissionPlanProtocol,ProtocolCorrectionReason::InvalidToolArguments,ProtocolCorrectionReason::PermissionActionMissing,
         ProtocolCorrectionReason::GoalControlMissing,ProtocolCorrectionReason::ToolChoiceFallback] {
         let store=fixture_store(NOW-DAY).await;
         let source=protocol_source(reason);

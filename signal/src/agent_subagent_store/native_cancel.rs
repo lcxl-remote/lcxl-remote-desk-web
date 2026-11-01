@@ -35,7 +35,7 @@ pub(crate) async fn cancel_native_actions_for_subject_on<
     operation: &str,
     now_ms: i64,
 ) -> Result<(), DbErr> {
-    let now = chrono::DateTime::from_timestamp_millis(now_ms).ok_or_else(invalid)?;
+    let now = chrono::DateTime::from_timestamp_millis(now_ms).ok_or_else(|| invalid())?;
     let rows = work::Entity::find()
         .filter(work::Column::ConversationId.eq(conversation))
         .filter(work::Column::ActorId.eq(actor))
@@ -133,7 +133,7 @@ impl SubAgentStore {
             .filter(session_row::Column::DeviceId.eq(device))
             .one(&txn)
             .await?
-            .ok_or_else(invalid)?;
+            .ok_or_else(|| invalid())?;
         let session = PersistedAgentSession::decode_json(&row.state_json).map_err(|_| invalid())?;
         if session.actor_id != actor
             || session.device_id != device
@@ -147,7 +147,7 @@ impl SubAgentStore {
             .filter(command::Column::ExecutionGeneration.eq(generation))
             .one(&txn)
             .await?
-            .ok_or_else(invalid)?;
+            .ok_or_else(|| invalid())?;
         if !matches!(row.status.as_str(), "dispatching" | "running" | "unknown") {
             txn.commit().await?;
             return Ok(false);

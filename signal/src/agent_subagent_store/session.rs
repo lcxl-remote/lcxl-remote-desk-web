@@ -8,7 +8,7 @@ pub(crate) async fn save_child_session(
 ) -> Result<(), DbErr> {
     desk_diagnose_core::image_input::retain_latest_session_image(&mut session.conversation)
         .map_err(|_| invalid())?;
-    let binding = session.agent_role.binding().ok_or_else(invalid)?;
+    let binding = session.agent_role.binding().ok_or_else(|| invalid())?;
     let txn = desk_diagnose_core::future::boxed(|| async {
         crate::db::begin_write(db, session_row::Entity).await
     })
@@ -31,7 +31,7 @@ pub(crate) async fn save_child_session(
     let previous_revision = run.state_revision;
     if run.report_corrections_used != session.subagent_report_corrections_used {
         run.report_corrections_used = session.subagent_report_corrections_used;
-        run.state_revision = run.state_revision.checked_add(1).ok_or_else(invalid)?;
+        run.state_revision = run.state_revision.checked_add(1).ok_or_else(|| invalid())?;
         run.updated_at = now.to_rfc3339();
     }
     let mut next = session.clone();
@@ -104,7 +104,7 @@ pub(crate) async fn write_child_session_on(
     if session.turn_state == desk_diagnose_core::session::TurnState::Failed
         && session.agent_role.binding().is_some()
     {
-        let binding = session.agent_role.binding().ok_or_else(invalid)?;
+        let binding = session.agent_role.binding().ok_or_else(|| invalid())?;
         let operation = format!("terminal:{}:{}", binding.task_id, binding.control_revision);
         super::native_cancel::cancel_native_actions_on(
             txn,
@@ -114,7 +114,7 @@ pub(crate) async fn write_child_session_on(
         )
         .await?;
     }
-    let version = session.version.checked_add(1).ok_or_else(invalid)?;
+    let version = session.version.checked_add(1).ok_or_else(|| invalid())?;
     let mut stored = session.clone();
     desk_diagnose_core::image_input::retain_latest_session_image(&mut stored.conversation)
         .map_err(|_| invalid())?;

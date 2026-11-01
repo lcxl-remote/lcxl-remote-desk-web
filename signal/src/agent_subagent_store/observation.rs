@@ -19,8 +19,10 @@ pub(super) async fn accepted_inputs_on(
         .filter(reservation_row::Column::RootConversationId.eq(&parent.conversation_id))
         .filter(reservation_row::Column::ConversationId.eq(&parent.conversation_id))
         .filter(
-            reservation_row::Column::GroupId
-                .eq(parent.delegation_group_id.as_deref().ok_or_else(invalid)?),
+            reservation_row::Column::GroupId.eq(parent
+                .delegation_group_id
+                .as_deref()
+                .ok_or_else(|| invalid())?),
         )
         .filter(
             reservation_row::Column::InputRevision
@@ -45,7 +47,7 @@ pub(super) async fn accepted_inputs_on(
             return Err(invalid());
         }
         let Some(call) = crate::entity::model_egress_receipt::Entity::find_by_id(
-            reservation.provider_receipt_id.ok_or_else(invalid)?,
+            reservation.provider_receipt_id.ok_or_else(|| invalid())?,
         )
         .one(txn)
         .await?
@@ -70,7 +72,7 @@ pub(super) async fn accepted_inputs_on(
         .await?;
         matched = Some(evidence.inputs);
     }
-    matched.ok_or_else(invalid)
+    matched.ok_or_else(|| invalid())
 }
 
 async fn validate_observation_on(
@@ -96,8 +98,8 @@ async fn validate_observation_on(
                 && message.role == ChatRole::Tool
                 && message.tool_call_id.as_deref() == Some(observation.tool_call_id.as_str())
         })
-        .ok_or_else(invalid)?;
-    let label = tool.data_envelope.as_ref().ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
+    let label = tool.data_envelope.as_ref().ok_or_else(|| invalid())?;
     label.validate().map_err(|_| invalid())?;
     if label.provenance.source_tool_name != desk_diagnose_core::subagent::tools::RESULT
         || label.digest_sha256 != format!("{:x}", Sha256::digest(tool.text.as_bytes()))
@@ -120,7 +122,7 @@ async fn validate_observation_on(
                 && message.role == ChatRole::Assistant
                 && message.turn_id == parent.current_turn_id
         })
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
     if interpreted {
         if response.tool_calls.is_empty() {
             if response.text.trim().is_empty() {
@@ -173,7 +175,7 @@ async fn validate_observation_on(
         )
         .one(txn)
         .await?
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
     let original: desk_agent_protocol::ai_assistant::subagent::AiAssistantSubAgentEvent =
         serde_json::from_str(&event.event_json).map_err(|_| invalid())?;
     if original.task.task_id != result.task_id
@@ -358,7 +360,7 @@ async fn save_main_history_on(
     let held_until = desk_diagnose_core::future::send_phase(|| prepared.finish_preparation_on(txn))
         .await
         .map_err(history_error)?;
-    let version = held.version.checked_add(1).ok_or_else(invalid)?;
+    let version = held.version.checked_add(1).ok_or_else(|| invalid())?;
     let state_json = {
         let mut stored = Box::new(held.clone());
         desk_diagnose_core::image_input::retain_latest_session_image(&mut stored.conversation)

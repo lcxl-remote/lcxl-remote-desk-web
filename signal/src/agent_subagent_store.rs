@@ -119,7 +119,15 @@ pub struct SubAgentStore {
     db: DatabaseConnection,
 }
 
+/// The text stays generic for callers; the log names the rejecting check.
+#[track_caller]
 fn invalid() -> DbErr {
+    let location = std::panic::Location::caller();
+    log::warn!(
+        "[subagent-store] rejected at {}:{}",
+        location.file(),
+        location.line()
+    );
     DbErr::Custom("delegated task is unavailable or its control state changed".into())
 }
 
@@ -209,7 +217,7 @@ async fn parent_on_inner<C: ConnectionTrait + crate::config::ConfigConnection>(
         .filter(session_row::Column::DeviceId.eq(device))
         .one(db)
         .await?
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
     let session =
         Box::new(PersistedAgentSession::decode_json(&row.state_json).map_err(|_| invalid())?);
     if !session.agent_role.is_main()
@@ -315,7 +323,7 @@ impl SubAgentStore {
             .filter(run_row::Column::TaskId.eq(task_id))
             .one(&txn)
             .await?
-            .ok_or_else(invalid)?;
+            .ok_or_else(|| invalid())?;
         let result = decode_run(&row)?.result();
         txn.commit().await?;
         Ok(result)
@@ -382,7 +390,7 @@ pub(crate) async fn apply_goal_source_on<C: ConnectionTrait + crate::config::Con
     let mut permission_ends =
         desk_diagnose_core::model_observability::permission::PendingEnds::default();
     let now = chrono::DateTime::from_timestamp_millis(now_ms)
-        .ok_or_else(invalid)?
+        .ok_or_else(|| invalid())?
         .to_rfc3339();
     let groups = desk_diagnose_core::future::boxed(|| async {
         group_row::Entity::find()
@@ -404,7 +412,7 @@ pub(crate) async fn apply_goal_source_on<C: ConnectionTrait + crate::config::Con
             .set_source_admission(admission)
             .map_err(|_| invalid())?;
         if group.limits.deadline_ms != row.deadline_ms && group.version == row.version as u64 {
-            group.version = group.version.checked_add(1).ok_or_else(invalid)?;
+            group.version = group.version.checked_add(1).ok_or_else(|| invalid())?;
         }
         desk_diagnose_core::future::boxed(|| replace_group_on(db, &row, &group, now_ms)).await?;
         let runs = desk_diagnose_core::future::boxed(|| async {

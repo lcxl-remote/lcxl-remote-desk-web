@@ -87,7 +87,7 @@ impl SubAgentStore {
                 )
                 .one(&txn)
                 .await?
-                .ok_or_else(invalid)?;
+                .ok_or_else(|| invalid())?;
             let source_withdrawn = work.cancel_requested_at.is_some()
                 || work.failure_accounted
                 || work.finished_at.is_some()
@@ -133,7 +133,7 @@ pub(crate) async fn close_scheduled_group_on(
     {
         return Err(invalid());
     }
-    let now = chrono::DateTime::from_timestamp_millis(now_ms).ok_or_else(invalid)?;
+    let now = chrono::DateTime::from_timestamp_millis(now_ms).ok_or_else(|| invalid())?;
     if group.source_admission != SourceAdmission::Closed {
         group.stop_parent().map_err(|_| invalid())?;
         group

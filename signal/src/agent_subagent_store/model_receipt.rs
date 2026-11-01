@@ -37,7 +37,7 @@ pub(super) async fn provider_usage_on<C: ConnectionTrait + crate::config::Config
         completed
             .timestamp_millis()
             .checked_sub(call.authorized_at.timestamp_millis())
-            .ok_or_else(invalid)?,
+            .ok_or_else(|| invalid())?,
     )
     .map_err(|_| invalid())?;
     let tokens = serde_json::from_str(&encoded).map_err(|_| invalid())?;
@@ -68,7 +68,7 @@ async fn validate_dispatch_on_inner(
             .await
     })
     .await?
-    .ok_or_else(invalid)?;
+    .ok_or_else(|| invalid())?;
     let group = decode_group(&source)?;
     if group.source_admission != SourceAdmission::Open
         || group.source_epoch != reservation.source_epoch
@@ -99,7 +99,7 @@ async fn validate_dispatch_on_inner(
             .await
     })
     .await?
-    .ok_or_else(invalid)?;
+    .ok_or_else(|| invalid())?;
     let session = PersistedAgentSession::decode_json(&row.state_json).map_err(|_| invalid())?;
     if session.surface != AgentSessionSurface::AiAssistant
         || session.version != row.version
@@ -115,7 +115,7 @@ async fn validate_dispatch_on_inner(
         })
         .await?;
     } else {
-        let token = reservation.planning_lease_token.ok_or_else(invalid)?;
+        let token = reservation.planning_lease_token.ok_or_else(|| invalid())?;
         if !session.turn_state.is_active()
             || session.lease_token != token
             || row.lease_token != token as i64
@@ -138,7 +138,7 @@ async fn validate_dispatch_on_inner(
                 .await
         })
         .await?
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
         let run = decode_run(&task)?;
         run.validate_session(&session).map_err(|_| invalid())?;
         run.require_current(run.fence()).map_err(|_| invalid())?;
@@ -202,7 +202,7 @@ impl SubAgentStore {
             .filter(reservation_row::Column::ReservationId.eq(&reservation.reservation_id))
             .one(txn)
             .await?
-            .ok_or_else(invalid)?;
+            .ok_or_else(|| invalid())?;
         if budget::decode_reservation(&old)? != *reservation
             || old.state != "reserved"
             || old.provider_receipt_id.is_some()
@@ -220,7 +220,7 @@ impl SubAgentStore {
                 )
                 .one(txn)
                 .await?
-                .ok_or_else(invalid)?;
+                .ok_or_else(|| invalid())?;
             if claimed.delegation_reservation_id.as_deref()
                 != Some(reservation.reservation_id.as_str())
             {
@@ -240,7 +240,7 @@ impl SubAgentStore {
                 provider_receipt_id: Set(Some(provider_receipt_id.into())),
                 provider_receipt_kind: Set(Some("oss_model_egress".into())),
                 provider_started_at_ms: Set(Some(now_ms)),
-                version: Set(old.version.checked_add(1).ok_or_else(invalid)?),
+                version: Set(old.version.checked_add(1).ok_or_else(|| invalid())?),
                 ..Default::default()
             })
             .filter(reservation_row::Column::Id.eq(old.id))
@@ -271,13 +271,13 @@ impl SubAgentStore {
             .filter(group_row::Column::RootConversationId.eq(&reservation.root_conversation_id))
             .one(&txn)
             .await?
-            .ok_or_else(invalid)?;
+            .ok_or_else(|| invalid())?;
         let group = decode_group(&source)?;
         let row = reservation_row::Entity::find()
             .filter(reservation_row::Column::ReservationId.eq(&reservation.reservation_id))
             .one(&txn)
             .await?
-            .ok_or_else(invalid)?;
+            .ok_or_else(|| invalid())?;
         if budget::decode_reservation(&row)? != *reservation {
             return Err(invalid());
         }
@@ -323,7 +323,7 @@ impl SubAgentStore {
                     .filter(run_row::Column::DeviceId.eq(&group.device_id))
                     .one(&txn)
                     .await?
-                    .ok_or_else(invalid)?;
+                    .ok_or_else(|| invalid())?;
                 let run = decode_run(&task)?;
                 planner_live &=
                     run.validate_session(&held).is_ok() && run.require_current(run.fence()).is_ok();

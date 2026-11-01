@@ -34,7 +34,7 @@ pub(super) async fn current_group_inner<C: ConnectionTrait + crate::config::Conf
         .filter(goal_row::Column::DeviceId.eq(&group.device_id))
         .one(db)
         .await?
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
     let mut goal = crate::agent_goal_store::decode(&goal)?;
     goal.apply_budget_policy(&crate::goal_budget_policy::read(db).await?)
         .map_err(|_| invalid())?;

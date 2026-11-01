@@ -2286,6 +2286,7 @@ async fn run_inner_impl(
     let truncated_turn_retries: u8 = 0;
     let permission_protocol_retries: u8 = 0;
     let post_tool_permission_protocol_retries: u8 = 0;
+    let invalid_tool_argument_retries: u8 = 0;
     let goal_correction_attempted = false;
     let goal_required_choice_rejected = false;
     let physical_model_attempt = 0u32;
@@ -2313,6 +2314,7 @@ async fn run_inner_impl(
         truncated_turn_retries,
         permission_protocol_retries,
         post_tool_permission_protocol_retries,
+        invalid_tool_argument_retries,
         goal_correction_attempted,
         goal_required_choice_rejected,
         physical_model_attempt,

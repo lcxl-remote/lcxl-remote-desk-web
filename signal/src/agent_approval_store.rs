@@ -283,7 +283,7 @@ pub(crate) async fn permission_authority_on(
         .permission_requests
         .iter()
         .find(|request| request.request_id == target_request_id)
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
     let mut facts = permission_request_authority_on(
         txn,
         session,
@@ -428,7 +428,7 @@ pub async fn claim_permission_review(
         .filter(delegation_row::Column::DeviceId.eq(&candidate.device_id))
         .one(&txn)
         .await?
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
     let mut delegation = decode(&delegation_row)?;
     let goal_row = goal_row::Entity::find()
         .filter(goal_row::Column::ConversationId.eq(&candidate.conversation_id))
@@ -496,7 +496,7 @@ pub async fn claim_permission_review(
             desk_diagnose_core::approval_review::ApprovalSource::PermissionItem { request_id, .. }
                 if request_id == &request.request_id)
                 })
-                .ok_or_else(invalid)?;
+                .ok_or_else(|| invalid())?;
             let item_id = match &candidate.source {
                 desk_diagnose_core::approval_review::ApprovalSource::PermissionItem {
                     item_id,
@@ -508,7 +508,7 @@ pub async fn claim_permission_review(
                 .items
                 .iter()
                 .find(|item| &item.item_id == item_id)
-                .ok_or_else(invalid)?;
+                .ok_or_else(|| invalid())?;
             let (descriptor, risk) =
                 desk_diagnose_core::approval_review::trusted_permission_descriptor(
                     registry, item, surface,
@@ -547,11 +547,11 @@ pub async fn claim_permission_review(
         };
     let reserved_tokens = desk_diagnose_core::approval_usage::reviewer_token_reservation(
         &authorized.prompt,
-        u64::try_from(config.gateway.max_context_bytes.ok_or_else(invalid)?)
+        u64::try_from(config.gateway.max_context_bytes.ok_or_else(|| invalid())?)
             .map_err(|_| invalid())?,
         u64::try_from(config.gateway.runtime_max_output_tokens).map_err(|_| invalid())?,
     )
-    .ok_or_else(invalid)?;
+    .ok_or_else(|| invalid())?;
     if matches!(
         candidate.source,
         desk_diagnose_core::approval_review::ApprovalSource::GoalProposal { .. }
@@ -695,7 +695,7 @@ pub async fn settle_permission_review(
         .filter(review_row::Column::CandidateId.eq(&candidate.candidate_id))
         .one(&txn)
         .await?
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
     if row.status != APPROVAL_REVIEW_STATUS_REVIEWING
         || row.lease_owner.as_deref() != Some(lease_owner)
         || row.lease_epoch != as_i64(lease_epoch)?
@@ -717,7 +717,7 @@ pub async fn settle_permission_review(
         .filter(delegation_row::Column::DelegationId.eq(&candidate.delegation_id))
         .one(&txn)
         .await?
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
     let mut delegation = decode(&stored)?;
     let goal_row = goal_row::Entity::find()
         .filter(goal_row::Column::ConversationId.eq(&candidate.conversation_id))
@@ -1005,7 +1005,7 @@ pub async fn expire_review_leases(
             .filter(delegation_row::Column::DeviceId.eq(&row.device_id))
             .one(&txn)
             .await?
-            .ok_or_else(invalid)?;
+            .ok_or_else(|| invalid())?;
         let mut delegation = decode(&stored)?;
         if row.reserved_tokens <= 0 {
             return Err(invalid());
@@ -1185,7 +1185,7 @@ pub(crate) async fn reviewed_permission_batch_on(
         .filter(delegation_row::Column::DeviceId.eq(&session.device_id))
         .one(txn)
         .await?
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
     let delegation = decode(&stored)?;
     let goal_row = goal_row::Entity::find()
         .filter(goal_row::Column::ConversationId.eq(&session.conversation_id))
@@ -1220,7 +1220,7 @@ pub(crate) async fn reviewed_permission_batch_on(
             .items
             .iter()
             .find(|item| &item.item_id == item_id)
-            .ok_or_else(invalid)?;
+            .ok_or_else(|| invalid())?;
         let (descriptor, risk) =
             desk_diagnose_core::approval_review::trusted_permission_descriptor(
                 registry, item, surface,
@@ -1265,7 +1265,7 @@ pub(crate) async fn reviewed_permission_batch_on(
                     failure.item_id == *item_id
                         && failure.candidate_id.as_deref() == Some(candidate.candidate_id.as_str())
                 })
-                .ok_or_else(invalid)?;
+                .ok_or_else(|| invalid())?;
             failures.push(failure.clone());
             continue;
         };
@@ -1313,7 +1313,7 @@ pub(crate) async fn reviewed_permission_batch_on(
             u64::try_from(row.model_config_revision).map_err(|_| invalid())?,
         );
         let review: ApprovalReviewDecision =
-            serde_json::from_str(row.decision_json.as_deref().ok_or_else(invalid)?)
+            serde_json::from_str(row.decision_json.as_deref().ok_or_else(|| invalid())?)
                 .map_err(|_| invalid())?;
         review.validate_for(candidate).map_err(|_| invalid())?;
         let status = match review.verdict {
@@ -1380,7 +1380,7 @@ pub(crate) async fn current_grant_parent_on(
         .filter(delegation_row::Column::DeviceId.eq(&session.device_id))
         .one(txn)
         .await?
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
     let delegation = decode(&row)?;
     let goal = current_goal_on(
         txn,
@@ -1398,7 +1398,7 @@ pub(crate) async fn current_grant_parent_on(
         .filter(agent_run_event::Column::Kind.eq(AgentRunEventKind::PermissionDecided.as_str()))
         .one(txn)
         .await?
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
     let event: PermissionDecidedEvent =
         serde_json::from_str(&event_row.payload_json).map_err(|_| invalid())?;
     event.validate().map_err(|_| invalid())?;
@@ -1423,7 +1423,7 @@ pub(crate) async fn current_grant_parent_on(
         .permission_requests
         .iter()
         .find(|request| request.request_id == event.request_id)
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
     if !matches!(
         request.state,
         desk_diagnose_core::dynamic_run::PermissionRequestState::Approved
@@ -1443,7 +1443,7 @@ pub(crate) async fn current_grant_parent_on(
                 &item.item_id,
             ) == grant.grant_id
         })
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
     if item.provider_id != grant.provider_id
         || item.tool_name != grant.tool_name
         || item.expected_effect != grant.effect
@@ -1457,7 +1457,7 @@ pub(crate) async fn current_grant_parent_on(
     let review = reviews
         .iter()
         .find(|review| review.item_id == item.item_id)
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
     let review_row = review_row::Entity::find()
         .filter(review_row::Column::CandidateId.eq(&review.candidate_id))
         .filter(review_row::Column::ConversationId.eq(&session.conversation_id))
@@ -1466,7 +1466,7 @@ pub(crate) async fn current_grant_parent_on(
         .filter(review_row::Column::DelegationId.eq(&delegation.delegation_id))
         .one(txn)
         .await?
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
     let expected_candidate = permission_review_candidate_id(
         &delegation.delegation_id,
         delegation.revision,
@@ -1477,9 +1477,13 @@ pub(crate) async fn current_grant_parent_on(
     .map_err(|_| invalid())?;
     let expected_source =
         permission_review_source_id(&request.request_id, &item.item_id).map_err(|_| invalid())?;
-    let decision: ApprovalReviewDecision =
-        serde_json::from_str(review_row.decision_json.as_deref().ok_or_else(invalid)?)
-            .map_err(|_| invalid())?;
+    let decision: ApprovalReviewDecision = serde_json::from_str(
+        review_row
+            .decision_json
+            .as_deref()
+            .ok_or_else(|| invalid())?,
+    )
+    .map_err(|_| invalid())?;
     if review_row.model_config_revision
         != i64::try_from(review.model_config_revision).map_err(|_| invalid())?
         || review_row.status != APPROVAL_REVIEW_STATUS_APPROVED
@@ -1508,7 +1512,15 @@ pub(crate) async fn current_grant_parent_on(
     })
 }
 
+/// The text stays generic for callers; the log names the rejecting check.
+#[track_caller]
 fn invalid() -> DbErr {
+    let location = std::panic::Location::caller();
+    log::warn!(
+        "[approval-store] rejected at {}:{}",
+        location.file(),
+        location.line()
+    );
     DbErr::Custom("AI approval delegation is stale or inconsistent".into())
 }
 
@@ -1601,15 +1613,19 @@ async fn restore_review_context_on(
         .await?;
     let Some(row) = row else { return Ok(false) };
     let authority: desk_diagnose_core::subagent::reservation::ReviewCallAuthority =
-        serde_json::from_str(row.call_authority_json.as_deref().ok_or_else(invalid)?)
-            .map_err(|_| invalid())?;
+        serde_json::from_str(
+            row.call_authority_json
+                .as_deref()
+                .ok_or_else(|| invalid())?,
+        )
+        .map_err(|_| invalid())?;
     authority
         .context_binding
         .restore(candidate, session)
         .map_err(|_| invalid())?;
     let key = crate::approval_review_secret::load(txn)
         .await?
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
     if authority.candidate_id != candidate.candidate_id
         || desk_diagnose_core::approval_review::candidate_context_hmac_sha256(&key, candidate)
             .map_err(|_| invalid())?
@@ -1664,11 +1680,16 @@ pub async fn prepare_permission_review_batch(
         .filter(delegation_row::Column::Status.eq("active"))
         .one(&txn)
         .await?
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
     let delegation = decode(&delegation_row)?;
     let configured = crate::approval_model_provider::load(&txn).await?;
-    let budget = usize::try_from(configured.gateway.max_context_bytes.ok_or_else(invalid)?)
-        .map_err(|_| invalid())?;
+    let budget = usize::try_from(
+        configured
+            .gateway
+            .max_context_bytes
+            .ok_or_else(|| invalid())?,
+    )
+    .map_err(|_| invalid())?;
     let goal_row = goal_row::Entity::find()
         .filter(goal_row::Column::ConversationId.eq(conversation_id))
         .filter(goal_row::Column::ActorId.eq(owner_id))
@@ -1733,7 +1754,7 @@ pub async fn prepare_permission_review_batch(
         .permission_requests
         .iter()
         .find(|request| request.request_id == request_id)
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
     // An interactive command needs the owner's live terminal at approval time,
     // so AI auto-approval never decides it; the request stays with the owner.
     if desk_diagnose_core::approval_review::requires_owner_decision(request) {
@@ -1829,7 +1850,7 @@ async fn session_on(
         .filter(agent_session::Column::DeviceId.eq(device_id))
         .one(txn)
         .await?
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
     let mut session = PersistedAgentSession::decode_json(&row.state_json).map_err(|_| invalid())?;
     if session.conversation_id != conversation_id
         || session.actor_id != owner_id
@@ -1852,8 +1873,11 @@ async fn append_audit_on(
     owner_decision_id: &str,
     now: DateTime<Utc>,
 ) -> Result<(), DbErr> {
-    session.last_event_seq = session.last_event_seq.checked_add(1).ok_or_else(invalid)?;
-    session.version = row.version.checked_add(1).ok_or_else(invalid)?;
+    session.last_event_seq = session
+        .last_event_seq
+        .checked_add(1)
+        .ok_or_else(|| invalid())?;
+    session.version = row.version.checked_add(1).ok_or_else(|| invalid())?;
     session.updated_at = now.to_rfc3339();
     let event = ApprovalDelegationAuditEvent {
         event: AgentRunEvent {
@@ -1973,7 +1997,7 @@ pub async fn open_for_subject(
     project(&delegation)?.insert(&txn).await?;
     let now =
         DateTime::<Utc>::from_timestamp_millis(i64::try_from(now_unix_ms).map_err(|_| invalid())?)
-            .ok_or_else(invalid)?;
+            .ok_or_else(|| invalid())?;
     append_audit_on(
         &txn,
         &session_row,
@@ -2006,7 +2030,7 @@ pub async fn close_for_subject(
         .filter(delegation_row::Column::DeviceId.eq(device_id))
         .one(&txn)
         .await?
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
     let mut delegation = decode(&row)?;
     delegation
         .close(ApprovalDelegationStatus::Closed)
@@ -2035,7 +2059,7 @@ pub async fn close_for_subject(
     }
     let now =
         DateTime::<Utc>::from_timestamp_millis(i64::try_from(now_unix_ms).map_err(|_| invalid())?)
-            .ok_or_else(invalid)?;
+            .ok_or_else(|| invalid())?;
     append_audit_on(
         &txn,
         &session_row,
@@ -2069,8 +2093,12 @@ async fn commit_directory_on(
         return Ok(());
     }
     let authority: desk_diagnose_core::subagent::reservation::ReviewCallAuthority =
-        serde_json::from_str(row.call_authority_json.as_deref().ok_or_else(invalid)?)
-            .map_err(|_| invalid())?;
+        serde_json::from_str(
+            row.call_authority_json
+                .as_deref()
+                .ok_or_else(|| invalid())?,
+        )
+        .map_err(|_| invalid())?;
     if session.input_revision != authority.input_revision
         || session.control_revision != authority.control_revision
         || Some(session.lease_token) != authority.source_planning_lease_token
@@ -2082,7 +2110,7 @@ async fn commit_directory_on(
     let model_decision =
         approved || status == desk_diagnose_core::approval_review::APPROVAL_REVIEW_STATUS_DENIED;
     let decision = if model_decision {
-        let review = review.ok_or_else(invalid)?;
+        let review = review.ok_or_else(|| invalid())?;
         DirectoryDecision {
             source: PermissionDecisionSource::AutomaticReview {
                 failures: vec![],
@@ -2141,7 +2169,8 @@ async fn save_directory_decision_on(
         session, request_id, approved, decision, now,
     )
     .map_err(|_| invalid())?;
-    let timestamp = DateTime::<Utc>::from_timestamp_millis(as_i64(now)?).ok_or_else(invalid)?;
+    let timestamp =
+        DateTime::<Utc>::from_timestamp_millis(as_i64(now)?).ok_or_else(|| invalid())?;
     let timestamp = timestamp.max(session_row.updated_at);
     next.updated_at = timestamp.to_rfc3339();
     let changed = agent_session::Entity::update_many()
@@ -2400,7 +2429,7 @@ async fn goal_review_input_on<C: ConnectionTrait + crate::config::ConfigConnecti
         .filter(goal_request::Column::DeviceId.eq(&session.device_id))
         .one(txn)
         .await?
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
     Ok((
         crate::agent_goal_open_store::decode(&row)?,
         crate::goal_budget_policy::read(txn).await?,
@@ -2420,8 +2449,12 @@ async fn commit_goal_on(
     }
     let (_, session) = session_on(txn, &row.conversation_id, &row.actor_id, &row.device_id).await?;
     let authority: desk_diagnose_core::subagent::reservation::ReviewCallAuthority =
-        serde_json::from_str(row.call_authority_json.as_deref().ok_or_else(invalid)?)
-            .map_err(|_| invalid())?;
+        serde_json::from_str(
+            row.call_authority_json
+                .as_deref()
+                .ok_or_else(|| invalid())?,
+        )
+        .map_err(|_| invalid())?;
     if session.input_revision != authority.input_revision
         || session.control_revision != authority.control_revision
     {
@@ -2444,7 +2477,7 @@ async fn commit_goal_on(
     let (source, reason) = if approved
         || status == desk_diagnose_core::approval_review::APPROVAL_REVIEW_STATUS_DENIED
     {
-        let decision = review.ok_or_else(invalid)?;
+        let decision = review.ok_or_else(|| invalid())?;
         (
             PermissionDecisionSource::AutomaticReview {
                 failures: vec![],
@@ -2498,7 +2531,7 @@ async fn commit_goal_on(
         &row.source_id,
         approved,
         chrono::DateTime::from_timestamp_millis(now.try_into().map_err(|_| invalid())?)
-            .ok_or_else(invalid)?,
+            .ok_or_else(|| invalid())?,
         Some(decision),
     )
     .await?;
@@ -2578,7 +2611,7 @@ pub async fn deny_goal_unavailable(
         request_id,
         false,
         chrono::DateTime::from_timestamp_millis(now.try_into().map_err(|_| invalid())?)
-            .ok_or_else(invalid)?,
+            .ok_or_else(|| invalid())?,
         Some(decision),
     )
     .await?;

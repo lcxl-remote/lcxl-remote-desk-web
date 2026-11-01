@@ -176,7 +176,7 @@ pub(crate) async fn apply_task_control_from_turn_on(
                 })
         })
         .and_then(|message| message.data_envelope.clone())
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
     let id = format!("model-control-{:x}", Sha256::digest(call.id.as_bytes()));
     let request = AiAssistantSubAgentControl {
         client_request_id: id,
@@ -283,7 +283,7 @@ async fn apply_task_control_with_source_on(
                 .await
         })
         .await?
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
         let group = current_group_on(txn, &group_row).await?;
         if group.source != run.binding.source {
             return Err(invalid());
@@ -297,12 +297,12 @@ async fn apply_task_control_with_source_on(
                 .await
         })
         .await?
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
         let child =
             PersistedAgentSession::decode_json(&child_row.state_json).map_err(|_| invalid())?;
         run.validate_session(&child).map_err(|_| invalid())?;
         let now = chrono::DateTime::from_timestamp_millis(now_ms)
-            .ok_or_else(invalid)?
+            .ok_or_else(|| invalid())?
             .to_rfc3339();
         let mut cancellation = None;
         let changed = match &request.action {
@@ -372,7 +372,7 @@ async fn apply_task_control_with_source_on(
                     )
                     .map_err(|_| invalid())?
                     .data_envelope
-                    .ok_or_else(invalid)?,
+                    .ok_or_else(|| invalid())?,
                 };
                 let adjusted = creation
                     .adjusted(

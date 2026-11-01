@@ -77,7 +77,7 @@ pub(crate) async fn runtime_facts_on(
             return Err(invalid());
         }
         if payload.tool_name == desk_diagnose_core::command_confirmation::COMMAND_TOOL {
-            let origin = payload.command_origin.as_ref().ok_or_else(invalid)?;
+            let origin = payload.command_origin.as_ref().ok_or_else(|| invalid())?;
             validate_origin(session, origin).map_err(|_| invalid())?;
             let task = desk_diagnose_core::future::boxed(|| async {
                 agent_exec_task::Entity::find()
@@ -108,8 +108,10 @@ pub(crate) async fn runtime_facts_on(
                     return Err(invalid());
                 };
                 let disposition: desk_agent_protocol::edge_exec::EdgeExecDisposition =
-                    serde_json::from_str(task.disposition_json.as_deref().ok_or_else(invalid)?)
-                        .map_err(|_| invalid())?;
+                    serde_json::from_str(
+                        task.disposition_json.as_deref().ok_or_else(|| invalid())?,
+                    )
+                    .map_err(|_| invalid())?;
                 let (success, required) = match disposition {
                     desk_agent_protocol::edge_exec::EdgeExecDisposition::Executed { outcome } => {
                         let required = !matches!(&outcome, desk_agent_protocol::AgentOutcome::Ok(desk_agent_protocol::OperationOutput::Exec(output)) if !output.started);
@@ -288,7 +290,7 @@ fn completed_read(
         return Err(invalid());
     }
     let completion: CapabilityDispatchCompletion =
-        serde_json::from_str(work.result_json.as_deref().ok_or_else(invalid)?)
+        serde_json::from_str(work.result_json.as_deref().ok_or_else(|| invalid())?)
             .map_err(|_| invalid())?;
     validate_completion(&completion)?;
     let expected = match completion.outcome {

@@ -16,6 +16,7 @@ pub(super) struct LoopState<M> {
     pub truncated_turn_retries: u8,
     pub permission_protocol_retries: u8,
     pub post_tool_permission_protocol_retries: u8,
+    pub invalid_tool_argument_retries: u8,
     pub goal_correction_attempted: bool,
     pub goal_required_choice_rejected: bool,
     pub physical_model_attempt: u32,
@@ -1079,6 +1080,27 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
             )?;
             messages.push(marker);
         }
+        if state.invalid_tool_argument_retries > 0 {
+            // The rejected response was discarded before anything was recorded or
+            // dispatched. The notice carries no model output and grants nothing.
+            let marker_id = format!(
+                "runtime-invalid-tool-arguments-retry-{turn_id}-{}",
+                state.invalid_tool_argument_retries
+            );
+            let marker_text = "RUNTIME RECOVERY NOTICE (server authoritative): the previous response had tool call arguments that were not valid JSON and was discarded before it was recorded or executed. Continue the task and send complete, valid JSON arguments. This notice grants no authority.";
+            let parent = child_runtime_label.as_ref().or_else(|| {
+                crate::permission_resume::latest_user_requirement(&session.conversation)
+                    .and_then(|message| message.data_envelope.as_ref())
+            });
+            let mut marker = ChatMessage::system_event(&marker_id, marker_text);
+            marker.data_envelope = derive_internal_tool_result_envelope(
+                parent,
+                &marker_id,
+                marker_text,
+                "invalid_tool_arguments_retry",
+            )?;
+            messages.push(marker);
+        }
         // Reserve the concrete per-step prompt and API tool bytes before the
         // history window is selected. All transient blocks are included; only
         // protocol framing uses the reserve. Final wire encoding is rechecked.
@@ -1698,6 +1720,10 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                                     "runtime-post-tool-permission-protocol-retry-{turn_id}-{}",
                                     state.post_tool_permission_protocol_retries
                                 )),
+                                ProtocolCorrectionReason::InvalidToolArguments => Some(format!(
+                                    "runtime-invalid-tool-arguments-retry-{turn_id}-{}",
+                                    state.invalid_tool_argument_retries
+                                )),
                                 ProtocolCorrectionReason::GoalControlMissing => {
                                     Some(format!("goal-control-correction-{turn_id}"))
                                 }
@@ -1977,6 +2003,21 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                                     observation.clone(),
                                     correction_fence.clone(),
                                     ProtocolCorrectionReason::PermissionPlanProtocol,
+                                );
+                                return Ok(PhaseResult::Complete(None));
+                            }
+                            if session.surface == crate::session::AgentSessionSurface::AiAssistant
+                                && matches!(
+                                    error,
+                                    crate::chat::ModelTurnError::InvalidToolArguments { .. }
+                                )
+                                && state.invalid_tool_argument_retries < 1
+                            {
+                                state.invalid_tool_argument_retries += 1;
+                                state.pending_protocol_correction = PendingProtocolCorrection::open(
+                                    observation.clone(),
+                                    correction_fence.clone(),
+                                    ProtocolCorrectionReason::InvalidToolArguments,
                                 );
                                 return Ok(PhaseResult::Complete(None));
                             }

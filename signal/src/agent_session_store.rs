@@ -2931,6 +2931,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unchanged_snapshot_is_readable_while_another_connection_holds_the_writer() {
+        let directory = tempfile::tempdir().unwrap();
+        let url = format!(
+            "sqlite://{}?mode=rwc",
+            directory.path().join("snapshot.db").display()
+        );
+        let db = crate::config::test_support::Database::connect(&url)
+            .await
+            .unwrap();
+        crate::db::initialize_schema(&db).await.unwrap();
+        db.execute_unprepared("PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 100")
+            .await
+            .unwrap();
+        let owner = SignalAgentSessionStore::new(db.clone());
+        let mut session = owner.claim_turn(claim("snapshot-turn")).await.unwrap();
+        session.surface = AgentSessionSurface::AiAssistant;
+        agent_session::Entity::update_many()
+            .col_expr(
+                agent_session::Column::StateJson,
+                sea_orm::sea_query::Expr::value(session.encode_json_for_storage().unwrap()),
+            )
+            .filter(agent_session::Column::ConversationId.eq(&session.conversation_id))
+            .exec(&db)
+            .await
+            .unwrap();
+        let subject = (
+            session.conversation_id.as_str(),
+            session.actor_id.as_str(),
+            session.device_id.as_str(),
+        );
+        let first = owner
+            .read_assistant_snapshot_for_subject(subject.0, subject.1, subject.2)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let other = crate::config::test_support::Database::connect(&url)
+            .await
+            .unwrap();
+        let writer = crate::db::begin_write(&other, agent_session::Entity)
+            .await
+            .unwrap();
+        let unchanged = owner
+            .read_assistant_snapshot_for_subject(subject.0, subject.1, subject.2)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(unchanged.session.seq, first.session.seq);
+
+        // A pending sequence change still needs the writer and must not fake success.
+        agent_session::Entity::update_many()
+            .col_expr(
+                agent_session::Column::SnapshotFingerprint,
+                sea_orm::sea_query::Expr::value("changed"),
+            )
+            .filter(agent_session::Column::ConversationId.eq(subject.0))
+            .exec(&writer)
+            .await
+            .unwrap();
+        writer.commit().await.unwrap();
+        let changed = owner
+            .read_assistant_snapshot_for_subject(subject.0, subject.1, subject.2)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(changed.session.seq, first.session.seq + 1);
+    }
+
+    #[tokio::test]
     async fn new_session_records_current_format_for_execution_scans() {
         let owner = store().await;
         let session = owner.claim_turn(claim("format-turn")).await.unwrap();

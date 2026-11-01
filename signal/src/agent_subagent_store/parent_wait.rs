@@ -61,7 +61,7 @@ pub(crate) async fn ready_wait_source_on(
         .filter(group_row::Column::GroupId.eq(&group.group_id))
         .one(txn)
         .await?
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
     let creation = decode_creation(&source)?;
     let message = parent
         .conversation
@@ -71,7 +71,7 @@ pub(crate) async fn ready_wait_source_on(
                 && message.role == ChatRole::Tool
                 && message.tool_call_id.as_deref() == Some(wait.tool_call_id.as_str())
         })
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
     let result: serde_json::Value = serde_json::from_str(&message.text).map_err(|_| invalid())?;
     if result["wait_id"].as_str() != Some(wait.wait_id.as_str())
         || !matches!(
@@ -146,7 +146,7 @@ impl SubAgentStore {
             .filter(group_row::Column::DeviceId.eq(device))
             .one(&txn)
             .await?
-            .ok_or_else(invalid)?;
+            .ok_or_else(|| invalid())?;
         let group = decode_group(&source)?;
         if group.source_admission == SourceAdmission::Paused {
             return Ok(ParentWaitResolution::SourcePaused);
@@ -175,7 +175,7 @@ impl SubAgentStore {
         if parent.ready_subagent_wait.is_some() && wait.source_epoch == group.source_epoch {
             let (wait, _, _) = ready_wait_source_on(&txn, &parent)
                 .await?
-                .ok_or_else(invalid)?;
+                .ok_or_else(|| invalid())?;
             txn.commit().await?;
             return Ok(ParentWaitResolution::Ready(wait));
         }
@@ -189,12 +189,12 @@ impl SubAgentStore {
                     && message.role == ChatRole::Tool
                     && message.tool_call_id.as_deref() == Some(wait.tool_call_id.as_str())
             })
-            .ok_or_else(invalid)?;
+            .ok_or_else(|| invalid())?;
         let mut labels = vec![
             parent.conversation[position]
                 .data_envelope
                 .clone()
-                .ok_or_else(invalid)?,
+                .ok_or_else(|| invalid())?,
         ];
         for expected in &wait.tasks {
             let row =
@@ -205,7 +205,12 @@ impl SubAgentStore {
             creation
                 .validate_task(&run.binding)
                 .map_err(|_| invalid())?;
-            labels.push(creation.instruction.data_envelope.ok_or_else(invalid)?);
+            labels.push(
+                creation
+                    .instruction
+                    .data_envelope
+                    .ok_or_else(|| invalid())?,
+            );
             current.push((
                 TaskFence {
                     task_id: run.binding.task_id.clone(),
@@ -322,7 +327,7 @@ impl SubAgentStore {
             .lease_token
             .checked_add(1)
             .filter(|value| *value <= i64::MAX as u64)
-            .ok_or_else(invalid)?;
+            .ok_or_else(|| invalid())?;
         parent
             .begin_turn(
                 &params.turn_id,
@@ -334,8 +339,8 @@ impl SubAgentStore {
             )
             .map_err(|_| invalid())?;
         parent.adopt_trigger(TriggerOrigin::SubAgentCompletion, &params.turn_id);
-        let old_lease = parent.lease_token.checked_sub(1).ok_or_else(invalid)?;
-        let version = parent.version.checked_add(1).ok_or_else(invalid)?;
+        let old_lease = parent.lease_token.checked_sub(1).ok_or_else(|| invalid())?;
+        let version = parent.version.checked_add(1).ok_or_else(|| invalid())?;
         parent.version = version;
         let changed = desk_diagnose_core::future::boxed(|| async {
             session_row::Entity::update_many()

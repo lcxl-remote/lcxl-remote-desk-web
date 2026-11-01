@@ -16,7 +16,7 @@ async fn source_goal_on(
     txn: &DatabaseTransaction,
     group: &DelegationGroup,
 ) -> Result<goal_row::Model, DbErr> {
-    let id = group.source.goal_id().ok_or_else(invalid)?;
+    let id = group.source.goal_id().ok_or_else(|| invalid())?;
     let row = goal_row::Entity::find()
         .filter(goal_row::Column::GoalId.eq(id))
         .filter(goal_row::Column::ConversationId.eq(&group.root_conversation_id))
@@ -25,7 +25,7 @@ async fn source_goal_on(
         .lock_exclusive()
         .one(txn)
         .await?
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
     let goal = crate::agent_goal_store::decode(&row)?;
     if goal.owner_id != group.actor_id
         || goal.device_id != group.device_id
@@ -124,12 +124,15 @@ pub(super) async fn reserve_call_for_session_on(
 ) -> Result<BudgetAdmission, DbErr> {
     let txn = call.txn();
     let session = call.session();
-    let group_id = session.delegation_group_id.as_deref().ok_or_else(invalid)?;
+    let group_id = session
+        .delegation_group_id
+        .as_deref()
+        .ok_or_else(|| invalid())?;
     let row = group_row::Entity::find()
         .filter(group_row::Column::GroupId.eq(group_id))
         .one(txn)
         .await?
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
     let group = decode_group(&row)?;
     let scheduled = super::scheduled_source::current_scheduled_source_on(txn, &row).await?;
     if group.source.goal_id().is_some() != goal_upper.is_some()
@@ -193,7 +196,7 @@ pub(super) async fn reserve_call_for_session_on(
                     let recorded = goal
                         .independent_settlements
                         .get(&reservation.reservation_id)
-                        .ok_or_else(invalid)?;
+                        .ok_or_else(|| invalid())?;
                     if recorded.total_tokens() != Some(actual.tokens)
                         || u64::from(recorded.model_calls) != actual.model_calls
                         || u64::from(recorded.tool_calls) != actual.tool_calls
@@ -270,7 +273,7 @@ pub(crate) async fn settle_call_budget_on(
         )
         .one(txn)
         .await?
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
     if budget::decode_reservation(&old)? != *reservation
         || actual.is_none() && actual_goal.is_some()
         || actual.is_some() && (reservation.source_goal_upper.is_some() != actual_goal.is_some())
@@ -282,7 +285,7 @@ pub(crate) async fn settle_call_budget_on(
         .filter(group_row::Column::RootConversationId.eq(&reservation.root_conversation_id))
         .one(txn)
         .await?
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
     super::scheduled_budget::lock_historical_on(txn, &source).await?;
     super::scheduled_budget::settle_on(txn, &source, &old, reservation, actual).await?;
     if let (Some(actual), Some(goal_actual)) = (actual, actual_goal) {
@@ -298,7 +301,7 @@ pub(crate) async fn settle_call_budget_on(
             .filter(group_row::Column::RootConversationId.eq(&reservation.root_conversation_id))
             .one(txn)
             .await?
-            .ok_or_else(invalid)?;
+            .ok_or_else(|| invalid())?;
         let group = decode_group(&row)?;
         let old_goal = source_goal_on(txn, &group).await?;
         let mut goal = crate::agent_goal_store::decode(&old_goal)?;

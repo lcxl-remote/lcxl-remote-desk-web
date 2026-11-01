@@ -57,7 +57,7 @@ impl SubAgentStore {
                 .await
         })
         .await?
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
         let txn = desk_diagnose_core::future::boxed(|| async {
             crate::db::begin_write(&self.db, session_row::Entity).await
         })
@@ -93,7 +93,7 @@ impl SubAgentStore {
                 .await
         })
         .await?
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
         let mut run = decode_run(&row)?;
         let source = desk_diagnose_core::future::boxed(|| async {
             group_row::Entity::find()
@@ -105,7 +105,7 @@ impl SubAgentStore {
                 .await
         })
         .await?
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
         let group = current_group_on(&txn, &source).await?;
         let creation: TaskCreationEnvelope =
             serde_json::from_str(&row.creation_envelope_json).map_err(|_| invalid())?;
@@ -143,7 +143,7 @@ impl SubAgentStore {
                     .await
             })
             .await?
-            .ok_or_else(invalid)?;
+            .ok_or_else(|| invalid())?;
             let mut session = PersistedAgentSession::decode_json(&session_row.state_json)
                 .map_err(|_| invalid())?;
             run.validate_session(&session).map_err(|_| invalid())?;
@@ -236,7 +236,7 @@ impl SubAgentStore {
                 .lease_token
                 .checked_add(1)
                 .filter(|value| *value <= i64::MAX as u64)
-                .ok_or_else(invalid)?;
+                .ok_or_else(|| invalid())?;
             session
                 .begin_turn(
                     &params.turn_id,
@@ -254,7 +254,10 @@ impl SubAgentStore {
                 replace_run_on(&txn, &row, &run, now.timestamp_millis()).await
             })
             .await?;
-            let version = session_row.version.checked_add(1).ok_or_else(invalid)?;
+            let version = session_row
+                .version
+                .checked_add(1)
+                .ok_or_else(|| invalid())?;
             session.version = version;
             let changed = desk_diagnose_core::future::boxed(|| async {
                 session_row::Entity::update_many()

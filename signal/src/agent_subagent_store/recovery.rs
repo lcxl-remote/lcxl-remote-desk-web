@@ -37,13 +37,13 @@ impl SubAgentStore {
             .filter(run_row::Column::TaskId.eq(task_id))
             .one(&self.db)
             .await?
-            .ok_or_else(invalid)?;
+            .ok_or_else(|| invalid())?;
         let txn = crate::db::begin_write(&self.db, session_row::Entity).await?;
         let row = run_row::Entity::find()
             .filter(run_row::Column::Id.eq(selected.id))
             .one(&txn)
             .await?
-            .ok_or_else(invalid)?;
+            .ok_or_else(|| invalid())?;
         let mut run = decode_run(&row)?;
         if run.state.is_terminal()
             || matches!(
@@ -57,7 +57,7 @@ impl SubAgentStore {
             .filter(group_row::Column::GroupId.eq(&run.binding.group_id))
             .one(&txn)
             .await?
-            .ok_or_else(invalid)?;
+            .ok_or_else(|| invalid())?;
         let group = current_group_on(&txn, &source).await?;
         let stored = session_row::Entity::find()
             .filter(session_row::Column::ConversationId.eq(&run.child_conversation_id))
@@ -65,7 +65,7 @@ impl SubAgentStore {
             .filter(session_row::Column::DeviceId.eq(&run.device_id))
             .one(&txn)
             .await?
-            .ok_or_else(invalid)?;
+            .ok_or_else(|| invalid())?;
         let mut session =
             PersistedAgentSession::decode_json(&stored.state_json).map_err(|_| invalid())?;
         run.validate_session(&session).map_err(|_| invalid())?;
@@ -74,7 +74,9 @@ impl SubAgentStore {
         {
             return Err(invalid());
         }
-        task_context_on(&txn, &session).await?.ok_or_else(invalid)?;
+        task_context_on(&txn, &session)
+            .await?
+            .ok_or_else(|| invalid())?;
         let now = chrono::Utc::now();
         let now_ms = now.timestamp_millis();
         if session.turn_state.is_active()
@@ -134,7 +136,7 @@ impl SubAgentStore {
                 .lease_token
                 .checked_add(1)
                 .filter(|value| *value <= i64::MAX as u64)
-                .ok_or_else(invalid)?;
+                .ok_or_else(|| invalid())?;
             session.finish_turn(TurnState::Idle, now.to_rfc3339());
         }
         let deadline_reached =
@@ -200,7 +202,7 @@ impl SubAgentStore {
         }
         // Rotating a lapsed lease and saving its facts is one CAS. No provider or
         // device I/O occurs while these control locks are held.
-        session.version = stored.version.checked_add(1).ok_or_else(invalid)?;
+        session.version = stored.version.checked_add(1).ok_or_else(|| invalid())?;
         let mut update = session_row::Entity::update_many()
             .set(session_row::ActiveModel {
                 state_json: Set(session.encode_json_for_storage().map_err(|_| invalid())?),

@@ -329,10 +329,11 @@ pub async fn process_pending_permission_review(
         Ok(outcome) => outcome,
         Err(error) => {
             log::warn!(
-                "[approval-executor] permission decision deferred: request={}, kind={:?}, retryable={}",
+                "[approval-executor] permission decision deferred: request={}, kind={:?}, retryable={}, message={}",
                 subject.request_id,
                 error.kind,
-                error.retryable
+                error.retryable,
+                error.message
             );
             return false;
         }

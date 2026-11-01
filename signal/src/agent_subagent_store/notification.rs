@@ -57,7 +57,7 @@ pub(crate) async fn ready_notification_source_on(
         .filter(group_row::Column::GroupId.eq(&group.group_id))
         .one(txn)
         .await?
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
     let creation = decode_creation(&source)?;
     let message = parent
         .conversation
@@ -67,8 +67,8 @@ pub(crate) async fn ready_notification_source_on(
                 && message.role == ChatRole::SystemEvent
                 && message.tool_call_id.is_none()
         })
-        .ok_or_else(invalid)?;
-    let label = message.data_envelope.as_ref().ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
+    let label = message.data_envelope.as_ref().ok_or_else(|| invalid())?;
     label.validate().map_err(|_| invalid())?;
     if label.provenance.source_tool_name != "subagent_notification"
         || label.digest_sha256 != format!("{:x}", Sha256::digest(message.text.as_bytes()))
@@ -87,7 +87,7 @@ pub(crate) async fn ready_notification_source_on(
             .filter(inbox::Column::EventKind.is_in(["completed", "failed", "cancelled"]))
             .one(txn)
             .await?
-            .ok_or_else(invalid)?;
+            .ok_or_else(|| invalid())?;
         let original: desk_agent_protocol::ai_assistant::subagent::AiAssistantSubAgentEvent =
             serde_json::from_str(&event.event_json).map_err(|_| invalid())?;
         let run = decode_run(
@@ -187,7 +187,7 @@ pub(crate) async fn prepare_notification_on(
         if task.source != decode_creation(&source)? {
             return Err(invalid());
         }
-        labels.push(task.instruction.data_envelope.ok_or_else(invalid)?);
+        labels.push(task.instruction.data_envelope.ok_or_else(|| invalid())?);
         events.push(NotificationEvent {
             event_id: candidate.event_id,
             task_id: run.binding.task_id.clone(),
@@ -291,7 +291,7 @@ pub(crate) async fn acknowledge_notification_on(
     let original = current
         .ready_subagent_notification
         .as_ref()
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
     if original.accepted_response_message_id.is_some() {
         if original.accepted_response_message_id.as_deref() != Some(response_id) {
             return Err(invalid());
@@ -310,8 +310,8 @@ pub(crate) async fn acknowledge_notification_on(
         .find(|message| {
             message.message_id == notification.message_id && message.role == ChatRole::SystemEvent
         })
-        .ok_or_else(invalid)?;
-    let label = message.data_envelope.as_ref().ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
+    let label = message.data_envelope.as_ref().ok_or_else(|| invalid())?;
     label.validate().map_err(|_| invalid())?;
     if label.provenance.source_tool_name != "subagent_notification"
         || label.digest_sha256 != format!("{:x}", Sha256::digest(message.text.as_bytes()))
@@ -326,7 +326,7 @@ pub(crate) async fn acknowledge_notification_on(
                 && message.role == ChatRole::Assistant
                 && message.turn_id == next.current_turn_id
         })
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
     let inputs = super::observation::accepted_inputs_on(txn, next, response).await?;
     if !inputs.iter().any(|input| {
         input.envelope_id == label.envelope_id && input.digest_sha256 == label.digest_sha256

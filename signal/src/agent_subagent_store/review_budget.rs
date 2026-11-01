@@ -22,10 +22,13 @@ pub(crate) async fn validate_review_lease_on(
         .filter(review_row::Column::CandidateId.eq(&authority.candidate_id))
         .one(txn)
         .await?
-        .ok_or_else(invalid)?;
-    let frozen: ReviewCallAuthority =
-        serde_json::from_str(row.call_authority_json.as_deref().ok_or_else(invalid)?)
-            .map_err(|_| invalid())?;
+        .ok_or_else(|| invalid())?;
+    let frozen: ReviewCallAuthority = serde_json::from_str(
+        row.call_authority_json
+            .as_deref()
+            .ok_or_else(|| invalid())?,
+    )
+    .map_err(|_| invalid())?;
     if frozen != *authority
         || row.conversation_id != authority.conversation_id
         || row.actor_id != authority.actor_id
@@ -85,7 +88,7 @@ async fn validate_review_scope_on_inner(
             .filter(session_row::Column::DeviceId.eq(&authority.device_id))
             .one(txn)
             .await?
-            .ok_or_else(invalid)?,
+            .ok_or_else(|| invalid())?,
         SessionRead::Reuse(proof) => {
             proof
                 .recheck_subject(
@@ -144,7 +147,7 @@ async fn validate_review_session_on(
         .filter(crate::entity::agent_approval_delegation::Column::DeviceId.eq(&authority.device_id))
         .one(txn)
         .await?
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
     let delegated = crate::agent_approval_store::decode(&delegated)?;
     delegated
         .require_current_for_session(session)
@@ -180,7 +183,7 @@ async fn validate_review_source_on(
         .filter(group_row::Column::DeviceId.eq(&authority.device_id))
         .one(txn)
         .await?
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
     let group = current_group_on(txn, &source).await?;
     if group.source_admission != SourceAdmission::Open
         || Some(group.source_epoch) != authority.source_epoch
@@ -213,7 +216,7 @@ async fn validate_review_source_on(
             .filter(run_row::Column::DeviceId.eq(&authority.device_id))
             .one(txn)
             .await?
-            .ok_or_else(invalid)?;
+            .ok_or_else(|| invalid())?;
         let run = decode_run(&task)?;
         run.validate_session(session).map_err(|_| invalid())?;
         run.require_current(run.fence()).map_err(|_| invalid())?;
@@ -249,7 +252,7 @@ pub(crate) async fn check_goal_review_funding_on(
         .filter(group_row::Column::DeviceId.eq(&session.device_id))
         .one(txn)
         .await?
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
     let group = current_group_on(txn, &row).await?;
     if !group.can_interpret(session.input_revision, session.control_revision) {
         return Err(ReviewStartError::Unavailable(ReviewReason::SourceChanged));
@@ -265,7 +268,7 @@ pub(crate) async fn check_goal_review_funding_on(
         false,
         now_ms,
     ) {
-        let reason = CallRejection::from_reserve(error).ok_or_else(invalid)?;
+        let reason = CallRejection::from_reserve(error).ok_or_else(|| invalid())?;
         return Err(ReviewStartError::Unavailable(reason.review_reason()));
     }
     Ok(())
@@ -320,7 +323,7 @@ pub(crate) async fn reserve_review_attempt_on(
             .await
     })
     .await?
-    .ok_or_else(invalid)?;
+    .ok_or_else(|| invalid())?;
     if review.call_authority_json.is_some() || review.delegation_reservation_id.is_some() {
         return Err(invalid());
     }
@@ -333,7 +336,7 @@ pub(crate) async fn reserve_review_attempt_on(
             .await
     })
     .await?
-    .ok_or_else(invalid)?;
+    .ok_or_else(|| invalid())?;
     let proof = TxnValidatedSession::from_row(txn, row)?;
     let session = proof.session();
     if session.input_revision != candidate.input_revision {
@@ -356,7 +359,7 @@ pub(crate) async fn reserve_review_attempt_on(
                 .await
         })
         .await?
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
         Some(current_group_on(txn, &row).await?)
     } else {
         None
@@ -370,13 +373,13 @@ pub(crate) async fn reserve_review_attempt_on(
         attempt,
         candidate_id: candidate.candidate_id.clone(),
         lease_epoch: u64::try_from(review.lease_epoch).map_err(|_| invalid())?,
-        lease_owner: review.lease_owner.clone().ok_or_else(invalid)?,
+        lease_owner: review.lease_owner.clone().ok_or_else(|| invalid())?,
         lease_deadline_ms: review
             .lease_deadline
             .map(u64::try_from)
             .transpose()
             .map_err(|_| invalid())?
-            .ok_or_else(invalid)?,
+            .ok_or_else(|| invalid())?,
         model_config_revision: u64::try_from(review.model_config_revision)
             .map_err(|_| invalid())?,
         delegation_id: candidate.delegation_id.clone(),
@@ -455,7 +458,7 @@ pub(crate) async fn reserve_review_attempt_on(
         runtime_max_output_tokens,
         authority.lease_deadline_ms.saturating_sub(now_ms as u64),
     )
-    .ok_or_else(invalid)?;
+    .ok_or_else(|| invalid())?;
     let admission = desk_diagnose_core::future::send_phase(|| async {
         desk_diagnose_core::future::boxed(|| async {
             funding::reserve_call_for_session_on(
@@ -555,7 +558,7 @@ impl ReviewCallUsage {
             self.tokens,
             u64::try_from(reserved_tokens).map_err(|_| invalid())?,
         )
-        .ok_or_else(invalid)
+        .ok_or_else(|| invalid())
     }
 }
 
@@ -567,9 +570,12 @@ pub(crate) async fn settle_review_call_on(
     claimed_tokens: Option<u64>,
     now_ms: i64,
 ) -> Result<ReviewCallUsage, DbErr> {
-    let authority: ReviewCallAuthority =
-        serde_json::from_str(row.call_authority_json.as_deref().ok_or_else(invalid)?)
-            .map_err(|_| invalid())?;
+    let authority: ReviewCallAuthority = serde_json::from_str(
+        row.call_authority_json
+            .as_deref()
+            .ok_or_else(|| invalid())?,
+    )
+    .map_err(|_| invalid())?;
     authority.validate().map_err(|_| invalid())?;
     let dispatched = row.provider_receipt_id.is_some();
     if dispatched != row.provider_receipt_kind.is_some()
@@ -595,7 +601,7 @@ pub(crate) async fn settle_review_call_on(
                     completed
                         .timestamp_millis()
                         .checked_sub(call.authorized_at.timestamp_millis())
-                        .ok_or_else(invalid)?,
+                        .ok_or_else(|| invalid())?,
                 )
                 .map_err(|_| invalid())?;
                 desk_diagnose_core::subagent::reservation::known_model_usage(
@@ -629,7 +635,7 @@ pub(crate) async fn settle_review_call_on(
             .filter(crate::entity::agent_delegation_reservation::Column::ReservationId.eq(id))
             .one(txn)
             .await?
-            .ok_or_else(invalid)?;
+            .ok_or_else(|| invalid())?;
         let reservation = budget::decode_reservation(&cost_row)?;
         if reservation.review_authority.as_ref() != Some(&authority)
             || cost_row.provider_receipt_id != row.provider_receipt_id
@@ -643,7 +649,7 @@ pub(crate) async fn settle_review_call_on(
                 Ok(Usage {
                     model_calls: u64::from(actual.model_calls),
                     tool_calls: u64::from(actual.tool_calls),
-                    tokens: actual.total_tokens().ok_or_else(invalid)?,
+                    tokens: actual.total_tokens().ok_or_else(|| invalid())?,
                 })
             })
             .transpose()?;
@@ -694,7 +700,7 @@ async fn validate_review_subject_on(
                 .filter(review_row::Column::CandidateId.eq(&authority.candidate_id))
                 .one(txn)
                 .await?
-                .ok_or_else(invalid)?;
+                .ok_or_else(|| invalid())?;
             crate::agent_approval_store::validate_goal_source_on(
                 txn,
                 session,
@@ -711,7 +717,7 @@ async fn validate_review_subject_on(
                 .filter(review_row::Column::CandidateId.eq(&authority.candidate_id))
                 .one(txn)
                 .await?
-                .ok_or_else(invalid)?;
+                .ok_or_else(|| invalid())?;
             use sha2::Digest;
             if row.action_sha256
                 != format!(
@@ -753,7 +759,7 @@ async fn validate_review_subject_on(
                 .filter(crate::entity::agent_action_item::Column::ActorId.eq(&authority.actor_id))
                 .one(txn)
                 .await?
-                .ok_or_else(invalid)?;
+                .ok_or_else(|| invalid())?;
             if work.status != crate::capability_grant_store::CAPABILITY_WORK_PREPARED
                 || work.target_device_id != authority.device_id
                 || session.current_turn_id.as_deref() != Some(work.turn_id.as_str())
@@ -771,7 +777,7 @@ async fn validate_review_subject_on(
                 )
                 .one(txn)
                 .await?
-                .ok_or_else(invalid)?;
+                .ok_or_else(|| invalid())?;
             if stored.status != crate::capability_grant_store::GRANT_STATUS_ACTIVE {
                 return Err(invalid());
             }
@@ -813,7 +819,7 @@ pub(super) async fn explain_closed_review_source_on(
         .filter(group_row::Column::DeviceId.eq(&session.device_id))
         .one(txn)
         .await?
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
     let group = current_group_on(txn, &source).await?;
     if now_ms >= group.limits.deadline_ms {
         return Err(DbErr::Custom(

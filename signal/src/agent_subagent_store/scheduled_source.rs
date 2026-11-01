@@ -19,7 +19,7 @@ pub(crate) async fn lock_child_source_on(
         .filter(group_row::Column::DeviceId.eq(&session.device_id))
         .one(txn)
         .await?
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
     current_scheduled_source_on(txn, &row).await?;
     Ok(())
 }
@@ -38,7 +38,10 @@ pub(crate) async fn current_scheduled_source_on(
         return Ok(None);
     }
     let creation = decode_creation(row)?;
-    let frozen = creation.scheduled_source.as_ref().ok_or_else(invalid)?;
+    let frozen = creation
+        .scheduled_source
+        .as_ref()
+        .ok_or_else(|| invalid())?;
     if group.source_admission != SourceAdmission::Open
         || creation
             .new_group(row.created_at, None)

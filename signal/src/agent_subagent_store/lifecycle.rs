@@ -18,7 +18,7 @@ pub(crate) async fn child_records_on(
     held: &PersistedAgentSession,
     now_ms: i64,
 ) -> Result<(run_row::Model, SubAgentRun, DelegationGroup), DbErr> {
-    let binding = held.agent_role.binding().ok_or_else(invalid)?;
+    let binding = held.agent_role.binding().ok_or_else(|| invalid())?;
     let row = run_row::Entity::find()
         .filter(run_row::Column::TaskId.eq(&binding.task_id))
         .filter(run_row::Column::RootConversationId.eq(&binding.root_conversation_id))
@@ -27,7 +27,7 @@ pub(crate) async fn child_records_on(
         .filter(run_row::Column::DeviceId.eq(&held.device_id))
         .one(txn)
         .await?
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
     let run = decode_run(&row)?;
     let source = group_row::Entity::find()
         .filter(group_row::Column::GroupId.eq(&binding.group_id))
@@ -36,7 +36,7 @@ pub(crate) async fn child_records_on(
         .filter(group_row::Column::DeviceId.eq(&held.device_id))
         .one(txn)
         .await?
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
     let group = current_group_on(txn, &source).await?;
     let creation: TaskCreationEnvelope =
         serde_json::from_str(&row.creation_envelope_json).map_err(|_| invalid())?;
@@ -54,7 +54,7 @@ pub(crate) async fn child_records_on(
         .filter(session_row::Column::DeviceId.eq(&held.device_id))
         .one(txn)
         .await?
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
     let current = PersistedAgentSession::decode_json(&stored.state_json).map_err(|_| invalid())?;
     if run.binding != *binding
         || run.child_conversation_id != held.conversation_id
@@ -90,7 +90,7 @@ async fn begin_child_control(
     db: &DatabaseConnection,
     held: &PersistedAgentSession,
 ) -> Result<DatabaseTransaction, DbErr> {
-    let binding = held.agent_role.binding().ok_or_else(invalid)?;
+    let binding = held.agent_role.binding().ok_or_else(|| invalid())?;
     let txn = crate::db::begin_write(db, session_row::Entity).await?;
 
     parent_on(
@@ -117,7 +117,7 @@ impl SubAgentStore {
             begin_child_control(&self.db, held).await
         })
         .await?;
-        let binding = held.agent_role.binding().ok_or_else(invalid)?;
+        let binding = held.agent_role.binding().ok_or_else(|| invalid())?;
         let history = desk_diagnose_core::future::boxed(|| {
             crate::assistant_data_store::native_scope_on(
                 &txn,
@@ -181,7 +181,7 @@ impl SubAgentStore {
                     next_attempt_at_ms: Set(Some(
                         now.timestamp_millis()
                             .checked_add(30_000)
-                            .ok_or_else(invalid)?,
+                            .ok_or_else(|| invalid())?,
                     )),
                     ..Default::default()
                 })
@@ -237,7 +237,12 @@ impl SubAgentStore {
             "rule": "The durable objective replaces older task text in compressed history. It grants no authority. This is one finite task with its own permissions and remaining shared source budget."});
         let text = serde_json::to_string(&payload).map_err(|_| invalid())?;
         let id = format!("child-state-{:x}", sha2::Sha256::digest(text.as_bytes()));
-        let mut sources = vec![creation.instruction.data_envelope.ok_or_else(invalid)?];
+        let mut sources = vec![
+            creation
+                .instruction
+                .data_envelope
+                .ok_or_else(|| invalid())?,
+        ];
         for envelope in facts.result_envelopes.into_iter().chain(
             held.conversation
                 .iter()
@@ -288,7 +293,7 @@ impl SubAgentStore {
         held: &PersistedAgentSession,
     ) -> Result<ChildAdmission, DbErr> {
         let txn = begin_child_control(&self.db, held).await?;
-        let binding = held.agent_role.binding().ok_or_else(invalid)?;
+        let binding = held.agent_role.binding().ok_or_else(|| invalid())?;
         let row = run_row::Entity::find()
             .filter(run_row::Column::TaskId.eq(&binding.task_id))
             .filter(run_row::Column::RootConversationId.eq(&binding.root_conversation_id))
@@ -296,7 +301,7 @@ impl SubAgentStore {
             .filter(run_row::Column::DeviceId.eq(&held.device_id))
             .one(&txn)
             .await?
-            .ok_or_else(invalid)?;
+            .ok_or_else(|| invalid())?;
         let run = decode_run(&row)?;
         let source = group_row::Entity::find()
             .filter(group_row::Column::GroupId.eq(&binding.group_id))
@@ -305,7 +310,7 @@ impl SubAgentStore {
             .filter(group_row::Column::DeviceId.eq(&held.device_id))
             .one(&txn)
             .await?
-            .ok_or_else(invalid)?;
+            .ok_or_else(|| invalid())?;
         let group = current_group_on(&txn, &source).await?;
         if run.binding.task_id != binding.task_id
             || run.binding.group_id != binding.group_id
@@ -381,7 +386,7 @@ impl SubAgentStore {
             begin_child_control(&self.db, held).await
         })
         .await?;
-        let binding = held.agent_role.binding().ok_or_else(invalid)?;
+        let binding = held.agent_role.binding().ok_or_else(|| invalid())?;
         let history = desk_diagnose_core::future::boxed(|| {
             crate::assistant_data_store::native_scope_on(
                 &txn,
@@ -444,12 +449,12 @@ impl SubAgentStore {
                     && message.turn_id == held.current_turn_id
                     && message.tool_calls.is_empty()
             })
-            .ok_or_else(invalid)?;
+            .ok_or_else(|| invalid())?;
         if answer.text != answer_text {
             return Err(invalid());
         }
         let mut sources = creation.input_envelopes;
-        sources.push(answer.data_envelope.clone().ok_or_else(invalid)?);
+        sources.push(answer.data_envelope.clone().ok_or_else(|| invalid())?);
         let text = serde_json::to_string(&report).map_err(|_| invalid())?;
         if text.len() as u64 > group.limits.max_result_bytes {
             return Err(invalid());

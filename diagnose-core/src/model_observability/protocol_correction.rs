@@ -11,6 +11,7 @@ closed_enum!(ProtocolCorrectionReason {
     CompletionInterpretation,
     PermissionProtocol,
     PermissionPlanProtocol,
+    InvalidToolArguments,
     PermissionActionMissing,
     GoalControlMissing,
     ToolChoiceFallback

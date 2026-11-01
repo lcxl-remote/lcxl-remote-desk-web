@@ -63,7 +63,7 @@ pub(super) fn start(data_root: PathBuf, quota: super::QuotaClient) -> Maintenanc
                     previous_unknown = Some(unknown);
                 }
                 Ok(Ok(None)) => (),
-                Ok(Err(error)) => tracing::warn!(error_kind = ?error.kind(),
+                Ok(Err(error)) => tracing::warn!(error_kind = ?error.kind(), error = %error,
                     clock_changed = error.get_ref().is_some_and(|error| error.is::<desk_file_recovery::CleanupClockError>()),
                     "File recovery maintenance failed; pending materials will be retried"),
                 Err(_) => {

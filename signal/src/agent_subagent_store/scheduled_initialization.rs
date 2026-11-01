@@ -23,7 +23,7 @@ impl SubAgentStore {
         })
         .await
         .map_err(|_| invalid())?
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
         let mut current =
             Box::new(PersistedAgentSession::decode_json(&row.state_json).map_err(|_| invalid())?);
         if *current != *held || !current.agent_role.is_main() {
@@ -62,10 +62,10 @@ impl SubAgentStore {
                 })
                 .await?;
                 current.conversation[0] = creation.owner_requirement.clone();
-                current.version = current.version.checked_add(1).ok_or_else(invalid)?;
+                current.version = current.version.checked_add(1).ok_or_else(|| invalid())?;
                 current.updated_at =
                     chrono::DateTime::from_timestamp_millis(authority.verified_at())
-                        .ok_or_else(invalid)?
+                        .ok_or_else(|| invalid())?
                         .to_rfc3339();
                 let changed = desk_diagnose_core::future::boxed(|| async {
                     session_row::Entity::update_many()
@@ -77,7 +77,7 @@ impl SubAgentStore {
                             updated_at: Set(chrono::DateTime::from_timestamp_millis(
                                 authority.verified_at(),
                             )
-                            .ok_or_else(invalid)?),
+                            .ok_or_else(|| invalid())?),
                             ..Default::default()
                         })
                         .filter(session_row::Column::Id.eq(row.id))
@@ -92,7 +92,10 @@ impl SubAgentStore {
                 }
                 creation
             } else {
-                let id = current.delegation_group_id.as_deref().ok_or_else(invalid)?;
+                let id = current
+                    .delegation_group_id
+                    .as_deref()
+                    .ok_or_else(|| invalid())?;
                 let source = desk_diagnose_core::future::boxed(|| async {
                     group_row::Entity::find()
                         .filter(group_row::Column::GroupId.eq(id))
@@ -103,7 +106,7 @@ impl SubAgentStore {
                         .await
                 })
                 .await?
-                .ok_or_else(invalid)?;
+                .ok_or_else(|| invalid())?;
                 let creation = decode_creation(&source)?;
                 if creation.model_destination != *destination
                     || creation.scheduled_source.as_ref()
@@ -118,19 +121,21 @@ impl SubAgentStore {
             let source = desk_diagnose_core::future::boxed(|| async {
                 group_row::Entity::find()
                     .filter(
-                        group_row::Column::GroupId
-                            .eq(current.delegation_group_id.as_deref().ok_or_else(invalid)?),
+                        group_row::Column::GroupId.eq(current
+                            .delegation_group_id
+                            .as_deref()
+                            .ok_or_else(|| invalid())?),
                     )
                     .one(&txn)
                     .await
             })
             .await?
-            .ok_or_else(invalid)?;
+            .ok_or_else(|| invalid())?;
             desk_diagnose_core::future::boxed(|| async {
                 super::scheduled_source::current_scheduled_source_on(&txn, &source).await
             })
             .await?
-            .ok_or_else(invalid)?;
+            .ok_or_else(|| invalid())?;
             let after = desk_diagnose_core::future::boxed(|| async {
                 crate::schedule_store::fresh_action_authority_on(&txn, &current).await
             })

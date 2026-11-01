@@ -1,5 +1,6 @@
 //! Child planning and root result delivery release independent session leases.
 use super::*;
+use std::time::Instant;
 
 impl SignalScheduleExecutor {
     pub(super) async fn run_subagent_tasks(self) {
@@ -77,6 +78,12 @@ impl SignalScheduleExecutor {
                             let store = &store;
                             let executor = &self;
                             async move {
+                                if !executor
+                                    .subagent_backoff
+                                    .is_ready(&row.task_id, Instant::now())
+                                {
+                                    return;
+                                }
                                 if row.state == "waiting_resource" {
                                     let available =
                                         executor.delegated_device_available(&row.device_id).await;
@@ -88,15 +95,20 @@ impl SignalScheduleExecutor {
                                         return;
                                     }
                                 }
-                                match store.child_runtime_candidate(&row.task_id).await {
-                                    Ok(Some(runtime)) => executor.drive_subagent(runtime).await,
-                                    Ok(None) => {}
-                                    Err(error) => log::warn!(
-                                        "[subagent-executor] task {} unavailable: {}",
-                                        row.task_id,
-                                        error
-                                    ),
-                                }
+                                let succeeded =
+                                    match store.child_runtime_candidate(&row.task_id).await {
+                                        Ok(Some(runtime)) => executor.drive_subagent(runtime).await,
+                                        Ok(None) => true,
+                                        Err(error) => {
+                                            log::warn!(
+                                                "[subagent-executor] task {} unavailable: {}",
+                                                row.task_id,
+                                                error
+                                            );
+                                            false
+                                        }
+                                    };
+                                executor.settle_subagent_attempt(&row.task_id, succeeded);
                             }
                         }))
                         .buffer_unordered(LOCAL_CONCURRENCY);
@@ -155,18 +167,31 @@ impl SignalScheduleExecutor {
                             let store = &store;
                             let executor = &self;
                             async move {
+                                if !executor
+                                    .subagent_backoff
+                                    .is_ready(&row.root_conversation_id, Instant::now())
+                                {
+                                    return;
+                                }
                                 let subject = (&row.root_conversation_id, &row.actor_id, &row.device_id);
-                                match store.resolve_parent_wait(subject.0, subject.1, subject.2).await {
+                                let succeeded = match store.resolve_parent_wait(subject.0, subject.1, subject.2).await {
                                     Ok(crate::agent_subagent_store::ParentWaitResolution::Ready(_) | crate::agent_subagent_store::ParentWaitResolution::NotWaiting) => {
                                         match store.parent_runtime_candidate(subject.0, subject.1, subject.2).await {
                                             Ok(Some(runtime)) => executor.drive_subagent(runtime).await,
-                                            Ok(None) => {}
-                                            Err(error) => log::warn!("[subagent-executor] root {} unavailable: {}", row.root_conversation_id, error),
+                                            Ok(None) => true,
+                                            Err(error) => {
+                                                log::warn!("[subagent-executor] root {} unavailable: {}", row.root_conversation_id, error);
+                                                false
+                                            }
                                         }
                                     }
-                                    Ok(_) => {}
-                                    Err(error) => log::warn!("[subagent-executor] root wait {} unavailable: {}", row.root_conversation_id, error),
-                                }
+                                    Ok(_) => true,
+                                    Err(error) => {
+                                        log::warn!("[subagent-executor] root wait {} unavailable: {}", row.root_conversation_id, error);
+                                        false
+                                    }
+                                };
+                                executor.settle_subagent_attempt(&row.root_conversation_id, succeeded);
                             }
                         })).buffer_unordered(LOCAL_CONCURRENCY);
                         while tasks.next().await.is_some() {}
@@ -191,7 +216,19 @@ impl SignalScheduleExecutor {
         targets.next().is_some() && targets.next().is_none()
     }
 
-    async fn drive_subagent(&self, runtime: desk_diagnose_core::subagent::runtime::RuntimeTurn) {
+    fn settle_subagent_attempt(&self, key: &str, succeeded: bool) {
+        if succeeded {
+            self.subagent_backoff.record_success(key);
+        } else {
+            self.subagent_backoff.record_failure(key, Instant::now());
+        }
+    }
+
+    /// Returns whether this attempt ended without an unresolved failure.
+    async fn drive_subagent(
+        &self,
+        runtime: desk_diagnose_core::subagent::runtime::RuntimeTurn,
+    ) -> bool {
         let conversation_id = runtime.session().conversation_id.clone();
         let store = crate::agent_subagent_store::SubAgentStore::new(self.db.clone());
         if matches!(
@@ -208,7 +245,7 @@ impl SignalScheduleExecutor {
                     None,
                 )
                 .await;
-            return;
+            return true;
         }
         let candidate = runtime.clone();
         let connections = self.connections.clone();
@@ -220,7 +257,7 @@ impl SignalScheduleExecutor {
         })
         .await
         {
-            Ok(Ok(_)) => {}
+            Ok(Ok(_)) => true,
             Ok(Err(error)) => {
                 if error.kind == desk_agent_protocol::AgentErrorKind::ModelRejected {
                     let _ = store
@@ -242,12 +279,16 @@ impl SignalScheduleExecutor {
                     conversation_id,
                     error.message
                 );
+                false
             }
-            Err(error) => log::warn!(
-                "[subagent-executor] turn {} interrupted: {}",
-                conversation_id,
-                error
-            ),
+            Err(error) => {
+                log::warn!(
+                    "[subagent-executor] turn {} interrupted: {}",
+                    conversation_id,
+                    error
+                );
+                false
+            }
         }
     }
 }

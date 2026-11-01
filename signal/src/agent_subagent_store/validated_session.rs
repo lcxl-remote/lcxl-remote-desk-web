@@ -72,7 +72,7 @@ impl<'t> TxnValidatedSession<'t> {
             .filter(session_row::Column::LeaseToken.eq(self.row.lease_token))
             .one(self.txn)
             .await?
-            .ok_or_else(invalid)?;
+            .ok_or_else(|| invalid())?;
         self.reuse(&row)?;
         Ok(row)
     }
@@ -85,7 +85,7 @@ impl<'t> TxnValidatedSession<'t> {
             .filter(session_row::Column::LeaseToken.eq(self.row.lease_token))
             .one(self.txn)
             .await?
-            .ok_or_else(invalid)?;
+            .ok_or_else(|| invalid())?;
         let session = self.reuse(&row)?;
         if !session.agent_role.is_main()
             || session.surface != AgentSessionSurface::AiAssistant

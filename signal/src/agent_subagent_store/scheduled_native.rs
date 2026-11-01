@@ -76,7 +76,7 @@ async fn scheduled_session_on(
         .filter(session_row::Column::DeviceId.eq(&group.device_id))
         .one(txn)
         .await?
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
     let session =
         Box::new(PersistedAgentSession::decode_json(&row.state_json).map_err(|_| invalid())?);
     if session.conversation_id != id
@@ -201,7 +201,7 @@ async fn scheduled_actions_on(
             .filter(outbox::Column::WorkId.eq(action.id))
             .one(txn)
             .await?
-            .ok_or_else(invalid)?;
+            .ok_or_else(|| invalid())?;
         let payload: CapabilityDispatchPayload =
             serde_json::from_str(&dispatch.payload_json).map_err(|_| invalid())?;
         if payload.work_id != action.id
@@ -228,7 +228,7 @@ async fn scheduled_actions_on(
                 }
                 continue;
             };
-            let origin = payload.command_origin.as_ref().ok_or_else(invalid)?;
+            let origin = payload.command_origin.as_ref().ok_or_else(|| invalid())?;
             origin.validate().map_err(|_| invalid())?;
             if task.exec_request_id != payload.call_id
                 || task.tool_call_id != origin.tool_call_id

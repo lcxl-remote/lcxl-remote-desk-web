@@ -40,7 +40,7 @@ impl SubAgentStore {
                 .await
         })
         .await?
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
         let mut session =
             PersistedAgentSession::decode_json(&row.state_json).map_err(|_| invalid())?;
         if session.agent_role.binding().is_none()
@@ -61,8 +61,8 @@ impl SubAgentStore {
                 task_context_on(&txn, &session).await
             })
             .await?
-            .ok_or_else(invalid)?;
-            let binding = session.agent_role.binding().ok_or_else(invalid)?;
+            .ok_or_else(|| invalid())?;
+            let binding = session.agent_role.binding().ok_or_else(|| invalid())?;
             desk_diagnose_core::future::boxed(|| async {
                 parent_on(
                     &txn,
@@ -104,7 +104,7 @@ impl SubAgentStore {
                 record_child_resume_on(&txn, &session, now.timestamp_millis()).await
             })
             .await?;
-            session.version = row.version.checked_add(1).ok_or_else(invalid)?;
+            session.version = row.version.checked_add(1).ok_or_else(|| invalid())?;
             let changed = desk_diagnose_core::future::boxed(|| async {
                 session_row::Entity::update_many()
                 .set(session_row::ActiveModel {

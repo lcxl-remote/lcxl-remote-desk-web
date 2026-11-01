@@ -34,7 +34,7 @@ impl SubAgentStore {
         let allocation = Usage {
             model_calls: u64::from(upper.model_calls),
             tool_calls: u64::from(upper.tool_calls),
-            tokens: upper.total_tokens().ok_or_else(invalid)?,
+            tokens: upper.total_tokens().ok_or_else(|| invalid())?,
         };
         let root = session
             .agent_role
@@ -51,14 +51,14 @@ impl SubAgentStore {
             .filter(group_row::Column::DeviceId.eq(&session.device_id))
             .one(&txn)
             .await?
-            .ok_or_else(invalid)?;
+            .ok_or_else(|| invalid())?;
         let group = decode_group(&group)?;
         if session.trigger_origin == desk_diagnose_core::session::TriggerOrigin::GoalContinuation {
             let segment = session
                 .focus_epoch
                 .goal_segment
                 .as_ref()
-                .ok_or_else(invalid)?;
+                .ok_or_else(|| invalid())?;
             if group.source.goal_id() != Some(segment.goal_id.as_str()) {
                 return Err(invalid());
             }
@@ -109,7 +109,7 @@ impl SubAgentStore {
             )
             .one(&txn)
             .await?
-            .ok_or_else(invalid)?;
+            .ok_or_else(|| invalid())?;
         if budget::decode_reservation(&row)? != *reservation {
             return Err(invalid());
         }
@@ -146,7 +146,7 @@ impl SubAgentStore {
                 Ok(Usage {
                     model_calls: u64::from(actual.model_calls),
                     tool_calls: u64::from(actual.tool_calls),
-                    tokens: actual.total_tokens().ok_or_else(invalid)?,
+                    tokens: actual.total_tokens().ok_or_else(|| invalid())?,
                 })
             })
             .transpose()?;

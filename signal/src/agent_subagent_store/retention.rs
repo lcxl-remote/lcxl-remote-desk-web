@@ -49,7 +49,7 @@ pub(crate) async fn tombstone_on<C: ConnectionTrait + crate::config::ConfigConne
     let row = tombstone::Entity::find_by_id(conversation)
         .one(db)
         .await?
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
     if row.actor_id != actor || row.device_id != device {
         return Err(invalid());
     }
@@ -112,7 +112,7 @@ pub(crate) async fn close_root_for_subject_on(
     let mut permission_ends =
         desk_diagnose_core::model_observability::permission::PendingEnds::default();
     let now = chrono::DateTime::from_timestamp_millis(now_ms)
-        .ok_or_else(invalid)?
+        .ok_or_else(|| invalid())?
         .to_rfc3339();
     let mut after = 0;
     loop {
@@ -131,7 +131,7 @@ pub(crate) async fn close_root_for_subject_on(
         if rows.is_empty() {
             break;
         }
-        after = rows.last().ok_or_else(invalid)?.id;
+        after = rows.last().ok_or_else(|| invalid())?.id;
         for row in rows {
             let mut group = decode_group(&row)?;
             group.stop_parent().map_err(|_| invalid())?;
@@ -247,8 +247,8 @@ fn close_child_on<'a>(
         .await?;
         let changed = session_row::Entity::update_many()
             .set(session_row::ActiveModel {
-                version: Set(row.version.checked_add(1).ok_or_else(invalid)?),
-                lease_token: Set(row.lease_token.checked_add(1).ok_or_else(invalid)?),
+                version: Set(row.version.checked_add(1).ok_or_else(|| invalid())?),
+                lease_token: Set(row.lease_token.checked_add(1).ok_or_else(|| invalid())?),
                 lease_deadline: Set(None),
 
                 ..Default::default()
@@ -480,7 +480,7 @@ pub(crate) async fn purge_authority(db: &DatabaseConnection, cutoff_ms: i64) -> 
     let next = if candidates.len() == 100 {
         candidates
             .last()
-            .ok_or_else(invalid)?
+            .ok_or_else(|| invalid())?
             .conversation_id
             .clone()
     } else {
@@ -661,7 +661,7 @@ pub(crate) async fn redact_deleted_content(
                     != desk_diagnose_core::subagent::TaskAssessment::Complete)
                     .then(|| "Report content expired".into());
             }
-            run.state_revision = run.state_revision.checked_add(1).ok_or_else(invalid)?;
+            run.state_revision = run.state_revision.checked_add(1).ok_or_else(|| invalid())?;
             run.validate().map_err(|error| {
                 DbErr::Custom(format!("invalid redacted delegated task: {error}"))
             })?;
@@ -705,7 +705,7 @@ pub(crate) async fn redact_deleted_content(
                     .reset_for_input(session.input_revision);
                 session.pending_visual_verification = None;
                 session.task_status_projection = None;
-                session.version = child.version.checked_add(1).ok_or_else(invalid)?;
+                session.version = child.version.checked_add(1).ok_or_else(|| invalid())?;
                 let encoded = session.encode_json_for_storage().map_err(|_| invalid())?;
                 PersistedAgentSession::decode_json(&encoded).map_err(|error| {
                     DbErr::Custom(format!("invalid redacted child session: {error:?}"))

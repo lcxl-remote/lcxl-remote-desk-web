@@ -32,7 +32,7 @@ pub(super) async fn reserve_on(
         .filter(cost::Column::ReservationId.eq(&reservation.reservation_id))
         .one(txn)
         .await?
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
     if budget::decode_reservation(&row)? != *reservation {
         return Err(invalid());
     }
@@ -41,7 +41,7 @@ pub(super) async fn reserve_on(
             .filter(group_row::Column::GroupId.eq(&reservation.group_id))
             .one(txn)
             .await?
-            .ok_or_else(invalid)?;
+            .ok_or_else(|| invalid())?;
         linked_on(txn, &group, &row, reservation).await?;
         return Ok(true);
     }
@@ -98,14 +98,18 @@ async fn linked_on(
     let id = row
         .source_schedule_budget_id
         .as_deref()
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
     let allocation = quota::Entity::find()
         .filter(quota::Column::ReservationId.eq(id))
         .one(txn)
         .await?
-        .ok_or_else(invalid)?;
-    if allocation.schedule_id != *group.source_schedule_id.as_ref().ok_or_else(invalid)?
-        || allocation.run_id != *group.source_occurrence_id.as_ref().ok_or_else(invalid)?
+        .ok_or_else(|| invalid())?;
+    if allocation.schedule_id != *group.source_schedule_id.as_ref().ok_or_else(|| invalid())?
+        || allocation.run_id
+            != *group
+                .source_occurrence_id
+                .as_ref()
+                .ok_or_else(|| invalid())?
         || allocation.run_id != reservation.root_conversation_id
         || allocation.owner_user_id.to_string() != group.actor_id
         || allocation.kind != "model_tokens"
@@ -131,7 +135,7 @@ pub(super) async fn validate_dispatch_on(
         .filter(group_row::Column::RootConversationId.eq(&reservation.root_conversation_id))
         .one(txn)
         .await?
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
     if let Some(allocation) = linked_on(txn, &group, row, reservation).await?
         && (allocation.state != "reserved" || allocation.charged_units != allocation.reserved_units)
     {

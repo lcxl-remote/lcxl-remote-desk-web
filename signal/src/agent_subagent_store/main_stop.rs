@@ -112,7 +112,7 @@ impl SubAgentStore {
                     .await
             })
             .await?
-            .ok_or_else(invalid)?;
+            .ok_or_else(|| invalid())?;
             let mut group = decode_group(&row)?;
             group.stop_parent().map_err(|_| invalid())?;
             desk_diagnose_core::future::boxed(|| async {
@@ -133,7 +133,7 @@ impl SubAgentStore {
                             .await
                     })
                     .await?
-                    .ok_or_else(invalid)?;
+                    .ok_or_else(|| invalid())?;
                     let child = PersistedAgentSession::decode_json(&row.state_json)
                         .map_err(|_| invalid())?;
                     run.validate_session(&child).map_err(|_| invalid())?;
@@ -196,13 +196,13 @@ impl SubAgentStore {
                 .await
         })
         .await?
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
         if row.version != parent.version
             || row.lease_token != i64::try_from(parent.lease_token).map_err(|_| invalid())?
         {
             return Err(invalid());
         }
-        stopped.version = parent.version.checked_add(1).ok_or_else(invalid)?;
+        stopped.version = parent.version.checked_add(1).ok_or_else(|| invalid())?;
         let changed = session_row::Entity::update_many()
             .set(session_row::ActiveModel {
                 state_json: Set(stopped.encode_json_for_storage().map_err(|_| invalid())?),
@@ -291,7 +291,7 @@ pub(crate) async fn resume_goal_parent_on(
         .control_revision
         .checked_add(1)
         .filter(|value| *value <= i64::MAX as u64)
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
     let rows = group_row::Entity::find()
         .filter(group_row::Column::RootConversationId.eq(&parent.conversation_id))
         .filter(group_row::Column::ActorId.eq(&parent.actor_id))

@@ -23,7 +23,7 @@ pub(crate) async fn parent_planning_on(
         .filter(session_row::Column::ConversationId.eq(&held.conversation_id))
         .one(txn)
         .await?
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
     if !held.agent_role.is_main()
         || !current.turn_state.is_active()
         || held.version != current.version
@@ -85,7 +85,10 @@ pub(crate) async fn spawn_on(
     if tools::parse(held, call).map_err(|_| invalid())? != Operation::Spawn(request.clone()) {
         return Err(invalid());
     }
-    let group_id = held.delegation_group_id.as_deref().ok_or_else(invalid)?;
+    let group_id = held
+        .delegation_group_id
+        .as_deref()
+        .ok_or_else(|| invalid())?;
     let creation_key = format!(
         "{:x}",
         Sha256::digest(
@@ -127,7 +130,7 @@ pub(crate) async fn spawn_on(
             .await
     })
     .await?
-    .ok_or_else(invalid)?;
+    .ok_or_else(|| invalid())?;
     let mut group = boxed_group(&original_row)?;
     let creation = decode_creation(&original_row)?;
     if !group.can_interpret(held.input_revision, held.control_revision) {

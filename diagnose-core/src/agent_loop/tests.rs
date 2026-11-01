@@ -5254,6 +5254,79 @@ async fn exact_permissioned_read_clears_the_continuation_checkpoint_after_the_ca
 }
 
 #[tokio::test]
+async fn ai_assistant_retries_invalid_tool_arguments_once_then_fails() {
+    use crate::session::AgentSessionSurface;
+
+    for (turns, expect_answer, expected_requests) in [
+        (
+            vec![
+                tool_use_args("bad", "sysinfo", "{\"a\":["),
+                answer("recovered"),
+            ],
+            true,
+            2,
+        ),
+        (
+            vec![
+                tool_use_args("bad-1", "sysinfo", "{\"a\":["),
+                tool_use_args("bad-2", "sysinfo", "{\"a\":["),
+                answer("unreachable"),
+            ],
+            false,
+            2,
+        ),
+    ] {
+        let mut seeded = PersistedAgentSession::new(
+            "conv",
+            "actor",
+            "device",
+            1,
+            scope(),
+            "2026-06-20T00:00:00Z",
+        );
+        seeded.surface = AgentSessionSurface::AiAssistant;
+        seeded.input_revision = 1;
+        seeded.latest_input_seq = 1;
+        let sess = MemSession {
+            inner: RefCell::new(Some(seeded)),
+            ..Default::default()
+        };
+        let requests = Rc::new(RefCell::new(vec![]));
+        let model = ScriptModel {
+            turns: RefCell::new(turns.into()),
+            requests: requests.clone(),
+        };
+        let tools = RecordingTools {
+            calls: Rc::new(RefCell::new(Vec::new())),
+            reply: "x".into(),
+        };
+        let registry = vec![read_tool("sysinfo", Capability::SystemInfo)];
+        let clock = || "2026-06-20T00:00:01Z".to_string();
+        let outcome = run_agent_turn(
+            &deps(&sess, &model, &tools, &registry, &clock),
+            claim(),
+            ChatMessage::text("u", ChatRole::User, "q"),
+            &mut NullTurnSink,
+        )
+        .await
+        .unwrap();
+
+        if expect_answer {
+            assert_eq!(outcome, LoopOutcome::Answered("recovered".into()));
+        } else {
+            assert!(matches!(outcome, LoopOutcome::ProtocolError(_)));
+        }
+        // The discarded call was never dispatched.
+        assert!(tools.calls.borrow().is_empty());
+        let requests = requests.borrow();
+        assert_eq!(requests.len(), expected_requests);
+        let notice = requests[1].messages.last().unwrap();
+        assert_eq!(notice.role, ChatRole::SystemEvent);
+        assert!(notice.text.contains("not valid JSON"));
+    }
+}
+
+#[tokio::test]
 async fn ai_assistant_retries_one_malformed_permission_plan_after_tool_result() {
     use crate::model_observability::protocol_correction::{
         ProtocolCorrectionCheck, ProtocolCorrectionReason,

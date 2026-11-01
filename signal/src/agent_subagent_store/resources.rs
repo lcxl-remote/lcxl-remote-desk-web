@@ -55,13 +55,13 @@ impl SubAgentStore {
             .filter(run_row::Column::TaskId.eq(task_id))
             .one(&self.db)
             .await?
-            .ok_or_else(invalid)?;
+            .ok_or_else(|| invalid())?;
         let txn = begin_candidate_control(self, &selected, false).await?;
         let row = run_row::Entity::find()
             .filter(run_row::Column::Id.eq(selected.id))
             .one(&txn)
             .await?
-            .ok_or_else(invalid)?;
+            .ok_or_else(|| invalid())?;
         let mut run = decode_run(&row)?;
         if run.state.is_terminal()
             || run.state == SubAgentState::Cancelling
@@ -73,7 +73,7 @@ impl SubAgentStore {
             .filter(group_row::Column::GroupId.eq(&run.binding.group_id))
             .one(&txn)
             .await?
-            .ok_or_else(invalid)?;
+            .ok_or_else(|| invalid())?;
         let group = current_group_on(&txn, &source).await?;
         run.fail("delegation_deadline_reached", &now.to_rfc3339())
             .map_err(|_| invalid())?;
@@ -120,25 +120,25 @@ impl SubAgentStore {
             .filter(run_row::Column::TaskId.eq(&expected.binding.task_id))
             .one(&self.db)
             .await?
-            .ok_or_else(invalid)?;
+            .ok_or_else(|| invalid())?;
         let txn = begin_candidate_control(self, &selected, true).await?;
         let row = run_row::Entity::find()
             .filter(run_row::Column::Id.eq(selected.id))
             .one(&txn)
             .await?
-            .ok_or_else(invalid)?;
+            .ok_or_else(|| invalid())?;
         let mut run = decode_run(&row)?;
         let source = group_row::Entity::find()
             .filter(group_row::Column::GroupId.eq(&run.binding.group_id))
             .one(&txn)
             .await?
-            .ok_or_else(invalid)?;
+            .ok_or_else(|| invalid())?;
         let group = current_group_on(&txn, &source).await?;
         let stored = session_row::Entity::find()
             .filter(session_row::Column::ConversationId.eq(&run.child_conversation_id))
             .one(&txn)
             .await?
-            .ok_or_else(invalid)?;
+            .ok_or_else(|| invalid())?;
         let current =
             PersistedAgentSession::decode_json(&stored.state_json).map_err(|_| invalid())?;
         if run.state != SubAgentState::Queued
@@ -161,7 +161,7 @@ impl SubAgentStore {
         } else {
             run.set_dependencies(
                 vec![TaskDependency::Resource {
-                    reason: resource.ok_or_else(invalid)?,
+                    reason: resource.ok_or_else(|| invalid())?,
                 }],
                 &now.to_rfc3339(),
             )
@@ -176,7 +176,7 @@ impl SubAgentStore {
                     next_attempt_at_ms: Set(Some(
                         now.timestamp_millis()
                             .checked_add(30_000)
-                            .ok_or_else(invalid)?,
+                            .ok_or_else(|| invalid())?,
                     )),
                     ..Default::default()
                 })
@@ -208,13 +208,13 @@ impl SubAgentStore {
             .filter(run_row::Column::TaskId.eq(task_id))
             .one(&self.db)
             .await?
-            .ok_or_else(invalid)?;
+            .ok_or_else(|| invalid())?;
         let txn = begin_candidate_control(self, &selected, true).await?;
         let row = run_row::Entity::find()
             .filter(run_row::Column::Id.eq(selected.id))
             .one(&txn)
             .await?
-            .ok_or_else(invalid)?;
+            .ok_or_else(|| invalid())?;
         let mut run = decode_run(&row)?;
         let now = chrono::Utc::now();
         if run.state != SubAgentState::WaitingResource
@@ -238,7 +238,7 @@ impl SubAgentStore {
             .filter(group_row::Column::GroupId.eq(&run.binding.group_id))
             .one(&txn)
             .await?
-            .ok_or_else(invalid)?;
+            .ok_or_else(|| invalid())?;
         let group = current_group_on(&txn, &source).await?;
         if group.source_admission != SourceAdmission::Open
             || run.source_paused
@@ -250,7 +250,7 @@ impl SubAgentStore {
             .filter(session_row::Column::ConversationId.eq(&run.child_conversation_id))
             .one(&txn)
             .await?
-            .ok_or_else(invalid)?;
+            .ok_or_else(|| invalid())?;
         let session =
             PersistedAgentSession::decode_json(&stored.state_json).map_err(|_| invalid())?;
         run.validate_session(&session).map_err(|_| invalid())?;

@@ -17,14 +17,16 @@ pub(crate) async fn shared_approval_current_on<
     if !check_child_permission_on(db, session, now_ms).await? {
         return Ok(false);
     }
-    task_context_on(db, session).await?.ok_or_else(invalid)?;
+    task_context_on(db, session)
+        .await?
+        .ok_or_else(|| invalid())?;
     let parent = session_row::Entity::find()
         .filter(session_row::Column::ConversationId.eq(&binding.root_conversation_id))
         .filter(session_row::Column::ActorId.eq(&session.actor_id))
         .filter(session_row::Column::DeviceId.eq(&session.device_id))
         .one(db)
         .await?
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
     let parent = PersistedAgentSession::decode_json(&parent.state_json).map_err(|_| invalid())?;
     if !parent.agent_role.is_main()
         || parent.surface != AgentSessionSurface::AiAssistant
@@ -41,7 +43,7 @@ pub(crate) async fn shared_approval_current_on<
         .filter(group_row::Column::DeviceId.eq(&session.device_id))
         .one(db)
         .await?
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
     Ok(
         decode_group(&group)?.source_admission == SourceAdmission::Open
             && !deleted_on(db, &binding.root_conversation_id).await?,

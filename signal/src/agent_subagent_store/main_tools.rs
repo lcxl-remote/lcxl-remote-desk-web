@@ -57,7 +57,10 @@ fn task_labels(row: &run_row::Model) -> Result<Vec<DataEnvelope>, DbErr> {
         .validate_task(&run.binding)
         .map_err(|_| invalid())?;
     Ok(vec![
-        creation.instruction.data_envelope.ok_or_else(invalid)?,
+        creation
+            .instruction
+            .data_envelope
+            .ok_or_else(|| invalid())?,
     ])
 }
 
@@ -67,15 +70,17 @@ pub(crate) async fn current_group_on(
 ) -> Result<DelegationGroup, DbErr> {
     let row = group_row::Entity::find()
         .filter(
-            group_row::Column::GroupId
-                .eq(parent.delegation_group_id.as_deref().ok_or_else(invalid)?),
+            group_row::Column::GroupId.eq(parent
+                .delegation_group_id
+                .as_deref()
+                .ok_or_else(|| invalid())?),
         )
         .filter(group_row::Column::RootConversationId.eq(&parent.conversation_id))
         .filter(group_row::Column::ActorId.eq(&parent.actor_id))
         .filter(group_row::Column::DeviceId.eq(&parent.device_id))
         .one(txn)
         .await?
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
     let group = decode_group(&row)?;
     if !group.can_interpret(parent.input_revision, parent.control_revision) {
         return Err(invalid());
@@ -94,7 +99,10 @@ async fn begin_main_tool(
     let txn = crate::db::begin_write(&store.db, session_row::Entity).await?;
     let child_id = match operation {
         Operation::Spawn(_) => {
-            let group_id = held.delegation_group_id.as_deref().ok_or_else(invalid)?;
+            let group_id = held
+                .delegation_group_id
+                .as_deref()
+                .ok_or_else(|| invalid())?;
             let key = format!(
                 "{:x}",
                 Sha256::digest(
@@ -209,7 +217,7 @@ impl SubAgentStore {
                 .await
         })
         .await?
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
         let mut labels = decode_creation(&source)?
             .input_envelopes()
             .map_err(|_| invalid())?;
@@ -359,7 +367,7 @@ impl SubAgentStore {
                     })
             })
             .and_then(|message| message.data_envelope.clone())
-            .ok_or_else(invalid)?;
+            .ok_or_else(|| invalid())?;
         if let Some(result) = parent.conversation.iter().find(|message| {
             message.role == ChatRole::Tool
                 && message.tool_call_id.as_deref() == Some(call.id.as_str())
@@ -503,7 +511,9 @@ impl SubAgentStore {
                 labels.extend(task_labels(&row)?);
                 if result.report.is_some() {
                     let label: DataEnvelope = serde_json::from_str(
-                        row.result_envelope_json.as_deref().ok_or_else(invalid)?,
+                        row.result_envelope_json
+                            .as_deref()
+                            .ok_or_else(|| invalid())?,
                     )
                     .map_err(|_| invalid())?;
                     label.validate().map_err(|_| invalid())?;

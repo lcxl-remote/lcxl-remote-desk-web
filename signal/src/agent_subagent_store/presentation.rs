@@ -17,7 +17,7 @@ pub(crate) async fn presentation_on<C: ConnectionTrait + crate::config::ConfigCo
             .filter(run_row::Column::DeviceId.eq(&session.device_id))
             .one(db)
             .await?
-            .ok_or_else(invalid)?;
+            .ok_or_else(|| invalid())?;
         let run = decode_run(&row)?;
         run.validate_session(session).map_err(|_| invalid())?;
         return Ok(AiAssistantDelegationSnapshot {

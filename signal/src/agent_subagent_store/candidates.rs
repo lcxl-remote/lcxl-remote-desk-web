@@ -113,7 +113,7 @@ impl SubAgentStore {
             .filter(run_row::Column::TaskId.eq(task_id))
             .one(&self.db)
             .await?
-            .ok_or_else(invalid)?;
+            .ok_or_else(|| invalid())?;
         let txn = crate::db::begin_write(&self.db, session_row::Entity).await?;
         parent_on(
             &txn,
@@ -126,7 +126,7 @@ impl SubAgentStore {
             .filter(run_row::Column::Id.eq(selected.id))
             .one(&txn)
             .await?
-            .ok_or_else(invalid)?;
+            .ok_or_else(|| invalid())?;
         let run = decode_run(&row)?;
         if run.state != SubAgentState::Queued || run.source_paused {
             return Ok(None);
@@ -138,7 +138,7 @@ impl SubAgentStore {
             .filter(group_row::Column::DeviceId.eq(&run.device_id))
             .one(&txn)
             .await?
-            .ok_or_else(invalid)?;
+            .ok_or_else(|| invalid())?;
         let group = decode_group(&group_row)?;
         if group.source_admission != SourceAdmission::Open
             || group.source_epoch != run.binding.source_epoch
@@ -156,7 +156,7 @@ impl SubAgentStore {
             .filter(session_row::Column::DeviceId.eq(&run.device_id))
             .one(&txn)
             .await?
-            .ok_or_else(invalid)?;
+            .ok_or_else(|| invalid())?;
         let session = PersistedAgentSession::decode_json(&row.state_json).map_err(|_| invalid())?;
         if session.version != row.version || session.turn_state.is_active() {
             return Ok(None);

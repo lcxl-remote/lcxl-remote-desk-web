@@ -73,7 +73,10 @@ async fn initialize_goal_group_inner(
     {
         return Err(invalid());
     }
-    let id = session.delegation_group_id.as_deref().ok_or_else(invalid)?;
+    let id = session
+        .delegation_group_id
+        .as_deref()
+        .ok_or_else(|| invalid())?;
     let row = group_row::Entity::find()
         .filter(group_row::Column::GroupId.eq(id))
         .filter(group_row::Column::RootConversationId.eq(&session.conversation_id))
@@ -81,7 +84,7 @@ async fn initialize_goal_group_inner(
         .filter(group_row::Column::DeviceId.eq(&session.device_id))
         .one(db)
         .await?
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
     let group = current_group_on(db, &row).await?;
     let creation = decode_creation(&row)?;
     let binding =

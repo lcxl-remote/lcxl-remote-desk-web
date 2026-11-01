@@ -20,14 +20,14 @@ pub(crate) async fn synchronize_control_on<C: ConnectionTrait + crate::config::C
             .await
     })
     .await?
-    .ok_or_else(invalid)?;
+    .ok_or_else(|| invalid())?;
     let mut session = PersistedAgentSession::decode_json(&row.state_json).map_err(|_| invalid())?;
     if session.version != row.version
         || i64::try_from(session.lease_token).ok() != Some(row.lease_token)
     {
         return Err(invalid());
     }
-    let now = chrono::DateTime::from_timestamp_millis(now_ms).ok_or_else(invalid)?;
+    let now = chrono::DateTime::from_timestamp_millis(now_ms).ok_or_else(|| invalid())?;
     if matches!(
         run.state,
         SubAgentState::Failed | SubAgentState::Cancelled | SubAgentState::Cancelling
@@ -58,7 +58,7 @@ pub(crate) async fn synchronize_control_on<C: ConnectionTrait + crate::config::C
                 .await
         })
         .await?
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
         let context: desk_diagnose_core::subagent::creation::TaskCreationEnvelope =
             serde_json::from_str(&task.creation_envelope_json).map_err(|_| invalid())?;
         context.validate_task(&run.binding).map_err(|_| invalid())?;
@@ -71,7 +71,7 @@ pub(crate) async fn synchronize_control_on<C: ConnectionTrait + crate::config::C
         }
         session.conversation.push(context.instruction);
     }
-    session.version = row.version.checked_add(1).ok_or_else(invalid)?;
+    session.version = row.version.checked_add(1).ok_or_else(|| invalid())?;
     let changed = session_row::Entity::update_many()
         .set(session_row::ActiveModel {
             state_json: Set(session.encode_json_for_storage().map_err(|_| invalid())?),
@@ -126,7 +126,7 @@ pub(crate) async fn append_state_event_on<C: ConnectionTrait + crate::config::Co
         parent_input_revision: group.parent_input_revision,
         parent_control_revision: group.parent_control_revision,
         created_at: chrono::DateTime::from_timestamp_millis(now_ms)
-            .ok_or_else(invalid)?
+            .ok_or_else(|| invalid())?
             .to_rfc3339(),
     };
     let event_json = serde_json::to_string(&event).map_err(|_| invalid())?;
@@ -168,7 +168,7 @@ pub(crate) async fn append_state_event_on<C: ConnectionTrait + crate::config::Co
         .filter(inbox::Column::DedupKeySha256.eq(&key))
         .one(db)
         .await?
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
     // Idempotency fixes the original event timestamp rather than replacing it.
     let original: AiAssistantSubAgentEvent =
         serde_json::from_str(&persisted.event_json).map_err(|_| invalid())?;

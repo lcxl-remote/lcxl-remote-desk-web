@@ -20,7 +20,7 @@ pub(crate) async fn task_context_on<C: ConnectionTrait + crate::config::ConfigCo
         .filter(run_row::Column::DeviceId.eq(&session.device_id))
         .one(db)
         .await?
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
     let run = decode_run(&row)?;
     run.validate_session(session).map_err(|_| invalid())?;
     let source = group_row::Entity::find()
@@ -30,7 +30,7 @@ pub(crate) async fn task_context_on<C: ConnectionTrait + crate::config::ConfigCo
         .filter(group_row::Column::DeviceId.eq(&session.device_id))
         .one(db)
         .await?
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
     let group = current_group_on(db, &source).await?;
     let creation: TaskCreationEnvelope =
         serde_json::from_str(&row.creation_envelope_json).map_err(|_| invalid())?;
@@ -104,7 +104,9 @@ async fn child_resume_admitted_inner<C: ConnectionTrait + crate::config::ConfigC
     let Some(binding) = session.agent_role.binding() else {
         return Ok(!session.main_stopped);
     };
-    task_context_on(db, session).await?.ok_or_else(invalid)?;
+    task_context_on(db, session)
+        .await?
+        .ok_or_else(|| invalid())?;
     if !check_child_permission_on(db, session, now_ms).await? {
         return Ok(false);
     }
@@ -112,13 +114,13 @@ async fn child_resume_admitted_inner<C: ConnectionTrait + crate::config::ConfigC
         .filter(run_row::Column::TaskId.eq(&binding.task_id))
         .one(db)
         .await?
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
     let run = decode_run(&run)?;
     let group = group_row::Entity::find()
         .filter(group_row::Column::GroupId.eq(&binding.group_id))
         .one(db)
         .await?
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
     let group = current_group_on(db, &group).await?;
     let charged = group
         .budget
@@ -153,17 +155,17 @@ pub(crate) async fn record_child_resume_on(
         .filter(run_row::Column::TaskId.eq(&binding.task_id))
         .one(txn)
         .await?
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
     let mut run = decode_run(&row)?;
     let group = group_row::Entity::find()
         .filter(group_row::Column::GroupId.eq(&binding.group_id))
         .one(txn)
         .await?
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
     let group = current_group_on(txn, &group).await?;
     let facts = super::facts::runtime_facts_on(txn, session, now_ms).await?;
     let now = chrono::DateTime::from_timestamp_millis(now_ms)
-        .ok_or_else(invalid)?
+        .ok_or_else(|| invalid())?
         .to_rfc3339();
     if run
         .synchronize_dependencies(facts.dependencies, true, &now)
@@ -189,7 +191,7 @@ impl SubAgentStore {
             .filter(run_row::Column::DeviceId.eq(&session.device_id))
             .one(&self.db)
             .await?
-            .ok_or_else(invalid)?;
+            .ok_or_else(|| invalid())?;
         let run = decode_run(&row)?;
         run.validate_session(session).map_err(|_| invalid())?;
         Ok(run.state.is_terminal() || run.state == SubAgentState::Cancelling)
@@ -220,7 +222,7 @@ impl SubAgentStore {
             .filter(session_row::Column::DeviceId.eq(device_id))
             .one(&txn)
             .await?
-            .ok_or_else(invalid)?;
+            .ok_or_else(|| invalid())?;
         let session = PersistedAgentSession::decode_json(&row.state_json).map_err(|_| invalid())?;
         if row.version != expected_version || session.version != row.version {
             return Err(invalid());

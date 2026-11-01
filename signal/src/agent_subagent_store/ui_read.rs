@@ -24,7 +24,7 @@ impl SubAgentStore {
             .filter(run_row::Column::DeviceId.eq(device))
             .one(&txn)
             .await?
-            .ok_or_else(invalid)?;
+            .ok_or_else(|| invalid())?;
         if through_state_revision > decode_run(&row)?.state_revision {
             return Err(invalid());
         }

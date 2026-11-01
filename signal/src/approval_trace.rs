@@ -932,10 +932,7 @@ impl Store {
             // Replaying committed source metadata is safe on every node: the metric
             // store owns shared deduplication and atomic contribution replacement.
             if let Err(error) = self.cleanup().await {
-                log::warn!(
-                    "approval detail cleanup failed: {}",
-                    error.sql_err().is_some()
-                );
+                log::warn!("approval detail cleanup failed: {error}");
             }
             let _ = self.reconcile(&mut reviews_after, &mut events_after).await;
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;

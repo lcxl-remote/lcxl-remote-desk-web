@@ -58,6 +58,8 @@ pub struct SignalScheduleExecutor {
     /// Instance-local position in the runnable goal FIFO. Only rotates which
     /// candidates are read next; claims are still decided under the write lock.
     goal_cursor: Arc<std::sync::Mutex<Option<crate::agent_goal_store::ContinuationCursor>>>,
+    /// Paces subagent candidates that keep failing; a hint, not an authorization.
+    subagent_backoff: Arc<desk_diagnose_core::retry_backoff::RetryBackoff>,
 }
 
 enum DispatchResult {
@@ -79,6 +81,7 @@ impl SignalScheduleExecutor {
             gate,
             approval_cursor: Arc::new(AtomicI64::new(0)),
             goal_cursor: Arc::new(std::sync::Mutex::new(None)),
+            subagent_backoff: Arc::default(),
         }
     }
 

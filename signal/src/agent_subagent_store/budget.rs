@@ -149,7 +149,10 @@ pub(super) async fn reserve_budget_for_session_on(
 ) -> Result<BudgetAdmission, DbErr> {
     let txn = call.txn();
     let session = call.session();
-    let group_id = session.delegation_group_id.as_deref().ok_or_else(invalid)?;
+    let group_id = session
+        .delegation_group_id
+        .as_deref()
+        .ok_or_else(|| invalid())?;
     let root = session
         .agent_role
         .binding()
@@ -166,7 +169,7 @@ pub(super) async fn reserve_budget_for_session_on(
             .await
     })
     .await?
-    .ok_or_else(invalid)?;
+    .ok_or_else(|| invalid())?;
     let mut group = boxed_group(&row)?;
     let child = session.agent_role.binding();
     let logical_key = format!(
@@ -226,7 +229,7 @@ pub(super) async fn reserve_budget_for_session_on(
         return if old.state == "settled" {
             Ok(BudgetAdmission::Settled(
                 existing,
-                serde_json::from_str(old.actual_json.as_deref().ok_or_else(invalid)?)
+                serde_json::from_str(old.actual_json.as_deref().ok_or_else(|| invalid())?)
                     .map_err(|_| invalid())?,
             ))
         } else {
@@ -252,7 +255,7 @@ pub(super) async fn reserve_budget_for_session_on(
         )
         .one(txn)
         .await?
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
     if review_authority.is_none()
         && live
             .lease_deadline
@@ -293,7 +296,7 @@ pub(super) async fn reserve_budget_for_session_on(
                 .await
         })
         .await?
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
         let run = decode_run(&task_row)?;
         run.validate_session(session).map_err(|_| invalid())?;
         run.require_current(run.fence()).map_err(|_| invalid())?;
@@ -312,10 +315,10 @@ pub(super) async fn reserve_budget_for_session_on(
         .reserve(group.limits, upper, child.is_some(), now_ms)
     {
         return Ok(BudgetAdmission::Rejected(
-            CallRejection::from_reserve(error).ok_or_else(invalid)?,
+            CallRejection::from_reserve(error).ok_or_else(|| invalid())?,
         ));
     }
-    group.version = group.version.checked_add(1).ok_or_else(invalid)?;
+    group.version = group.version.checked_add(1).ok_or_else(|| invalid())?;
     desk_diagnose_core::future::boxed(|| async {
         replace_group_on(txn, &row, &group, now_ms).await
     })
@@ -363,13 +366,14 @@ pub(crate) async fn settle_budget_on(
         .filter(reservation_row::Column::ReservationId.eq(&reservation.reservation_id))
         .one(txn)
         .await?
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| invalid())?;
     if decode_reservation(&row)? != *reservation {
         return Err(invalid());
     }
     if row.state == "settled" {
-        let settled: Usage = serde_json::from_str(row.actual_json.as_deref().ok_or_else(invalid)?)
-            .map_err(|_| invalid())?;
+        let settled: Usage =
+            serde_json::from_str(row.actual_json.as_deref().ok_or_else(|| invalid())?)
+                .map_err(|_| invalid())?;
         return if Some(settled) == actual {
             Ok(())
         } else {
@@ -395,13 +399,13 @@ pub(crate) async fn settle_budget_on(
             .filter(group_row::Column::RootConversationId.eq(&reservation.root_conversation_id))
             .one(txn)
             .await?
-            .ok_or_else(invalid)?;
+            .ok_or_else(|| invalid())?;
         let mut group = decode_group(&group_row)?;
         group
             .budget
             .settle(reservation.upper, actual, reservation.task_id.is_some())
             .map_err(|_| invalid())?;
-        group.version = group.version.checked_add(1).ok_or_else(invalid)?;
+        group.version = group.version.checked_add(1).ok_or_else(|| invalid())?;
         replace_group_on(txn, &group_row, &group, now_ms).await?;
     }
     let changed = reservation_row::Entity::update_many()
@@ -417,7 +421,7 @@ pub(crate) async fn settle_budget_on(
                 .transpose()
                 .map_err(|_| invalid())?),
             settled_at: Set(actual.map(|_| now_ms)),
-            version: Set(row.version.checked_add(1).ok_or_else(invalid)?),
+            version: Set(row.version.checked_add(1).ok_or_else(|| invalid())?),
             ..Default::default()
         })
         .filter(reservation_row::Column::Id.eq(row.id))
