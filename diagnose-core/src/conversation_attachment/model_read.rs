@@ -59,8 +59,9 @@ impl Input {
             || self.queries.is_some()
             || self.start_line.is_some()
             || self.end_line.is_some()
-            || self.max_bytes.is_some()
         {
+            // max_bytes bounds text pages only. Argument preparation fills its schema
+            // default, so its presence never means the model asked to page an image.
             return Err(invalid(
                 "Images do not support text search, line ranges or paging",
             ));
@@ -514,6 +515,14 @@ mod tests {
         let receipt = messages[0].text.clone();
         release_consumed(&mut messages).unwrap();
         assert_eq!(messages[0].text, receipt);
+    }
+    #[test]
+    fn image_read_accepts_the_prepared_arguments_of_a_bare_attachment_id() {
+        let mut prepared = serde_json::json!({"attachment_id":"visual-1"});
+        crate::model_input::fill_versions(super::super::READ_ATTACHMENT_TOOL, &mut prepared);
+        assert_eq!(prepared["max_bytes"], serde_json::json!(32768));
+        let input: Input = serde_json::from_value(prepared).unwrap();
+        input.validate_image().unwrap();
     }
     #[test]
     fn incompatible_selectors_and_insufficient_budget_fail_without_an_empty_page() {
