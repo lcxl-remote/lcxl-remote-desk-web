@@ -1,0 +1,1 @@
+{"type":"string","enum":["awaiting_approval","preparing"],"x-readme-ref-name":"UploadPhase"}

@@ -57,6 +57,7 @@ const FILE_ERROR_CODE_TO_KEY: ErrorCodeKeyMap = {
 const TRANSFER_ERROR_CODE_TO_KEY: ErrorCodeKeyMap = {
     [deskErrorCodeEnum.PERMISSION_ERROR]: "pages.fileError.transferDenied",
     [deskErrorCodeEnum.TIMEOUT]: "pages.fileError.transferStalled",
+    [deskErrorCodeEnum.NOT_IMPLEMENTED_YET]: "pages.desk.fileUpload.unsupported",
 }
 
 function formatRemainingTime(seconds: number): string {
@@ -336,10 +337,14 @@ function FileListContent({ orgId }: { orgId?: number }) {
         switch (transfer.status) {
             case 'connecting':
             case 'transferring':
+            case 'awaiting_approval':
+            case 'confirming':
                 return <Loader2 className="h-3 w-3 animate-spin" />
             case 'completed':
                 return <CheckCircle2 className="h-3 w-3 text-green-500" />
             case 'error':
+            case 'unconfirmed':
+            case 'cancelled':
                 return <XCircle className="h-3 w-3 text-red-500" />
         }
     }
@@ -414,13 +419,14 @@ function FileListContent({ orgId }: { orgId?: number }) {
                             {getTransferIcon(transfer)}
                             <div className="flex-1 min-w-0">
                                 <div className="flex items-center gap-2">
-                                    <span className="truncate font-medium">{transfer.fileName}</span>
+                                    <span className="truncate font-medium" title={transfer.fileName}>{transfer.resolvedFileName ?? transfer.fileName}</span>
                                     <span className="text-xs text-muted-foreground shrink-0">
                                         {transfer.direction === 'download' ? '↓' : '↑'}
                                         {' '}
                                         {transfer.status === 'transferring' && `${transfer.progress}%`}
                                         {transfer.status === 'connecting' && t('pages.fileManager.connecting')}
                                         {transfer.status === 'completed' && t('pages.fileManager.completed')}
+                                        {['awaiting_approval', 'confirming', 'unconfirmed', 'cancelled'].includes(transfer.status) && t(`pages.desk.fileUpload.${transfer.status}`)}
                                         {transfer.status === 'error' && deskErrorMessage(
                                             t,
                                             TRANSFER_ERROR_CODE_TO_KEY,
@@ -453,12 +459,13 @@ function FileListContent({ orgId }: { orgId?: number }) {
                                 size="icon"
                                 className="h-6 w-6 shrink-0"
                                 onClick={() => {
-                                    if (transfer.status === 'completed' || transfer.status === 'error') {
+                                    if (['completed', 'error', 'unconfirmed', 'cancelled'].includes(transfer.status)) {
                                         removeTransfer(transfer.transferId);
                                     } else {
                                         cancelTransfer(transfer.transferId);
                                     }
                                 }}
+                                disabled={transfer.status === 'confirming'}
                                 title={t('pages.fileManager.cancel')}
                             >
                                 <X className="h-3 w-3" />

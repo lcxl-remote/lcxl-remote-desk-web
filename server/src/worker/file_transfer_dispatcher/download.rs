@@ -10,6 +10,52 @@ pub(super) struct DownloadPlan {
 }
 
 impl FileTransferDispatcher {
+    pub(super) async fn start_download(
+        &self,
+        connection_id: String,
+        req: DownloadRequest,
+        cancellation: Option<Arc<AtomicBool>>,
+    ) {
+        let dispatcher = self.clone();
+
+        let transfer_id = req.transfer_id.clone();
+        let key = TransferKey::new(&connection_id, &transfer_id);
+        // Registered before this handler returns, not inside the task
+        // below. A `TransferCancel` can be the very next frame on this
+        // lane, and it is only recorded for a download that is
+        // registered — so registering later would let a cancel that
+        // arrives while the task is still opening the file be dropped,
+        // and the whole file would go out to a peer that asked for it to
+        // stop. The task releases this on its way out, whichever way it
+        // leaves, so nothing accumulates.
+        {
+            let mut inner = self.inner.lock().await;
+            if cancellation
+                .as_ref()
+                .is_some_and(|flag| flag.load(Ordering::SeqCst))
+                || !inner.active_connections.contains(&connection_id)
+            {
+                return;
+            }
+            inner.pending_requests.remove(&key);
+            inner.live_downloads.insert(key.clone());
+        }
+        tokio::spawn(async move {
+            let outcome = dispatcher.serve_download(connection_id.clone(), req).await;
+            {
+                let mut inner = dispatcher.inner.lock().await;
+                inner.live_downloads.remove(&key);
+                inner.cancelled_transfers.remove(&key);
+            }
+            if let Err(e) = outcome {
+                error!("[FileTransferDispatcher] download error: {e}");
+                dispatcher
+                    .finish_activity(&connection_id, &transfer_id, FileTransferOutcome::Failed)
+                    .await;
+            }
+        });
+    }
+
     pub(super) async fn serve_download(
         &self,
         connection_id: String,
@@ -247,6 +293,8 @@ impl FileTransferDispatcher {
                 connection_id,
                 FileTransferMessage::TransferComplete(TransferComplete {
                     transfer_id: transfer_id.to_string(),
+                    resolved_file_name: None,
+                    resolved_target_dir: None,
                 }),
             )
             .await

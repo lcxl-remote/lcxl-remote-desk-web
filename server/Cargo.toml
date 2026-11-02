@@ -160,7 +160,7 @@ arboard = { version = "3.6", features = ["wayland-data-control"] }
 plist = "1.8"
 objc2 = { workspace = true, features = ["exception"] }
 block2 = "0.5"
-objc2-foundation = { workspace = true, features = ["NSGeometry", "NSString"] }
+objc2-foundation = { workspace = true, features = ["NSGeometry", "NSString", "NSArray", "NSPathUtilities"] }
 foreign-types = "0.5"
 core-graphics = { workspace = true }
 core-foundation = "0.9"
@@ -179,6 +179,7 @@ which = { workspace = true }
 
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 desk-agent-protocol = { workspace = true, features = ["test-support"] }
 desk-signal-facade = { workspace = true, features = ["test-support"] }
 desk-turn = { workspace = true, features = ["test-support"] }

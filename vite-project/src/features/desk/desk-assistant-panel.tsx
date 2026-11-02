@@ -59,7 +59,7 @@ export function DeskAssistantPanel({ open, onClose, onFocus, children }: {
     }
     const stop = () => { gesture.current = null; };
     return (
-        <section ref={ref} role="region" aria-label={t('pages.aiAssistant.title')}
+        <section data-file-drop-ignore ref={ref} role="region" aria-label={t('pages.aiAssistant.title')}
             hidden={!open} inert={!open ? true : undefined}
             className="absolute z-30 flex flex-col overflow-hidden rounded-lg border bg-background text-foreground shadow-xl"
             style={{ display: open ? 'flex' : 'none', left: geometry.x, top: geometry.y,

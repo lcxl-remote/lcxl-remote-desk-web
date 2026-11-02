@@ -42,20 +42,23 @@ keeps the current directory. Android, iOS, and the Manager console behave the sa
 - **Download** files back to the controller.
 - **Delete** files, with a **recycle-bin** mechanism for recoverable deletions.
 
-A transfer the host refuses — file transfer is off in its security settings, or
-the owner declined the prompt — is reported as a refusal on the transfer row
-rather than sitting at 0%. If the host stops responding partway through, the
-transfer is abandoned after 30 seconds and can be retried.
+### Drop files onto the remote desktop
 
-Uploading over a file that already exists replaces it, and only ever in one
-step. While the upload runs, the bytes go to a temporary `.<name>.<id>.part`
-file next to the destination; the destination itself is untouched until the
-whole file has arrived and reached stable storage, at which point the temporary
-file takes its name. So an upload that is cancelled, runs out of room or loses
-its connection costs nothing — the file that was already there is still the
-file that is there, and the temporary one is removed. Two transfers uploading
-to the same path at once would each replace the other's result, so the second
-one is refused rather than accepted.
+On a Windows, Linux, or macOS host, drag ordinary files onto the remote picture and release to upload them to that session user's **Downloads** folder. You can drop several files; they upload one at a time. Folders are not supported. Android hosts do not currently support file transfer.
+
+The upper-right upload panel shows each file's state and the host-confirmed save location. Existing names in Downloads are preserved: a new file receives a name such as `report (1).txt`. Collapse the panel to keep using the desktop; uploads continue in the background. In narrow or short views it starts collapsed, and the expanded list scrolls.
+
+File transfer has its own permission. If approval is required, **Waiting for remote approval** remains until the owner answers or the host's configured approval period ends. Regular waiting updates keep this distinct from an unresponsive connection; 30 seconds without a response or progress ends the transfer.
+
+**Waiting for remote confirmation** means the file has been sent and may still be in transit or being saved. Cancel is available before this stage. Uploads, including empty files, show success only after the host confirms saving. If the connection or final confirmation is lost, check the remote folder before retrying: an unconfirmed result may already have been saved.
+
+Downloads must be on a filesystem that supports publishing a new file without replacing an existing name. Some network or FUSE mounts lack this operation; uploads there report an error. Choose a supported Downloads location or upload to an explicit path in the file manager.
+
+### Uploading to a selected folder
+
+The file manager uploads to the selected remote folder and replaces an existing file of the same name after the whole upload is received and saved. Two simultaneous uploads to the same path are refused rather than replacing each other's results. Android and iOS controllers also wait for the host's save confirmation before reporting success.
+
+During upload, a temporary `.<name>.<id>.part` file sits beside the destination; its dot prefix does not hide it on Windows. Cancelling before submission or a failure known to occur before publication removes it and preserves the existing file. An unconfirmed publication can leave a temporary or final file for inspection.
 
 ### When file transfers are unavailable
 

@@ -1,3 +1,4 @@
+import { useDeskFileUpload } from './use-desk-file-upload';
 import { AiAssistantWorkspace } from "./ai-assistant-page"
 import { DeskAssistantPanel } from "./desk-assistant-panel"
 import { hasAiAssistantBrowserEntry, type AiAssistantFeatureProfile } from "./ai-assistant-features"
@@ -451,7 +452,7 @@ export default function DeskSession({
         previousEpoch: string;
         settings: RemoteSessionSettings;
     } | null>(null);
-    const { peerConnection, remoteStream, initData, connect, mouseChannel, keyboardChannel, mouseMoveChannel, clipboardChannel, whiteboardChannel, cursorSyncChannel, isRTCConnected, rtcFailed, closeRTC, rtcStats } = useDeskRTC({
+    const { peerConnection, remoteStream, initData, connect, mouseChannel, keyboardChannel, mouseMoveChannel, clipboardChannel, fileTransferChannel, whiteboardChannel, cursorSyncChannel, isRTCConnected, rtcFailed, closeRTC, rtcStats } = useDeskRTC({
         deskId: deskId || null,
         subscribe,
         sendTracked,
@@ -847,6 +848,8 @@ export default function DeskSession({
         remapCtrlToCommand: macKeyboardMappingController !== undefined,
     });
     releaseInputsRef.current = releaseAllInputs;
+    const fileUpload = useDeskFileUpload({ channel: fileTransferChannel, platform: initData?.operation_system,
+        enabled: restricted.capabilityVisible('allow_file_transfer'), root: videoViewportRef, releaseInputs: releaseAllInputs });
     mobileInteraction.senderRef.current = sendMouseIntent;
     layoutCleanupRef.current = () => { releaseForLayout(); whiteboard.cancelStroke(); };
     useLayoutEffect(() => { whiteboard.reflowTextInput(); }, [whiteboard.reflowTextInput, toolbar.layout.video.x, toolbar.layout.video.y, toolbar.layout.video.width, toolbar.layout.video.height]);
@@ -1970,18 +1973,14 @@ export default function DeskSession({
                             </div>
                         )}
 
-                        {errorMessage && (
-                            <div className="absolute top-16 right-4 z-[60] bg-red-500/90 text-white px-4 py-2 rounded-lg text-sm font-medium shadow-lg backdrop-blur-md animate-in fade-in slide-in-from-top-4">
-                                {errorMessage}
-                            </div>
-                        )}
-
-                        {transferStatus !== 'idle' && transferStatus !== 'error' && (
-                            <div className="absolute top-16 right-4 z-[60] bg-black/80 text-white px-4 py-2 rounded-lg text-sm font-medium shadow-lg backdrop-blur-md border border-white/10 flex items-center gap-2 animate-in fade-in slide-in-from-top-4">
-                                <Loader2 className="w-4 h-4 animate-spin text-blue-400" />
-                                <span>{transferProgress ? `${t('pages.desk.syncing')} ${transferProgress}%` : t('pages.desk.syncing')}</span>
-                            </div>
-                        )}
+                        {fileUpload.dropOverlay}
+                        <div className="pointer-events-none absolute right-3 top-3 z-[60] flex max-h-[calc(100%_-_24px)] w-[336px] max-w-[calc(100%_-_24px)] flex-col gap-2">
+                            {errorMessage && <div role="alert" className="rounded-lg border bg-destructive px-4 py-2 text-sm text-destructive-foreground shadow-lg">{errorMessage}</div>}
+                            {transferStatus !== 'idle' && transferStatus !== 'error' && <div className="flex items-center gap-2 rounded-lg border bg-popover px-4 py-2 text-sm text-popover-foreground shadow-lg">
+                                <Loader2 className="h-4 w-4 animate-spin" /><span>{transferProgress ? `${t('pages.desk.syncing')} ${transferProgress}%` : t('pages.desk.syncing')}</span>
+                            </div>}
+                            {fileUpload.uploadPanel}
+                        </div>
 
                         {fallbackToast.show && (
                             <ClipboardFallbackToast

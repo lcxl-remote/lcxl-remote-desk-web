@@ -9,6 +9,53 @@ fn approval_req(req_id: &str) -> ApprovalRequest {
     }
 }
 
+#[tokio::test]
+async fn cancelling_file_approval_preserves_a_control_question_on_the_same_connection() {
+    let hub = HostControlHub::new_local();
+    let mut ui = hub.subscribe_outbound();
+    hub.mark_tauri_connected();
+    let mut tasks = Vec::new();
+    for (id, capability) in [
+        ("file", SecurityPermissionType::FileTransfer),
+        ("control", SecurityPermissionType::RemoteControl),
+    ] {
+        let owner = hub.clone();
+        tasks.push(tokio::spawn(async move {
+            owner
+                .request_approval(
+                    ApprovalRequest {
+                        req_id: id.into(),
+                        permission_type: capability,
+                        from_connection_id: Some("conn-1".into()),
+                    },
+                    None,
+                )
+                .await
+        }));
+    }
+    for _ in 0..2 {
+        loop {
+            if matches!(
+                ui.recv().await.unwrap(),
+                HostControlMessage::SecurityApprovalRequest { .. }
+            ) {
+                break;
+            }
+        }
+    }
+    hub.cancel_pending_capability("conn-1", SecurityPermissionType::FileTransfer);
+    assert!(!tasks.remove(0).await.unwrap().approved);
+    assert!(!tasks[0].is_finished());
+    assert!(hub.submit_approval(
+        "control",
+        ApprovalResponse {
+            approved: true,
+            remember: false
+        }
+    ));
+    assert!(tasks.remove(0).await.unwrap().approved);
+}
+
 // U-3: Local mode without ws subscribers denies immediately.
 #[tokio::test]
 async fn u3_local_no_subscriber_denies_immediately() {

@@ -1,1 +1,1 @@
-{"type":"object","required":["transfer_id"],"properties":{"transfer_id":{"type":"string"}},"x-readme-ref-name":"TransferComplete"}
+{"type":"object","required":["transfer_id"],"properties":{"resolved_file_name":{"type":["string","null"]},"resolved_target_dir":{"type":["string","null"]},"transfer_id":{"type":"string"}},"x-readme-ref-name":"TransferComplete"}

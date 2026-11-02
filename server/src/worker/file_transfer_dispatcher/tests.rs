@@ -5,6 +5,8 @@ use desk_ipc_protocol::message::MediaCodec;
 use desk_signal_facade::model::security_settings::SecuritySettings;
 use tempfile::TempDir;
 
+mod drop_upload;
+
 // ============== ft-metrics helpers ==============
 
 /// `throughput_mbps` returns 0 when wall time is zero, matching the
@@ -833,7 +835,7 @@ async fn stop_connection_clears_permission_cache() {
     })
     .await;
     let g = d.inner.lock().await;
-    assert!(g.permission_cache.get("c1").is_none());
+    assert!(!g.permission_cache.contains_key("c1"));
 }
 
 /// Download path: serve_download reads file from disk, emits a
@@ -928,17 +930,6 @@ async fn download_response_advertises_240kib_chunk_size() {
         FILE_TRANSFER_CHUNK_SIZE_TX, EXPECTED_CHUNK_SIZE,
         "chunk size constant regressed: see 2026-05-11 ft-metrics archive"
     );
-    assert!(
-        FILE_TRANSFER_CHUNK_SIZE_TX + BINARY_HEADER_SIZE <= CHROME_MAX_MESSAGE_SIZE,
-        "wire-level SCTP message ({} payload + {} header = {} bytes) \
-             must not exceed Chrome's typical max-message-size advertise \
-             ({} bytes) — exceeding it silently drops every binary chunk \
-             at the daemon (regression fixed 2026-05-11)",
-        FILE_TRANSFER_CHUNK_SIZE_TX,
-        BINARY_HEADER_SIZE,
-        FILE_TRANSFER_CHUNK_SIZE_TX + BINARY_HEADER_SIZE,
-        CHROME_MAX_MESSAGE_SIZE,
-    );
 
     let tmp = TempDir::new().unwrap();
     let file_path = tmp.path().join("big.bin");
@@ -964,6 +955,17 @@ async fn download_response_advertises_240kib_chunk_size() {
     let msg: FileTransferMessage = serde_json::from_slice(&p.data).unwrap();
     match msg {
         FileTransferMessage::DownloadResponse(r) => {
+            assert!(
+                r.chunk_size + BINARY_HEADER_SIZE <= CHROME_MAX_MESSAGE_SIZE,
+                "wire-level SCTP message ({} payload + {} header = {} bytes) \
+                     must not exceed Chrome's typical max-message-size advertise \
+                     ({} bytes) — exceeding it silently drops every binary chunk \
+                     at the daemon (regression fixed 2026-05-11)",
+                r.chunk_size,
+                BINARY_HEADER_SIZE,
+                r.chunk_size + BINARY_HEADER_SIZE,
+                CHROME_MAX_MESSAGE_SIZE,
+            );
             assert_eq!(
                 r.chunk_size, EXPECTED_CHUNK_SIZE,
                 "DownloadResponse.chunk_size must match server constant"
@@ -1024,7 +1026,8 @@ async fn upload_creates_file_and_completes_on_last_chunk() {
     let chunk_size = 8usize;
     let req = UploadRequest {
         transfer_id: transfer_id.clone(),
-        target_dir: tmp.path().to_string_lossy().to_string(),
+        target_dir: Some(tmp.path().to_string_lossy().to_string()),
+        target_location: None,
         file_name: "uploaded.bin".to_string(),
         file_size: (chunk_size as u64) * total_chunks,
         chunk_size,
@@ -1082,7 +1085,8 @@ async fn upload_of_an_empty_file_completes_with_no_chunks() {
     let transfer_id = "00000000-0000-0000-0000-000000000009".to_string();
     let req_msg = FileTransferMessage::UploadRequest(UploadRequest {
         transfer_id: transfer_id.clone(),
-        target_dir: tmp.path().to_string_lossy().to_string(),
+        target_dir: Some(tmp.path().to_string_lossy().to_string()),
+        target_location: None,
         file_name: "empty.txt".to_string(),
         file_size: 0,
         chunk_size: 8,
@@ -1103,6 +1107,8 @@ async fn upload_of_an_empty_file_completes_with_no_chunks() {
     // The controller sends no chunks at all, then says it is done.
     let complete = FileTransferMessage::TransferComplete(TransferComplete {
         transfer_id: transfer_id.clone(),
+        resolved_file_name: None,
+        resolved_target_dir: None,
     });
     d.handle_command(FileTransferPayload {
         connection_id: "c1".into(),
@@ -1112,7 +1118,13 @@ async fn upload_of_an_empty_file_completes_with_no_chunks() {
     })
     .await;
 
-    // No failure is reported, and the empty file survives.
+    match expect_message(&mut rx).await {
+        FileTransferMessage::TransferComplete(complete) => {
+            assert_eq!(complete.transfer_id, transfer_id);
+            assert_eq!(complete.resolved_file_name.as_deref(), Some("empty.txt"));
+        }
+        other => panic!("expected empty-file completion, got {other:?}"),
+    }
     assert_no_message(&mut rx).await;
     let written = tokio::fs::read(tmp.path().join("empty.txt")).await.unwrap();
     assert!(written.is_empty());
@@ -1126,7 +1138,8 @@ async fn upload_rejects_controller_declared_size_mismatch() {
     let transfer_id = "00000000-0000-0000-0000-0000000000f1".to_string();
     let req = UploadRequest {
         transfer_id: transfer_id.clone(),
-        target_dir: tmp.path().to_string_lossy().to_string(),
+        target_dir: Some(tmp.path().to_string_lossy().to_string()),
+        target_location: None,
         file_name: "mismatch.bin".to_string(),
         file_size: 9,
         chunk_size: 8,
@@ -1174,7 +1187,8 @@ async fn upload_states_with_identical_ids_are_isolated_by_connection() {
         d.start_connection(&start_payload(connection_id)).await;
         let req = UploadRequest {
             transfer_id: transfer_id.to_string(),
-            target_dir: tmp.path().to_string_lossy().to_string(),
+            target_dir: Some(tmp.path().to_string_lossy().to_string()),
+            target_location: None,
             file_name: file_name.to_string(),
             file_size: 4,
             chunk_size: 4,
@@ -1230,7 +1244,8 @@ async fn upload_rejects_duplicate_id_within_one_connection() {
     for file_name in ["first.bin", "second.bin"] {
         let req = UploadRequest {
             transfer_id: transfer_id.to_string(),
-            target_dir: tmp.path().to_string_lossy().to_string(),
+            target_dir: Some(tmp.path().to_string_lossy().to_string()),
+            target_location: None,
             file_name: file_name.to_string(),
             file_size: 4,
             chunk_size: 4,
@@ -1245,19 +1260,17 @@ async fn upload_rejects_duplicate_id_within_one_connection() {
         .await;
     }
 
-    let accepted = rx.recv().await.unwrap();
-    assert!(matches!(
-        serde_json::from_slice::<FileTransferMessage>(&accepted.data).unwrap(),
-        FileTransferMessage::UploadResponse(_)
-    ));
-    let rejected = rx.recv().await.unwrap();
-    match serde_json::from_slice::<FileTransferMessage>(&rejected.data).unwrap() {
-        FileTransferMessage::TransferError(error) => {
-            assert_eq!(error.transfer_id, transfer_id);
-            assert!(error.message.contains("already active"));
-        }
-        other => panic!("expected TransferError, got {other:?}"),
-    }
+    let replies = [expect_message(&mut rx).await, expect_message(&mut rx).await];
+    assert_eq!(replies.iter().filter(|reply| matches!(reply, FileTransferMessage::UploadResponse(response) if response.accepted)).count(), 1);
+    let error = replies
+        .iter()
+        .find_map(|reply| match reply {
+            FileTransferMessage::TransferError(error) => Some(error),
+            _ => None,
+        })
+        .expect("duplicate is refused");
+    assert_eq!(error.transfer_id, transfer_id);
+    assert!(error.message.contains("already active"));
     let inner = d.inner.lock().await;
     assert_eq!(
         inner.upload_states.len(),
@@ -1473,6 +1486,8 @@ async fn arm_upload(
         Arc::new(Upload {
             cancelled: AtomicBool::new(false),
             destination,
+            no_replace: false,
+            source_name: "payload.bin".into(),
             staging,
             state: TokioMutex::new(UploadState {
                 file,
@@ -1732,7 +1747,8 @@ async fn upload_one_chunk(
         connection_id: "c1".into(),
         data: serde_json::to_vec(&FileTransferMessage::UploadRequest(UploadRequest {
             transfer_id: transfer_id.to_string(),
-            target_dir: target_dir.to_string_lossy().to_string(),
+            target_dir: Some(target_dir.to_string_lossy().to_string()),
+            target_location: None,
             file_name: file_name.to_string(),
             file_size: body.len() as u64,
             chunk_size: body.len(),
@@ -1805,7 +1821,8 @@ async fn a_second_upload_to_the_same_file_is_refused() {
         connection_id: "c1".into(),
         data: serde_json::to_vec(&FileTransferMessage::UploadRequest(UploadRequest {
             transfer_id: transfer_id.to_string(),
-            target_dir: tmp.path().to_string_lossy().to_string(),
+            target_dir: Some(tmp.path().to_string_lossy().to_string()),
+            target_location: None,
             file_name: "contested.bin".to_string(),
             file_size: 4,
             chunk_size: 4,
@@ -1864,7 +1881,8 @@ async fn an_upload_onto_a_directory_is_refused_before_any_bytes_arrive() {
         connection_id: "c1".into(),
         data: serde_json::to_vec(&FileTransferMessage::UploadRequest(UploadRequest {
             transfer_id: transfer_id.to_string(),
-            target_dir: tmp.path().to_string_lossy().to_string(),
+            target_dir: Some(tmp.path().to_string_lossy().to_string()),
+            target_location: None,
             file_name: "occupied".to_string(),
             file_size: 4,
             chunk_size: 4,
@@ -2159,10 +2177,9 @@ async fn a_truncated_binary_chunk_fails_the_connection_transfers() {
     );
 }
 
-/// Binary chunk for an unknown transfer_id is dropped without
-/// touching disk or panicking.
+/// A lost worker's upload state must stop the sender without guessing whether it published.
 #[tokio::test]
-async fn binary_chunk_unknown_transfer_drops_silently() {
+async fn binary_chunk_unknown_transfer_reports_an_unconfirmed_result() {
     let (d, mut rx) = dispatcher();
     d.start_connection(&start_payload("c1")).await;
     let chunk = build_binary_chunk("00000000-0000-0000-0000-000000000099", 0, b"abc");
@@ -2173,7 +2190,12 @@ async fn binary_chunk_unknown_transfer_drops_silently() {
         transfer_id: None,
     })
     .await;
-    assert_no_message(&mut rx).await;
+    expect_only_transfer_error(
+        &mut rx,
+        "00000000-0000-0000-0000-000000000099",
+        DeskErrorCode::FILE_SAVE_UNCONFIRMED,
+    )
+    .await;
 }
 
 /// Backpressure regression: when the file lane is saturated, the
@@ -2246,7 +2268,8 @@ async fn handle_send_failed_aborts_only_targeted_upload() {
     for tid in [&id_a, &id_b] {
         let req = UploadRequest {
             transfer_id: tid.clone(),
-            target_dir: tmp.path().to_string_lossy().to_string(),
+            target_dir: Some(tmp.path().to_string_lossy().to_string()),
+            target_location: None,
             file_name: format!("up-{tid}.bin"),
             file_size: 4,
             chunk_size: 4,
@@ -2327,7 +2350,8 @@ async fn handle_send_failed_without_transfer_id_aborts_all_uploads() {
     for tid in [&id_a, &id_b] {
         let req = UploadRequest {
             transfer_id: tid.clone(),
-            target_dir: tmp.path().to_string_lossy().to_string(),
+            target_dir: Some(tmp.path().to_string_lossy().to_string()),
+            target_location: None,
             file_name: format!("up-{tid}.bin"),
             file_size: 4,
             chunk_size: 4,
@@ -2434,7 +2458,8 @@ async fn an_upload_that_cannot_open_its_target_reports_why() {
         connection_id: "c1".into(),
         data: serde_json::to_vec(&FileTransferMessage::UploadRequest(UploadRequest {
             transfer_id: transfer_id.clone(),
-            target_dir: tmp.path().to_string_lossy().to_string(),
+            target_dir: Some(tmp.path().to_string_lossy().to_string()),
+            target_location: None,
             file_name: "taken".to_string(),
             file_size: 4,
             chunk_size: 4,

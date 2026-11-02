@@ -133,6 +133,7 @@ type SharedPromptKey = (String, SecurityPermissionType);
 struct PendingEntry {
     response_tx: oneshot::Sender<ApprovalResponse>,
     from_connection_id: Option<String>,
+    permission_type: SecurityPermissionType,
 }
 
 /// Snapshot of an approval request, kept for ws-Ready replay.
@@ -552,6 +553,7 @@ impl HostControlHub {
             PendingEntry {
                 response_tx: tx,
                 from_connection_id: req.from_connection_id.clone(),
+                permission_type,
             },
         );
 
@@ -902,6 +904,29 @@ impl HostControlHub {
             }
         }
         cancelled
+    }
+
+    /// Cancel this connection's question for one capability, leaving other questions intact.
+    pub(crate) fn cancel_pending_capability(
+        &self,
+        connection_id: &str,
+        capability: SecurityPermissionType,
+    ) {
+        let ids = self
+            .inner
+            .pending_approvals
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, entry)| {
+                entry.from_connection_id.as_deref() == Some(connection_id)
+                    && entry.permission_type == capability
+            })
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        for id in ids {
+            self.cancel_local_request(&id);
+        }
     }
 
     fn cancel_local_request(&self, req_id: &str) -> bool {

@@ -40,8 +40,7 @@ pub(super) enum DcRoute {
     Keyboard,
     /// Clipboard writes (browser → host). Gated by `accept_clipboard_sync`.
     Clipboard,
-    /// File-transfer commands. Gated by `accept_control` (file ops are
-    /// part of the control surface).
+    /// File-transfer commands. The worker checks their independent permission.
     FileTransfer,
     /// Whiteboard commands. Gated by `accept_control`.
     Whiteboard,

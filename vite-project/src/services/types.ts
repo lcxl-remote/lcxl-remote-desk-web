@@ -5964,6 +5964,7 @@ export const deskErrorCodeEnum = {
     DEVICE_NOT_FOUND: 20,
     NOT_ALLOW_DELETE_FILE: 21,
     FILE_CHANGED: 22,
+    FILE_SAVE_UNCONFIRMED: 23,
     ILLEGAL_CREDENTIALS: 30,
     ACCOUNT_LOCKED: 31,
     TOO_MANY_ATTEMPTS: 32,
@@ -7114,6 +7115,14 @@ export type FileRecoveryReply = {
     outcome: FileRecoveryOutcome;
 };
 
+export const uploadLocationEnum = {
+    downloads: "downloads"
+} as const;
+
+export type UploadLocationEnumKey = (typeof uploadLocationEnum)[keyof typeof uploadLocationEnum];
+
+export type UploadLocation = UploadLocationEnumKey;
+
 export type UploadRequest = {
     /**
      * @minLength 0
@@ -7130,9 +7139,10 @@ export type UploadRequest = {
     */
     file_size: number;
     /**
-     * @type string
+     * @type string,null
     */
-    target_dir: string;
+    target_dir?: string | null;
+    target_location?: (null | UploadLocation);
     /**
      * @minLength 0
      * @type integer, int64
@@ -7156,10 +7166,46 @@ export type UploadResponse = {
     /**
      * @type string
     */
+    resolved_file_name: string;
+    /**
+     * @type string
+    */
+    resolved_target_dir: string;
+    /**
+     * @type string
+    */
+    transfer_id: string;
+};
+
+export const uploadPhaseEnum = {
+    awaiting_approval: "awaiting_approval",
+    preparing: "preparing"
+} as const;
+
+export type UploadPhaseEnumKey = (typeof uploadPhaseEnum)[keyof typeof uploadPhaseEnum];
+
+export type UploadPhase = UploadPhaseEnumKey;
+
+export type UploadStateChanged = {
+    /**
+     * @type string
+    */
+    phase: UploadPhase;
+    /**
+     * @type string
+    */
     transfer_id: string;
 };
 
 export type TransferComplete = {
+    /**
+     * @type string,null
+    */
+    resolved_file_name?: string | null;
+    /**
+     * @type string,null
+    */
+    resolved_target_dir?: string | null;
     /**
      * @type string
     */
@@ -7218,22 +7264,28 @@ export const fileTransferMessageTypeEnum4 = {
 export type FileTransferMessageTypeEnum4Key = (typeof fileTransferMessageTypeEnum4)[keyof typeof fileTransferMessageTypeEnum4];
 
 export const fileTransferMessageTypeEnum5 = {
-    transfer_complete: "transfer_complete"
+    upload_state_changed: "upload_state_changed"
 } as const;
 
 export type FileTransferMessageTypeEnum5Key = (typeof fileTransferMessageTypeEnum5)[keyof typeof fileTransferMessageTypeEnum5];
 
 export const fileTransferMessageTypeEnum6 = {
-    transfer_error: "transfer_error"
+    transfer_complete: "transfer_complete"
 } as const;
 
 export type FileTransferMessageTypeEnum6Key = (typeof fileTransferMessageTypeEnum6)[keyof typeof fileTransferMessageTypeEnum6];
 
 export const fileTransferMessageTypeEnum7 = {
-    transfer_cancel: "transfer_cancel"
+    transfer_error: "transfer_error"
 } as const;
 
 export type FileTransferMessageTypeEnum7Key = (typeof fileTransferMessageTypeEnum7)[keyof typeof fileTransferMessageTypeEnum7];
+
+export const fileTransferMessageTypeEnum8 = {
+    transfer_cancel: "transfer_cancel"
+} as const;
+
+export type FileTransferMessageTypeEnum8Key = (typeof fileTransferMessageTypeEnum8)[keyof typeof fileTransferMessageTypeEnum8];
 
 /**
  * @description File transfer message types (JSON text messages over DataChannel)
@@ -7258,21 +7310,26 @@ export type FileTransferMessage = ((DownloadRequest & {
      * @type string
     */
     type: FileTransferMessageTypeEnum4Key;
-}) | (TransferComplete & {
+}) | (UploadStateChanged & {
     /**
      * @type string
     */
     type: FileTransferMessageTypeEnum5Key;
-}) | (TransferError & {
+}) | (TransferComplete & {
     /**
      * @type string
     */
     type: FileTransferMessageTypeEnum6Key;
-}) | (TransferCancel & {
+}) | (TransferError & {
     /**
      * @type string
     */
     type: FileTransferMessageTypeEnum7Key;
+}) | (TransferCancel & {
+    /**
+     * @type string
+    */
+    type: FileTransferMessageTypeEnum8Key;
 }));
 
 /**

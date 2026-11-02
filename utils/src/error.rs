@@ -156,6 +156,8 @@ desk_error_codes! {
 
     NOT_ALLOW_DELETE_FILE = 21,
     FILE_CHANGED = 22,
+    /// Publication may have succeeded; confirm the saved result before retrying.
+    FILE_SAVE_UNCONFIRMED = 23,
 
     // ---- Login / registration anti-abuse (auth hardening) ----
     /// Authentication failed. Returned uniformly for every credential-rejection

@@ -1,1 +1,1 @@
-{"type":"object","required":["transfer_id","accepted"],"properties":{"accepted":{"type":"boolean"},"message":{"type":["string","null"]},"transfer_id":{"type":"string"}},"x-readme-ref-name":"UploadResponse"}
+{"type":"object","required":["transfer_id","accepted","resolved_target_dir","resolved_file_name"],"properties":{"accepted":{"type":"boolean"},"message":{"type":["string","null"]},"resolved_file_name":{"type":"string"},"resolved_target_dir":{"type":"string"},"transfer_id":{"type":"string"}},"x-readme-ref-name":"UploadResponse"}

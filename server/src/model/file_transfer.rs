@@ -14,6 +14,7 @@ pub enum FileTransferMessage {
     UploadRequest(UploadRequest),
     /// Server → Browser: Response confirming upload
     UploadResponse(UploadResponse),
+    UploadStateChanged(UploadStateChanged),
     /// Either direction: Transfer completed
     TransferComplete(TransferComplete),
     /// Either direction: Transfer error
@@ -40,7 +41,8 @@ pub struct DownloadResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct UploadRequest {
     pub transfer_id: String,
-    pub target_dir: String,
+    pub target_dir: Option<String>,
+    pub target_location: Option<UploadLocation>,
     pub file_name: String,
     pub file_size: u64,
     pub chunk_size: usize,
@@ -52,11 +54,36 @@ pub struct UploadResponse {
     pub transfer_id: String,
     pub accepted: bool,
     pub message: Option<String>,
+    pub resolved_target_dir: String,
+    pub resolved_file_name: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum UploadLocation {
+    Downloads,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum UploadPhase {
+    AwaitingApproval,
+    Preparing,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct UploadStateChanged {
+    pub transfer_id: String,
+    pub phase: UploadPhase,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct TransferComplete {
     pub transfer_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_file_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_target_dir: Option<String>,
 }
 
 /// Terminal failure of one transfer.

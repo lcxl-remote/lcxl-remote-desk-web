@@ -15,6 +15,8 @@ impl FileTransferDispatcher {
             hub,
             connection_ceilings,
             activity_sender,
+            #[cfg(test)]
+            download_directory: None,
         }
     }
 
@@ -84,7 +86,7 @@ impl FileTransferDispatcher {
     /// Two concurrent commands on a fresh connection can both miss the cache.
     /// They share one dialog — the hub keys in-flight prompts by connection and
     /// capability — so the user answers once and both callers receive it.
-    async fn permission_for(&self, connection_id: &str) -> bool {
+    pub(super) async fn permission_for(&self, connection_id: &str, allow_prompt: bool) -> bool {
         let capability = SecurityPermissionType::FileTransfer;
         {
             let generation = self.policy.capability(capability).generation;
@@ -106,6 +108,9 @@ impl FileTransferDispatcher {
             state.permission,
             |c| c.allow_file_transfer,
         );
+        if allow_transfer.is_none() && !allow_prompt {
+            return false;
+        }
         let resolved = resolve_permission(
             &self.policy,
             &self.hub,
@@ -163,6 +168,14 @@ impl FileTransferDispatcher {
             let mut inner = self.inner.lock().await;
             inner.active_connections.remove(&payload.connection_id);
             inner.permission_cache.remove(&payload.connection_id);
+            for (key, flag) in &inner.pending_requests {
+                if key.connection_id == payload.connection_id {
+                    flag.store(true, Ordering::SeqCst);
+                }
+            }
+            if let Some(queue) = inner.approval_queues.get(&payload.connection_id) {
+                queue.changed.notify_one();
+            }
             let transfer_keys: Vec<TransferKey> = inner
                 .activities
                 .iter()
@@ -228,6 +241,12 @@ impl FileTransferDispatcher {
             inner.live_downloads.clear();
             inner.cancelled_transfers.clear();
             inner.permission_cache.clear();
+            for flag in inner.pending_requests.values() {
+                flag.store(true, Ordering::SeqCst);
+            }
+            for queue in inner.approval_queues.values() {
+                queue.changed.notify_one();
+            }
             (paths, finished)
         };
         for path in paths {
@@ -276,7 +295,34 @@ impl FileTransferDispatcher {
         // download/upload would be silently dropped at the daemon.
         // The daemon now passes file_transfer through unconditionally
         // and we do the actual permission check here.
-        if !self.permission_for(&payload.connection_id).await {
+        if payload.is_text
+            && let Ok(message) = serde_json::from_slice::<FileTransferMessage>(&payload.data)
+        {
+            match message {
+                FileTransferMessage::TransferCancel(_) => {
+                    self.handle_text(payload).await;
+                    return;
+                }
+                FileTransferMessage::UploadRequest(req) => {
+                    self.queue_request(
+                        payload.connection_id,
+                        super::approval::TransferRequest::Upload(req),
+                    )
+                    .await;
+                    return;
+                }
+                FileTransferMessage::DownloadRequest(req) => {
+                    self.queue_request(
+                        payload.connection_id,
+                        super::approval::TransferRequest::Download(req),
+                    )
+                    .await;
+                    return;
+                }
+                _ => {}
+            }
+        }
+        if !self.permission_for(&payload.connection_id, false).await {
             // A denied command still has to be answered. The browser has
             // already put the transfer on screen and has no other way to learn
             // it was refused, so dropping the command here is what pinned the
@@ -287,23 +333,13 @@ impl FileTransferDispatcher {
                         "[FileTransferDispatcher] {}: permission denied — refusing transfer {}",
                         payload.connection_id, transfer_id
                     );
-                    if let Err(e) = self
-                        .emit_text(
-                            &payload.connection_id,
-                            FileTransferMessage::TransferError(TransferError {
-                                transfer_id: transfer_id.clone(),
-                                error_code: DeskErrorCode::PERMISSION_ERROR,
-                                message: "File transfer is not permitted on this connection"
-                                    .to_string(),
-                            }),
-                        )
-                        .await
-                    {
-                        warn!(
-                            "[FileTransferDispatcher] {}: failed to refuse transfer {}: {e}",
-                            payload.connection_id, transfer_id
-                        );
-                    }
+                    self.abort_transfers(
+                        &payload.connection_id,
+                        vec![TransferKey::new(&payload.connection_id, &transfer_id)],
+                        DeskErrorCode::PERMISSION_ERROR,
+                        "File transfer is not permitted on this connection",
+                    )
+                    .await;
                 }
                 None => {
                     self.reject_unattributable_frame(

@@ -11,7 +11,7 @@
 import { act } from '@testing-library/react';
 import { vi } from 'vitest';
 
-export class StubDataChannel {
+export class StubDataChannel extends EventTarget {
     static last: StubDataChannel | null = null;
     binaryType = 'blob';
     // A freshly created channel is not open yet — `openChannel` is what opens it.
@@ -20,9 +20,15 @@ export class StubDataChannel {
     bufferedAmount = 0;
     sent: Array<string | ArrayBuffer> = [];
     onopen: (() => void) | null = null;
-    onmessage: ((ev: { data: string | ArrayBuffer }) => void) | null = null;
+    private messageHandler: ((ev: { data: string | ArrayBuffer }) => void) | null = null;
+    set onmessage(handler: ((ev: { data: string | ArrayBuffer }) => void) | null) { this.messageHandler = handler; }
+    get onmessage() { return (event: { data: string | ArrayBuffer }) => {
+        this.dispatchEvent(new MessageEvent('message', { data: event.data }));
+        this.messageHandler?.(event);
+    }; }
     onerror: ((ev: unknown) => void) | null = null;
     constructor() {
+        super();
         StubDataChannel.last = this;
     }
     send(payload: string | ArrayBuffer) {
@@ -30,6 +36,7 @@ export class StubDataChannel {
     }
     close() {
         this.readyState = 'closed';
+        this.dispatchEvent(new Event('close'));
     }
     get textSent(): string[] {
         return this.sent.filter((s): s is string => typeof s === 'string');
@@ -203,6 +210,7 @@ export async function openSession(options: SessionOptions = {}): Promise<StubWeb
     await deliverSignaling({
         signaling_type: 101, // REMOTE_ACCESS_INITIALIZED
         signaling_data: {
+            operation_system: 'Windows',
             ice_servers: options.iceServers ?? [],
             connection_epoch: "test-epoch",
         },

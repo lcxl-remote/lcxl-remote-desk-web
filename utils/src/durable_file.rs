@@ -12,6 +12,9 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::Path;
 
+mod publish;
+pub use publish::{PublishError, durable_publish_new};
+
 /// Which permissions the replacement file carries.
 ///
 /// The replacement is a *different* file that takes the target's name, so the

@@ -1,3 +1,4 @@
+import { supportsFileTransfer } from '../desk/file-transfer-support';
 import { useRef, useState, useCallback } from 'react';
 import { v4 as uuidv4 } from 'uuid';
 import {
@@ -16,7 +17,7 @@ import {
     SIGNALING_TYPE_CODE_CLOSE_REMOTE_SESSION,
     SIGNALING_TYPE_CODE_ERROR,
 } from '../desk/constants';
-import { createAcceptGate } from './upload-accept-gate';
+import { UploadController, initialUpload, type UploadStatus } from './upload-controller';
 import { readSessionGrant } from '@/features/desk/session-grant';
 import {
     BufferedDownloadSink,
@@ -25,16 +26,12 @@ import {
     type WritableFileStreamLike,
 } from './download-sink';
 import {
-    buildBinaryChunk,
-    FILE_TRANSFER_CHUNK_SIZE,
     parseBinaryChunk,
     type DownloadRequest,
     type DownloadResponse,
     type FileTransferMessage,
     type TransferComplete,
     type TransferError,
-    type UploadRequest,
-    type UploadResponse,
 } from './file-transfer-protocol';
 import {
     canStreamToDisk,
@@ -142,6 +139,7 @@ const REMOTE_ACCESS_RETRY_DELAY_MS = 500;
 /** The host's answer to `RequestRemoteAccess`. Fields are read defensively: it is
  * whatever the host and the central put on the wire. */
 interface RemoteAccessInit {
+    operation_system?: unknown;
     ice_servers?: unknown;
     connection_epoch?: unknown;
 }
@@ -197,7 +195,9 @@ export interface TransferProgress {
     fileName: string;
     fileSize: number;
     direction: 'download' | 'upload';
-    status: 'connecting' | 'transferring' | 'completed' | 'error';
+    status: UploadStatus;
+    resolvedTargetDir?: string;
+    resolvedFileName?: string;
     progress: number; // 0-100
     transferredBytes: number;
     speed: number; // bytes per second
@@ -256,7 +256,8 @@ export function useFileTransfer(deskId: string | undefined, orgId?: number, fixe
     // ended by its watchdog rather than sitting on the screen forever.
     const activeTransfers = useRef(new TransferRegistry());
     // Gate that holds an upload's chunk loop until the host accepts.
-    const acceptGate = useRef(createAcceptGate());
+    const uploadController = useRef<UploadController | null>(null);
+    const uploadPreparations = useRef(new Map<string, { cancelled: boolean }>());
     // Track transfer speed state for EMA smoothing
     const transferSpeedState = useRef<Map<string, {
         startTime: number;
@@ -360,29 +361,12 @@ export function useFileTransfer(deskId: string | undefined, orgId?: number, fixe
         }
     }, []);
 
-    /**
-     * The one way a transfer ends.
-     *
-     * Nine paths reach here — host completion, host error, the inactivity
-     * watchdog, a local write failure, cancel, manual remove, disconnect,
-     * unmount, and a failed start — and each of them used to clean up a
-     * different subset: the cancelled-id set kept download ids forever,
-     * completion left the speed state behind, and closing the connection
-     * abandoned open sinks. Routing them all through one idempotent call is
-     * what makes the watchdog safe to add on top.
-     *
-     * Returns whether this call is the one that ended the transfer; a second
-     * caller for the same id gets `false` and must not touch the row again.
-     */
+    /** Finalize a download once, releasing its timer, speed metadata and sink. */
     const settleTransfer = useCallback((
         transferId: string,
         outcome?: { status: 'completed' | 'error'; errorMessage?: string; errorCode?: number },
     ): boolean => {
         if (!activeTransfers.current.settle(transferId)) return false;
-        // Reject rather than clear: an upload still parked on the gate has to
-        // be woken, or its `await` never returns and the row stays
-        // "connecting" for the life of the tab.
-        acceptGate.current.reject(transferId, outcome?.errorMessage ?? 'Transfer ended');
         void cleanupDownload(transferId);
         if (outcome) {
             updateTransfer(transferId, {
@@ -435,23 +419,6 @@ export function useFileTransfer(deskId: string | undefined, orgId?: number, fixe
                 transferSpeedState.current.set(resp.transfer_id, { startTime: Date.now(), lastCalcTime: Date.now(), lastCalcBytes: 0, lastUIUpdate: Date.now(), emaSpeed: 0 });
                 break;
             }
-            case 'upload_response': {
-                const resp = msg as UploadResponse;
-                if (resp.accepted) {
-                    // Release the upload's chunk loop.
-                    acceptGate.current.accept(resp.transfer_id);
-                    updateTransfer(resp.transfer_id, { status: 'transferring' });
-                } else {
-                    // The host normally refuses via `transfer_error`, not
-                    // `accepted:false`; this branch is kept for protocol
-                    // completeness.
-                    settleTransfer(resp.transfer_id, {
-                        status: 'error',
-                        errorMessage: resp.message || 'Upload rejected',
-                    });
-                }
-                break;
-            }
             case 'transfer_complete': {
                 const complete = msg as TransferComplete;
                 const sink = downloadSinks.current.get(complete.transfer_id);
@@ -487,6 +454,13 @@ export function useFileTransfer(deskId: string | undefined, orgId?: number, fixe
     // Handle incoming DataChannel messages
     const setupDataChannelHandlers = useCallback((dc: RTCDataChannel) => {
         dc.binaryType = 'arraybuffer';
+        uploadController.current?.dispose();
+        uploadController.current = new UploadController(dc, row => {
+            setTransfers(previous => previous.some(item => item.transferId === row.transferId)
+                ? previous.map(item => item.transferId === row.transferId ? row : item)
+                : [...previous, row]);
+            if (['completed', 'error', 'cancelled'].includes(row.status)) removeTransferAfterDelay(row.transferId);
+        });
 
         dc.onmessage = (event) => {
             if (typeof event.data === 'string') {
@@ -546,11 +520,9 @@ export function useFileTransfer(deskId: string | undefined, orgId?: number, fixe
 
         dc.onerror = (event) => {
             console.error('File transfer data channel error:', event);
-            // Wake any upload still waiting on the gate so it does not
-            // hang the UI in "connecting" forever.
-            acceptGate.current.rejectAll('Data channel error');
+            uploadController.current?.dispose();
         };
-    }, [updateTransfer, computeSpeedInfo, handleControlMessage, failDownload]);
+    }, [updateTransfer, computeSpeedInfo, handleControlMessage, failDownload, removeTransferAfterDelay]);
 
     // --- Connection lifecycle ---
 
@@ -612,7 +584,7 @@ export function useFileTransfer(deskId: string | undefined, orgId?: number, fixe
         closeDataPlane();
         // Wake any upload parked on the gate; without the channel it will never
         // be accepted.
-        acceptGate.current.rejectAll(error.message);
+        uploadController.current?.dispose();
         setChannelStatus('failed');
         setChannelFailure({
             kind: isConnectionError(error) ? error.kind : null,
@@ -1121,6 +1093,11 @@ export function useFileTransfer(deskId: string | undefined, orgId?: number, fixe
     // Close WebRTC and WebSocket connections. Idempotent: a second call finds
     // nothing left to settle and must not reject anything twice.
     const closeConnection = useCallback(() => {
+        for (const [id, preparation] of uploadPreparations.current) {
+            preparation.cancelled = true;
+            updateTransfer(id, { status: 'error', errorMessage: 'File manager connection closed' });
+        }
+        uploadPreparations.current.clear();
         // End every transfer still in flight. Without this the connection went
         // away while their sinks stayed open, their watchdogs stayed armed and
         // their rows stayed on screen mid-progress.
@@ -1133,7 +1110,7 @@ export function useFileTransfer(deskId: string | undefined, orgId?: number, fixe
             removeTransferAfterDelay(transferId);
         }
         // Wake every pending upload waiter before tearing down.
-        acceptGate.current.rejectAll('Connection closed');
+        uploadController.current?.dispose();
         const closed = new ConnectionError('session-closed', "File manager connection closed");
         rejectPendingRequests(closed);
         if (retryTimerRef.current) {
@@ -1233,181 +1210,48 @@ export function useFileTransfer(deskId: string | undefined, orgId?: number, fixe
         }
     }, [ensureDataChannel, updateTransfer, settleTransfer, failDownload]);
 
-    // Upload a file
+    // Uploads and downloads share the channel, but only the upload controller owns upload state.
     const uploadFile = useCallback(async (targetDir: string, file: File) => {
-        const transferId = uuidv4();
-
-        activeTransfers.current.start(transferId);
-        setTransfers(prev => [...prev, {
-            transferId,
-            fileName: file.name,
-            fileSize: file.size,
-            direction: 'upload',
-            status: 'connecting',
-            progress: 0,
-            transferredBytes: 0,
-            speed: 0,
-            remainingSeconds: 0,
-        }]);
-        transferSpeedState.current.set(transferId, { startTime: Date.now(), lastCalcTime: Date.now(), lastCalcBytes: 0, lastUIUpdate: Date.now(), emaSpeed: 0 });
-
+        const id = uuidv4();
+        const preparation = { cancelled: false };
+        uploadPreparations.current.set(id, preparation);
+        const row = initialUpload(file, id);
+        setTransfers(previous => [...previous, row]);
         try {
-            const dc = await ensureDataChannel();
-
-            const chunkSize = FILE_TRANSFER_CHUNK_SIZE;
-            // Exactly the number of chunks the loop below will send. An empty
-            // file sends none, and claiming one anyway made the host wait for
-            // a chunk that never came and then reject the finished upload as
-            // incomplete. The Android and iOS clients already declare zero.
-            const totalChunks = Math.ceil(file.size / chunkSize);
-
-            // Send upload request
-            const request: UploadRequest = {
-                type: 'upload_request',
-                transfer_id: transferId,
-                target_dir: targetDir,
-                file_name: file.name,
-                file_size: file.size,
-                chunk_size: chunkSize,
-                total_chunks: totalChunks,
-            };
-            dc.send(JSON.stringify(request));
-
-            // Wait for the host to accept (open the destination file)
-            // before pushing any bytes. Refusal, cancel, disconnect or
-            // timeout reject this and skip the chunk loop entirely.
-            await acceptGate.current.wait(transferId);
-
-            const reader = file.stream().getReader();
-            let chunkIndex = 0;
-            let sentBytes = 0;
-            let lastUploadUpdate = Date.now();
-            let leftover = new Uint8Array(0);
-
-            while (true) {
-                // Check if this upload has been cancelled
-                // Leaving the registry is what cancellation means: whoever
-                // ended this transfer — the user, the host, a disconnect —
-                // settled it there.
-                if (!activeTransfers.current.isActive(transferId)) {
-                    reader.cancel();
-                    return;
-                }
-
-                const { done, value } = await reader.read();
-
-                // Combine leftover with new data
-                let combined: Uint8Array;
-                if (leftover.length > 0 && value) {
-                    combined = new Uint8Array(leftover.length + value.length);
-                    combined.set(leftover);
-                    combined.set(value, leftover.length);
-                    leftover = new Uint8Array(0);
-                } else if (value) {
-                    combined = value;
-                } else {
-                    combined = leftover;
-                    leftover = new Uint8Array(0);
-                }
-
-                // Send full chunks
-                let offset = 0;
-                while (offset + chunkSize <= combined.length) {
-                    // Check cancellation before each chunk send
-                    if (!activeTransfers.current.isActive(transferId)) {
-                        reader.cancel();
-                        return;
-                    }
-
-                    const chunk = combined.slice(offset, offset + chunkSize);
-                    const buf = buildBinaryChunk(transferId, chunkIndex, chunk);
-                    dc.send(buf);
-                    chunkIndex++;
-                    sentBytes += chunk.length;
-                    offset += chunkSize;
-
-                    // Throttle UI updates to max once per 500ms
-                    const now = Date.now();
-                    if (now - lastUploadUpdate >= 500) {
-                        const progress = Math.round((sentBytes / file.size) * 100);
-                        const { speed, remainingSeconds } = computeSpeedInfo(transferId, sentBytes, file.size);
-                        updateTransfer(transferId, { progress, transferredBytes: sentBytes, speed, remainingSeconds });
-                        lastUploadUpdate = now;
-                    }
-
-                    // Robust backpressure: wait if browser send buffer is too full
-                    if (dc.bufferedAmount > 2 * 1024 * 1024) {
-                        while (dc.bufferedAmount > 512 * 1024) {
-                            await new Promise(r => setTimeout(r, 100));
-                        }
-                    }
-                }
-
-                // Save leftover
-                if (offset < combined.length) {
-                    leftover = combined.slice(offset);
-                }
-
-                if (done) {
-                    // Send remaining leftover as last chunk
-                    if (leftover.length > 0) {
-                        const buf = buildBinaryChunk(transferId, chunkIndex, leftover);
-                        dc.send(buf);
-                        sentBytes += leftover.length;
-                        chunkIndex++;
-                    }
-                    break;
-                }
-            }
-
-            // Send transfer complete
-            const complete: TransferComplete = {
-                type: 'transfer_complete',
-                transfer_id: transferId,
-            };
-            dc.send(JSON.stringify(complete));
-
-            // Sending the last chunk is not the same as the host having kept
-            // the file: it still verifies the byte count and can answer
-            // `transfer_error`. Show success, but stay registered so that
-            // verdict is not discarded as an unknown id — and let silence
-            // release the entry if the host never answers at all.
-            updateTransfer(transferId, {
-                status: 'completed',
-                progress: 100,
-                transferredBytes: file.size,
-            });
-            removeTransferAfterDelay(transferId, 60000);
-            // Releasing the entry is the callback's job — the registry keeps it
-            // registered while the callback runs precisely so the release goes
-            // through the same single exit as every other ending. An empty
-            // callback would leave the entry live forever with its timer spent,
-            // which is both a leak and a way for a late reply to be accepted
-            // long after this upload stopped meaning anything. No outcome: the
-            // row already reads "completed" and silence is not a reason to
-            // contradict it.
-            activeTransfers.current.watch(transferId, () => {
-                settleTransfer(transferId);
-            });
-
-        } catch (err) {
-            settleTransfer(transferId, {
-                status: 'error',
-                errorMessage: err instanceof Error ? err.message : 'Upload failed',
-                errorCode: err instanceof SignalingError || isConnectionError(err) ? err.code : undefined,
-            });
+            const session = await ensureSession();
+            if (preparation.cancelled) return;
+            if (!supportsFileTransfer(session.init.operation_system)) throw new SignalingError('Remote device does not support file transfer', deskErrorCodeEnum.NOT_IMPLEMENTED_YET);
+            const channel = await ensureDataChannel();
+            if (preparation.cancelled) return;
+            const owner = uploadController.current;
+            if (!owner || owner.channel !== channel) throw new Error('File transfer channel was replaced');
+            uploadPreparations.current.delete(id);
+            await owner.upload(file, { target_dir: targetDir }, id);
+        } catch (error) {
+            if (!preparation.cancelled) updateTransfer(id, { status: 'error', errorMessage: error instanceof Error ? error.message : 'Upload failed', errorCode: error instanceof SignalingError ? error.code : undefined });
+        } finally {
+            uploadPreparations.current.delete(id);
         }
-    }, [ensureDataChannel, updateTransfer, computeSpeedInfo, removeTransferAfterDelay, settleTransfer]);
+    }, [ensureDataChannel, ensureSession, updateTransfer]);
 
     // Cancel an active transfer (download or upload)
     const cancelTransfer = useCallback((transferId: string) => {
+        const preparation = uploadPreparations.current.get(transferId);
+        if (preparation) {
+            preparation.cancelled = true;
+            uploadPreparations.current.delete(transferId);
+            updateTransfer(transferId, { status: 'cancelled' });
+            return;
+        }
+        if (uploadController.current?.cancel(transferId)) return;
         // Send cancel message to server
         sendControlBestEffort({ type: 'transfer_cancel', transfer_id: transferId });
         settleTransfer(transferId, { status: 'error', errorMessage: 'Cancelled' });
-    }, [sendControlBestEffort, settleTransfer]);
+    }, [sendControlBestEffort, settleTransfer, updateTransfer]);
 
     // Manually remove a transfer from the list
     const removeTransfer = useCallback((transferId: string) => {
+        if (uploadPreparations.current.has(transferId) || uploadController.current?.owns(transferId)) return;
         settleTransfer(transferId);
         setTransfers(prev => prev.filter(t => t.transferId !== transferId));
     }, [settleTransfer]);

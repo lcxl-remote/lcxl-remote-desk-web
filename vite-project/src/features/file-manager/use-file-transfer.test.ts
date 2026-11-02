@@ -2,8 +2,8 @@ import { renderHook, act, cleanup } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { useFileTransfer } from './use-file-transfer';
 import { deskErrorCodeEnum } from '@/services';
+import { UPLOAD_CHUNK_SIZE as CHUNK } from './upload-controller';
 import {
-    CHUNK,
     installSignalingStubs,
     makeGatedFile,
     openChannel,

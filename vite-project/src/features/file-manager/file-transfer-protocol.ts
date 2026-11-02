@@ -26,7 +26,8 @@ export interface DownloadResponse {
 export interface UploadRequest {
     type: 'upload_request';
     transfer_id: string;
-    target_dir: string;
+    target_dir?: string;
+    target_location?: 'downloads';
     file_name: string;
     file_size: number;
     chunk_size: number;
@@ -38,11 +39,21 @@ export interface UploadResponse {
     transfer_id: string;
     accepted: boolean;
     message?: string;
+    resolved_target_dir: string;
+    resolved_file_name: string;
+}
+
+export interface UploadStateChanged {
+    type: 'upload_state_changed';
+    transfer_id: string;
+    phase: 'awaiting_approval' | 'preparing';
 }
 
 export interface TransferComplete {
     type: 'transfer_complete';
     transfer_id: string;
+    resolved_file_name?: string;
+    resolved_target_dir?: string;
 }
 
 export interface TransferError {
@@ -68,6 +79,7 @@ export type FileTransferMessage =
     | DownloadResponse
     | UploadRequest
     | UploadResponse
+    | UploadStateChanged
     | TransferComplete
     | TransferError
     | TransferCancel;

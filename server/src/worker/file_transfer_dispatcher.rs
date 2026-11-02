@@ -34,9 +34,7 @@
 //!
 //! ## Permission gating
 //!
-//! The daemon's DC router gates browser→worker forwarding on
-//! `accept_control` (see `pc_manager::route_is_permitted`). On top of
-//! that the worker re-checks the finer-grained
+//! File routing is independent of mouse/keyboard control. The worker checks the
 //! `resolve_permission(allow_file_transfer, FileTransfer)` gate
 //! once per connection — see `permission_for` and the
 //! `DispatcherInner::permission_cache` field. The cache mirrors the
@@ -88,7 +86,9 @@ use crate::model::policy_access::{CachedDecision, PolicyAccess};
 use crate::model::security_approval::{SecurityPermissionType, resolve_permission};
 use crate::worker::connection_ceiling::ConnectionCeilingStore;
 
+mod approval;
 mod download;
+mod download_directory;
 mod lifecycle;
 mod metrics;
 mod upload;
@@ -176,6 +176,8 @@ struct Upload {
     /// already had truncated or deleted, in exchange for one that never
     /// finished arriving.
     destination: PathBuf,
+    no_replace: bool,
+    source_name: String,
     /// Where the bytes actually go while they arrive. Same directory as
     /// [`Upload::destination`], so the final step is a rename within one
     /// filesystem, and uniquely named, so two uploads never adopt each other's
@@ -246,6 +248,8 @@ struct DispatcherInner {
     /// chunk frames flow over its `file_transfer_event` DC.
     permission_cache: HashMap<String, CachedDecision>,
     activities: HashSet<TransferKey>,
+    pending_requests: HashMap<TransferKey, Arc<AtomicBool>>,
+    approval_queues: HashMap<String, approval::ApprovalQueue>,
 }
 
 impl DispatcherInner {
@@ -258,6 +262,8 @@ impl DispatcherInner {
             active_connections: HashSet::new(),
             permission_cache: HashMap::new(),
             activities: HashSet::new(),
+            pending_requests: HashMap::new(),
+            approval_queues: HashMap::new(),
         }
     }
 
@@ -286,8 +292,19 @@ impl DispatcherInner {
     /// remove an open file still ends up with the staging file gone, and a
     /// connection ending never has to wait on a disk.
     fn take_upload(&mut self, key: &TransferKey) -> Option<PathBuf> {
+        if let Some(pending) = self.pending_requests.remove(key) {
+            pending.store(true, Ordering::SeqCst);
+        }
+        if let Some(queue) = self.approval_queues.get(&key.connection_id) {
+            queue.changed.notify_one();
+        }
         let upload = self.upload_states.remove(key)?;
         upload.cancel();
+        // Close an idle writer even if an acceptance reply still holds an Arc.
+        // Never wait on a writer that is currently doing IO.
+        if let Ok(mut state) = upload.state.try_lock() {
+            state.file = Box::new(tokio::io::sink());
+        }
         self.upload_destinations.remove(&upload.destination);
         Some(upload.staging.clone())
     }
@@ -319,6 +336,8 @@ pub struct FileTransferDispatcher {
     /// can only tighten file-transfer; owner connections carry no ceiling.
     connection_ceilings: ConnectionCeilingStore,
     activity_sender: mpsc::UnboundedSender<WorkerToService>,
+    #[cfg(test)]
+    download_directory: Option<PathBuf>,
 }
 
 /// Returns the `transfer_id` carried by every outbound
@@ -333,6 +352,7 @@ fn transfer_id_of(msg: &FileTransferMessage) -> Option<&str> {
         FileTransferMessage::DownloadResponse(m) => Some(&m.transfer_id),
         FileTransferMessage::UploadRequest(m) => Some(&m.transfer_id),
         FileTransferMessage::UploadResponse(m) => Some(&m.transfer_id),
+        FileTransferMessage::UploadStateChanged(m) => Some(&m.transfer_id),
         FileTransferMessage::TransferComplete(m) => Some(&m.transfer_id),
         FileTransferMessage::TransferError(m) => Some(&m.transfer_id),
         FileTransferMessage::TransferCancel(m) => Some(&m.transfer_id),
