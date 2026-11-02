@@ -10,9 +10,9 @@ function channel() {
 }
 const mouse = { current: channel() }, keyboard = { current: channel() }, move = { current: channel() };
 const pc = { current: Object.assign(new EventTarget(), { connectionState: 'connected' }) as unknown as RTCPeerConnection };
-function Fixture({ available = true, blocked = false }: { available?: boolean; blocked?: boolean }) {
+function Fixture({ available = true, blocked = false, suspended = false }: { available?: boolean; blocked?: boolean; suspended?: boolean }) {
     const videoRef = useRef<HTMLVideoElement>(null);
-    interaction = useMobileDeskInteraction({ videoRef, available, blocked, targetKey: 'display', peerConnection: pc,
+    interaction = useMobileDeskInteraction({ videoRef, available, blocked, suspended, targetKey: 'display', peerConnection: pc,
         isInputAllowed: () => true, mouseChannel: mouse, keyboardChannel: keyboard, mouseMoveChannel: move });
     interaction.senderRef.current = send;
     return <div data-testid="surface" ref={interaction.surfaceRef}><video ref={videoRef} /></div>;
@@ -54,6 +54,33 @@ describe('mobile surface adapter', () => {
         expect(send.mock.calls.filter(([e]) => e.event === 'mousedown')).toHaveLength(1);
         expect(interaction.model.markers).toHaveLength(0);
         Object.defineProperty(mouse.current, 'readyState', { configurable: true, value: 'open' });
+    });
+    it('ignores touches that began on a sibling and keeps a single video drag', () => {
+        const view = render(<Fixture />);
+        const surface = view.getByTestId('surface');
+        const a = { identifier: 1, clientX: 160, clientY: 120 };
+        const foreign = { identifier: 2, clientX: 10, clientY: 10 };
+        fireEvent.touchStart(surface, { touches: [a], changedTouches: [a] });
+        const moved = { ...a, clientX: 200 };
+        fireEvent.touchMove(surface, { touches: [moved, foreign], changedTouches: [moved] });
+        expect(send.mock.calls.filter(([e]) => e.event === 'mousedown')).toHaveLength(1);
+        expect(interaction.model.zoom).toBe(1);
+    });
+    it('consumes interrupted contacts until lift without resetting zoom or control', () => {
+        const view = render(<Fixture />);
+        const surface = view.getByTestId('surface');
+        act(() => interaction.change(m => m.zoomBy(2)));
+        const a = { identifier: 3, clientX: 160, clientY: 120 };
+        fireEvent.touchStart(surface, { touches: [a], changedTouches: [a] });
+        view.rerender(<Fixture suspended />);
+        fireEvent.touchEnd(surface, { touches: [], changedTouches: [a] });
+        view.rerender(<Fixture />);
+        expect(send).not.toHaveBeenCalled();
+        expect(interaction.model.zoom).toBe(2);
+        expect(interaction.model.canControl).toBe(true);
+        fireEvent.touchStart(surface, { touches: [a], changedTouches: [a] });
+        fireEvent.touchEnd(surface, { touches: [], changedTouches: [a] });
+        expect(send.mock.calls.filter(([e]) => e.event === 'mousedown')).toHaveLength(1);
     });
     it('restores fit before whiteboard interaction', () => {
         const view = render(<Fixture />);

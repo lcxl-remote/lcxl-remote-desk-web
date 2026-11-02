@@ -332,6 +332,17 @@ describe("useAdaptiveResolution", () => {
      * test (`min_delta_uses_provided_param`) this pins the threshold
      * is honoured.
      */
+    it("cancels a pending intermediate size when returning to the last sent viewport", () => {
+        const h = makeHarness({ debounceMs: 100 });
+        act(() => { mockResizeObserverState.fire({ width: 1280, height: 720 }); vi.advanceTimersByTime(100); });
+        act(() => { mockResizeObserverState.fire({ width: 1280, height: 664 }); });
+        act(() => { mockResizeObserverState.fire({ width: 1280, height: 720 }); vi.advanceTimersByTime(200); });
+        expect(h.sendCalls).toHaveLength(1);
+        act(() => { mockResizeObserverState.fire({ width: 1280, height: 664 }); });
+        act(() => { mockResizeObserverState.fire({ width: 0, height: 0 }); vi.advanceTimersByTime(200); });
+        expect(h.sendCalls).toHaveLength(1);
+    });
+
     it("skips small delta after first send", () => {
         const h = makeHarness({ debounceMs: 100 });
         act(() => {

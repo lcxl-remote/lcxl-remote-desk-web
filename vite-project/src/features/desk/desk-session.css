@@ -118,12 +118,12 @@
         0 8px 32px rgba(0, 0, 0, 0.4),
         0 2px 8px rgba(0, 0, 0, 0.2),
         inset 0 1px 0 rgba(255, 255, 255, 0.08);
-    padding: 6px;
+    padding: 2px 6px;
     display: flex;
     align-items: center;
     gap: 8px;
     z-index: 20;
-    transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    transition: none;
 }
 
 .controlBarDragHandle {
@@ -134,22 +134,23 @@
     justify-content: center;
     cursor: move;
     border-radius: 10px;
-    color: rgba(255, 255, 255, 0.9);
+    color: hsl(var(--popover-foreground));
     transition: background 0.2s ease, color 0.2s ease;
 }
 
 .controlBarDragHandle:hover {
-    background: rgba(255, 255, 255, 0.1);
-    color: #fff;
+    background: hsl(var(--accent));
+    color: hsl(var(--accent-foreground));
 }
 
 .controlBarContent {
+    position: relative;
     display: flex;
     align-items: center;
     overflow: hidden;
-    /* Avoid scrollbar allocation changing the height during the width animation. */
+    /* Scrollbars must not change the toolbar cross-axis thickness. */
     scrollbar-width: none;
-    transition: max-width 0.3s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.3s ease, margin 0.3s ease;
+    transition: max-width 0.28s ease, margin-left 0.28s ease, opacity 0.2s ease;
 }
 
 .controlBarContent::-webkit-scrollbar {
@@ -176,7 +177,8 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    padding-right: 6px;
+    /* Keep hover lift, edge shadows and focus outlines inside the scroll clipping boundary. */
+    padding: 4px 6px;
 }
 
 .controlButton {
@@ -187,9 +189,9 @@
     align-items: center;
     justify-content: center;
     padding: 0;
-    background: rgba(255, 255, 255, 0.05) !important;
-    border: 1px solid rgba(255, 255, 255, 0.1) !important;
-    color: rgba(255, 255, 255, 0.9) !important;
+    background: hsl(var(--muted) / .8) !important;
+    border: 1px solid hsl(var(--border)) !important;
+    color: hsl(var(--popover-foreground)) !important;
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
     transition:
         background 0.2s ease,
@@ -200,9 +202,9 @@
 }
 
 .controlButton:hover {
-    background: rgba(255, 255, 255, 0.15) !important;
-    border-color: rgba(255, 255, 255, 0.25) !important;
-    color: #fff !important;
+    background: hsl(var(--accent)) !important;
+    border-color: hsl(var(--ring) / .45) !important;
+    color: hsl(var(--accent-foreground)) !important;
     transform: translateY(-2px);
     box-shadow:
         0 4px 16px rgba(0, 0, 0, 0.3),
@@ -211,7 +213,8 @@
 
 .controlButton:active {
     transform: translateY(0);
-    background: rgba(255, 255, 255, 0.08);
+    background: hsl(var(--accent)) !important;
+    color: hsl(var(--accent-foreground)) !important;
     box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
 }
 
@@ -247,7 +250,20 @@
 .controlBar { max-width: calc(100% - 16px - env(safe-area-inset-left) - env(safe-area-inset-right)); bottom: max(16px, env(safe-area-inset-bottom)); }
 .controlBarDragHandle { flex-shrink: 0; touch-action: none; }
 .controlBarContent { min-width: 0; }
-.controlBarContent.expanded { overflow-x: auto; }
+.controlBarScrollViewport {
+    display: flex;
+    flex: 0 1 auto;
+    min-width: 0;
+    min-height: 0;
+    max-width: 100%;
+    max-height: 100%;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+    overscroll-behavior: contain;
+    scroll-padding: 22px;
+}
+.controlBarScrollViewport::-webkit-scrollbar { display: none; }
 .controlButtons { flex-shrink: 0; }
 .controlButton { flex-shrink: 0; }
 @media (pointer: coarse), (max-width: 640px) {
@@ -255,4 +271,50 @@
 }
 @media (prefers-reduced-motion: reduce) {
     .mobileClickMarker { animation: none; }
+}
+
+/* The stage owns local UI; only the video viewport clips media and input. */
+.videoWrapper {
+    overflow: visible;
+    --desk-safe-top: env(safe-area-inset-top, 0px);
+    --desk-safe-bottom: env(safe-area-inset-bottom, 0px);
+    --desk-safe-left: env(safe-area-inset-left, 0px);
+    --desk-safe-right: env(safe-area-inset-right, 0px);
+}
+.videoWrapper[data-maximized] { position: fixed; inset: 0; width: 100%; height: 100dvh; z-index: 100; }
+.deskVideoViewport { position: absolute; overflow: hidden; min-width: 0; min-height: 0; background: #000; }
+.controlBar { width: max-content; box-sizing: border-box; background: hsl(var(--popover) / .94); color: hsl(var(--popover-foreground)); border-color: hsl(var(--border)); }
+.controlBarDragHandle { color: inherit; }
+.controlBar[data-edge="left"], .controlBar[data-edge="right"] { flex-direction: column; gap: 8px; padding: 6px 2px; }
+.controlBar[data-edge="left"] .controlBarContent, .controlBar[data-edge="right"] .controlBarContent { min-height: 0; flex-direction: column; margin-left: 0; }
+.controlBarContent[data-axis="vertical"] .controlBarScrollViewport { flex-direction: column; overflow-x: hidden; overflow-y: auto; }
+.controlBar[data-edge="left"] .controlButtons, .controlBar[data-edge="right"] .controlButtons { flex-direction: column; padding: 4px 4px 6px; }
+.controlBar[data-edge="left"] .controlBarDragHandle, .controlBar[data-edge="right"] .controlBarDragHandle { flex: none; }
+.controlBar[data-edge]:not([data-edge="floating"]) { border-radius: 0; box-shadow: none; }
+.controlBar[data-edge]:not([data-edge="floating"]) .controlBarContent { transition: none; }
+.controlBar[data-dragging] .controlBarContent { transition: none; }
+.toolbarScrollArrow {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    z-index: 1;
+    display: flex;
+    width: 22px;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border-radius: 6px;
+    color: hsl(var(--popover-foreground));
+    cursor: pointer;
+}
+.toolbarScrollArrow.previous { left: 0; background: linear-gradient(to right, hsl(var(--popover)) 65%, hsl(var(--popover) / 0)); }
+.toolbarScrollArrow.next { right: 0; background: linear-gradient(to left, hsl(var(--popover)) 65%, hsl(var(--popover) / 0)); }
+.toolbarScrollArrow:hover { color: hsl(var(--primary)); }
+.controlBarContent[data-axis="vertical"] .toolbarScrollArrow { left: 0; right: 0; width: 100%; height: 22px; }
+.controlBarContent[data-axis="vertical"] .toolbarScrollArrow.previous { top: 0; bottom: auto; background: linear-gradient(to bottom, hsl(var(--popover)) 65%, hsl(var(--popover) / 0)); }
+.controlBarContent[data-axis="vertical"] .toolbarScrollArrow.next { bottom: 0; top: auto; background: linear-gradient(to top, hsl(var(--popover)) 65%, hsl(var(--popover) / 0)); }
+.toolbarMenuAnchor { position: absolute; width: 40px; height: 40px; top: 6px; left: 6px; opacity: 0; pointer-events: none; }
+.toolbarDockPreview { position: absolute; z-index: 19; border: 2px solid hsl(var(--primary)); background: hsl(var(--primary) / .18); pointer-events: none; }
+@media (prefers-reduced-motion: reduce) {
+    .controlBarContent { transition: none; }
 }

@@ -87,6 +87,7 @@ describe('useDeskInput — blur release uses last known cursor position', () => 
         const mouseMoveChannel = makeChannel();
         const keyboardChannel = makeChannel();
         const videoRef = { current: element };
+        const onRelease = vi.fn();
         const hook = renderHook(() =>
             useDeskInput({
                 videoRef,
@@ -94,6 +95,7 @@ describe('useDeskInput — blur release uses last known cursor position', () => 
                 keyboardChannel: { current: keyboardChannel as unknown as RTCDataChannel },
                 mouseMoveChannel: { current: mouseMoveChannel as unknown as RTCDataChannel },
                 isConnected: true,
+                onRelease,
             }),
         );
         // Establish a non-zero rendered surface (1:1 with the stubbed
@@ -109,8 +111,22 @@ describe('useDeskInput — blur release uses last known cursor position', () => 
                 }
             });
         };
-        return { handlers, keyboardChannel, mouseChannel, fire, hook };
+        return { handlers, keyboardChannel, mouseChannel, fire, hook, onRelease };
     }
+
+    it('releases a layout snapshot once while preserving the local viewport contract', () => {
+        const { mouseChannel, keyboardChannel, fire, hook, onRelease } = setup();
+        fire('mousedown', { offsetX: 960, offsetY: 540, button: 0, buttons: 1 });
+        fire('keydown', { key: 'Shift', code: 'ShiftLeft', keyCode: 16, location: 1 });
+        act(() => hook.result.current.releaseForLayout());
+        expect(lastSentPayload(mouseChannel)).toMatchObject({ event: 'mouseup', x: .5, y: .5 });
+        expect(lastSentPayload(keyboardChannel)).toMatchObject({ event: 'keyup', key_code: 16 });
+        expect(onRelease).toHaveBeenLastCalledWith(true);
+        const calls = mouseChannel.send.mock.calls.length + keyboardChannel.send.mock.calls.length;
+        act(() => hook.result.current.releaseAllInputs());
+        expect(mouseChannel.send.mock.calls.length + keyboardChannel.send.mock.calls.length).toBe(calls);
+        expect(onRelease).toHaveBeenLastCalledWith(false);
+    });
 
     it('sends the synthetic mouseup at the last cursor position, not (0,0)', () => {
         const { mouseChannel, fire } = setup();

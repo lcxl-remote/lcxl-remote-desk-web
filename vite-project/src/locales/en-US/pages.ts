@@ -1,6 +1,17 @@
 import modelMetrics from './model-metrics';
 
 export default {
+    "pages.desk.toolbarLayout.handle": "Move toolbar or choose dock position",
+    "pages.desk.toolbarLayout.scrollLeft": "Scroll toolbar buttons left",
+    "pages.desk.toolbarLayout.scrollRight": "Scroll toolbar buttons right",
+    "pages.desk.toolbarLayout.scrollUp": "Scroll toolbar buttons up",
+    "pages.desk.toolbarLayout.scrollDown": "Scroll toolbar buttons down",
+    "pages.desk.toolbarLayout.floating": "Float",
+    "pages.desk.toolbarLayout.top": "Dock top",
+    "pages.desk.toolbarLayout.bottom": "Dock bottom",
+    "pages.desk.toolbarLayout.left": "Dock left",
+    "pages.desk.toolbarLayout.right": "Dock right",
+    "pages.desk.toolbarLayout.leave": "Leave session",
     "pages.aiAssistant.memory.retainedHistory": "Retained history fragments",
     'pages.aiAssistant.memory.newerHistory': 'Newer fragments',
     "pages.aiAssistant.temporary.new": "New temporary conversation",

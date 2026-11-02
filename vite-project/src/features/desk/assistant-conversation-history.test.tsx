@@ -104,14 +104,17 @@ it('locates the original quotation again after viewing the latest content', asyn
             .mockResolvedValueOnce(response(source)).mockResolvedValueOnce(response(latest))
             .mockResolvedValueOnce(response(source)).mockResolvedValueOnce(response(snapshot())));
         show(); await screen.findByText('原来的问题');
+        await waitFor(() => expect(reveal).toHaveBeenCalledWith({ block: 'center' }));
         reveal.mockClear();
         fireEvent.click(screen.getByRole('button', { name: 'View latest conversation content' }));
         await screen.findByText('Newest answer');
         expect(reveal).not.toHaveBeenCalled();
         fireEvent.click(screen.getByRole('button', { name: 'Locate reference' }));
         await screen.findByText('原来的问题');
-        expect(reveal).toHaveBeenCalledWith({ block: 'center' });
-        expect(document.activeElement?.getAttribute('data-assistant-message-id')).toBe('original-answer');
+        await waitFor(() => {
+            expect(reveal).toHaveBeenCalledWith({ block: 'center' });
+            expect(document.activeElement?.getAttribute('data-assistant-message-id')).toBe('original-answer');
+        });
     } finally { reveal.mockRestore(); }
 });
 

@@ -5,7 +5,8 @@ import { Button } from '@/components/ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import type { useMobileDeskInteraction } from './use-mobile-desk-interaction';
 
-export function MobileDeskControls({ interaction, onOpenChange }: {
+export function MobileDeskControls({ interaction, onOpenChange, side = 'top' }: {
+    side?: 'top' | 'bottom' | 'left' | 'right';
     interaction: ReturnType<typeof useMobileDeskInteraction>;
     onOpenChange: (open: boolean) => void;
 }) {
@@ -33,7 +34,7 @@ export function MobileDeskControls({ interaction, onOpenChange }: {
     return <>
         <Popover onOpenChange={open => { change(model => model.cancel(true)); onOpenChange(open); }}>
             <PopoverTrigger asChild><Button className="controlButton" variant="ghost" aria-label={label('controls')}><Hand /></Button></PopoverTrigger>
-            <PopoverContent className="w-72 space-y-3" side="top">
+            <PopoverContent className="w-72 space-y-3" side={side}>
                 <p className="font-medium">{label('controls')}</p>
                 <div className="flex gap-2">
                     <Button variant={m.mode === 'direct' ? 'default' : 'outline'} aria-pressed={m.mode === 'direct'} onClick={() => change(model => model.setMode('direct'))}>{label('direct')}</Button>

@@ -1,7 +1,10 @@
 import { MobileDeskControls } from "./mobile-desk-controls"
 import type { useMobileDeskInteraction } from "./use-mobile-desk-interaction"
 import { AiAssistantIcon } from "@/components/ai-assistant-icon"
-import { useState } from "react"
+import { useEffect, useRef, useState } from "react"
+import type { useDraggableControlBar } from './use-draggable-control-bar'
+import { TOOLBAR_EDGES } from './toolbar-layout'
+import { ToolbarScrollArea } from './toolbar-scroll-area'
 import type {
     PointerEvent as ReactPointerEvent,
     RefObject,
@@ -70,6 +73,8 @@ import { getKeyboardShortcuts } from "./keyboard-shortcuts"
 import type { DesktopControllerPlatform } from "./keyboard-mapping"
 
 type DeskControlBarProps = {
+    toolbar?: ReturnType<typeof useDraggableControlBar>
+    connectionAvailable?: boolean
     mobileInteraction?: ReturnType<typeof useMobileDeskInteraction>
     onToggleAssistant?: () => void
     assistantOpen?: boolean
@@ -104,6 +109,8 @@ type DeskControlBarProps = {
 }
 
 export function DeskControlBar({
+    toolbar,
+    connectionAvailable = true,
     mobileInteraction,
     onToggleAssistant,
     assistantOpen,
@@ -138,9 +145,18 @@ export function DeskControlBar({
 }: DeskControlBarProps) {
     const { t } = useTranslation()
     const [isHovered, setIsHovered] = useState(false)
+    const [hoverSuppressed, setHoverSuppressed] = useState(false)
+    const [contentFocused, setContentFocused] = useState(false)
+    const [positionMenu, setPositionMenu] = useState(false)
+    const longPress = useRef<ReturnType<typeof setTimeout> | null>(null)
+    useEffect(() => () => { if (longPress.current) clearTimeout(longPress.current) }, [])
+    const pressPoint = useRef({ x: 0, y: 0 })
     const [isMenuOpen, setIsMenuOpen] = useState(false)
     const [isKeyboardMappingOpen, setIsKeyboardMappingOpen] = useState(false)
-    const isExpanded = isHovered || isMenuOpen || isDragging
+    const isExpanded = !!toolbar?.edge || !!toolbar?.preferences.expanded || isHovered && !hoverSuppressed || contentFocused || isMenuOpen || positionMenu
+    const clearLongPress = () => { if (longPress.current) clearTimeout(longPress.current); longPress.current = null }
+    const openPositionMenu = () => { clearLongPress(); toolbar?.cancel(); setPositionMenu(true) }
+    const menuSide = toolbar?.edge === 'top' ? 'bottom' : toolbar?.edge === 'left' ? 'right' : toolbar?.edge === 'right' ? 'left' : 'top'
     const keyboardMappingVariables = macKeyboardMappingController === "Linux"
         ? {
             controller: t("pages.desk.keyboardMapping.controller.linux"),
@@ -154,37 +170,71 @@ export function DeskControlBar({
     return (
         <div
             className="controlBar"
+            data-edge={toolbar?.edge ?? 'floating'}
+            data-dragging={isDragging || toolbar?.isInteracting || toolbar?.isSettling || undefined}
+            style={toolbar?.controlBarStyle}
             onPointerDownCapture={() => mobileInteraction?.change(model => model.cancel(true))}
             onMouseEnter={() => setIsHovered(true)}
-            onMouseLeave={() => setIsHovered(false)}
+            onMouseLeave={() => { setIsHovered(false); setHoverSuppressed(false) }}
             ref={controlBarRef}
         >
             <button
                 type="button"
-                aria-label={t('pages.desk.mobile.toolbar')}
-                aria-expanded={isExpanded}
+                aria-label={t(toolbar?.edge ? 'pages.desk.toolbarLayout.handle' : 'pages.desk.mobile.toolbar')}
+                aria-haspopup={toolbar?.edge ? 'menu' : undefined}
+                aria-expanded={toolbar?.edge ? positionMenu : isExpanded}
                 className="controlBarDragHandle"
-                onPointerDown={onDragStart}
+                onPointerDown={event => {
+                    onDragStart(event)
+                    if (event.button !== 0) return
+                    pressPoint.current = { x: event.clientX, y: event.clientY }
+                    clearLongPress()
+                    if (event.pointerType === 'touch') {
+                        const target = event.currentTarget
+                        longPress.current = setTimeout(() => { target.dataset.wasDragged = 'true'; openPositionMenu() }, 500)
+                    }
+                }}
+                onPointerMove={event => { if (Math.hypot(event.clientX - pressPoint.current.x, event.clientY - pressPoint.current.y) >= 8) clearLongPress() }}
+                onPointerUp={clearLongPress}
+                onPointerCancel={clearLongPress}
+                onContextMenu={event => { event.preventDefault(); openPositionMenu() }}
+                onKeyDown={event => { if (event.key === 'ContextMenu' || event.shiftKey && event.key === 'F10') { event.preventDefault(); openPositionMenu() } }}
                 onClick={event => {
                     if (event.currentTarget.dataset.wasDragged) {
                         delete event.currentTarget.dataset.wasDragged;
-                    } else setIsHovered(hovered => !hovered);
+                    } else if (toolbar?.edge) openPositionMenu();
+                    else if (toolbar) { toolbar.setExpanded(!isExpanded); setIsHovered(false); setHoverSuppressed(isExpanded) }
+                    else setIsHovered(hovered => !hovered);
                 }}
             >
                 <Menu className="h-5 w-5" />
             </button>
-            <div
-                className={`controlBarContent ${isExpanded ? "expanded" : "collapsed"}`}
-                inert={!isExpanded ? true : undefined}
+            {toolbar && <DropdownMenu open={positionMenu} onOpenChange={setPositionMenu}>
+                <DropdownMenuTrigger asChild><button type="button" className="toolbarMenuAnchor" tabIndex={-1} aria-hidden="true" /></DropdownMenuTrigger>
+                <DropdownMenuContent side={menuSide} onCloseAutoFocus={event => {
+                    event.preventDefault();
+                    controlBarRef.current?.querySelector<HTMLButtonElement>('.controlBarDragHandle')?.focus();
+                }}>
+                    <DropdownMenuItem onSelect={toolbar.float}>{t('pages.desk.toolbarLayout.floating')}</DropdownMenuItem>
+                    {TOOLBAR_EDGES.map(edge => <DropdownMenuItem key={edge} onSelect={() => toolbar.setPlacement({ kind: 'docked', edge, along: .5 })}>
+                        {t(`pages.desk.toolbarLayout.${edge}`)}
+                    </DropdownMenuItem>)}
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem onSelect={onToggleFullscreen}>{t(isFullscreen ? 'pages.desk.exitFullscreen' : 'pages.desk.fullscreen')}</DropdownMenuItem>
+                    <DropdownMenuItem onSelect={onDisconnect}>{t('pages.desk.toolbarLayout.leave')}</DropdownMenuItem>
+                </DropdownMenuContent>
+            </DropdownMenu>}
+            <ToolbarScrollArea
+                expanded={isExpanded}
+                vertical={toolbar?.vertical ?? false}
                 onBlur={(event) => {
                     if (!controlBarRef.current?.contains(event.relatedTarget as Node)) {
-                        setIsHovered(false)
+                        setContentFocused(false)
                     }
                 }}
-                onFocus={() => setIsHovered(true)}
+                onFocus={() => setContentFocused(true)}
             >
-                <div className="controlButtons">
-                    {mobileInteraction && <MobileDeskControls interaction={mobileInteraction} onOpenChange={setIsMenuOpen} />}
+                    {mobileInteraction && <MobileDeskControls side={menuSide} interaction={mobileInteraction} onOpenChange={setIsMenuOpen} />}
                     {onToggleAssistant && (
                         <Tooltip>
                             <TooltipTrigger asChild>
@@ -194,7 +244,7 @@ export function DeskControlBar({
                                     <AiAssistantIcon />
                                 </Button>
                             </TooltipTrigger>
-                            <TooltipContent>{t("pages.deskDashboard.aiAssistant")}</TooltipContent>
+                            <TooltipContent side={menuSide}>{t("pages.deskDashboard.aiAssistant")}</TooltipContent>
                         </Tooltip>
                     )}
                     {restricted.isRestricted && (
@@ -207,7 +257,7 @@ export function DeskControlBar({
                                     <Lock />
                                 </span>
                             </TooltipTrigger>
-                            <TooltipContent>
+                            <TooltipContent side={menuSide}>
                                 <p>{t("pages.desk.restricted.indicator")}</p>
                             </TooltipContent>
                         </Tooltip>
@@ -218,7 +268,7 @@ export function DeskControlBar({
                             <TooltipTrigger asChild>
                                 <Button
                                     className="controlButton"
-                                    disabled={isWaitingApproval}
+                                    disabled={isWaitingApproval || !connectionAvailable}
                                     onClick={onRequestControl}
                                     variant="ghost"
                                 >
@@ -227,7 +277,7 @@ export function DeskControlBar({
                                         : hasControl ? <XSquare /> : <MousePointer2 />}
                                 </Button>
                             </TooltipTrigger>
-                            <TooltipContent>
+                            <TooltipContent side={menuSide}>
                                 <p>
                                     {isWaitingApproval
                                         ? t("pages.desk.waitingPermission")
@@ -250,7 +300,7 @@ export function DeskControlBar({
                                 {isFullscreen ? <Minimize /> : <Maximize />}
                             </Button>
                         </TooltipTrigger>
-                        <TooltipContent>
+                        <TooltipContent side={menuSide}>
                             <p>{isFullscreen ? t("pages.desk.exitFullscreen") : t("pages.desk.fullscreen")}</p>
                         </TooltipContent>
                     </Tooltip>
@@ -266,7 +316,7 @@ export function DeskControlBar({
                                     <Settings />
                                 </Button>
                             </TooltipTrigger>
-                            <TooltipContent>
+                            <TooltipContent side={menuSide}>
                                 <p>{t("pages.desk.settings")}</p>
                             </TooltipContent>
                         </Tooltip>
@@ -282,7 +332,7 @@ export function DeskControlBar({
                                 <Activity />
                             </Button>
                         </TooltipTrigger>
-                        <TooltipContent>
+                        <TooltipContent side={menuSide}>
                             <p>{showStats ? t("pages.desk.hideStats") : t("pages.desk.showStats")}</p>
                         </TooltipContent>
                     </Tooltip>
@@ -304,7 +354,7 @@ export function DeskControlBar({
                                         : isPrivateScreen ? <ShieldCheck /> : <ShieldOff />}
                                 </Button>
                             </TooltipTrigger>
-                            <TooltipContent>
+                            <TooltipContent side={menuSide}>
                                 <p>{isPrivateScreenPending
                                     ? t("pages.desk.updatingPrivateScreen")
                                     : isPrivateScreen
@@ -328,7 +378,7 @@ export function DeskControlBar({
                                     {clipboardEnabled ? <Clipboard /> : <ClipboardX />}
                                 </Button>
                             </TooltipTrigger>
-                            <TooltipContent>
+                            <TooltipContent side={menuSide}>
                                 <p>
                                     {clipboardEnabled
                                         ? t("pages.desk.disableClipboardSync")
@@ -351,11 +401,12 @@ export function DeskControlBar({
                                         </Button>
                                     </DropdownMenuTrigger>
                                 </TooltipTrigger>
-                                <TooltipContent>
+                                <TooltipContent side={menuSide}>
                                     <p>{t("pages.desk.shortcuts")}</p>
                                 </TooltipContent>
                             </Tooltip>
                             <DropdownMenuContent
+                                side={menuSide}
                                 align="end"
                                 className="w-64 border-border bg-popover/95 backdrop-blur-md"
                             >
@@ -402,7 +453,7 @@ export function DeskControlBar({
                                     <PenTool />
                                 </Button>
                             </TooltipTrigger>
-                            <TooltipContent>
+                            <TooltipContent side={menuSide}>
                                 <p>
                                     {whiteboard.canActivate
                                         ? whiteboard.isActive
@@ -424,7 +475,7 @@ export function DeskControlBar({
                                 {microphone.isMicActive ? <Mic /> : <MicOff />}
                             </Button>
                         </TooltipTrigger>
-                        <TooltipContent>
+                        <TooltipContent side={menuSide}>
                             <p>
                                 {microphone.micError
                                     ? t(microphoneErrorTranslationKeys[microphone.micError])
@@ -444,7 +495,7 @@ export function DeskControlBar({
                                     </Button>
                                 </PopoverTrigger>
                             </TooltipTrigger>
-                            <TooltipContent>
+                            <TooltipContent side={menuSide}>
                                 <p>{t("pages.desk.audio")}</p>
                             </TooltipContent>
                         </Tooltip>
@@ -452,7 +503,7 @@ export function DeskControlBar({
                             align="center"
                             className="flex w-32 flex-col items-center gap-2 border-border bg-popover/95 px-3 py-4 backdrop-blur-md"
                             onOpenAutoFocus={(event) => event.preventDefault()}
-                            side="top"
+                            side={menuSide}
                             sideOffset={16}
                         >
                             <Slider
@@ -478,12 +529,11 @@ export function DeskControlBar({
                                 <Power />
                             </Button>
                         </TooltipTrigger>
-                        <TooltipContent>
+                        <TooltipContent side={menuSide}>
                             <p>{t("pages.desk.disconnect")}</p>
                         </TooltipContent>
                     </Tooltip>
-                </div>
-            </div>
+            </ToolbarScrollArea>
             <Dialog open={isKeyboardMappingOpen} onOpenChange={setIsKeyboardMappingOpen}>
                 <DialogContent className="sm:max-w-md">
                     <DialogHeader>

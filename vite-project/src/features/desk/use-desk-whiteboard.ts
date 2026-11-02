@@ -36,6 +36,25 @@ export function useDeskWhiteboard({ videoRef, whiteboardChannel, isConnected, ha
     const isDrawingRef = useRef(false);
     const currentPointsRef = useRef<{ x: number; y: number }[]>([]);
     const currentIdRef = useRef('');
+    const cancelStroke = useCallback(() => {
+        isDrawingRef.current = false;
+        currentPointsRef.current = [];
+        setElements([]);
+    }, []);
+    const reflowTextInput = useCallback(() => {
+        const video = videoRef.current;
+        if (!video) return;
+        const rect = video.getBoundingClientRect();
+        const content = computeVideoContentRect(rect.width, rect.height, video.videoWidth, video.videoHeight);
+        if (!content) return;
+        setTextInput(previous => {
+            if (!previous) return previous;
+            const clientX = Math.max(rect.left, Math.min(rect.left + content.offsetX + previous.x * content.width, rect.right - Math.min(300, rect.width)));
+            const clientY = Math.max(rect.top, Math.min(rect.top + content.offsetY + previous.y * content.height, rect.bottom - 48));
+            return clientX === previous.clientX && clientY === previous.clientY ? previous : { ...previous, clientX, clientY };
+        });
+    }, [videoRef]);
+    useEffect(reflowTextInput, [reflowTextInput, textInput?.x, textInput?.y]);
 
     const generateId = () => `wb_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 
@@ -209,5 +228,7 @@ export function useDeskWhiteboard({ videoRef, whiteboardChannel, isConnected, ha
         handlePointerMove,
         handlePointerUp,
         handleCanvasClick,
+        cancelStroke,
+        reflowTextInput,
     };
 }

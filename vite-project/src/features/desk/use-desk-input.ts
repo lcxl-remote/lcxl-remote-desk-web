@@ -128,7 +128,7 @@ type UseDeskInputProps = {
     managedTouches?: boolean;
     mapPosition?: (clientX: number, clientY: number) => Point | null;
     onPointerPosition?: (target: Point) => void;
-    onRelease?: () => void;
+    onRelease?: (preserveViewport?: boolean) => void;
     remapCtrlToCommand?: boolean; // Windows/Linux controller → macOS host compatibility
 };
 
@@ -207,7 +207,7 @@ export function useDeskInput({ videoRef, mouseChannel, keyboardChannel, mouseMov
         && mouseChannel.current?.readyState === 'open' && keyboardChannel.current?.readyState === 'open'
         && (!mouseMoveChannel || mouseMoveChannel.current?.readyState === 'open'), [peerConnection, mouseChannel, keyboardChannel, mouseMoveChannel]);
 
-    const releaseAllInputs = useCallback(() => {
+    const releaseSnapshot = useCallback((preserveViewport: boolean) => {
         const buttons = [...pressedButtonsRef.current];
         const keys = [...pressedKeysRef.current.values()];
         pressedButtonsRef.current.clear();
@@ -229,8 +229,10 @@ export function useDeskInput({ videoRef, mouseChannel, keyboardChannel, mouseMov
                 }));
             } catch { /* Host lifecycle cleanup also covers a closed channel. */ }
         }
-        currentRef.current.onRelease?.();
+        currentRef.current.onRelease?.(preserveViewport);
     }, [keyboardChannel, mouseChannel]);
+    const releaseAllInputs = useCallback(() => releaseSnapshot(false), [releaseSnapshot]);
+    const releaseForLayout = useCallback(() => releaseSnapshot(true), [releaseSnapshot]);
 
     const sendMouseIntent = useCallback((intent: MouseIntent) => {
         if (!inputOpen()) return;
@@ -478,7 +480,7 @@ export function useDeskInput({ videoRef, mouseChannel, keyboardChannel, mouseMov
             element.addEventListener("touchcancel", onTouchCancel, { passive: false });
         }
 
-        element.addEventListener("blur", releaseAllInputs);
+        element.addEventListener("blur", releaseForLayout);
         window.addEventListener("blur", releaseAllInputs);
         document.addEventListener("visibilitychange", handleVisibilityChange);
 
@@ -497,11 +499,11 @@ export function useDeskInput({ videoRef, mouseChannel, keyboardChannel, mouseMov
             element.removeEventListener("touchend", onTouchEnd);
             element.removeEventListener("touchcancel", onTouchCancel);
 
-            element.removeEventListener("blur", releaseAllInputs);
+            element.removeEventListener("blur", releaseForLayout);
             window.removeEventListener("blur", releaseAllInputs);
             document.removeEventListener("visibilitychange", handleVisibilityChange);
         };
-    }, [videoRef, isConnected, mouseChannel, keyboardChannel, mouseMoveChannel, ignoreInputEvents, remapCtrlToCommand, managedTouches, releaseAllInputs, inputOpen]);
+    }, [videoRef, isConnected, mouseChannel, keyboardChannel, mouseMoveChannel, ignoreInputEvents, remapCtrlToCommand, managedTouches, releaseAllInputs, releaseForLayout, inputOpen]);
 
     const sendKeyboardEvents = useCallback((events: SyntheticKeyEvent[]) => {
         for (const kbEvent of buildKeyboardEventSequence(events)) {
@@ -514,5 +516,5 @@ export function useDeskInput({ videoRef, mouseChannel, keyboardChannel, mouseMov
         }
     }, [keyboardChannel, inputOpen]);
 
-    return { sendKeyboardEvents, sendMouseIntent, releaseAllInputs };
+    return { sendKeyboardEvents, sendMouseIntent, releaseAllInputs, releaseForLayout };
 }

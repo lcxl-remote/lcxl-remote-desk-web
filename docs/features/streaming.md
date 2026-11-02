@@ -44,7 +44,18 @@ Mouse and keyboard input are injected on the controlled device over a dedicated 
 
 ## Browser fullscreen
 
-The toolbar's **Fullscreen** button makes the remote-desktop viewing area fullscreen on the controller. It uses the browser's native fullscreen permission and does not require remote-control approval. If the browser disables fullscreen, does not expose the API, or rejects entry or exit, the page displays an error notification with the browser's message when available. Embedded pages also need fullscreen authorization from their containing page. Use the toolbar's **Exit Fullscreen** button to return to the normal view.
+The toolbar's **Fullscreen** button makes the entire remote-desktop viewing area fullscreen without requiring remote-control approval. Browsers without the element fullscreen API use page maximization, keeping the toolbar and **Exit Fullscreen** available; browser address bars and system UI may remain visible. If a supported API is disabled or rejects entry or exit, the page reports the error. Embedded pages also need fullscreen permission from their containing page.
+
+A docked toolbar stays visible and reserves its own space in fullscreen. Use **Exit Fullscreen** to return. During page maximization, Escape keeps its existing remote-key or open-menu behavior; use the toolbar to leave the maximized view.
+
+## Toolbar layout
+
+Drag the toolbar handle with a mouse or one finger. Near the top, bottom, left or right edge of the viewing area, a highlighted strip previews docking; release to dock. The picture fits the remaining area without stretching. Top and bottom toolbars run horizontally; side toolbars run vertically. Drag inward and release to float again, or drag along an edge to reposition the toolbar.
+
+Docked controls stay expanded. When space is limited, scroll the button list along its direction; a mouse wheel also scrolls horizontal controls. Arrows at the list edges show where more buttons are available. Click an arrow to scroll in that direction. The handle remains outside the list. Right-click the handle, press Shift+F10 while it is focused, or hold it on a touch screen to choose a position directly. Local layout and fullscreen/leave actions remain available while reconnecting.
+
+This browser remembers the toolbar position and the floating toolbar's explicit expanded/collapsed choice on this device. All accounts and remote devices on the same site reuse the latest saved layout; existing open windows keep their own positions. Refreshing or reopening restores it within the current screen and safe area. This layout preference is separate from account/device connection settings, including in temporary support sessions. Clearing site data resets it; it does not sync to another browser or device.
+
 
 ## Prepare the controlled host
 
@@ -87,7 +98,7 @@ Mobile Web, iOS and Android offer two modes, with Direct touch selected initiall
 
 The Web toolbar shows Touch and zoom, Zoom in, Zoom out and Fit screen when touch is the primary pointing input. Desktop browsers using a mouse hide this group, including in narrow windows, while keeping Fullscreen and the other general controls. Switching to mouse input closes the touch menu and restores the local view to Fit screen.
 
-The toolbar hides its scrollbar to keep its height stable while expanding and collapsing. When buttons exceed the available width, horizontal scrolling and keyboard focus still let you reach the remaining controls.
+The toolbar hides its scrollbar to keep its height stable while expanding and collapsing. When buttons exceed the available space, scrolling along the toolbar and keyboard focus still let you reach the remaining controls.
 
 | Action | Direct touch | Touchpad |
 | --- | --- | --- |

@@ -1,6 +1,17 @@
 import modelMetrics from './model-metrics';
 
 export default {
+    "pages.desk.toolbarLayout.handle": "移动工具栏或选择停靠位置",
+    "pages.desk.toolbarLayout.scrollLeft": "向左滚动工具栏按钮",
+    "pages.desk.toolbarLayout.scrollRight": "向右滚动工具栏按钮",
+    "pages.desk.toolbarLayout.scrollUp": "向上滚动工具栏按钮",
+    "pages.desk.toolbarLayout.scrollDown": "向下滚动工具栏按钮",
+    "pages.desk.toolbarLayout.floating": "自由浮动",
+    "pages.desk.toolbarLayout.top": "停靠顶部",
+    "pages.desk.toolbarLayout.bottom": "停靠底部",
+    "pages.desk.toolbarLayout.left": "停靠左侧",
+    "pages.desk.toolbarLayout.right": "停靠右侧",
+    "pages.desk.toolbarLayout.leave": "离开会话",
     "pages.aiAssistant.memory.retainedHistory": "留存历史片段",
     'pages.aiAssistant.memory.newerHistory': '查看较新片段',
     "pages.aiAssistant.temporary.new": "新建临时对话",

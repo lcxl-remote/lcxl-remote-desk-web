@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useReducer, useRef, type RefObject } from 'react';
 import { MobileInteraction, type MouseIntent, type Point, type TouchPoint } from './mobile-interaction';
 
-export function useMobileDeskInteraction({ videoRef, available, blocked, targetKey, peerConnection, isInputAllowed, mouseChannel, keyboardChannel, mouseMoveChannel }: {
+export function useMobileDeskInteraction({ videoRef, available, blocked, suspended = false, targetKey, peerConnection, isInputAllowed, mouseChannel, keyboardChannel, mouseMoveChannel }: {
     videoRef: RefObject<HTMLVideoElement | null>;
     available: boolean;
     isInputAllowed: () => boolean;
     blocked: boolean;
+    suspended?: boolean;
     targetKey: string;
     peerConnection: RefObject<RTCPeerConnection | null>;
     mouseChannel: RefObject<RTCDataChannel | null>;
@@ -19,8 +20,8 @@ export function useMobileDeskInteraction({ videoRef, available, blocked, targetK
     const model = modelRef.current;
     const [, redraw] = useReducer(n => n + 1, 0);
     const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-    const optionsRef = useRef({ available, blocked, isInputAllowed });
-    optionsRef.current = { available, blocked, isInputAllowed };
+    const optionsRef = useRef({ available, blocked, suspended, isInputAllowed });
+    optionsRef.current = { available, blocked, suspended, isInputAllowed };
     const checkAvailability = useCallback(() => optionsRef.current.available && !optionsRef.current.blocked
         && optionsRef.current.isInputAllowed()
         && peerConnection.current?.connectionState === 'connected'
@@ -49,15 +50,20 @@ export function useMobileDeskInteraction({ videoRef, available, blocked, targetK
         model.updatePhysicalPointer(point);
         refresh();
     }, [model, refresh]);
-    const onRelease = useCallback(() => {
+    const onRelease = useCallback((preserveViewport = false) => {
         // The input adapter already released its snapshot, so discard the gesture without another up.
+        const hadControl = model.canControl;
         model.canControl = false;
-        model.cancel();
-        model.cursor = null;
-        model.markers = [];
+        model.cancel(preserveViewport);
+        if (preserveViewport) model.canControl = hadControl && checkAvailability();
+        else { model.cursor = null; model.markers = []; }
         model.dragArmed = false;
         refresh();
-    }, [model, refresh]);
+    }, [model, refresh, checkAvailability]);
+    useEffect(() => {
+        if (suspended) model.cancel(true);
+        refresh();
+    }, [suspended, model, refresh]);
 
     useEffect(() => {
         model.resetTarget();
@@ -103,13 +109,24 @@ export function useMobileDeskInteraction({ videoRef, available, blocked, targetK
     useEffect(() => {
         const surface = surfaceRef.current;
         if (!surface) return;
+        const owned = new Set<number>();
         const points = (touches: TouchList): TouchPoint[] => {
             const rect = surface.getBoundingClientRect();
-            return Array.from(touches, t => ({ id: t.identifier, x: t.clientX - rect.left, y: t.clientY - rect.top }));
+            return Array.from(touches).filter(t => owned.has(t.identifier))
+                .map(t => ({ id: t.identifier, x: t.clientX - rect.left, y: t.clientY - rect.top }));
         };
         const handle = (event: TouchEvent) => {
             if (optionsRef.current.blocked) return;
             if (event.cancelable) event.preventDefault();
+            if (event.type === 'touchstart') for (const touch of Array.from(event.changedTouches)) owned.add(touch.identifier);
+            if (optionsRef.current.suspended) {
+                model.cancel(true);
+                if (event.type === 'touchend' || event.type === 'touchcancel') {
+                    model.end(points(event.touches), [], performance.now());
+                    for (const t of Array.from(event.changedTouches)) owned.delete(t.identifier);
+                }
+                return;
+            }
             videoRef.current?.focus({ preventScroll: true });
             const active = points(event.touches);
             change(m => {
@@ -119,6 +136,7 @@ export function useMobileDeskInteraction({ videoRef, available, blocked, targetK
                 else if (event.type === 'touchend') m.end(active, points(event.changedTouches), now);
                 else m.cancel(true);
             });
+            if (event.type === 'touchend' || event.type === 'touchcancel') for (const t of Array.from(event.changedTouches)) owned.delete(t.identifier);
         };
         for (const name of ['touchstart', 'touchmove', 'touchend', 'touchcancel']) surface.addEventListener(name, handle as EventListener, { passive: false });
         return () => {

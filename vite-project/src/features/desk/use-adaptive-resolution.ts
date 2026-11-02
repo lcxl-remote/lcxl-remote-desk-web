@@ -278,11 +278,14 @@ export function useAdaptiveResolution({
 
         let latestObserved: { width: number; height: number } | null = null;
         const onResize = (rect: DOMRectReadOnly, deviceBox?: ResizeObserverSize) => {
+            if (timerRef.current !== null) clearTimeout(timerRef.current);
+            timerRef.current = null;
             const dpr = window.devicePixelRatio;
             const normalised = deviceBox
                 ? normaliseDevicePixelDims(deviceBox.inlineSize, deviceBox.blockSize, maxDimension)
                 : normaliseDims(rect.width, rect.height, dpr, maxDimension);
             if (!normalised) {
+                latestObserved = null;
                 console.debug("[adaptive-resolution hook] resize ignored: invalid rect", {
                     cssW: rect.width,
                     cssH: rect.height,
@@ -314,7 +317,7 @@ export function useAdaptiveResolution({
                 normalised,
                 debounceMs,
             });
-            timerRef.current = setTimeout(() => fire(normalised), debounceMs);
+            timerRef.current = setTimeout(() => { if (latestObserved) fire(latestObserved); }, debounceMs);
         };
 
         // A retryable response can arrive after the original resize has gone
@@ -325,7 +328,7 @@ export function useAdaptiveResolution({
             if (!target) return;
             lastSentRef.current = null;
             if (timerRef.current !== null) clearTimeout(timerRef.current);
-            timerRef.current = setTimeout(() => fire(target), debounceMs);
+            timerRef.current = setTimeout(() => { if (latestObserved) fire(latestObserved); }, debounceMs);
         };
 
         const observer = new ResizeObserver((entries) => {

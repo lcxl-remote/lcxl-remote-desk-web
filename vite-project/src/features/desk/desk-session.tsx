@@ -4,13 +4,14 @@ import { hasAiAssistantBrowserEntry, type AiAssistantFeatureProfile } from "./ai
 import { useListConnections } from "@/services/hooks/connectionController/useListConnections"
 import { useQueryServerInfo } from "@/services/hooks/systemController/useQueryServerInfo"
 import { isAiAssistantEnabled } from "./ai-assistant-switch"
-import { useEffect, useRef, useState, useCallback, useMemo } from "react"
+import { useEffect, useLayoutEffect, useRef, useState, useCallback, useMemo } from "react"
 import { useParams, useNavigate } from "react-router-dom"
 import { useTranslation } from "react-i18next"
 import { v4 } from "uuid"
 import { AlertTriangle, Loader2 } from "lucide-react"
 import { TooltipProvider } from "@/components/ui/tooltip"
 
+import { PortalContainerContext } from "@/components/ui/portal-container"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import "./desk-session.css"
@@ -302,6 +303,7 @@ export default function DeskSession({
     }, [isConnected, handleConnect]);
     const videoRef = useRef<HTMLVideoElement>(null)
     const videoWrapperRef = useRef<HTMLDivElement>(null)
+    const videoViewportRef = useRef<HTMLDivElement>(null)
     const controlBarRef = useRef<HTMLDivElement>(null)
 
     const [isConfigOpen, setIsConfigOpen] = useState(false);
@@ -368,7 +370,11 @@ export default function DeskSession({
         return /Mobile|Android|iP(ad|hone)/.test(navigator.userAgent) ? true : false;
     });
     const [audioVolume, setAudioVolume] = useState(100);
-    const [isFullscreen, setIsFullscreen] = useState(false);
+    const [fullscreenMode, setFullscreenMode] = useState<'inline' | 'native' | 'maximized'>('inline');
+    const isFullscreen = fullscreenMode === 'native';
+    const isMaximized = fullscreenMode === 'maximized';
+    const [fullscreenError, setFullscreenError] = useState<string | null>(null);
+    const layoutCleanupRef = useRef(() => {});
     // Whether this environment can capture Escape via the Keyboard Lock API
     // (Chromium + secure context). When it cannot, Escape is swallowed by the
     // browser in fullscreen, so we expose Esc in the shortcut menu and warn the
@@ -376,10 +382,13 @@ export default function DeskSession({
     const keyboardLockSupported = useMemo(() => isKeyboardLockSupported(), []);
     const [showEscHint, setShowEscHint] = useState(false);
 
-    const { handleDragStart, isDragging } = useDraggableControlBar({
+    const toolbar = useDraggableControlBar({
         controlBarRef,
         wrapperRef: videoWrapperRef,
+        onGrab: () => layoutCleanupRef.current(),
+        onLayoutChange: () => layoutCleanupRef.current(),
     })
+    const { handleDragStart, isDragging } = toolbar;
 
     const [showStats, setShowStats] = useState(false);
 
@@ -817,10 +826,12 @@ export default function DeskSession({
         available: isRTCConnected && hasControl && !isWaitingApproval,
         isInputAllowed,
         blocked: whiteboard.isInteractive || !!whiteboard.textInput,
+        suspended: toolbar.isInteracting,
         targetKey: `${initData?.connection_epoch ?? ''}:${activeSettings?.image_capture ?? ''}:${activeSettings?.video_device_name ?? ''}`,
         peerConnection, mouseChannel, keyboardChannel, mouseMoveChannel,
     });
-    const { sendKeyboardEvents, sendMouseIntent, releaseAllInputs } = useDeskInput({
+    const physicalInputAllowed = useCallback(() => isInputAllowed() && !toolbar.isInputSuspended(), [isInputAllowed, toolbar.isInputSuspended]);
+    const { sendKeyboardEvents, sendMouseIntent, releaseAllInputs, releaseForLayout } = useDeskInput({
         videoRef,
         mouseChannel,
         keyboardChannel,
@@ -828,7 +839,7 @@ export default function DeskSession({
         isConnected: isRTCConnected && hasControl, // Only enable inputs if we have control
         ignoreInputEvents: whiteboard.isInteractive || !!whiteboard.textInput,
         managedTouches: true,
-        isInputAllowed,
+        isInputAllowed: physicalInputAllowed,
         peerConnection,
         mapPosition: mobileInteraction.mapPosition,
         onPointerPosition: mobileInteraction.onPointerPosition,
@@ -837,6 +848,14 @@ export default function DeskSession({
     });
     releaseInputsRef.current = releaseAllInputs;
     mobileInteraction.senderRef.current = sendMouseIntent;
+    layoutCleanupRef.current = () => { releaseForLayout(); whiteboard.cancelStroke(); };
+    useLayoutEffect(() => { whiteboard.reflowTextInput(); }, [whiteboard.reflowTextInput, toolbar.layout.video.x, toolbar.layout.video.y, toolbar.layout.video.width, toolbar.layout.video.height]);
+    useEffect(() => {
+        if (!isMaximized) return;
+        const previous = document.body.style.overflow;
+        document.body.style.overflow = "hidden";
+        return () => { document.body.style.overflow = previous; };
+    }, [isMaximized]);
 
     const microphone = useDeskMicrophone({
         peerConnection,
@@ -1346,8 +1365,8 @@ export default function DeskSession({
         adaptiveGateOpen,
     ]);
     useAdaptiveResolution({
-        wrapperRef: videoWrapperRef,
-        enabled: adaptiveGateOpen,
+        wrapperRef: videoViewportRef,
+        enabled: adaptiveGateOpen && toolbar.layout.video.width > 0 && toolbar.layout.video.height > 0,
         targetKey: adaptiveTargetKey,
         sendChangeDisplay,
         pendingAutoRequestIds: pendingAutoRequestIdsRef,
@@ -1599,58 +1618,52 @@ export default function DeskSession({
     };
 
     const handleFullscreen = async () => {
+        setFullscreenError(null);
+        const reportError = (description: string) => {
+            if (document.fullscreenElement === videoWrapperRef.current) setFullscreenError(description);
+            else toast({ title: t('pages.desk.fullscreenFailed'), description, variant: 'destructive' });
+        };
+        toolbar.cancel();
+        layoutCleanupRef.current();
+        if (isMaximized) { setFullscreenMode('inline'); return; }
         try {
             if (!document.fullscreenElement) {
                 const wrapper = videoWrapperRef.current;
                 if (!wrapper) return;
-                if (typeof wrapper.requestFullscreen !== 'function' || document.fullscreenEnabled === false) {
-                    toast({
-                        title: t('pages.desk.fullscreenFailed'),
-                        description: t(typeof wrapper.requestFullscreen !== 'function'
-                            ? 'pages.desk.fullscreenUnsupported'
-                            : 'pages.desk.fullscreenBlocked'),
-                        variant: 'destructive',
-                    });
+                if (typeof wrapper.requestFullscreen !== 'function') { setFullscreenMode('maximized'); return; }
+                if (document.fullscreenEnabled === false) {
+                    reportError(t('pages.desk.fullscreenBlocked'));
                     return;
                 }
                 await wrapper.requestFullscreen();
                 // Lock Escape only after fullscreen is actually active.
                 if (document.fullscreenElement === wrapper) await lockEscapeKey();
-            } else {
+            } else if (document.fullscreenElement === videoWrapperRef.current) {
                 // The fullscreenchange listener releases the keyboard lock,
                 // including exits initiated by the browser's Escape shortcut.
                 await document.exitFullscreen();
             }
         } catch (error) {
-            toast({
-                title: t('pages.desk.fullscreenFailed'),
-                description: (error instanceof Error || error instanceof DOMException) && error.message
+            reportError((error instanceof Error || error instanceof DOMException) && error.message
                     ? t('pages.desk.fullscreenFailedDetail', { error: error.message })
-                    : t('pages.desk.fullscreenBlocked'),
-                variant: 'destructive',
-            });
+                    : t('pages.desk.fullscreenBlocked'));
         }
     };
 
     // Keep fullscreen state in sync
     useEffect(() => {
         const handleFullscreenChange = () => {
-            setIsFullscreen(!!document.fullscreenElement);
+            setFullscreenMode(previous => document.fullscreenElement === videoWrapperRef.current ? 'native' : previous === 'native' ? 'inline' : previous);
+            toolbar.cancel();
+            layoutCleanupRef.current();
             // Release the Escape keyboard lock whenever we leave fullscreen,
             // including the press-and-hold-Escape exit path that never goes
             // through handleFullscreen.
             if (!document.fullscreenElement) {
                 unlockKeyboard();
+                setFullscreenError(null);
             }
-            // Re-center control bar if it exists
-            if (controlBarRef.current) {
-                const cb = controlBarRef.current;
-                cb.style.transition = 'none';
-                cb.style.left = '';
-                cb.style.top = '';
-                cb.style.bottom = '';
-                cb.style.transform = '';
-            }
+
         };
         document.addEventListener('fullscreenchange', handleFullscreenChange);
         return () => document.removeEventListener('fullscreenchange', handleFullscreenChange);
@@ -1676,6 +1689,7 @@ export default function DeskSession({
     };
 
     return (
+        <PortalContainerContext.Provider value={isFullscreen || isMaximized ? videoWrapperRef.current ?? undefined : undefined}>
         <div className="flex h-full flex-col">
             <SessionTargetDialog
                 targets={sessionTargets}
@@ -1722,18 +1736,22 @@ export default function DeskSession({
                 </div>
             </div>
             <div className="relative flex-1 bg-black flex items-center justify-center overflow-hidden">
-                {!isConnected && (
-                    <div className="flex flex-col items-center gap-2 text-white z-50">
-                        <Loader2 className="h-8 w-8 animate-spin" />
-                        <span>{t('pages.desk.status.connecting')}</span>
-                    </div>
-                )}
+
 
                 <TooltipProvider>
                     <div
                         className="videoWrapper"
+                        data-maximized={isMaximized || undefined}
                         ref={videoWrapperRef}
                     >
+                        <div className="deskVideoViewport" ref={videoViewportRef} style={toolbar.viewportStyle}>
+                        {!isConnected && <div className="absolute inset-0 z-50 flex pointer-events-none flex-col items-center justify-center gap-2 text-white">
+                            <Loader2 className="h-8 w-8 animate-spin" />
+                            <span>{t('pages.desk.status.connecting')}</span>
+                        </div>}
+                        {fullscreenError && <div role="alert" className="absolute inset-x-3 top-3 z-[60] rounded-lg bg-destructive p-3 text-destructive-foreground">
+                            <strong>{t('pages.desk.fullscreenFailed')}</strong><p>{fullscreenError}</p>
+                        </div>}
                         <div className="deskInteractionSurface" ref={mobileInteraction.surfaceRef}>
                         <video
                             ref={videoRef}
@@ -1805,8 +1823,9 @@ export default function DeskSession({
                             <form
                                 className="fixed z-[9999] flex items-center gap-2 bg-popover text-popover-foreground p-2 rounded-lg shadow-lg border border-border"
                                 style={{
-                                    left: Math.min(whiteboard.textInput.clientX, window.innerWidth - 300),
-                                    top: Math.min(whiteboard.textInput.clientY, window.innerHeight - 60)
+                                    left: whiteboard.textInput.clientX,
+                                    top: whiteboard.textInput.clientY,
+                                    maxWidth: toolbar.layout.video.width
                                 }}
                                 onSubmit={(e) => {
                                     e.preventDefault();
@@ -1989,8 +2008,11 @@ export default function DeskSession({
                             </DeskAssistantPanel>
                         )}
 
-                        {isConnected && (
+                        </div>
+                        {toolbar.previewStyle && <div className="toolbarDockPreview" style={{ left: toolbar.previewStyle.x, top: toolbar.previewStyle.y, width: toolbar.previewStyle.width, height: toolbar.previewStyle.height }} />}
                             <DeskControlBar
+                                toolbar={toolbar}
+                                connectionAvailable={isConnected}
                                 assistantOpen={assistantOpen}
                                 onToggleAssistant={assistantAvailable ? () => {
                                     releaseAllInputs();
@@ -2002,7 +2024,7 @@ export default function DeskSession({
                                 controlBarRef={controlBarRef}
                                 hasControl={hasControl}
                                 isDragging={isDragging}
-                                isFullscreen={isFullscreen}
+                                isFullscreen={isFullscreen || isMaximized}
                                 isMuted={isMuted}
                                 isPrivateScreen={isPrivateScreen}
                                 isPrivateScreenPending={isPrivateScreenPending}
@@ -2027,10 +2049,10 @@ export default function DeskSession({
                                 macKeyboardMappingController={macKeyboardMappingController}
                                 whiteboard={whiteboard}
                             />
-                        )}
                     </div>
                 </TooltipProvider>
             </div >
         </div >
+        </PortalContainerContext.Provider>
     )
 }
