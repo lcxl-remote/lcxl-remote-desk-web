@@ -6,7 +6,14 @@ use sea_orm::{
     AccessMode, ConnectionTrait, DbBackend, DbErr, ExecResult, IsolationLevel, QueryResult,
     Statement, TransactionError, TransactionSession, TransactionTrait,
 };
-use std::{future::Future, pin::Pin, sync::Arc};
+use std::{
+    future::Future,
+    pin::Pin,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
 #[derive(Clone, Debug)]
 pub struct DatabaseConnection {
@@ -23,29 +30,94 @@ pub struct DatabaseTransaction {
 }
 
 /// The production pool has one connection, so a long transaction delays every other
-/// database user. Name the holder to make that queueing attributable.
+/// database user. Name the holder and split its time between SQLite statements and
+/// named phases to make that queueing attributable.
 #[derive(Debug)]
 struct HoldTimer {
     began: std::time::Instant,
     caller: Option<&'static std::panic::Location<'static>>,
+    statements: AtomicU64,
+    statement_micros: AtomicU64,
+    phases: Mutex<Vec<(&'static str, u64)>>,
 }
 
+const NOTABLE_HOLD: std::time::Duration = std::time::Duration::from_millis(200);
 const SLOW_HOLD: std::time::Duration = std::time::Duration::from_secs(1);
+
+impl HoldTimer {
+    fn new() -> Self {
+        Self {
+            began: std::time::Instant::now(),
+            caller: None,
+            statements: AtomicU64::new(0),
+            statement_micros: AtomicU64::new(0),
+            phases: Mutex::new(Vec::new()),
+        }
+    }
+
+    async fn statement<T>(&self, run: impl Future<Output = T>) -> T {
+        let started = std::time::Instant::now();
+        let result = run.await;
+        self.statements.fetch_add(1, Ordering::Relaxed);
+        self.statement_micros.fetch_add(
+            u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+        result
+    }
+
+    fn mark(&self, phase: &'static str) {
+        let at = u64::try_from(self.began.elapsed().as_millis()).unwrap_or(u64::MAX);
+        if let Ok(mut phases) = self.phases.lock() {
+            phases.push((phase, at));
+        }
+    }
+
+    /// Phase values are milliseconds since the transaction began. Time outside
+    /// statements is CPU work or waiting for the async runtime to resume this task.
+    fn summary(&self) -> String {
+        let phases = self
+            .phases
+            .lock()
+            .map(|phases| {
+                phases
+                    .iter()
+                    .map(|(name, at)| format!("{name}@{at}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .unwrap_or_default();
+        format!(
+            "statements={} statement_ms={} phases=[{phases}]",
+            self.statements.load(Ordering::Relaxed),
+            self.statement_micros.load(Ordering::Relaxed) / 1000,
+        )
+    }
+}
 
 impl Drop for HoldTimer {
     fn drop(&mut self) {
         let held = self.began.elapsed();
-        if held >= SLOW_HOLD {
-            match self.caller {
-                Some(caller) => log::warn!(
-                    "[db] write transaction from {caller} held the connection for {} ms",
-                    held.as_millis()
-                ),
-                None => log::warn!(
-                    "[db] transaction held the connection for {} ms",
-                    held.as_millis()
-                ),
-            }
+        if held < NOTABLE_HOLD {
+            return;
+        }
+        let level = if held >= SLOW_HOLD {
+            log::Level::Warn
+        } else {
+            log::Level::Info
+        };
+        let summary = self.summary();
+        match self.caller {
+            Some(caller) => log::log!(
+                level,
+                "[db] write transaction from {caller} held the connection for {} ms: {summary}",
+                held.as_millis()
+            ),
+            None => log::log!(
+                level,
+                "[db] transaction held the connection for {} ms: {summary}",
+                held.as_millis()
+            ),
         }
     }
 }
@@ -118,7 +190,34 @@ macro_rules! connection {
     };
 }
 connection!(DatabaseConnection);
-connection!(DatabaseTransaction);
+
+#[async_trait]
+impl ConnectionTrait for DatabaseTransaction {
+    fn get_database_backend(&self) -> DbBackend {
+        self.inner.get_database_backend()
+    }
+    async fn execute_raw(&self, statement: Statement) -> Result<ExecResult, DbErr> {
+        self.hold.statement(self.inner.execute_raw(statement)).await
+    }
+    async fn execute_unprepared(&self, sql: &str) -> Result<ExecResult, DbErr> {
+        self.hold
+            .statement(self.inner.execute_unprepared(sql))
+            .await
+    }
+    async fn query_one_raw(&self, statement: Statement) -> Result<Option<QueryResult>, DbErr> {
+        self.hold
+            .statement(self.inner.query_one_raw(statement))
+            .await
+    }
+    async fn query_all_raw(&self, statement: Statement) -> Result<Vec<QueryResult>, DbErr> {
+        self.hold
+            .statement(self.inner.query_all_raw(statement))
+            .await
+    }
+    fn is_mock_connection(&self) -> bool {
+        self.inner.is_mock_connection()
+    }
+}
 
 macro_rules! transactions {
     ($kind:ty, $snapshot:expr) => {
@@ -139,10 +238,7 @@ macro_rules! transactions {
                     inner,
                     configuration: self.configuration.clone(),
                     snapshot,
-                    hold: HoldTimer {
-                        began: std::time::Instant::now(),
-                        caller: None,
-                    },
+                    hold: HoldTimer::new(),
                 })
             }
             async fn transaction<F, T, E>(&self, callback: F) -> Result<T, TransactionError<E>>
@@ -196,7 +292,11 @@ transactions!(DatabaseTransaction, ConfigConnection::config_read);
 #[async_trait]
 impl TransactionSession for DatabaseTransaction {
     async fn commit(self) -> Result<(), DbErr> {
-        self.inner.commit().await
+        let Self { inner, hold, .. } = self;
+        hold.mark("before_commit");
+        let result = inner.commit().await;
+        hold.mark("committed");
+        result
     }
     async fn rollback(self) -> Result<(), DbErr> {
         self.inner.rollback().await
@@ -205,6 +305,10 @@ impl TransactionSession for DatabaseTransaction {
 impl DatabaseTransaction {
     pub(crate) fn name_holder(&mut self, caller: &'static std::panic::Location<'static>) {
         self.hold.caller = Some(caller);
+    }
+    /// Records a named point in the slow-transaction log line.
+    pub(crate) fn mark_phase(&self, phase: &'static str) {
+        self.hold.mark(phase);
     }
     pub async fn commit(self) -> Result<(), DbErr> {
         TransactionSession::commit(self).await
@@ -218,5 +322,8 @@ impl DatabaseTransaction {
 impl DatabaseTransaction {
     pub(crate) fn holder(&self) -> Option<&'static std::panic::Location<'static>> {
         self.hold.caller
+    }
+    pub(crate) fn hold_summary(&self) -> String {
+        self.hold.summary()
     }
 }

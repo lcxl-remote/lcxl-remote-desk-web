@@ -324,6 +324,7 @@ impl SignalModelEgressStore {
                 .await?;
         }
 
+        txn.mark_phase("source_fence");
         let row = model_egress_receipt::Entity::find_by_id(receipt_id)
             .one(&txn)
             .await?
@@ -352,6 +353,7 @@ impl SignalModelEgressStore {
         })
         .await
         .map_err(model_gate::admission_error)?;
+        txn.mark_phase("validated");
         let completed_at = chrono::Utc::now();
         let pending_archive = desk_diagnose_core::future::boxed(|| {
             model_gate::output::archive_on(
@@ -371,6 +373,7 @@ impl SignalModelEgressStore {
             );
             return Err(ModelAdmissionError::AssistantDataChanged);
         }
+        txn.mark_phase("archive_prepared");
         let expected_sources = match &row.assistant_source_set_json {
             Some(raw) => model_egress_receipt::Column::AssistantSourceSetJson.eq(raw.clone()),
             None => model_egress_receipt::Column::AssistantSourceSetJson.is_null(),
@@ -448,6 +451,7 @@ impl SignalModelEgressStore {
             .exec(&txn)
             .await?;
         ensure_single_update(result.rows_affected, "complete successful model egress")?;
+        txn.mark_phase("receipt_updated");
         if deadline.is_some_and(|until| until <= chrono::Utc::now().timestamp_millis() as u64) {
             log::warn!(
                 "[assistant-output] deadline elapsed: phase=native_write, receipt_id={receipt_id}, elapsed_ms={}",
@@ -468,8 +472,9 @@ impl SignalModelEgressStore {
             );
             return Err(ModelAdmissionError::AssistantDataChanged);
         }
-        log::debug!(
-            "[assistant-output] accepted: receipt_id={receipt_id}, elapsed_ms={}",
+        txn.mark_phase("archive_written");
+        log::info!(
+            "[turn-timing] accepted model output: receipt_id={receipt_id}, elapsed_ms={}",
             acceptance_started.elapsed().as_millis()
         );
         txn.commit().await.map_err(Into::into)

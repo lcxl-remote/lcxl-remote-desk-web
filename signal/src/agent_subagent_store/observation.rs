@@ -291,6 +291,7 @@ pub(crate) async fn save_main_delegation_session(
         parent_on(&txn, &held.conversation_id, &held.actor_id, &held.device_id).await
     })
     .await?;
+    txn.mark_phase("parent_read");
     if !desk_diagnose_core::future::boxed(|| async {
         crate::goal_work::rebase_background_events_on(&txn, &current, held).await
     })
@@ -339,15 +340,18 @@ async fn save_main_history_on(
     })
     .await
     .map_err(history_error)?;
+    txn.mark_phase("history_prepared");
     // Keep child observation and the original session update in this same
     // transaction. No native/source read follows the final history quota phase.
     desk_diagnose_core::future::send_phase(|| {
         acknowledge_results_on(txn, current, held, now.timestamp_millis())
     })
     .await?;
+    txn.mark_phase("results_acknowledged");
     desk_diagnose_core::future::send_phase(|| prepared.observe_native_status_on(txn))
         .await
         .map_err(history_error)?;
+    txn.mark_phase("native_status_observed");
     let captures = prepared.captures();
     let requests = prepared.requests(&captures).map_err(history_error)?;
     let deadlines = prepared.deadlines().map_err(history_error)?;
@@ -357,9 +361,11 @@ async fn save_main_history_on(
     .await
     .map_err(history_error)?;
 
+    txn.mark_phase("history_requests_prepared");
     let held_until = desk_diagnose_core::future::send_phase(|| prepared.finish_preparation_on(txn))
         .await
         .map_err(history_error)?;
+    txn.mark_phase("preparation_finished");
     let version = held.version.checked_add(1).ok_or_else(|| invalid())?;
     let state_json = {
         let mut stored = Box::new(held.clone());
@@ -369,6 +375,7 @@ async fn save_main_history_on(
         stored.version = version;
         stored.encode_json_for_storage().map_err(|_| invalid())?
     };
+    txn.mark_phase("state_encoded");
     let deadline = held
         .turn_state
         .is_active()
@@ -387,9 +394,11 @@ async fn save_main_history_on(
         return Err(invalid());
     }
 
+    txn.mark_phase("session_persisted");
     let outcomes = desk_diagnose_core::future::send_phase(|| pending.finalize_on())
         .await
         .map_err(history_error)?;
+    txn.mark_phase("history_finalized");
     let completed = u64::try_from(chrono::Utc::now().timestamp_millis()).map_err(|_| invalid())?;
     if outcomes.len() != deadlines.len()
         || held_until.is_some_and(|until| until <= completed)

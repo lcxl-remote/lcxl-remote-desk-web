@@ -2110,69 +2110,80 @@ impl SessionSeam for SignalAgentSessionStore {
     }
 
     async fn save(&self, session: &mut PersistedAgentSession) -> Result<(), AgentError> {
-        if !session.agent_role.is_main() {
-            return crate::agent_subagent_store::save_child_session(&self.db, session)
+        let started = std::time::Instant::now();
+        let result = desk_diagnose_core::future::boxed(|| async {
+            if !session.agent_role.is_main() {
+                return crate::agent_subagent_store::save_child_session(&self.db, session)
+                    .await
+                    .map_err(|error| internal(format!("save delegated session: {error}")));
+            }
+            if session.delegation_group_id.is_some()
+                || !session.accepted_subagent_observations.is_empty()
+            {
+                return desk_diagnose_core::future::send_phase(|| {
+                    crate::agent_subagent_store::save_main_delegation_session(&self.db, session)
+                })
                 .await
-                .map_err(|error| internal(format!("save delegated session: {error}")));
-        }
-        if session.delegation_group_id.is_some()
-            || !session.accepted_subagent_observations.is_empty()
-        {
-            return desk_diagnose_core::future::send_phase(|| {
-                crate::agent_subagent_store::save_main_delegation_session(&self.db, session)
-            })
-            .await
-            .map_err(|error| internal(format!("save delegation result: {error}")));
-        }
-        let now = Utc::now();
-        let new_version = session.version + 1;
-        desk_diagnose_core::image_input::retain_latest_session_image(&mut session.conversation)
-            .map_err(|error| internal(format!("invalid session image: {error}")))?;
-        let mut stored = session.clone();
-        // Pixels persist separately as attachments. Keep the latest validated
-        // image in the live turn for the next model step, but save only the
-        // text projection and attachment references in session JSON.
-        desk_diagnose_core::image_input::strip_session_images(&mut stored.conversation);
-        stored.version = new_version;
-        let state_json = stored
-            .encode_json_for_storage()
-            .map_err(|e| internal(format!("encode agent session state: {e}")))?;
-        let lease_deadline = session
-            .turn_state
-            .is_active()
-            .then_some(now + Duration::seconds(LEASE_TTL_SECS));
-        let result = if session.surface == AgentSessionSurface::AiAssistant
-            && session.assistant_data.is_some()
-        {
-            desk_diagnose_core::future::boxed(|| {
-                history_save::with_history(
+                .map_err(|error| internal(format!("save delegation result: {error}")));
+            }
+            let now = Utc::now();
+            let new_version = session.version + 1;
+            desk_diagnose_core::image_input::retain_latest_session_image(&mut session.conversation)
+                .map_err(|error| internal(format!("invalid session image: {error}")))?;
+            let mut stored = session.clone();
+            // Pixels persist separately as attachments. Keep the latest validated
+            // image in the live turn for the next model step, but save only the
+            // text projection and attachment references in session JSON.
+            desk_diagnose_core::image_input::strip_session_images(&mut stored.conversation);
+            stored.version = new_version;
+            let state_json = stored
+                .encode_json_for_storage()
+                .map_err(|e| internal(format!("encode agent session state: {e}")))?;
+            let lease_deadline = session
+                .turn_state
+                .is_active()
+                .then_some(now + Duration::seconds(LEASE_TTL_SECS));
+            let result = if session.surface == AgentSessionSurface::AiAssistant
+                && session.assistant_data.is_some()
+            {
+                desk_diagnose_core::future::boxed(|| {
+                    history_save::with_history(
+                        &self.db,
+                        session,
+                        &state_json,
+                        new_version,
+                        now,
+                        lease_deadline,
+                    )
+                })
+                .await?
+            } else {
+                history_save::persist_on(
                     &self.db,
                     session,
                     &state_json,
                     new_version,
                     now,
                     lease_deadline,
+                    None,
                 )
-            })
-            .await?
-        } else {
-            history_save::persist_on(
-                &self.db,
-                session,
-                &state_json,
-                new_version,
-                now,
-                lease_deadline,
-                None,
-            )
-            .await
-            .map_err(|e| internal(format!("save agent session: {e}")))?
-        };
-        if result.rows_affected != 1 {
-            return Err(internal("agent session lease or version was lost"));
-        }
-        session.version = new_version;
-        Ok(())
+                .await
+                .map_err(|e| internal(format!("save agent session: {e}")))?
+            };
+            if result.rows_affected != 1 {
+                return Err(internal("agent session lease or version was lost"));
+            }
+            session.version = new_version;
+            Ok(())
+        })
+        .await;
+        log::info!(
+            "[turn-timing] saved session: conversation={}, version={}, elapsed_ms={}",
+            session.conversation_id,
+            session.version,
+            started.elapsed().as_millis()
+        );
+        result
     }
 
     async fn settle_goal_slice(
@@ -3006,6 +3017,20 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(txn.holder().unwrap().file(), file!());
+        txn.rollback().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn write_transaction_reports_its_statements_and_phases() {
+        let owner = store().await;
+        let txn = crate::db::begin_write(&owner.db, agent_session::Entity)
+            .await
+            .unwrap();
+        txn.mark_phase("reserved");
+        agent_session::Entity::find().one(&txn).await.unwrap();
+        let summary = txn.hold_summary();
+        assert!(summary.contains("statements=2"), "{summary}");
+        assert!(summary.contains("reserved@"), "{summary}");
         txn.rollback().await.unwrap();
     }
 

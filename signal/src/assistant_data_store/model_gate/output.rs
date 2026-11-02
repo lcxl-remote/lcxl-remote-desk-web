@@ -162,6 +162,7 @@ pub(crate) async fn archive_on<'a>(
             prepared.set.context.policy_revision,
         )
         .map_err(AssistantStoreError::Invalid)?;
+    db.mark_phase("policies_captured");
     let input_policy_graph = super::super::output_archive::input_policy_graph_on(
         db,
         &prepared.set,
@@ -169,6 +170,7 @@ pub(crate) async fn archive_on<'a>(
         &input_policies,
     )
     .await?;
+    db.mark_phase("policy_graph_built");
     let mut proof = desk_diagnose_core::ai_assistant::output_archive::ArchivedAssistantOutput {
         source_set: prepared.set.as_ref().clone(),
         input_revision: prepared.set.context.input_revision,
@@ -189,6 +191,7 @@ pub(crate) async fn archive_on<'a>(
         proof.retained_policy = Some(retained.policy);
         proof.retained_roots = retained.read_roots;
     }
+    db.mark_phase("policy_resolved");
     Ok(Some(
         super::super::output_archive::prepare_on(db, &proof, &prepared.policy).await?,
     ))

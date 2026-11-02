@@ -120,6 +120,7 @@ pub(crate) async fn prepare_on<'a>(
     if proof.source_set.context.policy_revision != policy.revision {
         return Err(AssistantStoreError::Inaccessible);
     }
+    db.mark_phase("proof_validated");
     let grants = super::native_export::load_call_set_on(db, &proof.source_set).await?;
     let grants = grants
         .into_iter()
@@ -134,7 +135,9 @@ pub(crate) async fn prepare_on<'a>(
     proof
         .validate_grants(&grants)
         .map_err(AssistantStoreError::Invalid)?;
+    db.mark_phase("grants_validated");
     verify_native_on(db, proof).await?;
+    db.mark_phase("native_verified");
     if let Some(row) = archived::Entity::find()
         .filter(archived::Column::PhysicalCallId.eq(&proof.source_set.physical_call_id))
         .one(db)
@@ -153,6 +156,7 @@ pub(crate) async fn prepare_on<'a>(
         }));
     }
     verify_parents_on(db, proof).await?;
+    db.mark_phase("parents_verified");
     let encoded = output_store::encode_on(db, proof).await?;
     let evidence = &proof.sources.evidence;
     let row = archived::Model {
