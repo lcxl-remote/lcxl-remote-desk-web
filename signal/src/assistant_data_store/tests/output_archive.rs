@@ -51,6 +51,16 @@ async fn archived_output_preserves_original_input_and_provenance_without_respons
             .metadata_bytes
             - before.metadata_bytes,
         output_archive::metadata_bytes(&stored.row).unwrap()
+            + crate::entity::agent_assistant_model_input_item::Entity::find()
+                .all(&store.db)
+                .await
+                .unwrap()
+                .iter()
+                .map(
+                    |row| desk_assistant_data_store::output_store::item_metadata_bytes(row)
+                        .unwrap()
+                )
+                .sum::<i64>()
     );
     let after = quota::Entity::find().one(&store.db).await.unwrap().unwrap();
     assert!(

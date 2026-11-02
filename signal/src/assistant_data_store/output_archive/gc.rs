@@ -3,8 +3,8 @@
 
 use super::*;
 use crate::entity::{
-    agent_assistant_history as history, agent_assistant_model_parent as link,
-    agent_assistant_quota as quota, agent_session as session, model_egress_receipt as native,
+    agent_assistant_history as history, agent_assistant_quota as quota, agent_session as session,
+    model_egress_receipt as native,
 };
 use sea_orm::{PaginatorTrait, QueryOrder, sea_query::Condition};
 
@@ -176,7 +176,7 @@ async fn collect_archive_on(
         outcome.held += 1;
         return Ok(());
     }
-    let stored = match decode_row(row) {
+    let stored = match decode_row_on(db, row).await {
         Ok(value) => value,
         Err(AssistantStoreError::Backend(error)) => return Err(error.into()),
         Err(_) => {
@@ -184,34 +184,7 @@ async fn collect_archive_on(
             return Ok(());
         }
     };
-    match parents::verify_on(db, &stored.proof).await {
-        Ok(()) => {}
-        Err(AssistantStoreError::Backend(error)) => return Err(error.into()),
-        Err(_) => {
-            outcome.invalid += 1;
-            return Ok(());
-        }
-    }
-    let outgoing = link::Entity::find()
-        .filter(link::Column::ActorId.eq(actor))
-        .filter(link::Column::ConsumerCallId.eq(&stored.row.physical_call_id))
-        .all(db)
-        .await?;
     let mut refund = metadata_bytes(&stored.row)?;
-    for edge in &outgoing {
-        refund = refund
-            .checked_add(parents::metadata_bytes(edge)?)
-            .ok_or(AssistantStoreError::Capacity)?;
-    }
-    let removed = link::Entity::delete_many()
-        .filter(link::Column::ActorId.eq(actor))
-        .filter(link::Column::ConsumerCallId.eq(&stored.row.physical_call_id))
-        .filter(link::Column::ConsumerProofSha256.eq(&stored.row.proof_sha256))
-        .exec(db)
-        .await?;
-    if removed.rows_affected != outgoing.len() as u64 {
-        return Err(AssistantStoreError::Inaccessible);
-    }
     let removed = archived::Entity::delete_many()
         .filter(archived::Column::Id.eq(stored.row.id))
         .filter(archived::Column::ActorId.eq(actor))
@@ -222,6 +195,23 @@ async fn collect_archive_on(
         .await?;
     if removed.rows_affected != 1 {
         return Err(AssistantStoreError::Inaccessible);
+    }
+    let remaining = archived::Entity::find()
+        .filter(archived::Column::ActorId.eq(actor))
+        .filter(archived::Column::ConversationId.eq(&stored.row.conversation_id))
+        .count(db)
+        .await?;
+    if remaining == 0 {
+        refund = refund
+            .checked_add(
+                desk_assistant_data_store::output_store::collect_items_on(
+                    db,
+                    actor,
+                    &stored.row.conversation_id,
+                )
+                .await?,
+            )
+            .ok_or(AssistantStoreError::Capacity)?;
     }
     outcome.removed += 1;
     outcome.refunded_metadata_bytes = outcome
@@ -236,9 +226,11 @@ async fn held_on<C: ConnectionTrait>(
     row: &archived::Model,
     now: i64,
 ) -> Result<bool, AssistantStoreError> {
-    if link::Entity::find()
-        .filter(link::Column::ActorId.eq(&row.actor_id))
-        .filter(link::Column::ParentCallId.eq(&row.physical_call_id))
+    // Later calls in a conversation may reference any earlier output.
+    if archived::Entity::find()
+        .filter(archived::Column::ActorId.eq(&row.actor_id))
+        .filter(archived::Column::ConversationId.eq(&row.conversation_id))
+        .filter(archived::Column::Id.gt(row.id))
         .count(db)
         .await?
         > 0

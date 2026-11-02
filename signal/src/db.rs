@@ -372,7 +372,7 @@ async fn create_latest_schema<C: ConnectionTrait + crate::config::ConfigConnecti
     create_entity(
         db,
         &schema,
-        crate::entity::agent_assistant_model_parent::Entity,
+        crate::entity::agent_assistant_model_input_item::Entity,
     )
     .await?;
     create_entity(
@@ -736,7 +736,7 @@ async fn validate_latest_schema<C: ConnectionTrait + crate::config::ConfigConnec
     check_entity!(agent_assistant_data_authorization);
     check_entity!(agent_assistant_source_suppression);
     check_entity!(agent_assistant_model_output);
-    check_entity!(agent_assistant_model_parent);
+    check_entity!(agent_assistant_model_input_item);
     check_entity!(agent_assistant_control_receipt);
     check_entity!(agent_assistant_device_binding);
     check_entity!(agent_delegation_group);
@@ -1231,8 +1231,9 @@ async fn create_assistant_data_indexes<C: ConnectionTrait>(db: &C) -> Result<(),
         "CREATE INDEX IF NOT EXISTS idx_assistant_native_model_output ON model_egress_receipt (context_conversation_id, model_output_envelope_id, model_output_digest_sha256)",
         "CREATE INDEX IF NOT EXISTS idx_assistant_archived_output ON agent_assistant_model_output (conversation_id, output_envelope_id, output_digest_sha256)",
         "CREATE INDEX IF NOT EXISTS idx_assistant_archived_output_actor ON agent_assistant_model_output (actor_id, completed_at_ms, id)",
-        "CREATE UNIQUE INDEX IF NOT EXISTS uq_assistant_model_parent ON agent_assistant_model_parent (actor_id, consumer_call_id, parent_call_id)",
-        "CREATE INDEX IF NOT EXISTS idx_assistant_parent_pin ON agent_assistant_model_parent (actor_id, parent_call_id)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_assistant_model_input_item ON agent_assistant_model_input_item (actor_id, conversation_id, kind, item_sha256)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_assistant_model_input_item_ordinal ON agent_assistant_model_input_item (actor_id, conversation_id, kind, ordinal)",
+        "CREATE INDEX IF NOT EXISTS idx_assistant_archived_output_call ON agent_assistant_model_output (actor_id, conversation_id, physical_call_id)",
         "CREATE INDEX IF NOT EXISTS idx_assistant_output_gc_due ON agent_assistant_quota (output_gc_next_scan_at_ms, id)",
         "CREATE INDEX IF NOT EXISTS idx_assistant_memory_producer_pin ON agent_memory_revision (actor_id, producer_call_id, status)",
         "CREATE INDEX IF NOT EXISTS idx_assistant_source_use_source ON agent_assistant_source_use (actor_id, source_id, source_revision, id)",

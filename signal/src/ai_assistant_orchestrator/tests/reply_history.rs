@@ -183,12 +183,28 @@ async fn scenario(stack_bytes: Option<usize>) {
                 .all(&db)
                 .await
                 .unwrap();
-            let metadata = archives.iter().map(|row| {
-                let proof: desk_diagnose_core::ai_assistant::output_archive::ArchivedAssistantOutput = serde_json::from_str(&row.proof_json).unwrap();
-                let inputs = proof.sources.input_snapshot.policy_sources().into_iter().zip(&proof.input_policies.leaves)
-                    .map(|(source, leaf)| (source.provenance.source_provider_id.clone(), source.provenance.source_tool_name.clone(), leaf.as_ref().map(|value| value.contract))).collect::<Vec<_>>();
-                (proof.retained_policy.is_some(), inputs)
-            }).collect::<Vec<_>>();
+            let mut metadata = Vec::with_capacity(archives.len());
+            for row in archives {
+                let proof = crate::assistant_data_store::output_archive::decode_row_on(&db, row)
+                    .await
+                    .unwrap()
+                    .proof;
+                let inputs = proof
+                    .sources
+                    .input_snapshot
+                    .policy_sources()
+                    .into_iter()
+                    .zip(&proof.input_policies.leaves)
+                    .map(|(source, leaf)| {
+                        (
+                            source.provenance.source_provider_id.clone(),
+                            source.provenance.source_tool_name.clone(),
+                            leaf.as_ref().map(|value| value.contract),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                metadata.push((proof.retained_policy.is_some(), inputs));
+            }
             assert_eq!(
                 found.fragments.len(),
                 1,

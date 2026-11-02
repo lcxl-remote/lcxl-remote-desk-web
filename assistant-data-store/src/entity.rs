@@ -6,8 +6,8 @@ pub mod agent_assistant_data_authorization;
 pub mod agent_assistant_history;
 pub mod agent_assistant_history_conversation;
 pub mod agent_assistant_history_coverage;
+pub mod agent_assistant_model_input_item;
 pub mod agent_assistant_model_output;
-pub mod agent_assistant_model_parent;
 pub mod agent_assistant_origin;
 pub mod agent_assistant_quota;
 pub mod agent_assistant_read_projection;
@@ -35,7 +35,7 @@ pub fn register_schema(schema: sea_orm::SchemaBuilder) -> sea_orm::SchemaBuilder
         .register(agent_assistant_history_conversation::Entity)
         .register(agent_assistant_history_coverage::Entity)
         .register(agent_assistant_model_output::Entity)
-        .register(agent_assistant_model_parent::Entity)
+        .register(agent_assistant_model_input_item::Entity)
         .register(agent_assistant_origin::Entity)
         .register(agent_assistant_quota::Entity)
         .register(agent_assistant_read_projection::Entity)

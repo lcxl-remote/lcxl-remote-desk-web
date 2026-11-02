@@ -162,7 +162,7 @@ pub(crate) async fn archive_on<'a>(
             prepared.set.context.policy_revision,
         )
         .map_err(AssistantStoreError::Invalid)?;
-    let (input_policy_graph, parents) = super::super::output_archive::input_policy_graph_on(
+    let input_policy_graph = super::super::output_archive::input_policy_graph_on(
         db,
         &prepared.set,
         &sources.input_snapshot,
@@ -182,19 +182,15 @@ pub(crate) async fn archive_on<'a>(
         retained_policy: None,
         retained_roots: Vec::new(),
     };
-    if let Some(retained) = super::super::visible_history::native::resolve_policy_reusing_on(
-        db,
-        &proof,
-        completed_at_unix_ms,
-        &parents,
-    )
-    .await?
+    if let Some(retained) =
+        super::super::visible_history::native::resolve_policy_on(db, &proof, completed_at_unix_ms)
+            .await?
     {
         proof.retained_policy = Some(retained.policy);
         proof.retained_roots = retained.read_roots;
     }
     Ok(Some(
-        super::super::output_archive::prepare_on(db, &proof, &prepared.policy, &parents).await?,
+        super::super::output_archive::prepare_on(db, &proof, &prepared.policy).await?,
     ))
 }
 

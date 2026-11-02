@@ -195,8 +195,7 @@ REQUIRED['desk-diagnose-core'] += [
 for _package, _host in [('desk-signal', 'desk_signal'),
                         ('lcxl-remote-desk-manager', 'lcxl_remote_desk_manager::service')]:
     for _path in ['visible_history::snapshot::prepare_on',
-                  'visible_history::native::resolve_policy_reusing_on',
-                  'visible_history::native::resolve_cached_on',
+                  'visible_history::native::resolve_policy_on',
                   'visible_history::native::citation_roots_on',
                   'visible_history::citations::load_on',
                   'visible_history::native::inputs::owner_text_on',

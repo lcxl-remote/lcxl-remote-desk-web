@@ -19,16 +19,19 @@ pub(crate) fn validate_on<'a, C: ConnectionTrait + crate::config::ConfigConnecti
             if !is_native_output_policy_source(source) {
                 continue;
             }
-            let stored = super::output_archive::find_on(db, &session.conversation_id, source)
-                .await?
-                .ok_or(AssistantStoreError::Inaccessible)?;
-            if stored.proof.source_set.actor_id != session.actor_id {
+            let head = desk_assistant_data_store::output_store::find_head_on(
+                db,
+                &session.conversation_id,
+                source,
+            )
+            .await?
+            .ok_or(AssistantStoreError::Inaccessible)?;
+            if head.actor_id != session.actor_id {
                 return Err(AssistantStoreError::Inaccessible);
             }
-            if let Some(until) = stored
-                .proof
+            if let Some(until) = head
+                .summary()?
                 .retained_policy
-                .as_ref()
                 .and_then(|policy| policy.content_hard_expires_at_unix_ms)
             {
                 if until <= now {
@@ -36,17 +39,10 @@ pub(crate) fn validate_on<'a, C: ConnectionTrait + crate::config::ConfigConnecti
                 }
                 deadline = Some(deadline.map_or(until, |old| old.min(until)));
             }
-            let original =
-                crate::model_egress_store::SignalModelEgressStore::read_context_output_reusing_on(
-                    db,
-                    &session.conversation_id,
-                    source,
-                    Some(&stored),
-                )
-                .await?;
-            if original != stored.proof.sources {
-                return Err(AssistantStoreError::Inaccessible);
-            }
+            crate::model_egress_store::SignalModelEgressStore::verify_output_head_on(
+                db, &head, source,
+            )
+            .await?;
         }
         Ok(deadline)
     })

@@ -15,7 +15,8 @@ mod snapshot;
 pub use snapshot::{NativeInputLeafPolicy, NativeInputPolicyRegistration};
 mod derived;
 pub use derived::{
-    NativeDerivedInputPolicy, NativeInputPolicyGraph, is_native_output_policy_source,
+    NativeDerivedInputPolicy, NativeInputPolicyGraph, NativeInputPolicyGraphBuilder,
+    is_native_output_policy_source,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

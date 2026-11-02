@@ -23,7 +23,7 @@ fn tool_error_then_memory_write_and_update_keep_retention_and_recover_missing_co
 }
 
 async fn retention_scenario() {
-    for historical in [false, true] {
+    {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let db = crate::config::test_support::Database::connect("sqlite::memory:")
             .await
@@ -47,7 +47,6 @@ async fn retention_scenario() {
         .unwrap();
         let connections = web::Data::new(SharedConnectionMap::new());
         let mut memory_id = None;
-        let mut original = None;
         for step in 0..3 {
             let call_id = format!("retention-tool-{step}");
             let mut args = if step == 0 {
@@ -103,10 +102,7 @@ async fn retention_scenario() {
                         assert!(content.contains("expected_revision"));
                     } else {
                         let result: Value = serde_json::from_str(content).unwrap();
-                        assert_eq!(
-                            result["reason"], "committed",
-                            "historical={historical} step={step}: {result}"
-                        );
+                        assert_eq!(result["reason"], "committed", "step={step}: {result}");
                         assert_eq!(result["outcome"], "applied");
                     }
                     memory_sse(json!({"content":"memory-answer"}), "stop")
@@ -148,9 +144,6 @@ async fn retention_scenario() {
                     .unwrap(),
                 step as u64
             );
-            if step == 0 && historical {
-                original = Some(missing_control_archive(&db).await);
-            }
             if step > 0 {
                 let fact = agent_memory::Entity::find()
                     .one(&db)
@@ -169,87 +162,5 @@ async fn retention_scenario() {
                 memory_id = Some(fact.memory_id);
             }
         }
-        if let Some(original) = original {
-            assert_eq!(
-                crate::entity::agent_assistant_model_output::Entity::find_by_id(original.id)
-                    .one(&db)
-                    .await
-                    .unwrap()
-                    .unwrap(),
-                original
-            );
-        }
     }
-}
-
-async fn missing_control_archive(
-    db: &crate::config::connection::DatabaseConnection,
-) -> crate::entity::agent_assistant_model_output::Model {
-    use crate::entity::{
-        agent_assistant_model_output as archived, agent_assistant_model_parent as parent,
-    };
-    use desk_diagnose_core::ai_assistant::output_archive::ArchivedAssistantOutput;
-    use sea_orm::{ActiveModelTrait, ColumnTrait, IntoActiveModel, QueryFilter, QueryOrder, Set};
-    let row = archived::Entity::find()
-        .order_by_desc(archived::Column::Id)
-        .all(db)
-        .await
-        .unwrap()
-        .into_iter()
-        .find(|row| {
-            let proof = ArchivedAssistantOutput::decode(&row.proof_json).unwrap();
-            proof
-                .sources
-                .input_snapshot
-                .policy_sources()
-                .iter()
-                .any(|source| {
-                    matches!(
-                        source.provenance.source_tool_name.as_str(),
-                        "invalid_tool_arguments" | "memory_batch_rejected"
-                    )
-                })
-        })
-        .unwrap();
-    let mut proof = ArchivedAssistantOutput::decode(&row.proof_json).unwrap();
-    let index = proof
-        .sources
-        .input_snapshot
-        .policy_sources()
-        .iter()
-        .position(|source| {
-            matches!(
-                source.provenance.source_tool_name.as_str(),
-                "invalid_tool_arguments" | "memory_batch_rejected"
-            )
-        })
-        .unwrap();
-    proof.input_policies.leaves[index] = None;
-    proof.input_policies.policies.retain(|hash, _| {
-        proof
-            .input_policies
-            .leaves
-            .iter()
-            .flatten()
-            .any(|leaf| &leaf.policy_sha256 == hash)
-    });
-    proof.retained_policy = None;
-    proof.retained_roots.clear();
-    proof.validate().unwrap();
-    // Reproduce the old producer in this synthetic database before any child exists.
-    let mut changed = row.clone().into_active_model();
-    let fingerprint = proof.fingerprint().unwrap();
-    changed.proof_json = Set(serde_json::to_string(&proof).unwrap());
-    changed.proof_sha256 = Set(fingerprint.clone());
-    let saved = changed.update(db).await.unwrap();
-    parent::Entity::update_many()
-        .col_expr(
-            parent::Column::ConsumerProofSha256,
-            sea_orm::sea_query::Expr::value(fingerprint),
-        )
-        .filter(parent::Column::ConsumerCallId.eq(&row.physical_call_id))
-        .exec(db)
-        .await
-        .unwrap();
-    saved
 }

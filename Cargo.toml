@@ -301,3 +301,7 @@ core-audio-types = "0.2"
 # apple-cf 0.9.3 does not compile with Xcode 26's IOSurface Swift import. Keep
 # the reviewed one-line bridge patch local until upstream ships the fix.
 apple-cf = { path = "vendor/apple-cf" }
+
+# Proof hashing dominates debug runs of the assistant; this affects development builds only.
+[profile.dev.package.sha2]
+opt-level = 3

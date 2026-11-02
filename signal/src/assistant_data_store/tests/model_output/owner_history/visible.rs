@@ -236,17 +236,7 @@ async fn citations_are_bound_to_the_actual_consumed_roots_in_the_original_answer
                 .unwrap();
             archived.proof.retained_policy = None;
             archived.proof.retained_roots.clear();
-            crate::entity::agent_assistant_model_output::Entity::update_many()
-                .col_expr(
-                    crate::entity::agent_assistant_model_output::Column::ProofJson,
-                    Expr::value(serde_json::to_string(&archived.proof).unwrap()),
-                )
-                .col_expr(
-                    crate::entity::agent_assistant_model_output::Column::ProofSha256,
-                    Expr::value(archived.proof.fingerprint().unwrap()),
-                )
-                .filter(crate::entity::agent_assistant_model_output::Column::Id.eq(archived.row.id))
-                .exec(&store.db)
+            output_archive::rewrite_for_test(&store.db, archived.row.id, &archived.proof)
                 .await
                 .unwrap();
         }
@@ -355,11 +345,9 @@ async fn citations_are_bound_to_the_actual_consumed_roots_in_the_original_answer
 }
 
 #[tokio::test]
-async fn decoded_archive_reuse_still_reselects_exact_rows_and_parent_links() {
-    use crate::entity::{
-        agent_assistant_model_output as archived, agent_assistant_model_parent as parent,
-    };
-    for case in 0..4 {
+async fn decoded_archive_reuse_still_reselects_exact_rows() {
+    use crate::entity::agent_assistant_model_output as archived;
+    for case in 0..3 {
         let (store, _, proof, _) = admitted(&format!("archive-raw-revalidation-{case}")).await;
         let candidate = output(&proof);
         SignalModelEgressStore::new(store.db.clone())
@@ -398,23 +386,6 @@ async fn decoded_archive_reuse_still_reselects_exact_rows_and_parent_links() {
                     .exec(&txn)
                     .await
                     .unwrap();
-            }
-            2 => {
-                parent::ActiveModel {
-                    id: sea_orm::ActiveValue::NotSet,
-                    actor_id: Set(known.row.actor_id.clone()),
-                    conversation_id: Set(known.row.conversation_id.clone()),
-                    consumer_call_id: Set(known.row.physical_call_id.clone()),
-                    parent_call_id: Set("unprovided-parent".into()),
-                    consumer_proof_sha256: Set(known.row.proof_sha256.clone()),
-                    parent_proof_sha256: Set("a".repeat(64)),
-                    parent_output_envelope_id: Set("unprovided-parent-output".into()),
-                    parent_output_label_sha256: Set("a".repeat(64)),
-                    created_at_ms: Set(known.row.completed_at_ms),
-                }
-                .insert(&txn)
-                .await
-                .unwrap();
             }
             _ => {
                 native::Entity::update_many()

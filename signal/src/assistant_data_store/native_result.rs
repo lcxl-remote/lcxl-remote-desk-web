@@ -284,9 +284,12 @@ async fn prepare_on(
     if rows.len() != 1 {
         return Ok(Some(gap("omitted_policy")));
     }
-    let original = match super::output_archive::decode_row(
+    let original = match super::output_archive::decode_row_on(
+        db,
         rows.into_iter().next().expect("one original producer"),
-    ) {
+    )
+    .await
+    {
         Ok(value) => value,
         Err(AssistantStoreError::Backend(error)) => return Err(error.into()),
         Err(_) => return Ok(Some(gap("omitted_policy"))),

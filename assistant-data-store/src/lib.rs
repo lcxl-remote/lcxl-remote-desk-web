@@ -15,6 +15,7 @@ pub mod memory_keyword;
 pub mod memory_quota;
 pub mod memory_write;
 pub mod output_gc;
+pub mod output_store;
 pub mod projection;
 pub mod retrieval_cache;
 pub mod source_lifecycle;

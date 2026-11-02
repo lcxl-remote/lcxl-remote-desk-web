@@ -81,7 +81,6 @@ async fn scheduled_cleanup_uses_actual_proofs_and_refunds_only_once_across_indep
         (1, 0, 2)
     );
     assert_eq!(archived::Entity::find().count(&store.db).await.unwrap(), 0);
-    assert_eq!(link::Entity::find().count(&store.db).await.unwrap(), 0);
     let after = quota::Entity::find().one(&store.db).await.unwrap().unwrap();
     assert_eq!(
         before.metadata_bytes - after.metadata_bytes,
@@ -160,7 +159,6 @@ async fn failed_collection_keeps_its_committed_retry_time_but_rolls_back_all_sou
     assert!(after.output_gc_next_scan_at_ms.unwrap() > now as i64);
     assert_eq!(after.revision, before.revision + 1);
     assert_eq!(archived::Entity::find().count(&store.db).await.unwrap(), 2);
-    assert_eq!(link::Entity::find().count(&store.db).await.unwrap(), 1);
     assert_eq!(runtime_on(&store.db, "1").await.unwrap(), runtime);
     let independent = store.db.clone();
     assert_eq!(
@@ -231,7 +229,6 @@ async fn corrupt_future_schedule_is_repaired_without_weakening_original_lifetime
     assert!(after.output_gc_next_scan_at_ms.unwrap() < i64::MAX);
     assert_eq!(runtime_on(&store.db, "1").await.unwrap(), runtime);
     assert_eq!(archived::Entity::find().count(&store.db).await.unwrap(), 2);
-    assert_eq!(link::Entity::find().count(&store.db).await.unwrap(), 1);
     assert!(
         schedule::run_at_with_limit(&store.db, u64::MAX, 1)
             .await

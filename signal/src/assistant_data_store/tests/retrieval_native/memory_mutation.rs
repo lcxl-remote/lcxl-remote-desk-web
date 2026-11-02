@@ -333,8 +333,12 @@ async fn owner_evidence_is_saved_when_other_context_cannot_be_retained() {
     use crate::entity::agent_assistant_model_output as archived;
     let frame = write_frame("direct-owner-evidence", true, false, false).await;
     for row in archived::Entity::find().all(&frame.store.db).await.unwrap() {
-        let mut proof: desk_diagnose_core::ai_assistant::output_archive::ArchivedAssistantOutput =
-            serde_json::from_str(&row.proof_json).unwrap();
+        let id = row.id;
+        let mut proof =
+            *crate::assistant_data_store::output_archive::decode_row_on(&frame.store.db, row)
+                .await
+                .unwrap()
+                .proof;
         proof.retained_policy = None;
         proof
             .input_policies
@@ -342,17 +346,7 @@ async fn owner_evidence_is_saved_when_other_context_cannot_be_retained() {
             .iter_mut()
             .for_each(|leaf| *leaf = None);
         proof.input_policies.policies.clear();
-        archived::Entity::update_many()
-            .col_expr(
-                archived::Column::ProofJson,
-                sea_orm::sea_query::Expr::value(serde_json::to_string(&proof).unwrap()),
-            )
-            .col_expr(
-                archived::Column::ProofSha256,
-                sea_orm::sea_query::Expr::value(proof.fingerprint().unwrap()),
-            )
-            .filter(archived::Column::Id.eq(row.id))
-            .exec(&frame.store.db)
+        crate::assistant_data_store::output_archive::rewrite_for_test(&frame.store.db, id, &proof)
             .await
             .unwrap();
     }

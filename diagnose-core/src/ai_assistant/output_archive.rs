@@ -102,13 +102,6 @@ impl ArchivedAssistantOutput {
         sink_metadata_sha256(self)
     }
 
-    /// Parse a row this store validated before inserting it. The cost of `validate`
-    /// grows with every prior turn and runs per parent inside a write transaction,
-    /// so a re-read only checks its fingerprint and metadata bindings in the host.
-    pub fn decode_stored(raw: &str) -> Result<Self, &'static str> {
-        serde_json::from_str(raw).map_err(|_| "invalid archived assistant output encoding")
-    }
-
     pub fn decode(raw: &str) -> Result<Self, &'static str> {
         let value: Self =
             serde_json::from_str(raw).map_err(|_| "invalid archived assistant output encoding")?;

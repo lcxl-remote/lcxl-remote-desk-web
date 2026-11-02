@@ -7,13 +7,13 @@ use crate::entity::agent_assistant_model_output as archived;
 use desk_agent_protocol::{
     ai_assistant::user_instructions::AssistantDataPolicy, data_lineage::DataEnvelope,
 };
+use desk_assistant_data_store::output_store;
 use desk_diagnose_core::ai_assistant::output_archive::ArchivedAssistantOutput;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QuerySelect,
 };
 
 pub(crate) mod gc;
-pub(crate) mod parents;
 
 #[derive(Clone)]
 pub(crate) struct StoredOutput {
@@ -29,53 +29,46 @@ pub(crate) async fn input_policy_graph_on<C: ConnectionTrait>(
     snapshot: &desk_diagnose_core::model_egress::NativeModelInputSnapshot,
     registration: &desk_diagnose_core::ai_assistant::source_registry::NativeInputPolicyRegistration,
 ) -> Result<
-    (
-        desk_diagnose_core::ai_assistant::source_registry::NativeInputPolicyGraph,
-        Vec<StoredOutput>,
-    ),
+    desk_diagnose_core::ai_assistant::source_registry::NativeInputPolicyGraph,
     AssistantStoreError,
 > {
     use desk_diagnose_core::ai_assistant::source_registry::{
-        NativeInputPolicyGraph, is_native_output_policy_source,
+        NativeInputPolicyGraph, NativeInputPolicyGraphBuilder, is_native_output_policy_source,
     };
-    let mut graph =
+    let mut graph = NativeInputPolicyGraphBuilder::new(
         NativeInputPolicyGraph::empty(snapshot, &set.actor_id, &set.consumer_conversation_id)
-            .map_err(AssistantStoreError::Invalid)?;
+            .map_err(AssistantStoreError::Invalid)?,
+    )
+    .map_err(AssistantStoreError::Invalid)?;
     let mut seen = std::collections::BTreeSet::new();
-    let mut parents = Vec::new();
     for source in snapshot.policy_sources() {
         if !is_native_output_policy_source(source) || !seen.insert(&source.envelope_id) {
             continue;
         }
-        let Some(parent) = find_on(db, &set.consumer_conversation_id, source).await? else {
+        let Some(parent) =
+            output_store::find_head_on(db, &set.consumer_conversation_id, source).await?
+        else {
             continue;
         };
-        if parent.proof.source_set.actor_id != set.actor_id
-            || parent.proof.source_set.source_device_ref != set.source_device_ref
-            || parent.proof.source_set.physical_call_id == set.physical_call_id
+        if parent.actor_id != set.actor_id
+            || parent.device_ref != set.source_device_ref
+            || parent.physical_call_id == set.physical_call_id
         {
             return Err(AssistantStoreError::Inaccessible);
         }
-        let native =
-            crate::model_egress_store::SignalModelEgressStore::read_context_output_reusing_on(
-                db,
-                &set.consumer_conversation_id,
-                source,
-                Some(&parent),
-            )
-            .await?;
-        if native != parent.proof.sources {
-            return Err(AssistantStoreError::Inaccessible);
-        }
+        crate::model_egress_store::SignalModelEgressStore::verify_output_head_on(
+            db, &parent, source,
+        )
+        .await?;
         graph
-            .include_archive(&parent.proof)
+            .include(parent.reference()?)
             .map_err(AssistantStoreError::Invalid)?;
-        parents.push(parent);
     }
+    let graph = graph.finish();
     graph
         .validate(snapshot, registration)
         .map_err(AssistantStoreError::Invalid)?;
-    Ok((graph, parents))
+    Ok(graph)
 }
 
 /// All original native/source reads happen before the caller updates its native
@@ -83,7 +76,7 @@ pub(crate) async fn input_policy_graph_on<C: ConnectionTrait>(
 pub(crate) struct PendingOutputArchive<'a> {
     db: &'a DatabaseTransaction,
     row: Option<archived::Model>,
-    parents: Vec<crate::entity::agent_assistant_model_parent::Model>,
+    new_items: Vec<crate::entity::agent_assistant_model_input_item::Model>,
     charge: i64,
     maximum_metadata_bytes: u64,
 }
@@ -93,7 +86,7 @@ impl PendingOutputArchive<'_> {
         let Self {
             db,
             row,
-            parents,
+            new_items,
             charge,
             maximum_metadata_bytes,
         } = *self;
@@ -107,14 +100,10 @@ impl PendingOutputArchive<'_> {
             Some(maximum_metadata_bytes),
         )
         .await?;
+        output_store::insert_items_on(db, new_items).await?;
         let mut active: archived::ActiveModel = row.into();
         active.id = sea_orm::ActiveValue::NotSet;
-        decode_row(active.insert(db).await?)?;
-        for row in parents {
-            let mut active: crate::entity::agent_assistant_model_parent::ActiveModel = row.into();
-            active.id = sea_orm::ActiveValue::NotSet;
-            active.insert(db).await?;
-        }
+        active.insert(db).await?;
         Ok(())
     }
 }
@@ -125,7 +114,6 @@ pub(crate) async fn prepare_on<'a>(
     db: &'a DatabaseTransaction,
     proof: &ArchivedAssistantOutput,
     policy: &AssistantDataPolicy,
-    known: &[StoredOutput],
 ) -> Result<Box<PendingOutputArchive<'a>>, AssistantStoreError> {
     proof.validate().map_err(AssistantStoreError::Invalid)?;
     policy.validate().map_err(AssistantStoreError::Invalid)?;
@@ -152,19 +140,20 @@ pub(crate) async fn prepare_on<'a>(
         .one(db)
         .await?
     {
-        let stored = decode_row(row)?;
+        let stored = decode_row_on(db, row).await?;
         if stored.proof.as_ref() != proof {
             return Err(AssistantStoreError::Inaccessible);
         }
-        parents::verify_fingerprint_on(db, &stored.proof, &stored.row.proof_sha256).await?;
         return Ok(Box::new(PendingOutputArchive {
             db,
             row: None,
-            parents: Vec::new(),
+            new_items: Vec::new(),
             charge: 0,
             maximum_metadata_bytes: policy.max_metadata_bytes,
         }));
     }
+    verify_parents_on(db, proof).await?;
+    let encoded = output_store::encode_on(db, proof).await?;
     let evidence = &proof.sources.evidence;
     let row = archived::Model {
         id: 0,
@@ -182,20 +171,16 @@ pub(crate) async fn prepare_on<'a>(
         statement_timezone: proof.statement_timezone.clone(),
         completed_at_ms: signed(evidence.completed_at_unix_ms)?,
         proof_sha256: proof.fingerprint().map_err(AssistantStoreError::Invalid)?,
-        proof_json: serde_json::to_string(proof)
-            .map_err(|_| AssistantStoreError::Invalid("invalid archived model metadata"))?,
+        proof_json: encoded.proof_json.clone(),
+        parent_summary_json: encoded.parent_summary_json.clone(),
     };
-    let parents = parents::prepare_on(db, proof, known).await?;
-    let mut charge = metadata_bytes(&row)?;
-    for parent in &parents {
-        charge = charge
-            .checked_add(parents::metadata_bytes(parent)?)
-            .ok_or(AssistantStoreError::Capacity)?;
-    }
+    let charge = metadata_bytes(&row)?
+        .checked_add(encoded.item_bytes()?)
+        .ok_or(AssistantStoreError::Capacity)?;
     Ok(Box::new(PendingOutputArchive {
         db,
         row: Some(row),
-        parents,
+        new_items: encoded.new_items,
         charge,
         maximum_metadata_bytes: policy.max_metadata_bytes,
     }))
@@ -234,21 +219,27 @@ pub(crate) async fn find_reusing_on<C: ConnectionTrait>(
     };
     let stored = match known {
         Some(known) if known.row == row => known.clone(),
-        _ => decode_row(row)?,
+        _ => decode_row_on(db, row).await?,
     };
     if &stored.proof.output != output {
         return Err(AssistantStoreError::Inaccessible);
     }
-    // Decoding bound this exact row to its fingerprint; keep the link read and comparison.
-    parents::verify_fingerprint_on(db, &stored.proof, &stored.row.proof_sha256).await?;
     Ok(Some(stored))
 }
 
-pub(crate) fn decode_row(row: archived::Model) -> Result<StoredOutput, AssistantStoreError> {
+/// Rebuilds the complete proof, so its fingerprint covers the shared items too.
+pub(crate) async fn decode_row_on<C: ConnectionTrait>(
+    db: &C,
+    row: archived::Model,
+) -> Result<StoredOutput, AssistantStoreError> {
     let proof = Box::new(
-        ArchivedAssistantOutput::decode_stored(&row.proof_json)
-            .map_err(AssistantStoreError::Invalid)?,
+        output_store::decode_on(db, &row.actor_id, &row.conversation_id, &row.proof_json).await?,
     );
+    if !output_store::summary_matches(&proof, &row.parent_summary_json) {
+        return Err(AssistantStoreError::Invalid(
+            "archived model metadata binding changed",
+        ));
+    }
     let evidence = &proof.sources.evidence;
     if row.proof_sha256 != proof.fingerprint().map_err(AssistantStoreError::Invalid)?
         || row.actor_id != proof.source_set.actor_id
@@ -285,12 +276,70 @@ pub(crate) fn metadata_bytes(row: &archived::Model) -> Result<i64, AssistantStor
         &row.statement_timezone,
         &row.proof_sha256,
         &row.proof_json,
+        &row.parent_summary_json,
     ];
     let bytes = strings
         .into_iter()
         .try_fold(5 * 8_usize, |size, value| size.checked_add(value.len()))
         .ok_or(AssistantStoreError::Capacity)?;
     i64::try_from(bytes).map_err(|_| AssistantStoreError::Capacity)
+}
+
+/// Replaces a stored proof with a synthetic one for tests.
+#[cfg(test)]
+pub(crate) async fn rewrite_for_test<C: ConnectionTrait>(
+    db: &C,
+    id: i64,
+    proof: &ArchivedAssistantOutput,
+) -> Result<(), AssistantStoreError> {
+    let encoded = output_store::encode_on(db, proof).await?;
+    output_store::insert_items_on(db, encoded.new_items).await?;
+    archived::Entity::update_many()
+        .col_expr(
+            archived::Column::ProofJson,
+            sea_orm::sea_query::Expr::value(encoded.proof_json),
+        )
+        .col_expr(
+            archived::Column::ParentSummaryJson,
+            sea_orm::sea_query::Expr::value(encoded.parent_summary_json),
+        )
+        .col_expr(
+            archived::Column::ProofSha256,
+            sea_orm::sea_query::Expr::value(
+                proof.fingerprint().map_err(AssistantStoreError::Invalid)?,
+            ),
+        )
+        .filter(archived::Column::Id.eq(id))
+        .exec(db)
+        .await?;
+    Ok(())
+}
+
+/// Each parent's head was read again and must equal the frozen reference.
+async fn verify_parents_on<C: ConnectionTrait>(
+    db: &C,
+    proof: &ArchivedAssistantOutput,
+) -> Result<(), AssistantStoreError> {
+    proof
+        .input_policy_graph
+        .validate_native_closure(&proof.sources.input_snapshot)
+        .map_err(AssistantStoreError::Invalid)?;
+    for reference in &proof.input_policy_graph.parents {
+        let parent = output_store::find_head_by_call_on(
+            db,
+            &proof.source_set.actor_id,
+            &proof.source_set.consumer_conversation_id,
+            &reference.physical_call_id,
+        )
+        .await?
+        .ok_or(AssistantStoreError::Inaccessible)?;
+        if parent.device_ref != proof.source_set.source_device_ref
+            || parent.reference()? != *reference
+        {
+            return Err(AssistantStoreError::Inaccessible);
+        }
+    }
+    Ok(())
 }
 
 async fn verify_native_on<C: ConnectionTrait>(

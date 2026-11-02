@@ -26,8 +26,12 @@ pub struct Model {
     pub statement_timezone: String,
     pub completed_at_ms: i64,
     pub proof_sha256: String,
+    /// The proof with its growing lists replaced by item ordinal ranges.
     #[sea_orm(column_type = "Text")]
     pub proof_json: String,
+    /// Parent-use fields derived from the complete proof when it was accepted.
+    #[sea_orm(column_type = "Text")]
+    pub parent_summary_json: String,
 }
 
 impl ActiveModelBehavior for ActiveModel {}

@@ -53,14 +53,10 @@ async fn actual_followup_uses_the_accepted_memory_dependent_answer_as_history_wi
         assert!(stored.proof.source_set.authorizations.is_empty());
         let reference = &stored.proof.input_policy_graph.parents[0];
         assert_eq!(reference.output_envelope_id, parent.envelope_id);
-        let original = output_archive::parents::find_parent_on(
-            &store.db,
-            &session.actor_id,
-            &session.conversation_id,
-            reference,
-        )
-        .await
-        .unwrap();
+        let original = output_archive::find_on(&store.db, &session.conversation_id, &parent)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(original.proof.source_set.authorizations.len(), 1);
         assert_eq!(original.proof.output, parent);
     }

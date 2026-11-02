@@ -97,7 +97,7 @@ Manager 目录授权更新还须覆盖 `file_scope::update_file_scope_guarded`�
 
 
 
-独立快照须覆盖共享 `ReadProjectionProof::snapshot_envelope`、`AssistantModelDataManifest::validate_for` 和两宿主 `visible_history::snapshot::prepare_on`、`native::resolve_policy_reusing_on`、`native::inputs::owner_text_on`、`prior_outputs::validate_on`、`model_gate::authorize_on`、`model_gate::output::validate_on` 的实际执行帧。异步入口必须采到 poll，构造或 drop 不算覆盖。快照在原会话 CAS 和事务中首次接纳，保存当前会话自己的内容与静态保存策略；后续只核验当前会话、原生调用和内容硬期限。原会话删除、普通留存到期或内容更新不触发上下文剔除、摘要撤回或专用恢复。显式 1 MiB/2 MiB 组合覆盖接纳前后删除、同调用重放、在途回答、后续读取和篡改拒绝，当前会话及原操作围栏继续生效。
+独立快照须覆盖共享 `ReadProjectionProof::snapshot_envelope`、`AssistantModelDataManifest::validate_for` 和两宿主 `visible_history::snapshot::prepare_on`、`native::resolve_policy_on`、`native::inputs::owner_text_on`、`prior_outputs::validate_on`、`model_gate::authorize_on`、`model_gate::output::validate_on` 的实际执行帧。异步入口必须采到 poll，构造或 drop 不算覆盖。快照在原会话 CAS 和事务中首次接纳，保存当前会话自己的内容与静态保存策略；后续只核验当前会话、原生调用和内容硬期限。原会话删除、普通留存到期或内容更新不触发上下文剔除、摘要撤回或专用恢复。显式 1 MiB/2 MiB 组合覆盖接纳前后删除、同调用重放、在途回答、后续读取和篡改拒绝，当前会话及原操作围栏继续生效。
 
 共享维护单轮 `MaintenanceSweep::run_once_on` 以及 GC 的 `due_actors_on`、`claim_on`、`finish_quota_on` 须在两个宿主采到真实 poll。宿主保留定时器、原事务和取消所有者；共享单轮只合并分页、游标及回调顺序。配置的批次及领取上限不改变原生调用身份和结算；计数准入与已保存回执验证分开。共享单轮及 GC 游标提交的原始 future 检查 16 KiB，并在显式 1 MiB/2 MiB 线程上组合执行。
 
@@ -126,7 +126,9 @@ Manager 目录授权更新还须覆盖 `file_scope::update_file_scope_guarded`�
 
 模型参数错误反馈还须覆盖共享协议的 MemoryDraft、MemoryWriteRequest、ConversationSearchRequest 原校验函数，以及核心 `model_input::check_at` 与资料工具解码错误的实际执行帧。两宿主依赖图分别采集 `desk-agent-protocol` 和 `desk-diagnose-core` 的 Debug/Release 报告；协议 Debug 还要求独立合计容量 helper，Release 将其内联时由实际公开校验入口覆盖。原始 future 16 KiB、单帧 128 KiB 与默认 2 MiB 保持。无效遗忘参数在实际 1 MiB/2 MiB 模型循环中核验字段错误会交回模型，且无操作派发；模型 HTTP 出口另外核验记忆合计容量和解码失败均没有写入。
 
-记忆工具的参数拒绝、批次拒绝和提交回执继续保留实际父来源及其留存约束。缺失控制登记只从认证过的原始输入重新判定，不改写档案或父链接。两宿主 `visible_history::native::resolve_cached_on` 必须采到真实执行 poll；单次遍历的父策略缓存保留原 SELECT 和完整档案校验。显式 1 MiB/2 MiB 组合覆盖错误反馈后新增、更新及历史空策略恢复，并断言原档案保持不变。
+记忆工具的参数拒绝、批次拒绝和提交回执继续保留实际父来源及其留存约束。两宿主 `visible_history::native::resolve_policy_on` 必须采到真实执行 poll；每个父输出保留原 SELECT，只读归档头部，写入时确定的留存结果不再递归重算。显式 1 MiB/2 MiB 组合覆盖错误反馈后的新增和更新。
+
+模型调用校验父输出只读归档头部和收据小列，每次 SELECT 保留，不加载证明正文或条目。历史读取、引用等读取完整证明的路径还原条目并校验指纹。
 
 定时工具的原始参数保留须覆盖共享 `ui_model_ids::resolve_session_call_with_context`、定时提议 Schema/解析及两宿主 `manage_schedule_tool` 的真实执行。创建、查询与取消仍按原始调用、会话版本和租约核验，不用 JSON 重序列化替代原参数；输入错误与会话不可用分别处理。显式 1 MiB/2 MiB 组合通过真实模型出口覆盖非法周期规则的反馈、原始格式查询及待演练草稿创建，保持 16 KiB 原始 future 和 128 KiB 单帧上限。
 

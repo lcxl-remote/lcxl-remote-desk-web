@@ -1,5 +1,5 @@
-//! Immutable direct-parent references. Full original snapshots are stored once
-//! per accepted output, never recursively copied into every later archive.
+//! Immutable direct-parent references. Input lists are stored once per conversation
+//! as shared items, never recursively copied into every later archive.
 
 use super::super::{
     output_archive::ArchivedAssistantOutput,
@@ -113,6 +113,61 @@ pub struct NativeInputPolicyGraph {
     pub parents: Vec<NativeDerivedInputPolicy>,
 }
 
+/// Collects direct parents with one size total, so the metadata bound stays
+/// linear in the number of parents.
+pub struct NativeInputPolicyGraphBuilder {
+    graph: NativeInputPolicyGraph,
+    size: usize,
+    seen: BTreeMap<String, usize>,
+}
+
+impl NativeInputPolicyGraphBuilder {
+    pub fn new(graph: NativeInputPolicyGraph) -> Result<Self, &'static str> {
+        Ok(Self {
+            size: sink_metadata_size(&graph)?,
+            seen: graph
+                .parents
+                .iter()
+                .enumerate()
+                .map(|(index, parent)| (parent.output_envelope_id.clone(), index))
+                .collect(),
+            graph,
+        })
+    }
+
+    /// The host authenticates this direct parent. Its ancestors are not
+    /// cloned or inferred from this summary.
+    pub fn include(&mut self, reference: NativeDerivedInputPolicy) -> Result<(), &'static str> {
+        if reference.actor_id != self.graph.actor_id
+            || reference.conversation_id != self.graph.conversation_id
+        {
+            return Err("native parent belongs to another source context");
+        }
+        if let Some(index) = self.seen.get(&reference.output_envelope_id) {
+            if self.graph.parents[*index] != reference {
+                return Err("conflicting native parent reference");
+            }
+            return Ok(());
+        }
+        self.size = self
+            .size
+            .checked_add(sink_metadata_size(&reference)?)
+            .and_then(|size| size.checked_add(usize::from(!self.graph.parents.is_empty())))
+            .filter(|size| *size <= MAX_SOURCE_LINEAGE_BYTES)
+            .ok_or("native parent references exceed their metadata bound")?;
+        self.seen.insert(
+            reference.output_envelope_id.clone(),
+            self.graph.parents.len(),
+        );
+        self.graph.parents.push(reference);
+        Ok(())
+    }
+
+    pub fn finish(self) -> NativeInputPolicyGraph {
+        self.graph
+    }
+}
+
 impl NativeInputPolicyGraph {
     #[cfg(test)]
     pub fn from_archives(
@@ -122,10 +177,12 @@ impl NativeInputPolicyGraph {
         conversation: &str,
         parents: &[&ArchivedAssistantOutput],
     ) -> Result<Self, &'static str> {
-        let mut value = Self::empty(snapshot, actor, conversation)?;
+        let mut value =
+            NativeInputPolicyGraphBuilder::new(Self::empty(snapshot, actor, conversation)?)?;
         for parent in parents {
-            value.include_archive(parent)?;
+            value.include(NativeDerivedInputPolicy::from_archive(parent)?)?;
         }
+        let value = value.finish();
         value.validate(snapshot, registration)?;
         Ok(value)
     }
@@ -149,38 +206,6 @@ impl NativeInputPolicyGraph {
         })
     }
 
-    /// The actual host authenticates and pins this direct parent. Its ancestors
-    /// are not cloned or inferred from this summary.
-    pub fn include_archive(
-        &mut self,
-        parent: &ArchivedAssistantOutput,
-    ) -> Result<(), &'static str> {
-        if parent.source_set.actor_id != self.actor_id
-            || parent.source_set.consumer_conversation_id != self.conversation_id
-        {
-            return Err("native parent belongs to another source context");
-        }
-        let reference = NativeDerivedInputPolicy::from_archive(parent)?;
-        if let Some(old) = self
-            .parents
-            .iter()
-            .find(|old| old.output_envelope_id == reference.output_envelope_id)
-        {
-            if old != &reference {
-                return Err("conflicting native parent reference");
-            }
-            return Ok(());
-        }
-        let size = sink_metadata_size(self)?
-            .checked_add(sink_metadata_size(&reference)?)
-            .and_then(|size| size.checked_add(usize::from(!self.parents.is_empty())))
-            .filter(|size| *size <= MAX_SOURCE_LINEAGE_BYTES)
-            .ok_or("native parent references exceed their metadata bound")?;
-        self.parents.push(reference);
-        debug_assert!(size <= MAX_SOURCE_LINEAGE_BYTES);
-        Ok(())
-    }
-
     pub fn validate(
         &self,
         snapshot: &NativeModelInputSnapshot,
@@ -190,8 +215,8 @@ impl NativeInputPolicyGraph {
             .map(|_| ())
     }
 
-    /// Complete adjacency only. Hosts still load every referenced archive,
-    /// check each original native receipt and validate the full persisted DAG.
+    /// Complete adjacency only. Hosts match every parent against its archive
+    /// head and original receipt columns; full proofs are verified when read.
     pub fn validate_native_closure(
         &self,
         snapshot: &NativeModelInputSnapshot,

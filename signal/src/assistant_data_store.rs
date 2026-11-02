@@ -40,7 +40,7 @@ mod memory_view;
 pub(crate) mod model_gate;
 pub(crate) mod model_sources;
 mod native_export;
-mod output_archive;
+pub(crate) mod output_archive;
 mod owner_conversations;
 mod owner_copy;
 mod owner_search;

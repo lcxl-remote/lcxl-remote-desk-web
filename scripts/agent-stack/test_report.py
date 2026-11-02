@@ -341,7 +341,7 @@ class Reports(unittest.TestCase):
             self.assertTrue(report.check_ceiling({'frames': {'core::ptr::drop_in_place<' + symbol + '>': 32}}, report.HARD_FRAME_LIMIT, patterns))
         for package in ['desk-signal', 'lcxl-remote-desk-manager']:
             self.assertTrue(any('visible_history::snapshot::prepare_on' in p for p in gate.REQUIRED[package]))
-            self.assertTrue(any('visible_history::native::resolve_policy_reusing_on' in p for p in gate.REQUIRED[package]))
+            self.assertTrue(any('visible_history::native::resolve_policy_on' in p for p in gate.REQUIRED[package]))
 
     def test_history_readers_require_actual_polls(self):
         for package in ['desk-signal', 'lcxl-remote-desk-manager']:
@@ -403,7 +403,7 @@ class Reports(unittest.TestCase):
                         if 'closure' in pattern and any(name in pattern for name in [
                             'assistant_data_store::', 'schedule_store::', 'agent_goal_store::claim_slice',
                             'agent_run_event_store::', 'agent_subagent_store::observation::'])]
-            self.assertEqual(len(patterns), 73 if package == 'desk-signal' else 75)
+            self.assertEqual(len(patterns), 72 if package == 'desk-signal' else 74)
             for pattern in patterns:
                 constructor = pattern.removeprefix('^').split('.*', 1)[0].split(r'::_\{', 1)[0].rstrip(':')
                 depth = 2 if pattern.count('closure') == 2 else 1
