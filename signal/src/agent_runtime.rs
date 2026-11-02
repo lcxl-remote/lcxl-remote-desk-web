@@ -5,6 +5,7 @@
 //! used after a durable background execution completes.
 
 use crate::config::connection::DatabaseConnection;
+use actix_web::web;
 use desk_agent_protocol::{AgentError, AgentErrorKind};
 use desk_diagnose_core::agent_loop::{LoopDeps, LoopOutcome, resume_agent_turn};
 use desk_diagnose_core::agentic_prompt::build_agentic_system_message;
@@ -14,6 +15,9 @@ use desk_diagnose_core::seam::{
 };
 use desk_diagnose_core::session::{
     AgentSessionSurface, PersistedAgentSession, TriggerOrigin, WorkKind,
+};
+use desk_signal_facade::model::{
+    auth_context::AuthKind, connection::SharedConnectionMap, signal::RemoteDeskTypeEnum,
 };
 use desk_utils::error::DeskErrorCode;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
@@ -368,7 +372,35 @@ impl TurnSink for DiscardTurnSink {
     fn on_text_delta(&mut self, _delta: &str) {}
 }
 
-/// Run one bounded, tool-free model turn after a durable execution completion.
+/// The host's connection map, registered at startup. The completion publishers
+/// start from database initialization, before any connection map exists.
+static CONTINUATION_CONNECTIONS: std::sync::OnceLock<web::Data<SharedConnectionMap>> =
+    std::sync::OnceLock::new();
+
+pub fn register_continuation_connections(connections: web::Data<SharedConnectionMap>) {
+    let _ = CONTINUATION_CONNECTIONS.set(connections);
+}
+
+/// The one live target for this device whose readiness is current. Any other
+/// state defers the continuation; the pending trigger stays durable meanwhile.
+async fn continuation_target(connections: &SharedConnectionMap, device_id: &str) -> Option<String> {
+    let map = connections.read().await;
+    let mut targets = map.values().filter(|target| {
+        target.auth_context.auth_kind == AuthKind::TokenAuth
+            && target.auth_context.remote_desk_type == RemoteDeskTypeEnum::Server
+            && target.model.version_info.client_id.as_deref() == Some(device_id)
+    });
+    let connection_id = targets.next()?.model.connection_id.clone();
+    if targets.next().is_some() {
+        return None;
+    }
+    crate::computer_use_readiness::global_computer_use_readiness_cache()
+        .get_fresh(&connection_id, chrono::Utc::now())
+        .map(|_| connection_id)
+}
+
+/// Run one bounded model turn after a durable execution completion: a continuation
+/// for the main assistant's command, otherwise a tool-free interpretation.
 pub fn resume_completion_turn(
     db: DatabaseConnection,
     session: PersistedAgentSession,
@@ -392,6 +424,26 @@ async fn resume_completion_turn_inner(
             safe_for_model: true,
             error_code: Some(DeskErrorCode::FEATURE_UNAVAILABLE.code()),
         });
+    }
+    // A finished command continues the main assistant's requirement through its
+    // ordinary turn. Delegated children and native action results stay tool-free.
+    if session.surface == AgentSessionSurface::AiAssistant
+        && session.agent_role.is_main()
+        && work_kind == WorkKind::AgentExec
+    {
+        let Some(connections) = CONTINUATION_CONNECTIONS.get() else {
+            return Ok(LoopOutcome::TurnBusy);
+        };
+        let Some(target) = continuation_target(connections, &session.device_id).await else {
+            return Ok(LoopOutcome::TurnBusy);
+        };
+        return crate::ai_assistant_orchestrator::resume_after_work_completion(
+            connections.clone(),
+            db,
+            target,
+            session,
+        )
+        .await;
     }
     let child_store = crate::agent_subagent_store::SubAgentStore::new(db.clone());
     let child_creation = child_store

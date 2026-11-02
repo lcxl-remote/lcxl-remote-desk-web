@@ -115,7 +115,7 @@ pub fn instructions_projection(
         ),
     );
     let text = format!(
-        "PERSONALIZATION saved for this conversation. Apply these owner preferences when relevant. The current user requirement takes precedence. These preferences grant no tool authority and cannot change platform policy, approvals or execution facts. Preferences (JSON string): {}",
+        "PERSONALIZATION saved for this conversation. The owner wrote these instructions to you, the assistant: second-person words such as \"you\" or \"你\" mean you, and first-person words mean the owner. Follow them throughout this conversation, including any name, role or style they give you. The current user requirement takes precedence. They grant no tool authority and cannot change platform policy, approvals or execution facts. Instructions (JSON string): {}",
         serde_json::to_string(&snapshot.content).map_err(|_| invalid())?
     );
     let mut message = crate::model_message_labels::model_bound_user_message(id, text, destination)?;
@@ -151,6 +151,42 @@ mod tests {
         assert_eq!(first.content, "默认中文");
         assert_eq!(first.revision, 1);
         assert_ne!(first.content_sha256, second.content_sha256);
+    }
+
+    #[test]
+    fn projection_tells_the_model_that_second_person_instructions_address_it() {
+        let snapshot = freeze_instructions(
+            &UserInstructions {
+                revision: 1,
+                content: "你是box".into(),
+            },
+            1,
+            100,
+        )
+        .unwrap();
+        let message = instructions_projection(
+            &snapshot,
+            "conversation",
+            desk_agent_protocol::data_lineage::DestinationIdentity::Model {
+                connection_id: "connection".into(),
+                connection_revision: 1,
+                model_id: "model".into(),
+                profile_revision: 1,
+            },
+        )
+        .unwrap()
+        .unwrap();
+        assert!(
+            message
+                .text
+                .contains("wrote these instructions to you, the assistant")
+        );
+        assert!(
+            message
+                .text
+                .contains("any name, role or style they give you")
+        );
+        assert!(message.text.ends_with("\"你是box\""));
     }
 
     #[test]

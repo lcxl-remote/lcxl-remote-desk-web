@@ -375,6 +375,8 @@ impl ExecutionState {
 /// unbounded self-driving chain with no human in the loop. `allows_new_mutation`
 /// is the gate; the loop both hides mutating tools from an automation turn and
 /// refuses one defensively if it is somehow still requested.
+/// [`TriggerOrigin::WorkContinuation`] is the bounded exception: it spends the same
+/// automation budget and every mutation still needs an exact grant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TriggerOrigin {
@@ -399,6 +401,10 @@ pub enum TriggerOrigin {
     /// An explicit child-result wait resumes its original finite owner task.
     /// Current source controls, budgets and operation grants still apply.
     SubAgentCompletion,
+    /// A server-fired continuation of the existing owner requirement after a durable
+    /// work result arrived. It uses the ordinary tool and grant path, adds no
+    /// permission, and spends the chain's bounded automation budget.
+    WorkContinuation,
     /// A manager-fired automation turn reacting to a completed background command.
     /// Retained only to deserialize sessions written before generic work origins.
     ExecCompletion,
@@ -421,13 +427,15 @@ pub enum AgentSessionSurface {
 
 impl TriggerOrigin {
     /// A permission decision can lead to another legitimate request under the
-    /// same owner task. Completion and schedule origins never inherit the
-    /// session's AI-review delegation for new requests.
+    /// same owner task, as can a continuation of that task after its background
+    /// result. Interpretation and schedule origins never inherit the session's
+    /// AI-review delegation for new requests.
     pub fn allows_delegated_review(self) -> bool {
         matches!(
             self,
             TriggerOrigin::User
                 | TriggerOrigin::PermissionDecision
+                | TriggerOrigin::WorkContinuation
                 | TriggerOrigin::GoalContinuation
                 | TriggerOrigin::DelegatedTask
                 | TriggerOrigin::SubAgentCompletion
@@ -436,13 +444,15 @@ impl TriggerOrigin {
 
     /// Whether this origin may enter the ordinary mutation authorization path.
     /// User input, explicit permission decisions and confirmed continuations
-    /// still require current policy and exact grants; completions cannot start
-    /// an unbounded self-triggering chain of executions.
+    /// still require current policy and exact grants. Interpretation-only completions
+    /// cannot start executions, and work continuations stay under the automation
+    /// budget so a chain of results remains bounded.
     pub fn allows_new_mutation(self) -> bool {
         matches!(
             self,
             TriggerOrigin::User
                 | TriggerOrigin::PermissionDecision
+                | TriggerOrigin::WorkContinuation
                 | TriggerOrigin::ScheduledContinuation
                 | TriggerOrigin::ScheduledTask
                 | TriggerOrigin::GoalContinuation
@@ -1931,7 +1941,9 @@ impl PersistedAgentSession {
                     self.chain_id = turn_id.to_string();
                 }
             }
-            TriggerOrigin::ExecCompletion | TriggerOrigin::WorkCompletion { .. } => {
+            TriggerOrigin::WorkContinuation
+            | TriggerOrigin::ExecCompletion
+            | TriggerOrigin::WorkCompletion { .. } => {
                 self.automation_turns_used = self.automation_turns_used.saturating_add(1);
             }
         }
@@ -3252,6 +3264,10 @@ mod tests {
 
         // An owner permission decision can consume the newly issued grant but
         // neither opens a fresh chain nor spends automation budget.
+        let before = s.automation_turns_used;
+        s.adopt_trigger(TriggerOrigin::WorkContinuation, "continuation-a");
+        assert_eq!(s.automation_turns_used, before + 1);
+        s.automation_turns_used = before;
         s.adopt_trigger(TriggerOrigin::PermissionDecision, "permission-a");
         assert_eq!(s.trigger_origin, TriggerOrigin::PermissionDecision);
         assert!(s.trigger_origin.allows_new_mutation());
@@ -3276,6 +3292,8 @@ mod tests {
     fn delegated_review_continues_after_a_permission_decision_but_not_an_automation_trigger() {
         assert!(TriggerOrigin::User.allows_delegated_review());
         assert!(TriggerOrigin::PermissionDecision.allows_delegated_review());
+        assert!(TriggerOrigin::WorkContinuation.allows_delegated_review());
+        assert!(TriggerOrigin::WorkContinuation.allows_new_mutation());
         assert!(TriggerOrigin::GoalContinuation.allows_delegated_review());
         assert!(!TriggerOrigin::ScheduledContinuation.allows_delegated_review());
         assert!(!TriggerOrigin::ScheduledTask.allows_delegated_review());

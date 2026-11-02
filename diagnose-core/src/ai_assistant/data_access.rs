@@ -104,6 +104,7 @@ pub fn eligible_origin(session: &PersistedAgentSession) -> bool {
             session.trigger_origin,
             TriggerOrigin::User
                 | TriggerOrigin::PermissionDecision
+                | TriggerOrigin::WorkContinuation
                 | TriggerOrigin::GoalContinuation
                 | TriggerOrigin::ScheduledTask
                 | TriggerOrigin::ScheduledContinuation

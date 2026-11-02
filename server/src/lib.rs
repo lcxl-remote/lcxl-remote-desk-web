@@ -772,6 +772,7 @@ pub async fn run_with_hub(
             desk_signal::db::get_db().clone(),
             connection_map.clone(),
         ));
+        desk_signal::agent_runtime::register_continuation_connections(connection_map.clone());
         actix_web::rt::spawn(
             desk_signal::permission_resume_executor::SignalPermissionResumeExecutor::new(
                 desk_signal::db::get_db().clone(),

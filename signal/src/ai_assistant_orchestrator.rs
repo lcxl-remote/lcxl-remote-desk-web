@@ -885,16 +885,65 @@ pub async fn resume_after_permission_decision(
         ask,
         Some(PermissionResume {
             conversation_id,
-            permission_request_id,
+            permission_request_id: Some(permission_request_id),
         }),
     )
     .await;
 }
 
+/// Continue the owner's existing requirement after a durable background result.
+/// The caller already chose the single target connection for this device.
+pub async fn resume_after_work_completion(
+    connections: web::Data<SharedConnectionMap>,
+    db: DatabaseConnection,
+    target_connection_id: String,
+    session: desk_diagnose_core::session::PersistedAgentSession,
+) -> Result<LoopOutcome, AgentError> {
+    let question =
+        desk_diagnose_core::permission_resume::latest_user_requirement(&session.conversation)
+            .ok_or_else(|| transport_error("original requirement is unavailable"))?
+            .text
+            .clone();
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let actor_user_id = session
+        .actor_id
+        .parse::<i32>()
+        .map_err(|_| transport_error("invalid continuation owner"))?;
+    let ask = AiAssistantAsk {
+        temporary_conversation: None,
+        question,
+        locale: session.response_locale.clone(),
+        client_message_id: request_id.clone(),
+        conversation_id: session.client_conversation_id.clone(),
+        ..Default::default()
+    };
+    compose_turn(
+        connections,
+        db,
+        request_id,
+        String::new(),
+        target_connection_id,
+        actor_user_id,
+        session.device_id,
+        ask,
+        Some(PermissionResume {
+            conversation_id: session.conversation_id,
+            permission_request_id: None,
+        }),
+        None,
+        None,
+        None,
+    )
+    .await?
+    .ok_or_else(|| transport_error("work continuation did not pass runtime preflight"))
+}
+
+/// A server-authored continuation. `None` means a background result triggered it;
+/// `Some` names the owner permission decision being resumed.
 #[derive(Clone)]
 struct PermissionResume {
     conversation_id: String,
-    permission_request_id: String,
+    permission_request_id: Option<String>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1173,7 +1222,10 @@ async fn prepare_composed_turn(
             return Ok(PreparationStep::Ready(None));
         }
     };
-    let permission_child_context = if resume_conversation_id.is_some() {
+    let permission_child_context = if resume_conversation_id
+        .as_ref()
+        .is_some_and(|resume| resume.permission_request_id.is_some())
+    {
         let snapshot = snapshot
             .as_ref()
             .ok_or_else(|| transport_error("permission session is unavailable"))?;
@@ -1249,16 +1301,18 @@ async fn prepare_composed_turn(
                         .as_ref()
                         .ok_or_else(|| transport_error("original input session is missing"))?;
                     use desk_diagnose_core::dynamic_run::PermissionRequestState;
-                    if !session.permission_requests.iter().any(|request| {
-                        request.request_id == resume.permission_request_id
-                            && request.input_revision == session.input_revision
-                            && matches!(
-                                request.state,
-                                PermissionRequestState::Approved
-                                    | PermissionRequestState::PartiallyApproved
-                                    | PermissionRequestState::Denied
-                            )
-                    }) {
+                    if let Some(permission_request_id) = &resume.permission_request_id
+                        && !session.permission_requests.iter().any(|request| {
+                            &request.request_id == permission_request_id
+                                && request.input_revision == session.input_revision
+                                && matches!(
+                                    request.state,
+                                    PermissionRequestState::Approved
+                                        | PermissionRequestState::PartiallyApproved
+                                        | PermissionRequestState::Denied
+                                )
+                        })
+                    {
                         return Err(transport_error(
                             "permission decision no longer belongs to the current input",
                         ));
@@ -1527,7 +1581,9 @@ async fn prepare_composed_turn(
                             return Ok(PreparationStep::Ready(None));
                         }
                     };
-                    let permission_decision_resume = resume_conversation_id.is_some()
+                    let permission_decision_resume = resume_conversation_id
+                        .as_ref()
+                        .is_some_and(|resume| resume.permission_request_id.is_some())
                         || scheduled
                             .as_ref()
                             .is_some_and(|resume| resume.permission_request_id.is_some());
@@ -1712,15 +1768,18 @@ async fn prepare_composed_turn(
                             })
                         })
                         .unwrap_or_else(|| {
-                            resume_conversation_id.as_ref().map_or_else(
-                                || uuid::Uuid::new_v4().to_string(),
-                                |resume| {
-                                    crate::agent_session_store::permission_resume::turn_id(
-                                        &conversation_id,
-                                        &resume.permission_request_id,
-                                    )
-                                },
-                            )
+                            resume_conversation_id
+                                .as_ref()
+                                .and_then(|resume| resume.permission_request_id.as_ref())
+                                .map_or_else(
+                                    || uuid::Uuid::new_v4().to_string(),
+                                    |permission_request_id| {
+                                        crate::agent_session_store::permission_resume::turn_id(
+                                            &conversation_id,
+                                            permission_request_id,
+                                        )
+                                    },
+                                )
                         });
                     let export_source = if resume_conversation_id.is_some()
                         || scheduled.is_some()
@@ -2083,13 +2142,16 @@ async fn prepare_composed_turn(
                             let sessions = if let Some(resume) = &resume_conversation_id {
                                 let snapshot =
                                     snapshot.as_ref().expect("validated resume snapshot");
-                                sessions
-                                    .with_expected_input_revision(snapshot.input_revision)
-                                    .with_permission_resume(
-                                        resume.permission_request_id.clone(),
+                                let sessions =
+                                    sessions.with_expected_input_revision(snapshot.input_revision);
+                                match &resume.permission_request_id {
+                                    Some(permission_request_id) => sessions.with_permission_resume(
+                                        permission_request_id.clone(),
                                         snapshot.seq,
                                         capability_grants.clone(),
-                                    )
+                                    ),
+                                    None => sessions,
+                                }
                             } else {
                                 sessions
                             };
@@ -2348,7 +2410,7 @@ async fn prepare_composed_turn(
                                         .approved_exact_input_expires_at_unix_ms;
                                     let decision_request_id = resume_conversation_id
                                         .as_ref()
-                                        .map(|resume| resume.permission_request_id.as_str())
+                                        .and_then(|resume| resume.permission_request_id.as_deref())
                                         .or_else(|| {
                                             scheduled.as_ref()?.permission_request_id.as_deref()
                                         })
@@ -2613,6 +2675,58 @@ async fn prepare_composed_turn(
                                             .await;
                                         }
                                         let accepted_at = clock();
+                                        if resume_conversation_id.as_ref().is_some_and(|resume| {
+                                            resume.permission_request_id.is_none()
+                                        }) {
+                                            let model = &model;
+                                            return desk_diagnose_core::future::phase(|| async move {
+                                                let policy = model.model_egress_policy()?.ok_or_else(|| {
+                                                    transport_error("continuation model policy is unavailable")
+                                                })?;
+                                                let original = snapshot
+                                                    .as_ref()
+                                                    .and_then(|session| {
+                                                        desk_diagnose_core::permission_resume::latest_user_requirement(
+                                                            &session.messages,
+                                                        )
+                                                    })
+                                                    .ok_or_else(|| transport_error("original requirement is unavailable"))?;
+                                                let bridge = desk_diagnose_core::permission_resume::authorized_work_completion_resume_message(
+                                                    format!("{request_id}-completion"),
+                                                    &policy,
+                                                    original,
+                                                )?;
+                                                let claim = ClaimTurnParams {
+                                                    conversation_id,
+                                                    actor_id,
+                                                    device_id: target_device_id,
+                                                    policy_revision: PERSONAL_ASSISTANT_POLICY_REVISION,
+                                                    current_pdp_scope: scope,
+                                                    turn_id: turn_id.clone(),
+                                                    request_id: None,
+                                                    connection_id: None,
+                                                    trigger_origin: TriggerOrigin::WorkContinuation,
+                                                    now: accepted_at,
+                                                };
+                                                let mut sink = StreamingTurnSink::starting_at(
+                                                    |_event: AiAssistantEvent| {},
+                                                    request_id,
+                                                    0,
+                                                );
+                                                sink.set_provenance(AiProvenance::stamp(
+                                                    config.model,
+                                                    Some(chrono::Utc::now().to_rfc3339()),
+                                                ));
+                                                sink.turn_started(&turn_id);
+                                                let outcome = desk_diagnose_core::future::boxed(|| {
+                                                    resume_agent_turn_after_permission(&deps, claim, bridge, &mut sink)
+                                                })
+                                                .await?;
+                                                sink.finish_outcome(&outcome);
+                                                Ok(Some(outcome))
+                                            })
+                                            .await;
+                                        }
                                         if resume_conversation_id.is_some() {
                                             let model = &model;
                                             return desk_diagnose_core::future::phase(|| async move {
@@ -2986,6 +3100,7 @@ mod tests {
     mod rehearsal_entry;
     mod reply_history;
     mod scheduled;
+    mod work_continuation;
     use desk_agent_protocol::data_lineage::Sensitivity;
     use desk_diagnose_core::seam::NullTurnSink;
     use sea_orm::EntityTrait;

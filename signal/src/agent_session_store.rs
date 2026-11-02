@@ -1847,6 +1847,7 @@ impl SessionSeam for SignalAgentSessionStore {
                     if matches!(
                         params.trigger_origin,
                         desk_diagnose_core::session::TriggerOrigin::WorkCompletion { .. }
+                            | desk_diagnose_core::session::TriggerOrigin::WorkContinuation
                     ) && crate::agent_goal_store::load_latest_for_subject(
                         &self.db,
                         &params.conversation_id,

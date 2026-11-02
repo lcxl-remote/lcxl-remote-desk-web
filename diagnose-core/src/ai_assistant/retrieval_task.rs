@@ -86,7 +86,9 @@ pub fn goal_authority(
         // or recovery is pending. It never resumes the background planner.
         if !matches!(
             session.trigger_origin,
-            TriggerOrigin::User | TriggerOrigin::PermissionDecision
+            TriggerOrigin::User
+                | TriggerOrigin::PermissionDecision
+                | TriggerOrigin::WorkContinuation
         ) || goal.state == GoalState::Running
         {
             return Err("retrieval goal requires its original claimed segment");

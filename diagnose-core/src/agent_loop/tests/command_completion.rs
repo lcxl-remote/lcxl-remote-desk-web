@@ -254,3 +254,116 @@ async fn check_completion_usage(with_usage: bool, invalid_count: usize) {
     assert_eq!(stored.pending_auto_triggers[0].event_id, "completed-2");
     assert!(tools.calls.borrow().is_empty());
 }
+
+/// The continuation sees the whole conversation and the ordinary tools, including
+/// mutating ones, spends automation budget, and drains every result it covered.
+#[tokio::test]
+async fn work_continuation_keeps_history_and_tools_and_drains_seen_results() {
+    let sess = MemSession::default();
+    let mut owner_scope = scope();
+    owner_scope.mode = ExecutionMode::ConfirmEachAction;
+    let mut session = PersistedAgentSession::new("conv", "actor", "device", 1, owner_scope, "now");
+    session.surface = crate::session::AgentSessionSurface::AiAssistant;
+    session.input_revision = 1;
+    session.latest_input_seq = 1;
+    session.chain_id = "original-chain".into();
+    let destination = desk_agent_protocol::data_lineage::DestinationIdentity::Model {
+        connection_id: "test".into(),
+        connection_revision: 1,
+        model_id: "test".into(),
+        profile_revision: 1,
+    };
+    let user = crate::model_message_labels::model_bound_user_message(
+        "user".into(),
+        "Wait, then open the calculator".into(),
+        destination.clone(),
+    )
+    .unwrap();
+    session.conversation.push(user.clone());
+    session.conversation.push(ChatMessage::text(
+        "earlier-answer",
+        ChatRole::Assistant,
+        "The wait is running in the background.",
+    ));
+    let mut result = ChatMessage::untrusted_output("completed-1", "call-1", "task-1", "done");
+    result.data_envelope = crate::model_message_labels::internal_tool_result_envelope(
+        user.data_envelope.as_ref(),
+        "completed-1",
+        &result.text,
+        "exec_command",
+    )
+    .unwrap();
+    session.conversation.push(result);
+    session
+        .pending_auto_triggers
+        .push(crate::session::PendingWorkTrigger {
+            work_id: 1,
+            kind: crate::session::WorkKind::AgentExec,
+            execution_id: "generation-1".into(),
+            tool_call_id: "call-1".into(),
+            event_id: "completed-1".into(),
+            chain_id: session.chain_id.clone(),
+            resolution_org_id: None,
+            since: "now".into(),
+        });
+    *sess.inner.borrow_mut() = Some(session);
+    let requests = Rc::new(RefCell::new(vec![]));
+    let model = ScriptModel {
+        turns: RefCell::new([answer("Nothing else remains.")].into()),
+        requests: requests.clone(),
+    };
+    let tools = RecordingTools {
+        calls: Rc::new(RefCell::new(vec![])),
+        reply: "unused".into(),
+    };
+    let registry = [mutating_tool("write_it", Capability::SystemInfo)];
+    let clock = || "2026-09-05T00:00:00Z".to_string();
+    let mut continuation = claim();
+    continuation.trigger_origin = crate::session::TriggerOrigin::WorkContinuation;
+    continuation.current_pdp_scope.mode = ExecutionMode::ConfirmEachAction;
+    let bridge = crate::permission_resume::model_bound_work_completion_resume_message(
+        "bridge".into(),
+        destination,
+        &user.text,
+    )
+    .unwrap();
+    let outcome = resume_agent_turn_after_permission(
+        &deps(&sess, &model, &tools, &registry, &clock),
+        continuation,
+        bridge,
+        &mut NullTurnSink,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        outcome,
+        LoopOutcome::Answered("Nothing else remains.".into())
+    );
+    let requests = requests.borrow();
+    let ids = requests[0]
+        .messages
+        .iter()
+        .map(|message| message.message_id.as_str())
+        .collect::<Vec<_>>();
+    for id in ["user", "earlier-answer", "completed-1", "bridge"] {
+        assert!(ids.contains(&id), "{id} missing from {ids:?}");
+    }
+    assert!(requests[0].tools.iter().any(|tool| tool.name == "write_it"));
+    assert!(
+        !requests[0]
+            .messages
+            .iter()
+            .any(|message| message.text.contains("No tools are available"))
+    );
+    let stored = sess.inner.borrow();
+    let stored = stored.as_ref().unwrap();
+    assert!(stored.pending_auto_triggers.is_empty());
+    assert_eq!(stored.automation_turns_used, 1);
+    assert_eq!(stored.chain_id, "original-chain");
+    assert_eq!(
+        crate::permission_resume::latest_user_requirement(&stored.conversation)
+            .unwrap()
+            .message_id,
+        "user"
+    );
+}

@@ -281,6 +281,7 @@ impl From<crate::session::TriggerOrigin> for Origin {
             Trigger::GoalContinuation => Self::GoalContinuation,
             Trigger::DelegatedTask => Self::Subagent,
             Trigger::SubAgentCompletion
+            | Trigger::WorkContinuation
             | Trigger::ExecCompletion
             | Trigger::WorkCompletion { .. } => Self::WorkCompletion,
         }

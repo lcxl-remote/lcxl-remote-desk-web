@@ -68,6 +68,7 @@ pub async fn run_local_api(
     let settings_coordinator_data = web::Data::from(settings_coordinator);
     let connection_map = web::Data::new(SharedConnectionMap::from(BTreeMap::new()));
 
+    desk_signal::agent_runtime::register_continuation_connections(connection_map.clone());
     actix_web::rt::spawn(
         desk_signal::permission_resume_executor::SignalPermissionResumeExecutor::new(
             desk_signal::db::get_db().clone(),

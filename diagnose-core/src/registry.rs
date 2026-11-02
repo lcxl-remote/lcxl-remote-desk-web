@@ -202,6 +202,7 @@ pub fn exposure_block_reason(
             origin,
             TriggerOrigin::User
                 | TriggerOrigin::PermissionDecision
+                | TriggerOrigin::WorkContinuation
                 | TriggerOrigin::GoalContinuation
                 | TriggerOrigin::ScheduledTask
                 | TriggerOrigin::ScheduledContinuation
@@ -504,6 +505,27 @@ mod tests {
         // Unknown name.
         assert!(
             lookup_exposed(&reg, "nope", &s, &ExecutionState::None, TriggerOrigin::User).is_none()
+        );
+    }
+
+    /// A work continuation enters the ordinary mutation path: the tool is offered
+    /// under the same scope a user turn gets, and grants still decide execution.
+    #[test]
+    fn work_continuation_keeps_mutating_tools() {
+        let reg = registry();
+        let s = scope(
+            &[Capability::SystemInfo, Capability::LogRecent],
+            ExecutionMode::ConfirmEachAction,
+        );
+        assert!(
+            lookup_exposed(
+                &reg,
+                "file_write",
+                &s,
+                &ExecutionState::None,
+                TriggerOrigin::WorkContinuation
+            )
+            .is_some()
         );
     }
 
