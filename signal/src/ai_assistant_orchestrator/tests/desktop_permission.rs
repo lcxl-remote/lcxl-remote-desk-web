@@ -148,18 +148,24 @@ async fn run_desktop_history_case(
             "describe_tools",
             serde_json::json!({"tool_names":[read_name,"execute_ui_actions"]}),
         );
-        replies.insert(3, tool_reply("request_permissions", serde_json::json!({"items":[{
-            "tool_name":"execute_ui_actions", "reason":"Invoke the requested Calendar button",
-            "suggested_ttl_seconds":120, "suggested_max_uses":2,
-            "application_scope":{"application_id":"a1", "actions":["invoke"]}
-        }]})));
+        replies.insert(
+            3,
+            tool_reply(
+                "request_permissions",
+                serde_json::json!({"items":[{
+                    "tool_name":"execute_ui_actions", "reason":"Select the requested Calendar item",
+                    "suggested_ttl_seconds":120, "suggested_max_uses":2,
+                    "application_scope":{"application_id":"a1", "actions":["select"]}
+                }]}),
+            ),
+        );
         replies[3] = replies[3].replace("call-request_permissions", "call-ui-permission");
         replies.insert(
             4,
             tool_reply(
                 "execute_ui_actions",
                 serde_json::json!({
-                    "application_id":"a1", "steps":[{"element_id":"e1", "action":{"kind":"invoke"}}]
+                    "application_id":"a1", "steps":[{"element_id":"e1", "action":{"kind":"select"}}]
                 }),
             ),
         );
@@ -1229,7 +1235,7 @@ fn concrete_ui_nodes() -> Vec<UiNodeProjection> {
             value: None,
             is_protected: false,
             enabled: true,
-            supported_actions: vec![UiSemanticActionKind::Invoke],
+            supported_actions: vec![UiSemanticActionKind::Select],
         },
     )
     .collect()

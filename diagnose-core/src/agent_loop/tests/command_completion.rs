@@ -367,3 +367,86 @@ async fn work_continuation_keeps_history_and_tools_and_drains_seen_results() {
         "user"
     );
 }
+
+struct DenyingTools {
+    calls: Rc<RefCell<Vec<String>>>,
+}
+
+#[async_trait(?Send)]
+impl ToolSeam for DenyingTools {
+    async fn run_read(&self, _: &ToolCall) -> Result<ToolRunOutput, AgentError> {
+        unreachable!("only mutating tools run in this test")
+    }
+
+    async fn confirm_and_exec(
+        &self,
+        call: &ToolCall,
+        _: &crate::seam::ExecContext,
+    ) -> Result<ExecOutcome, AgentError> {
+        self.calls.borrow_mut().push(call.name.clone());
+        Ok(ExecOutcome::ReviewDenied {
+            reason: "reviewer refused".into(),
+        })
+    }
+}
+
+/// After two refusals one tool stops reaching the reviewer, a different tool still
+/// does, and a new owner input starts over.
+#[tokio::test]
+async fn repeated_review_denials_stop_that_tool_until_the_owner_replies() {
+    let sess = MemSession::default();
+    let mut owner_scope = scope();
+    owner_scope.mode = ExecutionMode::ConfirmEachAction;
+    let session = PersistedAgentSession::new("conv", "actor", "device", 1, owner_scope, "now");
+    *sess.inner.borrow_mut() = Some(session);
+    let model = ScriptModel {
+        turns: RefCell::new(
+            [
+                tool_use_args("c1", "ui", "{}"),
+                tool_use_args("c2", "ui", "{}"),
+                tool_use_args("c3", "ui", "{}"),
+                tool_use_args("c4", "other", "{}"),
+                answer("Please decide how to proceed."),
+            ]
+            .into(),
+        ),
+        requests: Rc::new(RefCell::new(vec![])),
+    };
+    let calls = Rc::new(RefCell::new(vec![]));
+    let tools = DenyingTools {
+        calls: calls.clone(),
+    };
+    let registry = [
+        mutating_tool("ui", Capability::SystemInfo),
+        mutating_tool("other", Capability::SystemInfo),
+    ];
+    let clock = || "2026-09-05T00:00:00Z".to_string();
+    let mut start = claim();
+    start.current_pdp_scope.mode = ExecutionMode::ConfirmEachAction;
+    let outcome = run_agent_turn(
+        &deps(&sess, &model, &tools, &registry, &clock),
+        start,
+        ChatMessage::text("user", ChatRole::User, "press the button"),
+        &mut NullTurnSink,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        outcome,
+        LoopOutcome::Answered("Please decide how to proceed.".into())
+    );
+    assert_eq!(*calls.borrow(), vec!["ui", "ui", "other"]);
+    let mut stored = sess.inner.borrow().clone().unwrap();
+    let blocked = stored
+        .conversation
+        .iter()
+        .find(|message| message.tool_call_id.as_deref() == Some("c3"))
+        .unwrap();
+    assert!(blocked.text.contains("ask how to proceed"));
+    assert_eq!(stored.review_denials["ui"], 2);
+    assert_eq!(stored.review_denials["other"], 1);
+    stored.adopt_trigger(crate::session::TriggerOrigin::PermissionDecision, "t2");
+    assert_eq!(stored.review_denials["ui"], 2);
+    stored.adopt_trigger(crate::session::TriggerOrigin::User, "t3");
+    assert!(stored.review_denials.is_empty());
+}

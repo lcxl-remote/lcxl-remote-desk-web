@@ -355,6 +355,9 @@ pub fn committed_input_outcome(
 }
 
 /// The seams + config the loop runs over, borrowed for one turn.
+/// Concrete review refusals of one tool before the owner has to decide.
+const MAX_REVIEW_DENIALS_PER_TOOL: u32 = 2;
+
 pub struct LoopDeps<'a> {
     pub session_seam: &'a dyn SessionSeam,
     pub model: &'a dyn ModelSeam,
@@ -3715,6 +3718,24 @@ async fn run_mutating<F: FnMut() -> String>(
     sink: &mut dyn TurnSink,
     observation: &crate::model_observability::tool::ToolObservation,
 ) -> Result<Option<LoopOutcome>, AgentError> {
+    // Repeated reviewer refusals of one tool need the owner, not another attempt.
+    // Other tools stay available, so the assistant may pursue a different method.
+    if session.review_denials.get(&call.name).copied().unwrap_or(0) >= MAX_REVIEW_DENIALS_PER_TOOL {
+        observation.permission(crate::model_observability::PermissionOutcome::PolicyRejected);
+        let note = format!(
+            "not executed: independent AI review already refused {} {MAX_REVIEW_DENIALS_PER_TOOL} times for this request. Do not call it again; tell the owner what was refused and ask how to proceed, or use a different method.",
+            call.name
+        );
+        append_mutating_result(
+            deps,
+            session,
+            call,
+            ChatMessage::tool_result(mint(), &call.id, note),
+        )?;
+        finish_tool(session, &call.id, false, sink);
+        *halted = Some("not executed: a prior command in this turn was not run".to_string());
+        return Ok(None);
+    }
     // Defence in depth behind the exposure gate: a mutating tool is never
     // advertised to an automation turn ([`lookup_exposed`] would already reject
     // it), but should one still reach here it is refused before any work is
@@ -3859,6 +3880,21 @@ async fn run_mutating<F: FnMut() -> String>(
                 )
                 .await?,
             );
+        }
+        Ok(ExecOutcome::ReviewDenied { reason }) => {
+            *session.review_denials.entry(call.name.clone()).or_default() += 1;
+            append_mutating_result(
+                deps,
+                session,
+                call,
+                ChatMessage::tool_result(
+                    mint(),
+                    &call.id,
+                    format!("the command was rejected: {reason}"),
+                ),
+            )?;
+            finish_tool(session, &call.id, false, sink);
+            *halted = Some("not executed: a prior command in this turn was not run".to_string());
         }
         Ok(ExecOutcome::Rejected { reason }) => {
             let text = match reason {

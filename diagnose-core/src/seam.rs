@@ -629,6 +629,9 @@ pub enum ExecOutcome {
     },
     /// The operator rejected the command; nothing ran.
     Rejected { reason: Option<String> },
+    /// The independent AI reviewer refused this exact call; nothing ran. Counted
+    /// per tool so repeated refusals go to the owner instead of the reviewer.
+    ReviewDenied { reason: String },
     /// The runtime durably refused dispatch before any execution generation was
     /// recorded. This is not an operator rejection or a successful cancellation.
     NotExecuted { reason: String },

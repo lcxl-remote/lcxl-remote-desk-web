@@ -185,10 +185,12 @@ async fn prepare_on_inner(
     let CapabilityGrantIssuer::AiApproval(parent) = &grant.issued_by else {
         return Ok(None);
     };
-    let expected =
+    let Some(expected) =
         concrete_call_review_identity(&grant, subject.server_call_id, subject.canonical_input_json)
             .map_err(|_| invalid())?
-            .ok_or_else(invalid)?;
+    else {
+        return Ok(None);
+    };
     desk_diagnose_core::future::boxed(|| async {
         crate::agent_approval_store::current_grant_parent_on(txn, &session, &grant, now_unix_ms)
             .await

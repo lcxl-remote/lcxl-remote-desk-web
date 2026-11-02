@@ -346,6 +346,7 @@ pub async fn get_ai_assistant_session(
     connection_map: web::Data<SharedConnectionMap>,
     query: web::Query<AiAssistantSessionQuery>,
 ) -> Result<HttpResponse, DeskSignalError> {
+    let request_started = std::time::Instant::now();
     let actor_id = SINGLE_ACCOUNT_USER_ID.to_string();
     let store = SignalAgentSessionStore::new(crate::db::get_db().clone());
     let selected = match query.scheduled_selection() {
@@ -381,12 +382,20 @@ pub async fn get_ai_assistant_session(
         return Ok(not_accessible());
     };
     // The snapshot reader applies its current subject checks; selectors are not authority.
+    let snapshot_started = std::time::Instant::now();
     let snapshot = store
         .read_assistant_snapshot_for_subject(&session_id, &actor_id, &target_audience)
         .await
         .map_err(|error| {
             DeskSignalError::new_custom_error(DeskErrorCode::SYSTEM_ERROR, &error.message)
         })?;
+    if snapshot_started.elapsed().as_millis() >= 1_000 {
+        log::info!(
+            "[turn-timing] read session snapshot: selected_after_ms={}, snapshot_ms={}",
+            request_started.elapsed().as_millis() - snapshot_started.elapsed().as_millis(),
+            snapshot_started.elapsed().as_millis()
+        );
+    }
     match snapshot {
         Some(snapshot) => {
             let background_tasks = snapshot.background_tasks;

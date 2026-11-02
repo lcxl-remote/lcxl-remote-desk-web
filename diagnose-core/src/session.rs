@@ -619,6 +619,9 @@ pub struct PersistedAgentSession {
     /// per-chain cap.
     #[serde(default)]
     pub automation_turns_used: u32,
+    /// Concrete AI review refusals per tool on the current chain, reset with it.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub review_denials: std::collections::BTreeMap<String, u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_control_connection_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1265,6 +1268,7 @@ impl PersistedAgentSession {
             trigger_origin: TriggerOrigin::User,
             chain_id: String::new(),
             automation_turns_used: 0,
+            review_denials: Default::default(),
             active_control_connection_id: None,
             current_request_id: None,
             current_turn_id: None,
@@ -1932,6 +1936,7 @@ impl PersistedAgentSession {
             TriggerOrigin::User | TriggerOrigin::ScheduledTask => {
                 self.chain_id = turn_id.to_string();
                 self.automation_turns_used = 0;
+                self.review_denials.clear();
             }
             TriggerOrigin::PermissionDecision
             | TriggerOrigin::ScheduledContinuation

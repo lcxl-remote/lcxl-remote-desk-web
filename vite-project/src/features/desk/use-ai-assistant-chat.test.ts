@@ -50,6 +50,28 @@ describe('useAiAssistantChat', () => {
         } finally { unmount(); clock.mockRestore(); }
     });
 
+    it('does not stack snapshot polls behind a slow response', async () => {
+        vi.useFakeTimers();
+        const scope = 'slow-snapshot-poll';
+        localStorage.setItem(`ai-assistant-conversation:${scope}`, 'slow-conversation');
+        const pending: Array<(value: unknown) => void> = [];
+        const fetchMock = vi.fn(() => new Promise(resolve => { pending.push(resolve); }));
+        vi.stubGlobal('fetch', fetchMock);
+        const { result, unmount } = renderHook(() => useAiAssistantChat({ deskId: scope,
+            subscribe: () => () => undefined, sendMessage: vi.fn(() => 'request') }));
+        try {
+            const snapshotCalls = () => fetchMock.mock.calls.filter(([url]) =>
+                String(url).includes('/api/my/ai-assistant-session?')).length;
+            await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+            const initial = snapshotCalls();
+            await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+            expect(snapshotCalls()).toBe(initial + 1);
+            await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+            expect(snapshotCalls()).toBe(initial + 1);
+            expect(result.current.historyRestoreFailed).toBe(false);
+        } finally { unmount(); vi.useRealTimers(); localStorage.removeItem(`ai-assistant-conversation:${scope}`); }
+    });
+
     it.each(['saved', 'storage event'])('reports failed %s history restoration and starts a distinct conversation after reset', async (entry) => {
         const scope = `restore-failure-${entry}`;
         const key = `ai-assistant-conversation:${scope}`;
@@ -405,7 +427,7 @@ describe('useAiAssistantChat', () => {
             })));
             await act(async () => {
                 const retry = result.current.retryDelivery();
-                await vi.advanceTimersByTimeAsync(10_000);
+                await vi.advanceTimersByTimeAsync(30_000);
                 await retry;
             });
             expect(sendMessage).toHaveBeenCalledTimes(2);

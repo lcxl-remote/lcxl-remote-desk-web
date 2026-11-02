@@ -43,6 +43,8 @@ import {
 
 const PREVIEW_TOOL = 'preview_computer_action';
 
+const SNAPSHOT_TIMEOUT_MS = 30_000;
+
 export type AiAssistantMessage = {
     citations?: AssistantCitation[];
     citationsIncomplete?: boolean;
@@ -611,7 +613,7 @@ export function useAiAssistantChat({
             return 'failed' as const;
         };
         const controller = new AbortController();
-        const timeout = window.setTimeout(() => controller.abort(), 10_000);
+        const timeout = window.setTimeout(() => controller.abort(), SNAPSHOT_TIMEOUT_MS);
         try {
             const response = await fetch(
             `/api/my/ai-assistant-session?connection=${encodeURIComponent(deskId)}` +
@@ -933,8 +935,12 @@ export function useAiAssistantChat({
     }, [conversationStorageScope, initialConversationId, loadSnapshot, rehearsal?.client_conversation_id]);
 
     useEffect(() => {
+        // A slow snapshot must not stack further requests behind it.
+        let polling = false;
         const interval = window.setInterval(() => {
-            if (conversationId.current) void loadSnapshot(conversationId.current);
+            if (!conversationId.current || polling) return;
+            polling = true;
+            void loadSnapshot(conversationId.current).finally(() => { polling = false; });
         }, 2_000);
         return () => window.clearInterval(interval);
     }, [loadSnapshot]);
