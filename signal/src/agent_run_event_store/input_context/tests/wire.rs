@@ -119,7 +119,8 @@ async fn real_object_read_transport_keeps_original_refs_bounds_and_lineage_and_r
                                     }),
                                 })
                                 .into_connection_model(host.clone(), None);
-                                ConnectionState {client_id,
+                                ConnectionState {lifecycle: Default::default(),
+client_id,
 model: (ConnectionModel {
                                         device_id: None,
                                         owner_node_id: None,

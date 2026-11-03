@@ -84,6 +84,7 @@ async fn object_wire_replays_first_receipts_after_reconnect_and_model_removal() 
                             })
                             .into_connection_model("controller".into(), None);
                             ConnectionState {
+                                lifecycle: Default::default(),
                                 client_id,
                                 model: (ConnectionModel {
                                     device_id: None,
@@ -101,6 +102,7 @@ async fn object_wire_replays_first_receipts_after_reconnect_and_model_removal() 
                         // The object update is central metadata, not an edge call.
                         // A synthetic registered peer supplies the bound audience.
                         let mut target = actor.clone();
+                        target.lifecycle = Default::default();
                         std::sync::Arc::make_mut(&mut target.model).connection_id = "host".into();
                         let (client_id, model) = (SignalingPeer {
                             version_info: Some(VersionInfo {

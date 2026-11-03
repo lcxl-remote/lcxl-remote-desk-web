@@ -91,6 +91,7 @@ async fn browser_wire_case_inner() {
                             })
                             .into_connection_model(bound_id.clone(), None);
                             ConnectionState {
+                                lifecycle: Default::default(),
                                 client_id,
                                 model: (ConnectionModel {
                                     device_id: None,

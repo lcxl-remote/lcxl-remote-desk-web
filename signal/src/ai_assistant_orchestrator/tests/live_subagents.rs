@@ -85,6 +85,7 @@ async fn host(connections: &SharedConnectionMap) {
             })
             .into_connection_model("live-fixture-host".into(), None);
             ConnectionState {
+                lifecycle: Default::default(),
                 client_id,
                 model: (ConnectionModel {
                     device_id: None,

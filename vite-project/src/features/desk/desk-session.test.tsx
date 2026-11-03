@@ -23,6 +23,10 @@ import { SIGNALING_TYPE_CODE_MEDIA_PIPELINE_STATE_CHANGED } from './constants';
 
 const signalingHarness = vi.hoisted(() => ({
   subscribers: new Set<(message: any) => void>(),
+  sendMessage: vi.fn((_type: number, _data: unknown, _target?: string) => 'admission-request'),
+  sendTracked: vi.fn(() => ({ requestId: 'r', disposition: 'sent' })),
+  cancelQueued: vi.fn(),
+  cancelQueuedScope: vi.fn(),
 }));
 const fullscreenHarness = vi.hoisted(() => ({
   connected: true,
@@ -120,9 +124,10 @@ vi.mock('./use-desk-signaling', () => ({
       signalingHarness.subscribers.add(handler);
       return () => signalingHarness.subscribers.delete(handler);
     },
-    sendMessage: vi.fn(),
-    sendTracked: vi.fn(() => ({ requestId: 'r', disposition: 'sent' })),
-    cancelQueued: vi.fn(),
+    sendMessage: signalingHarness.sendMessage,
+    sendTracked: signalingHarness.sendTracked,
+    cancelQueued: signalingHarness.cancelQueued,
+    cancelQueuedScope: signalingHarness.cancelQueuedScope,
   }),
 }));
 
@@ -185,14 +190,19 @@ vi.mock('./use-cursor-sync', () => ({
   }),
 }));
 
-vi.mock('@/hooks/use-device-id', () => ({
-  useDeviceConnectionResolution: () => ({
-    status: 'persistent',
-    connection: {
-      connection_id: 'test-desk',
-      version_info: null, peer: { remote_desk_type:'server', operation_system:'Other', display_name:null }, exec_capabilities: { available_exec_shells: [], exec_pty:false, exec_pty_elevation:false, max_ai_command_runtime_ms:null }, ai_assistant_settings: null, device_id: 'standalone-test-host',
-    },
-    deviceKey: 'client:standalone-test-host',
+const targetHarness = vi.hoisted(() => ({
+  assertCurrent: vi.fn(async () => {}),
+  refresh: vi.fn(async () => {}),
+  discoveryRevision: 0,
+}));
+vi.mock('./device-target-context', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./device-target-context')>()),
+  useDeviceTarget: () => ({
+    kind: 'device', connectionId: 'test-desk', deviceId: 'standalone-test-host',
+    basePath: '/desk/device/standalone-test-host',
+    assertCurrent: targetHarness.assertCurrent, refresh: targetHarness.refresh,
+    discoveryRevision: targetHarness.discoveryRevision,
+    resolution: { status: 'persistent', deviceKey: 'device:standalone-test-host' },
   }),
 }));
 
@@ -328,6 +338,54 @@ describe('DeskSession Control Bar', () => {
 
     // We expect it to still be expanded
     expect(content).toHaveClass('expanded');
+  });
+});
+
+describe('DeskSession target admission fence', () => {
+  beforeEach(() => {
+    signalingHarness.sendMessage.mockClear();
+    targetHarness.assertCurrent.mockReset().mockResolvedValue(undefined);
+    targetHarness.refresh.mockClear();
+    targetHarness.discoveryRevision = 0;
+  });
+  afterEach(() => {
+    targetHarness.assertCurrent.mockReset().mockResolvedValue(undefined);
+    targetHarness.discoveryRevision = 0;
+  });
+
+  it('sends one admission after an in-flight target refresh, even across rerenders', async () => {
+    let resolve!: () => void;
+    targetHarness.assertCurrent.mockReturnValue(new Promise<void>(done => { resolve = done; }));
+    const view = render(<DeskSession />);
+    view.rerender(<DeskSession />);
+    expect(targetHarness.assertCurrent).toHaveBeenCalledOnce();
+    expect(signalingHarness.sendMessage).not.toHaveBeenCalled();
+    await act(async () => { resolve(); });
+    expect(signalingHarness.sendMessage).toHaveBeenCalledOnce();
+    expect(signalingHarness.sendMessage.mock.calls[0][2]).toBe('test-desk');
+  });
+
+  it('discards a pending admission after the runtime unmounts', async () => {
+    let resolve!: () => void;
+    targetHarness.assertCurrent.mockReturnValue(new Promise<void>(done => { resolve = done; }));
+    const view = render(<DeskSession />);
+    view.unmount();
+    await act(async () => { resolve(); });
+    expect(signalingHarness.sendMessage).not.toHaveBeenCalled();
+    expect(targetHarness.refresh).not.toHaveBeenCalled();
+  });
+
+  it('admits after discovery recovers and does not admit again for later metadata refreshes', async () => {
+    targetHarness.assertCurrent.mockRejectedValueOnce(new Error('Target discovery failed'));
+    const view = render(<DeskSession />);
+    await waitFor(() => expect(targetHarness.refresh).toHaveBeenCalledOnce());
+    expect(signalingHarness.sendMessage).not.toHaveBeenCalled();
+    targetHarness.discoveryRevision = 1;
+    view.rerender(<DeskSession />);
+    await waitFor(() => expect(signalingHarness.sendMessage).toHaveBeenCalledOnce());
+    targetHarness.discoveryRevision = 2;
+    view.rerender(<DeskSession />);
+    expect(signalingHarness.sendMessage).toHaveBeenCalledOnce();
   });
 });
 

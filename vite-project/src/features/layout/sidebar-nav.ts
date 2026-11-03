@@ -1,3 +1,4 @@
+import { sessionPath } from '@/features/desk/device-target-paths';
 import { BarChart3, LifeBuoy, Monitor, Settings } from "lucide-react"
 import type { LucideIcon } from "lucide-react"
 import { AiAssistantIcon } from "@/components/ai-assistant-icon"
@@ -39,7 +40,7 @@ export function buildNavItems({
             ? [
                   {
                       title: "menu.desk_control",
-                      url: `/desk/${targetConnectionId}/control`,
+                      url: sessionPath(targetConnectionId),
                       icon: Monitor,
                   },
               ]

@@ -99,6 +99,8 @@ export type { QueryComputerUseApplicationPolicyMutationKey } from "./computerUse
 export type { QueryComputerUseCommunicationPolicyMutationKey } from "./computerUsePolicyController/useQueryComputerUseCommunicationPolicy.ts";
 export type { UpdateComputerUseApplicationPolicyMutationKey } from "./computerUsePolicyController/useUpdateComputerUseApplicationPolicy.ts";
 export type { UpdateComputerUseCommunicationPolicyMutationKey } from "./computerUsePolicyController/useUpdateComputerUseCommunicationPolicy.ts";
+export type { GetDeviceConnectionQueryKey } from "./connectionController/useGetDeviceConnection.ts";
+export type { GetDeviceConnectionSuspenseQueryKey } from "./connectionController/useGetDeviceConnectionSuspense.ts";
 export type { ListConnectionsQueryKey } from "./connectionController/useListConnections.ts";
 export type { ListConnectionsSuspenseQueryKey } from "./connectionController/useListConnectionsSuspense.ts";
 export type { VerifyConnectionMutationKey } from "./connectionController/useVerifyConnection.ts";
@@ -542,6 +544,12 @@ export { useUpdateComputerUseApplicationPolicy } from "./computerUsePolicyContro
 export { updateComputerUseCommunicationPolicyMutationKey } from "./computerUsePolicyController/useUpdateComputerUseCommunicationPolicy.ts";
 export { updateComputerUseCommunicationPolicyMutationOptions } from "./computerUsePolicyController/useUpdateComputerUseCommunicationPolicy.ts";
 export { useUpdateComputerUseCommunicationPolicy } from "./computerUsePolicyController/useUpdateComputerUseCommunicationPolicy.ts";
+export { getDeviceConnectionQueryKey } from "./connectionController/useGetDeviceConnection.ts";
+export { getDeviceConnectionQueryOptions } from "./connectionController/useGetDeviceConnection.ts";
+export { useGetDeviceConnection } from "./connectionController/useGetDeviceConnection.ts";
+export { getDeviceConnectionSuspenseQueryKey } from "./connectionController/useGetDeviceConnectionSuspense.ts";
+export { getDeviceConnectionSuspenseQueryOptions } from "./connectionController/useGetDeviceConnectionSuspense.ts";
+export { useGetDeviceConnectionSuspense } from "./connectionController/useGetDeviceConnectionSuspense.ts";
 export { listConnectionsQueryKey } from "./connectionController/useListConnections.ts";
 export { listConnectionsQueryOptions } from "./connectionController/useListConnections.ts";
 export { useListConnections } from "./connectionController/useListConnections.ts";

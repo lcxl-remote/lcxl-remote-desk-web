@@ -1,6 +1,7 @@
 import { createBrowserRouter, Navigate } from 'react-router-dom';
 
 export const router = createBrowserRouter([
+    { path: '/desk/session/:connectionId', lazy: async () => ({ Component: (await import('@/features/desk/finite-device-target')).default }) },
     {
         path: '/user/login',
         lazy: async () => ({
@@ -95,41 +96,15 @@ export const router = createBrowserRouter([
                     Component: (await import('@/features/desk/desk-list')).default,
                 }),
             },
-            {
-                path: 'desk/:id',
-                lazy: async () => ({
-                    Component: (await import('@/features/desk/desk-dashboard')).default,
-                }),
-            },
-            {
-                path: 'desk/:id/control',
-                lazy: async () => ({
-                    Component: (await import('@/features/desk/desk-session')).default,
-                }),
-            },
-            {
-                path: 'desk/:id/files',
-                lazy: async () => ({
-                    Component: (await import('@/features/file-manager/file-list')).default,
-                }),
-            },
-            {
-                path: 'desk/:id/terminal',
-                lazy: async () => ({
-                    Component: (await import('@/features/terminal/terminal-session-launcher')).default,
-                }),
-            },
-            {
-                path: 'desk/:id/browser-setup',
-                lazy: async () => ({
-                    Component: (await import('@/features/desk/browser-setup-page')).default,
-                }),
-            },
-            {
-                path: 'desk/:id/assistant',
-                lazy: async () => ({
-                    Component: (await import('@/features/desk/ai-assistant-page')).default,
-                }),
+            { path: 'desk/device/:deviceId', lazy: async () => ({ Component: (await import('@/features/desk/device-target')).default }),
+                children: [
+                    { index: true, lazy: async () => ({ Component: (await import('@/features/desk/desk-dashboard')).default }) },
+                    { path: 'control', lazy: async () => ({ Component: (await import('@/features/desk/desk-session')).default }) },
+                    { path: 'files', lazy: async () => ({ Component: (await import('@/features/file-manager/file-list')).default }) },
+                    { path: 'terminal', lazy: async () => ({ Component: (await import('@/features/terminal/terminal-session-launcher')).default }) },
+                    { path: 'browser-setup', lazy: async () => ({ Component: (await import('@/features/desk/browser-setup-page')).default }) },
+                    { path: 'assistant', lazy: async () => ({ Component: (await import('@/features/desk/ai-assistant-page')).default }) },
+                ],
             },
             {
                 path: 'support',

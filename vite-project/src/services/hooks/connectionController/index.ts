@@ -1,6 +1,14 @@
+export type { GetDeviceConnectionQueryKey } from "./useGetDeviceConnection.ts";
+export type { GetDeviceConnectionSuspenseQueryKey } from "./useGetDeviceConnectionSuspense.ts";
 export type { ListConnectionsQueryKey } from "./useListConnections.ts";
 export type { ListConnectionsSuspenseQueryKey } from "./useListConnectionsSuspense.ts";
 export type { VerifyConnectionMutationKey } from "./useVerifyConnection.ts";
+export { getDeviceConnectionQueryKey } from "./useGetDeviceConnection.ts";
+export { getDeviceConnectionQueryOptions } from "./useGetDeviceConnection.ts";
+export { useGetDeviceConnection } from "./useGetDeviceConnection.ts";
+export { getDeviceConnectionSuspenseQueryKey } from "./useGetDeviceConnectionSuspense.ts";
+export { getDeviceConnectionSuspenseQueryOptions } from "./useGetDeviceConnectionSuspense.ts";
+export { useGetDeviceConnectionSuspense } from "./useGetDeviceConnectionSuspense.ts";
 export { listConnectionsQueryKey } from "./useListConnections.ts";
 export { listConnectionsQueryOptions } from "./useListConnections.ts";
 export { useListConnections } from "./useListConnections.ts";

@@ -3,11 +3,10 @@ import { useDeskFileUpload } from './use-desk-file-upload';
 import { AiAssistantWorkspace } from "./ai-assistant-page"
 import { DeskAssistantPanel } from "./desk-assistant-panel"
 import { hasAiAssistantBrowserEntry, type AiAssistantFeatureProfile } from "./ai-assistant-features"
-import { useListConnections } from "@/services/hooks/connectionController/useListConnections"
 import { useQueryServerInfo } from "@/services/hooks/systemController/useQueryServerInfo"
 import { isAiAssistantEnabled } from "./ai-assistant-switch"
 import { useEffect, useLayoutEffect, useRef, useState, useCallback, useMemo } from "react"
-import { useParams, useNavigate } from "react-router-dom"
+import { useNavigate } from "react-router-dom"
 import { useTranslation } from "react-i18next"
 import { v4 } from "uuid"
 import { AlertTriangle, Loader2 } from "lucide-react"
@@ -101,7 +100,7 @@ import {
 } from "./constants"
 import { AdmissionRetrySchedule } from "./admission-retry"
 import { usePrivateScreenPending } from "./use-private-screen-pending"
-import { useDeviceConnectionResolution } from "@/hooks/use-device-id"
+import { useDeviceTarget } from "./device-target-context"
 import {
     DEFAULT_DESK_USER_PREFERENCES,
     DeskPreferenceStore,
@@ -169,12 +168,12 @@ export default function DeskSession({
     const assistantFeatureProfile = suppliedAssistantFeatureProfile === undefined
         ? serverInfo.data?.data?.ai_assistant ?? null
         : suppliedAssistantFeatureProfile
-    const { id: deskId } = useParams<{ id: string }>()
+    const target = useDeviceTarget()
+    const deskId = target.connectionId
     const navigate = useNavigate()
     const [assistantOpen, setAssistantOpen] = useState(false)
     const [assistantMounted, setAssistantMounted] = useState(false)
-    const { data: assistantConnections } = useListConnections()
-    const assistantConnection = assistantConnections?.data?.find(connection => connection.connection_id === deskId)
+    const assistantConnection = target.connection
     const { t } = useTranslation()
     const { toast } = useToast()
 
@@ -198,7 +197,7 @@ export default function DeskSession({
         timer: null as number | null,
     });
 
-    const { isConnected, subscribe, sendMessage, sendTracked, cancelQueued, cancelQueuedScope } = useDeskSignaling()
+    const { isConnected, subscribe, sendMessage, sendTracked, cancelQueued, cancelQueuedScope } = useDeskSignaling({ usePrepared: true })
 
     // Restriction state derived from the redeemed grant (if any) for this target.
     const restricted = useRestrictedSession(deskId);
@@ -213,7 +212,7 @@ export default function DeskSession({
     // Grant classification happens before resolving any persistent device key.
     // Restricted sessions are always memory-only even if the target itself has
     // a stable manager device id.
-    const deviceConnectionResolution = useDeviceConnectionResolution(deskId);
+    const deviceConnectionResolution = target.resolution;
     const controllerUserKey = preferenceOwnerKey === undefined
         ? "standalone-owner"
         : preferenceOwnerKey;
@@ -250,37 +249,47 @@ export default function DeskSession({
         }
     }, []);
 
+    const { assertCurrent, refresh: refreshTarget } = target;
     const sendRemoteAdmission = useCallback((newLogicalAttempt: boolean) => {
         if (
             !deskId
             || preferenceOwnerLoading
             || deviceConnectionResolution.status === "loading"
         ) return;
+        if (newLogicalAttempt) clearAdmissionRetry();
         const state = admissionRetryRef.current;
-        if (newLogicalAttempt) {
-            clearAdmissionRetry();
-            // Admission consumes the already-hydrated stable scope. The old
-            // connection-id-keyed Wayland localStorage path is intentionally
-            // gone; a missing stable identity remains page-memory-only.
-            admittedWaylandModeRef.current = preferenceStoreRef.current!
-                .loadDevice(preferenceScope)
-                .waylandControlMode;
-        }
-        const requestData = buildDesktopRequestRemotePayload(
-            deskId,
-            grantSessionId,
-            admittedWaylandModeRef.current,
-            orgId,
-            selectedSessionTargetRef.current,
-        )
-        const requestId = sendMessage(
-            SIGNALING_TYPE_CODE_REQUEST_REMOTE_ACCESS,
-            requestData,
-            deskId,
-        );
-        state.requestIds.add(requestId);
+        const generation = state.generation;
         hasRequestedRef.current = true;
+        void (async () => {
+            await assertCurrent();
+            if (state.generation !== generation) return;
+            if (newLogicalAttempt) {
+                // Admission uses the stable preference scope. A missing stable
+                // identity keeps preferences in page memory.
+                admittedWaylandModeRef.current = preferenceStoreRef.current!
+                    .loadDevice(preferenceScope)
+                    .waylandControlMode;
+            }
+            const requestData = buildDesktopRequestRemotePayload(
+                deskId,
+                grantSessionId,
+                admittedWaylandModeRef.current,
+                orgId,
+                selectedSessionTargetRef.current,
+            )
+            const requestId = sendMessage(
+                SIGNALING_TYPE_CODE_REQUEST_REMOTE_ACCESS,
+                requestData,
+                deskId,
+            );
+            state.requestIds.add(requestId);
+        })().catch(() => {
+            if (state.generation !== generation) return;
+            hasRequestedRef.current = false;
+            void refreshTarget();
+        });
     }, [
+        assertCurrent, refreshTarget,
         clearAdmissionRetry,
         deskId,
         deviceConnectionResolution.status,
@@ -302,7 +311,7 @@ export default function DeskSession({
         if (isConnected) {
             handleConnect();
         }
-    }, [isConnected, handleConnect]);
+    }, [isConnected, handleConnect, target.discoveryRevision]);
     const videoRef = useRef<HTMLVideoElement>(null)
     const videoWrapperRef = useRef<HTMLDivElement>(null)
     const videoViewportRef = useRef<HTMLDivElement>(null)
@@ -385,6 +394,7 @@ export default function DeskSession({
     const [showEscHint, setShowEscHint] = useState(false);
 
     const toolbar = useDraggableControlBar({
+        persistent: !restricted.isRestricted,
         controlBarRef,
         wrapperRef: videoWrapperRef,
         onGrab: () => layoutCleanupRef.current(),
@@ -1511,7 +1521,7 @@ export default function DeskSession({
 
     const handleConfigCancel = () => {
         setIsConfigOpen(false);
-        navigate(`/desk/${deskId}`);
+        navigate(target.exitPath);
     };
 
     const requestRemoteControl = useCallback((clipboardIntent?: boolean) => {
@@ -1594,7 +1604,7 @@ export default function DeskSession({
             }
         }
         closeRTC();
-        navigate(`/desk/${deskId}`);
+        navigate(target.exitPath);
     };
 
     const handleMediaPipelineRetry = () => {

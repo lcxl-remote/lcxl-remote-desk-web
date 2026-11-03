@@ -1,12 +1,11 @@
 import { AiAssistantIcon } from '@/components/ai-assistant-icon';
-import { useParams, useNavigate } from "react-router-dom"
+import { useNavigate } from "react-router-dom"
 import { useTranslation } from "react-i18next"
 import { Monitor, Terminal as TerminalIcon, Folder, ArrowLeft, Globe, Server, Lock } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle, CardFooter } from "@/components/ui/card"
-import { useListConnections } from "@/services/hooks/connectionController/useListConnections"
-import { Skeleton } from "@/components/ui/skeleton"
+import { useDeviceTarget } from "./device-target-context"
 import { Badge } from "@/components/ui/badge"
 import { useRestrictedSession } from "@/features/desk/restricted-session"
 import { isAiAssistantEnabled } from "@/features/desk/ai-assistant-switch"
@@ -16,33 +15,14 @@ const OSS_AI_ASSISTANT_ENABLED = import.meta.env.BASE_URL !== '/console/';
 export default function DeskDashboard({
     showAssistant = OSS_AI_ASSISTANT_ENABLED,
 }: { showAssistant?: boolean }) {
-    const { id: deskId } = useParams<{ id: string }>()
+    const target = useDeviceTarget()
+    const deskId = target.connectionId
     const navigate = useNavigate()
     const { t } = useTranslation()
-    const { data: connections, isLoading, isError, refetch } = useListConnections()
+
     const restricted = useRestrictedSession(deskId)
 
-    const connection = connections?.data?.find((s: any) => s.connection_id === deskId)
-
-    if (isLoading) {
-        return (
-            <div className="p-6 space-y-6">
-                <Skeleton className="h-8 w-[200px]" />
-                <div className="grid gap-4 md:grid-cols-3">
-                    <Skeleton className="h-[150px] w-full" />
-                    <Skeleton className="h-[150px] w-full" />
-                    <Skeleton className="h-[150px] w-full" />
-                </div>
-            </div>
-        )
-    }
-
-    if (isError) {
-        return <div className="p-6 space-y-4">
-            <p role="alert" className="text-destructive">{t('pages.deskList.loadFailed')}</p>
-            <Button variant="outline" onClick={() => void refetch()}>{t('common.refresh')}</Button>
-        </div>
-    }
+    const connection = target.connection
 
     if (!connection) {
         return (
@@ -117,7 +97,7 @@ export default function DeskDashboard({
             <div>
                 <h3 className="text-xl font-semibold mb-4">{t('pages.deskDashboard.features')}</h3>
                 <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-4">
-                    <Card className="hover:border-primary/50 transition-colors cursor-pointer flex flex-col" onClick={() => navigate(`/desk/${deskId}/control`)}>
+                    <Card className="hover:border-primary/50 transition-colors cursor-pointer flex flex-col" onClick={() => navigate(target.path('control'))}>
                         <CardHeader>
                             <CardTitle className="flex items-center gap-2">
                                 <Monitor className="h-5 w-5 text-blue-500" />
@@ -138,7 +118,7 @@ export default function DeskDashboard({
                     </Card>
 
                     {restricted.capabilityVisible('allow_terminal') && (
-                    <Card className="hover:border-primary/50 transition-colors cursor-pointer flex flex-col" onClick={() => navigate(`/desk/${deskId}/terminal`)}>
+                    <Card className="hover:border-primary/50 transition-colors cursor-pointer flex flex-col" onClick={() => navigate(target.path('terminal'))}>
                         <CardHeader>
                             <CardTitle className="flex items-center gap-2">
                                 <TerminalIcon className="h-5 w-5 text-green-500" />
@@ -160,7 +140,7 @@ export default function DeskDashboard({
                     )}
 
                     {restricted.capabilityVisible('allow_file_browse') && (
-                    <Card className="hover:border-primary/50 transition-colors cursor-pointer flex flex-col" onClick={() => navigate(`/desk/${deskId}/files`)}>
+                    <Card className="hover:border-primary/50 transition-colors cursor-pointer flex flex-col" onClick={() => navigate(target.path('files'))}>
                         <CardHeader>
                             <CardTitle className="flex items-center gap-2">
                                 <Folder className="h-5 w-5 text-yellow-500" />
@@ -183,7 +163,7 @@ export default function DeskDashboard({
 
                     {showAssistant && restricted.ownerPlaneVisible
                         && isAiAssistantEnabled(connection.ai_assistant_settings) && (
-                    <Card className="hover:border-primary/50 transition-colors cursor-pointer flex flex-col" onClick={() => navigate(`/desk/${deskId}/assistant`)}>
+                    <Card className="hover:border-primary/50 transition-colors cursor-pointer flex flex-col" onClick={() => navigate(target.path('assistant'))}>
                         <CardHeader>
                             <CardTitle className="flex items-center gap-2">
                                 <AiAssistantIcon className="h-5 w-5 text-violet-500" />

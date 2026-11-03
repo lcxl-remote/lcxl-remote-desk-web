@@ -5,7 +5,7 @@
 // main session and the separate file-transfer connection — must carry the
 // grant_session_id so the trusted central can look the grant up and stamp the
 // ceiling. This module holds that grant, keyed by the target connection id (the
-// route `:id`), in sessionStorage so it survives the navigation from redeem to the
+// finite route `:connectionId`), in sessionStorage so it survives the navigation from redeem to the
 // desk view and a page reload within the same tab, but never leaks across tabs or
 // outlives the tab.
 //
@@ -20,6 +20,7 @@ import type { SecuritySettings } from '@/services/types';
 export type GrantSource = 'device-code' | 'support';
 
 export interface SessionGrant {
+    principalKey: string;
     /// The reusable grant token attached to every RequestRemoteAccess for this target.
     grantSessionId: string;
     /// The code's capability ceiling, used only to hide entries a dimension explicitly
@@ -30,18 +31,19 @@ export interface SessionGrant {
 }
 
 const GRANT_KEY_PREFIX = 'desk-grant:';
+const memory = new Map<string, SessionGrant>();
 
 const keyFor = (deskId: string) => `${GRANT_KEY_PREFIX}${deskId}`;
 
 /// Persist a restricted grant for a target. Called right after a successful redeem,
 /// before navigating to the desk view.
 export function saveSessionGrant(deskId: string, grant: SessionGrant): void {
+    memory.set(deskId, grant);
     try {
         sessionStorage.setItem(keyFor(deskId), JSON.stringify(grant));
     } catch {
-        // Storage disabled / quota exceeded: the session degrades to the backend's
-        // fail-closed enforcement (host still requires the stamped grant), so a
-        // failure here only costs the UX hints, never safety.
+        // Storage disabled / quota exceeded: this page keeps the grant in memory.
+        // A later reload requires redemption again.
     }
 }
 
@@ -50,20 +52,22 @@ export function saveSessionGrant(deskId: string, grant: SessionGrant): void {
 export function readSessionGrant(deskId: string): SessionGrant | null {
     try {
         const raw = sessionStorage.getItem(keyFor(deskId));
-        if (!raw) return null;
+        if (!raw) return memory.get(deskId) ?? null;
         const parsed = JSON.parse(raw) as SessionGrant;
-        if (typeof parsed?.grantSessionId !== 'string' || parsed.grantSessionId.length === 0) {
+        if (typeof parsed?.grantSessionId !== 'string' || parsed.grantSessionId.length === 0
+            || typeof parsed.principalKey !== 'string' || parsed.principalKey.length === 0) {
             return null;
         }
         return parsed;
     } catch {
-        return null;
+        return memory.get(deskId) ?? null;
     }
 }
 
 /// Drop any stored grant for a target. Called on the owner/full-control path so a
 /// previous restricted grant for the same target cannot downgrade the owner session.
 export function clearSessionGrant(deskId: string): void {
+    memory.delete(deskId);
     try {
         sessionStorage.removeItem(keyFor(deskId));
     } catch {
@@ -76,6 +80,7 @@ export function clearSessionGrant(deskId: string): void {
 /// (they would be rejected server-side by principal, but must not leak as UX state
 /// either). Mirrors the native clients' `clearAllGrants` on sign-out.
 export function clearAllGrants(): void {
+    memory.clear();
     try {
         const keys: string[] = [];
         for (let i = 0; i < sessionStorage.length; i++) {

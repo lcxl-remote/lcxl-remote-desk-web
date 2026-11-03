@@ -6,13 +6,14 @@ import type { ToolbarPlacement, ToolbarPreferences, ToolbarRect, ToolbarSize } f
 function browserStorage(): Storage | null {
     try { return window.localStorage; } catch { return null; }
 }
-export function useDraggableControlBar({ controlBarRef, wrapperRef, onGrab, onLayoutChange }: {
+export function useDraggableControlBar({ controlBarRef, wrapperRef, onGrab, onLayoutChange, persistent = true }: {
     controlBarRef: RefObject<HTMLDivElement | null>;
     wrapperRef: RefObject<HTMLDivElement | null>;
     onGrab?: () => void;
     onLayoutChange?: () => void;
+    persistent?: boolean;
 }) {
-    const [preferences, setPreferences] = useState(() => readToolbarPreferences(browserStorage()));
+    const [preferences, setPreferences] = useState(() => readToolbarPreferences(persistent ? browserStorage() : null));
     const [bounds, setBounds] = useState<ToolbarRect>({ x: 0, y: 0, width: 0, height: 0 });
     const [size, setSize] = useState<ToolbarSize>({ width: 54, height: 54 });
     const [thickness, setThickness] = useState(54);
@@ -34,8 +35,8 @@ export function useDraggableControlBar({ controlBarRef, wrapperRef, onGrab, onLa
     const save = useCallback((value: ToolbarPreferences) => {
         current.current.preferences = value;
         setPreferences(value);
-        writeToolbarPreferences(browserStorage(), value);
-    }, []);
+        writeToolbarPreferences(persistent ? browserStorage() : null, value);
+    }, [persistent]);
     useLayoutEffect(() => {
         const drop = pendingDrop.current, bar = controlBarRef.current;
         if (!drop || !bar) return;

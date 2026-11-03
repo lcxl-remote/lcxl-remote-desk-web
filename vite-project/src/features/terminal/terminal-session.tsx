@@ -1,3 +1,4 @@
+import { useOptionalDeviceTarget } from '@/features/desk/device-target-context';
 import { appendBrowserPeerReport } from '@/features/desk/browser-peer-report';
 import { AiAssistantIcon } from '@/components/ai-assistant-icon';
 
@@ -55,6 +56,9 @@ const SIGNALING_TYPE_CODE_ERROR = -1
 const TERMINAL_HEARTBEAT_INTERVAL_MS = 30_000
 
 export function TerminalView({ connectionId, deviceId, command, operationSystem, onClose, orgId }: { connectionId: string; deviceId?: string; command: string; operationSystem?: OperationSystemEnum; onClose: () => void; orgId?: number }) {
+    const target = useOptionalDeviceTarget();
+    const assertCurrent = target?.assertCurrent;
+    const refreshTarget = target?.refresh;
     const { t } = useTranslation()
     const terminalRef = useRef<HTMLDivElement>(null)
     const [isConnected, setIsConnected] = useState(false)
@@ -259,6 +263,7 @@ export function TerminalView({ connectionId, deviceId, command, operationSystem,
         let ws: WebSocket | null = null;
         let connectTimer: number;
         let admissionRetryTimer: number | null = null;
+        let closeTimer: ReturnType<typeof setTimeout> | null = null;
         let disposed = false;
         const admissionRetry = new AdmissionRetrySchedule();
 
@@ -267,6 +272,7 @@ export function TerminalView({ connectionId, deviceId, command, operationSystem,
             const host = window.location.host;
             const url = new URL(`${protocol}//${host}/api/desk/terminal/${connectionId}`);
             appendBrowserPeerReport(url);
+            if (orgId != null) url.searchParams.set("org_id", String(orgId));
 
             // Add command param
             // Legacy logic: command = encodeURIComponent(select_command.join(","))
@@ -288,8 +294,10 @@ export function TerminalView({ connectionId, deviceId, command, operationSystem,
                 url.searchParams.append("grant_session_id", grant.grantSessionId);
             }
 
-            const connectWS = () => {
+            const connectWS = async () => {
                 try {
+                    await assertCurrent?.();
+                    if (disposed) return;
                     const connectUrl = new URL(url.toString());
                     if (sessionTargetIdRef.current) {
                         connectUrl.searchParams.set("session_target_id", sessionTargetIdRef.current);
@@ -422,6 +430,7 @@ export function TerminalView({ connectionId, deviceId, command, operationSystem,
                     }
 
                     ws.onclose = () => {
+                        void refreshTarget?.();
                         console.log("Terminal WebSocket disconnected")
                         if (xtermRef.current) {
                             setIsConnected(false)
@@ -431,15 +440,19 @@ export function TerminalView({ connectionId, deviceId, command, operationSystem,
                         markTerminalClosed()
 
                         // Trigger onClose after a brief delay so the user sees the disconnect message
-                        setTimeout(() => {
-                            onClose()
+                        closeTimer = setTimeout(() => {
+                            if (!disposed) onClose()
                         }, 1000)
                     }
 
                     ws.onerror = (error) => {
+                        void refreshTarget?.();
                         console.error("Terminal WebSocket error", error)
                     }
                 } catch (e) {
+                    if (disposed) return;
+                    void refreshTarget?.();
+                    onClose();
                     console.error("WebSocket init error", e)
                 }
             };
@@ -548,11 +561,12 @@ export function TerminalView({ connectionId, deviceId, command, operationSystem,
                 resizeObserverRef.current.disconnect()
             }
             clearTimeout(resizeTimeout)
+            if (closeTimer !== null) clearTimeout(closeTimer)
 
             xtermRef.current = null
             term.dispose()
         }
-    }, [connectionId, deviceId, command, onClose, t, markTerminalStarted, markTerminalClosed])
+    }, [assertCurrent, refreshTarget, connectionId, deviceId, orgId, command, onClose, t, markTerminalStarted, markTerminalClosed])
 
     const selectSessionTarget = useCallback((targetId: string) => {
         const resume = resumeSessionTargetRef.current

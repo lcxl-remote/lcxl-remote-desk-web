@@ -54,7 +54,7 @@ Drag the toolbar handle with a mouse or one finger. Near the top, bottom, left o
 
 Docked controls stay expanded. When space is limited, scroll the button list along its direction; a mouse wheel also scrolls horizontal controls. Arrows at the list edges show where more buttons are available. Click an arrow to scroll in that direction. The handle remains outside the list. Right-click the handle, press Shift+F10 while it is focused, or hold it on a touch screen to choose a position directly. Local layout and fullscreen/leave actions remain available while reconnecting.
 
-This browser remembers the toolbar position and the floating toolbar's explicit expanded/collapsed choice on this device. All accounts and remote devices on the same site reuse the latest saved layout; existing open windows keep their own positions. Refreshing or reopening restores it within the current screen and safe area. This layout preference is separate from account/device connection settings, including in temporary support sessions. Clearing site data resets it; it does not sync to another browser or device.
+This browser remembers the toolbar position and the floating toolbar's explicit expanded/collapsed choice on this device. All accounts and remote devices on the same site reuse the latest saved layout; existing open windows keep their own positions. Refreshing or reopening restores it within the current screen and safe area. This layout preference is separate from account/device connection settings. Temporary support sessions keep their layout in page memory and do not read or write saved preferences. Clearing site data resets it; it does not sync to another browser or device.
 
 
 ## Prepare the controlled host

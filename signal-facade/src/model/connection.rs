@@ -47,7 +47,8 @@ pub enum ConnectionScope {
 
 /// Optional payload of a `FetchConnections` request. Absent payload defaults to
 /// personal scope. The OSS signal server ignores this (single instance, no org).
-#[derive(Serialize, Deserialize, Clone, Debug, Default, ToSchema)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, ToSchema, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct FetchConnectionsScope {
     /// Which set of connections to return. Defaults to `Personal`.
     #[serde(default)]
@@ -71,9 +72,12 @@ use actix_ws::Session;
 use std::{
     collections::{HashMap, HashSet},
     ops::Deref,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
-use tokio::sync::{RwLock, oneshot};
+use tokio::sync::{Notify, RwLock, oneshot};
 
 /// One pending signaling request and the response types allowed to complete it.
 /// A frame with the same request id but a different wire role stays pending.
@@ -124,6 +128,7 @@ pub(crate) fn take_matching_request_callback(
 /// Used by both signal server and manager.
 #[derive(Clone)]
 pub struct ConnectionState {
+    pub lifecycle: Arc<ConnectionLifecycle>,
     /// Connection model (id, ip, version info)
     pub model: Arc<ConnectionModel>,
     /// Private host audience; never serialized in a connection response.
@@ -146,39 +151,194 @@ pub struct ConnectionState {
 }
 
 impl ConnectionState {
+    pub fn ensure_active(&self) -> Result<(), DeskSignalFacadeError> {
+        if self.lifecycle.is_retired() {
+            return DeskSignalFacadeError::custom_error(
+                DeskErrorCode::TARGET_CONNECTION_CHANGED,
+                "Target connection changed",
+            );
+        }
+        Ok(())
+    }
+    pub async fn send_binary(&self, bytes: bytes::Bytes) -> Result<(), DeskSignalFacadeError> {
+        self.ensure_active()?;
+        let mut session = self.session.write().await;
+        self.ensure_active()?;
+        session.binary(bytes).await?;
+        Ok(())
+    }
+
     /// Public connection metadata never carries a node credential.
     pub fn public_model(&self) -> ConnectionModel {
         self.model.as_ref().clone()
     }
 }
 
-/// Shared connection map: connection_id -> ConnectionState
-pub struct SharedConnectionMap(pub RwLock<BTreeMap<String, ConnectionState>>);
+/// Retirement is shared by every snapshot of a connection. Cleanup is claimed
+/// once, including cancellation paths that only reach the handler's Drop.
+#[derive(Default)]
+pub struct ConnectionLifecycle {
+    retired: AtomicBool,
+    cleanup_started: AtomicBool,
+    wake: Notify,
+}
 
+impl ConnectionLifecycle {
+    pub fn is_retired(&self) -> bool {
+        self.retired.load(Ordering::Acquire)
+    }
+
+    pub fn retire(&self) {
+        self.retired.store(true, Ordering::Release);
+        self.wake.notify_waiters();
+    }
+
+    pub(crate) fn claim_cleanup(&self) -> Option<ConnectionCleanupClaim<'_>> {
+        self.cleanup_started
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()
+            .map(|_| ConnectionCleanupClaim {
+                lifecycle: self,
+                completed: false,
+            })
+    }
+
+    pub async fn retired(&self) {
+        loop {
+            let notified = self.wake.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.is_retired() {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+/// A cancelled cleanup remains eligible for the handler's Drop fallback.
+pub(crate) struct ConnectionCleanupClaim<'a> {
+    lifecycle: &'a ConnectionLifecycle,
+    completed: bool,
+}
+impl ConnectionCleanupClaim<'_> {
+    pub fn complete(mut self) {
+        self.completed = true;
+    }
+}
+impl Drop for ConnectionCleanupClaim<'_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.lifecycle
+                .cleanup_started
+                .store(false, Ordering::Release);
+        }
+    }
+}
+
+/// The OSS identity index and connection table commit under the same short lock.
+/// Manager uses the table only; its authoritative ownership remains in Redis.
+pub struct ConnectionRegistry {
+    connections: BTreeMap<String, ConnectionState>,
+    current_clients: HashMap<String, String>,
+    exclusive_oss: bool,
+}
+
+impl Deref for ConnectionRegistry {
+    type Target = BTreeMap<String, ConnectionState>;
+    fn deref(&self) -> &Self::Target {
+        &self.connections
+    }
+}
+
+impl ConnectionRegistry {
+    fn indexed_client(state: &ConnectionState) -> Option<&str> {
+        (state.auth_context.auth_kind == crate::model::auth_context::AuthKind::TokenAuth
+            && state.model.peer.remote_desk_type == RemoteDeskTypeEnum::Server)
+            .then_some(state.client_id.as_deref())
+            .flatten()
+            .filter(|id| !id.is_empty())
+    }
+
+    pub fn insert(&mut self, id: String, state: ConnectionState) -> Option<ConnectionState> {
+        let mut retired = self.remove(&id);
+        if self.exclusive_oss
+            && let Some(client) = Self::indexed_client(&state)
+        {
+            let old_id = self.current_clients.get(client).cloned();
+            if let Some(old_id) = old_id {
+                retired = self.remove(&old_id).or(retired);
+            }
+            self.current_clients.insert(client.to_owned(), id.clone());
+        }
+        self.connections.insert(id, state);
+        retired
+    }
+
+    pub fn remove(&mut self, id: &str) -> Option<ConnectionState> {
+        let removed = self.connections.remove(id)?;
+        removed.lifecycle.retire();
+        if let Some(client) = Self::indexed_client(&removed)
+            && self
+                .current_clients
+                .get(client)
+                .is_some_and(|current| current == id)
+        {
+            self.current_clients.remove(client);
+        }
+        Some(removed)
+    }
+
+    pub fn clear(&mut self) {
+        for state in self.connections.values() {
+            state.lifecycle.retire();
+        }
+        self.connections.clear();
+        self.current_clients.clear();
+    }
+
+    pub fn current_oss_server(&self, client_id: &str) -> Option<&ConnectionState> {
+        self.current_clients
+            .get(client_id)
+            .and_then(|id| self.connections.get(id))
+    }
+}
+
+/// No mutable map dereference: mutations must maintain the identity index.
+pub struct SharedConnectionMap(RwLock<ConnectionRegistry>);
 impl Default for SharedConnectionMap {
     fn default() -> Self {
         Self::new()
     }
 }
-
 impl SharedConnectionMap {
     pub fn new() -> Self {
-        SharedConnectionMap(RwLock::new(BTreeMap::new()))
+        Self::from(BTreeMap::new())
     }
-    pub fn from(connection_map: BTreeMap<String, ConnectionState>) -> Self {
-        SharedConnectionMap(RwLock::new(connection_map))
+    pub fn new_oss() -> Self {
+        Self(RwLock::new(ConnectionRegistry {
+            connections: BTreeMap::new(),
+            current_clients: HashMap::new(),
+            exclusive_oss: true,
+        }))
+    }
+    pub fn from(connections: BTreeMap<String, ConnectionState>) -> Self {
+        Self(RwLock::new(ConnectionRegistry {
+            connections,
+            current_clients: HashMap::new(),
+            exclusive_oss: false,
+        }))
     }
 }
-
 impl Deref for SharedConnectionMap {
-    type Target = RwLock<BTreeMap<String, ConnectionState>>;
+    type Target = RwLock<ConnectionRegistry>;
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
 use crate::error::DeskSignalFacadeError;
-use crate::model::signal::{ForwardSignalingSender, SignalingType};
+use crate::model::signal::{ForwardSignalingSender, RemoteDeskTypeEnum, SignalingType};
 use desk_utils::error::DeskErrorCode;
 use std::time::Duration;
 
@@ -188,6 +348,7 @@ impl ForwardSignalingSender for ConnectionState {
         from_connection_id: Option<String>,
         signaling_model: &SignalingModel,
     ) -> Result<(), DeskSignalFacadeError> {
+        self.ensure_active()?;
         let signaling_model = SignalingModel::new(
             &signaling_model.request_id,
             signaling_model.signaling_type,
@@ -196,11 +357,10 @@ impl ForwardSignalingSender for ConnectionState {
             signaling_model.get_raw_data().clone(),
             signaling_model.response_state.clone(),
         );
-        self.session
-            .write()
-            .await
-            .text(serde_json::to_string(&signaling_model)?)
-            .await?;
+        let text = serde_json::to_string(&signaling_model)?;
+        let mut session = self.session.write().await;
+        self.ensure_active()?;
+        session.text(text).await?;
         Ok(())
     }
 
@@ -209,6 +369,7 @@ impl ForwardSignalingSender for ConnectionState {
         from_connection_id: &str,
         signaling_model: &SignalingModel,
     ) -> Result<(), DeskSignalFacadeError> {
+        self.ensure_active()?;
         let signaling_model = SignalingModel::new(
             &signaling_model.request_id,
             signaling_model.signaling_type,
@@ -217,11 +378,10 @@ impl ForwardSignalingSender for ConnectionState {
             signaling_model.get_raw_data().clone(),
             signaling_model.response_state.clone(),
         );
-        self.session
-            .write()
-            .await
-            .text(serde_json::to_string(&signaling_model)?)
-            .await?;
+        let text = serde_json::to_string(&signaling_model)?;
+        let mut session = self.session.write().await;
+        self.ensure_active()?;
+        session.text(text).await?;
 
         Ok(())
     }
@@ -235,6 +395,7 @@ impl ForwardSignalingSender for ConnectionState {
     where
         T: ?Sized + Serialize + Sync,
     {
+        self.ensure_active()?;
         let expected_response_types = crate::service::response_types_for_request(signaling_type);
         if expected_response_types.is_empty() {
             return DeskSignalFacadeError::custom_error(
@@ -253,12 +414,19 @@ impl ForwardSignalingSender for ConnectionState {
             signaling_model.request_id.clone(),
             PendingRequestCallback::new(expected_response_types, tx),
         );
-        if let Err(error) = self.session.write().await.text(signaling_text).await {
+        let sent = async {
+            let mut session = self.session.write().await;
+            self.ensure_active()?;
+            session.text(signaling_text).await?;
+            Ok::<_, DeskSignalFacadeError>(())
+        }
+        .await;
+        if let Err(error) = sent {
             self.request_callback_map
                 .write()
                 .await
                 .remove(&signaling_model.request_id);
-            return Err(error.into());
+            return Err(error);
         }
 
         // TODO: timeout should be configured in the config file
@@ -364,6 +532,20 @@ mod tests {
         assert_eq!(model.connection_id, "c1");
         assert!(model.device_id.is_none());
         assert!(model.owner_node_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn retirement_wakes_all_waiters_and_accepts_late_waiters() {
+        let lifecycle = ConnectionLifecycle::default();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::join!(lifecycle.retired(), lifecycle.retired(), async {
+                tokio::task::yield_now().await;
+                lifecycle.retire();
+            });
+            lifecycle.retired().await;
+        })
+        .await
+        .unwrap();
     }
 
     #[test]

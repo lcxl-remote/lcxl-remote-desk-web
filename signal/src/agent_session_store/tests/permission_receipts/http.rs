@@ -65,6 +65,7 @@ async fn controller_replays_before_readiness_and_rejects_changed_target_without_
         })
         .into_connection_model(host.clone(), None);
         ConnectionState {
+            lifecycle: Default::default(),
             client_id,
             model: (ConnectionModel {
                 device_id: None,
@@ -143,7 +144,13 @@ async fn controller_replays_before_readiness_and_rejects_changed_target_without_
     )
     .await;
     assert_eq!(response["success"], false);
-    map.write().await.get_mut(&host).unwrap().client_id = Some("other-device".into());
+    {
+        let mut map = map.write().await;
+        let mut peer = map.remove(&host).unwrap();
+        peer.client_id = Some("other-device".into());
+        peer.lifecycle = Default::default();
+        map.insert(host.clone(), peer);
+    }
     let response: serde_json::Value = actix_web::test::call_and_read_body_json(
         &app,
         actix_web::test::TestRequest::post()

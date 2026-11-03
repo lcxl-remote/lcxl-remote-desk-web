@@ -1,3 +1,4 @@
+import { devicePath } from './device-target-paths';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
@@ -112,7 +113,7 @@ export default function AiAssistantAttentionPage() {
                             </div>
                             {connection && item.clientConversationId ? (
                                 <Button asChild size="sm">
-                                    <Link to={`/desk/${encodeURIComponent(connection)}/assistant${search}`}>
+                                    <Link to={`${devicePath(item.deviceId, 'assistant')}${search}`}>
                                         {t('pages.aiAssistantAttention.open')}<ArrowRight className="ml-2 h-4 w-4" />
                                     </Link>
                                 </Button>

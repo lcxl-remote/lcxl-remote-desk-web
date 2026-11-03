@@ -7,7 +7,7 @@ vi.mock('react-i18next', () => import('@/test-utils/i18n-mock').then(module => m
 
 it('opens the assistant for the selected online device', () => {
     render(<MemoryRouter><AiAssistantConversationChoices
-        devices={[{ connectionId: 'desk-1', name: 'Office Mac', description: 'macOS' }]}
+        devices={[{ connectionId: 'desk-1', deviceId: 'stable-device', name: 'Office Mac', description: 'macOS' }]}
         loading={false}
         error={false}
         refreshing={false}
@@ -16,5 +16,5 @@ it('opens the assistant for the selected online device', () => {
 
     expect(screen.getByText('Office Mac')).toBeInTheDocument();
     expect(screen.getByRole('link', { name: /Open AI Assistant/ }))
-        .toHaveAttribute('href', '/desk/desk-1/assistant');
+        .toHaveAttribute('href', '/desk/device/stable-device/assistant');
 });

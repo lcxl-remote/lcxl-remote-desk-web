@@ -1,5 +1,6 @@
+import { useDeviceTarget } from '@/features/desk/device-target-context';
 import { useState, useRef, useEffect, useCallback } from "react"
-import { useParams, useNavigate } from "react-router-dom"
+import { useNavigate } from "react-router-dom"
 import { useTranslation } from "react-i18next"
 import { FileIcon, FolderIcon, ArrowUp, RefreshCw, Home, HardDrive, ArrowLeft, Download, Upload, Loader2, CheckCircle2, XCircle, X, ChevronLeft, ChevronRight, Trash2, Info } from "lucide-react"
 
@@ -72,12 +73,13 @@ function formatRemainingTime(seconds: number): string {
 }
 
 export default function FileList({ orgId }: { orgId?: number } = {}) {
-    const { id } = useParams<{ id: string }>()
+    const { connectionId: id } = useDeviceTarget()
     return <FileListContent key={`${orgId ?? ''}:${id ?? ''}`} orgId={orgId} />
 }
 
 function FileListContent({ orgId }: { orgId?: number }) {
-    const { id: connectionId } = useParams<{ id: string }>()
+    const target = useDeviceTarget()
+    const { connectionId } = target
     const navigate = useNavigate()
     const { t } = useTranslation()
     // A fresh request also reloads Home when the previous request was Home.
@@ -357,7 +359,7 @@ function FileListContent({ orgId }: { orgId?: number }) {
             />
             <div className="flex items-center justify-between px-4 py-2 border-b">
                 <div className="flex items-center gap-2 overflow-hidden">
-                    <Button variant="outline" size="icon" onClick={() => navigate(`/desk/${connectionId}`)} title={t('pages.fileManager.backToDashboard')}>
+                    <Button variant="outline" size="icon" onClick={() => navigate(target.basePath)} title={t('pages.fileManager.backToDashboard')}>
                         <ArrowLeft className="h-4 w-4" />
                     </Button>
                     <Button variant="ghost" size="icon" onClick={() => handleNavigate(null)} aria-label={t('pages.fileManager.userHome')} title={t('pages.fileManager.userHome')}>

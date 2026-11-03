@@ -99,6 +99,7 @@ async fn real_socket_observer_rejects_wrong_subject_and_frame_then_commits_origi
                                     None,
                                 );
                             ConnectionState {
+                                lifecycle: Default::default(),
                                 client_id,
                                 model: (ConnectionModel {
                                     device_id: None,

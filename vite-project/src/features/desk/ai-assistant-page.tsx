@@ -1,3 +1,5 @@
+import { useOptionalDeviceTarget } from './device-target-context';
+import { devicePath } from './device-target-paths';
 import { AssistantGoalProposalControls } from './assistant-goal-proposal-controls';
 import { ApprovalReviews, useOwnApprovalAccess } from '@/features/approval/reviews';
 import { AssistantGoalPanel, goalPlanningAction } from './assistant-goal-panel';
@@ -33,7 +35,7 @@ import { AssistantComposerStatus } from './assistant-composer-status';
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
 import { capabilityDescriptionKey } from './assistant-capability-copy';
 import { type FormEvent, useEffect, useRef, useState } from 'react';
-import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { Link, useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { Bot, Check, AlertTriangle, ArrowDown, ArrowLeft, CalendarClock, Eye, FolderKey, ListTodo, ListTree, LoaderCircle, Monitor, Paperclip, RefreshCw, Settings2, ShieldCheck, SlidersHorizontal, X } from 'lucide-react';
 
@@ -43,7 +45,6 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
 import { MarkdownContent } from '@/components/markdown-content';
-import { useListConnections } from '@/services/hooks/connectionController/useListConnections';
 import { useGetModelProvider } from '@/services/hooks/modelProviderController/useGetModelProvider';
 import { AssistantBrowserPairing } from './assistant-browser-pairing';
 import { canPairLocalDevice } from './local-device-pairing';
@@ -253,7 +254,7 @@ export function AiAssistantWorkspace({
 }) {
     const { t } = useTranslation();
     const { i18n } = useTranslation();
-    const { isConnected, subscribe, sendMessage } = useDeskSignaling();
+    const { isConnected, subscribe, sendMessage } = useDeskSignaling({ usePrepared: true });
     const { entries, inspectSession, inspectUi, scheduleUi, cancelDelayedUi, remainingSeconds, applications, listApplications, applicationSelectionAvailable } = useAiAssistantObservation({
         deskId,
         enabled: assistantEnabled && isConnected,
@@ -276,11 +277,12 @@ export function AiAssistantWorkspace({
     const capabilities = useAiAssistantCapabilities({
         deskId, subscribe, sendMessage, enabled: assistantEnabled && isConnected,
     });
-    const recoveryConnections = useListConnections();
+    const target = useOptionalDeviceTarget();
+    const recoveryConnection = target?.connection;
     const exportSessionBackup = async (conversation: string | undefined, id: string) => {
         // Recovery records use the durable server session key, not the client
         // conversation UUID used when submitting new assistant turns.
-        const connection = recoveryConnections.data?.data?.find(item => item.connection_id === deskId);
+        const connection = recoveryConnection;
         if (!conversation || !connection) throw new Error('Backup target unavailable');
         const data = await exportDeviceFileRecovery({ connection: deskId, device_id: connection.device_id,
             conversation_id: conversation, recovery_id: id }, { responseType: 'blob' });
@@ -739,8 +741,8 @@ export function AiAssistantWorkspace({
             )}
 </>,
                 connection: <>
-            {recoveryConnections.data?.data?.some(item => item.connection_id === deskId) && <FileRecoverySettings
-                key={deskId} target={{ connection: deskId, device_id: recoveryConnections.data.data?.find(item => item.connection_id === deskId)?.device_id }} />}
+            {(recoveryConnection?.connection_id === deskId) && <FileRecoverySettings
+                key={deskId} target={{ connection: deskId, device_id: recoveryConnection?.device_id }} />}
             {localPairingAvailable && <AssistantBrowserPairing assistantEnabled={assistantEnabled} />}
 </>,
                 observation: <>            <div className="grid gap-4 lg:grid-cols-2">
@@ -801,7 +803,7 @@ export function AiAssistantWorkspace({
                 </Alert>
             )}
             {browserTakeoverRequired && (
-                <Link to={`/desk/${encodeURIComponent(deskId)}/browser-setup`}
+                <Link to={devicePath(stableDeviceId, 'browser-setup', target?.orgId)}
                     state={{ returnTo: setupOrigin.pathname + setupOrigin.search }} data-testid="browser-remote-takeover"
                     className="flex w-full shrink-0 items-center gap-2 border bg-muted/40 px-3 py-2 text-sm hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
                     <Monitor className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
@@ -822,13 +824,13 @@ export function AiAssistantWorkspace({
                             )}
                             <CardTitle className="flex min-w-0 items-center gap-2 text-base">
                                 <AssistantConnectionIcon connected={isConnected} enabled={assistantEnabled} />
-                                <span title={recoveryConnections.data?.data?.find(item => item.connection_id === deskId)?.peer.display_name ?? deskId}
-                                    className="truncate">{recoveryConnections.data?.data?.find(item => item.connection_id === deskId)?.peer.display_name
+                                <span title={recoveryConnection?.peer.display_name ?? deskId}
+                                    className="truncate">{recoveryConnection?.peer.display_name
                                         || chat.sessionTarget?.display_name || t('pages.aiAssistant.chatTitle')}</span>
                             </CardTitle>
                         </div>
                         <div className="assistant-header-actions flex shrink-0 items-center gap-1">
-                            <AssistantHistory deskId={deskId} deviceId={recoveryConnections.data?.data?.find(item => item.connection_id === deskId)?.device_id} disabled={!!rehearsal || chat.hydrating || chat.contextUpdating || chat.permissionUpdating || !!chat.grantRevoking}
+                            <AssistantHistory deskId={deskId} deviceId={recoveryConnection?.device_id} disabled={!!rehearsal || chat.hydrating || chat.contextUpdating || chat.permissionUpdating || !!chat.grantRevoking}
                                 onDeleted={id => { if (chat.forgetConversation(id)) setSelectedCapabilityIds([]); }}
                                 onSelect={(id) => {
                                     if (!chat.selectConversation(id)) return false;
@@ -1202,7 +1204,8 @@ function AiAssistantDevicePage({
 }: {
     featureProfile?: AiAssistantFeatureProfile | null;
 }) {
-    const { id: deskId } = useParams<{ id: string }>();
+    const target = useOptionalDeviceTarget();
+    const deskId = target?.connectionId;
     const [searchParams] = useSearchParams();
     const { t } = useTranslation();
     const serverInfo = useQueryServerInfo({ query: { enabled: suppliedFeatureProfile === undefined } });
@@ -1210,8 +1213,8 @@ function AiAssistantDevicePage({
         ? serverInfo.data?.data?.ai_assistant ?? null
         : suppliedFeatureProfile;
     const restricted = useRestrictedSession(deskId);
-    const { data: connections, isLoading } = useListConnections();
-    const connection = connections?.data?.find((item: any) => item.connection_id === deskId);
+    const connection = target?.connection;
+    const isLoading = false;
     const localPairingAvailable = canPairLocalDevice(connection?.device_id, serverInfo);
 
     if (suppliedFeatureProfile === undefined && serverInfo.isLoading) {
@@ -1266,7 +1269,7 @@ function AiAssistantDevicePage({
                 {row => <AiAssistantWorkspace
                     key={row.rehearsal_id}
                     rehearsal={row}
-                    backTo={`/desk/${encodeURIComponent(deskId)}`}
+                    backTo={target!.basePath}
                     deskId={deskId}
                     stableDeviceId={connection.device_id ?? ''}
                     localPairingAvailable={localPairingAvailable}
@@ -1275,7 +1278,7 @@ function AiAssistantDevicePage({
                 />}
             </AiAssistantRehearsalGate> : (
                 <AiAssistantWorkspace
-                    backTo={`/desk/${encodeURIComponent(deskId)}`}
+                    backTo={target!.basePath}
                     initialConversationId={searchParams.get('conversation')}
                     deskId={deskId}
                     stableDeviceId={connection.device_id ?? ''}

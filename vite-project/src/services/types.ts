@@ -5635,6 +5635,18 @@ export type ConnectionModel = {
     version_info?: (null | VersionInfo);
 };
 
+export const connectionScopeEnum = {
+    personal: "personal",
+    org: "org"
+} as const;
+
+export type ConnectionScopeEnumKey = (typeof connectionScopeEnum)[keyof typeof connectionScopeEnum];
+
+/**
+ * @description Selector for which connections a `FetchConnections` request wants.\n\n`Personal` returns the requester\'s own devices; `Org` returns the devices\nauthorized to the named organization (manager only). The OSS single-instance\nsignal server has no organization model and ignores the variant, returning\nonly the local Server connections authorized by the requester\'s identity.
+*/
+export type ConnectionScope = ConnectionScopeEnumKey;
+
 export const connectionSettingsEffectEnum = {
     unchanged: "unchanged",
     needs_reconnect: "needs_reconnect"
@@ -6035,6 +6047,7 @@ export const deskErrorCodeEnum = {
     AI_APPROVAL_PROBE_OUTPUT_TRUNCATED: 110,
     AI_CONTEXT_SUMMARY_OUTPUT_TRUNCATED: 111,
     AI_ASSISTANT_DATA_CHANGED: 112,
+    TARGET_CONNECTION_CHANGED: 113,
     ACTION_NEED_RETRY: 1001,
     REMOTE_DESK_OFFLINE: 10003,
     TIMEOUT: 10004,
@@ -9701,6 +9714,15 @@ export type RedeemCodeResult = {
      * @type string
     */
     target_connection_id: string;
+    /**
+     * @description Stable navigation context; absent for fixed OSS grants.
+     * @type string,null
+    */
+    target_device_id?: string | null;
+    /**
+     * @type integer,null, int32
+    */
+    target_org_id?: number | null;
 };
 
 export const rehearsalApprovalSourceEnum = {
@@ -12122,6 +12144,59 @@ export type RestResponseComputerUseCommunicationPolicy = {
     success: boolean;
 };
 
+export type RestResponseConnectionModel = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @description Connection information
+     * @type object | undefined
+    */
+    data?: {
+        ai_assistant_settings?: (null | AiAssistantSettings);
+        /**
+         * @description Connection ID
+         * @type string
+        */
+        connection_id: string;
+        /**
+         * @description Stable public target: the OSS client identity or Manager device UUID.\nBrowser connections have no device handle. This value grants no authority.
+         * @type string,null
+        */
+        device_id?: string | null;
+        /**
+         * @description Effective host execution capabilities, independent of API version and authority.
+         * @type object
+        */
+        exec_capabilities: HostExecCapabilities;
+        /**
+         * @description IP address of the connection
+         * @type string,null
+        */
+        ip?: string | null;
+        /**
+         * @description Owning manager instance node id for cross-instance routing. Filled by the\nmanager; `None` on the OSS signal server (single instance, no\ncross-instance routing).
+         * @type string,null
+        */
+        owner_node_id?: string | null;
+        /**
+         * @description Public peer description. The authenticated boundary decides role and browser name.
+         * @type object
+        */
+        peer: PeerInfo;
+        version_info?: (null | VersionInfo);
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
 export type RestResponseConnectionVerifyResult = {
     /**
      * @type integer, int32
@@ -13534,6 +13609,15 @@ export type RestResponseRedeemCodeResult = {
          * @type string
         */
         target_connection_id: string;
+        /**
+         * @description Stable navigation context; absent for fixed OSS grants.
+         * @type string,null
+        */
+        target_device_id?: string | null;
+        /**
+         * @type integer,null, int32
+        */
+        target_org_id?: number | null;
     };
     /**
      * @type string,null
@@ -18249,6 +18333,37 @@ export type DeleteDeviceCodeMutation = {
     Errors: any;
 };
 
+export type GetDeviceConnectionPathParams = {
+    /**
+     * @type string
+    */
+    device_id: string;
+};
+
+export type GetDeviceConnectionQueryParams = {
+    /**
+     * @description Selector for which connections a `FetchConnections` request wants.\n\n`Personal` returns the requester\'s own devices; `Org` returns the devices\nauthorized to the named organization (manager only). The OSS single-instance\nsignal server has no organization model and ignores the variant, returning\nonly the local Server connections authorized by the requester\'s identity.
+     * @type string | undefined
+    */
+    scope?: ConnectionScope;
+    /**
+     * @description Organization id, required when `scope` is `Org`.
+     * @type string | undefined
+    */
+    org_id?: string;
+};
+
+export type GetDeviceConnection200 = RestResponseConnectionModel;
+
+export type GetDeviceConnectionQueryResponse = GetDeviceConnection200;
+
+export type GetDeviceConnectionQuery = {
+    Response: GetDeviceConnection200;
+    PathParams: GetDeviceConnectionPathParams;
+    QueryParams: GetDeviceConnectionQueryParams;
+    Errors: any;
+};
+
 /**
  * @description WebSocket stream
 */
@@ -18878,6 +18993,11 @@ export type OpenTerminalSessionPathParams = {
 
 export type OpenTerminalSessionQueryParams = {
     /**
+     * @description Explicit organization context; never falls back to another scope.
+     * @type integer,null, int32
+    */
+    org_id?: number | null;
+    /**
      * @description The command to start the terminal session. with the format of \"path/to/executable,arg1,arg2\"
      * @type string
     */
@@ -18922,6 +19042,10 @@ export type ListTerminalPathParams = {
 };
 
 export type ListTerminalQueryParams = {
+    /**
+     * @type integer,null, int32
+    */
+    org_id?: number | null;
     /**
      * @description Target device handle (UUID; manager multi-instance addressing); `None` on\nthe OSS single-instance signal.
      * @type string,null

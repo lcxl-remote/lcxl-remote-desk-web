@@ -14,9 +14,16 @@ const allPrompt = (): SecuritySettings => ({});
 describe('session-grant storage', () => {
     beforeEach(() => sessionStorage.clear());
 
+    it('rejects stored grants without a valid principal binding', () => {
+        for (const principalKey of [undefined, null, '', 7]) {
+            sessionStorage.setItem('desk-grant:unbound', JSON.stringify({ principalKey, grantSessionId: 'grant', accessCeiling: null, source: 'support' }));
+            expect(readSessionGrant('unbound')).toBeNull();
+        }
+    });
+
     it('round-trips a saved grant and clears it', () => {
         saveSessionGrant('desk-1', {
-            grantSessionId: 'gs-1',
+            principalKey: 'code-session', grantSessionId: 'gs-1',
             accessCeiling: { allow_terminal: true },
             source: 'device-code',
         });
@@ -30,19 +37,19 @@ describe('session-grant storage', () => {
     });
 
     it('is scoped per target', () => {
-        saveSessionGrant('desk-a', { grantSessionId: 'gs-a', accessCeiling: null, source: 'support' });
+        saveSessionGrant('desk-a', { principalKey: 'code-session', grantSessionId: 'gs-a', accessCeiling: null, source: 'support' });
         expect(readSessionGrant('desk-a')?.grantSessionId).toBe('gs-a');
         expect(readSessionGrant('desk-b')).toBeNull();
     });
 
     it('ignores a grant with an empty token', () => {
-        sessionStorage.setItem('desk-grant:desk-x', JSON.stringify({ grantSessionId: '', accessCeiling: null }));
+        sessionStorage.setItem('desk-grant:desk-x', JSON.stringify({ principalKey: 'code-session', grantSessionId: '', accessCeiling: null }));
         expect(readSessionGrant('desk-x')).toBeNull();
     });
 
     it('clearAllGrants drops every target but leaves unrelated keys', () => {
-        saveSessionGrant('desk-a', { grantSessionId: 'gs-a', accessCeiling: null, source: 'support' });
-        saveSessionGrant('desk-b', { grantSessionId: 'gs-b', accessCeiling: null, source: 'device-code' });
+        saveSessionGrant('desk-a', { principalKey: 'code-session', grantSessionId: 'gs-a', accessCeiling: null, source: 'support' });
+        saveSessionGrant('desk-b', { principalKey: 'code-session', grantSessionId: 'gs-b', accessCeiling: null, source: 'device-code' });
         sessionStorage.setItem('unrelated', 'keep-me');
 
         clearAllGrants();
@@ -67,7 +74,7 @@ describe('deriveRestrictedSession', () => {
 
     it('hides only the dimensions the ceiling explicitly denies', () => {
         saveSessionGrant('desk-1', {
-            grantSessionId: 'gs-1',
+            principalKey: 'code-session', grantSessionId: 'gs-1',
             accessCeiling: { allow_terminal: false, allow_clipboard_sync: true, ...allPrompt() },
             source: 'device-code',
         });
@@ -83,7 +90,7 @@ describe('deriveRestrictedSession', () => {
     });
 
     it('treats a null ceiling as all-tryable but still restricted', () => {
-        saveSessionGrant('desk-1', { grantSessionId: 'gs-1', accessCeiling: null, source: 'support' });
+        saveSessionGrant('desk-1', { principalKey: 'code-session', grantSessionId: 'gs-1', accessCeiling: null, source: 'support' });
         const r = deriveRestrictedSession('desk-1');
         expect(r.isRestricted).toBe(true);
         expect(r.ownerPlaneVisible).toBe(false);
@@ -93,7 +100,7 @@ describe('deriveRestrictedSession', () => {
     it('anti-downgrade: clearing the grant before an owner connect restores full control', () => {
         // Redeem a restricted code for a target in this tab...
         saveSessionGrant('desk-1', {
-            grantSessionId: 'gs-1',
+            principalKey: 'code-session', grantSessionId: 'gs-1',
             accessCeiling: { allow_terminal: false, allow_file_browse: false },
             source: 'device-code',
         });

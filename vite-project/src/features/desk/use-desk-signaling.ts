@@ -1,3 +1,5 @@
+import { deskErrorCodeEnum } from '@/services/types';
+import { useOptionalDeviceTarget } from './device-target-context';
 import { appendBrowserPeerReport } from '@/features/desk/browser-peer-report';
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { v4 } from 'uuid';
@@ -63,7 +65,7 @@ const HEARTBEAT_TIMEOUT_MS = 60_000; // 2 missed heartbeats = dead
 const RECONNECT_BASE_DELAY_MS = 1_000;
 const RECONNECT_MAX_DELAY_MS = 30_000;
 
-export function useDeskSignaling() {
+export function useDeskSignaling({ usePrepared = false }: { usePrepared?: boolean } = {}) {
     const socketRef = useRef<WebSocket | null>(null);
     const [isConnected, setIsConnected] = useState(false);
     const messageQueue = useRef<QueuedMessage[]>([]);
@@ -135,7 +137,12 @@ export function useDeskSignaling() {
         }
     }, []);
 
-    const connect = useCallback(() => {
+    const target = useOptionalDeviceTarget();
+    const assertCurrent = target?.assertCurrent;
+    const claimSignalingSocket = usePrepared ? target?.claimSignalingSocket : undefined;
+    const refreshTarget = target?.refresh;
+    const connect = useCallback(async () => {
+        try { if (assertCurrent) await assertCurrent(); } catch { void refreshTarget?.(); return; }
         if (intentionalCloseRef.current) return;
         if (socketRef.current && (socketRef.current.readyState === WebSocket.CONNECTING || socketRef.current.readyState === WebSocket.OPEN)) return;
 
@@ -146,10 +153,12 @@ export function useDeskSignaling() {
         const host = window.location.host;
         const url = new URL(`${protocol}//${host}/api/desk/signaling`);
         appendBrowserPeerReport(url);
-        const ws = new WebSocket(url.toString());
+        const prepared = claimSignalingSocket?.();
+        const ws = prepared ?? new WebSocket(url.toString());
         socketRef.current = ws;
 
         ws.onopen = () => {
+            if (intentionalCloseRef.current || socketRef.current !== ws) return;
             console.log('Signaling WebSocket connected');
             setIsConnected(true);
             reconnectAttemptsRef.current = 0;
@@ -196,6 +205,7 @@ export function useDeskSignaling() {
         };
 
         ws.onclose = () => {
+            if (!intentionalCloseRef.current) void refreshTarget?.();
             console.log('Signaling WebSocket closed');
             setIsConnected(false);
             clearHeartbeat();
@@ -212,12 +222,17 @@ export function useDeskSignaling() {
         };
 
         ws.onerror = (error) => {
+            void refreshTarget?.();
             console.error('Signaling WebSocket error', error);
         };
 
         ws.onmessage = (event) => {
             try {
                 const message = JSON.parse(event.data) as SignalingMessage;
+                const code = message.response_state?.error_code;
+                if (code === deskErrorCodeEnum.TARGET_CONNECTION_CHANGED
+                    || code === deskErrorCodeEnum.REMOTE_DESK_OFFLINE
+                    || code === deskErrorCodeEnum.DEVICE_NOT_FOUND) void refreshTarget?.();
 
                 // Track heartbeat responses
                 if (message.signaling_type === SIGNALING_TYPE_CODE_HEARTBEAT_ACKNOWLEDGED) {
@@ -244,7 +259,8 @@ export function useDeskSignaling() {
                 console.error('Failed to parse signaling message', e);
             }
         };
-    }, [clearHeartbeat, clearReconnectTimer]);
+        if (prepared && prepared.readyState === WebSocket.OPEN) ws.onopen?.(new Event('open'));
+    }, [assertCurrent, claimSignalingSocket, refreshTarget, clearHeartbeat, clearReconnectTimer]);
 
     /**
      * Send a signaling message. Returns the actual `request_id` that
@@ -349,13 +365,24 @@ export function useDeskSignaling() {
             intentionalCloseRef.current = true;
             clearHeartbeat();
             clearReconnectTimer();
+            messageQueue.current = [];
             if (socketRef.current) {
+                socketRef.current.onopen = null;
+                socketRef.current.onmessage = null;
+                socketRef.current.onerror = null;
                 socketRef.current.onclose = null;
                 socketRef.current.close();
                 socketRef.current = null;
             }
         };
     }, [connect, clearHeartbeat, clearReconnectTimer]);
+
+    // A failed discovery can leave no socket and no close event to schedule a
+    // retry. A later successful discovery may resume this transport without
+    // rebuilding an established socket or replaying a terminal operation.
+    useEffect(() => {
+        if (target?.discoveryRevision) void connect();
+    }, [target?.discoveryRevision, connect]);
 
     return {
         isConnected,

@@ -323,10 +323,7 @@ impl SignalExecPtyCarriers {
             .cloned()
             .ok_or(CarrierError::TargetOffline)?;
         target
-            .session
-            .write()
-            .await
-            .binary(bytes)
+            .send_binary(bytes)
             .await
             .map_err(|_| CarrierError::Transport)
     }
@@ -590,7 +587,7 @@ fn cancel_from_host_frame(frame: &PtyWireFrame) -> Option<PtyCancelFrame> {
 
 async fn send_cancel(target: &ConnectionState, cancel: PtyCancelFrame) {
     if let Ok(encoded) = exec_pty_wire::encode(&PtyWireFrame::Cancel(cancel)) {
-        let _ = target.session.write().await.binary(encoded).await;
+        let _ = target.send_binary(encoded.into()).await;
     }
 }
 

@@ -42,7 +42,6 @@ pub mod windows_office_helper;
 pub mod worker;
 
 use std::{
-    collections::BTreeMap,
     env,
     fs::{File, TryLockError},
     io::ErrorKind,
@@ -114,7 +113,7 @@ use desk_signal::{
             get_approval_model_provider, reuse_ai_gateway_for_approval,
             test_approval_model_provider, update_approval_model_provider,
         },
-        connection::list_connections,
+        connection::{get_device_connection, list_connections},
         device_code::{
             batch_delete_device_codes, create_device_code, delete_device_code, list_device_codes,
             update_device_code,
@@ -361,6 +360,7 @@ pub fn configure_api_surface(
                     .service(stop_support)
                     .service(support_status)
                     .service(list_connections)
+                    .service(get_device_connection)
                     .service(list_terminal)
                     .service(open_terminal_session)
                     .service(query_sysinfo)
@@ -770,7 +770,7 @@ pub async fn run_with_hub(
             None
         };
 
-    let connection_map = web::Data::new(SharedConnectionMap::from(BTreeMap::new()));
+    let connection_map = web::Data::new(SharedConnectionMap::new_oss());
     if startup_mode_has_signal_db(&startup_mode) {
         actix_web::rt::spawn(desk_signal::file_recovery_dispatch::run(
             desk_signal::db::get_db().clone(),
@@ -1324,7 +1324,7 @@ mod tests {
                 .into_utoipa_app()
                 .app_data(settings)
                 .app_data(web::Data::new(None::<TauriLoginToken>))
-                .app_data(web::Data::new(SharedConnectionMap::from(BTreeMap::new())))
+                .app_data(web::Data::new(SharedConnectionMap::new_oss()))
                 .app_data(web::Data::new(None::<Arc<host_control::HostControlHub>>))
                 .configure(|cfg| {
                     configure_api_surface(
@@ -1536,6 +1536,7 @@ mod tests {
         for expected in [
             "/api/desk/settings",
             "/api/desk/device_codes",
+            "/api/desk/devices/{device_id}/connection",
             "/api/desk/signaling",
             "/api/my/ai-assistant-session",
             "/api/my/ai-assistant-session/permission-decision",
@@ -1646,7 +1647,7 @@ mod tests {
                 .app_data(settings)
                 .app_data(validator)
                 .app_data(web::Data::new(None::<TauriLoginToken>))
-                .app_data(web::Data::new(SharedConnectionMap::from(BTreeMap::new())))
+                .app_data(web::Data::new(SharedConnectionMap::new_oss()))
                 .app_data(web::Data::new(None::<Arc<host_control::HostControlHub>>))
                 .configure(|cfg| {
                     configure_api_surface(

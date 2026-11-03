@@ -1,6 +1,12 @@
 import modelMetrics from './model-metrics';
 
 export default {
+    "pages.deviceTarget.unavailable": "目标不可用，请刷新后重试。",
+    "pages.deviceTarget.offline": "设备已离线。",
+    "pages.deviceTarget.storeUnavailable": "暂时无法查询设备状态，请稍后重试。",
+    "pages.deviceTarget.sessionUnavailable": "此会话不可用，请重新兑换设备码。",
+    "pages.deviceTarget.redeemAgain": "重新兑换设备码",
+
     "pages.desk.fileUpload.title": "文件上传",
     "pages.desk.fileUpload.drop": "松开即可上传",
     "pages.desk.fileUpload.downloads": "保存到远端下载目录",

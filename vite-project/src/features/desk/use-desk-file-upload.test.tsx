@@ -76,4 +76,21 @@ describe('desktop file drop', () => {
         expect(fireEvent.drop(document.body, { dataTransfer: data() })).toBe(false);
         expect(fireEvent.drop(document.body, { dataTransfer: { types: ['text/plain'] } })).toBe(true);
     });
+    it('drops the old target queue and ignores late upload completion after a device generation switch', async () => {
+        const old = channel(); const next = channel();
+        const view = render(<Desk key="c1" channel={old} />);
+        fireEvent.drop(screen.getByTestId('desktop'), { dataTransfer: data('first.txt') });
+        fireEvent.drop(screen.getByTestId('desktop'), { dataTransfer: data('queued.txt') });
+        const request = frames(old).find(frame => frame.type === 'upload_request');
+        const late = old.onmessage;
+        view.rerender(<Desk key="c2" channel={next} />);
+        await act(async () => late?.({ data: JSON.stringify({ type: 'upload_response', transfer_id: request.transfer_id, accepted: true }) }));
+        await flush();
+        expect(next.textSent).toHaveLength(0);
+        expect(frames(old).filter(frame => frame.type === 'upload_request')).toHaveLength(1);
+        expect(screen.queryByText('queued.txt')).not.toBeInTheDocument();
+        fireEvent.drop(screen.getByTestId('desktop'), { dataTransfer: data('new.txt') });
+        expect(frames(next).filter(frame => frame.type === 'upload_request')).toHaveLength(1);
+    });
+
 });

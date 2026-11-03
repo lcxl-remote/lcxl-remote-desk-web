@@ -256,56 +256,49 @@ pub struct SignalingHandler<U: SignalingUser> {
 
 impl<U: SignalingUser> Drop for SignalingHandler<U> {
     fn drop(&mut self) {
-        let handle = match Handle::try_current() {
-            Ok(handle) => handle,
-            Err(e) => {
-                log::warn!(
-                    "Failed to get tokio handle in SignalingContext::drop: {}",
-                    e
-                );
-                return;
-            }
-        };
-        let connection_id = self.connection_state.model.connection_id.clone();
-        let connection_map = self.connection_map.clone();
-        let blocking_handle = handle.clone();
-        let removed_value = futures::executor::block_on(async move {
-            blocking_handle
-                .spawn_blocking(move || connection_map.blocking_write().remove(&connection_id))
-                .await
-        });
-        match removed_value {
-            Ok(None) => log::error!(
-                "Failed to remove connection from map: connection {} not found",
-                self.connection_state.model.connection_id
-            ),
-            Ok(Some(connection_state)) => {
-                log::info!(
-                    "Removed connection from map: {}",
-                    connection_state.model.connection_id
-                )
-            }
-            Err(err) => log::error!("Failed to remove connection from map: {:?}", err),
-        }
-
-        // Active cleanup signal: a Browser leaving has broken every PC
-        // it was the remote of. Fan a `ConnectionRemoved` out to all
-        // remaining `Server`-type peers so their daemon-side PC
-        // managers can release per-`connection_id` resources (DXGI
-        // duplication, encoder, IPC senders) immediately, instead of
-        // waiting for the multi-second ICE `disconnected → failed`
-        // fallback. Run in a background task so a slow / blocked peer
-        // can't stall the drop path. We only fan out for Browser
-        // departures: a Server leaving means there's nothing on the
-        // other side that still cares about this signaling connection.
-        if self.connection_state.model.peer.remote_desk_type == RemoteDeskTypeEnum::Browser {
-            let connection_id = self.connection_state.model.connection_id.clone();
-            let connection_map = self.connection_map.clone();
+        self.connection_state.lifecycle.retire();
+        if let Ok(handle) = Handle::try_current() {
+            let state = self.connection_state.clone();
+            let map = self.connection_map.clone();
             handle.spawn(async move {
-                broadcast_connection_removed_to_servers(&connection_id, &connection_map).await;
+                cleanup_connection(&state, &map).await;
             });
         }
     }
+}
+
+async fn close_connection(state: &ConnectionState) {
+    // A backpressured or half-open old transport cannot delay a new publication.
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let session = state.session.read().await.clone();
+        let _ = session.close(None).await;
+    })
+    .await;
+}
+
+async fn cleanup_connection(state: &ConnectionState, map: &SharedConnectionMap) {
+    let Some(claim) = state.lifecycle.claim_cleanup() else {
+        return;
+    };
+    state.lifecycle.retire();
+    {
+        let mut registry = map.write().await;
+        if registry
+            .get(&state.model.connection_id)
+            .is_some_and(|current| Arc::ptr_eq(&current.lifecycle, &state.lifecycle))
+        {
+            registry.remove(&state.model.connection_id);
+        }
+    }
+    state.request_callback_map.write().await.clear();
+    let close = close_connection(state);
+    let notify = async {
+        if state.model.peer.remote_desk_type == RemoteDeskTypeEnum::Browser {
+            broadcast_connection_removed_to_servers(&state.model.connection_id, map).await;
+        }
+    };
+    tokio::join!(close, notify);
+    claim.complete();
 }
 
 /// Fan a `SignalingType::ConnectionRemoved` notification out to every
@@ -350,9 +343,16 @@ pub async fn broadcast_connection_removed_to_servers(
     );
 
     for state in server_states {
-        if let Err(e) = state.send_to_peer(connection_id, &template).await {
+        if !matches!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                state.send_to_peer(connection_id, &template)
+            )
+            .await,
+            Ok(Ok(()))
+        ) {
             log::warn!(
-                "ConnectionRemoved fan-out for {connection_id} → {}: {e}",
+                "ConnectionRemoved fan-out failed for {connection_id} → {}",
                 state.model.connection_id,
             );
         }
@@ -394,6 +394,7 @@ impl<U: SignalingUser> SignalingHandler<U> {
             connection_model.device_id = Some(device_id);
         }
         let connection_state = ConnectionState {
+            lifecycle: Default::default(),
             client_id,
             model: (connection_model).into(),
             session: Arc::new(RwLock::new(ws_session)),
@@ -403,10 +404,16 @@ impl<U: SignalingUser> SignalingHandler<U> {
             auth_context,
         };
 
-        connection_map
+        let retired = connection_map
             .write()
             .await
             .insert(connection_id.clone(), connection_state.clone());
+        if let Some(retired) = retired {
+            let map = connection_map.clone();
+            tokio::spawn(async move {
+                cleanup_connection(&retired, &map).await;
+            });
+        }
         Ok(Self {
             connection_state,
             connection_map,
@@ -582,6 +589,7 @@ impl<U: SignalingUser> SignalingHandler<U> {
         signaling_model: &SignalingModel,
         ignore_connection_not_found: bool,
     ) -> Result<(), DeskSignalFacadeError> {
+        self.connection_state.ensure_active()?;
         // Device user restriction logic
         if self.user.get_access() == Some("device_user")
             && let Some(target_connection) = self.user.get_target_connection_id()
@@ -711,6 +719,7 @@ impl<U: SignalingUser> SignalingHandler<U> {
         &mut self,
         text: ByteString,
     ) -> Result<MessageControl, DeskSignalFacadeError> {
+        self.connection_state.ensure_active()?;
         log::debug!("Received signaling text: {} bytes", text.len());
         let signaling_model = serde_json::from_str::<SignalingModel>(&text)?;
         if self.connection_state.auth_context.auth_kind
@@ -1465,6 +1474,7 @@ impl<U: SignalingUser> SignalingHandler<U> {
     }
 
     pub async fn binary(&mut self, bin: Bytes) -> Result<(), DeskSignalFacadeError> {
+        self.connection_state.ensure_active()?;
         let Some(observer) = self.binary_frame_observer.clone() else {
             return DeskSignalFacadeError::custom_error(
                 DeskErrorCode::INVALID_PARAMS,
@@ -1486,17 +1496,35 @@ impl<U: SignalingUser> SignalingHandler<U> {
 
     pub async fn do_handle_signaling(
         &mut self,
+        stream: AggregatedMessageStream,
+    ) -> Result<(), DeskSignalFacadeError> {
+        let result = self.handle_stream(stream).await;
+        cleanup_connection(&self.connection_state, &self.connection_map).await;
+        result
+    }
+
+    async fn handle_stream(
+        &mut self,
         mut stream: AggregatedMessageStream,
     ) -> Result<(), DeskSignalFacadeError> {
-        while let Some(msg) = stream.next().await {
+        let lifecycle = self.connection_state.lifecycle.clone();
+        loop {
+            let msg = tokio::select! {
+                biased;
+                () = lifecycle.retired() => break,
+                msg = stream.next() => match msg { Some(msg) => msg, None => break },
+            };
+            if lifecycle.is_retired() {
+                break;
+            }
+
             match msg {
                 Ok(AggregatedMessage::Text(text)) => {
                     // echo text message
                     match self.handle_message(text).await {
                         Ok(MessageControl::Continue) => {}
                         Ok(MessageControl::Close) => {
-                            let session = self.connection_state.session.read().await.clone();
-                            let _ = session.close(None).await;
+                            close_connection(&self.connection_state).await;
                             break;
                         }
                         Err(_) => {
@@ -1508,8 +1536,7 @@ impl<U: SignalingUser> SignalingHandler<U> {
                 Ok(AggregatedMessage::Binary(bin)) => {
                     if self.binary(bin).await.is_err() {
                         log::error!("Error handling binary message");
-                        let session = self.connection_state.session.read().await.clone();
-                        let _ = session.close(None).await;
+                        close_connection(&self.connection_state).await;
                         break;
                     }
                 }

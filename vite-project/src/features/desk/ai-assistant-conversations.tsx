@@ -1,3 +1,4 @@
+import { devicePath } from './device-target-paths';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { ArrowRight, RefreshCw } from 'lucide-react';
@@ -13,6 +14,7 @@ import { AiAssistantHubLayout } from './ai-assistant-hub-layout';
 
 export type AssistantDeviceChoice = {
     connectionId: string;
+    deviceId: string;
     name: string | null | undefined;
     description: string | null | undefined;
 };
@@ -60,7 +62,7 @@ export function AiAssistantConversationChoices({
                     </p>}
                 </CardContent>
                 <Button asChild size="sm" className="w-full">
-                    <Link to={`/desk/${encodeURIComponent(device.connectionId)}/assistant`}
+                    <Link to={devicePath(device.deviceId, 'assistant')}
                         onClick={() => clearSessionGrant(device.connectionId)}>
                         {t('pages.aiAssistant.conversations.open')}
                         <ArrowRight className="ml-2 h-4 w-4" aria-hidden="true" />
@@ -76,9 +78,10 @@ export default function AiAssistantConversations() {
     const serverInfo = useQueryServerInfo();
     const enabled = hasAiAssistantBrowserEntry(serverInfo.data?.data?.ai_assistant);
     const devices = enabled ? (connections.data?.data ?? [])
-        .filter(connection => isAiAssistantEnabled(connection.ai_assistant_settings))
+        .filter(connection => !!connection.device_id && isAiAssistantEnabled(connection.ai_assistant_settings))
         .map(connection => ({
             connectionId: connection.connection_id,
+            deviceId: connection.device_id!,
             name: connection.peer.display_name,
             description: connection.peer.operation_system,
         })) : [];

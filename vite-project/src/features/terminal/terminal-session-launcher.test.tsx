@@ -9,11 +9,12 @@ vi.mock('react-i18next', () => ({
     }),
 }));
 
-vi.mock('@/hooks/use-device-id', () => ({
-    useDeviceConnection: () => ({
+vi.mock('@/features/desk/device-target-context', async (importOriginal) => ({
+    ...(await importOriginal<typeof import('@/features/desk/device-target-context')>()),
+    useDeviceTarget: () => ({ connectionId: 'connection-1', basePath: '/desk/device/device-1', connection: {
         device_id: 'device-1',
         version_info: null, peer: { remote_desk_type:'server', operation_system:'Mac', display_name:null }, exec_capabilities: { available_exec_shells: [], exec_pty:false, exec_pty_elevation:false, max_ai_command_runtime_ms:null }, ai_assistant_settings: null,
-    }),
+    } }),
 }));
 
 vi.mock('@/services/hooks/terminalController/useListTerminal', () => ({
@@ -36,10 +37,10 @@ import TerminalSessionLauncher from './terminal-session-launcher';
 describe('TerminalSessionLauncher', () => {
     it('loads the terminal runtime only after selecting a shell', async () => {
         render(
-            <MemoryRouter initialEntries={['/desk/connection-1/terminal']}>
+            <MemoryRouter initialEntries={['/desk/device/device-1/terminal']}>
                 <Routes>
                     <Route
-                        path="/desk/:id/terminal"
+                        path="/desk/device/:deviceId/terminal"
                         element={<TerminalSessionLauncher />}
                     />
                 </Routes>

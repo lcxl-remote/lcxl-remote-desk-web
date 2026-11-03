@@ -6,9 +6,9 @@ import { TOOLBAR_STORAGE_KEY } from './toolbar-layout';
 const capture = vi.fn(), release = vi.fn();
 let resize = () => {};
 let stageWidth = 320, barWidth = 200;
-function Fixture() {
+function Fixture({ persistent = true }: { persistent?: boolean }) {
     const wrapperRef = useRef<HTMLDivElement>(null), controlBarRef = useRef<HTMLDivElement>(null);
-    const toolbar = useDraggableControlBar({ wrapperRef, controlBarRef });
+    const toolbar = useDraggableControlBar({ wrapperRef, controlBarRef, persistent });
     return <div ref={wrapperRef} data-testid="wrapper" data-edge={toolbar.edge}>
         <div data-testid="video" style={toolbar.viewportStyle} />
         <div ref={controlBarRef} data-testid="bar" style={toolbar.controlBarStyle}>
@@ -105,4 +105,16 @@ it.each([0, .5, 1])('positions every expansion frame at anchor %s before resize 
         });
     }
     expect(localStorage.getItem(TOOLBAR_STORAGE_KEY)).toBe(saved);
+});
+
+it('keeps a finite session toolbar in memory without reading or changing owner preferences', () => {
+    const existing = JSON.stringify({ version: 1, placement: { mode: 'docked', edge: 'bottom' }, expanded: true });
+    localStorage.setItem(TOOLBAR_STORAGE_KEY, existing);
+    const view = render(<Fixture persistent={false} />);
+    expect(view.getByTestId('wrapper')).not.toHaveAttribute('data-edge');
+    start(view);
+    fireEvent.pointerMove(document, { pointerId: 7, clientX: 150, clientY: 235 });
+    fireEvent.pointerUp(document, { pointerId: 7, clientX: 150, clientY: 235 });
+    expect(view.getByTestId('wrapper')).toHaveAttribute('data-edge', 'bottom');
+    expect(localStorage.getItem(TOOLBAR_STORAGE_KEY)).toBe(existing);
 });

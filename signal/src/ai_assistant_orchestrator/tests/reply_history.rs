@@ -122,6 +122,7 @@ async fn scenario(stack_bytes: Option<usize>) {
         })
         .into_connection_model(host.clone(), None);
         ConnectionState {
+            lifecycle: Default::default(),
             client_id,
             model: (ConnectionModel {
                 device_id: None,

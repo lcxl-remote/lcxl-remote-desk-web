@@ -1,6 +1,7 @@
+import { useOptionalDeviceTarget } from '@/features/desk/device-target-context';
 import { appendBrowserPeerReport } from '@/features/desk/browser-peer-report';
 import { supportsFileTransfer } from '../desk/file-transfer-support';
-import { useRef, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import { v4 as uuidv4 } from 'uuid';
 import {
     SIGNALING_TYPE_CODE_REQUEST_REMOTE_ACCESS,
@@ -241,6 +242,12 @@ interface DownloadMeta {
 
 // null pins the anonymous portable worker; undefined permits target selection.
 export function useFileTransfer(deskId: string | undefined, orgId?: number, fixedSessionTargetId?: string | null) {
+    const target = useOptionalDeviceTarget();
+    const assertCurrent = target?.assertCurrent;
+    const claimSignalingSocket = target?.claimSignalingSocket;
+    const refreshTarget = target?.refresh;
+    const alive = useRef(true);
+    useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
     const wsRef = useRef<WebSocket | null>(null);
     const pcRef = useRef<RTCPeerConnection | null>(null);
     const dcRef = useRef<RTCDataChannel | null>(null);
@@ -636,9 +643,11 @@ export function useFileTransfer(deskId: string | undefined, orgId?: number, fixe
      * finished its handshake is discarded instead of reused: re-sending
      * `RequestRemoteAccess` over it would admit a second session on the host.
      */
-    const ensureSession = useCallback((): Promise<SignalingSession> => {
+    const ensureSession = useCallback(async (): Promise<SignalingSession> => {
         const live = sessionRef.current;
         if (live && live.ws.readyState === WebSocket.OPEN) return Promise.resolve(live);
+        if (assertCurrent) await assertCurrent();
+        if (!alive.current) throw new ConnectionError('session-closed', 'Target changed');
         const inFlight = sessionAttemptRef.current;
         if (inFlight) return inFlight.promise;
         if (!deskId) {
@@ -663,7 +672,8 @@ export function useFileTransfer(deskId: string | undefined, orgId?: number, fixe
         const url = new URL(`${protocol}//${host}/api/desk/signaling`);
         appendBrowserPeerReport(url);
 
-        const ws = new WebSocket(url.toString());
+        const prepared = claimSignalingSocket?.();
+        const ws = prepared ?? new WebSocket(url.toString());
         wsRef.current = ws;
 
         const settle = (init: RemoteAccessInit) => {
@@ -721,6 +731,7 @@ export function useFileTransfer(deskId: string | undefined, orgId?: number, fixe
         };
 
         ws.onerror = (err) => {
+            void refreshTarget?.();
             console.error("File transfer WS error:", err);
             if (wsRef.current !== ws) return;
             teardownSession(new ConnectionError('session-closed', 'WebSocket connection failed'));
@@ -728,6 +739,7 @@ export function useFileTransfer(deskId: string | undefined, orgId?: number, fixe
 
         ws.onclose = () => {
             if (wsRef.current !== ws) return;
+            void refreshTarget?.();
             console.log("File transfer WS closed");
             teardownSession(new ConnectionError('session-closed', 'File manager connection closed'));
         };
@@ -742,6 +754,9 @@ export function useFileTransfer(deskId: string | undefined, orgId?: number, fixe
          */
         const handleRemoteAccessReply = (signaling: any) => {
             const errorCode: number | undefined = signaling.response_state?.error_code;
+            if (errorCode === deskErrorCodeEnum.TARGET_CONNECTION_CHANGED
+                || errorCode === deskErrorCodeEnum.REMOTE_DESK_OFFLINE
+                || errorCode === deskErrorCodeEnum.DEVICE_NOT_FOUND) void refreshTarget?.();
             const message: string | undefined = signaling.response_state?.message;
             if (sessionAttemptRef.current !== attempt) {
                 // The session is already up, so this belongs to something built on
@@ -883,8 +898,9 @@ export function useFileTransfer(deskId: string | undefined, orgId?: number, fixe
             }
         };
 
+        if (prepared && prepared.readyState === WebSocket.OPEN) ws.onopen?.(new Event('open'));
         return attempt.promise;
-    }, [deskId, orgId, fixedSessionTargetId, closeDataPlane, teardownSession, failChannelAttempt]);
+    }, [assertCurrent, claimSignalingSocket, refreshTarget, deskId, orgId, fixedSessionTargetId, closeDataPlane, teardownSession, failChannelAttempt]);
 
     /** Send a signaling frame over an established session. */
     const sendSignaling = useCallback((

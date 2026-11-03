@@ -5,7 +5,7 @@ use desk_signal::controller::device_code::{
     DeviceCodeBatchDeleteParams, DeviceCodeItem, DeviceCodeListResult,
 };
 use desk_signal_facade::model::{
-    connection::ConnectionsFetchedData,
+    connection::{ConnectionScope, ConnectionsFetchedData},
     desk_settings::DeskSettings,
     media_pipeline::MediaPipelineStateData,
     remote_session::{
@@ -47,6 +47,7 @@ use desk_input_injection::model::data_channel::{KeyboardEventData, MouseEventDat
     MouseEventData,
     SignalRequestControlData,
     ConnectionsFetchedData,
+    ConnectionScope,
     TerminalInputData,
     TerminalOutputData,
     TerminalResizeData,

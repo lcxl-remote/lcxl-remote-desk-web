@@ -1,3 +1,7 @@
+vi.mock('@/features/desk/device-target-context', async (importOriginal) => ({
+    ...(await importOriginal<typeof import('@/features/desk/device-target-context')>()),
+    useDeviceTarget: () => ({ kind: 'device', connectionId: 'connection-1', basePath: '/desk/device/stable-device-1' }),
+}));
 import { fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { MemoryRouter, Route, Routes } from "react-router-dom"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"

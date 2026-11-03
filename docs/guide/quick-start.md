@@ -96,3 +96,11 @@ It embeds the full server and adds the Privacy Screen and Whiteboard. For a head
 - Learn how the pieces fit together in [Core Concepts](/guide/concepts).
 - Understand the different process layouts in [Startup Modes](/guide/startup-modes).
 - Tune behavior via the [config.toml Reference](/config/config-toml).
+
+## Bookmark a device and reconnect
+
+Pages opened from the device list use a stable device address. After a reboot or network reconnect, refresh the same page once the device is online again. Resetting the device identity creates a new device; the previous address does not follow that new identity. The address grants no access: the current account and device authorization are checked whenever the page is opened.
+
+A changed connection closes the previous desktop, file and terminal channels and clears pending confirmations and upload queues. Unfinished transfers and commands are not replayed. Check their actual outcome before starting again. If device discovery temporarily fails, refresh later; a failed status query does not establish that the device is offline.
+
+When a device is not online, OSS signaling reports the target as unavailable. Code redemption opens a limited session bound to one connection. Redeem a still-valid code again after a reconnect; that session address is not a permanent device entry.

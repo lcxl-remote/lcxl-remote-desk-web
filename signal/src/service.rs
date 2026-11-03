@@ -6,10 +6,7 @@ use actix_ws::{AggregatedMessageStream, Session};
 use desk_server_user::model::CurrentUser;
 use desk_signal_facade::{
     error::DeskSignalFacadeError,
-    model::{
-        connection::SharedConnectionMap,
-        signal::{RemoteDeskTypeEnum, TurnProvider},
-    },
+    model::{connection::SharedConnectionMap, signal::TurnProvider},
     service::{DeviceCodeService, SignalingHandler},
 };
 use uuid::Uuid;
@@ -62,6 +59,7 @@ impl DeviceCodeService for SignalDeviceCodeService {
 
 /// Removes a `connection_id → device_code` binding from the usage map when the
 /// signaling connection ends, regardless of how `handle_signaling` returns.
+#[derive(Clone)]
 struct ConnectionDeviceGuard {
     map: Arc<crate::turn_usage::ConnectionDeviceMap>,
     connection_id: String,
@@ -86,6 +84,7 @@ impl Drop for ConnectionDeviceGuard {
 /// peer disconnects. An operator disconnect before approval therefore cannot
 /// leave a command eligible for later dispatch, while a target disconnect wakes
 /// the result waiter into the conservative unknown outcome.
+#[derive(Clone)]
 struct CentralPendingConnectionGuard {
     pending: Arc<crate::agent_exec::SignalAgentExecPending>,
     computer_use_readiness: Arc<crate::computer_use_readiness::ComputerUseReadinessCache>,
@@ -252,8 +251,86 @@ pub async fn handle_signaling(
             ),
         ),
     ));
+    let _retirement_cleanup = watch_retirement(
+        handler.connection_state.lifecycle.clone(),
+        _central_pending_guard.clone(),
+        _device_guard.clone(),
+    );
     handler.do_handle_signaling(stream).await?;
     Ok(())
 }
 
 pub type SignalingContext<T> = SignalingHandler<T>;
+
+// An admitted handler keeps its own result fence; retirement can release its
+// connection-scoped waiters without cancelling that handler future.
+fn watch_retirement(
+    lifecycle: Arc<desk_signal_facade::model::connection::ConnectionLifecycle>,
+    pending: CentralPendingConnectionGuard,
+    device: Option<ConnectionDeviceGuard>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        lifecycle.retired().await;
+        drop((pending, device));
+    })
+}
+
+#[cfg(test)]
+mod retirement_tests {
+    use super::*;
+    #[tokio::test]
+    async fn retired_connections_drain_while_the_original_handler_still_owns_its_guards() {
+        let turn = Arc::new(crate::turn_usage::ConnectionDeviceMap::default());
+        let pending = Arc::new(crate::remote_tool_edge::SignalRemoteToolPendingStore::default());
+        let mut originals = Vec::new();
+        let mut waiters = Vec::new();
+        for round in 0..1000 {
+            let id = format!("c{round}");
+            turn.write().await.insert(id.clone(), "device".into());
+            let guard = CentralPendingConnectionGuard {
+                pending: Arc::new(crate::agent_exec::SignalAgentExecPending::new()),
+                computer_use_readiness: Arc::new(
+                    crate::computer_use_readiness::ComputerUseReadinessCache::default(),
+                ),
+                remote_tool_pending: pending.clone(),
+                computer_action_pending: Arc::new(
+                    crate::remote_tool_edge::SignalComputerActionPendingStore::default(),
+                ),
+                connection_id: id.clone(),
+            };
+            let device = ConnectionDeviceGuard {
+                map: turn.clone(),
+                connection_id: id.clone(),
+            };
+            let (sender, receiver) = tokio::sync::oneshot::channel();
+            assert!(pending.register(format!("request-{round}"), id, sender));
+            let lifecycle =
+                Arc::new(desk_signal_facade::model::connection::ConnectionLifecycle::default());
+            let task = watch_retirement(lifecycle.clone(), guard.clone(), Some(device.clone()));
+            // Exercise retirement before and after the watcher registers its wait.
+            if round % 2 == 0 {
+                tokio::task::yield_now().await;
+            }
+            lifecycle.retire();
+            task.await.unwrap();
+            waiters.push(receiver);
+            originals.push((guard, device));
+        }
+        for waiter in waiters {
+            let error = waiter.await.unwrap().unwrap_err();
+            assert_eq!(
+                error.kind,
+                desk_agent_protocol::AgentErrorKind::TargetOffline
+            );
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !turn.read().await.is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(pending.drain_for_connection("c999"), 0);
+        drop(originals);
+    }
+}

@@ -388,6 +388,7 @@ pub(super) async fn route_terminal_requests_handled_inline_not_bridged() {
         (
             SignalingType::StartTerminal,
             serde_json::to_value(desk_signal_facade::model::terminal::StartTerminalSession {
+                org_id: None,
                 session_target_id: None,
                 command: "C:\\Windows\\System32\\cmd.exe".to_string(),
                 device_id: None,
@@ -458,6 +459,7 @@ pub(super) async fn route_start_terminal_owner_stamp_records_admission_and_marks
         None,
         Some(
             serde_json::to_value(desk_signal_facade::model::terminal::StartTerminalSession {
+                org_id: None,
                 session_target_id: None,
                 command: "cmd.exe".to_string(),
                 device_id: None,
@@ -515,6 +517,7 @@ pub(super) async fn route_start_terminal_dispatch_failure_clears_capability_foot
         None,
         Some(
             serde_json::to_value(desk_signal_facade::model::terminal::StartTerminalSession {
+                org_id: None,
                 session_target_id: None,
                 command: "cmd.exe".to_string(),
                 device_id: None,

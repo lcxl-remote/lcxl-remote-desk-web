@@ -1,3 +1,4 @@
+import { sessionPath } from '@/features/desk/device-target-paths';
 import { useState, useEffect, useRef } from "react"
 import { useForm } from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
@@ -23,7 +24,7 @@ import { useRedeemCode } from "@/services/hooks/authController/useRedeemCode"
 import { useGetCurrentUser } from "@/services/hooks/userController/useGetCurrentUser"
 import { useQueryServerInfo } from "@/services/hooks/systemController/useQueryServerInfo"
 import { startupModeEnum } from "@/services/types"
-import { saveSessionGrant, clearSessionGrant } from "@/features/desk/session-grant"
+import { saveSessionGrant } from "@/features/desk/session-grant"
 import { ModeToggle } from "@/components/mode-toggle"
 import { LanguageToggle } from "@/components/language-toggle"
 import { AsyncButton } from "@/components/async-button"
@@ -49,7 +50,7 @@ export default function LoginPage() {
     const navigate = useNavigate()
     const [searchParams] = useSearchParams()
     const { toast } = useToast()
-    const [activeTab, setActiveTab] = useState("account")
+    const [activeTab, setActiveTab] = useState(searchParams.get("tab") === "device_code" ? "device_code" : "account")
     const [tauriAutoLoginPending, setTauriAutoLoginPending] = useState(false)
     const tauriAutoLoginTokenRef = useRef<string | null>(null)
     const [lockedUntilMs, setLockedUntilMs] = useState(0)
@@ -141,20 +142,14 @@ export default function LoginPage() {
         if (!result?.target_connection_id) {
             throw new Error(t("pages.login.deviceCode.offline"))
         }
-        if (result.grant_session_id) {
-            // A capability-scoped session: remember the grant + ceiling for this target.
-            saveSessionGrant(result.target_connection_id, {
-                grantSessionId: result.grant_session_id,
-                accessCeiling: result.access_ceiling ?? null,
-                source: "device-code",
-            })
-        } else {
-            // Full control (no grant): drop any stale restricted grant for this target
-            // so a residual token cannot downgrade the session.
-            clearSessionGrant(result.target_connection_id)
-        }
+        saveSessionGrant(result.target_connection_id, {
+            principalKey: 'code-session',
+            grantSessionId: result.grant_session_id,
+            accessCeiling: result.access_ceiling ?? null,
+            source: 'device-code',
+        });
         toast({ title: t("pages.login.deviceCode.redeemSuccess") })
-        navigate(`/desk/${result.target_connection_id}`)
+        navigate(sessionPath(result.target_connection_id))
     }
 
     async function onSubmit(values: FormValues) {

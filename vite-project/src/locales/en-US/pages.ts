@@ -1,6 +1,12 @@
 import modelMetrics from './model-metrics';
 
 export default {
+    "pages.deviceTarget.unavailable": "Device unavailable. Refresh to try again.",
+    "pages.deviceTarget.offline": "This device is offline.",
+    "pages.deviceTarget.storeUnavailable": "Device discovery is temporarily unavailable. Try again later.",
+    "pages.deviceTarget.sessionUnavailable": "This session is unavailable. Redeem the code again.",
+    "pages.deviceTarget.redeemAgain": "Redeem a code",
+
     "pages.desk.fileUpload.title": "File uploads",
     "pages.desk.fileUpload.drop": "Drop to upload",
     "pages.desk.fileUpload.downloads": "Save to remote Downloads",

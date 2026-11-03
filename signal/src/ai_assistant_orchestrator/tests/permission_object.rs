@@ -240,6 +240,7 @@ async fn run_case_with_live_inner(change: Option<&str>, mode: ResumeMode, live: 
                             })
                             .into_connection_model(host.clone(), None);
                             ConnectionState {
+                                lifecycle: Default::default(),
                                 client_id,
                                 model: (ConnectionModel {
                                     device_id: None,
@@ -543,6 +544,7 @@ async fn run_case_with_live_inner(change: Option<&str>, mode: ResumeMode, live: 
         assert_eq!(executor.scan_once(0).await.unwrap().attempted, 0);
         map.write().await.insert(host.clone(), original.clone());
         let mut duplicate = original;
+        duplicate.lifecycle = Default::default();
         std::sync::Arc::make_mut(&mut duplicate.model).connection_id = format!("duplicate-{host}");
         map.write()
             .await

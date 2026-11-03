@@ -130,6 +130,9 @@ mod tests {
     async fn code_sessions_cannot_access_rest() {
         let app = at::init_service(
             App::new()
+                .app_data(web::Data::new(
+                    desk_signal_facade::model::connection::SharedConnectionMap::new_oss(),
+                ))
                 .wrap(SessionMiddleware::new(
                     CookieSessionStore::default(),
                     Key::generate(),
@@ -148,6 +151,11 @@ mod tests {
                         )
                         .service(desk_signal::controller::web_search::update_web_search)
                         .service(desk_signal::controller::web_search::test_web_search)
+                        .service(
+                            web::scope("/desk").service(
+                                desk_signal::controller::connection::get_device_connection,
+                            ),
+                        )
                         .route("/probe", web::get().to(protected_probe)),
                 ),
         )
@@ -198,6 +206,10 @@ mod tests {
         for (method, uri) in [
             (
                 actix_web::http::Method::GET,
+                "/api/desk/devices/missing/connection",
+            ),
+            (
+                actix_web::http::Method::GET,
                 "/api/admin/system/ai-context-management",
             ),
             (
@@ -244,11 +256,24 @@ mod tests {
             &app,
             at::TestRequest::get()
                 .uri("/api/probe")
-                .cookie(owner_cookie)
+                .cookie(owner_cookie.clone())
                 .to_request(),
         )
         .await;
         assert_eq!(owner.status(), StatusCode::OK);
+        let target = at::call_service(
+            &app,
+            at::TestRequest::get()
+                .uri("/api/desk/devices/missing/connection")
+                .cookie(owner_cookie)
+                .to_request(),
+        )
+        .await;
+        assert_eq!(target.status(), StatusCode::OK);
+        assert_eq!(target.headers().get("cache-control").unwrap(), "no-store");
+        let target: serde_json::Value = at::read_body_json(target).await;
+        assert_eq!(target["code"], DeskErrorCode::DEVICE_NOT_FOUND.code());
+        assert!(target["data"].is_null());
     }
 }
 

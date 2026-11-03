@@ -50,6 +50,9 @@ pub struct RedeemCodeParams {
 pub struct RedeemCodeResult {
     /// The resolved target device connection to control.
     pub target_connection_id: String,
+    /// Stable navigation context; absent for fixed OSS grants.
+    pub target_device_id: Option<String>,
+    pub target_org_id: Option<i32>,
     /// The reusable grant-session token the control end must attach to every
     /// RequestRemoteAccess for this target, including desktop and file-manager sessions.
     pub grant_session_id: String,
@@ -207,6 +210,8 @@ pub async fn redeem_code(
     Ok(
         HttpResponse::Ok().json(RestResponse::succeed_with_data(RedeemCodeResult {
             target_connection_id,
+            target_device_id: None,
+            target_org_id: None,
             grant_session_id: minted.grant_session_id,
             access_ceiling: Some(ceiling),
         })),
@@ -354,6 +359,8 @@ mod tests {
         };
         let result = RedeemCodeResult {
             target_connection_id: "conn-1".to_string(),
+            target_device_id: None,
+            target_org_id: None,
             grant_session_id: "gs-1".to_string(),
             access_ceiling: Some(ceiling),
         };

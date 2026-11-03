@@ -1,7 +1,7 @@
 import { SelectItem } from '@/components/ui/select';
 import { SelectField } from '@/components/ui/select-field';
 import { lazy, Suspense, useCallback, useState } from "react"
-import { useNavigate, useParams } from "react-router-dom"
+import { useNavigate } from "react-router-dom"
 import { ArrowLeft, Loader2, TerminalSquare } from "lucide-react"
 import { useTranslation } from "react-i18next"
 
@@ -14,7 +14,7 @@ import {
     CardTitle,
 } from "@/components/ui/card"
 import { Label } from "@/components/ui/label"
-import { useDeviceConnection } from "@/hooks/use-device-id"
+import { useDeviceTarget } from "@/features/desk/device-target-context"
 import { useListTerminal } from "@/services/hooks/terminalController/useListTerminal"
 
 const TerminalView = lazy(() =>
@@ -51,15 +51,16 @@ function fallbackTerminalCommands(operationSystem: string | undefined): string[]
 export default function TerminalSessionLauncher({
     orgId,
 }: TerminalSessionLauncherProps = {}) {
-    const { id: connectionId } = useParams<{ id: string }>()
+    const target = useDeviceTarget()
+    const { connectionId } = target
     const navigate = useNavigate()
     const { t } = useTranslation()
-    const connection = useDeviceConnection(connectionId)
+    const connection = target.connection
     const deviceId = connection?.device_id ?? undefined
     const operationSystem = connection?.peer?.operation_system
     const { data: terminalList, isLoading } = useListTerminal(
         connectionId || '',
-        deviceId ? { device_id: deviceId } : undefined,
+        { device_id: deviceId, org_id: orgId },
     )
     const [selectedCommand, setSelectedCommand] = useState("")
 
@@ -96,7 +97,7 @@ export default function TerminalSessionLauncher({
                 <Button
                     variant="outline"
                     size="sm"
-                    onClick={() => navigate(`/desk/${connectionId}`)}
+                    onClick={() => navigate(target.basePath)}
                 >
                     <ArrowLeft className="mr-2 h-4 w-4" />
                     {t('pages.deskTerminal.dashboard')}

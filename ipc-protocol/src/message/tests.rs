@@ -1024,6 +1024,7 @@ fn start_terminal_round_trips_wincode() {
         request_id: "req-start".to_string(),
         connection_id: "conn-term".to_string(),
         session: StartTerminalSession {
+            org_id: None,
             session_target_id: None,
             command: "C:\\Windows\\System32\\cmd.exe,/k,echo,hello".to_string(),
             device_id: None,
@@ -1440,6 +1441,7 @@ fn service_to_worker_all_variants_round_trip() {
             request_id: "r6".to_string(),
             connection_id: "c".to_string(),
             session: StartTerminalSession {
+                org_id: None,
                 session_target_id: None,
                 command: "cmd.exe".to_string(),
                 device_id: None,

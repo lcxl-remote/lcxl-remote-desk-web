@@ -1,18 +1,23 @@
-import { Link, useLocation, useParams } from 'react-router-dom';
+import { useDeviceTarget } from './device-target-context';
+import { Link, useLocation } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { ArrowLeft, Monitor } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 
 export default function BrowserSetupPage() {
-    const { id } = useParams();
+    const target = useDeviceTarget();
     const { t } = useTranslation();
     const location = useLocation();
-    const devicePath = `/desk/${encodeURIComponent(id ?? '')}`;
     const origin = location.state?.returnTo;
-    const assistantPath = typeof origin === 'string'
-        && [devicePath + '/assistant', devicePath + '/control'].includes(origin.split('?')[0])
-        ? origin : devicePath + '/assistant';
+    const assistantPath = (() => {
+        if (typeof origin !== 'string') return target.path('assistant');
+        const resolved = new URL(origin, window.location.origin);
+        const sameScope = resolved.searchParams.get('org_id') === (target.orgId == null ? null : String(target.orgId));
+        return resolved.origin === window.location.origin && sameScope
+            && [target.path('assistant'), target.path('control')].some(path => path.split('?')[0] === resolved.pathname)
+            ? origin : target.path('assistant');
+    })();
     return (
         <div className="h-full overflow-y-auto p-4 sm:p-6">
             <main className="mx-auto max-w-3xl space-y-6 pb-8">
@@ -26,7 +31,7 @@ export default function BrowserSetupPage() {
                 <div className="space-y-3 rounded-lg border bg-muted/40 p-4">
                     <p className="text-sm">{t('pages.aiAssistant.browserSetup.device')}</p>
                     <p className="text-sm text-muted-foreground">{t('pages.aiAssistant.browserTakeoverBusy')}</p>
-                    <Button asChild variant="outline"><Link to={`/desk/${encodeURIComponent(id ?? '')}/control`}>
+                    <Button asChild variant="outline"><Link to={target.path('control')}>
                         <Monitor className="mr-2 h-4 w-4" />{t('pages.aiAssistant.browserTakeoverAction')}
                     </Link></Button>
                 </div>

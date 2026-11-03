@@ -58,7 +58,7 @@ describe('buildNavItems', () => {
                 targetConnectionId: 'conn-1',
                 startupMode: startupModeEnum.default,
             }),
-        ).toEqual(['/desk/conn-1/control']);
+        ).toEqual(['/desk/session/conn-1']);
     });
 
     it('offers nothing to a device code with no target', () => {

@@ -6,6 +6,9 @@ use utoipa::{IntoParams, ToSchema};
     Debug, Clone, Serialize, Deserialize, IntoParams, wincode::SchemaWrite, wincode::SchemaRead,
 )]
 pub struct StartTerminalSession {
+    /// Explicit organization context; never falls back to another scope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_id: Option<i32>,
     /// The command to start the terminal session. with the format of "path/to/executable,arg1,arg2"
     pub command: String,
     /// Opaque daemon-issued session target. Omitted only for the single-ready-
@@ -62,6 +65,8 @@ pub struct ListTerminalPath {
 /// ignores it and routes by the path `connection_id` (dual-target wire model).
 #[derive(Clone, Debug, Default, Deserialize, Serialize, IntoParams, ToSchema)]
 pub struct ListTerminalQuery {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_id: Option<i32>,
     /// Target device handle (UUID; manager multi-instance addressing); `None` on
     /// the OSS single-instance signal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -112,6 +117,7 @@ mod wincode_tests {
     #[test]
     fn start_terminal_session_round_trips_wincode() {
         let original = StartTerminalSession {
+            org_id: None,
             command: r"C:\Windows\System32\cmd.exe,/k,echo,hello".to_string(),
             session_target_id: Some("22222222-2222-4222-8222-222222222222".to_string()),
             device_id: Some("11111111-1111-4111-8111-111111111111".to_string()),

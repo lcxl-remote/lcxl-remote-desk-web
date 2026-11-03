@@ -1,3 +1,4 @@
+import { devicePath } from '@/features/desk/device-target-paths';
 import type { ConnectionModel } from '@/services/types';
 
 export function assistantConnections(connections: ConnectionModel[]): Record<string, string> {
@@ -15,5 +16,5 @@ export function assistantConnections(connections: ConnectionModel[]): Record<str
 
 export function assistantPaths(connections: ConnectionModel[]): Record<string, string> {
     return Object.fromEntries(Object.entries(assistantConnections(connections))
-        .map(([device, connection]) => [device, `/desk/${encodeURIComponent(connection)}/assistant`]));
+        .map(([device]) => [device, devicePath(device, 'assistant')]));
 }

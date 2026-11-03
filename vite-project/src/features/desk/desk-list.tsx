@@ -1,3 +1,4 @@
+import { devicePath } from './device-target-paths';
 
 import { useTranslation } from "react-i18next"
 import { useNavigate } from "react-router-dom"
@@ -15,7 +16,6 @@ import {
 import { Badge } from "@/components/ui/badge"
 import { useListConnections } from "@/services/hooks/connectionController/useListConnections"
 import { Skeleton } from "@/components/ui/skeleton"
-import { clearSessionGrant } from "@/features/desk/session-grant"
 import { HostReadinessBanners } from "@/features/desk/host-readiness-banners"
 
 export default function DeskList() {
@@ -27,8 +27,7 @@ export default function DeskList() {
     // full-control session, so drop any stale restricted grant for this target first
     // (a residual redeem token must never downgrade an owner session).
     const handleConnect = (id: string) => {
-        clearSessionGrant(id)
-        navigate(`/desk/${id}`)
+        navigate(devicePath(id))
     }
 
     if (isLoading) {
@@ -111,7 +110,7 @@ export default function DeskList() {
                             </div>
                         </CardContent>
                         <CardFooter className="flex flex-row items-center justify-end border-t bg-muted/50 px-6 py-3">
-                            <Button size="sm" onClick={() => handleConnect(connection.connection_id)}>
+                            <Button size="sm" onClick={() => handleConnect(connection.device_id!)}>
                                 <Power className="mr-2 h-4 w-4" /> {t('pages.deskList.connect')}
                             </Button>
                         </CardFooter>

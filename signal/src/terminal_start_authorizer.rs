@@ -222,6 +222,7 @@ mod tests {
     /// selector in its `StartTerminalSession` payload.
     fn start_terminal_with_grant(grant_session_id: Option<&str>) -> SignalingModel {
         let inner = StartTerminalSession {
+            org_id: None,
             session_target_id: None,
             command: "cmd.exe".to_string(),
             device_id: None,

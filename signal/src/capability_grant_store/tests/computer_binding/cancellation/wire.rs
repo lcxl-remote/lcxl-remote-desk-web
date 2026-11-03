@@ -89,6 +89,7 @@ async fn original_stop_socket_retries_only_stop_after_ack_loss_and_rejects_recon
                             })
                             .into_connection_model("host-original".into(), None);
                             ConnectionState {
+                                lifecycle: Default::default(),
                                 client_id,
                                 model: (ConnectionModel {
                                     device_id: None,
@@ -151,6 +152,7 @@ async fn original_stop_socket_retries_only_stop_after_ack_loss_and_rejects_recon
     let original = connections.write().await.remove("host-original").unwrap();
     assert!(!dispatcher.send_original(id).await.unwrap());
     let mut replacement = original.clone();
+    replacement.lifecycle = Default::default();
     std::sync::Arc::make_mut(&mut replacement.model).connection_id = "new-host".into();
     connections
         .write()
@@ -160,6 +162,7 @@ async fn original_stop_socket_retries_only_stop_after_ack_loss_and_rejects_recon
     connections.write().await.remove("new-host");
     for bad in ["cookie", "browser", "audience", "connection"] {
         let mut target = original.clone();
+        target.lifecycle = Default::default();
         match bad {
             "cookie" => target.auth_context = AuthContext::cookie(1, RemoteDeskTypeEnum::Server),
             "browser" => {

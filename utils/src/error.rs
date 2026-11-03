@@ -532,6 +532,9 @@ desk_error_codes! {
     /// Memory or cross-conversation context requires a fresh source projection.
     AI_ASSISTANT_DATA_CHANGED = 112,
 
+    /// The authorized device has reconnected since this operation was prepared.
+    TARGET_CONNECTION_CHANGED = 113,
+
     ACTION_NEED_RETRY = 1001,
 
     REMOTE_DESK_OFFLINE = 10003,
@@ -861,6 +864,7 @@ mod tests {
         assert_eq!(DeskErrorCode::AI_ASSISTANT_SUBJECT_MISMATCH.code(), 61);
         assert_eq!(DeskErrorCode::AGENT_SAME_TOOL_REPEAT_LIMIT.code(), 70);
         assert_eq!(DeskErrorCode::SHARED_STORE_UNAVAILABLE.code(), 109);
+        assert_eq!(DeskErrorCode::TARGET_CONNECTION_CHANGED.code(), 113);
         assert_eq!(DeskErrorCode::AI_MODEL_IMAGE_INPUT_UNSUPPORTED.code(), 85);
         let codes = [
             DeskErrorCode::DEVICE_QUOTA_EXCEEDED.code(),

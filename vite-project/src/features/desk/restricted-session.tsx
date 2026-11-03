@@ -13,12 +13,10 @@
 //     an unset dimension (`null`/prompt) stays visible-and-tryable, because the host
 //     may still allow it after an on-device approval.
 //
-// The desk routes are flat siblings sharing the `:id` target, so each derives its own
-// state from the route param via `useRestrictedSession()`; there is no wrapping
-// provider to prop-drill through.
+// The target boundary separates stable owner routes from fixed grant sessions.
 
 import { useMemo } from 'react';
-import { useParams } from 'react-router-dom';
+import { useOptionalDeviceTarget } from './device-target-context';
 
 import type { SecuritySettings } from '@/services/types';
 import { readSessionGrant } from './session-grant';
@@ -51,15 +49,8 @@ export interface RestrictedSession {
 // Derive the restriction state for a target from its stored grant. Pure — exported
 // for unit tests.
 //
-// The absence of a grant is treated as an owner (full) session. This is correct for
-// the flows that reach here (redeem stores a grant; owner-connect clears it), but the
-// grant lives only in this tab's sessionStorage: a non-owner who deep-links the
-// target in a fresh tab has no grant and is rendered as owner, showing owner-plane
-// affordances. That is a UX artifact only — the host independently fail-closes, and
-// the manager's RequestRemoteAccess authorizer rejects a non-owner with no valid grant, so
-// no owner-plane action succeeds. A fully robust indicator would require a
-// server-authoritative "my relationship to this device" signal rather than the tab's
-// volatile grant; that is a deliberate follow-up, not a safety gap.
+// Stable device routes use authorized discovery. Fixed finite routes require a
+// matching principal-bound grant before mounting and always hide owner entries.
 export function deriveRestrictedSession(deskId: string | undefined): RestrictedSession {
     const grant = deskId ? readSessionGrant(deskId) : null;
     const isRestricted = grant != null;
@@ -78,10 +69,12 @@ export function deriveRestrictedSession(deskId: string | undefined): RestrictedS
     };
 }
 
-// Hook form: derive the restriction for the current route's `:id` (or an explicit
-// target), memoized on the target.
 export function useRestrictedSession(deskId?: string): RestrictedSession {
-    const { id } = useParams<{ id: string }>();
-    const target = deskId ?? id;
-    return useMemo(() => deriveRestrictedSession(target), [target]);
+    const target = useOptionalDeviceTarget();
+    const id = deskId ?? target?.connectionId;
+    const finite = target?.kind === 'session';
+    return useMemo(() => {
+        const restricted = deriveRestrictedSession(target?.kind === 'device' ? undefined : id);
+        return finite ? { ...restricted, isRestricted: true, ownerPlaneVisible: false } : restricted;
+    }, [id, finite, target?.kind]);
 }
