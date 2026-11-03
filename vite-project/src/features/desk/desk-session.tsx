@@ -173,7 +173,7 @@ export default function DeskSession({
     const [assistantOpen, setAssistantOpen] = useState(false)
     const [assistantMounted, setAssistantMounted] = useState(false)
     const { data: assistantConnections } = useListConnections()
-    const assistantConnection = assistantConnections?.find(connection => connection.connection_id === deskId)
+    const assistantConnection = assistantConnections?.data?.find(connection => connection.connection_id === deskId)
     const { t } = useTranslation()
     const { toast } = useToast()
 

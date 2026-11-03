@@ -279,7 +279,7 @@ export function AiAssistantWorkspace({
     const exportSessionBackup = async (conversation: string | undefined, id: string) => {
         // Recovery records use the durable server session key, not the client
         // conversation UUID used when submitting new assistant turns.
-        const connection = recoveryConnections.data?.find(item => item.connection_id === deskId);
+        const connection = recoveryConnections.data?.data?.find(item => item.connection_id === deskId);
         if (!conversation || !connection) throw new Error('Backup target unavailable');
         const data = await exportDeviceFileRecovery({ connection: deskId, device_id: connection.device_id,
             conversation_id: conversation, recovery_id: id }, { responseType: 'blob' });
@@ -738,8 +738,8 @@ export function AiAssistantWorkspace({
             )}
 </>,
                 connection: <>
-            {recoveryConnections.data?.some(item => item.connection_id === deskId) && <FileRecoverySettings
-                key={deskId} target={{ connection: deskId, device_id: recoveryConnections.data.find(item => item.connection_id === deskId)?.device_id }} />}
+            {recoveryConnections.data?.data?.some(item => item.connection_id === deskId) && <FileRecoverySettings
+                key={deskId} target={{ connection: deskId, device_id: recoveryConnections.data.data?.find(item => item.connection_id === deskId)?.device_id }} />}
             {localPairingAvailable && <AssistantBrowserPairing assistantEnabled={assistantEnabled} />}
 </>,
                 observation: <>            <div className="grid gap-4 lg:grid-cols-2">
@@ -821,13 +821,13 @@ export function AiAssistantWorkspace({
                             )}
                             <CardTitle className="flex min-w-0 items-center gap-2 text-base">
                                 <AssistantConnectionIcon connected={isConnected} enabled={assistantEnabled} />
-                                <span title={recoveryConnections.data?.find(item => item.connection_id === deskId)?.version_info.display_name ?? deskId}
-                                    className="truncate">{recoveryConnections.data?.find(item => item.connection_id === deskId)?.version_info.display_name
+                                <span title={recoveryConnections.data?.data?.find(item => item.connection_id === deskId)?.version_info.display_name ?? deskId}
+                                    className="truncate">{recoveryConnections.data?.data?.find(item => item.connection_id === deskId)?.version_info.display_name
                                         || chat.sessionTarget?.display_name || t('pages.aiAssistant.chatTitle')}</span>
                             </CardTitle>
                         </div>
                         <div className="assistant-header-actions flex shrink-0 items-center gap-1">
-                            <AssistantHistory deskId={deskId} deviceId={recoveryConnections.data?.find(item => item.connection_id === deskId)?.device_id} disabled={!!rehearsal || chat.hydrating || chat.contextUpdating || chat.permissionUpdating || !!chat.grantRevoking}
+                            <AssistantHistory deskId={deskId} deviceId={recoveryConnections.data?.data?.find(item => item.connection_id === deskId)?.device_id} disabled={!!rehearsal || chat.hydrating || chat.contextUpdating || chat.permissionUpdating || !!chat.grantRevoking}
                                 onDeleted={id => { if (chat.forgetConversation(id)) setSelectedCapabilityIds([]); }}
                                 onSelect={(id) => {
                                     if (!chat.selectConversation(id)) return false;
@@ -1210,7 +1210,7 @@ function AiAssistantDevicePage({
         : suppliedFeatureProfile;
     const restricted = useRestrictedSession(deskId);
     const { data: connections, isLoading } = useListConnections();
-    const connection = connections?.find((item: any) => item.connection_id === deskId);
+    const connection = connections?.data?.find((item: any) => item.connection_id === deskId);
 
     if (suppliedFeatureProfile === undefined && serverInfo.isLoading) {
         return <div className="p-6"><Skeleton className="h-64 w-full" /></div>;

@@ -3085,4 +3085,6 @@ export default {
     "pages.aiAssistant.processing.state.waiting_native": "Waiting for native results",
     "pages.aiAssistant.processing.state.needs_input": "Needs more context",
     "pages.aiAssistant.processing.state.failed": "Failed",
+  'pages.deskList.loadFailed': 'Could not load devices. Try again.',
+
 };

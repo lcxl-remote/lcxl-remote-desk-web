@@ -1,4 +1,5 @@
 use actix_web::{HttpResponse, get, web};
+use desk_utils::rest::RestResponse;
 
 use crate::error::DeskSignalFacadeError;
 use crate::model::connection::{ConnectionModel, SharedConnectionMap};
@@ -10,7 +11,7 @@ pub const TAG: &str = "Connection";
     tag = TAG,
     summary = "List all online desk connections",
     responses(
-        (status = 200, description = "List of online desk connections", body = Vec<ConnectionModel>),
+        (status = 200, description = "List of online desk connections", body = RestResponse<Vec<ConnectionModel>>),
     ),
 )]
 #[get("/connections")]
@@ -26,5 +27,5 @@ pub async fn list_connections(
             .collect()
     };
 
-    Ok(HttpResponse::Ok().json(connections))
+    Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(connections)))
 }

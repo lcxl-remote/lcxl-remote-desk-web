@@ -20,3 +20,7 @@ Signaling endpoints authenticate differently depending on who connects — see [
 3. Update the frontend: regenerate the client and add an `onMessage` handler in the frontend RTC hook.
 
 See the [Module Map](/reference/modules#adding-a-new-signaling-type) for the cross-cutting checklist.
+
+## Connection discovery
+
+`GET /api/desk/connections` returns the same `RestResponse` envelope on OSS and Manager: successful discovery has `success: true` and `data: []` for an empty list. A failed read has `success: false` and must not be displayed as an offline device or an empty fleet. Manager reports shared-store unavailability with code `109` and corrupt records or database failures with code `1`. The WebSocket `FetchConnections` operation returns a correlated `ConnectionsFetched` on both success and failure; clients check `response_state` before decoding the list.

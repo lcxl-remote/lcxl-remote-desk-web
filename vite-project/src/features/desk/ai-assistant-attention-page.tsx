@@ -34,7 +34,7 @@ export default function AiAssistantAttentionPage() {
     const [loadingMore, setLoadingMore] = useState(false);
     const requestEpoch = useRef(0);
     const connections = useListConnections({ query: { refetchInterval: 10_000 } });
-    const online = connections.isError ? [] : (connections.data ?? []);
+    const online = connections.isError ? [] : (connections.data?.data ?? []);
     const connectionIds = useMemo(() => assistantConnections(online), [online]);
 
     const loadPage = useCallback(async (offset: number, append: boolean) => {
@@ -117,7 +117,7 @@ export default function AiAssistantAttentionPage() {
                                     </Link>
                                 </Button>
                             ) : (
-                                <span className="text-muted-foreground">{t('pages.aiAssistantAttention.deviceOffline')}</span>
+                                <span className="text-muted-foreground">{t(connections.isError ? 'pages.deskList.loadFailed' : connections.isPending ? 'common.loading' : 'pages.aiAssistantAttention.deviceOffline')}</span>
                             )}
                         </CardContent>
                     </Card>

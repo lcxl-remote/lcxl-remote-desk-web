@@ -3073,4 +3073,6 @@ export default {
     "pages.aiAssistant.processing.state.waiting_native": "等待原生结果",
     "pages.aiAssistant.processing.state.needs_input": "需要补充资料",
     "pages.aiAssistant.processing.state.failed": "处理失败",
+  'pages.deskList.loadFailed': '设备列表加载失败，请重试。',
+
 };

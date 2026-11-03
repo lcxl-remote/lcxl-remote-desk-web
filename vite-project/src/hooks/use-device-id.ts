@@ -14,7 +14,7 @@ export type DeviceConnectionResolution =
 export function useDeviceConnection(connectionId: string | undefined) {
     const { data: connections } = useListConnections()
     if (!connectionId) return undefined
-    return connections?.find((c) => c.connection_id === connectionId)
+    return connections?.data?.find((c) => c.connection_id === connectionId)
 }
 
 /**
@@ -30,7 +30,7 @@ export function useDeviceConnectionResolution(
         return { status: "loading", connection: undefined }
     }
     const connection = connectionId
-        ? query.data?.find((item) => item.connection_id === connectionId)
+        ? query.data?.data?.find((item) => item.connection_id === connectionId)
         : undefined
     const managerDeviceId = connection?.device_id?.trim()
     if (connection && managerDeviceId) {

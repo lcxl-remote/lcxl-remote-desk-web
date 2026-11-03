@@ -21,7 +21,7 @@ import { HostReadinessBanners } from "@/features/desk/host-readiness-banners"
 export default function DeskList() {
     const { t } = useTranslation()
     const navigate = useNavigate()
-    const { data: connections, isLoading, isFetching, refetch } = useListConnections()
+    const { data: connections, isLoading, isFetching, isError, refetch } = useListConnections()
 
     // Helper to handle navigation to desk. Connecting from the owner's own list is a
     // full-control session, so drop any stale restricted grant for this target first
@@ -42,6 +42,14 @@ export default function DeskList() {
                 </div>
             </div>
         )
+    }
+
+    if (isError) {
+        return <div className="space-y-4">
+            <HostReadinessBanners />
+            <p role="alert" className="text-destructive">{t('pages.deskList.loadFailed')}</p>
+            <Button variant="outline" onClick={() => void refetch()}>{t('common.refresh')}</Button>
+        </div>
     }
 
     return (
@@ -65,12 +73,12 @@ export default function DeskList() {
             <HostReadinessBanners />
 
             <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-                {connections?.length === 0 && (
+                {connections?.data?.length === 0 && (
                     <div className="col-span-full text-center text-muted-foreground py-10">
                         {t('pages.deskList.empty')}
                     </div>
                 )}
-                {connections?.map((connection: any) => (
+                {connections?.data?.map((connection: any) => (
                     <Card key={connection.connection_id} className="overflow-hidden">
                         <CardHeader className="flex flex-row items-start bg-muted/50">
                             <div className="grid gap-0.5">

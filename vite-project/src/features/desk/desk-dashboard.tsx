@@ -19,10 +19,10 @@ export default function DeskDashboard({
     const { id: deskId } = useParams<{ id: string }>()
     const navigate = useNavigate()
     const { t } = useTranslation()
-    const { data: connections, isLoading } = useListConnections()
+    const { data: connections, isLoading, isError, refetch } = useListConnections()
     const restricted = useRestrictedSession(deskId)
 
-    const connection = connections?.find((s: any) => s.connection_id === deskId)
+    const connection = connections?.data?.find((s: any) => s.connection_id === deskId)
 
     if (isLoading) {
         return (
@@ -35,6 +35,13 @@ export default function DeskDashboard({
                 </div>
             </div>
         )
+    }
+
+    if (isError) {
+        return <div className="p-6 space-y-4">
+            <p role="alert" className="text-destructive">{t('pages.deskList.loadFailed')}</p>
+            <Button variant="outline" onClick={() => void refetch()}>{t('common.refresh')}</Button>
+        </div>
     }
 
     if (!connection) {

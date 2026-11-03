@@ -20,3 +20,7 @@
 3. 更新前端：重新生成客户端并在前端 RTC hook 中添加 `onMessage` 处理程序。
 
 跨切面清单见[模块地图](/zh/reference/modules#添加新信令类型)。
+
+## 连接发现
+
+OSS 与 Manager 的 `GET /api/desk/connections` 使用相同的 `RestResponse` 包络：成功时 `success: true`，空列表为 `data: []`；读取失败时 `success: false`，不能显示为设备离线或空设备列表。Manager 共享存储不可用返回 `109`，记录损坏或数据库错误返回 `1`。WebSocket 的 `FetchConnections` 无论成功或失败均返回原请求关联的 `ConnectionsFetched`；客户端先检查 `response_state`，再解析列表。

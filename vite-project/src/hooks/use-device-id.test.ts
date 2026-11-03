@@ -8,7 +8,7 @@ const h = vi.hoisted(() => ({
 }))
 vi.mock("@/services/hooks/connectionController/useListConnections", () => ({
     useListConnections: () => ({
-        data: h.connections,
+        data: { success: true, code: 0, data: h.connections },
         isLoading: h.isLoading,
     }),
 }))

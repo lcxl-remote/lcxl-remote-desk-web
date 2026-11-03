@@ -14726,6 +14726,51 @@ export type RestResponseUserInstructions = {
     success: boolean;
 };
 
+export type RestResponseVecConnectionModel = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type array | undefined
+    */
+    data?: {
+        /**
+         * @description Connection ID
+         * @type string
+        */
+        connection_id: string;
+        /**
+         * @description External device handle (a non-enumerable UUID) for multi-instance\naddressing. Filled by the manager (whose presence registry maps it to the\ninternal device id); `None` on the OSS single-instance signal server, which\nhas no device registry. Dual-target field, not a backward-compat field:\ncontrol ends address a manager device by this handle and an OSS connection\nby `connection_id`.
+         * @type string,null
+        */
+        device_id?: string | null;
+        /**
+         * @description IP address of the connection
+         * @type string,null
+        */
+        ip?: string | null;
+        /**
+         * @description Owning manager instance node id for cross-instance routing. Filled by the\nmanager; `None` on the OSS signal server (single instance, no\ncross-instance routing).
+         * @type string,null
+        */
+        owner_node_id?: string | null;
+        /**
+         * @description Version information for the API.
+         * @type object
+        */
+        version_info: VersionInfo;
+    }[];
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
 export type RestResponseVecVisualEvidenceFrame = {
     /**
      * @type integer, int32
@@ -18090,7 +18135,7 @@ export type CreateBrowserExtensionPairingMutation = {
 /**
  * @description List of online desk connections
 */
-export type ListConnections200 = ConnectionModel[];
+export type ListConnections200 = RestResponseVecConnectionModel;
 
 export type ListConnectionsQueryResponse = ListConnections200;
 
