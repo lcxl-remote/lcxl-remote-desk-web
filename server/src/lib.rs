@@ -1023,28 +1023,28 @@ pub async fn run_with_hub(
         };
         App::new()
             .into_utoipa_app()
-            .map(|app| app.wrap(Logger::default()))
+            .map(|app| app.wrap(Logger::new(desk_signal_facade::http_log::REQUEST_LOG_FORMAT)))
             .map(|app| {
                 app.wrap_fn(|req, srv| {
                     let method = req.method().clone();
-                    let uri = req.uri().to_string();
+                    let path = req.path().to_string();
                     let peer = req.connection_info().realip_remote_addr().map(str::to_owned);
                     let fut = srv.call(req);
 
                     async move {
                         let res = fut.await;
                         match &res {
-                            Err(err) => {
+                            Err(_) => {
                                 error!(
-                                    "HTTP request failed: method={}, uri={}, peer={:?}, error={}, debug={:?}",
-                                    method, uri, peer, err, err
+                                    "HTTP request failed: method={}, path={}, peer={:?}",
+                                    method, path, peer
                                 );
                             }
                             Ok(resp) if resp.status().is_server_error() => {
                                 error!(
-                                    "HTTP request returned server error: method={}, uri={}, peer={:?}, status={}",
+                                    "HTTP request returned server error: method={}, path={}, peer={:?}, status={}",
                                     method,
-                                    uri,
+                                    path,
                                     peer,
                                     resp.status()
                                 );
@@ -1358,15 +1358,14 @@ mod tests {
                 "DELETE" => test::TestRequest::delete().uri(uri).to_request(),
                 _ => unreachable!("unhandled method {method}"),
             };
-            match test::try_call_service(&app, req).await {
-                Ok(resp) => assert_ne!(
+            // A middleware/handler rejection (e.g. 401) means the route matched.
+            if let Ok(resp) = test::try_call_service(&app, req).await {
+                assert_ne!(
                     resp.status(),
                     actix_web::http::StatusCode::NOT_FOUND,
                     "{method} {uri} returned 404 — route must be registered by \
                      configure_api_surface (daemon opts)",
-                ),
-                // A middleware/handler rejection (e.g. 401) means the route matched.
-                Err(_) => {}
+                );
             }
         }
     }
@@ -1673,14 +1672,14 @@ mod tests {
         )
         .await;
 
-        let version = VersionInfo {
+        let mut version = VersionInfo {
             api_version: 1,
             build_number: 1,
             commit_hash: "test".into(),
-            remote_desk_type: RemoteDeskTypeEnum::Browser,
+            remote_desk_type: RemoteDeskTypeEnum::Server,
             operation_system: OperationSystemEnum::Windows,
             display_name: None,
-            client_id: None,
+            client_id: Some("host-fixture".into()),
             token: Some("test-token".into()),
             debug_build: false,
             repository_url: None,
@@ -1705,5 +1704,12 @@ mod tests {
             "signaling should bypass enforce_device_scope and reach the WS handshake (got {})",
             resp.status(),
         );
+        version.remote_desk_type = RemoteDeskTypeEnum::Browser;
+        let query = serde_urlencoded::to_string(&version).unwrap();
+        let req = test::TestRequest::get()
+            .uri(&format!("/api/desk/signaling?{query}"))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), actix_web::http::StatusCode::UNAUTHORIZED);
     }
 }

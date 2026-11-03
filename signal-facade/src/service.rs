@@ -244,10 +244,8 @@ pub struct SignalingHandler<U: SignalingUser> {
     pub support_code_minter: Option<Arc<dyn SupportCodeMinter>>,
     pub remote_access_admission_authorizer: Option<Arc<dyn RemoteAccessAdmissionAuthorizer>>,
     pub host_remote_access_controller: Option<Arc<dyn HostRemoteAccessController>>,
-    /// Resolver for `FetchConnections` requests. `Some` only in the manager
-    /// (which returns a cluster-wide, scope-authorized list from presence);
-    /// `None` in the signal server, where the handler falls back to the local
-    /// connection map.
+    /// Host-provided scope-authorized connection listing. Unset handlers deny
+    /// enumeration, including auxiliary terminal sockets.
     pub fetch_connections_resolver: Option<Arc<dyn FetchConnectionsResolver>>,
     /// Cross-instance relay for frames whose target connection this instance does
     /// not hold. `Some` only in the manager (which routes the frame to the owning
@@ -282,7 +280,10 @@ impl<U: SignalingUser> Drop for SignalingHandler<U> {
                 self.connection_state.model.connection_id
             ),
             Ok(Some(connection_state)) => {
-                log::info!("Removed connection from map: {:?}", connection_state.model)
+                log::info!(
+                    "Removed connection from map: {}",
+                    connection_state.model.connection_id
+                )
             }
             Err(err) => log::error!("Failed to remove connection from map: {:?}", err),
         }
@@ -365,7 +366,7 @@ impl<U: SignalingUser> SignalingHandler<U> {
     #[allow(clippy::too_many_arguments)]
     pub async fn init(
         connection_id: String,
-        client_version_info: VersionInfo,
+        mut client_version_info: VersionInfo,
         connection_map: web::Data<SharedConnectionMap>,
         ws_session: Session,
         user: U,
@@ -388,6 +389,8 @@ impl<U: SignalingUser> SignalingHandler<U> {
             );
         }
 
+        // Credentials are consumed by the host controller, never connection metadata.
+        client_version_info.token = None;
         let connection_model = ConnectionModel {
             connection_id: connection_id.clone(),
             version_info: client_version_info.clone(),
@@ -565,9 +568,7 @@ impl<U: SignalingUser> SignalingHandler<U> {
         self
     }
 
-    /// Attach a cluster-wide `FetchConnections` resolver (the manager's
-    /// presence-backed, scope-authorized list). The signal server never calls
-    /// this, so `FetchConnections` falls back to the local connection map.
+    /// Attach the host's scope-authorized connection resolver.
     pub fn with_fetch_connections_resolver(
         mut self,
         resolver: Arc<dyn FetchConnectionsResolver>,
@@ -719,7 +720,7 @@ impl<U: SignalingUser> SignalingHandler<U> {
         &mut self,
         text: ByteString,
     ) -> Result<MessageControl, DeskSignalFacadeError> {
-        log::debug!("Received text message: {}", text);
+        log::debug!("Received signaling text: {} bytes", text.len());
         let signaling_model = serde_json::from_str::<SignalingModel>(&text)?;
         if self.connection_state.auth_context.auth_kind
             == crate::model::auth_context::AuthKind::CookieAuth
@@ -856,37 +857,53 @@ impl<U: SignalingUser> SignalingHandler<U> {
                 );
             }
             SignalingType::FetchConnections => {
-                let connection_map = if let Some(resolver) = &self.fetch_connections_resolver {
-                    // Manager: cluster-wide, presence-backed, scope-authorized
-                    // list. The scope payload is optional and defaults to
-                    // personal.
-                    let scope = signaling_model.get_data_with_default::<FetchConnectionsScope>()?;
-                    let models = resolver.resolve(&self.connection_state, scope).await?;
-                    models
-                        .into_iter()
-                        .map(|model| (model.connection_id.clone(), model))
-                        .collect()
-                } else {
-                    // Signal server: single-instance local map.
-                    let connection_map = self.connection_map.read().await;
-                    connection_map
-                        .iter()
-                        .map(|item| (item.0.clone(), item.1.model.clone()))
-                        .collect()
+                let resolved = match &self.fetch_connections_resolver {
+                    Some(resolver) => {
+                        match signaling_model.get_data_with_default::<FetchConnectionsScope>() {
+                            Ok(scope) => resolver.resolve(&self.connection_state, scope).await,
+                            Err(_) => DeskSignalFacadeError::custom_error(
+                                DeskErrorCode::INVALID_PARAMS,
+                                "Invalid connection scope",
+                            ),
+                        }
+                    }
+                    None => DeskSignalFacadeError::custom_error(
+                        DeskErrorCode::PERMISSION_ERROR,
+                        "Connection listing is not permitted",
+                    ),
                 };
-                let connection_list = ConnectionsFetchedData {
-                    current_connection_id: self.connection_state.model.connection_id.clone(),
-                    connection_map,
+                let response = match resolved {
+                    Ok(models) => {
+                        let connection_list = ConnectionsFetchedData {
+                            current_connection_id: self.connection_state.model.connection_id.clone(),
+                            connection_map: models
+                                .into_iter()
+                                .map(|model| (model.connection_id.clone(), model))
+                                .collect(),
+                        };
+                        SignalingModel::success_response(
+                            &signaling_model.request_id,
+                            SignalingType::ConnectionsFetched,
+                            None,
+                            None,
+                            Some(&connection_list),
+                        )?
+                    }
+                    Err(error) => {
+                        let code = match error {
+                            DeskSignalFacadeError::CustomError(error) => error.error_code,
+                            _ => DeskErrorCode::SYSTEM_ERROR,
+                        };
+                        SignalingModel::error(
+                            &signaling_model.request_id,
+                            SignalingType::ConnectionsFetched,
+                            None,
+                            None,
+                            code,
+                            "Connection listing failed",
+                        )?
+                    }
                 };
-
-                log::info!("Sending connection list to client: {:?}", connection_list);
-                let response = SignalingModel::success_response(
-                    &signaling_model.request_id,
-                    SignalingType::ConnectionsFetched,
-                    None,
-                    None,
-                    Some(&connection_list),
-                )?;
                 self.connection_state.send_response(None, &response).await?;
             }
             SignalingType::ConnectionsFetched => {
@@ -1374,7 +1391,7 @@ impl<U: SignalingUser> SignalingHandler<U> {
                 }
             }
             SignalingType::Error => {
-                log::warn!("Received error from client: {:?}", signaling_model);
+                log::warn!("Received client error frame");
             }
             SignalingType::Unknown => {
                 log::warn!("Received unknown signaling type");
@@ -1491,15 +1508,15 @@ impl<U: SignalingUser> SignalingHandler<U> {
                             let _ = session.close(None).await;
                             break;
                         }
-                        Err(e) => {
-                            log::error!("Error handling signaling message: {}", e);
+                        Err(_) => {
+                            log::error!("Error handling signaling message");
                         }
                     }
                 }
 
                 Ok(AggregatedMessage::Binary(bin)) => {
-                    if let Err(e) = self.binary(bin).await {
-                        log::error!("Error handling binary message: {}", e);
+                    if self.binary(bin).await.is_err() {
+                        log::error!("Error handling binary message");
                         let session = self.connection_state.session.read().await.clone();
                         let _ = session.close(None).await;
                         break;
@@ -1513,12 +1530,12 @@ impl<U: SignalingUser> SignalingHandler<U> {
                 Ok(AggregatedMessage::Pong(_)) => {
                     // ignore PONG frames
                 }
-                Ok(AggregatedMessage::Close(close_reason)) => {
-                    log::warn!("WS close frame received: {:?}", close_reason);
+                Ok(AggregatedMessage::Close(_)) => {
+                    log::info!("WS close frame received");
                     break;
                 }
-                Err(e) => {
-                    log::error!("WS error: {}", e);
+                Err(_) => {
+                    log::error!("WS transport error");
                     break;
                 }
             }

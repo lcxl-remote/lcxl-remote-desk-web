@@ -27,6 +27,7 @@ mod command_policy;
 pub mod computer_cancel_dispatch;
 pub mod computer_use_readiness;
 pub mod config;
+mod connection_resolver;
 pub mod context_management_config;
 pub mod control_authorizer;
 pub mod controller;

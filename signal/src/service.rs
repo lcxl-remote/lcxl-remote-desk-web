@@ -113,56 +113,6 @@ impl Drop for CentralPendingConnectionGuard {
     }
 }
 
-/// Resolve the single-account auth context for a connection's adjudicated role on
-/// the OSS signal. Roles are already server-adjudicated upstream (a `Server` only
-/// via a valid node token; everything else via the session cookie), so the auth
-/// kind follows the role:
-///
-/// - `Server` — token-authenticated as the target device (it registers a device
-///   code and is the control target).
-/// - Everything else — the cookie-authenticated single account. This deliberately
-///   includes the host's **`Support`** upstream: on a plain signal that role has
-///   **no** temp-code / central-brain privileges (only the manager attaches those),
-///   so it is ordinary single-account routing-only, exactly like a `Browser`. Made
-///   an explicit, tested seam so the role is never silently mishandled.
-pub(crate) fn single_account_auth_context(
-    remote_desk_type: RemoteDeskTypeEnum,
-) -> desk_signal_facade::model::auth_context::AuthContext {
-    use desk_signal_facade::model::auth_context::AuthContext;
-    match remote_desk_type {
-        RemoteDeskTypeEnum::Server => AuthContext::token_auth(
-            crate::control_authorizer::SINGLE_ACCOUNT_USER_ID,
-            crate::control_authorizer::SINGLE_ACCOUNT_TOKEN_ID,
-            RemoteDeskTypeEnum::Server,
-        ),
-        RemoteDeskTypeEnum::Browser
-        | RemoteDeskTypeEnum::Signal
-        | RemoteDeskTypeEnum::Manager
-        | RemoteDeskTypeEnum::Support => AuthContext::cookie(
-            crate::control_authorizer::SINGLE_ACCOUNT_USER_ID,
-            remote_desk_type,
-        ),
-    }
-}
-
-/// Map a resolved browser identity to its `AuthContext`, the single source of truth
-/// shared by the main signaling connection and the terminal WS connection (so a
-/// code-session vs owner stamp can never drift between them, per the design's shared
-/// resolver requirement). A redeemed code-session resolves to its own principal
-/// (never the single-account owner) so the capability-ceiling stamps use the code's
-/// ceiling rather than full control.
-pub(crate) fn browser_auth_context(
-    code_session: Option<&desk_signal_facade::model::code_session::CodeSessionCookie>,
-    remote_desk_type: RemoteDeskTypeEnum,
-) -> desk_signal_facade::model::auth_context::AuthContext {
-    match code_session {
-        Some(cs) => desk_signal_facade::model::auth_context::AuthContext::code_session(
-            cs.code_session_id.clone(),
-        ),
-        None => single_account_auth_context(remote_desk_type),
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 pub async fn handle_signaling(
     client_version_info: VersionInfo,
@@ -174,6 +124,7 @@ pub async fn handle_signaling(
     turn: Option<std::sync::Arc<dyn TurnProvider>>,
     conn_device_map: Option<Arc<crate::turn_usage::ConnectionDeviceMap>>,
     code_session: Option<desk_signal_facade::model::code_session::CodeSessionCookie>,
+    auth_context: desk_signal_facade::model::auth_context::AuthContext,
 ) -> Result<(), DeskSignalError> {
     log::info!("Handling signaling");
     let random_uuid = Uuid::new_v4();
@@ -207,14 +158,6 @@ pub async fn handle_signaling(
         }
         _ => None,
     };
-
-    // Signal is the OSS single-account central brain: it resolves the connection's
-    // identity so its control-frame authorizer can stamp a trusted actor/target.
-    // A capability-scoped code-session resolves to its own principal (never the
-    // single-account owner) so the RequestRemoteAccess authorizer stamps the redeemed
-    // code's ceiling rather than full control.
-    let auth_context =
-        browser_auth_context(code_session.as_ref(), client_version_info.remote_desk_type);
 
     // The central-brain injection point authorizes the single-account Device
     // Assistant and execution surfaces.
@@ -273,7 +216,7 @@ pub async fn handle_signaling(
     let mut handler = SignalingHandler::init(
         connection_id,
         client_version_info,
-        connection_map,
+        connection_map.clone(),
         ws_session,
         user,
         ip,
@@ -300,44 +243,20 @@ pub async fn handle_signaling(
     .with_remote_access_admission_authorizer(remote_access_control.clone())
     .with_host_remote_access_controller(remote_access_control);
 
+    handler = handler.with_fetch_connections_resolver(Arc::new(
+        crate::connection_resolver::SignalFetchConnectionsResolver::new(
+            connection_map,
+            code_session,
+            crate::access_grant::global_access_grant_store(),
+            Arc::new(
+                crate::request_remote_authorizer::DbDeviceGenerationLookup::new(
+                    crate::db::get_db().clone(),
+                ),
+            ),
+        ),
+    ));
     handler.do_handle_signaling(stream).await?;
     Ok(())
 }
 
 pub type SignalingContext<T> = SignalingHandler<T>;
-
-#[cfg(test)]
-mod tests {
-    use super::single_account_auth_context;
-    use desk_signal_facade::model::auth_context::AuthKind;
-    use desk_signal_facade::model::signal::RemoteDeskTypeEnum;
-
-    #[test]
-    fn server_role_is_token_authenticated_target() {
-        let ctx = single_account_auth_context(RemoteDeskTypeEnum::Server);
-        assert_eq!(ctx.auth_kind, AuthKind::TokenAuth);
-        assert_eq!(ctx.remote_desk_type, RemoteDeskTypeEnum::Server);
-        assert_eq!(
-            ctx.user_id,
-            Some(crate::control_authorizer::SINGLE_ACCOUNT_USER_ID)
-        );
-    }
-
-    #[test]
-    fn support_role_is_routing_only_single_account() {
-        // On a plain signal the host's Support upstream carries no central-brain /
-        // temp-code privileges: it resolves to the cookie-authenticated single
-        // account, exactly like a Browser, and never token-auth (so it binds no
-        // device and issues no code). This locks that the role is handled, not
-        // silently absorbed or mistaken for a Server.
-        let support = single_account_auth_context(RemoteDeskTypeEnum::Support);
-        assert_eq!(support.auth_kind, AuthKind::CookieAuth);
-        assert_eq!(support.remote_desk_type, RemoteDeskTypeEnum::Support);
-        assert_eq!(support.bound_device_id, None);
-
-        let browser = single_account_auth_context(RemoteDeskTypeEnum::Browser);
-        // Same auth kind / account as a Browser — routing-only parity.
-        assert_eq!(support.auth_kind, browser.auth_kind);
-        assert_eq!(support.user_id, browser.user_id);
-    }
-}

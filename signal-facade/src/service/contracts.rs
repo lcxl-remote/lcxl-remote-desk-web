@@ -722,11 +722,9 @@ pub trait HostRemoteAccessController: Send + Sync {
 
 /// Resolves a `FetchConnections` request into the connection list to return.
 ///
-/// The signal server leaves this unset and the handler falls back to the local
-/// connection map (single instance, correct). The manager implements it to
-/// return a cluster-wide, presence-backed and scope-authorized list whose items
-/// carry `device_id` / `owner_node_id` — so a control end behind a load balancer
-/// sees every device regardless of which instance holds the desk-server socket.
+/// Both hosts install a resolver before reading frames. OSS filters its local
+/// map by owner or live grant; Manager intersects shared presence with current
+/// database permissions. An unset resolver denies enumeration.
 ///
 /// `requester` is the asking connection (carries the trusted `AuthContext` used
 /// for scoped authorization); `scope` is the parsed request payload.

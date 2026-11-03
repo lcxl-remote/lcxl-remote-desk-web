@@ -393,13 +393,8 @@ pub enum RemoteDeskTypeEnum {
     /// this enum used by another project, not this project
     /// so keep this enum but do not use it
     Manager,
-    /// Temporary-support type: a desk server's dedicated, short-lived upstream
-    /// connection opened solely to obtain and serve a temporary support session
-    /// (a supporter the owner does not otherwise share the device with). Distinct
-    /// from its main `Server` connection so it registers no device / presence and
-    /// the host can hold it as a restricted, fail-closed session. Only a central
-    /// brain (the manager) attaches temp-code semantics to this role; a plain
-    /// signal treats it as routing-only.
+    /// Reserved role, rejected by node-token authentication. Support codes use
+    /// the host's regular Server upstream.
     Support,
 }
 

@@ -22,6 +22,7 @@ pub mod remote_session;
 pub mod request_remote_authz;
 pub mod security_settings;
 pub mod signal;
+pub mod signaling_credentials;
 pub mod startup_mode;
 pub mod support;
 pub mod system_info;

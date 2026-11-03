@@ -1,6 +1,6 @@
+use crate::controller::signaling::browser_auth_context;
 use crate::controller::signaling::{resolve_browser_identity, trusted_browser_display_name};
 use crate::request_remote_authorizer::DbDeviceGenerationLookup;
-use crate::service::browser_auth_context;
 use crate::terminal_start_authorizer::SignalTerminalStartAuthorizer;
 use crate::{model::SharedConnectionMap, service::SignalingContext, version};
 use actix_session::Session;
@@ -49,7 +49,7 @@ pub async fn open_terminal_session(
         Some(identity) => identity,
         None => return Err(actix_web::error::ErrorUnauthorized("User not logged in")),
     };
-    let auth_context = browser_auth_context(code_session.as_ref(), RemoteDeskTypeEnum::Browser);
+    let auth_context = browser_auth_context(code_session.as_ref());
     let actor_display_name = trusted_browser_display_name(&user.name, code_session.is_some());
     if query_list.command.is_empty() {
         return Err(actix_web::error::ErrorBadRequest(

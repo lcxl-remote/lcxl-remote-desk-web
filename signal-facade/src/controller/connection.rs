@@ -17,12 +17,14 @@ pub const TAG: &str = "Connection";
 pub async fn list_connections(
     connection_map: web::Data<SharedConnectionMap>,
 ) -> Result<HttpResponse, DeskSignalFacadeError> {
-    let connection_map = connection_map.read().await;
-    let connections: Vec<ConnectionModel> = connection_map
-        .values()
-        .filter(|s| s.model.version_info.remote_desk_type == RemoteDeskTypeEnum::Server)
-        .map(|s| s.model.clone())
-        .collect();
+    let connections: Vec<ConnectionModel> = {
+        let connection_map = connection_map.read().await;
+        connection_map
+            .values()
+            .filter(|s| s.model.version_info.remote_desk_type == RemoteDeskTypeEnum::Server)
+            .map(|s| s.public_model())
+            .collect()
+    };
 
     Ok(HttpResponse::Ok().json(connections))
 }

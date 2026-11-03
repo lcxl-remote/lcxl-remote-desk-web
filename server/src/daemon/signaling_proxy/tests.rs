@@ -49,8 +49,10 @@ fn rejected_media_command_wakes_the_matching_terminal_waiter() {
         MediaKind, MediaSettingsAppliedPayload, MediaSettingsApplyOutcome,
     };
 
-    let mut coordinator = PerConnectionMediaCoordinator::default();
-    coordinator.current_apply_request_id = Some("settings-1".to_string());
+    let mut coordinator = PerConnectionMediaCoordinator {
+        current_apply_request_id: Some("settings-1".to_string()),
+        ..Default::default()
+    };
     coordinator.video.generation = 2;
     coordinator.video.lifecycle = MediaSlotLifecycle::Transitioning;
     coordinator.video.pending_generation = Some(2);
@@ -82,8 +84,10 @@ fn rejected_media_command_ignores_a_stale_request_correlation() {
         MediaKind, MediaSettingsAppliedPayload, MediaSettingsApplyOutcome,
     };
 
-    let mut coordinator = PerConnectionMediaCoordinator::default();
-    coordinator.current_apply_request_id = Some("settings-2".to_string());
+    let mut coordinator = PerConnectionMediaCoordinator {
+        current_apply_request_id: Some("settings-2".to_string()),
+        ..Default::default()
+    };
     coordinator.audio.generation = 3;
     let (tx, mut rx) = tokio::sync::oneshot::channel();
     coordinator.audio_terminal_waiter = Some((3, tx));
@@ -241,15 +245,14 @@ fn guard_and_clean_signaling_url_catches_control_prefixed_literal() {
 }
 
 #[test]
-fn redact_token_in_url_masks_only_the_token() {
+fn signaling_url_logging_omits_the_entire_query() {
     let out = redact_token_in_url(
-        "wss://sig.example/api/desk/signaling?token=SECRET123&build_number=42&probe=1",
+        "wss://sig.example/api/desk/signaling?token=SECRET123&repository_url=PRIVATE_REPO&grant_session_id=GRANT_SECRET&probe=1",
     );
-    // The credential is gone; the rest of the query survives for debugging.
-    assert!(!out.contains("SECRET123"), "token must not appear: {out}");
-    assert!(out.contains("token=%2A%2A%2A") || out.contains("token=***"));
-    assert!(out.contains("build_number=42"));
-    assert!(out.contains("probe=1"));
+    assert_eq!(out, "wss://sig.example/api/desk/signaling");
+    for secret in ["SECRET123", "PRIVATE_REPO", "GRANT_SECRET"] {
+        assert!(!out.contains(secret));
+    }
 }
 
 #[test]
@@ -288,7 +291,7 @@ fn redact_token_in_url_masks_token_in_fragment_and_userinfo() {
         !frag.contains("SECRET123"),
         "fragment token must not appear: {frag}"
     );
-    // Userinfo credentials are stripped, and a real token query is still masked.
+    // Userinfo and the entire query are stripped.
     let ui = redact_token_in_url("wss://user:s3cret@sig.example/api?token=SECRET123");
     assert!(!ui.contains("SECRET123"), "token must not appear: {ui}");
     assert!(!ui.contains("s3cret"), "userinfo must not appear: {ui}");
@@ -1730,6 +1733,7 @@ fn build_virtual_display_response_failed_emits_invalid_state_error() {
 /// The cache feeds two paths:
 ///   * `refresh_hz=0` fallback in the auto-resolution router path
 ///   * the same-resolution idempotent short-circuit in the router
+///
 /// Without this update the daemon would never learn the driver's
 /// actual mode and could neither fill in refresh nor skip redundant
 /// IPC.

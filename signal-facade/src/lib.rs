@@ -8,3 +8,5 @@ pub mod terminal_completion;
 pub mod web_fetch;
 pub mod web_search;
 pub mod wincode_adapters;
+
+pub mod http_log;

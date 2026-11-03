@@ -34,7 +34,7 @@ pub struct ConnectionModel {
 /// `Personal` returns the requester's own devices; `Org` returns the devices
 /// authorized to the named organization (manager only). The OSS single-instance
 /// signal server has no organization model and ignores the variant, returning
-/// its local connection map regardless.
+/// only the local Server connections authorized by the requester's identity.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ConnectionScope {
@@ -143,6 +143,15 @@ pub struct ConnectionState {
     pub auth_context: crate::model::auth_context::AuthContext,
 }
 
+impl ConnectionState {
+    /// Public connection metadata never carries a node credential.
+    pub fn public_model(&self) -> ConnectionModel {
+        let mut model = self.model.clone();
+        model.version_info.token = None;
+        model
+    }
+}
+
 /// Shared connection map: connection_id -> ConnectionState
 pub struct SharedConnectionMap(pub RwLock<BTreeMap<String, ConnectionState>>);
 
@@ -179,13 +188,14 @@ impl ForwardSignalingSender for ConnectionState {
         from_connection_id: Option<String>,
         signaling_model: &SignalingModel,
     ) -> Result<(), DeskSignalFacadeError> {
-        let signaling_model = SignalingModel::success_response(
+        let signaling_model = SignalingModel::new(
             &signaling_model.request_id,
             signaling_model.signaling_type,
             from_connection_id,
             Some(self.model.connection_id.clone()),
-            signaling_model.get_raw_data().as_ref(),
-        )?;
+            signaling_model.get_raw_data().clone(),
+            signaling_model.response_state.clone(),
+        );
         self.session
             .write()
             .await

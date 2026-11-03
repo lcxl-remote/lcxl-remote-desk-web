@@ -133,12 +133,8 @@ pub(super) fn guard_and_clean_signaling_url(
     Ok(url_clean.to_string())
 }
 
-/// Render a dial URL for logging with every credential-bearing part neutralized:
-/// the `token` query value is masked, any userinfo (`user:pass@`) is stripped, and
-/// any fragment is dropped (a malformed base could otherwise push the appended
-/// token into the fragment). If the URL does not parse, fail safe by keeping only
-/// the part before the first `?`/`#` (a credential can only live in the query or
-/// fragment) rather than logging it verbatim.
+/// Log only the dial endpoint, omitting userinfo, query and fragment. Invalid
+/// URLs produce a fixed placeholder because no portion is known to be safe.
 pub(super) fn redact_token_in_url(raw: &str) -> String {
     let Ok(mut url) = url::Url::parse(raw) else {
         // Unparseable: any part of the raw string may carry a credential (userinfo,
@@ -153,25 +149,7 @@ pub(super) fn redact_token_in_url(raw: &str) -> String {
     let _ = url.set_username("");
     let _ = url.set_password(None);
     url.set_fragment(None);
-    if url.query().is_some() {
-        let redacted: Vec<(String, String)> = url
-            .query_pairs()
-            .map(|(k, v)| {
-                if k.eq_ignore_ascii_case("token") {
-                    (k.into_owned(), "***".to_string())
-                } else {
-                    (k.into_owned(), v.into_owned())
-                }
-            })
-            .collect();
-        {
-            let mut qs = url.query_pairs_mut();
-            qs.clear();
-            for (k, v) in &redacted {
-                qs.append_pair(k, v);
-            }
-        }
-    }
+    url.set_query(None);
     url.to_string()
 }
 

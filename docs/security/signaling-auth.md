@@ -13,8 +13,8 @@ The project has connection paths with **different authentication mechanisms** th
 
 The signaling server decides each connection's `remote_desk_type` itself — a client's self-reported role is never trusted:
 
-- A connection presenting a **valid** node token authenticates as its reported role (a desk-server host reports `server`).
-- A connection presenting a **non-empty but invalid** token is rejected with **401** — it is *not* silently downgraded to a cookie/Browser session. This lets a client whose token went stale clear it and re-issue, instead of looping as an anonymous Browser.
+- A node token admits only a `server` connection. A token declaring `browser` or another role is rejected with **401**; it cannot become an owner session.
+- An explicitly empty, duplicate, malformed or invalid token is rejected with **401**, even when an owner Cookie is also present. Credential extraction is independent of optional version metadata.
 - A connection with **no token** authenticates via the session cookie and is always a `browser`, regardless of any self-reported role.
 
 The same contract holds on both the open-source signaling server and the enterprise manager.
@@ -30,7 +30,9 @@ Because a redeemed session is not the owner, it is **capability-scoped** and enf
 - **Privileged signaling is allow-listed.** Only session-establishment and control-plane frames pass on a scoped session; any frame that could leak host credentials (the `signaling_token` / `manager_api_token`) is denied at the host's signaling gate.
 - **The session is time-boxed.** A support code carries a TTL; the host's local user can also end it at any time, and closing it cleans up only that connection.
 
-Minting a support code is a **central-brain (manager) capability** — the open-source signaling server routes connections but does **not** originate support codes. On a plain signaling server the `Support` role is ordinary routing-only (equivalent to a `Browser`: no device presence, no special privileges); device-code redemption and the capability-scoped enforcement above are part of the open-source baseline regardless.
+Minting a support code is a **central-brain (manager) capability** — the open-source signaling server routes connections but does **not** originate support codes. Hosts request support codes over their regular `server` connection. Device-code redemption and capability-scoped enforcement are part of the open-source baseline.
+
+Connection lists contain public metadata without node tokens. An OSS code session can enumerate only its redeemed target while its principal, expiry, revocation state and code generation remain valid. Manager lists require a browser account and current owner or organization access; node tokens cannot enumerate devices. Auxiliary terminal sockets reject connection-list requests.
 
 ## Obtaining a host token (`POST /api/tokens`)
 
@@ -55,7 +57,7 @@ This outbound guard is separate from the model-provider SSRF guard (`ProviderSsr
 
 - **Browser connections do not carry a token.** They authenticate with the Actix-Session cookie. Route extractors must use `Option<web::Query<VersionInfo>>`, and manager signaling routes are excluded from the global Session middleware.
 - The `local_signaling_token` is a host credential. It is masked in logs (the `SystemSettings` `Debug` output redacts it and the other secrets) and is never logged in plaintext.
-- Tokens for remote signaling and the manager are passed in the WebSocket URL query string.
+- Tokens for remote signaling and the manager are passed in the WebSocket URL query string. Application access logs record the path without Query or Referer; signaling logs omit raw frames and grant identifiers. Configure reverse-proxy access logs to omit credential-bearing queries too.
 
 ## Manager credential proof and local lease
 

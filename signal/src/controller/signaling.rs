@@ -5,6 +5,7 @@ use actix_web::{HttpRequest, HttpResponse, get, rt, web};
 use desk_server_user::{model::CurrentUser, service::UserSessionAccessor};
 use desk_signal_facade::{
     model::{
+        auth_context::AuthContext,
         code_session::{CODE_SESSION_KEY, CodeSessionCookie},
         probe::{SIGNALING_PROBE_HEADER, SIGNALING_PROBE_HEADER_VALUE, is_probe_query},
         signal::{RemoteDeskTypeEnum, TurnProvider},
@@ -27,7 +28,7 @@ pub const TAG: &str = "Signaling";
 /// owner-vs-code-session adjudication cannot drift (a code-session's ceiling must be
 /// enforced identically on both). Returns the routing `CurrentUser` plus the raw
 /// `CodeSessionCookie` (so the caller can derive the `AuthContext` via
-/// [`crate::service::browser_auth_context`]).
+/// [`browser_auth_context`]).
 pub(crate) fn resolve_browser_identity(
     session: &Session,
 ) -> Result<Option<(CurrentUser, Option<CodeSessionCookie>)>, actix_web::Error> {
@@ -48,11 +49,23 @@ pub(crate) fn resolve_browser_identity(
     }
 }
 
+/// Called only after resolving an authenticated cookie identity. Roles cannot
+/// manufacture an owner; nodes receive their context in the token branch.
+pub(crate) fn browser_auth_context(code_session: Option<&CodeSessionCookie>) -> AuthContext {
+    match code_session {
+        Some(cs) => AuthContext::code_session(cs.code_session_id.clone()),
+        None => AuthContext::cookie(
+            crate::control_authorizer::SINGLE_ACCOUNT_USER_ID,
+            RemoteDeskTypeEnum::Browser,
+        ),
+    }
+}
+
 /// Result of validating the (optional) node token presented on the signaling
 /// query string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TokenOutcome {
-    /// No token was presented (empty or missing).
+    /// No token was presented.
     Absent,
     /// A non-empty token was presented and validated.
     Valid,
@@ -65,9 +78,8 @@ enum TokenOutcome {
 enum RoleDecision {
     /// Reject the connection with 401.
     Reject,
-    /// Authenticated as a node via a valid token; act as the reported role
-    /// (a desk-server host reports `Server`).
-    Node(RemoteDeskTypeEnum),
+    /// Authenticated as a node via a valid token; only Server is admitted.
+    Node,
     /// No token presented; authenticate via the session cookie and act as a
     /// `Browser` regardless of any self-reported role.
     Cookie,
@@ -75,13 +87,14 @@ enum RoleDecision {
 
 /// Pure role adjudication: the security-critical core of signaling auth.
 ///
-/// - A valid token authenticates a node acting as its reported role.
+/// - A valid token admits only a Server node.
 /// - A non-empty but invalid token is rejected (NEVER falls back to cookie auth,
 ///   so a stale token surfaces as 401 instead of a silent Browser downgrade).
 /// - No token defers to cookie session auth, which is always `Browser`.
 fn adjudicate_role(token: TokenOutcome, reported_type: RemoteDeskTypeEnum) -> RoleDecision {
     match token {
-        TokenOutcome::Valid => RoleDecision::Node(reported_type),
+        TokenOutcome::Valid if reported_type == RemoteDeskTypeEnum::Server => RoleDecision::Node,
+        TokenOutcome::Valid => RoleDecision::Reject,
         TokenOutcome::Invalid => RoleDecision::Reject,
         TokenOutcome::Absent => RoleDecision::Cookie,
     }
@@ -130,7 +143,11 @@ pub async fn open_signaling_handle(
     validator_opt: Option<web::Data<Arc<dyn NodeTokenValidator>>>,
     conn_device_map: Option<web::Data<crate::turn_usage::ConnectionDeviceMap>>,
 ) -> Result<HttpResponse, actix_web::Error> {
-    info!("Incoming signaling request: {} {}", req.method(), req.uri());
+    info!(
+        "Incoming signaling request: {} {}",
+        req.method(),
+        req.path()
+    );
 
     let version_info_opt = query.map(|q| q.into_inner());
 
@@ -139,14 +156,13 @@ pub async fn open_signaling_handle(
     // passes `NodeTokenValidator` is allowed to act as `Server`; every
     // cookie/session connection is forced to `Browser`. This mirrors the
     // manager's contract so both ends behave identically.
-    let presented_token = version_info_opt
-        .as_ref()
-        .and_then(|vi| vi.token.as_deref())
-        .filter(|t| !t.is_empty());
+    let presented_token =
+        desk_signal_facade::model::signaling_credentials::node_token(req.query_string());
 
-    let token_outcome = match presented_token {
-        None => TokenOutcome::Absent,
-        Some(token) => {
+    let token_outcome = match &presented_token {
+        Err(_) => TokenOutcome::Invalid,
+        Ok(None) => TokenOutcome::Absent,
+        Ok(Some(token)) => {
             // A non-empty token MUST validate. On failure we deliberately do NOT
             // fall back to cookie auth, so a stale/wrong token surfaces as 401
             // and the client can clear its cache and re-issue, instead of being
@@ -192,9 +208,13 @@ pub async fn open_signaling_handle(
             log::warn!("Invalid node token provided");
             return Err(actix_web::error::ErrorUnauthorized("Unauthorized"));
         }
-        RoleDecision::Node(role) => {
+        RoleDecision::Node => {
             info!("Node token validated successfully");
-            (CurrentUser::new_admin("server_node"), role, None)
+            (
+                CurrentUser::new_admin("server_node"),
+                RemoteDeskTypeEnum::Server,
+                None,
+            )
         }
         RoleDecision::Cookie => {
             // No token: authenticate via the session cookie. Such a connection is
@@ -210,6 +230,16 @@ pub async fn open_signaling_handle(
                 }
             }
         }
+    };
+
+    let auth_context = if adjudicated_type == RemoteDeskTypeEnum::Server {
+        AuthContext::token_auth(
+            crate::control_authorizer::SINGLE_ACCOUNT_USER_ID,
+            crate::control_authorizer::SINGLE_ACCOUNT_TOKEN_ID,
+            RemoteDeskTypeEnum::Server,
+        )
+    } else {
+        browser_auth_context(code_session.as_ref())
     };
 
     info!("User {} is signaling", user.name);
@@ -245,6 +275,7 @@ pub async fn open_signaling_handle(
         ai_assistant_revision: None,
         ai_assistant_enabled: None,
     });
+    version_info.token = None;
     // Overwrite browser identity fields with server-adjudicated values before
     // the connection enters the shared map. Node display names remain device
     // metadata, but browser names may later enter a host authorization stamp and
@@ -281,10 +312,11 @@ pub async fn open_signaling_handle(
             turn_provider,
             conn_device_map.map(|d| d.into_inner()),
             code_session,
+            auth_context,
         )
         .await;
-        if let Err(e) = result {
-            error!("Error handling signaling: {}", e);
+        if result.is_err() {
+            error!("Error handling signaling");
         } else {
             info!("Signaling handle is finished");
         }
@@ -445,19 +477,23 @@ mod tests {
         // admitted as a Server node.
         assert_eq!(
             adjudicate_role(TokenOutcome::Valid, RemoteDeskTypeEnum::Server),
-            RoleDecision::Node(RemoteDeskTypeEnum::Server)
+            RoleDecision::Node
         );
     }
 
     #[test]
-    fn valid_token_admits_reported_support_role() {
-        // A desk-server's dedicated temporary-support upstream presents a valid
-        // token and reports Support: it is admitted as a Support node (routing-only
-        // on a plain signal), not rejected and not coerced to Browser.
-        assert_eq!(
-            adjudicate_role(TokenOutcome::Valid, RemoteDeskTypeEnum::Support),
-            RoleDecision::Node(RemoteDeskTypeEnum::Support)
-        );
+    fn valid_token_rejects_every_non_server_role() {
+        for role in [
+            RemoteDeskTypeEnum::Browser,
+            RemoteDeskTypeEnum::Support,
+            RemoteDeskTypeEnum::Signal,
+            RemoteDeskTypeEnum::Manager,
+        ] {
+            assert_eq!(
+                adjudicate_role(TokenOutcome::Valid, role),
+                RoleDecision::Reject
+            );
+        }
     }
 
     #[test]
@@ -487,6 +523,126 @@ mod tests {
         assert_eq!(
             adjudicate_role(TokenOutcome::Absent, RemoteDeskTypeEnum::Browser),
             RoleDecision::Cookie
+        );
+    }
+
+    #[actix_web::test]
+    async fn credential_errors_cannot_downgrade_to_an_owner_cookie() {
+        use actix_session::{SessionMiddleware, storage::CookieSessionStore};
+        let validator: Arc<dyn NodeTokenValidator> = Arc::new(MockValidator {
+            good: "goodtoken".into(),
+        });
+        let connections = web::Data::new(SharedConnectionMap::new());
+        let app = actix_web::test::init_service(
+            App::new()
+                .app_data(connections.clone())
+                .app_data(web::Data::new(validator))
+                .wrap(
+                    SessionMiddleware::builder(
+                        CookieSessionStore::default(),
+                        actix_web::cookie::Key::generate(),
+                    )
+                    .cookie_secure(false)
+                    .build(),
+                )
+                .route(
+                    "/fixture-login",
+                    web::get().to(|session: Session| async move {
+                        session
+                            .set_current_user(&CurrentUser::new_admin("owner"))
+                            .unwrap();
+                        HttpResponse::Ok().finish()
+                    }),
+                )
+                .service(open_signaling_handle),
+        )
+        .await;
+        let login = actix_web::test::call_service(
+            &app,
+            actix_web::test::TestRequest::get()
+                .uri("/fixture-login")
+                .to_request(),
+        )
+        .await;
+        let cookie = login.response().cookies().next().unwrap().into_owned();
+        let mut vi = VersionInfo::new(
+            1,
+            0,
+            String::new(),
+            RemoteDeskTypeEnum::Server,
+            None,
+            Some("host".into()),
+        );
+        let base = serde_urlencoded::to_string(&vi).unwrap();
+        vi.remote_desk_type = RemoteDeskTypeEnum::Browser;
+        let browser = serde_urlencoded::to_string(&vi).unwrap();
+        for query in [
+            format!("{base}&token="),
+            format!("{base}&token=wrong"),
+            format!("{base}&token=goodtoken&token=goodtoken"),
+            format!("{base}&token=goodtoken&to%6ben=wrong"),
+            format!("{browser}&token=goodtoken"),
+            "api_version=invalid&token=goodtoken".into(),
+            "token=%GG".into(),
+        ] {
+            let req = actix_web::test::TestRequest::get()
+                .uri(&format!("/api/desk/signaling?{query}"))
+                .cookie(cookie.clone())
+                .to_request();
+            let response = actix_web::test::call_service(&app, req).await;
+            assert_eq!(
+                response.status(),
+                actix_web::http::StatusCode::UNAUTHORIZED,
+                "{query}"
+            );
+        }
+        // These are positive routing tests: missing upgrade headers fail only
+        // after valid node or owner-cookie authentication reaches the handshake.
+        for query in [format!("{base}&token=goodtoken"), base, String::new()] {
+            let req = actix_web::test::TestRequest::get()
+                .uri(&format!("/api/desk/signaling?{query}"))
+                .cookie(cookie.clone())
+                .to_request();
+            let response = actix_web::test::call_service(&app, req).await;
+            assert_eq!(response.status(), actix_web::http::StatusCode::BAD_REQUEST);
+        }
+        // Probes validate credentials independently of registration metadata.
+        for (query, status) in [
+            ("probe=1&token=goodtoken&api_version=invalid", 200),
+            ("probe=1&token=", 401),
+            ("probe=1&token=a&token=b", 401),
+        ] {
+            let req = actix_web::test::TestRequest::get()
+                .uri(&format!("/api/desk/signaling?{query}"))
+                .to_request();
+            let response = actix_web::test::call_service(&app, req).await;
+            assert_eq!(response.status().as_u16(), status);
+            assert_eq!(
+                response.headers().get(SIGNALING_PROBE_HEADER).unwrap(),
+                SIGNALING_PROBE_HEADER_VALUE
+            );
+        }
+        assert!(connections.read().await.is_empty());
+    }
+
+    #[test]
+    fn browser_identity_never_infers_owner_from_a_node_role() {
+        let owner = browser_auth_context(None);
+        assert_eq!(
+            owner,
+            AuthContext::cookie(
+                crate::control_authorizer::SINGLE_ACCOUNT_USER_ID,
+                RemoteDeskTypeEnum::Browser
+            )
+        );
+        let code = CodeSessionCookie {
+            code_session_id: "principal".into(),
+            grant_session_id: "grant".into(),
+            target_connection_id: "target".into(),
+        };
+        assert_eq!(
+            browser_auth_context(Some(&code)),
+            AuthContext::code_session("principal")
         );
     }
 
@@ -547,3 +703,6 @@ mod tests {
         assert_eq!(version_info.display_name.as_deref(), Some("device-name"));
     }
 }
+
+#[cfg(test)]
+mod performance;

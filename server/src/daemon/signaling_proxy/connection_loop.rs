@@ -44,6 +44,7 @@ pub(super) async fn teardown_manager_members(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn maintain_proxy_connection(
     settings: web::Data<SharedSettings>,
     router_ctx: &RouterContext,
@@ -128,9 +129,9 @@ pub(super) async fn maintain_proxy_connection(
         "[agent-exec] verified available shells: {:?}",
         version_info.available_exec_shell_list()
     );
-    if !crate::version::SERVER_REPOSITORY_URL.is_empty() {
-        version_info.repository_url = Some(crate::version::SERVER_REPOSITORY_URL.to_string());
-    }
+    version_info.repository_url = Some(crate::version::SERVER_REPOSITORY_URL)
+        .filter(|url| !url.is_empty())
+        .map(str::to_owned);
     let version_query = serde_urlencoded::to_string(&version_info)
         .map_err(|e| format!("Failed to encode version info: {e}"))?;
 
@@ -179,13 +180,16 @@ pub(super) async fn maintain_proxy_connection(
         "[Proxy] Connecting to: {}",
         redact_token_in_url(&signaling_url)
     );
-    debug!("[Proxy] Full URL: {}", redact_token_in_url(&connect_url));
+    debug!(
+        "[Proxy] Dial endpoint: {}",
+        redact_token_in_url(&connect_url)
+    );
 
     let (_resp, framed) = client
         .ws(&connect_url)
         .connect()
         .await
-        .map_err(|e| format!("WebSocket connect failed: {e:?}"))?;
+        .map_err(|_| "WebSocket connect failed".to_string())?;
 
     info!(
         "[Proxy] Connected to {}",
@@ -416,8 +420,7 @@ pub(super) async fn maintain_proxy_connection(
                                     InboundOutcome::Continue => {}
                                     InboundOutcome::FatalReject { error_code, message } => {
                                         warn!(
-                                            "[Proxy] Manager rejected registration (code {error_code}): \
-                                             {message}; stopping auto-reconnect until manual retry"
+                                            "[Proxy] Manager rejected registration (code {error_code}); stopping auto-reconnect until manual retry"
                                         );
                                         if let Some(state) = manager_link_state.as_ref() {
                                             state.record_fatal(error_code, message.clone()).await;
@@ -513,8 +516,8 @@ pub(super) async fn maintain_proxy_connection(
                             awc::ws::Frame::Ping(data) => {
                                 let _ = sink.send(awc::ws::Message::Pong(data)).await;
                             }
-                            awc::ws::Frame::Close(reason) => {
-                                warn!("[Proxy] WS close frame: {reason:?}");
+                            awc::ws::Frame::Close(_) => {
+                                info!("[Proxy] WS close frame received");
                                 break;
                             }
                             _ => {}

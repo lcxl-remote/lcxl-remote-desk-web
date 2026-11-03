@@ -40,8 +40,8 @@ pub(super) async fn handle_inbound_signaling_text(
 ) -> InboundOutcome {
     let parsed = match serde_json::from_str::<SignalingModel>(&text_str) {
         Ok(m) => m,
-        Err(e) => {
-            warn!("[Proxy] Dropping malformed signaling text: {e}");
+        Err(_) => {
+            warn!("[Proxy] Dropping malformed signaling text");
             return InboundOutcome::Continue;
         }
     };

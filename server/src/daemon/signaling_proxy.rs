@@ -153,7 +153,7 @@ fn reject_media_settings_command(
 /// host-local `manager_enabled` toggle is not turned off (`Some(false)`).
 ///
 /// The single predicate behind the always-on manager upstream guard, the
-/// on-demand support upstream guard, and the shared [`ManagerLinkGate`] value, so
+/// on-demand support-code guard, and the shared [`ManagerLinkGate`] value, so
 /// none of them can drift from the others.
 pub fn manager_link_should_connect(
     manager_url: &Option<String>,
@@ -182,13 +182,13 @@ pub async fn run_signaling_proxy(
     // API so the UI can show the rejection and trigger a reconnect.
     manager_link_state: Arc<ManagerLinkState>,
     // On-demand temporary-support lifecycle: the host REST API flips it active to
-    // request a support session; the support loop below drives a dedicated Support
-    // upstream from it. The same handle rides into the router context so the
+    // request a support code on the regular Server upstream. The same handle
+    // rides into the router context so the
     // inbound `SupportCodeIssued` handler can record the code + arm its TTL.
     support_link_state: Arc<SupportLinkState>,
     // Shared "should the manager link be connected" gate. Flipping it to `false`
     // (host UI disabling the manager connection) tears the current manager /
-    // support upstream down and puts the fleet audit sink back to purely-local.
+    // link down and puts the fleet audit sink back to purely-local.
     manager_link_gate: Arc<ManagerLinkGate>,
     inprocess_computer_use_broker: Option<
         Arc<crate::worker::agent::computer_use_broker::ComputerUseBroker>,
@@ -396,7 +396,7 @@ pub async fn run_signaling_proxy(
                 // The local loopback is `TrustedCentral` in Default mode but is NOT
                 // the manager link, so fatal device-quota rejection is disabled here.
                 let display_url = redact_token_in_url(&local_url);
-                if let Err(error) = maintain_proxy_connection(
+                if let Err(_error) = maintain_proxy_connection(
                     settings.clone(),
                     &router_ctx,
                     local_url,
@@ -412,7 +412,7 @@ pub async fn run_signaling_proxy(
                 )
                 .await
                 {
-                    warn!("[Proxy] Local signaling connection to {display_url} failed: {error}");
+                    warn!("[Proxy] Local signaling connection to {display_url} failed");
                 }
 
                 tokio::time::sleep(Duration::from_secs(5)).await;
