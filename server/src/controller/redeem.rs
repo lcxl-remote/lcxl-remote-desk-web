@@ -103,7 +103,8 @@ pub async fn redeem_code(
 
     // Count before parsing or looking up the secret code. Trusted proxy handling
     // and IPv6 prefix aggregation are shared with account login.
-    if rate_limiter.consume_redeem(client_ip.network_key(&req)) == QuotaDecision::Limited {
+    let network = client_ip.network_key(&req);
+    if rate_limiter.consume_redeem(network) == QuotaDecision::Limited {
         return Ok(HttpResponse::Ok().json(RestResponse::<()>::failed(
             DeskErrorCode::TOO_MANY_ATTEMPTS,
             "Too many attempts. Please try again later.".to_string(),
@@ -140,6 +141,12 @@ pub async fn redeem_code(
         }
     };
     let Some((target_connection_id, code_snapshot)) = resolved else {
+        if rate_limiter.record_redeem_failure(network) == QuotaDecision::Limited {
+            return Ok(HttpResponse::Ok().json(RestResponse::<()>::failed(
+                DeskErrorCode::TOO_MANY_ATTEMPTS,
+                "Too many attempts. Please try again later.".into(),
+            )));
+        }
         return Ok(HttpResponse::Ok().json(RestResponse::<()>::failed(
             DeskErrorCode::DEVICE_NOT_FOUND,
             "Code not found or device is offline".into(),
@@ -331,6 +338,64 @@ mod tests {
         .await;
         assert_eq!(body["success"], false);
         assert_eq!(body["code"], DeskErrorCode::DEVICE_NOT_FOUND.code());
+    }
+
+    #[actix_web::test]
+    async fn failed_redemption_locks_the_network_before_the_next_lookup() {
+        use crate::service::rate_limit::LOGIN_MAX_FAILURES;
+        let extractor = ClientIpExtractor::default();
+        let network = extractor.key_for("2001:db8:1:2::1".parse().unwrap());
+        let limiter = Arc::new(AuthRateLimiter::new(64));
+        for _ in 0..LOGIN_MAX_FAILURES - 1 {
+            assert_eq!(
+                limiter.record_redeem_failure(network),
+                QuotaDecision::Allowed
+            );
+        }
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(settings_with_mode(StartupMode::Default)))
+                .app_data(web::Data::new(
+                    desk_signal::model::SharedConnectionMap::new_oss(),
+                ))
+                .app_data(web::Data::new(extractor))
+                .app_data(web::Data::new(limiter.clone()))
+                .wrap(SessionMiddleware::new(
+                    CookieSessionStore::default(),
+                    Key::generate(),
+                ))
+                .service(redeem_code),
+        )
+        .await;
+        for (peer, code, expected) in [
+            (
+                "[2001:db8:1:2::1]:1",
+                "WRONG",
+                DeskErrorCode::TOO_MANY_ATTEMPTS,
+            ),
+            // A different address in the prefix and a forged XFF cannot evade the lock.
+            (
+                "[2001:db8:1:2::abcd]:1",
+                "",
+                DeskErrorCode::TOO_MANY_ATTEMPTS,
+            ),
+            ("[2001:db8:1:3::1]:1", "", DeskErrorCode::INVALID_PARAMS),
+        ] {
+            let response = test::call_service(
+                &app,
+                TestRequest::post()
+                    .uri("/api/desk/redeem-code")
+                    .peer_addr(peer.parse().unwrap())
+                    .insert_header(("x-forwarded-for", "198.51.100.9"))
+                    .set_json(serde_json::json!({"code": code}))
+                    .to_request(),
+            )
+            .await;
+            assert!(response.status().is_success());
+            let body: serde_json::Value = test::read_body_json(response).await;
+            assert_eq!(body["code"], expected.code());
+        }
+        assert_eq!(limiter.login_lock_ttl(&network), None);
     }
 
     /// The success result carries the code's ceiling under `access_ceiling`, the

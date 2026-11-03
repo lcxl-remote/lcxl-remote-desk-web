@@ -40,8 +40,12 @@ So **Deny** anywhere wins (hard-denied); an unset dimension on either side alway
 - Global host access settings: [config.toml → `[security]`](/config/config-toml#security-security).
 - The signaling-layer view of restricted sessions: [Signaling Authentication](/security/signaling-auth).
 
+## Attempt limits
+
+Default mode limits redemption attempts per source network and applies temporary backoff after repeated unavailable codes. Wait before retrying when told there have been too many attempts. Changing Cookies or successfully redeeming a code does not clear failure history. Existing connections are unaffected. See [Local Account and Initialization Security](/security/local-account-security#access-code-redemption) for limits and waiting rules. Standalone Signaling mode does not offer code redemption.
+
 ## New device code length
 
 Under Settings → Device Codes, set the generated length to a whole number from 6 to 64; the default is 8. First assignments and explicit regenerations use the new length. Existing devices keep their codes when reconnecting. Saving a length neither rotates existing codes nor revokes their grants.
 
-For example, after changing 8 to 12, existing 8-character codes remain redeemable and new devices receive 12-character codes. Explicitly regenerating a device’s code gives it a new 12-character code stops redemption of the old code, and prevents old grants from opening new connections.
+For example, after changing 8 to 12, existing 8-character codes remain redeemable and new devices receive 12-character codes. Explicitly regenerating a device’s code gives it a new 12-character code, stops redemption of the old code, and prevents old grants from opening new connections.

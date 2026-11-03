@@ -29,12 +29,27 @@ attack has stopped but first-run setup remains blocked, restart the process or
 container to clear the in-memory bootstrap/probe state; persistent settings and
 the environment token are unchanged. Restart is not a defense against ongoing
 traffic and is not the capacity strategy for the always-on redeem endpoint.
-Redeem attempts use an independent table and retain the existing limit of five
-attempts per minute for each network identity.
 
 Send the token only in the POST body. For access from another machine, terminate
 TLS in front of the server and set `LRD_COOKIE_SECURE=true`; plain HTTP can expose
 the token and session cookie to the network.
+
+## Access-code redemption
+
+In Default mode, redemption is limited to five attempts per source network in
+each 60-second window, counting both success and failure. Unavailable codes also
+accumulate failures in a fixed 15-minute window. Twenty failures trigger a
+60-second lock; subsequent failures use the password-login exponential backoff,
+capped at one hour. Wait before retrying when told there have been too many
+attempts. Standalone Signaling mode does not offer code redemption.
+
+Redemption and password login have independent state. Successful redemption or
+password login does not clear redemption failures; records and locks expire
+naturally. A full bounded table rejects new sources without evicting live failure
+records. Capacity uses `LRD_AUTH_RATE_LIMIT_MAX_BUCKETS` (default 65536). Successful
+requests consume only the short-term quota and do not create long-term failure
+records. Existing connections and redeemed grants are unaffected. Throttling
+returns business code `32` with HTTP 200.
 
 ## Reverse proxies
 

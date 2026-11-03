@@ -90,6 +90,7 @@ struct State {
     bootstrap: HashMap<NetworkKey, Counter>,
     probe: HashMap<NetworkKey, Counter>,
     redeem: HashMap<NetworkKey, Counter>,
+    redeem_failures: HashMap<NetworkKey, ActiveLock>,
     last_capacity_warn_ms: HashMap<&'static str, u64>,
     last_sweep_ms: HashMap<&'static str, u64>,
     #[cfg(test)]
@@ -155,6 +156,7 @@ impl AuthRateLimitMetrics {
             ("bootstrap", state.bootstrap.len()),
             ("probe", state.probe.len()),
             ("redeem", state.redeem.len()),
+            ("redeem_failure", state.redeem_failures.len()),
         ] {
             self.active_entries
                 .record(value as u64, &[KeyValue::new("kind", kind)]);
@@ -200,6 +202,7 @@ impl AuthRateLimiter {
                 bootstrap: HashMap::new(),
                 probe: HashMap::new(),
                 redeem: HashMap::new(),
+                redeem_failures: HashMap::new(),
                 last_capacity_warn_ms: HashMap::new(),
                 last_sweep_ms: HashMap::new(),
                 #[cfg(test)]
@@ -369,6 +372,59 @@ impl AuthRateLimiter {
         )
     }
 
+    /// Invalid codes use the login backoff curve but never its state or reset.
+    pub fn record_redeem_failure(&self, key: NetworkKey) -> QuotaDecision {
+        let now = self.clock.now_ms();
+        let mut state = self.lock_state();
+        if !self.redeem_failure_capacity(&mut state, key, now) {
+            return QuotaDecision::Limited;
+        }
+        let failure = state.redeem_failures.entry(key).or_insert(ActiveLock {
+            failure: Counter {
+                count: 0,
+                expires_at_ms: now + LOGIN_WINDOW_SEC * 1_000,
+            },
+            lock_until_ms: 0,
+        });
+        if failure.lock_until_ms > now {
+            return QuotaDecision::Limited;
+        }
+        failure.failure.count = failure.failure.count.saturating_add(1);
+        let decision = match lock_ttl_ms_for(failure.failure.count) {
+            Some(ttl) => {
+                failure.lock_until_ms = now + ttl;
+                QuotaDecision::Limited
+            }
+            None => QuotaDecision::Allowed,
+        };
+        self.metrics.record_state(&state);
+        decision
+    }
+
+    fn redeem_failure_capacity(&self, state: &mut State, key: NetworkKey, now: u64) -> bool {
+        let expired =
+            |entry: &ActiveLock| entry.failure.expires_at_ms <= now && entry.lock_until_ms <= now;
+        if state.redeem_failures.get(&key).is_some_and(expired) {
+            state.redeem_failures.remove(&key);
+        }
+        if state.redeem_failures.contains_key(&key)
+            || state.redeem_failures.len() < self.redeem_capacity
+        {
+            return true;
+        }
+        if sweep_due(state, "redeem_failure", now) {
+            state.redeem_failures.retain(|_, entry| !expired(entry));
+        }
+        if state.redeem_failures.len() < self.redeem_capacity {
+            return true;
+        }
+        warn_capacity(state, "redeem_failure", now);
+        self.metrics
+            .record_capacity_exhausted("redeem_failure", "fail_closed");
+        self.metrics.record_state(state);
+        false
+    }
+
     fn consume_security_quota(
         &self,
         key: NetworkKey,
@@ -378,6 +434,15 @@ impl AuthRateLimiter {
     ) -> QuotaDecision {
         let now = self.clock.now_ms();
         let mut state = self.lock_state();
+        if matches!(kind, SecurityQuotaKind::Redeem)
+            && (!self.redeem_failure_capacity(&mut state, key, now)
+                || state
+                    .redeem_failures
+                    .get(&key)
+                    .is_some_and(|entry| entry.lock_until_ms > now))
+        {
+            return QuotaDecision::Limited;
+        }
         let capacity = match kind {
             SecurityQuotaKind::Probe => self.probe_capacity,
             SecurityQuotaKind::Redeem => self.redeem_capacity,
@@ -813,6 +878,105 @@ mod tests {
         clock.advance((PROBE_WINDOW_SEC + 1) * 1_000);
         assert_eq!(limiter.consume_probe(key(1)), QuotaDecision::Allowed);
         assert_eq!(limiter.consume_redeem(key(1)), QuotaDecision::Allowed);
+    }
+
+    #[test]
+    fn redeem_failures_back_off_expire_and_do_not_share_login_state() {
+        let clock = Arc::new(ManualClock::default());
+        let limiter = limiter(clock.clone(), 8);
+        for _ in 0..LOGIN_MAX_FAILURES - 1 {
+            assert_eq!(
+                limiter.record_redeem_failure(key(1)),
+                QuotaDecision::Allowed
+            );
+        }
+        // A successful admission, or password-login reset, cannot erase failures.
+        assert_eq!(limiter.consume_redeem(key(1)), QuotaDecision::Allowed);
+        limiter.clear_login(&key(1));
+        assert_eq!(
+            limiter.record_redeem_failure(key(1)),
+            QuotaDecision::Limited
+        );
+        assert_eq!(limiter.login_lock_ttl(&key(1)), None);
+        assert_eq!(limiter.consume_redeem(key(1)), QuotaDecision::Limited);
+        assert_eq!(limiter.consume_redeem(key(2)), QuotaDecision::Allowed);
+        clock.advance(LOGIN_LOCK_BASE_SEC * 1_000);
+        assert_eq!(limiter.consume_redeem(key(1)), QuotaDecision::Allowed);
+        assert_eq!(
+            limiter.record_redeem_failure(key(1)),
+            QuotaDecision::Limited
+        );
+        assert_eq!(
+            limiter.lock_state().redeem_failures[&key(1)].lock_until_ms,
+            clock.now_ms() + LOGIN_LOCK_BASE_SEC * 2_000
+        );
+        for previous_ttl in [120, 240] {
+            let until = limiter.lock_state().redeem_failures[&key(1)].lock_until_ms;
+            clock.advance(until - clock.now_ms());
+            assert_eq!(
+                limiter.record_redeem_failure(key(1)),
+                QuotaDecision::Limited
+            );
+            let next = limiter.lock_state().redeem_failures[&key(1)].lock_until_ms;
+            assert_eq!(next - clock.now_ms(), previous_ttl * 2_000);
+        }
+        clock.advance((LOGIN_WINDOW_SEC + LOGIN_LOCK_MAX_SEC) * 1_000);
+        assert_eq!(limiter.consume_redeem(key(1)), QuotaDecision::Allowed);
+        assert!(!limiter.lock_state().redeem_failures.contains_key(&key(1)));
+    }
+
+    #[test]
+    fn redeem_failure_capacity_is_bounded_and_success_does_not_fill_it() {
+        let clock = Arc::new(ManualClock::default());
+        let limiter = AuthRateLimiter::with_clock_and_capacities(clock.clone(), 1, 2, 2, 1);
+        assert_eq!(limiter.consume_redeem(key(1)), QuotaDecision::Allowed);
+        assert!(limiter.lock_state().redeem_failures.is_empty());
+        assert_eq!(
+            limiter.record_redeem_failure(key(1)),
+            QuotaDecision::Allowed
+        );
+        assert_eq!(limiter.consume_redeem(key(2)), QuotaDecision::Limited);
+        assert_eq!(
+            limiter.record_redeem_failure(key(2)),
+            QuotaDecision::Limited
+        );
+        assert_eq!(limiter.lock_state().redeem_failures.len(), 1);
+        clock.advance((LOGIN_WINDOW_SEC + 1) * 1_000);
+        assert_eq!(limiter.consume_redeem(key(2)), QuotaDecision::Allowed);
+        assert!(limiter.lock_state().redeem_failures.is_empty());
+    }
+
+    #[test]
+    fn concurrent_redeem_failures_preserve_the_lock_and_request_quota() {
+        let limiter = Arc::new(limiter(Arc::new(ManualClock::default()), 8));
+        let mut threads = Vec::new();
+        for _ in 0..40 {
+            let limiter = limiter.clone();
+            threads.push(std::thread::spawn(move || {
+                limiter.record_redeem_failure(key(1))
+            }));
+        }
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        assert_eq!(
+            limiter.lock_state().redeem_failures[&key(1)].failure.count,
+            LOGIN_MAX_FAILURES
+        );
+        assert_eq!(limiter.consume_redeem(key(1)), QuotaDecision::Limited);
+        assert_eq!(limiter.login_lock_ttl(&key(1)), None);
+        let attempts: Vec<_> = (0..16)
+            .map(|_| {
+                let limiter = limiter.clone();
+                std::thread::spawn(move || limiter.consume_redeem(key(2)))
+            })
+            .collect();
+        let allowed = attempts
+            .into_iter()
+            .map(|attempt| attempt.join().unwrap())
+            .filter(|decision| *decision == QuotaDecision::Allowed)
+            .count();
+        assert_eq!(allowed as u64, REDEEM_MAX_ATTEMPTS);
     }
 
     #[test]
