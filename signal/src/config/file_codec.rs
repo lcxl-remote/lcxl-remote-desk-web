@@ -13,6 +13,10 @@ fn value<T: Serialize>(source: &T) -> Result<Value, DbErr> {
 fn raw(config: &GlobalConfig) -> Result<Map<String, Value>, DbErr> {
     Ok(Map::from_iter([
         ("device_codes".into(), value(&config.device_codes)?),
+        (
+            "access_code_protection".into(),
+            value(&config.access_code_protection)?,
+        ),
         ("ai_gateway".into(), value(&config.ai_gateway)?),
         ("approval_gateway".into(), value(&config.approval_gateway)?),
         ("approval_trace".into(), value(&config.approval_trace)?),
@@ -173,6 +177,11 @@ impl<'de> Deserialize<'de> for GlobalConfig {
         }
         let mut take = |name: &str| defaults.remove(name).expect("known section");
         let config = Self {
+            access_code_protection: decode(
+                take("access_code_protection"),
+                "access_code_protection",
+            )
+            .map_err(serde::de::Error::custom)?,
             device_codes: decode(take("device_codes"), "device_codes")
                 .map_err(serde::de::Error::custom)?,
             ai_gateway: decode(take("ai_gateway"), "ai_gateway")
@@ -330,6 +339,7 @@ pub(super) fn revision(config: &GlobalConfig, key: &str) -> String {
         "assistant_data_settings" => config.assistant_data_settings.revision.to_string(),
         "assistant_user_instructions" => config.assistant_user_instructions.revision.to_string(),
         "device_codes" => config.device_codes.revision.to_string(),
+        "access_code_protection" => config.access_code_protection.revision.to_string(),
         "terminal_completion" => config.terminal_completion.revision.to_string(),
         "subagent_policy" => config.subagent_policy.revision.to_string(),
         "goal_budget_policy" => config.goal_budget_policy.revision.to_string(),
@@ -398,6 +408,7 @@ pub(super) fn advance_revision(
             "assistant_data_settings" => config.assistant_data_settings.revision = next,
             "assistant_user_instructions" => config.assistant_user_instructions.revision = next,
             "device_codes" => config.device_codes.revision = next,
+            "access_code_protection" => config.access_code_protection.revision = next,
             "terminal_completion" => config.terminal_completion.revision = next,
             "subagent_policy" => config.subagent_policy.revision = next,
             "goal_budget_policy" => config.goal_budget_policy.revision = next,

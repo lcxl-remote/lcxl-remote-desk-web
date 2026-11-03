@@ -1,3 +1,4 @@
+pub mod access_code_protection_config;
 pub mod access_grant;
 pub mod agent_action_store;
 mod agent_approval_concrete;

@@ -90,3 +90,5 @@ describe("DeviceCodeList action ownership", () => {
         await waitFor(() => expect(screen.queryByRole("button", { name: "Saving…" })).toBeNull())
     })
 })
+
+vi.mock('./access-code-protection-settings', () => ({ AccessCodeProtectionSettingsCard: () => null }));

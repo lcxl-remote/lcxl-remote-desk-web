@@ -73,6 +73,7 @@ pub struct RedeemCodeResult {
     ),
 )]
 #[post("/api/desk/redeem-code")]
+#[allow(clippy::too_many_arguments)] // Actix extractors keep policy and session ownership explicit.
 pub async fn redeem_code(
     req: HttpRequest,
     body: web::Json<RedeemCodeParams>,
@@ -81,6 +82,7 @@ pub async fn redeem_code(
     client_ip: web::Data<ClientIpExtractor>,
     rate_limiter: web::Data<Arc<AuthRateLimiter>>,
     session: Session,
+    configuration: Option<web::Data<desk_signal::config::ConfigContext>>,
 ) -> Result<HttpResponse, AWError> {
     let params = body.into_inner();
 
@@ -101,10 +103,18 @@ pub async fn redeem_code(
         )));
     }
 
+    let Some(configuration) = configuration else {
+        return Ok(HttpResponse::Ok().json(RestResponse::<()>::failed(
+            DeskErrorCode::SYSTEM_ERROR,
+            "Access-code configuration is unavailable".into(),
+        )));
+    };
+    let policy = configuration.read().await.access_code_protection.policy;
+
     // Count before parsing or looking up the secret code. Trusted proxy handling
     // and IPv6 prefix aggregation are shared with account login.
     let network = client_ip.network_key(&req);
-    if rate_limiter.consume_redeem(network) == QuotaDecision::Limited {
+    if rate_limiter.consume_redeem(network, &policy) == QuotaDecision::Limited {
         return Ok(HttpResponse::Ok().json(RestResponse::<()>::failed(
             DeskErrorCode::TOO_MANY_ATTEMPTS,
             "Too many attempts. Please try again later.".to_string(),
@@ -141,7 +151,7 @@ pub async fn redeem_code(
         }
     };
     let Some((target_connection_id, code_snapshot)) = resolved else {
-        if rate_limiter.record_redeem_failure(network) == QuotaDecision::Limited {
+        if rate_limiter.record_redeem_failure(network, &policy) == QuotaDecision::Limited {
             return Ok(HttpResponse::Ok().json(RestResponse::<()>::failed(
                 DeskErrorCode::TOO_MANY_ATTEMPTS,
                 "Too many attempts. Please try again later.".into(),
@@ -261,6 +271,24 @@ mod tests {
         web,
     };
 
+    struct TestPersistence;
+    #[async_trait::async_trait]
+    impl desk_signal::config::ConfigPersistence for TestPersistence {
+        async fn persist(
+            &self,
+            _: &desk_signal::config::GlobalConfig,
+        ) -> Result<(), sea_orm::DbErr> {
+            Ok(())
+        }
+    }
+    fn configuration() -> web::Data<desk_signal::config::ConfigContext> {
+        let mut config = desk_signal::config::GlobalConfig::default();
+        config.metadata.instance = "redeem-test".into();
+        web::Data::from(
+            desk_signal::config::ConfigContext::new(config, Arc::new(TestPersistence)).unwrap(),
+        )
+    }
+
     fn settings_with_mode(mode: StartupMode) -> SharedSettings {
         let mut settings = Settings::default();
         let mut temp_path = std::env::temp_dir();
@@ -279,6 +307,7 @@ mod tests {
         ));
         let app = test::init_service(
             App::new()
+                .app_data(configuration())
                 .app_data(web::Data::new(settings))
                 .app_data(connection_map)
                 .app_data(web::Data::new(ClientIpExtractor::default()))
@@ -341,6 +370,103 @@ mod tests {
     }
 
     #[actix_web::test]
+    async fn runtime_configuration_changes_limits_without_erasing_history() {
+        let configuration = configuration();
+        configuration
+            .update(|config| {
+                config.access_code_protection.policy.network_max_attempts = 1;
+                Ok::<_, sea_orm::DbErr>(Some(()))
+            })
+            .await
+            .unwrap();
+        let app = test::init_service(
+            App::new()
+                .app_data(configuration.clone())
+                .app_data(web::Data::new(settings_with_mode(StartupMode::Default)))
+                .app_data(web::Data::new(
+                    desk_signal::model::SharedConnectionMap::new_oss(),
+                ))
+                .app_data(web::Data::new(ClientIpExtractor::default()))
+                .app_data(web::Data::new(Arc::new(AuthRateLimiter::new(64))))
+                .wrap(SessionMiddleware::new(
+                    CookieSessionStore::default(),
+                    Key::generate(),
+                ))
+                .service(redeem_code),
+        )
+        .await;
+        for (step, expected) in [
+            DeskErrorCode::DEVICE_NOT_FOUND,
+            DeskErrorCode::TOO_MANY_ATTEMPTS,
+            DeskErrorCode::DEVICE_NOT_FOUND,
+            DeskErrorCode::TOO_MANY_ATTEMPTS,
+            DeskErrorCode::TOO_MANY_ATTEMPTS,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if step >= 2 {
+                configuration
+                    .update(|config| {
+                        let policy = &mut config.access_code_protection.policy;
+                        policy.network_max_attempts = if step == 2 { 2 } else { 100 };
+                        if step == 3 {
+                            policy.max_failures = 1;
+                        }
+                        if step == 4 {
+                            policy.lock_base_sec = 1;
+                            policy.lock_max_sec = 1;
+                        }
+                        Ok::<_, sea_orm::DbErr>(Some(()))
+                    })
+                    .await
+                    .unwrap();
+            }
+            let response = test::call_service(
+                &app,
+                TestRequest::post()
+                    .uri("/api/desk/redeem-code")
+                    .peer_addr("198.51.100.41:1".parse().unwrap())
+                    .set_json(serde_json::json!({"code":"WRONG"}))
+                    .to_request(),
+            )
+            .await;
+            let body: serde_json::Value = test::read_body_json(response).await;
+            assert_eq!(body["code"], expected.code());
+        }
+    }
+
+    #[actix_web::test]
+    async fn default_mode_without_configuration_refuses_redemption() {
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(settings_with_mode(StartupMode::Default)))
+                .app_data(web::Data::new(
+                    desk_signal::model::SharedConnectionMap::new_oss(),
+                ))
+                .app_data(web::Data::new(ClientIpExtractor::default()))
+                .app_data(web::Data::new(Arc::new(AuthRateLimiter::new(64))))
+                .wrap(SessionMiddleware::new(
+                    CookieSessionStore::default(),
+                    Key::generate(),
+                ))
+                .service(redeem_code),
+        )
+        .await;
+        let response = test::call_service(
+            &app,
+            TestRequest::post()
+                .uri("/api/desk/redeem-code")
+                .set_json(serde_json::json!({"code":"WRONG"}))
+                .to_request(),
+        )
+        .await;
+        assert!(response.status().is_success());
+        let body: serde_json::Value = test::read_body_json(response).await;
+        assert_eq!(body["code"], DeskErrorCode::SYSTEM_ERROR.code());
+    }
+
+    #[actix_web::test]
     async fn failed_redemption_locks_the_network_before_the_next_lookup() {
         use crate::service::rate_limit::LOGIN_MAX_FAILURES;
         let extractor = ClientIpExtractor::default();
@@ -348,12 +474,13 @@ mod tests {
         let limiter = Arc::new(AuthRateLimiter::new(64));
         for _ in 0..LOGIN_MAX_FAILURES - 1 {
             assert_eq!(
-                limiter.record_redeem_failure(network),
+                limiter.record_redeem_failure(network, &desk_signal_facade::access_code_protection::AccessCodeProtectionPolicy::default()),
                 QuotaDecision::Allowed
             );
         }
         let app = test::init_service(
             App::new()
+                .app_data(configuration())
                 .app_data(web::Data::new(settings_with_mode(StartupMode::Default)))
                 .app_data(web::Data::new(
                     desk_signal::model::SharedConnectionMap::new_oss(),

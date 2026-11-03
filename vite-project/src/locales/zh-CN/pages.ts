@@ -1,6 +1,20 @@
 import modelMetrics from './model-metrics';
 
 export default {
+    'pages.accessCodeProtection.title': '访问码保护',
+    'pages.accessCodeProtection.description': '设备码和协助码共用这些限制。修改保留已有计数和锁定；秒数范围为 1～86400，次数范围为 1～100000。',
+    'pages.accessCodeProtection.enabled': '连续失败退避',
+    'pages.accessCodeProtection.requestWindow': '请求窗口（秒）',
+    'pages.accessCodeProtection.userAttempts': '每账号次数上限',
+    'pages.accessCodeProtection.networkAttempts': '每来源网络次数上限',
+    'pages.accessCodeProtection.failureWindow': '失败窗口（秒）',
+    'pages.accessCodeProtection.maxFailures': '失败次数阈值',
+    'pages.accessCodeProtection.lockBase': '初始锁定（秒）',
+    'pages.accessCodeProtection.lockMax': '最大锁定（秒）',
+    'pages.accessCodeProtection.invalid': '请输入范围内的整数，最大锁定不能短于初始锁定',
+    'pages.accessCodeProtection.error': '访问码保护设置未保存，请重新加载后重试',
+    'pages.accessCodeProtection.saved': '访问码保护设置已保存',
+
     'pages.deviceCodeSettings.title': '设备码生成',
     'pages.deviceCodeSettings.description': '默认生成 8 位设备码，可设置为 6～64 位。仅影响此后首次分配或主动重新生成的码，现有码和授权保持不变。',
     'pages.deviceCodeSettings.length': '新设备码长度',

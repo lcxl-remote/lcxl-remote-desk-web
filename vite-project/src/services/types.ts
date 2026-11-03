@@ -4,6 +4,67 @@
 */
 
 
+export type AccessCodeProtectionPolicy = {
+    /**
+     * @type boolean
+    */
+    backoff_enabled: boolean;
+    /**
+     * @minLength 1
+     * @maxLength 86400
+     * @type integer, int32
+    */
+    failure_window_sec: number;
+    /**
+     * @minLength 1
+     * @maxLength 86400
+     * @type integer, int32
+    */
+    lock_base_sec: number;
+    /**
+     * @minLength 1
+     * @maxLength 86400
+     * @type integer, int32
+    */
+    lock_max_sec: number;
+    /**
+     * @minLength 1
+     * @maxLength 100000
+     * @type integer, int32
+    */
+    max_failures: number;
+    /**
+     * @minLength 1
+     * @maxLength 100000
+     * @type integer, int32
+    */
+    network_max_attempts: number;
+    /**
+     * @minLength 1
+     * @maxLength 86400
+     * @type integer, int32
+    */
+    request_window_sec: number;
+    /**
+     * @minLength 1
+     * @maxLength 100000
+     * @type integer,null, int32
+    */
+    user_max_attempts?: number | null;
+};
+
+export type AccessCodeProtectionSettings = {
+    /**
+     * @type object
+    */
+    policy: AccessCodeProtectionPolicy;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    revision: number;
+};
+
 /**
  * @description Browser-facing knobs that drive the adaptive-resolution hook. Server\nsources these from `Settings.virtual_display.adaptive_*` and ships\nthem through `RemoteAccessInitializedData` so each browser session uses the\nhost operator\'s preference without round-tripping a separate REST\nquery.\n\n`adaptive_throttle_ms` is intentionally NOT included — it is the\ndaemon\'s defensive rate limit and the browser does not need to know\nit.
 */
@@ -10315,6 +10376,35 @@ export type RequestRemoteModel = {
     session_target_id?: string | null;
 };
 
+export type RestResponseAccessCodeProtectionSettings = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @type object
+        */
+        policy: AccessCodeProtectionPolicy;
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        revision: number;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
 export type RestResponseAiAssistantAttentionListDto = {
     /**
      * @type integer, int32
@@ -17716,6 +17806,18 @@ export type TurnUsageResult = {
     range: UsageRangeDto;
 };
 
+export type UpdateAccessCodeProtectionSettings = {
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    expected_revision: number;
+    /**
+     * @type object
+    */
+    policy: AccessCodeProtectionPolicy;
+};
+
 export type UpdateContextManagementRequest = {
     /**
      * @minLength 1
@@ -17983,6 +18085,27 @@ export type UpdateApprovalTraceSettingsMutationResponse = UpdateApprovalTraceSet
 export type UpdateApprovalTraceSettingsMutation = {
     Response: UpdateApprovalTraceSettings200;
     Request: UpdateApprovalTraceSettingsMutationRequest;
+    Errors: any;
+};
+
+export type GetAccessCodeProtection200 = RestResponseAccessCodeProtectionSettings;
+
+export type GetAccessCodeProtectionQueryResponse = GetAccessCodeProtection200;
+
+export type GetAccessCodeProtectionQuery = {
+    Response: GetAccessCodeProtection200;
+    Errors: any;
+};
+
+export type UpdateAccessCodeProtection200 = RestResponseAccessCodeProtectionSettings;
+
+export type UpdateAccessCodeProtectionMutationRequest = UpdateAccessCodeProtectionSettings;
+
+export type UpdateAccessCodeProtectionMutationResponse = UpdateAccessCodeProtection200;
+
+export type UpdateAccessCodeProtectionMutation = {
+    Response: UpdateAccessCodeProtection200;
+    Request: UpdateAccessCodeProtectionMutationRequest;
     Errors: any;
 };
 

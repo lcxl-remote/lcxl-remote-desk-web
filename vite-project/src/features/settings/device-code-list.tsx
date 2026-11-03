@@ -1,3 +1,4 @@
+import { AccessCodeProtectionSettingsCard } from './access-code-protection-settings';
 import { DeviceCodeSettingsCard } from './device-code-settings';
 import { useRef, useState } from "react"
 import { useTranslation } from "react-i18next"
@@ -256,6 +257,7 @@ export function DeviceCodeList() {
             </div>
 
             <DeviceCodeSettingsCard />
+            <AccessCodeProtectionSettingsCard />
 
             <Card>
                 <CardHeader>

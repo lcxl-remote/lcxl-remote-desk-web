@@ -25,7 +25,7 @@ use crate::{
     usage_retention::UsageRetentionConfig,
 };
 
-pub const SECTION_NAMES: [&str; 17] = [
+pub const SECTION_NAMES: [&str; 18] = [
     "ai_gateway",
     "approval_gateway",
     "approval_trace",
@@ -37,6 +37,7 @@ pub const SECTION_NAMES: [&str; 17] = [
     "assistant_user_instructions",
     "terminal_completion",
     "device_codes",
+    "access_code_protection",
     "subagent_policy",
     "goal_budget_policy",
     "schedule_budget_policy",
@@ -55,6 +56,8 @@ pub struct Metadata {
 
 #[derive(Clone)]
 pub struct GlobalConfig {
+    pub access_code_protection:
+        desk_signal_facade::access_code_protection::AccessCodeProtectionSettings,
     pub device_codes: desk_signal_facade::device_code::DeviceCodeSettings,
     pub ai_gateway: ModelProviderConfig,
     pub approval_gateway: ApprovalModelConfig,
@@ -82,6 +85,7 @@ impl Default for GlobalConfig {
     fn default() -> Self {
         Self {
             device_codes: Default::default(),
+            access_code_protection: Default::default(),
             ai_gateway: ModelProviderConfig::default(),
             approval_gateway: ApprovalModelConfig::default(),
             approval_trace:
@@ -114,6 +118,10 @@ impl std::fmt::Debug for GlobalConfig {
 
 impl GlobalConfig {
     pub fn validate(&self) -> Result<(), DbErr> {
+        self.access_code_protection
+            .policy
+            .validate(false)
+            .map_err(|_| invalid("access_code_protection"))?;
         self.device_codes
             .validate()
             .map_err(|_| invalid("device_codes"))?;

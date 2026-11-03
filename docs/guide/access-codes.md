@@ -42,7 +42,7 @@ So **Deny** anywhere wins (hard-denied); an unset dimension on either side alway
 
 ## Attempt limits
 
-Default mode limits redemption attempts per source network and applies temporary backoff after repeated unavailable codes. Wait before retrying when told there have been too many attempts. Changing Cookies or successfully redeeming a code does not clear failure history. Existing connections are unaffected. See [Local Account and Initialization Security](/security/local-account-security#access-code-redemption) for limits and waiting rules. Standalone Signaling mode does not offer code redemption.
+Adjust protection parameters under Settings → Device Codes → Access-code protection. Default mode limits redemption attempts per source network and applies temporary backoff after repeated unavailable codes. Wait before retrying when told there have been too many attempts. Changing Cookies or successfully redeeming a code does not clear failure history. Existing connections are unaffected. See [Local Account and Initialization Security](/security/local-account-security#access-code-redemption) for limits and waiting rules. Standalone Signaling mode does not offer code redemption.
 
 ## New device code length
 

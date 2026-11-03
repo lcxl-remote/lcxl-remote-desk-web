@@ -1,3 +1,4 @@
+pub mod access_code_protection;
 pub mod context_management;
 pub mod controller;
 pub mod device_code;

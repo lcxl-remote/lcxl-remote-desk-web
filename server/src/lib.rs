@@ -403,6 +403,8 @@ pub fn configure_api_surface(
                 if opts.has_signal_db {
                     cfg.service(desk_signal::controller::device_code_settings::get_device_code_settings)
                         .service(desk_signal::controller::device_code_settings::update_device_code_settings);
+                    cfg.service(desk_signal::controller::access_code_protection::get_access_code_protection)
+                        .service(desk_signal::controller::access_code_protection::update_access_code_protection);
                     cfg.service(desk_signal::controller::assistant_data::get_assistant_data_settings);
                     cfg.service(desk_signal::controller::assistant_data::update_assistant_data_settings);
                     cfg.service(desk_signal::controller::assistant_data::get_assistant_user_instructions);
@@ -994,6 +996,10 @@ pub async fn run_with_hub(
         _ => {}
     }
 
+    let access_code_configuration = desk_signal::db::try_get_db().map(|db| {
+        web::Data::from(desk_signal::config::ConfigConnection::config_context(db).clone())
+    });
+
     // Start the Actix web server
     let mut http_server = HttpServer::new(move || {
         let default_static_file_path = static_file_path.clone();
@@ -1076,6 +1082,11 @@ pub async fn run_with_hub(
             .app_data(turn_stop_guard.clone())
             .app_data(client_ip_extractor_data)
             .app_data(auth_rate_limiter_data)
+            .configure(|cfg| {
+                if let Some(configuration) = &access_code_configuration {
+                    cfg.app_data(configuration.clone());
+                }
+            })
             .app_data(bootstrap_token_data)
             .app_data(api_json_config()) // limit payload size + uniform error body
             .configure(|cfg| {
@@ -1414,6 +1425,8 @@ mod tests {
     #[actix_web::test]
     async fn daemon_surface_registers_device_code_endpoints() {
         assert_daemon_routes_registered(&[
+            ("GET", "/api/admin/system/access-code-protection"),
+            ("PUT", "/api/admin/system/access-code-protection"),
             ("GET", "/api/admin/system/device-code-settings"),
             ("PUT", "/api/admin/system/device-code-settings"),
             ("GET", "/api/desk/device_codes"),
@@ -1541,6 +1554,7 @@ mod tests {
             "/api/desk/settings",
             "/api/desk/device_codes",
             "/api/admin/system/device-code-settings",
+            "/api/admin/system/access-code-protection",
             "/api/desk/devices/{device_id}/connection",
             "/api/desk/signaling",
             "/api/my/ai-assistant-session",

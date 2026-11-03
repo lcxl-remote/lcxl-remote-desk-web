@@ -1,6 +1,20 @@
 import modelMetrics from './model-metrics';
 
 export default {
+    'pages.accessCodeProtection.title': 'Access-code protection',
+    'pages.accessCodeProtection.description': 'Device and support codes share these limits. Changes retain existing counters and locks. Seconds: 1–86400; attempts: 1–100000.',
+    'pages.accessCodeProtection.enabled': 'Backoff after repeated failures',
+    'pages.accessCodeProtection.requestWindow': 'Request window (seconds)',
+    'pages.accessCodeProtection.userAttempts': 'Attempts per account',
+    'pages.accessCodeProtection.networkAttempts': 'Attempts per source network',
+    'pages.accessCodeProtection.failureWindow': 'Failure window (seconds)',
+    'pages.accessCodeProtection.maxFailures': 'Failure threshold',
+    'pages.accessCodeProtection.lockBase': 'Initial lock (seconds)',
+    'pages.accessCodeProtection.lockMax': 'Maximum lock (seconds)',
+    'pages.accessCodeProtection.invalid': 'Enter whole numbers within range; maximum lock must not be shorter than initial lock',
+    'pages.accessCodeProtection.error': 'Access-code settings were not saved. Reload and try again.',
+    'pages.accessCodeProtection.saved': 'Access-code protection settings saved',
+
     'pages.deviceCodeSettings.title': 'Device code generation',
     'pages.deviceCodeSettings.description': 'New device codes default to 8 characters and can use 6–64. Changes apply to first assignments and explicit regenerations only; existing codes and grants remain unchanged.',
     'pages.deviceCodeSettings.length': 'New device code length',

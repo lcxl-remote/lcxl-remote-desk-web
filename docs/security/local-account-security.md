@@ -11,9 +11,9 @@ seconds. A successful login clears that network identity's state. Lock state is
 not shared across processes and is cleared by restart, so internet-facing
 deployments should also use upstream network protection.
 
-These policy thresholds are intentionally fixed in this release to keep OSS
-deployment configuration small. Only the IPv6 grouping prefix and bounded
-login/redeem capacity tier are configurable.
+Password-login thresholds are fixed. The IPv6 grouping prefix and bounded
+login/redemption capacity tier are configurable. Access-code redemption has its
+own protection settings, described below.
 
 ## Initialization token
 
@@ -36,12 +36,11 @@ the token and session cookie to the network.
 
 ## Access-code redemption
 
-In Default mode, redemption is limited to five attempts per source network in
-each 60-second window, counting both success and failure. Unavailable codes also
-accumulate failures in a fixed 15-minute window. Twenty failures trigger a
-60-second lock; subsequent failures use the password-login exponential backoff,
-capped at one hour. Wait before retrying when told there have been too many
-attempts. Standalone Signaling mode does not offer code redemption.
+Under Settings → Device Codes → Access-code protection, configure the request window, source-network attempt limit, failure window and threshold, and initial and maximum lock durations. Seconds must be whole numbers from 1 to 86400 and attempt limits from 1 to 100000. Maximum lock must not be shorter than initial lock. OSS redemption has no separate account dimension and does not display an account limit.
+
+Default mode starts with five attempts per source network in 60 seconds, counting successes and failures. By default, 20 unavailable codes in 15 minutes trigger a 60-second lock with exponential backoff capped at one hour. The backoff switch leaves basic request limits active. Wait before retrying when told there have been too many attempts. Standalone Signaling mode does not offer code redemption.
+
+New attempts adopt saved parameters without clearing counters or locks. Existing windows and locks keep their deadlines; new caps apply to existing counts, and new windows and subsequent failures use the new parameters.
 
 Redemption and password login have independent state. Successful redemption or
 password login does not clear redemption failures; records and locks expire

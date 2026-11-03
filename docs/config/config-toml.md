@@ -204,6 +204,7 @@ OSS saves AI gateways, search and global policies in the same `config.toml` as h
 | Section | Fields and meaning |
 | --- | --- |
 | `[device_codes]` | `length`: generated length for new device codes; default `8`, range `6`–`64`. Applies to first assignments and explicit regenerations; existing codes stay unchanged |
+| `[access_code_protection]` | Access-code request limits and failure backoff; also editable on the Device Codes settings page |
 | `[ai_gateway]` | `wire_protocol`, `base_url`, `model`, `api_key`, `supports_image_input`; `profile_schema_version`, `reasoning_contract`, `anthropic_prefix_binding`, `request_options_json`, `output_limit_field`, `runtime_max_output_tokens`, `max_context_bytes`; `response_format`, `execution_mode`, `max_steps_per_turn`, `max_same_tool_calls_per_turn`, `exec_approval_timeout_secs` (seconds) |
 | `[approval_gateway]` | `enabled`; its independent model settings are in `[approval_gateway.gateway]`, with the same fields as the main gateway. OSS has no price, currency or accounting settings |
 | `[web_search]` | `schema_version`, `provider` (`duck_duck_go`, `brave`, `tavily`), optional `api_key` |

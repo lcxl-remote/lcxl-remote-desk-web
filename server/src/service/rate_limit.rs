@@ -12,6 +12,7 @@ use opentelemetry::{
 };
 
 use super::client_ip::NetworkKey;
+use desk_signal_facade::access_code_protection::AccessCodeProtectionPolicy;
 
 pub const MAX_BUCKETS_ENV: &str = "LRD_AUTH_RATE_LIMIT_MAX_BUCKETS";
 pub const DEFAULT_MAX_BUCKETS: usize = 65_536;
@@ -27,8 +28,8 @@ pub const BOOTSTRAP_WINDOW_SEC: u64 = 600;
 pub const BOOTSTRAP_MAX_FAILURES: u64 = 20;
 pub const PROBE_WINDOW_SEC: u64 = 600;
 pub const PROBE_MAX_ATTEMPTS: u64 = 60;
-pub const REDEEM_WINDOW_SEC: u64 = 60;
-pub const REDEEM_MAX_ATTEMPTS: u64 = 5;
+#[cfg(test)]
+const REDEEM_MAX_ATTEMPTS: u64 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoginFailureResult {
@@ -360,20 +361,33 @@ impl AuthRateLimiter {
             SecurityQuotaKind::Probe,
             PROBE_WINDOW_SEC,
             PROBE_MAX_ATTEMPTS,
+            false,
         )
     }
 
-    pub fn consume_redeem(&self, key: NetworkKey) -> QuotaDecision {
+    pub fn consume_redeem(
+        &self,
+        key: NetworkKey,
+        policy: &AccessCodeProtectionPolicy,
+    ) -> QuotaDecision {
         self.consume_security_quota(
             key,
             SecurityQuotaKind::Redeem,
-            REDEEM_WINDOW_SEC,
-            REDEEM_MAX_ATTEMPTS,
+            u64::from(policy.request_window_sec),
+            u64::from(policy.network_max_attempts),
+            policy.backoff_enabled,
         )
     }
 
     /// Invalid codes use the login backoff curve but never its state or reset.
-    pub fn record_redeem_failure(&self, key: NetworkKey) -> QuotaDecision {
+    pub fn record_redeem_failure(
+        &self,
+        key: NetworkKey,
+        policy: &AccessCodeProtectionPolicy,
+    ) -> QuotaDecision {
+        if !policy.backoff_enabled {
+            return QuotaDecision::Allowed;
+        }
         let now = self.clock.now_ms();
         let mut state = self.lock_state();
         if !self.redeem_failure_capacity(&mut state, key, now) {
@@ -382,7 +396,7 @@ impl AuthRateLimiter {
         let failure = state.redeem_failures.entry(key).or_insert(ActiveLock {
             failure: Counter {
                 count: 0,
-                expires_at_ms: now + LOGIN_WINDOW_SEC * 1_000,
+                expires_at_ms: now + u64::from(policy.failure_window_sec) * 1_000,
             },
             lock_until_ms: 0,
         });
@@ -390,7 +404,7 @@ impl AuthRateLimiter {
             return QuotaDecision::Limited;
         }
         failure.failure.count = failure.failure.count.saturating_add(1);
-        let decision = match lock_ttl_ms_for(failure.failure.count) {
+        let decision = match policy.lock_ttl_ms(failure.failure.count) {
             Some(ttl) => {
                 failure.lock_until_ms = now + ttl;
                 QuotaDecision::Limited
@@ -431,10 +445,11 @@ impl AuthRateLimiter {
         kind: SecurityQuotaKind,
         window_sec: u64,
         max: u64,
+        backoff_enabled: bool,
     ) -> QuotaDecision {
         let now = self.clock.now_ms();
         let mut state = self.lock_state();
-        if matches!(kind, SecurityQuotaKind::Redeem)
+        if backoff_enabled
             && (!self.redeem_failure_capacity(&mut state, key, now)
                 || state
                     .redeem_failures
@@ -852,7 +867,10 @@ mod tests {
                 BootstrapAttempt::Invalid
             );
             assert_eq!(limiter.consume_probe(existing), QuotaDecision::Allowed);
-            assert_eq!(limiter.consume_redeem(existing), QuotaDecision::Allowed);
+            assert_eq!(
+                limiter.consume_redeem(existing, &AccessCodeProtectionPolicy::default()),
+                QuotaDecision::Allowed
+            );
         }
         clock.advance((BOOTSTRAP_WINDOW_SEC + 1) * 1_000);
         assert_eq!(
@@ -860,7 +878,10 @@ mod tests {
             BootstrapAttempt::Allowed
         );
         assert_eq!(limiter.consume_probe(key(3)), QuotaDecision::Allowed);
-        assert_eq!(limiter.consume_redeem(key(3)), QuotaDecision::Allowed);
+        assert_eq!(
+            limiter.consume_redeem(key(3), &AccessCodeProtectionPolicy::default()),
+            QuotaDecision::Allowed
+        );
     }
 
     #[test]
@@ -872,12 +893,21 @@ mod tests {
         }
         assert_eq!(limiter.consume_probe(key(1)), QuotaDecision::Limited);
         for _ in 0..REDEEM_MAX_ATTEMPTS {
-            assert_eq!(limiter.consume_redeem(key(1)), QuotaDecision::Allowed);
+            assert_eq!(
+                limiter.consume_redeem(key(1), &AccessCodeProtectionPolicy::default()),
+                QuotaDecision::Allowed
+            );
         }
-        assert_eq!(limiter.consume_redeem(key(1)), QuotaDecision::Limited);
+        assert_eq!(
+            limiter.consume_redeem(key(1), &AccessCodeProtectionPolicy::default()),
+            QuotaDecision::Limited
+        );
         clock.advance((PROBE_WINDOW_SEC + 1) * 1_000);
         assert_eq!(limiter.consume_probe(key(1)), QuotaDecision::Allowed);
-        assert_eq!(limiter.consume_redeem(key(1)), QuotaDecision::Allowed);
+        assert_eq!(
+            limiter.consume_redeem(key(1), &AccessCodeProtectionPolicy::default()),
+            QuotaDecision::Allowed
+        );
     }
 
     #[test]
@@ -886,24 +916,36 @@ mod tests {
         let limiter = limiter(clock.clone(), 8);
         for _ in 0..LOGIN_MAX_FAILURES - 1 {
             assert_eq!(
-                limiter.record_redeem_failure(key(1)),
+                limiter.record_redeem_failure(key(1), &AccessCodeProtectionPolicy::default()),
                 QuotaDecision::Allowed
             );
         }
         // A successful admission, or password-login reset, cannot erase failures.
-        assert_eq!(limiter.consume_redeem(key(1)), QuotaDecision::Allowed);
+        assert_eq!(
+            limiter.consume_redeem(key(1), &AccessCodeProtectionPolicy::default()),
+            QuotaDecision::Allowed
+        );
         limiter.clear_login(&key(1));
         assert_eq!(
-            limiter.record_redeem_failure(key(1)),
+            limiter.record_redeem_failure(key(1), &AccessCodeProtectionPolicy::default()),
             QuotaDecision::Limited
         );
         assert_eq!(limiter.login_lock_ttl(&key(1)), None);
-        assert_eq!(limiter.consume_redeem(key(1)), QuotaDecision::Limited);
-        assert_eq!(limiter.consume_redeem(key(2)), QuotaDecision::Allowed);
-        clock.advance(LOGIN_LOCK_BASE_SEC * 1_000);
-        assert_eq!(limiter.consume_redeem(key(1)), QuotaDecision::Allowed);
         assert_eq!(
-            limiter.record_redeem_failure(key(1)),
+            limiter.consume_redeem(key(1), &AccessCodeProtectionPolicy::default()),
+            QuotaDecision::Limited
+        );
+        assert_eq!(
+            limiter.consume_redeem(key(2), &AccessCodeProtectionPolicy::default()),
+            QuotaDecision::Allowed
+        );
+        clock.advance(LOGIN_LOCK_BASE_SEC * 1_000);
+        assert_eq!(
+            limiter.consume_redeem(key(1), &AccessCodeProtectionPolicy::default()),
+            QuotaDecision::Allowed
+        );
+        assert_eq!(
+            limiter.record_redeem_failure(key(1), &AccessCodeProtectionPolicy::default()),
             QuotaDecision::Limited
         );
         assert_eq!(
@@ -914,14 +956,17 @@ mod tests {
             let until = limiter.lock_state().redeem_failures[&key(1)].lock_until_ms;
             clock.advance(until - clock.now_ms());
             assert_eq!(
-                limiter.record_redeem_failure(key(1)),
+                limiter.record_redeem_failure(key(1), &AccessCodeProtectionPolicy::default()),
                 QuotaDecision::Limited
             );
             let next = limiter.lock_state().redeem_failures[&key(1)].lock_until_ms;
             assert_eq!(next - clock.now_ms(), previous_ttl * 2_000);
         }
         clock.advance((LOGIN_WINDOW_SEC + LOGIN_LOCK_MAX_SEC) * 1_000);
-        assert_eq!(limiter.consume_redeem(key(1)), QuotaDecision::Allowed);
+        assert_eq!(
+            limiter.consume_redeem(key(1), &AccessCodeProtectionPolicy::default()),
+            QuotaDecision::Allowed
+        );
         assert!(!limiter.lock_state().redeem_failures.contains_key(&key(1)));
     }
 
@@ -929,21 +974,115 @@ mod tests {
     fn redeem_failure_capacity_is_bounded_and_success_does_not_fill_it() {
         let clock = Arc::new(ManualClock::default());
         let limiter = AuthRateLimiter::with_clock_and_capacities(clock.clone(), 1, 2, 2, 1);
-        assert_eq!(limiter.consume_redeem(key(1)), QuotaDecision::Allowed);
-        assert!(limiter.lock_state().redeem_failures.is_empty());
         assert_eq!(
-            limiter.record_redeem_failure(key(1)),
+            limiter.consume_redeem(key(1), &AccessCodeProtectionPolicy::default()),
             QuotaDecision::Allowed
         );
-        assert_eq!(limiter.consume_redeem(key(2)), QuotaDecision::Limited);
+        assert!(limiter.lock_state().redeem_failures.is_empty());
         assert_eq!(
-            limiter.record_redeem_failure(key(2)),
+            limiter.record_redeem_failure(key(1), &AccessCodeProtectionPolicy::default()),
+            QuotaDecision::Allowed
+        );
+        assert_eq!(
+            limiter.consume_redeem(key(2), &AccessCodeProtectionPolicy::default()),
+            QuotaDecision::Limited
+        );
+        assert_eq!(
+            limiter.record_redeem_failure(key(2), &AccessCodeProtectionPolicy::default()),
             QuotaDecision::Limited
         );
         assert_eq!(limiter.lock_state().redeem_failures.len(), 1);
         clock.advance((LOGIN_WINDOW_SEC + 1) * 1_000);
-        assert_eq!(limiter.consume_redeem(key(2)), QuotaDecision::Allowed);
+        assert_eq!(
+            limiter.consume_redeem(key(2), &AccessCodeProtectionPolicy::default()),
+            QuotaDecision::Allowed
+        );
         assert!(limiter.lock_state().redeem_failures.is_empty());
+    }
+
+    #[test]
+    fn configured_redemption_policy_changes_limits_without_resetting_history() {
+        let clock = Arc::new(ManualClock::default());
+        let limiter = limiter(clock.clone(), 8);
+        let policy = AccessCodeProtectionPolicy {
+            network_max_attempts: 2,
+            request_window_sec: 10,
+            max_failures: 2,
+            failure_window_sec: 30,
+            lock_base_sec: 7,
+            lock_max_sec: 11,
+            ..AccessCodeProtectionPolicy::default()
+        };
+        assert_eq!(
+            limiter.consume_redeem(key(1), &policy),
+            QuotaDecision::Allowed
+        );
+        assert_eq!(
+            limiter.consume_redeem(key(1), &policy),
+            QuotaDecision::Allowed
+        );
+        assert_eq!(
+            limiter.consume_redeem(key(1), &policy),
+            QuotaDecision::Limited
+        );
+        let relaxed = AccessCodeProtectionPolicy {
+            network_max_attempts: 10,
+            request_window_sec: 60,
+            ..policy
+        };
+        assert_eq!(
+            limiter.consume_redeem(key(1), &relaxed),
+            QuotaDecision::Allowed
+        );
+        assert_eq!(limiter.lock_state().redeem[&key(1)].count, 3);
+        assert_eq!(limiter.lock_state().redeem[&key(1)].expires_at_ms, 10000);
+        assert_eq!(
+            limiter.record_redeem_failure(key(1), &policy),
+            QuotaDecision::Allowed
+        );
+        assert_eq!(
+            limiter.record_redeem_failure(key(1), &policy),
+            QuotaDecision::Limited
+        );
+        let short_lock = AccessCodeProtectionPolicy {
+            lock_base_sec: 1,
+            lock_max_sec: 1,
+            ..relaxed
+        };
+        assert_eq!(
+            limiter.consume_redeem(key(1), &short_lock),
+            QuotaDecision::Limited
+        );
+        clock.advance(7000);
+        assert_eq!(
+            limiter.consume_redeem(key(1), &short_lock),
+            QuotaDecision::Allowed
+        );
+        assert_eq!(
+            limiter.record_redeem_failure(key(1), &short_lock),
+            QuotaDecision::Limited
+        );
+        assert_eq!(
+            limiter.lock_state().redeem_failures[&key(1)].lock_until_ms,
+            8000
+        );
+        let disabled = AccessCodeProtectionPolicy {
+            backoff_enabled: false,
+            ..short_lock
+        };
+        assert_eq!(
+            limiter.consume_redeem(key(1), &disabled),
+            QuotaDecision::Allowed
+        );
+        assert_eq!(
+            limiter.record_redeem_failure(key(1), &disabled),
+            QuotaDecision::Allowed
+        );
+        assert_eq!(
+            limiter.lock_state().redeem_failures[&key(1)].failure.count,
+            3
+        );
+        assert_eq!(limiter.login_lock_ttl(&key(1)), None);
     }
 
     #[test]
@@ -953,7 +1092,7 @@ mod tests {
         for _ in 0..40 {
             let limiter = limiter.clone();
             threads.push(std::thread::spawn(move || {
-                limiter.record_redeem_failure(key(1))
+                limiter.record_redeem_failure(key(1), &AccessCodeProtectionPolicy::default())
             }));
         }
         for thread in threads {
@@ -963,12 +1102,17 @@ mod tests {
             limiter.lock_state().redeem_failures[&key(1)].failure.count,
             LOGIN_MAX_FAILURES
         );
-        assert_eq!(limiter.consume_redeem(key(1)), QuotaDecision::Limited);
+        assert_eq!(
+            limiter.consume_redeem(key(1), &AccessCodeProtectionPolicy::default()),
+            QuotaDecision::Limited
+        );
         assert_eq!(limiter.login_lock_ttl(&key(1)), None);
         let attempts: Vec<_> = (0..16)
             .map(|_| {
                 let limiter = limiter.clone();
-                std::thread::spawn(move || limiter.consume_redeem(key(2)))
+                std::thread::spawn(move || {
+                    limiter.consume_redeem(key(2), &AccessCodeProtectionPolicy::default())
+                })
             })
             .collect();
         let allowed = attempts
@@ -984,14 +1128,23 @@ mod tests {
         let limiter = limiter(Arc::new(ManualClock::default()), 8);
         for existing in [key(1), key(2)] {
             assert_eq!(limiter.consume_probe(existing), QuotaDecision::Allowed);
-            assert_eq!(limiter.consume_redeem(existing), QuotaDecision::Allowed);
+            assert_eq!(
+                limiter.consume_redeem(existing, &AccessCodeProtectionPolicy::default()),
+                QuotaDecision::Allowed
+            );
         }
         assert_eq!(limiter.consume_probe(key(3)), QuotaDecision::Limited);
-        assert_eq!(limiter.consume_redeem(key(3)), QuotaDecision::Limited);
+        assert_eq!(
+            limiter.consume_redeem(key(3), &AccessCodeProtectionPolicy::default()),
+            QuotaDecision::Limited
+        );
         assert_eq!(limiter.sweep_count("probe"), 1);
         assert_eq!(limiter.sweep_count("redeem"), 1);
         assert_eq!(limiter.consume_probe(key(4)), QuotaDecision::Limited);
-        assert_eq!(limiter.consume_redeem(key(4)), QuotaDecision::Limited);
+        assert_eq!(
+            limiter.consume_redeem(key(4), &AccessCodeProtectionPolicy::default()),
+            QuotaDecision::Limited
+        );
         assert_eq!(limiter.sweep_count("probe"), 1);
         assert_eq!(limiter.sweep_count("redeem"), 1);
     }

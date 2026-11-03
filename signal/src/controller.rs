@@ -1,3 +1,4 @@
+pub mod access_code_protection;
 pub mod ai_assistant_session;
 pub mod ai_usage;
 pub mod approval_model_provider;

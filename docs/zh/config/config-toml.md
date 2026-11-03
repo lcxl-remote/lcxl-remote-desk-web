@@ -150,6 +150,7 @@ OSS 的 AI 网关、审批网关、搜索和策略配置与主机设置保存在
 | 配置段 | 字段与含义 |
 | --- | --- |
 | `[device_codes]` | `length`：新设备码生成长度，默认 `8`，范围 `6`～`64`；只影响首次分配和主动重新生成，保留现有码 |
+| `[access_code_protection]` | 访问码请求频率与失败退避设置；也可在设备码设置页修改 |
 | `[ai_gateway]` | `wire_protocol`、`base_url`、`model`、`api_key`、`supports_image_input`；`profile_schema_version`、`reasoning_contract`、`anthropic_prefix_binding`、`request_options_json`、`output_limit_field`、`runtime_max_output_tokens`、`max_context_bytes`；`response_format`、`execution_mode`、`max_steps_per_turn`、`max_same_tool_calls_per_turn`、`exec_approval_timeout_secs`（秒） |
 | `[approval_gateway]` | `enabled`；独立模型配置位于 `[approval_gateway.gateway]`，字段沿用主网关。OSS 不包含价格、货币或记账配置 |
 | `[web_search]` | `schema_version`、`provider`（`duck_duck_go` / `brave` / `tavily`）、可选 `api_key` |

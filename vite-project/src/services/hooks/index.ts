@@ -1,3 +1,6 @@
+export type { GetAccessCodeProtectionQueryKey } from "./accessCodeProtectionController/useGetAccessCodeProtection.ts";
+export type { GetAccessCodeProtectionSuspenseQueryKey } from "./accessCodeProtectionController/useGetAccessCodeProtectionSuspense.ts";
+export type { UpdateAccessCodeProtectionMutationKey } from "./accessCodeProtectionController/useUpdateAccessCodeProtection.ts";
 export type { GetApprovalMetricsOverviewQueryKey } from "./aiApprovalController/useGetApprovalMetricsOverview.ts";
 export type { GetApprovalMetricsOverviewSuspenseQueryKey } from "./aiApprovalController/useGetApprovalMetricsOverviewSuspense.ts";
 export type { GetApprovalReviewQueryKey } from "./aiApprovalController/useGetApprovalReview.ts";
@@ -244,6 +247,15 @@ export type { GetWebSearchQueryKey } from "./webSearchController/useGetWebSearch
 export type { GetWebSearchSuspenseQueryKey } from "./webSearchController/useGetWebSearchSuspense.ts";
 export type { TestWebSearchMutationKey } from "./webSearchController/useTestWebSearch.ts";
 export type { UpdateWebSearchMutationKey } from "./webSearchController/useUpdateWebSearch.ts";
+export { getAccessCodeProtectionQueryKey } from "./accessCodeProtectionController/useGetAccessCodeProtection.ts";
+export { getAccessCodeProtectionQueryOptions } from "./accessCodeProtectionController/useGetAccessCodeProtection.ts";
+export { useGetAccessCodeProtection } from "./accessCodeProtectionController/useGetAccessCodeProtection.ts";
+export { getAccessCodeProtectionSuspenseQueryKey } from "./accessCodeProtectionController/useGetAccessCodeProtectionSuspense.ts";
+export { getAccessCodeProtectionSuspenseQueryOptions } from "./accessCodeProtectionController/useGetAccessCodeProtectionSuspense.ts";
+export { useGetAccessCodeProtectionSuspense } from "./accessCodeProtectionController/useGetAccessCodeProtectionSuspense.ts";
+export { updateAccessCodeProtectionMutationKey } from "./accessCodeProtectionController/useUpdateAccessCodeProtection.ts";
+export { updateAccessCodeProtectionMutationOptions } from "./accessCodeProtectionController/useUpdateAccessCodeProtection.ts";
+export { useUpdateAccessCodeProtection } from "./accessCodeProtectionController/useUpdateAccessCodeProtection.ts";
 export { getApprovalMetricsOverviewQueryKey } from "./aiApprovalController/useGetApprovalMetricsOverview.ts";
 export { getApprovalMetricsOverviewQueryOptions } from "./aiApprovalController/useGetApprovalMetricsOverview.ts";
 export { useGetApprovalMetricsOverview } from "./aiApprovalController/useGetApprovalMetricsOverview.ts";
