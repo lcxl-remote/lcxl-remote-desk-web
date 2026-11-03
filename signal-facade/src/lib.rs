@@ -1,5 +1,6 @@
 pub mod context_management;
 pub mod controller;
+pub mod device_code;
 pub mod error;
 pub mod grant;
 pub mod model;

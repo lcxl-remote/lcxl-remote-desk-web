@@ -1,0 +1,1 @@
+{"type":"object","required":["expected_revision","length"],"properties":{"expected_revision":{"type":"integer","format":"int64","minimum":0},"length":{"type":"integer","format":"int32","maximum":64,"minimum":6}},"additionalProperties":false,"x-readme-ref-name":"UpdateDeviceCodeSettings"}

@@ -145,10 +145,11 @@ external = "[2001:db8::1]:3478"
 
 ## OSS 全局配置
 
-OSS 的 AI 网关、审批网关、搜索和策略配置与主机设置保存在同一份 `config.toml`，路径由当前 profile 或 `--config-file-path` 决定。设置页面保存后立即写入这份文件；停服后也可手工编辑，重新启动加载。以下九个段及 `[oss_config_metadata]` 不接受 `LRD_*` 环境变量覆盖；其他主机设置保持原有环境变量行为。
+OSS 的 AI 网关、审批网关、搜索和策略配置与主机设置保存在同一份 `config.toml`，路径由当前 profile 或 `--config-file-path` 决定。设置页面保存后立即写入这份文件；停服后也可手工编辑，重新启动加载。下列配置段及 `[oss_config_metadata]` 不接受 `LRD_*` 环境变量覆盖；其他主机设置保持原有环境变量行为。
 
 | 配置段 | 字段与含义 |
 | --- | --- |
+| `[device_codes]` | `length`：新设备码生成长度，默认 `8`，范围 `6`～`64`；只影响首次分配和主动重新生成，保留现有码 |
 | `[ai_gateway]` | `wire_protocol`、`base_url`、`model`、`api_key`、`supports_image_input`；`profile_schema_version`、`reasoning_contract`、`anthropic_prefix_binding`、`request_options_json`、`output_limit_field`、`runtime_max_output_tokens`、`max_context_bytes`；`response_format`、`execution_mode`、`max_steps_per_turn`、`max_same_tool_calls_per_turn`、`exec_approval_timeout_secs`（秒） |
 | `[approval_gateway]` | `enabled`；独立模型配置位于 `[approval_gateway.gateway]`，字段沿用主网关。OSS 不包含价格、货币或记账配置 |
 | `[web_search]` | `schema_version`、`provider`（`duck_duck_go` / `brave` / `tavily`）、可选 `api_key` |

@@ -1,6 +1,14 @@
 import modelMetrics from './model-metrics';
 
 export default {
+    'pages.deviceCodeSettings.title': '设备码生成',
+    'pages.deviceCodeSettings.description': '默认生成 8 位设备码，可设置为 6～64 位。仅影响此后首次分配或主动重新生成的码，现有码和授权保持不变。',
+    'pages.deviceCodeSettings.length': '新设备码长度',
+    'pages.deviceCodeSettings.invalid': '请输入 6～64 之间的整数',
+    'pages.deviceCodeSettings.error': '设备码设置未保存，请重新加载后重试',
+    'pages.deviceCodeSettings.saved': '设备码设置已保存',
+    'pages.deviceCodeSettings.automatic': '留空，由服务端按当前设置生成',
+
     "pages.deviceTarget.unavailable": "目标不可用，请刷新后重试。",
     "pages.deviceTarget.offline": "设备已离线。",
     "pages.deviceTarget.storeUnavailable": "暂时无法查询设备状态，请稍后重试。",
@@ -2280,9 +2288,9 @@ export default {
   'pages.desk.connectionType': '类型',
   'pages.desk.unknown': '未知',
   'pages.login.deviceCode.tab': '设备码连接',
-  'pages.login.deviceCode.placeholder': '请输入 6 位设备码',
+  'pages.login.deviceCode.placeholder': '请输入设备码或协助码',
   'pages.login.deviceCode.required': '设备码是必填项！',
-  'pages.login.deviceCode.length': '设备码必须是 6 位',
+  'pages.login.deviceCode.length': '请输入有效的访问码',
   'pages.login.deviceCode.offline': '设备已离线或设备码无效',
   'pages.login.deviceCode.connect': '连接',
   'pages.login.deviceCode.hint': '使用设备码连接将建立一个受限会话，可用能力由设备所有者设置；未开放的能力不可用，已开放但设为「询问」的能力在操作时对方会弹框确认。',

@@ -1,6 +1,14 @@
 import modelMetrics from './model-metrics';
 
 export default {
+    'pages.deviceCodeSettings.title': 'Device code generation',
+    'pages.deviceCodeSettings.description': 'New device codes default to 8 characters and can use 6–64. Changes apply to first assignments and explicit regenerations only; existing codes and grants remain unchanged.',
+    'pages.deviceCodeSettings.length': 'New device code length',
+    'pages.deviceCodeSettings.invalid': 'Enter a whole number from 6 to 64',
+    'pages.deviceCodeSettings.error': 'Device code settings were not saved. Reload and try again.',
+    'pages.deviceCodeSettings.saved': 'Device code settings saved',
+    'pages.deviceCodeSettings.automatic': 'Leave blank to generate on the server',
+
     "pages.deviceTarget.unavailable": "Device unavailable. Refresh to try again.",
     "pages.deviceTarget.offline": "This device is offline.",
     "pages.deviceTarget.storeUnavailable": "Device discovery is temporarily unavailable. Try again later.",
@@ -2290,9 +2298,9 @@ export default {
   'pages.desk.connectionType': 'Type',
   'pages.desk.unknown': 'Unknown',
   'pages.login.deviceCode.tab': 'Connect with Code',
-  'pages.login.deviceCode.placeholder': 'Please input 6-digit device code',
+  'pages.login.deviceCode.placeholder': 'Enter a device or support code',
   'pages.login.deviceCode.required': 'Device code is required!',
-  'pages.login.deviceCode.length': 'Device code must be 6 digits',
+  'pages.login.deviceCode.length': 'Enter a valid access code',
   'pages.login.deviceCode.offline': 'Device is offline or device code is invalid',
   'pages.login.deviceCode.connect': 'Connect',
   'pages.login.deviceCode.hint': 'Connecting with a code opens a restricted session; the available capabilities are set by the device owner. Capabilities that are not granted stay unavailable, and a granted "ask" capability prompts the owner for approval when you use it.',

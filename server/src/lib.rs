@@ -401,6 +401,8 @@ pub fn configure_api_surface(
             })
             .configure(move |cfg| {
                 if opts.has_signal_db {
+                    cfg.service(desk_signal::controller::device_code_settings::get_device_code_settings)
+                        .service(desk_signal::controller::device_code_settings::update_device_code_settings);
                     cfg.service(desk_signal::controller::assistant_data::get_assistant_data_settings);
                     cfg.service(desk_signal::controller::assistant_data::update_assistant_data_settings);
                     cfg.service(desk_signal::controller::assistant_data::get_assistant_user_instructions);
@@ -1412,6 +1414,8 @@ mod tests {
     #[actix_web::test]
     async fn daemon_surface_registers_device_code_endpoints() {
         assert_daemon_routes_registered(&[
+            ("GET", "/api/admin/system/device-code-settings"),
+            ("PUT", "/api/admin/system/device-code-settings"),
             ("GET", "/api/desk/device_codes"),
             ("POST", "/api/desk/device_codes"),
             ("PUT", "/api/desk/device_codes/1"),
@@ -1536,6 +1540,7 @@ mod tests {
         for expected in [
             "/api/desk/settings",
             "/api/desk/device_codes",
+            "/api/admin/system/device-code-settings",
             "/api/desk/devices/{device_id}/connection",
             "/api/desk/signaling",
             "/api/my/ai-assistant-session",

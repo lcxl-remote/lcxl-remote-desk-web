@@ -5,6 +5,7 @@ pub mod assistant_data;
 pub mod connection;
 pub mod context_management;
 pub mod device_code;
+pub mod device_code_settings;
 pub mod exec_pty;
 pub mod goal_budget_policy;
 pub mod model_provider;

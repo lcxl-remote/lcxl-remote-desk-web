@@ -20,40 +20,15 @@ impl DeviceCodeService for SignalDeviceCodeService {
         &self,
         client_id: &str,
     ) -> Result<Option<String>, DeskSignalFacadeError> {
-        let db = crate::db::get_db();
-        use crate::entity::device_code;
-        use sea_orm::*;
-
-        let db_model_opt = device_code::Entity::find()
-            .filter(device_code::Column::ClientId.eq(client_id.to_string()))
-            .one(db)
+        crate::device_code_store::get_or_create(crate::db::get_db(), client_id)
             .await
-            .map_err(|e| {
+            .map(Some)
+            .map_err(|error| {
                 DeskSignalFacadeError::new_custom_error(
                     desk_utils::error::DeskErrorCode::SYSTEM_ERROR,
-                    &e.to_string(),
+                    &error.to_string(),
                 )
-            })?;
-
-        if let Some(db_model) = db_model_opt {
-            Ok(Some(db_model.device_code))
-        } else {
-            let new_code = desk_utils::string::generate_device_code(6);
-            let new_model = device_code::ActiveModel {
-                client_id: Set(client_id.to_string()),
-                device_code: Set(new_code.clone()),
-                created_at: Set(chrono::Utc::now()),
-                updated_at: Set(chrono::Utc::now()),
-                ..Default::default()
-            };
-
-            if let Err(e) = new_model.insert(db).await {
-                log::error!("Failed to generate device_code: {}", e);
-                Ok(None)
-            } else {
-                Ok(Some(new_code))
-            }
-        }
+            })
     }
 }
 

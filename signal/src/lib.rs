@@ -32,6 +32,8 @@ pub mod context_management_config;
 pub mod control_authorizer;
 pub mod controller;
 pub mod db;
+pub mod device_code_config;
+pub mod device_code_store;
 pub mod entity;
 pub mod error;
 pub mod exec_pty_carrier;

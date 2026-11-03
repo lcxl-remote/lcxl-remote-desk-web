@@ -22,7 +22,6 @@ use std::sync::Arc;
 use desk_signal_facade::grant::{AccessGrantStore, GrantPrincipal, GrantSessionRecord};
 use desk_signal_facade::model::code_session::{CODE_SESSION_KEY, CodeSessionCookie};
 use desk_signal_facade::model::security_settings::SecuritySettings;
-use desk_signal_facade::model::signal::RemoteDeskTypeEnum;
 use desk_utils::error::DeskErrorCode;
 use desk_utils::rest::RestResponse;
 
@@ -119,27 +118,38 @@ pub async fn redeem_code(
         )));
     }
 
-    // Resolve the code to a live target device connection: a `Server` connection
-    // whose registered device code matches. The target's `client_id` is the grant
-    // audience (server-authoritative, taken from the receiving connection).
-    let resolved = {
-        let map = connection_map.read().await;
-        map.iter().find_map(|(cid, cstate)| {
-            let is_server = cstate.model.peer.remote_desk_type == RemoteDeskTypeEnum::Server;
-            let code_matches = cstate.device_code.as_deref() == Some(code.as_str());
-            let client_id = cstate.client_id.clone();
-            match (is_server && code_matches, client_id) {
-                (true, Some(client_id)) if !client_id.is_empty() => Some((cid.clone(), client_id)),
-                _ => None,
+    // An empty authoritative online map cannot contain a redeemable target.
+    let online_map_empty = connection_map.read().await.is_empty();
+    let resolved = if online_map_empty {
+        None
+    } else {
+        match desk_signal::device_code_store::resolve_online(
+            desk_signal::db::get_db(),
+            connection_map.get_ref(),
+            &code,
+        )
+        .await
+        {
+            Ok(value) => value,
+            Err(_) => {
+                return Ok(HttpResponse::Ok().json(RestResponse::<()>::failed(
+                    DeskErrorCode::SYSTEM_ERROR,
+                    "Device code lookup is unavailable".into(),
+                )));
             }
-        })
+        }
     };
-    let Some((target_connection_id, target_client_id)) = resolved else {
+    let Some((target_connection_id, code_snapshot)) = resolved else {
         return Ok(HttpResponse::Ok().json(RestResponse::<()>::failed(
             DeskErrorCode::DEVICE_NOT_FOUND,
-            "Code not found or device is offline".to_string(),
+            "Code not found or device is offline".into(),
         )));
     };
+    let target_client_id = code_snapshot.client_id;
+    // A concurrent rotation may invalidate this snapshot, but can never promote
+    // an old code to the new generation or a different capability ceiling.
+    let ceiling = SecuritySettings::parse_code_ceiling(code_snapshot.capabilities.as_deref());
+    let generation = code_snapshot.generation as i64;
 
     // Do not mint a grant while the durable central mirror is locked. Without
     // this check a code holder could redeem after the generation bump and keep
@@ -160,9 +170,6 @@ pub async fn redeem_code(
             )));
         }
     }
-
-    // Load the owner-configured ceiling and live generation for the target's code.
-    let (ceiling, generation) = load_code_ceiling(&target_client_id).await;
 
     // Mint a code-session principal + a reusable grant bound to it, then remember
     // the code-session identity in the encrypted cookie. The signaling plane
@@ -233,26 +240,6 @@ async fn target_is_remote_access_locked_in<C: sea_orm::ConnectionTrait>(
             .await?
             .is_some_and(|state| state.locked),
     )
-}
-
-/// Load `(ceiling, generation)` for the device code registered under
-/// `client_id`. A missing row (target not registered) yields the restrictive
-/// all-prompt ceiling at generation 0 — a redeemer never gains a wider ceiling
-/// than configured.
-async fn load_code_ceiling(client_id: &str) -> (SecuritySettings, i64) {
-    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
-    let db = desk_signal::db::get_db();
-    match desk_signal::entity::device_code::Entity::find()
-        .filter(desk_signal::entity::device_code::Column::ClientId.eq(client_id))
-        .one(db)
-        .await
-    {
-        Ok(Some(row)) => (
-            SecuritySettings::parse_code_ceiling(row.capabilities.as_deref()),
-            row.generation as i64,
-        ),
-        _ => (SecuritySettings::all_prompt(), 0),
-    }
 }
 
 #[cfg(test)]

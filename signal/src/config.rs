@@ -25,7 +25,7 @@ use crate::{
     usage_retention::UsageRetentionConfig,
 };
 
-pub const SECTION_NAMES: [&str; 16] = [
+pub const SECTION_NAMES: [&str; 17] = [
     "ai_gateway",
     "approval_gateway",
     "approval_trace",
@@ -36,6 +36,7 @@ pub const SECTION_NAMES: [&str; 16] = [
     "assistant_data_settings",
     "assistant_user_instructions",
     "terminal_completion",
+    "device_codes",
     "subagent_policy",
     "goal_budget_policy",
     "schedule_budget_policy",
@@ -54,6 +55,7 @@ pub struct Metadata {
 
 #[derive(Clone)]
 pub struct GlobalConfig {
+    pub device_codes: desk_signal_facade::device_code::DeviceCodeSettings,
     pub ai_gateway: ModelProviderConfig,
     pub approval_gateway: ApprovalModelConfig,
     pub approval_trace: desk_signal_facade::model::approval_trace::ApprovalTraceSettings,
@@ -79,6 +81,7 @@ pub struct GlobalConfig {
 impl Default for GlobalConfig {
     fn default() -> Self {
         Self {
+            device_codes: Default::default(),
             ai_gateway: ModelProviderConfig::default(),
             approval_gateway: ApprovalModelConfig::default(),
             approval_trace:
@@ -111,6 +114,9 @@ impl std::fmt::Debug for GlobalConfig {
 
 impl GlobalConfig {
     pub fn validate(&self) -> Result<(), DbErr> {
+        self.device_codes
+            .validate()
+            .map_err(|_| invalid("device_codes"))?;
         self.approval_runtime
             .validate()
             .map_err(|_| invalid("approval_runtime"))?;

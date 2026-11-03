@@ -113,6 +113,9 @@ export type { DeleteDeviceCodeMutationKey } from "./deviceCodeController/useDele
 export type { ListDeviceCodesQueryKey } from "./deviceCodeController/useListDeviceCodes.ts";
 export type { ListDeviceCodesSuspenseQueryKey } from "./deviceCodeController/useListDeviceCodesSuspense.ts";
 export type { UpdateDeviceCodeMutationKey } from "./deviceCodeController/useUpdateDeviceCode.ts";
+export type { GetDeviceCodeSettingsQueryKey } from "./deviceCodeSettingsController/useGetDeviceCodeSettings.ts";
+export type { GetDeviceCodeSettingsSuspenseQueryKey } from "./deviceCodeSettingsController/useGetDeviceCodeSettingsSuspense.ts";
+export type { UpdateDeviceCodeSettingsMutationKey } from "./deviceCodeSettingsController/useUpdateDeviceCodeSettings.ts";
 export type { OpenExecPtyCarrierQueryKey } from "./execPTYController/useOpenExecPtyCarrier.ts";
 export type { OpenExecPtyCarrierSuspenseQueryKey } from "./execPTYController/useOpenExecPtyCarrierSuspense.ts";
 export type { ConfirmLocalFileRecoveryClockMutationKey } from "./fileRecoveryController/useConfirmLocalFileRecoveryClock.ts";
@@ -586,6 +589,15 @@ export { useListDeviceCodesSuspense } from "./deviceCodeController/useListDevice
 export { updateDeviceCodeMutationKey } from "./deviceCodeController/useUpdateDeviceCode.ts";
 export { updateDeviceCodeMutationOptions } from "./deviceCodeController/useUpdateDeviceCode.ts";
 export { useUpdateDeviceCode } from "./deviceCodeController/useUpdateDeviceCode.ts";
+export { getDeviceCodeSettingsQueryKey } from "./deviceCodeSettingsController/useGetDeviceCodeSettings.ts";
+export { getDeviceCodeSettingsQueryOptions } from "./deviceCodeSettingsController/useGetDeviceCodeSettings.ts";
+export { useGetDeviceCodeSettings } from "./deviceCodeSettingsController/useGetDeviceCodeSettings.ts";
+export { getDeviceCodeSettingsSuspenseQueryKey } from "./deviceCodeSettingsController/useGetDeviceCodeSettingsSuspense.ts";
+export { getDeviceCodeSettingsSuspenseQueryOptions } from "./deviceCodeSettingsController/useGetDeviceCodeSettingsSuspense.ts";
+export { useGetDeviceCodeSettingsSuspense } from "./deviceCodeSettingsController/useGetDeviceCodeSettingsSuspense.ts";
+export { updateDeviceCodeSettingsMutationKey } from "./deviceCodeSettingsController/useUpdateDeviceCodeSettings.ts";
+export { updateDeviceCodeSettingsMutationOptions } from "./deviceCodeSettingsController/useUpdateDeviceCodeSettings.ts";
+export { useUpdateDeviceCodeSettings } from "./deviceCodeSettingsController/useUpdateDeviceCodeSettings.ts";
 export { openExecPtyCarrierQueryKey } from "./execPTYController/useOpenExecPtyCarrier.ts";
 export { openExecPtyCarrierQueryOptions } from "./execPTYController/useOpenExecPtyCarrier.ts";
 export { useOpenExecPtyCarrier } from "./execPTYController/useOpenExecPtyCarrier.ts";

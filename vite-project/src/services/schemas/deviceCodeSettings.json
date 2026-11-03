@@ -1,0 +1,1 @@
+{"type":"object","required":["length","revision"],"properties":{"length":{"type":"integer","format":"int32","default":8,"maximum":64,"minimum":6},"revision":{"type":"integer","format":"int64","minimum":0}},"additionalProperties":false,"x-readme-ref-name":"DeviceCodeSettings"}

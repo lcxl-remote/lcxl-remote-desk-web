@@ -6436,12 +6436,28 @@ export type DeviceCodeListResult = {
     total: number;
 };
 
+export type DeviceCodeSettings = {
+    /**
+     * @minLength 6
+     * @maxLength 64
+     * @default 8
+     * @type integer, int32
+    */
+    length: number;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    revision: number;
+};
+
 export type DeviceCodeUpdateParams = {
     capabilities?: (null | SecuritySettings);
     /**
-     * @type string
+     * @description Omit to generate a fresh code using the current length setting.
+     * @type string,null
     */
-    device_code: string;
+    device_code?: string | null;
 };
 
 /**
@@ -12401,6 +12417,38 @@ export type RestResponseDeleteAiAssistantSessionResponse = {
     success: boolean;
 };
 
+export type RestResponseDeviceCodeSettings = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @minLength 6
+         * @maxLength 64
+         * @default 8
+         * @type integer, int32
+        */
+        length: number;
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        revision: number;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
 export type RestResponseEmptyResponseDto = {
     /**
      * @type integer, int32
@@ -17713,6 +17761,20 @@ export type UpdateCredentialsRequest = {
     new_username?: string | null;
 };
 
+export type UpdateDeviceCodeSettings = {
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    expected_revision: number;
+    /**
+     * @minLength 6
+     * @maxLength 64
+     * @type integer, int32
+    */
+    length: number;
+};
+
 export type UpdateGoalBudgetPolicy = {
     /**
      * @minLength 0
@@ -17963,6 +18025,27 @@ export type UpdateContextManagementMutationResponse = UpdateContextManagement200
 export type UpdateContextManagementMutation = {
     Response: UpdateContextManagement200;
     Request: UpdateContextManagementMutationRequest;
+    Errors: any;
+};
+
+export type GetDeviceCodeSettings200 = RestResponseDeviceCodeSettings;
+
+export type GetDeviceCodeSettingsQueryResponse = GetDeviceCodeSettings200;
+
+export type GetDeviceCodeSettingsQuery = {
+    Response: GetDeviceCodeSettings200;
+    Errors: any;
+};
+
+export type UpdateDeviceCodeSettings200 = RestResponseDeviceCodeSettings;
+
+export type UpdateDeviceCodeSettingsMutationRequest = UpdateDeviceCodeSettings;
+
+export type UpdateDeviceCodeSettingsMutationResponse = UpdateDeviceCodeSettings200;
+
+export type UpdateDeviceCodeSettingsMutation = {
+    Response: UpdateDeviceCodeSettings200;
+    Request: UpdateDeviceCodeSettingsMutationRequest;
     Errors: any;
 };
 

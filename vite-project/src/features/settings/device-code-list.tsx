@@ -1,3 +1,4 @@
+import { DeviceCodeSettingsCard } from './device-code-settings';
 import { useRef, useState } from "react"
 import { useTranslation } from "react-i18next"
 import { Loader2, Plus, RefreshCw, Trash2, Edit2 } from "lucide-react"
@@ -37,16 +38,6 @@ import { Checkbox } from "@/components/ui/checkbox"
 import { v4 as uuidv4 } from "uuid"
 import { CapabilityCeilingEditor } from "@/features/settings/capability-ceiling-editor"
 import { AsyncButton } from "@/components/async-button"
-
-// Generate a fresh 6-character device code from an unambiguous charset.
-const generateDeviceCode = () => {
-    const charset = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
-    let code = ""
-    for (let i = 0; i < 6; i++) {
-        code += charset.charAt(Math.floor(Math.random() * charset.length))
-    }
-    return code
-}
 
 export function DeviceCodeList() {
     const { t } = useTranslation()
@@ -95,19 +86,19 @@ export function DeviceCodeList() {
     }
 
     const handleOpenCreate = () => {
-        setCreateForm({ clientId: uuidv4(), deviceCode: generateDeviceCode(), capabilities: null })
+        setCreateForm({ clientId: uuidv4(), deviceCode: '', capabilities: null })
         setIsCreateOpen(true)
     }
 
     const submitCreate = async () => {
-        if (!createForm.clientId || !createForm.deviceCode) return;
+        if (!createForm.clientId) return;
         const action = "create"
         if (!beginAction(action)) return
         try {
             await createDeviceCode({
                 data: {
                     client_id: createForm.clientId,
-                    device_code: createForm.deviceCode,
+                    device_code: createForm.deviceCode || undefined,
                     capabilities: createForm.capabilities
                 }
             })
@@ -196,7 +187,7 @@ export function DeviceCodeList() {
             await updateDeviceCode({
                 id: regenItem.id,
                 data: {
-                    device_code: generateDeviceCode(),
+                    device_code: undefined,
                     capabilities: regenItem.capabilities ?? null
                 }
             })
@@ -263,6 +254,8 @@ export function DeviceCodeList() {
                     </Button>
                 </div>
             </div>
+
+            <DeviceCodeSettingsCard />
 
             <Card>
                 <CardHeader>
@@ -384,6 +377,7 @@ export function DeviceCodeList() {
                             </Label>
                             <Input
                                 id="deviceCode"
+                                placeholder={t('pages.deviceCodeSettings.automatic')}
                                 value={createForm.deviceCode}
                                 onChange={(e) => setCreateForm({ ...createForm, deviceCode: e.target.value })}
                                 className="col-span-3"
@@ -403,7 +397,7 @@ export function DeviceCodeList() {
                             pending={pendingAction === "create" || isCreating}
                             pendingLabel={t('common.saving')}
                             onClick={() => void submitCreate()}
-                            disabled={!createForm.clientId || !createForm.deviceCode}
+                            disabled={!createForm.clientId}
                         >
                             {t('common.save')}
                         </AsyncButton>
