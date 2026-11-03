@@ -128,8 +128,7 @@ impl SignalPermissionResumeExecutor {
             let mut targets = map.values().filter(|target| {
                 target.auth_context.auth_kind == AuthKind::TokenAuth
                     && target.auth_context.remote_desk_type == RemoteDeskTypeEnum::Server
-                    && target.model.version_info.client_id.as_deref()
-                        == Some(session.device_id.as_str())
+                    && target.client_id.as_deref() == Some(session.device_id.as_str())
             });
             let Some(target) = targets.next() else {
                 return Ok(false);

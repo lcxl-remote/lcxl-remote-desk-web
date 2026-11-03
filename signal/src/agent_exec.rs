@@ -403,8 +403,6 @@ fn build_exec_frame(
     validation_input: &ExecInput,
 ) -> Result<SignalingModel, AgentError> {
     let audience = target
-        .model
-        .version_info
         .client_id
         .clone()
         .filter(|id| !id.is_empty())

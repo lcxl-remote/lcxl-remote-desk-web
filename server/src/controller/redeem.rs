@@ -122,10 +122,9 @@ pub async fn redeem_code(
     let resolved = {
         let map = connection_map.read().await;
         map.iter().find_map(|(cid, cstate)| {
-            let is_server =
-                cstate.model.version_info.remote_desk_type == RemoteDeskTypeEnum::Server;
+            let is_server = cstate.model.peer.remote_desk_type == RemoteDeskTypeEnum::Server;
             let code_matches = cstate.device_code.as_deref() == Some(code.as_str());
-            let client_id = cstate.model.version_info.client_id.clone();
+            let client_id = cstate.client_id.clone();
             match (is_server && code_matches, client_id) {
                 (true, Some(client_id)) if !client_id.is_empty() => Some((cid.clone(), client_id)),
                 _ => None,

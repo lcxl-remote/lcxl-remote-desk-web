@@ -6,6 +6,10 @@ use crate::{
 };
 use desk_agent_protocol::AgentScope;
 use desk_diagnose_core::session::PersistedAgentSession;
+#[cfg(test)]
+use desk_signal_facade::model::peer::{
+    HostExecCapabilities, PeerInfo, ServerRegistration, SignalingPeer,
+};
 use desk_signal_facade::model::{
     auth_context::AuthKind, connection::SharedConnectionMap, signal::RemoteDeskTypeEnum,
 };
@@ -34,7 +38,7 @@ async fn target(
     let mut targets = map.values().filter(|peer| {
         peer.auth_context.auth_kind == AuthKind::TokenAuth
             && peer.auth_context.remote_desk_type == RemoteDeskTypeEnum::Server
-            && peer.model.version_info.client_id.as_deref() == Some(device)
+            && peer.client_id.as_deref() == Some(device)
     });
     let first = targets.next().ok_or(ScheduleStoreError::NotFound)?;
     if targets.next().is_some() {
@@ -163,26 +167,48 @@ mod tests {
         .await
         .unwrap();
         let (_, socket, _) = actix_ws::handle(&request, payload).unwrap();
-        ConnectionState {
-            model: ConnectionModel {
-                connection_id: id.into(),
-                ip: None,
-                version_info: VersionInfo::new(
-                    1,
-                    1,
-                    "fixture".into(),
-                    RemoteDeskTypeEnum::Server,
-                    None,
-                    Some(device.into()),
-                ),
-                device_id: None,
-                owner_node_id: None,
-            },
-            session: std::sync::Arc::new(tokio::sync::RwLock::new(socket)),
-            terminal_connection_ids: Default::default(),
-            request_callback_map: Default::default(),
-            device_code: None,
-            auth_context: AuthContext::token_auth(1, 1, RemoteDeskTypeEnum::Server),
+        {
+            let (client_id, model) = (SignalingPeer {
+                version_info: Some(VersionInfo {
+                    api_version: 1,
+                    build_number: 1,
+                    commit_hash: "fixture".into(),
+                    debug_build: cfg!(debug_assertions),
+                }),
+                peer: PeerInfo {
+                    remote_desk_type: RemoteDeskTypeEnum::Server,
+                    operation_system: Default::default(),
+                    display_name: None,
+                },
+                server: (Some(device.into())).map(|client_id| ServerRegistration {
+                    client_id,
+                    exec_capabilities: HostExecCapabilities {
+                        available_exec_shells: Vec::new(),
+                        exec_pty: false,
+                        exec_pty_elevation: false,
+                        max_ai_command_runtime_ms: None,
+                    },
+                    ai_assistant_settings: desk_agent_protocol::ai_assistant::AiAssistantSettings {
+                        revision: 0,
+                        enabled: false,
+                    },
+                }),
+            })
+            .into_connection_model(id.into(), None);
+            ConnectionState {
+                client_id,
+                model: (ConnectionModel {
+                    device_id: None,
+                    owner_node_id: None,
+                    ..model
+                })
+                .into(),
+                session: std::sync::Arc::new(tokio::sync::RwLock::new(socket)),
+                terminal_connection_ids: Default::default(),
+                request_callback_map: Default::default(),
+                device_code: None,
+                auth_context: AuthContext::token_auth(1, 1, RemoteDeskTypeEnum::Server),
+            }
         }
     }
 

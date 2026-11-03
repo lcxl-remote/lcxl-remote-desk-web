@@ -601,7 +601,7 @@ pub async fn revoke_ai_assistant_capability_grant(
         {
             return Ok(not_accessible());
         }
-        match target.model.version_info.client_id.as_deref() {
+        match target.client_id.as_deref() {
             Some(id) if !id.is_empty() => id.to_string(),
             _ => return Ok(not_accessible()),
         }
@@ -690,7 +690,7 @@ pub(crate) async fn decide_permission_on(
         {
             return Ok(not_accessible());
         }
-        match target.model.version_info.client_id.as_deref() {
+        match target.client_id.as_deref() {
             Some(id) if !id.is_empty() => id.to_string(),
             _ => return Ok(not_accessible()),
         }
@@ -1099,7 +1099,7 @@ pub async fn list_ai_assistant_sessions(
         {
             return Ok(not_accessible());
         }
-        match target.model.version_info.client_id.as_deref() {
+        match target.client_id.as_deref() {
             Some(id) if !id.is_empty() => id.to_string(),
             _ => return Ok(not_accessible()),
         }

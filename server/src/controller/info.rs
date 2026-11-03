@@ -2,17 +2,21 @@ use actix_web::{HttpResponse, get, web};
 use desk_utils::rest::RestResponse;
 use sysinfo::System;
 
+#[cfg(target_os = "linux")]
+use crate::model::info::WaylandPortalInfo;
 use crate::{
     TauriIsAdminOverride,
     error::DeskError,
     model::{
-        info::{BackendInfo, MacosAutologin, ServerInfo, SystemInfo, WaylandPortalInfo},
+        info::{BackendInfo, MacosAutologin, ServerInfo, SystemInfo},
         settings::{SharedSettings, StartupMode},
     },
 };
 use desk_capture_engine::model::image_capture::ImageCaptureTypeHelper as _;
 use desk_server_version::SERVER_API_VERSION;
-use desk_signal_facade::model::desk_settings::{DeskSettings, LinuxInputControlMode};
+use desk_signal_facade::model::desk_settings::DeskSettings;
+#[cfg(target_os = "linux")]
+use desk_signal_facade::model::desk_settings::LinuxInputControlMode;
 
 #[cfg(target_os = "linux")]
 use crate::model::info::{
@@ -146,11 +150,24 @@ pub async fn query_server_info(
     tauri_is_admin: Option<web::Data<TauriIsAdminOverride>>,
     coordinator: web::Data<crate::model::settings_coordinator::SettingsCoordinator>,
 ) -> Result<HttpResponse, DeskError> {
-    let (startup_mode, initialized, wayland_default_mode) = {
+    #[cfg(not(target_os = "linux"))]
+    let _ = &coordinator;
+    let (startup_mode, initialized, wayland_default_mode, local_device_id) = {
         let settings = settings.read().await;
         let mode = settings.args.startup_mode.clone();
         let init = !settings.user.login_password.is_empty();
-        (mode, init, settings.desk.wayland_control_mode.clone())
+        let local_device_id = matches!(
+            mode,
+            StartupMode::Default | StartupMode::DeskServer | StartupMode::ServiceDaemon
+        )
+        .then(|| settings.system.get_client_id().ok())
+        .flatten();
+        (
+            mode,
+            init,
+            settings.desk.wayland_control_mode.clone(),
+            local_device_id,
+        )
     };
     #[cfg(not(target_os = "linux"))]
     let _ = &wayland_default_mode;
@@ -209,6 +226,7 @@ pub async fn query_server_info(
     let wayland_portal = None;
 
     let info = ServerInfo {
+        local_device_id,
         platform: std::env::consts::OS.to_string(),
         startup_mode,
         api_version: SERVER_API_VERSION,
@@ -328,6 +346,8 @@ pub async fn query_backend_info(
     settings: web::Data<SharedSettings>,
     coordinator: web::Data<crate::model::settings_coordinator::SettingsCoordinator>,
 ) -> Result<HttpResponse, DeskError> {
+    #[cfg(not(target_os = "linux"))]
+    let _ = &coordinator;
     let desk_settings: DeskSettings = {
         let guard = settings.read().await;
         guard.desk.clone()
@@ -520,6 +540,46 @@ mod tests {
         let detail = detail.expect("missing broker snapshot must explain the wait");
         assert!(detail.contains("has not reported"));
         assert!(!detail.contains("AvailableDeviceTypes=0"));
+    }
+
+    #[actix_web::test]
+    async fn server_info_reports_only_the_actual_local_host_identity() {
+        for mode in [
+            StartupMode::Default,
+            StartupMode::DeskServer,
+            StartupMode::ServiceDaemon,
+            StartupMode::Signaling,
+        ] {
+            let mut settings = Settings::default();
+            settings.args.startup_mode = mode.clone();
+            let expected_id = settings.system.get_or_generate_client_id();
+            let settings = std::sync::Arc::new(SharedSettings::from(settings));
+            let coordinator =
+                crate::model::settings_coordinator::SettingsCoordinator::from_settings(
+                    settings.clone(),
+                )
+                .await;
+            let app = test::init_service(
+                App::new()
+                    .app_data(web::Data::from(settings))
+                    .app_data(web::Data::new(coordinator))
+                    .service(query_server_info),
+            )
+            .await;
+            let request = test::TestRequest::get()
+                .uri("/api/server_info")
+                .to_request();
+            let response = test::call_service(&app, request).await;
+            assert!(response.status().is_success());
+            let body: RestResponse<ServerInfo> = test::read_body_json(response).await;
+            assert!(body.success);
+            let info = body.data.unwrap();
+            if mode == StartupMode::Signaling {
+                assert!(info.local_device_id.is_none());
+            } else {
+                assert_eq!(info.local_device_id.as_deref(), Some(expected_id.as_str()));
+            }
+        }
     }
 
     #[actix_web::test]

@@ -33,8 +33,7 @@ impl SignalScheduleExecutor {
             let mut matching = peers.values().filter(|peer| {
                 peer.auth_context.auth_kind == AuthKind::TokenAuth
                     && peer.auth_context.remote_desk_type == RemoteDeskTypeEnum::Server
-                    && peer.model.version_info.client_id.as_deref()
-                        == Some(task.target_device_id.as_str())
+                    && peer.client_id.as_deref() == Some(task.target_device_id.as_str())
             });
             let first = matching.next().map(|peer| peer.model.connection_id.clone());
             if matching.next().is_some() {

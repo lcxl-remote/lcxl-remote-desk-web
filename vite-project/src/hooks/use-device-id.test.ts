@@ -23,10 +23,10 @@ describe("useDeviceConnection", () => {
         h.connections = [{
             connection_id: "conn-1",
             device_id: "42",
-            version_info: { operation_system: "Mac" },
+            version_info: null, peer: { remote_desk_type:'server', operation_system:"Mac", display_name:null }, exec_capabilities: { available_exec_shells: [], exec_pty:false, exec_pty_elevation:false, max_ai_command_runtime_ms:null }, ai_assistant_settings: null,
         }]
         const { result } = renderHook(() => useDeviceConnection("conn-1"))
-        expect(result.current?.version_info.operation_system).toBe("Mac")
+        expect(result.current?.peer.operation_system).toBe("Mac")
     })
 
     it("resolves the manager device id for a connection", () => {
@@ -76,11 +76,11 @@ describe("useDeviceConnectionResolution", () => {
         h.isLoading = false
     })
 
-    it("prefers manager device identity and falls back to standalone client id", () => {
+    it("uses the public device identity from either host", () => {
         h.connections = [{
             connection_id: "conn-1",
             device_id: "manager-1",
-            version_info: { client_id: "client-1" },
+            version_info: null, peer: { remote_desk_type:'server', operation_system:'Other', display_name:null }, exec_capabilities: { available_exec_shells: [], exec_pty:false, exec_pty_elevation:false, max_ai_command_runtime_ms:null }, ai_assistant_settings: null,
         }]
         const manager = renderHook(() => (
             useDeviceConnectionResolution("conn-1")
@@ -92,14 +92,14 @@ describe("useDeviceConnectionResolution", () => {
 
         h.connections = [{
             connection_id: "conn-1",
-            version_info: { client_id: "client-1" },
+            version_info: null, peer: { remote_desk_type:'server', operation_system:'Other', display_name:null }, exec_capabilities: { available_exec_shells: [], exec_pty:false, exec_pty_elevation:false, max_ai_command_runtime_ms:null }, ai_assistant_settings: null, device_id: "client-1",
         }]
         const standalone = renderHook(() => (
             useDeviceConnectionResolution("conn-1")
         ))
         expect(standalone.result.current).toMatchObject({
             status: "persistent",
-            deviceKey: "client:client-1",
+            deviceKey: "device:client-1",
         })
     })
 

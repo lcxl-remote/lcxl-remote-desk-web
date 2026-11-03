@@ -1,5 +1,8 @@
 //! Real signaling process recovery using a durable management-created timer.
 use super::*;
+use desk_signal_facade::model::peer::{
+    HostExecCapabilities, PeerInfo, ServerRegistration, SignalingPeer,
+};
 use std::{
     path::Path,
     process::{Child, Command, Stdio},
@@ -270,16 +273,38 @@ async fn exercise_process(reconnect: bool) {
             version::VersionInfo,
         };
         use futures_util::{SinkExt, StreamExt};
-        let mut version = VersionInfo::new(
-            1,
-            1,
-            "process-test".into(),
-            RemoteDeskTypeEnum::Server,
-            None,
-            Some("device".into()),
+        let version = SignalingPeer {
+            version_info: Some(VersionInfo {
+                api_version: 1,
+                build_number: 1,
+                commit_hash: "process-test".into(),
+                debug_build: cfg!(debug_assertions),
+            }),
+            peer: PeerInfo {
+                remote_desk_type: RemoteDeskTypeEnum::Server,
+                operation_system: Default::default(),
+                display_name: None,
+            },
+            server: (Some("device".into())).map(|client_id| ServerRegistration {
+                client_id,
+                exec_capabilities: HostExecCapabilities {
+                    available_exec_shells: Vec::new(),
+                    exec_pty: false,
+                    exec_pty_elevation: false,
+                    max_ai_command_runtime_ms: Some(
+                        desk_agent_protocol::exec_policy::DEFAULT_TIMEOUT_MS,
+                    ),
+                },
+                ai_assistant_settings: desk_agent_protocol::ai_assistant::AiAssistantSettings {
+                    revision: 0,
+                    enabled: false,
+                },
+            }),
+        };
+        let query = format!(
+            "{}&token=process-test-node-token",
+            version.to_query_string().unwrap()
         );
-        version.token = Some("process-test-node-token".into());
-        let query = serde_urlencoded::to_string(&version).unwrap();
         let (_, mut socket) = awc::Client::default()
             .ws(format!("ws://127.0.0.1:{port}/api/desk/signaling?{query}"))
             .connect()

@@ -76,11 +76,11 @@ export default function AiAssistantConversations() {
     const serverInfo = useQueryServerInfo();
     const enabled = hasAiAssistantBrowserEntry(serverInfo.data?.data?.ai_assistant);
     const devices = enabled ? (connections.data?.data ?? [])
-        .filter(connection => isAiAssistantEnabled(connection.version_info))
+        .filter(connection => isAiAssistantEnabled(connection.ai_assistant_settings))
         .map(connection => ({
             connectionId: connection.connection_id,
-            name: connection.version_info.display_name,
-            description: connection.version_info.operation_system,
+            name: connection.peer.display_name,
+            description: connection.peer.operation_system,
         })) : [];
 
     return <AiAssistantConversationChoices

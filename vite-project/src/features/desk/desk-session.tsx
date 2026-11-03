@@ -1,3 +1,4 @@
+import { canPairLocalDevice } from "./local-device-pairing"
 import { useDeskFileUpload } from './use-desk-file-upload';
 import { AiAssistantWorkspace } from "./ai-assistant-page"
 import { DeskAssistantPanel } from "./desk-assistant-panel"
@@ -202,7 +203,7 @@ export default function DeskSession({
     // Restriction state derived from the redeemed grant (if any) for this target.
     const restricted = useRestrictedSession(deskId);
     const assistantAvailable = showAssistant && restricted.ownerPlaneVisible
-        && isAiAssistantEnabled(assistantConnection?.version_info)
+        && isAiAssistantEnabled(assistantConnection?.ai_assistant_settings)
         && hasAiAssistantBrowserEntry(assistantFeatureProfile);
     useEffect(() => {
         setAssistantOpen(false);
@@ -1999,8 +2000,8 @@ export default function DeskSession({
                                 onClose={() => setAssistantOpen(false)} onFocus={releaseAllInputs}>
                                 <AiAssistantWorkspace key={deskId}
                                     deskId={deskId}
-                                    stableDeviceId={assistantConnection.version_info.client_id ?? assistantConnection.device_id ?? deskId}
-                                    localPairingAvailable={!assistantConnection.device_id}
+                                    stableDeviceId={assistantConnection.device_id ?? ''}
+                                    localPairingAvailable={canPairLocalDevice(assistantConnection.device_id, serverInfo)}
                                     featureProfile={assistantFeatureProfile}
                                     assistantEnabled={true}
                                     />

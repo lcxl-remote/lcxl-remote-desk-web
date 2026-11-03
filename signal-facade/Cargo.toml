@@ -14,6 +14,7 @@ test-support = []
 clap = ["dep:clap"]
 
 [dependencies]
+serde_urlencoded = { workspace = true }
 desk-agent-protocol = { workspace = true }
 desk-diagnose-core = { workspace = true }
 desk-utils = { workspace = true }
@@ -48,5 +49,4 @@ kuchikiki = "=0.8.8-speedreader"
 desk-diagnose-core = { workspace = true, features = ["test-support"] }
 http = "1"
 tokio = { workspace = true, features = ["test-util"] }
-serde_urlencoded = { workspace = true }
 toml = { workspace = true }

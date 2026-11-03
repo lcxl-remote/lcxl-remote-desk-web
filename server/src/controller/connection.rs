@@ -25,11 +25,7 @@ use std::time::Duration;
 use actix_session::Session;
 use actix_web::{Error as AWError, HttpRequest, HttpResponse, post, web};
 use desk_server_user::{model::CurrentUser, service::UserSessionAccessor};
-use desk_signal_facade::model::{
-    probe::{SIGNALING_PROBE_HEADER, SIGNALING_PROBE_HEADER_VALUE},
-    signal::RemoteDeskTypeEnum,
-    version::VersionInfo,
-};
+use desk_signal_facade::model::probe::{SIGNALING_PROBE_HEADER, SIGNALING_PROBE_HEADER_VALUE};
 use desk_utils::{error::DeskErrorCode, rest::RestResponse};
 use log::debug;
 use serde::{Deserialize, Serialize};
@@ -232,21 +228,13 @@ fn client_for_url<'a, T>(url: &str, secure: &'a T, plain: &'a T) -> &'a T {
     }
 }
 
-/// Build a fully-valid `VersionInfo` probe query (all required fields present so
-/// the signaling endpoint deserializes it and reads the token) with `probe=1`.
-/// Returns `None` only if encoding fails (treated as unreachable by the caller).
+/// Probe credentials without registering a device or reporting a peer version.
 fn build_probe_query(token: Option<&str>) -> Option<String> {
-    let mut version_info = VersionInfo::new(
-        desk_server_version::SERVER_API_VERSION,
-        crate::version::SERVER_BUILD_NUMBER,
-        crate::version::SERVER_COMMIT_HASH.to_string(),
-        RemoteDeskTypeEnum::Server,
-        None,
-        None,
-    );
-    version_info.token = token.map(|t| t.to_string());
-    let encoded = serde_urlencoded::to_string(&version_info).ok()?;
-    Some(format!("{encoded}&probe=1"))
+    let mut fields = vec![("probe", "1")];
+    if let Some(token) = token {
+        fields.push(("token", token));
+    }
+    serde_urlencoded::to_string(fields).ok()
 }
 
 /// Probe one `ws(s)` (or `http(s)`) URL with the given token. Never panics;

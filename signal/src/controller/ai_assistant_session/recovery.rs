@@ -18,13 +18,7 @@ pub(crate) async fn resolve(
                 {
                     return Ok(None);
                 }
-                let Some(audience) = target
-                    .model
-                    .version_info
-                    .client_id
-                    .as_deref()
-                    .filter(|id| !id.is_empty())
-                else {
+                let Some(audience) = target.client_id.as_deref().filter(|id| !id.is_empty()) else {
                     return Ok(None);
                 };
                 Some(audience.to_owned())

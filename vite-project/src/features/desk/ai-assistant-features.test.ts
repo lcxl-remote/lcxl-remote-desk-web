@@ -15,6 +15,7 @@ const features = {
     background_task_cancel: true,
     object_context: true,
     exec_pty: true,
+    device_settings: false,
 };
 
 describe('AI Assistant feature profile', () => {

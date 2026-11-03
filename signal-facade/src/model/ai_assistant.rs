@@ -17,6 +17,8 @@ pub struct AiAssistantClientCapabilities {
     pub grant_revoke: bool,
     pub background_task_cancel: bool,
     pub object_context: bool,
+    /// This HTTP host exposes compare-and-set device AI Assistant settings.
+    pub device_settings: bool,
     /// This server exposes the dedicated one-shot exec-PTY carrier surface.
     /// Per-device/session readiness is still proven by a successful prepare.
     pub exec_pty: bool,
@@ -36,6 +38,7 @@ impl AiAssistantClientCapabilities {
             grant_revoke: true,
             background_task_cancel: true,
             object_context: true,
+            device_settings: false,
             exec_pty: true,
         }
     }
@@ -51,6 +54,7 @@ impl AiAssistantClientCapabilities {
             grant_revoke: true,
             background_task_cancel: true,
             object_context: true,
+            device_settings: true,
             exec_pty: true,
         }
     }
@@ -81,6 +85,8 @@ mod tests {
 
     #[test]
     fn profiles_keep_one_shape_and_gate_controls_independently() {
+        assert!(!AiAssistantClientCapabilities::oss().device_settings);
+        assert!(AiAssistantClientCapabilities::manager_current().device_settings);
         let oss = serde_json::to_value(AiAssistantClientCapabilities::oss()).unwrap();
         let manager =
             serde_json::to_value(AiAssistantClientCapabilities::manager_current()).unwrap();

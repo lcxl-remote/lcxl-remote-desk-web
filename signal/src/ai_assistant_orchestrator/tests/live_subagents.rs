@@ -2,6 +2,9 @@
 //! The host route is synthetic; these cases never approve or invoke a device tool.
 use super::*;
 use desk_diagnose_core::{chat::TokenUsage, session::PersistedAgentSession};
+use desk_signal_facade::model::peer::{
+    HostExecCapabilities, PeerInfo, ServerRegistration, SignalingPeer,
+};
 use sea_orm::{ColumnTrait, QueryFilter};
 use serde_json::{Value, json};
 use std::time::{Duration, Instant};
@@ -50,30 +53,52 @@ async fn host(connections: &SharedConnectionMap) {
     .await
     .unwrap();
     let (_, socket, _stream) = actix_ws::handle(&request, payload).unwrap();
-    connections.write().await.insert(
-        "live-fixture-host".into(),
-        ConnectionState {
-            model: ConnectionModel {
-                connection_id: "live-fixture-host".into(),
-                ip: None,
-                version_info: VersionInfo::new(
-                    1,
-                    1,
-                    "fixture".into(),
-                    RemoteDeskTypeEnum::Server,
-                    None,
-                    Some("device".into()),
-                ),
-                device_id: None,
-                owner_node_id: None,
-            },
-            session: std::sync::Arc::new(tokio::sync::RwLock::new(socket)),
-            terminal_connection_ids: Default::default(),
-            request_callback_map: Default::default(),
-            device_code: None,
-            auth_context: AuthContext::token_auth(1, 1, RemoteDeskTypeEnum::Server),
-        },
-    );
+    connections
+        .write()
+        .await
+        .insert("live-fixture-host".into(), {
+            let (client_id, model) = (SignalingPeer {
+                version_info: Some(VersionInfo {
+                    api_version: 1,
+                    build_number: 1,
+                    commit_hash: "fixture".into(),
+                    debug_build: cfg!(debug_assertions),
+                }),
+                peer: PeerInfo {
+                    remote_desk_type: RemoteDeskTypeEnum::Server,
+                    operation_system: Default::default(),
+                    display_name: None,
+                },
+                server: (Some("device".into())).map(|client_id| ServerRegistration {
+                    client_id,
+                    exec_capabilities: HostExecCapabilities {
+                        available_exec_shells: Vec::new(),
+                        exec_pty: false,
+                        exec_pty_elevation: false,
+                        max_ai_command_runtime_ms: None,
+                    },
+                    ai_assistant_settings: desk_agent_protocol::ai_assistant::AiAssistantSettings {
+                        revision: 0,
+                        enabled: false,
+                    },
+                }),
+            })
+            .into_connection_model("live-fixture-host".into(), None);
+            ConnectionState {
+                client_id,
+                model: (ConnectionModel {
+                    device_id: None,
+                    owner_node_id: None,
+                    ..model
+                })
+                .into(),
+                session: std::sync::Arc::new(tokio::sync::RwLock::new(socket)),
+                terminal_connection_ids: Default::default(),
+                request_callback_map: Default::default(),
+                device_code: None,
+                auth_context: AuthContext::token_auth(1, 1, RemoteDeskTypeEnum::Server),
+            }
+        });
 }
 
 #[actix_web::test]

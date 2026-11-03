@@ -216,6 +216,8 @@ pub struct MacosAutologin {
 /// Server information
 #[derive(Serialize, Deserialize, Debug, Clone, ToSchema)]
 pub struct ServerInfo {
+    /// Stable identity of a desktop hosted by this HTTP server; absent for a central signaling service.
+    pub local_device_id: Option<String>,
     /// Rust target operating-system name used for local host UI branching.
     pub platform: String,
     /// Startup mode of the server. Typed rather than free-form so the generated
@@ -334,6 +336,7 @@ mod tests {
             (StartupMode::McpStdio, "mcp-stdio"),
         ] {
             let info = ServerInfo {
+                local_device_id: None,
                 platform: "test".into(),
                 startup_mode: mode.clone(),
                 api_version: 1,

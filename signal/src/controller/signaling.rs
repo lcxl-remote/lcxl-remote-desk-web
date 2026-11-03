@@ -1,3 +1,7 @@
+#[cfg(test)]
+use desk_signal_facade::model::peer::{
+    HostExecCapabilities, PeerInfo, ServerRegistration, SignalingPeer,
+};
 use std::sync::Arc;
 
 use actix_session::Session;
@@ -110,23 +114,11 @@ pub(crate) fn trusted_browser_display_name(
     (!is_code_session).then(|| authenticated_user_name.to_string())
 }
 
-fn apply_server_adjudicated_identity(
-    version_info: &mut VersionInfo,
-    adjudicated_type: RemoteDeskTypeEnum,
-    authenticated_user_name: &str,
-    is_code_session: bool,
-) {
-    version_info.remote_desk_type = adjudicated_type;
-    if adjudicated_type == RemoteDeskTypeEnum::Browser {
-        version_info.display_name =
-            trusted_browser_display_name(authenticated_user_name, is_code_session);
-    }
-}
-
 #[utoipa::path(
     tag = TAG,
     summary = "Open signaling handle and return a WebSocket stream",
-    params(VersionInfo),
+    params(VersionInfo, desk_signal_facade::model::peer::PeerQuery,
+        ("token" = Option<String>, Query, description = "Node credential, accepted only for Server role; omit for Cookie-authenticated browsers")),
     responses(
         (status = 200, description = "return websocket stream"),
     ),
@@ -197,9 +189,12 @@ pub async fn open_signaling_handle(
             .finish());
     }
 
-    let reported_type = version_info_opt
-        .as_ref()
-        .map(|vi| vi.remote_desk_type)
+    let peer_query =
+        web::Query::<desk_signal_facade::model::peer::PeerQuery>::from_query(req.query_string())
+            .map_err(|_| actix_web::error::ErrorUnauthorized("Invalid peer report"))?
+            .into_inner();
+    let reported_type = peer_query
+        .remote_desk_type
         .unwrap_or(RemoteDeskTypeEnum::Browser);
 
     let (user, adjudicated_type, code_session) = match adjudicate_role(token_outcome, reported_type)
@@ -244,6 +239,14 @@ pub async fn open_signaling_handle(
 
     info!("User {} is signaling", user.name);
 
+    let client = peer_query
+        .into_peer(
+            version_info_opt,
+            adjudicated_type,
+            trusted_browser_display_name(&user.name, code_session.is_some()),
+        )
+        .map_err(actix_web::error::ErrorBadRequest)?;
+
     let (res, session, stream) = actix_ws::handle(&req, stream)?;
 
     let stream = stream
@@ -256,36 +259,6 @@ pub async fn open_signaling_handle(
         .max_frame_size(desk_agent_protocol::remote_tool::SIGNALING_FRAME_LIMIT)
         .aggregate_continuations()
         .max_continuation_size(desk_agent_protocol::remote_tool::SIGNALING_FRAME_LIMIT);
-
-    let mut version_info = version_info_opt.unwrap_or_else(|| VersionInfo {
-        api_version: desk_server_version::SERVER_API_VERSION,
-        build_number: crate::version::SIGNAL_BUILD_NUMBER,
-        commit_hash: crate::version::SIGNAL_COMMIT_HASH.to_string(),
-        remote_desk_type: RemoteDeskTypeEnum::Browser,
-        operation_system: desk_signal_facade::model::os::OperationSystemEnum::default(),
-        display_name: Some(user.name.clone()),
-        client_id: None,
-        token: None,
-        debug_build: false,
-        repository_url: None,
-        available_exec_shells: None,
-        max_ai_command_runtime_ms: None,
-        exec_pty: false,
-        exec_pty_elevation: false,
-        ai_assistant_revision: None,
-        ai_assistant_enabled: None,
-    });
-    version_info.token = None;
-    // Overwrite browser identity fields with server-adjudicated values before
-    // the connection enters the shared map. Node display names remain device
-    // metadata, but browser names may later enter a host authorization stamp and
-    // therefore must never come from the signaling query.
-    apply_server_adjudicated_identity(
-        &mut version_info,
-        adjudicated_type,
-        &user.name,
-        code_session.is_some(),
-    );
 
     let ip = req
         .connection_info()
@@ -303,7 +276,7 @@ pub async fn open_signaling_handle(
     rt::spawn(async move {
         // receive messages from websocket
         let result = handle_signaling(
-            version_info,
+            client,
             stream,
             connection_map,
             session,
@@ -350,17 +323,14 @@ mod tests {
     }
 
     fn probe_uri(token: Option<&str>) -> String {
-        let mut version_info = VersionInfo::new(
-            desk_server_version::SERVER_API_VERSION,
-            0,
-            "test".to_string(),
-            RemoteDeskTypeEnum::Server,
-            Some("probe-host".to_string()),
-            Some("client-1".to_string()),
-        );
-        version_info.token = token.map(|t| t.to_string());
-        let query = serde_urlencoded::to_string(&version_info).expect("encode version info");
-        format!("/api/desk/signaling?{query}&probe=1")
+        let mut fields = vec![("probe", "1")];
+        if let Some(token) = token {
+            fields.push(("token", token));
+        }
+        format!(
+            "/api/desk/signaling?{}",
+            serde_urlencoded::to_string(fields).unwrap()
+        )
     }
 
     async fn call_probe(
@@ -482,16 +452,21 @@ mod tests {
     }
 
     #[test]
-    fn valid_token_rejects_every_non_server_role() {
-        for role in [
-            RemoteDeskTypeEnum::Browser,
-            RemoteDeskTypeEnum::Support,
-            RemoteDeskTypeEnum::Signal,
-            RemoteDeskTypeEnum::Manager,
-        ] {
-            assert_eq!(
-                adjudicate_role(TokenOutcome::Valid, role),
-                RoleDecision::Reject
+    fn valid_token_rejects_browser_role() {
+        assert_eq!(
+            adjudicate_role(TokenOutcome::Valid, RemoteDeskTypeEnum::Browser),
+            RoleDecision::Reject
+        );
+    }
+
+    #[test]
+    fn obsolete_roles_cannot_be_deserialized() {
+        for role in ["support", "signal", "manager"] {
+            assert!(
+                serde_urlencoded::from_str::<desk_signal_facade::model::peer::PeerQuery>(&format!(
+                    "remote_desk_type={role}"
+                ))
+                .is_err()
             );
         }
     }
@@ -524,6 +499,32 @@ mod tests {
             adjudicate_role(TokenOutcome::Absent, RemoteDeskTypeEnum::Browser),
             RoleDecision::Cookie
         );
+    }
+
+    #[actix_web::test]
+    async fn incomplete_server_report_is_a_protocol_error_without_invalidating_the_credential() {
+        use actix_session::{SessionMiddleware, storage::CookieSessionStore};
+        let validator: Arc<dyn NodeTokenValidator> = Arc::new(MockValidator {
+            good: "goodtoken".into(),
+        });
+        let connections = web::Data::new(SharedConnectionMap::new());
+        let app = actix_web::test::init_service(
+            App::new()
+                .app_data(connections.clone())
+                .app_data(web::Data::new(validator))
+                .wrap(SessionMiddleware::new(
+                    CookieSessionStore::default(),
+                    actix_web::cookie::Key::generate(),
+                ))
+                .service(open_signaling_handle),
+        )
+        .await;
+        let request = actix_web::test::TestRequest::get().uri("/api/desk/signaling?token=goodtoken&api_version=1&build_number=1&commit_hash=fixture&remote_desk_type=server&client_id=host").to_request();
+        let response = actix_web::test::call_service(&app, request).await;
+        assert_eq!(response.status(), actix_web::http::StatusCode::BAD_REQUEST);
+        let body = actix_web::test::read_body(response).await;
+        assert_eq!(body.as_ref(), b"Missing node capabilities");
+        assert!(connections.read().await.is_empty());
     }
 
     #[actix_web::test]
@@ -565,17 +566,37 @@ mod tests {
         )
         .await;
         let cookie = login.response().cookies().next().unwrap().into_owned();
-        let mut vi = VersionInfo::new(
-            1,
-            0,
-            String::new(),
-            RemoteDeskTypeEnum::Server,
-            None,
-            Some("host".into()),
-        );
-        let base = serde_urlencoded::to_string(&vi).unwrap();
-        vi.remote_desk_type = RemoteDeskTypeEnum::Browser;
-        let browser = serde_urlencoded::to_string(&vi).unwrap();
+        let mut vi = SignalingPeer {
+            version_info: Some(VersionInfo {
+                api_version: 1,
+                build_number: 0,
+                commit_hash: String::new(),
+                debug_build: cfg!(debug_assertions),
+            }),
+            peer: PeerInfo {
+                remote_desk_type: RemoteDeskTypeEnum::Server,
+                operation_system: Default::default(),
+                display_name: None,
+            },
+            server: (Some("host".into())).map(|client_id| ServerRegistration {
+                client_id,
+                exec_capabilities: HostExecCapabilities {
+                    available_exec_shells: Vec::new(),
+                    exec_pty: false,
+                    exec_pty_elevation: false,
+                    max_ai_command_runtime_ms: Some(
+                        desk_agent_protocol::exec_policy::DEFAULT_TIMEOUT_MS,
+                    ),
+                },
+                ai_assistant_settings: desk_agent_protocol::ai_assistant::AiAssistantSettings {
+                    revision: 0,
+                    enabled: false,
+                },
+            }),
+        };
+        let base = vi.to_query_string().unwrap();
+        vi.peer.remote_desk_type = RemoteDeskTypeEnum::Browser;
+        let browser = vi.to_query_string().unwrap();
         for query in [
             format!("{base}&token="),
             format!("{base}&token=wrong"),
@@ -648,59 +669,59 @@ mod tests {
 
     #[test]
     fn authenticated_browser_name_overrides_self_report() {
-        let mut version_info = VersionInfo::new(
-            1,
-            1,
-            "test".to_string(),
-            RemoteDeskTypeEnum::Browser,
-            Some("spoofed-owner".to_string()),
-            None,
-        );
-        apply_server_adjudicated_identity(
-            &mut version_info,
-            RemoteDeskTypeEnum::Browser,
-            "real-owner",
-            false,
-        );
-        assert_eq!(version_info.display_name.as_deref(), Some("real-owner"));
+        let query: desk_signal_facade::model::peer::PeerQuery = serde_urlencoded::from_str("remote_desk_type=server&operation_system=Windows&display_name=spoofed-owner&client_id=host&available_exec_shells=pwsh&exec_pty=false&exec_pty_elevation=false&max_ai_command_runtime_ms=60000&ai_assistant_revision=4&ai_assistant_enabled=true").unwrap();
+        let peer = query
+            .into_peer(
+                Some(VersionInfo {
+                    api_version: 1,
+                    build_number: 1,
+                    commit_hash: "fixture".into(),
+                    debug_build: false,
+                }),
+                RemoteDeskTypeEnum::Browser,
+                trusted_browser_display_name("real-owner", false),
+            )
+            .unwrap();
+        assert_eq!(peer.peer.display_name.as_deref(), Some("real-owner"));
+        assert!(peer.server.is_none());
     }
 
     #[test]
     fn code_session_browser_has_no_display_name() {
-        let mut version_info = VersionInfo::new(
-            1,
-            1,
-            "test".to_string(),
-            RemoteDeskTypeEnum::Browser,
-            Some("spoofed-owner".to_string()),
-            None,
-        );
-        apply_server_adjudicated_identity(
-            &mut version_info,
-            RemoteDeskTypeEnum::Browser,
-            "code_session",
-            true,
-        );
-        assert_eq!(version_info.display_name, None);
+        let query: desk_signal_facade::model::peer::PeerQuery = serde_urlencoded::from_str("remote_desk_type=server&operation_system=Windows&display_name=spoofed-owner&client_id=host&available_exec_shells=pwsh&exec_pty=false&exec_pty_elevation=false&max_ai_command_runtime_ms=60000&ai_assistant_revision=4&ai_assistant_enabled=true").unwrap();
+        let peer = query
+            .into_peer(
+                Some(VersionInfo {
+                    api_version: 1,
+                    build_number: 1,
+                    commit_hash: "fixture".into(),
+                    debug_build: false,
+                }),
+                RemoteDeskTypeEnum::Browser,
+                trusted_browser_display_name("real-owner", true),
+            )
+            .unwrap();
+        assert_eq!(peer.peer.display_name.as_deref(), None);
+        assert!(peer.server.is_none());
     }
 
     #[test]
     fn authenticated_node_keeps_device_metadata_name() {
-        let mut version_info = VersionInfo::new(
-            1,
-            1,
-            "test".to_string(),
-            RemoteDeskTypeEnum::Server,
-            Some("device-name".to_string()),
-            Some("client-1".to_string()),
-        );
-        apply_server_adjudicated_identity(
-            &mut version_info,
-            RemoteDeskTypeEnum::Server,
-            "server_node",
-            false,
-        );
-        assert_eq!(version_info.display_name.as_deref(), Some("device-name"));
+        let query: desk_signal_facade::model::peer::PeerQuery = serde_urlencoded::from_str("remote_desk_type=server&operation_system=Windows&display_name=device-name&client_id=host&available_exec_shells=pwsh&exec_pty=false&exec_pty_elevation=false&max_ai_command_runtime_ms=60000&ai_assistant_revision=4&ai_assistant_enabled=true").unwrap();
+        let peer = query
+            .into_peer(
+                Some(VersionInfo {
+                    api_version: 1,
+                    build_number: 1,
+                    commit_hash: "fixture".into(),
+                    debug_build: false,
+                }),
+                RemoteDeskTypeEnum::Server,
+                trusted_browser_display_name("server_node", false),
+            )
+            .unwrap();
+        assert_eq!(peer.peer.display_name.as_deref(), Some("device-name"));
+        assert!(peer.server.is_some());
     }
 }
 

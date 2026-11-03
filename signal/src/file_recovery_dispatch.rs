@@ -37,8 +37,6 @@ pub async fn run(
                     && target.auth_context.remote_desk_type == RemoteDeskTypeEnum::Server)
                     .then(|| {
                         target
-                            .model
-                            .version_info
                             .client_id
                             .as_ref()
                             .map(|device| (connection.clone(), device.clone()))

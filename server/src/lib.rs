@@ -1,5 +1,9 @@
 #[cfg(test)]
 use actix_web::cookie::Key;
+#[cfg(test)]
+use desk_signal_facade::model::peer::{
+    HostExecCapabilities, PeerInfo, ServerRegistration, SignalingPeer,
+};
 pub mod agent_adapter;
 pub mod controller;
 pub mod daemon;
@@ -1672,25 +1676,35 @@ mod tests {
         )
         .await;
 
-        let mut version = VersionInfo {
-            api_version: 1,
-            build_number: 1,
-            commit_hash: "test".into(),
-            remote_desk_type: RemoteDeskTypeEnum::Server,
-            operation_system: OperationSystemEnum::Windows,
-            display_name: None,
-            client_id: Some("host-fixture".into()),
-            token: Some("test-token".into()),
-            debug_build: false,
-            repository_url: None,
-            available_exec_shells: None,
-            max_ai_command_runtime_ms: None,
-            exec_pty: false,
-            exec_pty_elevation: false,
-            ai_assistant_revision: None,
-            ai_assistant_enabled: None,
+        let mut version = SignalingPeer {
+            version_info: Some(VersionInfo {
+                api_version: 1,
+                build_number: 1,
+                commit_hash: "test".into(),
+                debug_build: false,
+            }),
+            peer: PeerInfo {
+                remote_desk_type: RemoteDeskTypeEnum::Server,
+                operation_system: OperationSystemEnum::Windows,
+                display_name: None,
+            },
+            server: (Some("host-fixture".into())).map(|client_id| ServerRegistration {
+                client_id,
+                exec_capabilities: HostExecCapabilities {
+                    available_exec_shells: Vec::new(),
+                    exec_pty: false,
+                    exec_pty_elevation: false,
+                    max_ai_command_runtime_ms: Some(
+                        desk_agent_protocol::exec_policy::DEFAULT_TIMEOUT_MS,
+                    ),
+                },
+                ai_assistant_settings: desk_agent_protocol::ai_assistant::AiAssistantSettings {
+                    revision: 0,
+                    enabled: false,
+                },
+            }),
         };
-        let query = serde_urlencoded::to_string(&version).unwrap();
+        let query = format!("{}&token=test-token", version.to_query_string().unwrap());
         let uri = format!("/api/desk/signaling?{query}");
         let req = test::TestRequest::get().uri(&uri).to_request();
         let resp = test::call_service(&app, req).await;
@@ -1704,8 +1718,12 @@ mod tests {
             "signaling should bypass enforce_device_scope and reach the WS handshake (got {})",
             resp.status(),
         );
-        version.remote_desk_type = RemoteDeskTypeEnum::Browser;
-        let query = serde_urlencoded::to_string(&version).unwrap();
+        assert_eq!(
+            resp.response().head().reason,
+            Some("No WebSocket Upgrade header found")
+        );
+        version.peer.remote_desk_type = RemoteDeskTypeEnum::Browser;
+        let query = format!("{}&token=test-token", version.to_query_string().unwrap());
         let req = test::TestRequest::get()
             .uri(&format!("/api/desk/signaling?{query}"))
             .to_request();

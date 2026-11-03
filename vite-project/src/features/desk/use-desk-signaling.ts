@@ -1,7 +1,7 @@
+import { appendBrowserPeerReport } from '@/features/desk/browser-peer-report';
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { v4 } from 'uuid';
 import {
-    SIGNALING_API_VERSION,
     SIGNALING_TYPE_CODE_HEARTBEAT_ACKNOWLEDGED,
     SIGNALING_TYPE_CODE_SEND_HEARTBEAT,
 } from './constants';
@@ -145,11 +145,7 @@ export function useDeskSignaling() {
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const host = window.location.host;
         const url = new URL(`${protocol}//${host}/api/desk/signaling`);
-        url.searchParams.set('api_version', String(SIGNALING_API_VERSION));
-        url.searchParams.set('build_number', '0');
-        url.searchParams.set('commit_hash', 'web');
-        url.searchParams.set('operation_system', 'Web');
-        url.searchParams.set('remote_desk_type', 'browser');
+        appendBrowserPeerReport(url);
         const ws = new WebSocket(url.toString());
         socketRef.current = ws;
 

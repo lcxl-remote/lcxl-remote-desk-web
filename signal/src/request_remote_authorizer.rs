@@ -274,7 +274,7 @@ impl RequestRemoteAuthorizer for SignalRequestRemoteAuthorizer {
                     Some(target) => resolve_target_audience(
                         target.auth_context.auth_kind,
                         target.auth_context.remote_desk_type,
-                        target.model.version_info.client_id.as_deref(),
+                        target.client_id.as_deref(),
                     ),
                 }
             };
@@ -302,7 +302,7 @@ impl RequestRemoteAuthorizer for SignalRequestRemoteAuthorizer {
                     0,
                     signal_actor_summary(
                         ActorAccessSource::AuthenticatedAccount,
-                        actor.model.version_info.display_name.clone(),
+                        actor.model.peer.display_name.clone(),
                     ),
                     audience,
                     expires_at,
@@ -325,7 +325,7 @@ impl RequestRemoteAuthorizer for SignalRequestRemoteAuthorizer {
                         generation,
                         signal_actor_summary(
                             ActorAccessSource::TemporaryGrant,
-                            actor.model.version_info.display_name.clone(),
+                            actor.model.peer.display_name.clone(),
                         ),
                         audience,
                         expires_at,

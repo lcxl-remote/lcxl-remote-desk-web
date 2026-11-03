@@ -14,6 +14,7 @@ pub mod media_pipeline;
 pub mod model_metrics;
 pub mod model_usage;
 pub mod os;
+pub mod peer;
 pub mod policy_snapshot;
 pub mod private_screen;
 pub mod probe;

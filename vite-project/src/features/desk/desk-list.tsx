@@ -83,11 +83,11 @@ export default function DeskList() {
                         <CardHeader className="flex flex-row items-start bg-muted/50">
                             <div className="grid gap-0.5">
                                 <CardTitle className="group flex items-center gap-2 text-lg">
-                                    {connection.version_info?.display_name || t('pages.deskList.unnamedConnection')}
+                                    {connection.peer?.display_name || t('pages.deskList.unnamedConnection')}
                                     <Badge variant="default" className="bg-green-500 hover:bg-green-600">{t('pages.searchTable.nameStatus.online')}</Badge>
                                 </CardTitle>
                                 <CardDescription>
-                                    {connection.version_info?.operation_system} - {connection.version_info?.remote_desk_type}
+                                    {connection.peer?.operation_system} - {connection.peer?.remote_desk_type}
                                 </CardDescription>
                             </div>
                         </CardHeader>
@@ -105,7 +105,7 @@ export default function DeskList() {
                                     </li>
                                     <li className="flex items-center justify-between">
                                         <span className="text-muted-foreground">{t('pages.deskList.platform')}</span>
-                                        <span>{connection.version_info?.operation_system || t('pages.desk.unknown')}</span>
+                                        <span>{connection.peer?.operation_system || t('pages.desk.unknown')}</span>
                                     </li>
                                 </ul>
                             </div>

@@ -388,7 +388,7 @@ async fn continuation_target(connections: &SharedConnectionMap, device_id: &str)
     let mut targets = map.values().filter(|target| {
         target.auth_context.auth_kind == AuthKind::TokenAuth
             && target.auth_context.remote_desk_type == RemoteDeskTypeEnum::Server
-            && target.model.version_info.client_id.as_deref() == Some(device_id)
+            && target.client_id.as_deref() == Some(device_id)
     });
     let connection_id = targets.next()?.model.connection_id.clone();
     if targets.next().is_some() {

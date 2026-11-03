@@ -32,20 +32,12 @@ export function useDeviceConnectionResolution(
     const connection = connectionId
         ? query.data?.data?.find((item) => item.connection_id === connectionId)
         : undefined
-    const managerDeviceId = connection?.device_id?.trim()
-    if (connection && managerDeviceId) {
+    const deviceId = connection?.device_id?.trim()
+    if (connection && deviceId) {
         return {
             status: "persistent",
             connection,
-            deviceKey: `device:${managerDeviceId}`,
-        }
-    }
-    const standaloneClientId = connection?.version_info.client_id?.trim()
-    if (connection && standaloneClientId) {
-        return {
-            status: "persistent",
-            connection,
-            deviceKey: `client:${standaloneClientId}`,
+            deviceKey: `device:${deviceId}`,
         }
     }
     return { status: "memory-only", connection, deviceKey: null }

@@ -1,8 +1,8 @@
 type AiAssistantProjection = {
-    ai_assistant_enabled?: boolean | null;
+    enabled?: boolean | null;
 };
 
-/** Missing projections fail closed because AI Assistant has no legacy compatibility mode. */
-export function isAiAssistantEnabled(versionInfo?: AiAssistantProjection | null): boolean {
-    return versionInfo?.ai_assistant_enabled === true;
+/** Only an explicit device settings projection enables AI Assistant. */
+export function isAiAssistantEnabled(settings?: AiAssistantProjection | null): boolean {
+    return settings?.enabled === true;
 }

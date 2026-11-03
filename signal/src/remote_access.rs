@@ -188,10 +188,10 @@ impl RemoteAccessAdmissionAuthorizer for SignalRemoteAccessControl {
             let Some(target) = target else {
                 return RemoteAccessAdmissionOutcome::Allow;
             };
-            if target.model.version_info.remote_desk_type != RemoteDeskTypeEnum::Server {
+            if target.model.peer.remote_desk_type != RemoteDeskTypeEnum::Server {
                 return RemoteAccessAdmissionOutcome::Allow;
             }
-            let Some(client_id) = target.model.version_info.client_id.as_deref() else {
+            let Some(client_id) = target.client_id.as_deref() else {
                 return RemoteAccessAdmissionOutcome::Reject {
                     code: DeskErrorCode::REMOTE_ACCESS_LOCKED,
                     message: "Target host lock state is unavailable".into(),
@@ -230,11 +230,11 @@ impl HostRemoteAccessController for SignalRemoteAccessControl {
         model: &'a SignalingModel,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
-            if source.model.version_info.remote_desk_type != RemoteDeskTypeEnum::Server {
+            if source.model.peer.remote_desk_type != RemoteDeskTypeEnum::Server {
                 log::warn!("non-host attempted UpdateRemoteAccessLockData");
                 return;
             }
-            let Some(client_id) = source.model.version_info.client_id.as_deref() else {
+            let Some(client_id) = source.client_id.as_deref() else {
                 return;
             };
             let Ok(request) = model.get_data::<UpdateRemoteAccessLockData>() else {
@@ -265,7 +265,7 @@ impl HostRemoteAccessController for SignalRemoteAccessControl {
         model: &'a SignalingModel,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
-            if source.model.version_info.remote_desk_type != RemoteDeskTypeEnum::Server {
+            if source.model.peer.remote_desk_type != RemoteDeskTypeEnum::Server {
                 return;
             }
             let Ok(request) = model.get_data::<TerminateRemotePeerData>() else {
@@ -277,7 +277,7 @@ impl HostRemoteAccessController for SignalRemoteAccessControl {
                 .await
                 .get(&request.target_connection_id)
                 .is_some_and(|host_client_id| {
-                    source.model.version_info.client_id.as_deref() == Some(host_client_id.as_str())
+                    source.client_id.as_deref() == Some(host_client_id.as_str())
                 });
             let outcome = if owns_peer {
                 let target = self

@@ -46,6 +46,7 @@ import { MarkdownContent } from '@/components/markdown-content';
 import { useListConnections } from '@/services/hooks/connectionController/useListConnections';
 import { useGetModelProvider } from '@/services/hooks/modelProviderController/useGetModelProvider';
 import { AssistantBrowserPairing } from './assistant-browser-pairing';
+import { canPairLocalDevice } from './local-device-pairing';
 import { useQueryServerInfo } from '@/services/hooks/systemController/useQueryServerInfo';
 import { useRestrictedSession } from './restricted-session';
 import { useDeskSignaling } from './use-desk-signaling';
@@ -821,8 +822,8 @@ export function AiAssistantWorkspace({
                             )}
                             <CardTitle className="flex min-w-0 items-center gap-2 text-base">
                                 <AssistantConnectionIcon connected={isConnected} enabled={assistantEnabled} />
-                                <span title={recoveryConnections.data?.data?.find(item => item.connection_id === deskId)?.version_info.display_name ?? deskId}
-                                    className="truncate">{recoveryConnections.data?.data?.find(item => item.connection_id === deskId)?.version_info.display_name
+                                <span title={recoveryConnections.data?.data?.find(item => item.connection_id === deskId)?.peer.display_name ?? deskId}
+                                    className="truncate">{recoveryConnections.data?.data?.find(item => item.connection_id === deskId)?.peer.display_name
                                         || chat.sessionTarget?.display_name || t('pages.aiAssistant.chatTitle')}</span>
                             </CardTitle>
                         </div>
@@ -1211,6 +1212,7 @@ function AiAssistantDevicePage({
     const restricted = useRestrictedSession(deskId);
     const { data: connections, isLoading } = useListConnections();
     const connection = connections?.data?.find((item: any) => item.connection_id === deskId);
+    const localPairingAvailable = canPairLocalDevice(connection?.device_id, serverInfo);
 
     if (suppliedFeatureProfile === undefined && serverInfo.isLoading) {
         return <div className="p-6"><Skeleton className="h-64 w-full" /></div>;
@@ -1259,27 +1261,27 @@ function AiAssistantDevicePage({
         <div className="absolute inset-0 flex min-w-0 flex-col gap-2 overflow-hidden">
             {searchParams.has('rehearsal') ? <AiAssistantRehearsalGate
                 rehearsalId={searchParams.get('rehearsal') ?? ''}
-                deviceId={String(connection.device_id ?? connection.version_info.client_id ?? '')}
+                deviceId={String(connection.device_id ?? '')}
             >
                 {row => <AiAssistantWorkspace
                     key={row.rehearsal_id}
                     rehearsal={row}
                     backTo={`/desk/${encodeURIComponent(deskId)}`}
                     deskId={deskId}
-                    stableDeviceId={connection.version_info.client_id ?? connection.device_id ?? deskId}
-                    localPairingAvailable={!connection.device_id}
+                    stableDeviceId={connection.device_id ?? ''}
+                    localPairingAvailable={localPairingAvailable}
                     featureProfile={featureProfile}
-                    assistantEnabled={isAiAssistantEnabled(connection.version_info)}
+                    assistantEnabled={isAiAssistantEnabled(connection.ai_assistant_settings)}
                 />}
             </AiAssistantRehearsalGate> : (
                 <AiAssistantWorkspace
                     backTo={`/desk/${encodeURIComponent(deskId)}`}
                     initialConversationId={searchParams.get('conversation')}
                     deskId={deskId}
-                    stableDeviceId={connection.version_info.client_id ?? connection.device_id ?? deskId}
-                    localPairingAvailable={!connection.device_id}
+                    stableDeviceId={connection.device_id ?? ''}
+                    localPairingAvailable={localPairingAvailable}
                     featureProfile={featureProfile}
-                    assistantEnabled={isAiAssistantEnabled(connection.version_info)}
+                    assistantEnabled={isAiAssistantEnabled(connection.ai_assistant_settings)}
                 />
             )}
         </div>

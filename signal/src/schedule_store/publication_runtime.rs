@@ -31,8 +31,7 @@ impl SignalTaskPublicationVerifier<'_> {
         let mut matches = map.values().filter(|peer| {
             peer.auth_context.auth_kind == AuthKind::TokenAuth
                 && peer.auth_context.remote_desk_type == RemoteDeskTypeEnum::Server
-                && peer.model.version_info.client_id.as_deref()
-                    == Some(task.target_device_id.as_str())
+                && peer.client_id.as_deref() == Some(task.target_device_id.as_str())
         });
         let peer = matches.next().ok_or(ScheduleStoreError::NotFound)?;
         if matches.next().is_some() {

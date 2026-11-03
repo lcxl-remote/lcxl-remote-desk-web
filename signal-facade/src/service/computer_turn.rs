@@ -14,7 +14,7 @@ pub fn query_from_host(
 ) -> Option<ComputerActionTurnQuery> {
     query_from_identity(
         &source.auth_context,
-        source.model.version_info.remote_desk_type,
+        source.model.peer.remote_desk_type,
         model,
     )
 }

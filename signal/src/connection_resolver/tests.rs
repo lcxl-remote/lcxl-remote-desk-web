@@ -1,6 +1,9 @@
 use super::*;
 use actix_web::{FromRequest, HttpResponse, body::MessageBody, test::TestRequest};
 use desk_server_user::model::CurrentUser;
+use desk_signal_facade::model::peer::{
+    HostExecCapabilities, PeerInfo, ServerRegistration, SignalingPeer,
+};
 use desk_signal_facade::{
     grant::{GrantClock, GrantPrincipal, GrantSessionRecord, InProcessAccessGrantStore},
     model::{
@@ -44,14 +47,32 @@ async fn make_handler(
     map: web::Data<SharedConnectionMap>,
 ) -> (HttpResponse, SignalingHandler<CurrentUser>) {
     let (response, session) = websocket().await;
-    let version = VersionInfo::new(
-        1,
-        0,
-        String::new(),
-        auth.remote_desk_type,
-        None,
-        Some(format!("client-{id}")),
-    );
+    let version = SignalingPeer {
+        version_info: Some(VersionInfo {
+            api_version: 1,
+            build_number: 0,
+            commit_hash: String::new(),
+            debug_build: cfg!(debug_assertions),
+        }),
+        peer: PeerInfo {
+            remote_desk_type: auth.remote_desk_type,
+            operation_system: Default::default(),
+            display_name: None,
+        },
+        server: (Some(format!("client-{id}"))).map(|client_id| ServerRegistration {
+            client_id,
+            exec_capabilities: HostExecCapabilities {
+                available_exec_shells: Vec::new(),
+                exec_pty: false,
+                exec_pty_elevation: false,
+                max_ai_command_runtime_ms: None,
+            },
+            ai_assistant_settings: desk_agent_protocol::ai_assistant::AiAssistantSettings {
+                revision: 0,
+                enabled: false,
+            },
+        }),
+    };
     let handler = SignalingHandler::init(
         id.into(),
         version,
@@ -64,6 +85,7 @@ async fn make_handler(
         auth,
         CredentialPolicy::Plain,
         1,
+        None,
     )
     .await
     .unwrap();
@@ -158,15 +180,8 @@ async fn real_handler_scopes_enumeration_and_rechecks_live_grants() {
         map.clone(),
     )
     .await;
-    // Deliberately poison the fixture to verify the public projection even if
-    // a future internal caller ever supplies unsanitized connection metadata.
-    map.write()
-        .await
-        .get_mut("b")
-        .unwrap()
-        .model
-        .version_info
-        .token = Some("unrelated-node-secret".into());
+    let public_b = serde_json::to_value(map.read().await["b"].public_model()).unwrap();
+    assert!(public_b["version_info"].get("token").is_none());
     let (response, browser) = make_handler(
         "browser",
         AuthContext::code_session("principal-a"),

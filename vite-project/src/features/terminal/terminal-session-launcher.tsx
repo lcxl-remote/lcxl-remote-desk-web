@@ -56,7 +56,7 @@ export default function TerminalSessionLauncher({
     const { t } = useTranslation()
     const connection = useDeviceConnection(connectionId)
     const deviceId = connection?.device_id ?? undefined
-    const operationSystem = connection?.version_info?.operation_system
+    const operationSystem = connection?.peer?.operation_system
     const { data: terminalList, isLoading } = useListTerminal(
         connectionId || '',
         deviceId ? { device_id: deviceId } : undefined,

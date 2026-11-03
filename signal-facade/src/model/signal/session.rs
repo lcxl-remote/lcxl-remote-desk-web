@@ -386,16 +386,6 @@ pub enum RemoteDeskTypeEnum {
     Browser,
     /// Lcxl remote desktop server type
     Server,
-    /// Lcxl remote desktop signal type
-    Signal,
-    /// Lcxl remote desktop manager type,
-    /// used for manage multiple remote desktops,
-    /// this enum used by another project, not this project
-    /// so keep this enum but do not use it
-    Manager,
-    /// Reserved role, rejected by node-token authentication. Support codes use
-    /// the host's regular Server upstream.
-    Support,
 }
 
 /// Request remote access model.

@@ -33,11 +33,7 @@ function makeConnection(operationSystem: string | null) {
     return {
         connection_id: "conn-1",
         ip: "10.0.0.1",
-        version_info: {
-            display_name: "My Desk",
-            operation_system: operationSystem,
-            remote_desk_type: "Desk",
-        },
+        version_info: null, peer: { remote_desk_type:"Desk", operation_system:operationSystem, display_name:"My Desk" }, exec_capabilities: { available_exec_shells: [], exec_pty:false, exec_pty_elevation:false, max_ai_command_runtime_ms:null }, ai_assistant_settings: null,
     };
 }
 

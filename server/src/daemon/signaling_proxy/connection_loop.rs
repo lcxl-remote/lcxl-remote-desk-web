@@ -1,6 +1,9 @@
 //! Lifecycle of one outbound signaling-proxy connection.
 
 use super::*;
+use desk_signal_facade::model::peer::{
+    HostExecCapabilities, PeerInfo, ServerRegistration, SignalingPeer,
+};
 
 struct OutstandingHeartbeat {
     request_id: String,
@@ -96,16 +99,6 @@ pub(super) async fn maintain_proxy_connection(
     // grant, so the restriction is enforced per session rather than per link.
     let remote_desk_type = RemoteDeskTypeEnum::Server;
 
-    let mut version_info = VersionInfo::new(
-        desk_server_version::SERVER_API_VERSION,
-        crate::version::SERVER_BUILD_NUMBER,
-        crate::version::SERVER_COMMIT_HASH.to_string(),
-        remote_desk_type,
-        display_name,
-        Some(client_id),
-    );
-    version_info.token = Some(auth_token.clone());
-    version_info.set_available_exec_shells(&crate::exec_shells::available_exec_shells());
     let (
         advertised_ai_command_runtime_ms,
         advertised_exec_pty_capabilities,
@@ -121,19 +114,37 @@ pub(super) async fn maintain_proxy_connection(
             settings.ai_assistant,
         )
     };
-    version_info.max_ai_command_runtime_ms = Some(advertised_ai_command_runtime_ms);
-    version_info.exec_pty = advertised_exec_pty_capabilities.exec_pty;
-    version_info.exec_pty_elevation = advertised_exec_pty_capabilities.exec_pty_elevation;
-    version_info.set_ai_assistant_settings(advertised_ai_assistant_settings);
-    log::info!(
-        "[agent-exec] verified available shells: {:?}",
-        version_info.available_exec_shell_list()
-    );
-    version_info.repository_url = Some(crate::version::SERVER_REPOSITORY_URL)
-        .filter(|url| !url.is_empty())
-        .map(str::to_owned);
-    let version_query = serde_urlencoded::to_string(&version_info)
-        .map_err(|e| format!("Failed to encode version info: {e}"))?;
+    let shells = crate::exec_shells::available_exec_shells();
+    log::info!("[agent-exec] verified available shells: {:?}", shells);
+    let peer = SignalingPeer {
+        version_info: Some(VersionInfo {
+            api_version: desk_server_version::SERVER_API_VERSION,
+            build_number: crate::version::SERVER_BUILD_NUMBER,
+            commit_hash: crate::version::SERVER_COMMIT_HASH.to_string(),
+            debug_build: cfg!(debug_assertions),
+        }),
+        peer: PeerInfo {
+            remote_desk_type,
+            operation_system: Default::default(),
+            display_name,
+        },
+        server: Some(ServerRegistration {
+            client_id,
+            exec_capabilities: HostExecCapabilities {
+                available_exec_shells: shells,
+                exec_pty: advertised_exec_pty_capabilities.exec_pty,
+                exec_pty_elevation: advertised_exec_pty_capabilities.exec_pty_elevation,
+                max_ai_command_runtime_ms: Some(advertised_ai_command_runtime_ms),
+            },
+            ai_assistant_settings: advertised_ai_assistant_settings,
+        }),
+    };
+    let report_query = peer
+        .to_query_string()
+        .map_err(|_| "Failed to encode peer report")?;
+    let credential_query = serde_urlencoded::to_string([("token", auth_token.as_str())])
+        .map_err(|_| "Failed to encode signaling credential")?;
+    let version_query = format!("{report_query}&{credential_query}");
 
     let mut root_store = RootCertStore::empty();
     for cert in load_native_certs().expect("could not load platform certs") {

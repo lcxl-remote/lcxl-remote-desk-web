@@ -1,3 +1,4 @@
+use desk_signal_facade::model::peer::SignalingPeer;
 use std::sync::Arc;
 
 use actix_web::web;
@@ -8,7 +9,6 @@ use desk_signal_facade::{
     model::{
         connection::SharedConnectionMap,
         signal::{RemoteDeskTypeEnum, TurnProvider},
-        version::VersionInfo,
     },
     service::{DeviceCodeService, SignalingHandler},
 };
@@ -115,7 +115,7 @@ impl Drop for CentralPendingConnectionGuard {
 
 #[allow(clippy::too_many_arguments)]
 pub async fn handle_signaling(
-    client_version_info: VersionInfo,
+    client_version_info: SignalingPeer,
     stream: AggregatedMessageStream,
     connection_map: web::Data<SharedConnectionMap>,
     ws_session: Session,
@@ -131,14 +131,10 @@ pub async fn handle_signaling(
     let connection_id = String::from(random_uuid);
 
     let device_code_service = SignalDeviceCodeService;
-    let device_code = if client_version_info.remote_desk_type == RemoteDeskTypeEnum::Server {
-        if let Some(client_id) = &client_version_info.client_id {
-            device_code_service
-                .get_or_create_device_code(client_id)
-                .await?
-        } else {
-            None
-        }
+    let device_code = if let Some(registration) = client_version_info.server.as_ref() {
+        device_code_service
+            .get_or_create_device_code(&registration.client_id)
+            .await?
     } else {
         None
     };
@@ -225,6 +221,7 @@ pub async fn handle_signaling(
         auth_context,
         desk_signal_facade::service::CredentialPolicy::Plain,
         desk_server_version::SERVER_API_VERSION,
+        None,
     )
     .await?
     .with_control_authorizer(control_authorizer)

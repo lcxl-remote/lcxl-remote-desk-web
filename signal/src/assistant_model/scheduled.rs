@@ -41,7 +41,7 @@ impl FreshTaskModelContext {
         let mut matches = peers.values().filter(|peer| {
             peer.auth_context.auth_kind == AuthKind::TokenAuth
                 && peer.auth_context.remote_desk_type == RemoteDeskTypeEnum::Server
-                && peer.model.version_info.client_id.as_deref() == Some(self.device_id.as_str())
+                && peer.client_id.as_deref() == Some(self.device_id.as_str())
         });
         if matches
             .next()

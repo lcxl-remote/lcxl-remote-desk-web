@@ -1,6 +1,9 @@
 //! Explicit measurement of the real HTTP authentication boundary, without a
 //! WebSocket upgrade or device registration. This is not a media benchmark.
 use super::*;
+use desk_signal_facade::model::peer::{
+    HostExecCapabilities, PeerInfo, ServerRegistration, SignalingPeer,
+};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct Validator(Arc<AtomicUsize>);
@@ -29,16 +32,38 @@ async fn signaling_authentication_performance() {
             .service(open_signaling_handle),
     )
     .await;
-    let mut vi = VersionInfo::new(
-        1,
-        0,
-        "benchmark".into(),
-        RemoteDeskTypeEnum::Server,
-        Some("fixture".into()),
-        Some("benchmark-host".into()),
+    let vi = SignalingPeer {
+        version_info: Some(VersionInfo {
+            api_version: 1,
+            build_number: 0,
+            commit_hash: "benchmark".into(),
+            debug_build: cfg!(debug_assertions),
+        }),
+        peer: PeerInfo {
+            remote_desk_type: RemoteDeskTypeEnum::Server,
+            operation_system: Default::default(),
+            display_name: Some("fixture".into()),
+        },
+        server: (Some("benchmark-host".into())).map(|client_id| ServerRegistration {
+            client_id,
+            exec_capabilities: HostExecCapabilities {
+                available_exec_shells: Vec::new(),
+                exec_pty: false,
+                exec_pty_elevation: false,
+                max_ai_command_runtime_ms: Some(
+                    desk_agent_protocol::exec_policy::DEFAULT_TIMEOUT_MS,
+                ),
+            },
+            ai_assistant_settings: desk_agent_protocol::ai_assistant::AiAssistantSettings {
+                revision: 0,
+                enabled: false,
+            },
+        }),
+    };
+    let query = format!(
+        "{}&token=benchmark-fictional-credential",
+        vi.to_query_string().unwrap()
     );
-    vi.token = Some("benchmark-fictional-credential".into());
-    let query = serde_urlencoded::to_string(&vi).unwrap();
     let uri = format!("/api/desk/signaling?{query}");
     let mut nanos = Vec::with_capacity(SAMPLES);
     let start = std::time::Instant::now();

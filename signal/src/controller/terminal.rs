@@ -2,13 +2,12 @@ use crate::controller::signaling::browser_auth_context;
 use crate::controller::signaling::{resolve_browser_identity, trusted_browser_display_name};
 use crate::request_remote_authorizer::DbDeviceGenerationLookup;
 use crate::terminal_start_authorizer::SignalTerminalStartAuthorizer;
-use crate::{model::SharedConnectionMap, service::SignalingContext, version};
+use crate::{model::SharedConnectionMap, service::SignalingContext};
 use actix_session::Session;
 use actix_web::{HttpRequest, HttpResponse, get, rt, web};
 use desk_signal_facade::model::{
     signal::{RemoteDeskTypeEnum, SignalingModel, SignalingType, TurnProvider},
     terminal::{StartTerminalPath, StartTerminalSession},
-    version::VersionInfo,
 };
 use desk_signal_facade::service::{
     CredentialPolicy, RequestRemoteOutcome, TerminalStartAuthorizer,
@@ -33,10 +32,12 @@ pub const TAG: &str = "Terminal";
     ),
 )]
 #[get("/terminal/{connection_id}")]
+#[allow(clippy::too_many_arguments)] // Independent Actix boundary extractors.
 pub async fn open_terminal_session(
     req: HttpRequest,
     path: web::Path<StartTerminalPath>,
     query_list: web::Query<StartTerminalSession>,
+    version: Option<web::Query<desk_signal_facade::model::version::VersionInfo>>,
     connection_map: web::Data<SharedConnectionMap>,
     session: Session,
     stream: web::Payload,
@@ -78,14 +79,17 @@ pub async fn open_terminal_session(
         .map(|s| s.to_string());
 
     // the web socket is from browser
-    let client_version_info = VersionInfo::new(
-        desk_server_version::SERVER_API_VERSION,
-        version::SIGNAL_BUILD_NUMBER,
-        version::SIGNAL_COMMIT_HASH.to_owned(),
-        RemoteDeskTypeEnum::Browser,
-        actor_display_name,
-        None,
-    );
+    let peer_query =
+        web::Query::<desk_signal_facade::model::peer::PeerQuery>::from_query(req.query_string())
+            .map_err(|_| actix_web::error::ErrorBadRequest("Invalid browser report"))?
+            .into_inner();
+    let client_version_info = peer_query
+        .into_peer(
+            version.map(|v| v.into_inner()),
+            RemoteDeskTypeEnum::Browser,
+            actor_display_name,
+        )
+        .map_err(actix_web::error::ErrorBadRequest)?;
 
     let random_uuid = Uuid::new_v4();
     let connection_id = String::from(random_uuid);
@@ -106,6 +110,7 @@ pub async fn open_terminal_session(
         auth_context,
         CredentialPolicy::Plain,
         desk_server_version::SERVER_API_VERSION,
+        None,
     )
     .await?;
 

@@ -396,15 +396,15 @@ impl ControlFrameAuthorizer for SignalControlAuthorizer {
                     Some(target) => resolve_target_audience(
                         target.auth_context.auth_kind,
                         target.auth_context.remote_desk_type,
-                        target.model.version_info.client_id.as_deref(),
+                        target.client_id.as_deref(),
                     )
                     .map(|audience| {
                         (
                             audience,
-                            target.model.version_info.available_exec_shell_list(),
+                            target.model.exec_capabilities.available_exec_shells.clone(),
                             target
                                 .model
-                                .version_info
+                                .exec_capabilities
                                 .max_ai_command_runtime_ms
                                 .unwrap_or(desk_agent_protocol::exec_policy::DEFAULT_TIMEOUT_MS),
                         )

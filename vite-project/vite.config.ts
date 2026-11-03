@@ -2,9 +2,11 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import path from 'node:path'
+import { readClientBuild } from './build/client-build'
 
 // https://vitejs.dev/config/
 export default defineConfig({
+    define: { __LCXL_CLIENT_BUILD__: JSON.stringify(readClientBuild(import.meta.dirname)) },
     plugins: [react()],
     resolve: {
         alias: {

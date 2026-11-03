@@ -97,7 +97,7 @@ impl FileRecoveryObserver for FileRecoveryHub {
         Box::pin(async move {
             if source.auth_context.auth_kind != AuthKind::TokenAuth
                 || source.auth_context.remote_desk_type != RemoteDeskTypeEnum::Server
-                || source.model.version_info.remote_desk_type != RemoteDeskTypeEnum::Server
+                || source.model.peer.remote_desk_type != RemoteDeskTypeEnum::Server
                 || model.signaling_type != SignalingType::FileRecoveryManaged
                 || model.to_connection_id.is_some()
                 || model
@@ -161,8 +161,6 @@ pub async fn request_authorized(
         return Err(RecoveryRequestError::Offline);
     }
     let audience = target
-        .model
-        .version_info
         .client_id
         .as_deref()
         .filter(|v| !v.is_empty())

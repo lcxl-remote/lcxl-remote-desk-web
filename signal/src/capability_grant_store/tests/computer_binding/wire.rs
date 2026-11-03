@@ -2,6 +2,9 @@
 
 use super::*;
 use crate::remote_tool_edge::{SignalComputerActionObserver, SignalComputerActionPendingStore};
+use desk_signal_facade::model::peer::{
+    HostExecCapabilities, PeerInfo, ServerRegistration, SignalingPeer,
+};
 use desk_signal_facade::{
     model::{
         auth_context::AuthContext,
@@ -49,38 +52,66 @@ async fn real_socket_observer_rejects_wrong_subject_and_frame_then_commits_origi
                             "browser" => AuthContext::token_auth(1, 1, RemoteDeskTypeEnum::Browser),
                             _ => AuthContext::token_auth(1, 1, RemoteDeskTypeEnum::Server),
                         };
-                        let state = ConnectionState {
-                            model: ConnectionModel {
-                                connection_id: if identity == "reconnected" {
-                                    "other-host"
-                                } else {
-                                    "host-original"
-                                }
-                                .into(),
-                                ip: None,
-                                version_info: VersionInfo::new(
-                                    1,
-                                    1,
-                                    "fixture".into(),
-                                    RemoteDeskTypeEnum::Server,
-                                    None,
-                                    Some(
+                        let state = {
+                            let (client_id, model) =
+                                (SignalingPeer {
+                                    version_info: Some(VersionInfo {
+                                        api_version: 1,
+                                        build_number: 1,
+                                        commit_hash: "fixture".into(),
+                                        debug_build: cfg!(debug_assertions),
+                                    }),
+                                    peer: PeerInfo {
+                                        remote_desk_type: RemoteDeskTypeEnum::Server,
+                                        operation_system: Default::default(),
+                                        display_name: None,
+                                    },
+                                    server: (Some(
                                         if identity == "audience" {
                                             "other-device"
                                         } else {
                                             "device-1"
                                         }
                                         .into(),
-                                    ),
-                                ),
-                                device_id: None,
-                                owner_node_id: None,
-                            },
-                            session: Arc::new(tokio::sync::RwLock::new(socket)),
-                            terminal_connection_ids: Default::default(),
-                            request_callback_map: Default::default(),
-                            device_code: None,
-                            auth_context,
+                                    ))
+                                    .map(|client_id| ServerRegistration {
+                                        client_id,
+                                        exec_capabilities: HostExecCapabilities {
+                                            available_exec_shells: Vec::new(),
+                                            exec_pty: false,
+                                            exec_pty_elevation: false,
+                                            max_ai_command_runtime_ms: None,
+                                        },
+                                        ai_assistant_settings:
+                                            desk_agent_protocol::ai_assistant::AiAssistantSettings {
+                                                revision: 0,
+                                                enabled: false,
+                                            },
+                                    }),
+                                })
+                                .into_connection_model(
+                                    if identity == "reconnected" {
+                                        "other-host"
+                                    } else {
+                                        "host-original"
+                                    }
+                                    .into(),
+                                    None,
+                                );
+                            ConnectionState {
+                                client_id,
+                                model: (ConnectionModel {
+                                    device_id: None,
+                                    owner_node_id: None,
+                                    ..model
+                                })
+                                .into(),
+                                session: Arc::new(tokio::sync::RwLock::new(socket)),
+                                terminal_connection_ids: Default::default(),
+                                request_callback_map: Default::default(),
+                                device_code: None,
+                                auth_context,
+                            }
                         };
                         actix_web::rt::spawn(async move {
                             while let Some(Ok(message)) = stream.next().await {

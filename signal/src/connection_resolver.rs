@@ -74,11 +74,17 @@ impl FetchConnectionsResolver for SignalFetchConnectionsResolver {
             if auth.auth_kind == AuthKind::CookieAuth
                 && auth.user_id == Some(crate::control_authorizer::SINGLE_ACCOUNT_USER_ID)
             {
-                let connections = self.connections.read().await;
-                return Ok(connections
-                    .values()
-                    .filter(|state| is_server(state))
-                    .map(ConnectionState::public_model)
+                let snapshots: Vec<_> = {
+                    let connections = self.connections.read().await;
+                    connections
+                        .values()
+                        .filter(|state| is_server(state))
+                        .map(|state| state.model.clone())
+                        .collect()
+                };
+                return Ok(snapshots
+                    .into_iter()
+                    .map(|model| model.as_ref().clone())
                     .collect());
             }
             let cookie = self.code_session.as_ref().ok_or_else(denied)?;
@@ -97,8 +103,7 @@ impl FetchConnectionsResolver for SignalFetchConnectionsResolver {
             }
             .ok_or_else(denied)?;
             let audience = target
-                .version_info
-                .client_id
+                .device_id
                 .as_deref()
                 .filter(|id| !id.is_empty())
                 .ok_or_else(denied)?;

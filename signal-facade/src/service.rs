@@ -24,12 +24,12 @@ use crate::{
             ConnectionModel, ConnectionState, ConnectionsFetchedData, FetchConnectionsScope,
             SharedConnectionMap,
         },
+        peer::SignalingPeer,
         signal::{
             ForwardSignalingSender, LcxlRTCIceServer, RemoteAccessInitializedData,
             RemoteDeskTypeEnum, RequestRemoteModel, SignalingModel, SignalingType, SignalingUser,
             TurnProvider, TurnRemoteSessionPeerRequest, TurnRemoteSessionRequest,
         },
-        version::VersionInfo,
     },
 };
 
@@ -297,10 +297,8 @@ impl<U: SignalingUser> Drop for SignalingHandler<U> {
         // fallback. Run in a background task so a slow / blocked peer
         // can't stall the drop path. We only fan out for Browser
         // departures: a Server leaving means there's nothing on the
-        // other side that still cares; a signaling-only or manager
-        // peer never owned PC state in the first place.
-        if self.connection_state.model.version_info.remote_desk_type == RemoteDeskTypeEnum::Browser
-        {
+        // other side that still cares about this signaling connection.
+        if self.connection_state.model.peer.remote_desk_type == RemoteDeskTypeEnum::Browser {
             let connection_id = self.connection_state.model.connection_id.clone();
             let connection_map = self.connection_map.clone();
             handle.spawn(async move {
@@ -328,7 +326,7 @@ pub async fn broadcast_connection_removed_to_servers(
         let map_guard = connection_map.read().await;
         map_guard
             .values()
-            .filter(|s| s.model.version_info.remote_desk_type == RemoteDeskTypeEnum::Server)
+            .filter(|s| s.model.peer.remote_desk_type == RemoteDeskTypeEnum::Server)
             .cloned()
             .collect()
     };
@@ -366,7 +364,7 @@ impl<U: SignalingUser> SignalingHandler<U> {
     #[allow(clippy::too_many_arguments)]
     pub async fn init(
         connection_id: String,
-        mut client_version_info: VersionInfo,
+        client: SignalingPeer,
         connection_map: web::Data<SharedConnectionMap>,
         ws_session: Session,
         user: U,
@@ -376,35 +374,28 @@ impl<U: SignalingUser> SignalingHandler<U> {
         auth_context: crate::model::auth_context::AuthContext,
         credential_policy: CredentialPolicy,
         server_api_version: i32,
+        public_device_id: Option<String>,
     ) -> Result<Self, DeskSignalFacadeError> {
         log::info!(
             "Init new SignalingContext, connection id: {}",
             connection_id
         );
-        if client_version_info.api_version > server_api_version {
-            log::warn!(
-                "Client API version({}) is higher than server's({}). This may cause compatibility issues.",
-                client_version_info.api_version,
-                server_api_version
-            );
+        if client
+            .version_info
+            .as_ref()
+            .is_some_and(|version| version.api_version > server_api_version)
+        {
+            log::warn!("Client API version is higher than server API version");
         }
+        let (client_id, mut connection_model) =
+            client.into_connection_model(connection_id.clone(), ip);
 
-        // Credentials are consumed by the host controller, never connection metadata.
-        client_version_info.token = None;
-        let connection_model = ConnectionModel {
-            connection_id: connection_id.clone(),
-            version_info: client_version_info.clone(),
-            ip,
-            // Multi-instance routing fields are resolved from the manager's
-            // presence registry (the `FetchConnectionsResolver` seam), not from
-            // the per-instance local connection map. The locally constructed
-            // model carries `None`; on the OSS signal server they stay `None`.
-            device_id: None,
-            owner_node_id: None,
-        };
-
+        if let Some(device_id) = public_device_id {
+            connection_model.device_id = Some(device_id);
+        }
         let connection_state = ConnectionState {
-            model: connection_model,
+            client_id,
+            model: (connection_model).into(),
             session: Arc::new(RwLock::new(ws_session)),
             terminal_connection_ids: Arc::new(RwLock::new(std::collections::HashSet::new())),
             request_callback_map: Arc::new(RwLock::new(std::collections::HashMap::new())),
@@ -1040,7 +1031,7 @@ impl<U: SignalingUser> SignalingHandler<U> {
                     && let Some(peer_request) = build_remote_session_peer_request(
                         &signaling_model,
                         &self.connection_state.model.connection_id,
-                        self.connection_state.model.version_info.client_id.clone(),
+                        self.connection_state.client_id.clone(),
                         REQUEST_REMOTE_TURN_TTL_SECS,
                     )
                 {

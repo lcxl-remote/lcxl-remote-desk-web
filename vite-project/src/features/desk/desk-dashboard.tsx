@@ -65,7 +65,7 @@ export default function DeskDashboard({
                     <div>
                         <div className="flex items-center gap-2">
                             <h2 className="text-3xl font-bold tracking-tight">
-                                {connection.version_info?.display_name || t('pages.deskDashboard.unnamedConnection')}
+                                {connection.peer?.display_name || t('pages.deskDashboard.unnamedConnection')}
                             </h2>
                             <Badge variant="default" className="bg-green-500 hover:bg-green-600">{t('pages.deskDashboard.online')}</Badge>
                             {restricted.isRestricted && (
@@ -99,7 +99,7 @@ export default function DeskDashboard({
                         <Server className="h-4 w-4 text-muted-foreground" />
                     </CardHeader>
                     <CardContent>
-                        <div className="text-2xl font-bold">{connection.version_info?.operation_system || t('pages.deskDashboard.unknown')}</div>
+                        <div className="text-2xl font-bold">{connection.peer?.operation_system || t('pages.deskDashboard.unknown')}</div>
                     </CardContent>
                 </Card>
                 <Card>
@@ -108,7 +108,7 @@ export default function DeskDashboard({
                         <Monitor className="h-4 w-4 text-muted-foreground" />
                     </CardHeader>
                     <CardContent>
-                        <div className="text-2xl font-bold">{connection.version_info?.remote_desk_type || t('pages.deskDashboard.unknown')}</div>
+                        <div className="text-2xl font-bold">{connection.peer?.remote_desk_type || t('pages.deskDashboard.unknown')}</div>
                     </CardContent>
                 </Card>
             </div>
@@ -182,7 +182,7 @@ export default function DeskDashboard({
                     )}
 
                     {showAssistant && restricted.ownerPlaneVisible
-                        && isAiAssistantEnabled(connection.version_info) && (
+                        && isAiAssistantEnabled(connection.ai_assistant_settings) && (
                     <Card className="hover:border-primary/50 transition-colors cursor-pointer flex flex-col" onClick={() => navigate(`/desk/${deskId}/assistant`)}>
                         <CardHeader>
                             <CardTitle className="flex items-center gap-2">

@@ -626,7 +626,7 @@ impl ComputerActionObserver for SignalComputerActionObserver {
                 SignalingType::QueryComputerActionTurn => {
                     if let (Some(query), Some(device)) = (
                         desk_signal_facade::service::computer_turn::query_from_host(source, model),
-                        source.model.version_info.client_id.as_deref(),
+                        source.client_id.as_deref(),
                     ) {
                         let state = desk_diagnose_core::future::boxed(|| async { self.store.computer_turn_state(device, &query).await }).await
                             .unwrap_or(desk_agent_protocol::computer_turn::ComputerActionTurnState::Unavailable);
@@ -651,7 +651,7 @@ impl ComputerActionObserver for SignalComputerActionObserver {
                         return;
                     }
                     if let (Some(audience), Ok(state)) = (
-                        source.model.version_info.client_id.as_deref(),
+                        source.client_id.as_deref(),
                         model.get_data::<ComputerActionStateReport>(),
                     ) && desk_diagnose_core::future::boxed(|| async {
                         self.store
@@ -671,7 +671,7 @@ impl ComputerActionObserver for SignalComputerActionObserver {
                 }
                 SignalingType::ComputerActionStarted => {
                     if let Ok(started) = model.get_data::<ComputerActionStarted>() {
-                        let Some(audience) = source.model.version_info.client_id.as_deref() else {
+                        let Some(audience) = source.client_id.as_deref() else {
                             return;
                         };
                         if desk_diagnose_core::future::boxed(|| async {
@@ -697,7 +697,7 @@ impl ComputerActionObserver for SignalComputerActionObserver {
                 }
                 SignalingType::ComputerActionCompleted => {
                     if let Ok(completed) = model.get_data::<ComputerActionCompleted>() {
-                        let Some(audience) = source.model.version_info.client_id.as_deref() else {
+                        let Some(audience) = source.client_id.as_deref() else {
                             return;
                         };
                         use crate::capability_grant_store::computer_completion::CompletionObservation;
@@ -3606,7 +3606,7 @@ impl SignalAiAssistantTools {
                 true,
             )
         })?;
-        let audience = target.model.version_info.client_id.clone().ok_or_else(|| {
+        let audience = target.client_id.clone().ok_or_else(|| {
             error(
                 AgentErrorKind::PermissionDenied,
                 "target host has no bound client id",
@@ -4431,7 +4431,7 @@ impl SignalAiAssistantTools {
             })
         });
         let audience =
-            artifact_pre_send!(target.model.version_info.client_id.clone().ok_or_else(|| {
+            artifact_pre_send!(target.client_id.clone().ok_or_else(|| {
                 error(
                     AgentErrorKind::PermissionDenied,
                     "target host has no bound client id",
@@ -5084,7 +5084,7 @@ impl SignalAiAssistantTools {
             })
         });
         let audience =
-            browser_pre_send!(target.model.version_info.client_id.clone().ok_or_else(|| {
+            browser_pre_send!(target.client_id.clone().ok_or_else(|| {
                 error(
                     AgentErrorKind::PermissionDenied,
                     "target host has no bound client id",
@@ -5529,7 +5529,7 @@ impl SignalAiAssistantTools {
                 true,
             )
         })?;
-        let audience = target.model.version_info.client_id.clone().ok_or_else(|| {
+        let audience = target.client_id.clone().ok_or_else(|| {
             error(
                 AgentErrorKind::PermissionDenied,
                 "target host has no bound client id",

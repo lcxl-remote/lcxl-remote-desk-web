@@ -67,7 +67,7 @@ impl turn::auth::AuthHandler for TurnAuthHandler {
         })
         .map_err(|e| turn::Error::Other(e.to_string()))?;
         if let Some(connection) = connection_option {
-            if let Some(client_id) = &connection.model.version_info.client_id {
+            if let Some(client_id) = &connection.client_id {
                 let key = turn::auth::generate_auth_key(username, realm, client_id);
                 log::info!("auth_handle password success for username={}", username);
                 // Local path: the username is the connection_id verbatim.

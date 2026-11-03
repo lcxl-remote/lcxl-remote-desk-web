@@ -7,7 +7,7 @@ export default function OssSchedulesPage() {
     const paths = assistantPaths(online);
     const connectionIds = assistantConnections(online);
     const devices = (query.data?.data ?? []).flatMap(connection => {
-        const id = connection.version_info.client_id;
+        const id = connection.device_id;
         return id ? [{ id, name: id, connectionId: connectionIds[id], assistantPath: paths[id] }] : [];
     });
     return <SchedulePage devices={devices} loadingDevices={query.isLoading} />;

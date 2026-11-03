@@ -33,18 +33,16 @@ pub(crate) async fn current(
         return Err(denied());
     }
     let device = target
-        .model
-        .version_info
         .client_id
         .clone()
         .filter(|id| !id.is_empty())
         .ok_or_else(denied)?;
-    let shells = target.model.version_info.available_exec_shell_list();
-    let exec_pty = target.model.version_info.exec_pty;
-    let exec_pty_elevation = exec_pty && target.model.version_info.exec_pty_elevation;
+    let shells = target.model.exec_capabilities.available_exec_shells.clone();
+    let exec_pty = target.model.exec_capabilities.exec_pty;
+    let exec_pty_elevation = exec_pty && target.model.exec_capabilities.exec_pty_elevation;
     let max_runtime_ms = target
         .model
-        .version_info
+        .exec_capabilities
         .max_ai_command_runtime_ms
         .unwrap_or(desk_agent_protocol::exec_policy::DEFAULT_TIMEOUT_MS);
     drop(map);

@@ -1,3 +1,4 @@
+import { appendBrowserPeerReport } from '@/features/desk/browser-peer-report';
 import { AiAssistantIcon } from '@/components/ai-assistant-icon';
 
 import { useEffect, useRef, useState, useCallback } from "react"
@@ -265,6 +266,7 @@ export function TerminalView({ connectionId, deviceId, command, operationSystem,
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             const host = window.location.host;
             const url = new URL(`${protocol}//${host}/api/desk/terminal/${connectionId}`);
+            appendBrowserPeerReport(url);
 
             // Add command param
             // Legacy logic: command = encodeURIComponent(select_command.join(","))

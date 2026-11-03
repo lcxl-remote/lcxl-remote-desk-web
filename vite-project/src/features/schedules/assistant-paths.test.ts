@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { ConnectionModel } from '@/services/types';
 import { assistantPaths, assistantConnections } from './assistant-paths';
 
-const connection = (id: string, device?: string, client = 'stable-client') => ({ connection_id: id, device_id: device, version_info: { client_id: client } } as ConnectionModel);
+const connection = (id: string, device = 'stable-client') => ({ connection_id: id, device_id: device, version_info: null, peer: { remote_desk_type:'server', operation_system:'Other', display_name:null }, exec_capabilities: { available_exec_shells: [], exec_pty:false, exec_pty_elevation:false, max_ai_command_runtime_ms:null }, ai_assistant_settings: null } as ConnectionModel);
 describe('guided run device routing', () => {
     it('uses the Manager public handle and encodes the current connection route', () => {
         expect(assistantPaths([connection('live/connection', 'public-device')])).toEqual({ 'public-device': '/desk/live%2Fconnection/assistant' });

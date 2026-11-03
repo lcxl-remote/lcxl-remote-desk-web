@@ -2,6 +2,9 @@
 //! Cookie validation and device reference issuance use synthetic fixture inputs.
 
 use super::*;
+use desk_signal_facade::model::peer::{
+    HostExecCapabilities, PeerInfo, ServerRegistration, SignalingPeer,
+};
 mod live_context;
 use crate::{control_authorizer::SignalControlAuthorizer, entity::model_probe_observation};
 use desk_agent_protocol::ai_assistant::AiAssistantObjectContextUpdated;
@@ -64,39 +67,74 @@ async fn object_wire_replays_first_receipts_after_reconnect_and_model_removal() 
                     let authorizer = authorizer.clone();
                     async move {
                         let (response, socket, mut stream) = actix_ws::handle(&request, payload)?;
-                        let actor = ConnectionState {
-                            model: ConnectionModel {
-                                connection_id: "controller".into(),
-                                ip: None,
-                                version_info: VersionInfo::new(
-                                    1,
-                                    1,
-                                    "fixture".into(),
-                                    RemoteDeskTypeEnum::Browser,
-                                    None,
-                                    None,
-                                ),
-                                device_id: None,
-                                owner_node_id: None,
-                            },
-                            session: Arc::new(tokio::sync::RwLock::new(socket)),
-                            terminal_connection_ids: Default::default(),
-                            request_callback_map: Default::default(),
-                            device_code: None,
-                            auth_context: AuthContext::cookie(7, RemoteDeskTypeEnum::Browser),
+                        let actor = {
+                            let (client_id, model) = (SignalingPeer {
+                                version_info: Some(VersionInfo {
+                                    api_version: 1,
+                                    build_number: 1,
+                                    commit_hash: "fixture".into(),
+                                    debug_build: cfg!(debug_assertions),
+                                }),
+                                peer: PeerInfo {
+                                    remote_desk_type: RemoteDeskTypeEnum::Browser,
+                                    operation_system: Default::default(),
+                                    display_name: None,
+                                },
+                                server: None,
+                            })
+                            .into_connection_model("controller".into(), None);
+                            ConnectionState {
+                                client_id,
+                                model: (ConnectionModel {
+                                    device_id: None,
+                                    owner_node_id: None,
+                                    ..model
+                                })
+                                .into(),
+                                session: Arc::new(tokio::sync::RwLock::new(socket)),
+                                terminal_connection_ids: Default::default(),
+                                request_callback_map: Default::default(),
+                                device_code: None,
+                                auth_context: AuthContext::cookie(7, RemoteDeskTypeEnum::Browser),
+                            }
                         };
                         // The object update is central metadata, not an edge call.
                         // A synthetic registered peer supplies the bound audience.
                         let mut target = actor.clone();
-                        target.model.connection_id = "host".into();
-                        target.model.version_info = VersionInfo::new(
-                            1,
-                            1,
-                            "fixture".into(),
-                            RemoteDeskTypeEnum::Server,
-                            None,
-                            Some("device".into()),
+                        std::sync::Arc::make_mut(&mut target.model).connection_id = "host".into();
+                        let (client_id, model) = (SignalingPeer {
+                            version_info: Some(VersionInfo {
+                                api_version: 1,
+                                build_number: 1,
+                                commit_hash: "fixture".into(),
+                                debug_build: cfg!(debug_assertions),
+                            }),
+                            peer: PeerInfo {
+                                remote_desk_type: RemoteDeskTypeEnum::Server,
+                                operation_system: Default::default(),
+                                display_name: None,
+                            },
+                            server: (Some("device".into())).map(|client_id| ServerRegistration {
+                                client_id,
+                                exec_capabilities: HostExecCapabilities {
+                                    available_exec_shells: Vec::new(),
+                                    exec_pty: false,
+                                    exec_pty_elevation: false,
+                                    max_ai_command_runtime_ms: None,
+                                },
+                                ai_assistant_settings:
+                                    desk_agent_protocol::ai_assistant::AiAssistantSettings {
+                                        revision: 0,
+                                        enabled: false,
+                                    },
+                            }),
+                        })
+                        .into_connection_model(
+                            target.model.connection_id.clone(),
+                            target.model.ip.clone(),
                         );
+                        target.client_id = client_id;
+                        target.model = model.into();
                         target.auth_context =
                             AuthContext::token_auth(7, 1, RemoteDeskTypeEnum::Server);
                         {

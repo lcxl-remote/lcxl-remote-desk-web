@@ -173,6 +173,11 @@ export type AiAssistantClientCapabilities = {
     */
     capability_inventory: boolean;
     /**
+     * @description This HTTP host exposes compare-and-set device AI Assistant settings.
+     * @type boolean
+    */
+    device_settings: boolean;
+    /**
      * @description This server exposes the dedicated one-shot exec-PTY carrier surface.\nPer-device/session readiness is still proven by a successful prepare.
      * @type boolean
     */
@@ -5497,6 +5502,29 @@ export type ComputerUseCommunicationPolicyUpdate = {
     expected_revision: number;
 };
 
+/**
+ * @description Effective host execution capabilities, independent of API version and authority.
+*/
+export type HostExecCapabilities = {
+    /**
+     * @type array
+    */
+    available_exec_shells: string[];
+    /**
+     * @type boolean
+    */
+    exec_pty: boolean;
+    /**
+     * @type boolean
+    */
+    exec_pty_elevation: boolean;
+    /**
+     * @minLength 0
+     * @type integer,null, int32
+    */
+    max_ai_command_runtime_ms?: number | null;
+};
+
 export const operationSystemEnumEnum = {
     Windows: "Windows",
     Linux: "Linux",
@@ -5516,10 +5544,7 @@ export type OperationSystemEnum = OperationSystemEnumEnumKey;
 
 export const remoteDeskTypeEnumEnum = {
     browser: "browser",
-    server: "server",
-    signal: "signal",
-    manager: "manager",
-    support: "support"
+    server: "server"
 } as const;
 
 export type RemoteDeskTypeEnumEnumKey = (typeof remoteDeskTypeEnumEnum)[keyof typeof remoteDeskTypeEnumEnum];
@@ -5530,71 +5555,13 @@ export type RemoteDeskTypeEnumEnumKey = (typeof remoteDeskTypeEnumEnum)[keyof ty
 export type RemoteDeskTypeEnum = RemoteDeskTypeEnumEnumKey;
 
 /**
- * @description Version information for the API.
+ * @description Public peer description. The authenticated boundary decides role and browser name.
 */
-export type VersionInfo = {
+export type PeerInfo = {
     /**
-     * @description Device-owned AI Assistant value projected at the same revision.
-     * @type boolean,null
-    */
-    ai_assistant_enabled?: boolean | null;
-    /**
-     * @description Device-owned AI Assistant revision projected at connection time.
-     * @minLength 0
-     * @type integer,null, int64
-    */
-    ai_assistant_revision?: number | null;
-    /**
-     * @description The version of the API. This is a simple integer that increments when API is changed.
-     * @type integer, int32
-    */
-    api_version: number;
-    /**
-     * @description Canonical shell names the host has verified as usable by the AI command\nexecutor. This is narrower than the interactive-terminal list: only\ninterpreters supported by the free-form classifier are reported.
-     * @type string,null
-    */
-    available_exec_shells?: string | null;
-    /**
-     * @description The build number of the server.
-     * @type integer, int32
-    */
-    build_number: number;
-    /**
-     * @description Client ID of the server.
-     * @type string,null
-    */
-    client_id?: string | null;
-    /**
-     * @description The commit hash of the server.
-     * @type string
-    */
-    commit_hash: string;
-    /**
-     * @description Whether this binary was compiled with debug assertions (a debug build).\nDefaults to `false` for peers that do not report it.
-     * @type boolean | undefined
-    */
-    debug_build?: boolean;
-    /**
-     * @description Display name of the remote desk.
      * @type string,null
     */
     display_name?: string | null;
-    /**
-     * @description Current host support for the one-shot exec-PTY transport. This is a\ncapability/readiness bit, not a protocol version.
-     * @type boolean | undefined
-    */
-    exec_pty?: boolean;
-    /**
-     * @description Current host support for root-contained interactive sudo/doas execution.\nThis is separately reported because ordinary PTY support does not imply\nthat a privileged command can be contained safely.
-     * @type boolean | undefined
-    */
-    exec_pty_elevation?: boolean;
-    /**
-     * @description Edge-local total wall-time ceiling for one AI command. The central brain\nadvertises this to the model and reproduces it when sealing a plan; the\nedge re-applies the current value at PEP time.
-     * @minLength 0
-     * @type integer,null, int32
-    */
-    max_ai_command_runtime_ms?: number | null;
     /**
      * @description Operation system enum
      * @type string
@@ -5605,32 +5572,51 @@ export type VersionInfo = {
      * @type string
     */
     remote_desk_type: RemoteDeskTypeEnum;
+};
+
+/**
+ * @description Build and API information reported by a peer. Missing reports stay unknown.
+*/
+export type VersionInfo = {
     /**
-     * @description Source repository URL this binary was built from, when known.\nDefaults to `None` for peers that do not report it.
-     * @type string,null
+     * @type integer, int32
     */
-    repository_url?: string | null;
+    api_version: number;
     /**
-     * @description Authentication token for server nodes or API clients.
-     * @type string,null
+     * @type integer, int32
     */
-    token?: string | null;
+    build_number: number;
+    /**
+     * @type string
+    */
+    commit_hash: string;
+    /**
+     * @description A reported debug marker; false is not proof of a release build.
+     * @type boolean | undefined
+    */
+    debug_build?: boolean;
 };
 
 /**
  * @description Connection information
 */
 export type ConnectionModel = {
+    ai_assistant_settings?: (null | AiAssistantSettings);
     /**
      * @description Connection ID
      * @type string
     */
     connection_id: string;
     /**
-     * @description External device handle (a non-enumerable UUID) for multi-instance\naddressing. Filled by the manager (whose presence registry maps it to the\ninternal device id); `None` on the OSS single-instance signal server, which\nhas no device registry. Dual-target field, not a backward-compat field:\ncontrol ends address a manager device by this handle and an OSS connection\nby `connection_id`.
+     * @description Stable public target: the OSS client identity or Manager device UUID.\nBrowser connections have no device handle. This value grants no authority.
      * @type string,null
     */
     device_id?: string | null;
+    /**
+     * @description Effective host execution capabilities, independent of API version and authority.
+     * @type object
+    */
+    exec_capabilities: HostExecCapabilities;
     /**
      * @description IP address of the connection
      * @type string,null
@@ -5642,10 +5628,11 @@ export type ConnectionModel = {
     */
     owner_node_id?: string | null;
     /**
-     * @description Version information for the API.
+     * @description Public peer description. The authenticated boundary decides role and browser name.
      * @type object
     */
-    version_info: VersionInfo;
+    peer: PeerInfo;
+    version_info?: (null | VersionInfo);
 };
 
 export const connectionSettingsEffectEnum = {
@@ -13867,6 +13854,11 @@ export type RestResponseServerInfo = {
          * @type boolean
         */
         is_admin: boolean;
+        /**
+         * @description Stable identity of a desktop hosted by this HTTP server; absent for a central signaling service.
+         * @type string,null
+        */
+        local_device_id?: string | null;
         macos_permissions?: (null | MacosPermissions);
         /**
          * @description Rust target operating-system name used for local host UI branching.
@@ -14735,16 +14727,22 @@ export type RestResponseVecConnectionModel = {
      * @type array | undefined
     */
     data?: {
+        ai_assistant_settings?: (null | AiAssistantSettings);
         /**
          * @description Connection ID
          * @type string
         */
         connection_id: string;
         /**
-         * @description External device handle (a non-enumerable UUID) for multi-instance\naddressing. Filled by the manager (whose presence registry maps it to the\ninternal device id); `None` on the OSS single-instance signal server, which\nhas no device registry. Dual-target field, not a backward-compat field:\ncontrol ends address a manager device by this handle and an OSS connection\nby `connection_id`.
+         * @description Stable public target: the OSS client identity or Manager device UUID.\nBrowser connections have no device handle. This value grants no authority.
          * @type string,null
         */
         device_id?: string | null;
+        /**
+         * @description Effective host execution capabilities, independent of API version and authority.
+         * @type object
+        */
+        exec_capabilities: HostExecCapabilities;
         /**
          * @description IP address of the connection
          * @type string,null
@@ -14756,10 +14754,11 @@ export type RestResponseVecConnectionModel = {
         */
         owner_node_id?: string | null;
         /**
-         * @description Version information for the API.
+         * @description Public peer description. The authenticated boundary decides role and browser name.
          * @type object
         */
-        version_info: VersionInfo;
+        peer: PeerInfo;
+        version_info?: (null | VersionInfo);
     }[];
     /**
      * @type string,null
@@ -16946,6 +16945,11 @@ export type ServerInfo = {
      * @type boolean
     */
     is_admin: boolean;
+    /**
+     * @description Stable identity of a desktop hosted by this HTTP server; absent for a central signaling service.
+     * @type string,null
+    */
+    local_device_id?: string | null;
     macos_permissions?: (null | MacosPermissions);
     /**
      * @description Rust target operating-system name used for local host UI branching.
@@ -18709,87 +18713,71 @@ export type UpdateVirtualDisplaySettingsMutation = {
 
 export type OpenSignalingHandleQueryParams = {
     /**
-     * @description The version of the API. This is a simple integer that increments when API is changed.
      * @type integer, int32
     */
     api_version: number;
     /**
-     * @description The build number of the server.
      * @type integer, int32
     */
     build_number: number;
     /**
-     * @description The commit hash of the server.
      * @type string
     */
     commit_hash: string;
     /**
-     * @description Remote Desk Type Enum
-     * @type string
-    */
-    remote_desk_type: RemoteDeskTypeEnum;
-    /**
-     * @description Operation system enum
-     * @type string
-    */
-    operation_system: OperationSystemEnum;
-    /**
-     * @description Display name of the remote desk.
-     * @type string | undefined
-    */
-    display_name?: string;
-    /**
-     * @description Client ID of the server.
-     * @type string | undefined
-    */
-    client_id?: string;
-    /**
-     * @description Authentication token for server nodes or API clients.
-     * @type string | undefined
-    */
-    token?: string;
-    /**
-     * @description Whether this binary was compiled with debug assertions (a debug build).\nDefaults to `false` for peers that do not report it.
+     * @description A reported debug marker; false is not proof of a release build.
      * @type boolean | undefined
     */
     debug_build?: boolean;
     /**
-     * @description Source repository URL this binary was built from, when known.\nDefaults to `None` for peers that do not report it.
+     * @description Remote Desk Type Enum
      * @type string | undefined
     */
-    repository_url?: string;
+    remote_desk_type?: RemoteDeskTypeEnum;
     /**
-     * @description Canonical shell names the host has verified as usable by the AI command\nexecutor. This is narrower than the interactive-terminal list: only\ninterpreters supported by the free-form classifier are reported.
+     * @description Operation system enum
+     * @type string | undefined
+    */
+    operation_system?: OperationSystemEnum;
+    /**
+     * @type string | undefined
+    */
+    display_name?: string;
+    /**
+     * @type string | undefined
+    */
+    client_id?: string;
+    /**
      * @type string | undefined
     */
     available_exec_shells?: string;
     /**
-     * @description Edge-local total wall-time ceiling for one AI command. The central brain\nadvertises this to the model and reproduces it when sealing a plan; the\nedge re-applies the current value at PEP time.
+     * @type boolean | undefined
+    */
+    exec_pty?: boolean;
+    /**
+     * @type boolean | undefined
+    */
+    exec_pty_elevation?: boolean;
+    /**
      * @minLength 0
      * @type integer | undefined, int32
     */
     max_ai_command_runtime_ms?: number;
     /**
-     * @description Current host support for the one-shot exec-PTY transport. This is a\ncapability/readiness bit, not a protocol version.
-     * @type boolean | undefined
-    */
-    exec_pty?: boolean;
-    /**
-     * @description Current host support for root-contained interactive sudo/doas execution.\nThis is separately reported because ordinary PTY support does not imply\nthat a privileged command can be contained safely.
-     * @type boolean | undefined
-    */
-    exec_pty_elevation?: boolean;
-    /**
-     * @description Device-owned AI Assistant revision projected at connection time.
      * @minLength 0
      * @type integer | undefined, int64
     */
     ai_assistant_revision?: number;
     /**
-     * @description Device-owned AI Assistant value projected at the same revision.
      * @type boolean | undefined
     */
     ai_assistant_enabled?: boolean;
+    /**
+     * @description Node credential, accepted only for Server role; omit for Cookie-authenticated browsers
+     * @type string | undefined
+    */
+    token?: string;
 };
 
 /**

@@ -3,6 +3,9 @@ use super::*;
 use actix_web::FromRequest;
 use desk_agent_protocol::computer_use::*;
 use desk_diagnose_core::session::PersistedAgentSession;
+use desk_signal_facade::model::peer::{
+    HostExecCapabilities, PeerInfo, ServerRegistration, SignalingPeer,
+};
 use desk_signal_facade::model::{
     auth_context::AuthContext, connection::ConnectionModel, signal::RemoteDeskTypeEnum,
     version::VersionInfo,
@@ -67,30 +70,49 @@ async fn finished_command_continues_with_history_and_tools_then_drains_its_trigg
     )
     .unwrap();
     let host = format!("continuation-host-{}", uuid::Uuid::new_v4());
-    connections.write().await.insert(
-        host.clone(),
+    connections.write().await.insert(host.clone(), {
+        let (client_id, model) = (SignalingPeer {
+            version_info: Some(VersionInfo {
+                api_version: 1,
+                build_number: 1,
+                commit_hash: "fixture".into(),
+                debug_build: cfg!(debug_assertions),
+            }),
+            peer: PeerInfo {
+                remote_desk_type: RemoteDeskTypeEnum::Server,
+                operation_system: Default::default(),
+                display_name: None,
+            },
+            server: (Some("device".into())).map(|client_id| ServerRegistration {
+                client_id,
+                exec_capabilities: HostExecCapabilities {
+                    available_exec_shells: Vec::new(),
+                    exec_pty: false,
+                    exec_pty_elevation: false,
+                    max_ai_command_runtime_ms: None,
+                },
+                ai_assistant_settings: desk_agent_protocol::ai_assistant::AiAssistantSettings {
+                    revision: 0,
+                    enabled: false,
+                },
+            }),
+        })
+        .into_connection_model(host.clone(), None);
         ConnectionState {
-            model: ConnectionModel {
-                connection_id: host.clone(),
-                ip: None,
-                version_info: VersionInfo::new(
-                    1,
-                    1,
-                    "fixture".into(),
-                    RemoteDeskTypeEnum::Server,
-                    None,
-                    Some("device".into()),
-                ),
+            client_id,
+            model: (ConnectionModel {
                 device_id: None,
                 owner_node_id: None,
-            },
+                ..model
+            })
+            .into(),
             session: Arc::new(tokio::sync::RwLock::new(socket)),
             terminal_connection_ids: Default::default(),
             request_callback_map: Default::default(),
             device_code: None,
             auth_context: AuthContext::token_auth(1, 1, RemoteDeskTypeEnum::Server),
-        },
-    );
+        }
+    });
     let now = chrono::Utc::now();
     crate::computer_use_readiness::global_computer_use_readiness_cache()
         .update(

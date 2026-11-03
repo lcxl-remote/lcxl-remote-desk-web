@@ -9,6 +9,7 @@ export type AiAssistantFeatureProfile = {
     background_task_cancel: boolean;
     object_context: boolean;
     exec_pty: boolean;
+    device_settings: boolean;
 };
 
 export function hasAiAssistantBrowserEntry(

@@ -1,6 +1,7 @@
 use actix_web::{
     FromRequest, HttpResponse, body::MessageBody, middleware::Logger, test::TestRequest, web,
 };
+use desk_signal_facade::model::peer::{PeerInfo, SignalingPeer};
 use desk_signal_facade::{
     error::DeskSignalFacadeError,
     model::{
@@ -69,9 +70,20 @@ async fn handler(
     map: web::Data<SharedConnectionMap>,
 ) -> (HttpResponse, SignalingHandler<User>) {
     let (response, session) = websocket().await;
-    let mut version =
-        VersionInfo::new(1, 0, String::new(), RemoteDeskTypeEnum::Browser, None, None);
-    version.token = Some("sentinel-node-secret".into());
+    let version = SignalingPeer {
+        version_info: Some(VersionInfo {
+            api_version: 1,
+            build_number: 0,
+            commit_hash: String::new(),
+            debug_build: cfg!(debug_assertions),
+        }),
+        peer: PeerInfo {
+            remote_desk_type: RemoteDeskTypeEnum::Browser,
+            operation_system: Default::default(),
+            display_name: None,
+        },
+        server: None,
+    };
     let handler = SignalingHandler::init(
         id.into(),
         version,
@@ -84,6 +96,7 @@ async fn handler(
         AuthContext::code_session("principal-a"),
         CredentialPolicy::Plain,
         1,
+        None,
     )
     .await
     .unwrap();
@@ -112,14 +125,15 @@ impl FetchConnectionsResolver for Deny {
 async fn credential_consumption_and_connection_failure_frames() {
     let map = web::Data::new(SharedConnectionMap::new());
     let (response, mut handler) = handler("browser", map.clone()).await;
-    assert!(handler.connection_state.model.version_info.token.is_none());
-    assert!(
-        map.read().await["browser"]
-            .model
-            .version_info
-            .token
-            .is_none()
-    );
+    for model in [
+        handler.connection_state.public_model(),
+        map.read().await["browser"].public_model(),
+    ] {
+        let value = serde_json::to_value(model).unwrap();
+        assert!(value.get("token").is_none());
+        assert!(value["version_info"].get("token").is_none());
+        assert!(value["version_info"].get("client_id").is_none());
+    }
     let mut body = response.into_body();
 
     // Auxiliary sockets have no resolver: deny with the declared response, not
@@ -254,5 +268,63 @@ async fn logs_omit_credentials_headers_frames_and_connection_models() {
         "sentinel-invalid-json-secret",
     ] {
         assert!(!logs.contains(secret), "secret leaked: {secret}");
+    }
+}
+
+#[actix_web::test]
+async fn host_public_handle_is_selected_before_connection_publication() {
+    use desk_signal_facade::model::peer::PeerQuery;
+    let map = web::Data::new(SharedConnectionMap::new());
+    for public_handle in [None, Some("manager-public-device".to_string())] {
+        let (_, session) = websocket().await;
+        let query: PeerQuery = serde_urlencoded::from_str("remote_desk_type=server&client_id=private-audience&available_exec_shells=sh&exec_pty=false&exec_pty_elevation=false&max_ai_command_runtime_ms=60000&ai_assistant_revision=3&ai_assistant_enabled=true").unwrap();
+        let peer = query
+            .into_peer(
+                Some(VersionInfo {
+                    api_version: 1,
+                    build_number: 2,
+                    commit_hash: "source".into(),
+                    debug_build: false,
+                }),
+                RemoteDeskTypeEnum::Server,
+                None,
+            )
+            .unwrap();
+        let expected = public_handle
+            .as_deref()
+            .unwrap_or("private-audience")
+            .to_owned();
+        let handler = SignalingHandler::init(
+            "host".into(),
+            peer,
+            map.clone(),
+            session,
+            User,
+            None,
+            None,
+            None,
+            AuthContext::token_auth(7, 1, RemoteDeskTypeEnum::Server),
+            CredentialPolicy::Plain,
+            1,
+            public_handle,
+        )
+        .await
+        .unwrap();
+        let forwarded_state = handler.connection_state.clone();
+        assert!(Arc::ptr_eq(
+            &forwarded_state.model,
+            &handler.connection_state.model
+        ));
+        assert_eq!(
+            handler.connection_state.client_id.as_deref(),
+            Some("private-audience")
+        );
+        assert_eq!(
+            map.read().await["host"].model.device_id.as_deref(),
+            Some(expected.as_str())
+        );
+        let public = serde_json::to_value(handler.connection_state.public_model()).unwrap();
+        assert!(public.get("client_id").is_none());
+        assert!(public["version_info"].get("client_id").is_none());
     }
 }

@@ -18,7 +18,7 @@ vi.mock("@/services/hooks/connectionController/useListConnections", () => ({
     useListConnections: () => ({
         data: [{
             connection_id: "connection-1",
-            version_info: { client_id: "stable-device-1" },
+            version_info: null, peer: { remote_desk_type:'server', operation_system:'Other', display_name:null }, exec_capabilities: { available_exec_shells: [], exec_pty:false, exec_pty_elevation:false, max_ai_command_runtime_ms:null }, ai_assistant_settings: null, device_id: "stable-device-1",
         }],
     }),
 }))

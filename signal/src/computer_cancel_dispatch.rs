@@ -68,7 +68,7 @@ impl SignalComputerCancelDispatcher {
             return Ok(false);
         };
         if target.model.connection_id != candidate.connection_id
-            || target.model.version_info.client_id.as_deref() != Some(&candidate.audience)
+            || target.client_id.as_deref() != Some(&candidate.audience)
             || target.auth_context.auth_kind != AuthKind::TokenAuth
             || target.auth_context.remote_desk_type != RemoteDeskTypeEnum::Server
         {

@@ -62,8 +62,6 @@ async fn audience(connections: &SharedConnectionMap, id: &str) -> Result<String,
         return Err(unavailable());
     }
     target
-        .model
-        .version_info
         .client_id
         .clone()
         .filter(|v| !v.is_empty())

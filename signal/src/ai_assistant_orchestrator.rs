@@ -2278,11 +2278,9 @@ async fn prepare_composed_turn(
                                     .get(&target_connection_id)
                                     .map(|target| {
                                         (
-                    target.model.version_info.available_exec_shell_list(),
+                    target.model.exec_capabilities.available_exec_shells.clone(),
                     target
-                        .model
-                        .version_info
-                        .max_ai_command_runtime_ms
+                        .model.exec_capabilities.max_ai_command_runtime_ms
                         .unwrap_or(desk_agent_protocol::exec_policy::DEFAULT_TIMEOUT_MS),
                 )
                                     })

@@ -1,3 +1,4 @@
+use crate::model::peer::{HostExecCapabilities, PeerInfo};
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
@@ -13,13 +14,12 @@ pub struct ConnectionModel {
     /// IP address of the connection
     pub ip: Option<String>,
     /// Version info of the connection
-    pub version_info: VersionInfo,
-    /// External device handle (a non-enumerable UUID) for multi-instance
-    /// addressing. Filled by the manager (whose presence registry maps it to the
-    /// internal device id); `None` on the OSS single-instance signal server, which
-    /// has no device registry. Dual-target field, not a backward-compat field:
-    /// control ends address a manager device by this handle and an OSS connection
-    /// by `connection_id`.
+    pub version_info: Option<VersionInfo>,
+    pub peer: PeerInfo,
+    pub exec_capabilities: HostExecCapabilities,
+    pub ai_assistant_settings: Option<desk_agent_protocol::ai_assistant::AiAssistantSettings>,
+    /// Stable public target: the OSS client identity or Manager device UUID.
+    /// Browser connections have no device handle. This value grants no authority.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_id: Option<String>,
     /// Owning manager instance node id for cross-instance routing. Filled by the
@@ -125,7 +125,9 @@ pub(crate) fn take_matching_request_callback(
 #[derive(Clone)]
 pub struct ConnectionState {
     /// Connection model (id, ip, version info)
-    pub model: ConnectionModel,
+    pub model: Arc<ConnectionModel>,
+    /// Private host audience; never serialized in a connection response.
+    pub client_id: Option<String>,
     /// Actix WebSocket session
     pub session: Arc<RwLock<Session>>,
     /// Terminal connection IDs (from_connection_id set).
@@ -146,9 +148,7 @@ pub struct ConnectionState {
 impl ConnectionState {
     /// Public connection metadata never carries a node credential.
     pub fn public_model(&self) -> ConnectionModel {
-        let mut model = self.model.clone();
-        model.version_info.token = None;
-        model
+        self.model.as_ref().clone()
     }
 }
 
@@ -298,30 +298,24 @@ mod tests {
             api_version: 0,
             build_number: 0,
             commit_hash: String::new(),
-            remote_desk_type: RemoteDeskTypeEnum::Server,
-            operation_system: Default::default(),
-            display_name: None,
-            client_id: None,
-            token: None,
             debug_build: false,
-            repository_url: None,
-            available_exec_shells: None,
-            max_ai_command_runtime_ms: None,
-            exec_pty: false,
-            exec_pty_elevation: false,
-            ai_assistant_revision: None,
-            ai_assistant_enabled: None,
         }
     }
 
     #[test]
     fn connection_model_omits_multi_instance_fields_when_none() {
-        // OSS single-instance signal server leaves device_id/owner_node_id unset;
-        // they must not appear on the wire, so an OSS client never sees them.
+        // A browser connection has no device or owning-instance handle.
         let model = ConnectionModel {
             connection_id: "c1".into(),
             ip: None,
-            version_info: sample_version_info(),
+            version_info: Some(sample_version_info()),
+            peer: PeerInfo {
+                remote_desk_type: RemoteDeskTypeEnum::Server,
+                operation_system: super::super::os::OperationSystemEnum::Other,
+                display_name: None,
+            },
+            exec_capabilities: Default::default(),
+            ai_assistant_settings: None,
             device_id: None,
             owner_node_id: None,
         };
@@ -338,7 +332,14 @@ mod tests {
         let model = ConnectionModel {
             connection_id: "c1".into(),
             ip: Some("203.0.113.4".into()),
-            version_info: sample_version_info(),
+            version_info: Some(sample_version_info()),
+            peer: PeerInfo {
+                remote_desk_type: RemoteDeskTypeEnum::Server,
+                operation_system: super::super::os::OperationSystemEnum::Other,
+                display_name: None,
+            },
+            exec_capabilities: Default::default(),
+            ai_assistant_settings: None,
             device_id: Some("11111111-1111-4111-8111-111111111111".into()),
             owner_node_id: Some("node-a".into()),
         };
@@ -356,7 +357,9 @@ mod tests {
         // A payload produced by the OSS signal server (no device fields) must
         // still deserialize on a control end built against the dual-target model.
         let vi = serde_json::to_string(&sample_version_info()).unwrap();
-        let json = format!(r#"{{"connection_id":"c1","ip":null,"version_info":{vi}}}"#);
+        let json = format!(
+            r#"{{"connection_id":"c1","ip":null,"version_info":{vi},"peer":{{"remote_desk_type":"server","operation_system":"Other","display_name":null}},"exec_capabilities":{{"available_exec_shells":[],"exec_pty":false,"exec_pty_elevation":false,"max_ai_command_runtime_ms":null}}}}"#
+        );
         let model: ConnectionModel = serde_json::from_str(&json).unwrap();
         assert_eq!(model.connection_id, "c1");
         assert!(model.device_id.is_none());

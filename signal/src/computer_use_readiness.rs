@@ -187,7 +187,7 @@ impl ComputerUseReadinessObserver for SignalComputerUseReadinessObserver {
     ) -> Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
             if source.auth_context.remote_desk_type != RemoteDeskTypeEnum::Server
-                || source.model.version_info.remote_desk_type != RemoteDeskTypeEnum::Server
+                || source.model.peer.remote_desk_type != RemoteDeskTypeEnum::Server
             {
                 log::warn!("dropping Computer Use readiness from a non-server connection");
                 return;
@@ -199,7 +199,13 @@ impl ComputerUseReadinessObserver for SignalComputerUseReadinessObserver {
                     return;
                 }
             };
-            if readiness.server_api_version != source.model.version_info.api_version {
+            if source
+                .model
+                .version_info
+                .as_ref()
+                .map(|version| version.api_version)
+                != Some(readiness.server_api_version)
+            {
                 log::warn!("dropping Computer Use readiness with mismatched server API version");
                 return;
             }

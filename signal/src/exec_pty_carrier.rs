@@ -119,16 +119,16 @@ impl SignalExecPtyCarriers {
             let target = map
                 .get(&request.target_connection_id)
                 .ok_or(CarrierError::TargetOffline)?;
-            if browser.model.version_info.remote_desk_type != RemoteDeskTypeEnum::Browser
+            if browser.model.peer.remote_desk_type != RemoteDeskTypeEnum::Browser
                 || browser.auth_context.auth_kind != AuthKind::CookieAuth
                 || browser.auth_context.user_id
                     != Some(crate::control_authorizer::SINGLE_ACCOUNT_USER_ID)
             {
                 return Err(CarrierError::BrowserNotOwner);
             }
-            if target.model.version_info.remote_desk_type != RemoteDeskTypeEnum::Server
+            if target.model.peer.remote_desk_type != RemoteDeskTypeEnum::Server
                 || target.auth_context.auth_kind != AuthKind::TokenAuth
-                || !target.model.version_info.exec_pty
+                || !target.model.exec_capabilities.exec_pty
             {
                 return Err(CarrierError::TargetOffline);
             }
@@ -336,7 +336,7 @@ impl SignalExecPtyCarriers {
         source: &ConnectionState,
         bytes: Bytes,
     ) -> Result<(), CarrierError> {
-        if source.model.version_info.remote_desk_type != RemoteDeskTypeEnum::Server
+        if source.model.peer.remote_desk_type != RemoteDeskTypeEnum::Server
             || source.auth_context.auth_kind != AuthKind::TokenAuth
         {
             return Err(CarrierError::WrongTarget);
