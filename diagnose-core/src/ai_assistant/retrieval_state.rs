@@ -14,7 +14,7 @@ use desk_agent_protocol::{
             ConversationSearchRequest, HistoryAccessScope, HistorySort,
         },
         memory::{MemoryHistoryRequest, MemorySearchRequest},
-        source::{SourceReadPurpose, validate_source_id},
+        source::{SourceReadPurpose, validate_optional_device_ref, validate_source_id},
     },
     data_lineage::DestinationIdentity,
 };
@@ -36,6 +36,8 @@ pub struct RetrievalQueryBinding {
     /// Original memory-read upper scope, frozen for automatic tasks. Current
     /// settings must still permit use; enabling later cannot widen an old task.
     pub memory_device_rule: Option<AssistantDeviceScope>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub request_memory_device_refs: Vec<String>,
     pub destination: DestinationIdentity,
     /// Original task authority, never a planner lease or the quota idle window.
     pub authority_expires_at_unix_ms: Option<u64>,
@@ -91,6 +93,11 @@ impl RetrievalQueryBinding {
             scope_sha256: super::data_access::scope_sha256(call.session)?,
             history_scope,
             memory_device_rule,
+            request_memory_device_refs: if memory_device_rule.is_some() {
+                data.request_memory_devices().to_vec()
+            } else {
+                Vec::new()
+            },
             destination: call.destination.clone(),
             authority_expires_at_unix_ms: deadline,
         })
@@ -100,9 +107,19 @@ impl RetrievalQueryBinding {
             &self.actor_id,
             &self.root_conversation_id,
             &self.retrieval_episode_id,
-            &self.source_device_ref,
         ] {
             validate_source_id(id)?;
+        }
+        validate_optional_device_ref(&self.source_device_ref)?;
+        desk_agent_protocol::ai_assistant::validate_target_refs(
+            self.request_memory_device_refs.iter().map(String::as_str),
+        )?;
+        if !self.request_memory_device_refs.is_empty()
+            && (!self.source_device_ref.is_empty()
+                || self.memory_device_rule != Some(AssistantDeviceScope::CurrentDevice)
+                || self.history_scope.is_some())
+        {
+            return Err("retrieval query request devices do not match its original scope");
         }
         if let Some(task) = &self.task_id {
             validate_source_id(task)?;
@@ -490,11 +507,13 @@ impl FrozenRetrievalQuery {
                 .is_some_and(|scope| scope.device_rule == AssistantDeviceScope::CurrentDevice),
         };
         if current_only
-            && self
-                .snapshot
-                .device_refs
-                .iter()
-                .any(|device| device != &self.binding.source_device_ref)
+            && self.snapshot.device_refs.iter().any(|device| {
+                if self.binding.request_memory_device_refs.is_empty() {
+                    device != &self.binding.source_device_ref
+                } else {
+                    !self.binding.request_memory_device_refs.contains(device)
+                }
+            })
         {
             return Err("retrieval snapshot contains a device outside its query rule");
         }

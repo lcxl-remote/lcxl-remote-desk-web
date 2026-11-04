@@ -5,6 +5,7 @@ use crate::agent_run_event_store::{InputSubject, ReadContextSelection, SignalAge
 use desk_agent_protocol::data_lineage::DestinationIdentity;
 use desk_diagnose_core::input_read_context::object_read::ObjectReadBinding;
 
+#[derive(Clone)]
 pub(super) struct OriginalInput {
     revision: u64,
     pub(super) selection: ReadContextSelection,
@@ -61,7 +62,7 @@ impl SignalAiAssistantTools {
                 InputSubject {
                     run_id: &self.run_id,
                     actor_id: &self.actor_id,
-                    device_id: &self.target_device_id,
+                    device_id: self.session_device_id(),
                     client_conversation_id: input.client_conversation_id.as_deref(),
                 },
                 input.revision,

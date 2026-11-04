@@ -21,6 +21,11 @@ impl SignalAgentSessionStore {
         actor: &str,
         device: &str,
     ) -> Result<Option<String>, AgentError> {
+        if device.is_empty()
+            && actor != crate::control_authorizer::SINGLE_ACCOUNT_USER_ID.to_string()
+        {
+            return Err(internal("Conversation not found or not accessible"));
+        }
         let txn = crate::db::begin_write(&self.db, agent_session::Entity)
             .await
             .map_err(save_backend)?;
@@ -76,7 +81,10 @@ impl SignalAgentSessionStore {
             session
                 .check_surface(AgentSessionSurface::AiAssistant)
                 .map_err(|_| internal("Conversation not accessible"))?;
-            if session.conversation_id != id || !session.agent_role.is_main() {
+            if session.conversation_id != id
+                || !session.agent_role.is_main()
+                || (device.is_empty() && !session.has_admitted_personal_input())
+            {
                 return Err(internal("Only a main conversation can be deleted"));
             }
             (
@@ -91,7 +99,8 @@ impl SignalAgentSessionStore {
                     &row.state_json,
                 )
                 .map_err(|_| internal("Invalid conversation metadata"))?;
-            if !metadata.matches_subject(id, actor, device)
+            if device.is_empty()
+                || !metadata.matches_subject(id, actor, device)
                 || !metadata.is_main()
                 || metadata.surface != AgentSessionSurface::AiAssistant
             {

@@ -39,9 +39,9 @@ pub(crate) async fn prepare_on(
         &set,
         chrono::Utc::now().timestamp_millis() as u64,
     )?;
-    let binding = desk_diagnose_core::native_ids::stable(
-        desk_diagnose_core::native_ids::Kind::AssistantDeviceBinding,
-        &(&config.metadata.instance, &session.device_id),
+    let binding = crate::assistant_data_store::source_device_ref(
+        &config.metadata.instance,
+        &session.device_id,
     );
     if set.source_device_ref != binding
         || session.assistant_data.as_ref().is_none_or(|data| {

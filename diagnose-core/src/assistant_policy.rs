@@ -7,12 +7,138 @@
 //! checked independently, even when this revision matches.
 
 use crate::{
+    conversation_key::{
+        AssistantConversationScope, derive_assistant_conversation_key,
+        is_valid_client_conversation_id,
+    },
     seam::ClaimTurnParams,
     session::{AgentSessionSurface, PersistedAgentSession, TriggerOrigin},
 };
-use desk_agent_protocol::{AgentError, AgentErrorKind};
+use desk_agent_protocol::{
+    AgentError, AgentErrorKind, AgentScope, Capability, ExecutionMode, ai_assistant::AiAssistantAsk,
+};
 
 pub const PERSONAL_ASSISTANT_POLICY_REVISION: i64 = 1;
+
+pub fn is_targetless_web_tool(tool: &crate::registry::RegisteredTool) -> bool {
+    crate::web_research::is_web_tool(tool.name())
+        || tool.name() == crate::conversation_attachment::READ_ATTACHMENT_TOOL
+        || matches!(
+            tool.effect,
+            crate::registry::ToolEffect::PermissionPlanning
+                | crate::registry::ToolEffect::CapabilityDiscovery
+        )
+}
+
+pub fn targetless_web_internal_tools() -> Vec<crate::registry::RegisteredTool> {
+    let mut tools = crate::permission_tools::permission_planning_tool_registry();
+    tools.extend(crate::capability_disclosure::capability_discovery_tool_registry());
+    tools.extend(
+        crate::conversation_history::conversation_history_tool_registry()
+            .into_iter()
+            .filter(|tool| tool.name() == crate::conversation_attachment::READ_ATTACHMENT_TOOL),
+    );
+    tools
+}
+
+pub fn validate_assistant_ask_scope(
+    ask: &AiAssistantAsk,
+    device_bound: bool,
+) -> Result<(), &'static str> {
+    if device_bound {
+        return if ask.target_refs.is_empty() {
+            Ok(())
+        } else {
+            Err("device-bound input cannot select personal conversation targets")
+        };
+    }
+    if !ask
+        .conversation_id
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(is_valid_client_conversation_id)
+    {
+        return Err("personal input requires a valid continuation id");
+    }
+    if ask.start_goal
+        || ask.previous_completed_goal_id.is_some()
+        || ask.temporary_conversation.is_some()
+        || !ask.selected_capability_ids.is_empty()
+        || !ask.selected_attachment_ids.is_empty()
+    {
+        return Err("personal assistant input cannot carry device-bound context");
+    }
+    Ok(())
+}
+
+/// An owner-only conversation may admit a request without a device binding.
+/// This check is shared by the stores. The host must authenticate and lock
+/// the owner before accepting the request.
+pub fn validate_targetless_input(
+    actor_id: &str,
+    run_id: &str,
+    continuation_id: Option<&str>,
+    scope: &AgentScope,
+) -> Result<(), &'static str> {
+    let Some(continuation_id) = continuation_id.filter(|id| is_valid_client_conversation_id(id))
+    else {
+        return Err("targetless input requires a valid continuation id");
+    };
+    if run_id
+        != derive_assistant_conversation_key(
+            actor_id,
+            AssistantConversationScope::Personal,
+            continuation_id,
+        )
+    {
+        return Err("targetless input requires the personal conversation key");
+    }
+    if !is_targetless_scope(scope) {
+        return Err("targetless input cannot carry device authority");
+    }
+    Ok(())
+}
+
+fn is_targetless_scope(scope: &AgentScope) -> bool {
+    scope.mode == ExecutionMode::ReadOnly
+        && scope.granted.iter().all(|capability| {
+            matches!(
+                capability,
+                Capability::WebResearchFetch | Capability::WebResearchSearch
+            )
+        })
+}
+
+pub fn permits_permission_request(
+    session: &PersistedAgentSession,
+    request: &crate::dynamic_run::PermissionRequest,
+) -> bool {
+    if !session.device_id.is_empty() {
+        return true;
+    }
+    let registry = crate::ai_assistant::ai_assistant_provider_registry_ref();
+    session.has_admitted_personal_input()
+        && session.agent_role.is_main()
+        && (request.exact_command().is_some_and(|command| {
+            session.allows_new_mutation()
+                && session.admits_assistant_device(&command.target_device_id)
+                && command.actor_id == session.actor_id
+                && command.input_revision == request.input_revision
+                && command.policy_revision == session.policy_revision
+        }) || request.items.iter().all(|item| {
+            crate::web_research::is_web_tool(&item.tool_name)
+                && registry
+                    .capability_for_tool(&item.tool_name)
+                    .is_some_and(|capability| {
+                        capability.wire.effect == item.expected_effect
+                            && registry
+                                .provider_for_capability(&capability.wire.capability_id)
+                                .is_some_and(|provider| {
+                                    provider.wire.provider_id == item.provider_id
+                                })
+                    })
+        }))
+}
 
 pub fn require_current_policy(revision: i64) -> Result<(), AgentError> {
     if revision == PERSONAL_ASSISTANT_POLICY_REVISION {
@@ -53,16 +179,113 @@ pub fn validate_claim(
         return Ok(());
     }
     require_current_policy(params.policy_revision)?;
+    if params.device_id.is_empty()
+        && (params.trigger_origin != TriggerOrigin::User
+            || !is_targetless_scope(&params.current_pdp_scope))
+    {
+        return Err(AgentError {
+            kind: AgentErrorKind::PermissionDenied,
+            message: "targetless turn cannot carry device or continuation authority".into(),
+            retryable: false,
+            safe_for_model: false,
+            error_code: None,
+        });
+    }
     if params.trigger_origin != TriggerOrigin::User {
         require_current_policy(previous_revision.unwrap_or(0))?;
     }
     Ok(())
 }
 
+/// A host may use this only after matching the persisted owner decision and
+/// original input inside the permission-resume claim transaction.
+pub fn validate_permission_resume_claim(
+    session: &PersistedAgentSession,
+    params: &ClaimTurnParams,
+    decision: &crate::dynamic_run::PermissionDecidedEvent,
+) -> Result<(), AgentError> {
+    if !params.device_id.is_empty() {
+        return validate_claim(session.surface, Some(session.policy_revision), params);
+    }
+    require_current_policy(params.policy_revision)?;
+    require_current_policy(session.policy_revision)?;
+    if session.has_admitted_personal_input()
+        && session.agent_role.is_main()
+        && params.trigger_origin == TriggerOrigin::PermissionDecision
+        && session.input_revision == decision.request_input_revision
+        && matches!(
+            decision.decision_source,
+            crate::dynamic_run::PermissionDecisionSource::UserDecision
+        )
+        && is_targetless_scope(&params.current_pdp_scope)
+    {
+        return Ok(());
+    }
+    Err(AgentError {
+        kind: AgentErrorKind::PermissionDenied,
+        message: "Targetless resume requires the original owner decision and web-only authority"
+            .into(),
+        retryable: false,
+        safe_for_model: false,
+        error_code: None,
+    })
+}
+
+/// The host has matched the completion to its durable dispatch. Recheck the
+/// original input and pending event against the session being claimed.
+pub fn validate_personal_work_claim(
+    session: &PersistedAgentSession,
+    params: &ClaimTurnParams,
+    input_revision: u64,
+    event_id: &str,
+) -> Result<(), AgentError> {
+    require_current_policy(params.policy_revision)?;
+    require_current_policy(session.policy_revision)?;
+    if params.device_id.is_empty()
+        && params.trigger_origin == TriggerOrigin::WorkContinuation
+        && session.has_admitted_personal_input()
+        && session.agent_role.is_main()
+        && session.input_revision == input_revision
+        && is_targetless_scope(&params.current_pdp_scope)
+        && session.pending_auto_triggers.iter().any(|pending| {
+            pending.event_id == event_id
+                && pending.chain_id == session.chain_id
+                && pending.kind == crate::session::WorkKind::AgentExec
+        })
+    {
+        return Ok(());
+    }
+    Err(AgentError {
+        kind: AgentErrorKind::SessionUnavailable,
+        message: "The original request is no longer eligible for command continuation".into(),
+        retryable: false,
+        safe_for_model: false,
+        error_code: None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use desk_agent_protocol::{AgentScope, ExecutionMode};
+
+    #[test]
+    fn targetless_ask_requires_a_personal_continuation_without_device_selectors() {
+        let mut ask = AiAssistantAsk::default();
+        assert!(validate_assistant_ask_scope(&ask, false).is_err());
+        ask.conversation_id = Some("personal-thread".into());
+        assert!(validate_assistant_ask_scope(&ask, false).is_ok());
+        ask.target_refs.push("mac".into());
+        assert!(validate_assistant_ask_scope(&ask, false).is_ok());
+        assert!(validate_assistant_ask_scope(&ask, true).is_err());
+        ask.selected_attachment_ids
+            .push("old-device-attachment".into());
+        assert!(validate_assistant_ask_scope(&ask, false).is_err());
+        ask.selected_attachment_ids.clear();
+        ask.selected_capability_ids
+            .push("device-system-info".into());
+        assert!(validate_assistant_ask_scope(&ask, false).is_err());
+    }
 
     #[test]
     fn empty_owner_conversation_can_enable_review_without_adopting_a_policy() {

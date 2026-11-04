@@ -3,7 +3,7 @@
 
 use super::{
     AssistantStoreError,
-    conversation_search::{now_ms, owner_devices_on, validate_final_time},
+    conversation_search::{now_ms, validate_final_time},
     memory_view::{self, MemoryReadAuthorization},
     retrieval_native::NativeAssistantDataFence,
     retrieval_result::{self, RetrievalResultInput},
@@ -180,7 +180,7 @@ async fn source_on(
         .ok_or(AssistantStoreError::Inaccessible)?;
     let scope =
         usable_memory_scope(fence.context.session, now).ok_or(AssistantStoreError::Inaccessible)?;
-    let devices = owner_devices_on(db, fence).await?;
+    let devices = memory_view::retrieval_devices_on(db, fence, now).await?;
     let scope_hash = scope_sha256(fence.context.session).map_err(AssistantStoreError::Invalid)?;
     let authority = MemoryReadAuthorization {
         actor_id: actor,
@@ -204,7 +204,7 @@ async fn source_on(
     if !fact.device_ref.is_empty()
         && (!devices.contains(&fact.device_ref)
             || (scope.device_rule == AssistantDeviceScope::CurrentDevice
-                && fact.device_ref != data.source_device_ref))
+                && !scope.current_device_refs().contains(&fact.device_ref)))
     {
         return Err(AssistantStoreError::Inaccessible);
     }
@@ -278,16 +278,15 @@ async fn source_on(
         memories: vec![reference],
         expires_at_unix_ms: expiry,
     };
-    usage.expires_at_unix_ms = super::model_sources::validate_on(
+    usage.expires_at_unix_ms = super::model_sources::validate_session_sources_on(
         db,
-        actor,
-        &data.source_device_ref,
+        fence.context.session,
         &usage,
         &fence.access,
-        None,
         fence.context.destination,
         &fence.policy,
         now,
+        None,
     )
     .await?;
     Ok(SelectedSource { source, usage })

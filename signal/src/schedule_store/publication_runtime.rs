@@ -85,7 +85,7 @@ impl TaskPublicationVerifier for SignalTaskPublicationVerifier<'_> {
             crate::ai_assistant_orchestrator::current_capability_projection(
                 txn,
                 self.connections,
-                &target,
+                Some(&target),
                 ModelCapabilities {
                     image_input: config.supports_image_input,
                 },

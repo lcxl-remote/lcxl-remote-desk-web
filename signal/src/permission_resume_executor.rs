@@ -101,49 +101,54 @@ impl SignalPermissionResumeExecutor {
         else {
             return Ok(false);
         };
-        match crate::agent_goal_store::wake_for_permission_decision(
-            &self.db,
-            &session.conversation_id,
-            &session.actor_id,
-            &session.device_id,
-            &candidate.request_id,
-            chrono::Utc::now(),
-        )
-        .await
-        {
-            Ok(desk_diagnose_core::goal::GoalPermissionWake::NoGoal) => {}
-            Ok(
-                desk_diagnose_core::goal::GoalPermissionWake::Queued
-                | desk_diagnose_core::goal::GoalPermissionWake::Held,
-            ) => return Ok(true),
-            Err(error) => {
-                log::warn!(
-                    "[ai-assistant-goal] durable permission decision routing deferred: {error}"
-                );
-                return Ok(false);
+        let connection_id = if session.device_id.is_empty() {
+            String::new()
+        } else {
+            match crate::agent_goal_store::wake_for_permission_decision(
+                &self.db,
+                &session.conversation_id,
+                &session.actor_id,
+                &session.device_id,
+                &candidate.request_id,
+                chrono::Utc::now(),
+            )
+            .await
+            {
+                Ok(desk_diagnose_core::goal::GoalPermissionWake::NoGoal) => {}
+                Ok(
+                    desk_diagnose_core::goal::GoalPermissionWake::Queued
+                    | desk_diagnose_core::goal::GoalPermissionWake::Held,
+                ) => return Ok(true),
+                Err(error) => {
+                    log::warn!(
+                        "[ai-assistant-goal] durable permission decision routing deferred: {error}"
+                    );
+                    return Ok(false);
+                }
             }
-        }
-        let connection_id = {
-            let map = self.connections.read().await;
-            let mut targets = map.values().filter(|target| {
-                target.auth_context.auth_kind == AuthKind::TokenAuth
-                    && target.auth_context.remote_desk_type == RemoteDeskTypeEnum::Server
-                    && target.client_id.as_deref() == Some(session.device_id.as_str())
-            });
-            let Some(target) = targets.next() else {
-                return Ok(false);
+            let connection_id = {
+                let map = self.connections.read().await;
+                let mut targets = map.values().filter(|target| {
+                    target.auth_context.auth_kind == AuthKind::TokenAuth
+                        && target.auth_context.remote_desk_type == RemoteDeskTypeEnum::Server
+                        && target.client_id.as_deref() == Some(session.device_id.as_str())
+                });
+                let Some(target) = targets.next() else {
+                    return Ok(false);
+                };
+                if targets.next().is_some() {
+                    return Ok(false);
+                }
+                target.model.connection_id.clone()
             };
-            if targets.next().is_some() {
+            if crate::computer_use_readiness::global_computer_use_readiness_cache()
+                .get_fresh(&connection_id, now)
+                .is_none()
+            {
                 return Ok(false);
             }
-            target.model.connection_id.clone()
+            connection_id
         };
-        if crate::computer_use_readiness::global_computer_use_readiness_cache()
-            .get_fresh(&connection_id, now)
-            .is_none()
-        {
-            return Ok(false);
-        }
         let child_creation = crate::agent_subagent_store::SubAgentStore::new(self.db.clone())
             .child_creation_context(&session)
             .await

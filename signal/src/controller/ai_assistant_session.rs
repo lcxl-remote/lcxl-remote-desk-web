@@ -10,7 +10,9 @@
 use actix_session::Session;
 use actix_web::{HttpResponse, get, post, web};
 use desk_agent_protocol::ai_assistant::AiAssistantAsk;
-use desk_diagnose_core::conversation_key::derive_conversation_key;
+use desk_diagnose_core::conversation_key::{
+    AssistantConversationScope, derive_assistant_conversation_key, derive_conversation_key,
+};
 use desk_diagnose_core::{
     ai_assistant::{ai_assistant_provider_registry, provider_readiness_reports},
     capability_availability::project_capability_availability,
@@ -28,6 +30,10 @@ use crate::error::DeskSignalError;
 pub const TAG: &str = "AiAssistantSession";
 mod command_tasks;
 pub use command_tasks::cancel_ai_assistant_command;
+mod device_roster;
+#[cfg(test)]
+pub(crate) use device_roster::update_roster;
+pub use device_roster::{get_ai_assistant_device_roster, update_ai_assistant_device_roster};
 mod directories;
 mod stop;
 mod subagents;
@@ -349,9 +355,10 @@ pub async fn get_ai_assistant_session(
     let request_started = std::time::Instant::now();
     let actor_id = SINGLE_ACCOUNT_USER_ID.to_string();
     let store = SignalAgentSessionStore::new(crate::db::get_db().clone());
-    let selected = match query.scheduled_selection() {
+    use AiAssistantSnapshotSelection::{DeviceIntent, PersonalIntent, Saved, Scheduled};
+    let selected = match query.snapshot_selection() {
         Err(_) => return Ok(not_accessible()),
-        Ok(Some((task, run))) => {
+        Ok(Scheduled { task, run }) => {
             match crate::schedule_store::ScheduleStore::new(crate::db::get_db().clone())
                 .resolve_run_session(SINGLE_ACCOUNT_USER_ID, task, run)
                 .await
@@ -366,14 +373,35 @@ pub async fn get_ai_assistant_session(
                 Err(_) => return Ok(not_accessible()),
             }
         }
-        Ok(None) => {
+        Ok(Saved { session }) => store
+            .recovery_device(session, &actor_id)
+            .await
+            .map_err(|_| {
+                DeskSignalError::new_custom_error(
+                    DeskErrorCode::PERMISSION_ERROR,
+                    "AI Assistant session not found or not accessible",
+                )
+            })?
+            .map(|device| (session.to_owned(), device)),
+        Ok(PersonalIntent { conversation }) => Some((
+            derive_assistant_conversation_key(
+                &actor_id,
+                AssistantConversationScope::Personal,
+                conversation,
+            ),
+            String::new(),
+        )),
+        Ok(DeviceIntent {
+            connection,
+            conversation,
+        }) => {
             recovery::resolve(
                 &store,
                 &connection_map,
                 &actor_id,
-                query.connection.as_deref().unwrap_or(""),
-                query.session.as_deref(),
-                query.conversation.as_deref(),
+                connection,
+                None,
+                Some(conversation),
             )
             .await?
         }
@@ -591,31 +619,19 @@ pub async fn revoke_ai_assistant_capability_grant(
     connection_map: web::Data<SharedConnectionMap>,
     body: web::Json<CapabilityGrantRevokeBody>,
 ) -> Result<HttpResponse, DeskSignalError> {
-    let target_audience = {
-        let map = connection_map.read().await;
-        let Some(target) = map.get(&body.connection) else {
-            return Ok(not_accessible());
-        };
-        if target.auth_context.auth_kind != AuthKind::TokenAuth
-            || target.auth_context.remote_desk_type != RemoteDeskTypeEnum::Server
-        {
-            return Ok(not_accessible());
-        }
-        match target.client_id.as_deref() {
-            Some(id) if !id.is_empty() => id.to_string(),
-            _ => return Ok(not_accessible()),
-        }
+    let Some(target_audience) =
+        permission_device(&connection_map, body.connection.as_deref()).await
+    else {
+        return Ok(not_accessible());
     };
     let actor_id = SINGLE_ACCOUNT_USER_ID.to_string();
-    let session_id = match (
-        body.session.as_deref().filter(|value| !value.is_empty()),
+    let Some(session_id) = selected_permission_session_id(
+        &actor_id,
+        &target_audience,
+        body.session.as_deref(),
         body.conversation.as_deref(),
-    ) {
-        (Some(session_id), _) => session_id.to_string(),
-        (None, Some(conversation)) => {
-            derive_conversation_key(&actor_id, &target_audience, Some(conversation), "")
-        }
-        (None, None) => return Ok(not_accessible()),
+    ) else {
+        return Ok(not_accessible());
     };
     let session = SignalAgentSessionStore::new(crate::db::get_db().clone())
         .read_snapshot_for_subject(&session_id, &actor_id, &target_audience)
@@ -634,10 +650,11 @@ pub async fn revoke_ai_assistant_capability_grant(
     })?;
     let grant =
         crate::capability_grant_store::SignalCapabilityGrantStore::new(crate::db::get_db().clone())
-            .revoke(
+            .revoke_for_run(
                 &body.grant_id,
                 &actor_id,
                 &target_audience,
+                &session_id,
                 now_unix_ms,
                 &body.reason,
             )
@@ -653,6 +670,27 @@ pub async fn revoke_ai_assistant_capability_grant(
             grant,
         ))),
     )
+}
+
+async fn permission_device(
+    connections: &SharedConnectionMap,
+    connection: Option<&str>,
+) -> Option<String> {
+    let Some(connection) = connection else {
+        return Some(String::new());
+    };
+    let map = connections.read().await;
+    let target = map.get(connection)?;
+    if target.auth_context.auth_kind != AuthKind::TokenAuth
+        || target.auth_context.remote_desk_type != RemoteDeskTypeEnum::Server
+    {
+        return None;
+    }
+    target
+        .client_id
+        .as_ref()
+        .filter(|id| !id.is_empty())
+        .cloned()
 }
 
 #[utoipa::path(
@@ -680,33 +718,83 @@ pub(crate) async fn decide_permission_on(
     connection_map: web::Data<SharedConnectionMap>,
     body: web::Json<PermissionDecisionBody>,
 ) -> Result<HttpResponse, DeskSignalError> {
-    let target_audience = {
-        let map = connection_map.read().await;
-        let Some(target) = map.get(&body.connection) else {
-            return Ok(not_accessible());
-        };
-        if target.auth_context.auth_kind != AuthKind::TokenAuth
-            || target.auth_context.remote_desk_type != RemoteDeskTypeEnum::Server
+    let actor_id = SINGLE_ACCOUNT_USER_ID.to_string();
+    let store = SignalAgentSessionStore::new(db.clone());
+    let personal_request = if let Some(session_id) = selected_permission_session_id(
+        &actor_id,
+        "",
+        body.session.as_deref(),
+        body.conversation
+            .as_deref()
+            .filter(|_| body.connection.is_none()),
+    ) {
+        store
+            .read_snapshot_for_subject(&session_id, &actor_id, "")
+            .await
+            .map_err(|error| {
+                DeskSignalError::new_custom_error(DeskErrorCode::SYSTEM_ERROR, &error.message)
+            })?
+            .and_then(|snapshot| {
+                snapshot.permission_requests.into_iter().find(|request| {
+                    request.request_id == body.request_id && request.exact_command().is_some()
+                })
+            })
+    } else {
+        None
+    };
+    let selected_command = personal_request
+        .as_ref()
+        .and_then(|request| request.exact_command());
+    let connection = if let Some(command) = selected_command {
+        let connection = command.target_connection_id();
+        if body
+            .connection
+            .as_deref()
+            .is_some_and(|supplied| supplied != connection)
         {
             return Ok(not_accessible());
         }
-        match target.client_id.as_deref() {
-            Some(id) if !id.is_empty() => id.to_string(),
-            _ => return Ok(not_accessible()),
+        let map = connection_map.read().await;
+        let available = map
+            .current_oss_server(&command.target_device_id)
+            .is_some_and(|state| {
+                state.model.connection_id == connection
+                    && !state.lifecycle.is_retired()
+                    && state
+                        .model
+                        .ai_assistant_settings
+                        .as_ref()
+                        .is_some_and(|settings| settings.enabled)
+            });
+        if !available {
+            return Ok(not_accessible());
         }
+        Some(connection)
+    } else {
+        body.connection.as_deref()
     };
-    let actor_id = SINGLE_ACCOUNT_USER_ID.to_string();
-    let store = SignalAgentSessionStore::new(db.clone());
-    let session_id = match (
-        body.session.as_deref().filter(|value| !value.is_empty()),
+    let target_audience = if selected_command.is_some() {
+        String::new()
+    } else {
+        let Some(audience) = permission_device(&connection_map, connection).await else {
+            return Ok(not_accessible());
+        };
+        audience
+    };
+    let Some(session_id) = selected_permission_session_id(
+        &actor_id,
+        &target_audience,
+        body.session.as_deref(),
         body.conversation.as_deref(),
-    ) {
-        (Some(session_id), _) => session_id.to_string(),
-        (None, Some(conversation)) => {
-            derive_conversation_key(&actor_id, &target_audience, Some(conversation), "")
-        }
-        (None, None) => return Ok(not_accessible()),
+    ) else {
+        return Ok(not_accessible());
     };
+    if connection.is_none() && body.carrier_id.is_some() {
+        return Ok(HttpResponse::Ok().json(RestResponse::<()>::failed(
+            DeskErrorCode::INVALID_PARAMS,
+            "carrierId is only valid when approving an interactive command".into(),
+        )));
+    }
     let decisions: Vec<desk_diagnose_core::dynamic_run::PermissionDecisionItem> =
         body.items.clone().into_iter().map(Into::into).collect();
     if let Some(state) = store
@@ -736,19 +824,26 @@ pub(crate) async fn decide_permission_on(
             "system clock predates Unix epoch",
         )
     })?;
-    let readiness = crate::computer_use_readiness::global_computer_use_readiness_cache()
-        .get_fresh(&body.connection, now_dt)
-        .ok_or_else(|| {
-            DeskSignalError::new_custom_error(
-                DeskErrorCode::PRECONDITION_FAILED,
-                "target capability readiness is unavailable; refresh and retry",
-            )
-        })?;
-    let readiness_revision = readiness.readiness.revision;
+    let readiness = connection
+        .map(|connection| {
+            crate::computer_use_readiness::global_computer_use_readiness_cache()
+                .get_fresh(connection, now_dt)
+                .ok_or_else(|| {
+                    DeskSignalError::new_custom_error(
+                        DeskErrorCode::PRECONDITION_FAILED,
+                        "target capability readiness is unavailable; refresh and retry",
+                    )
+                })
+        })
+        .transpose()?;
+    let readiness_revision = readiness.as_ref().map_or(
+        desk_diagnose_core::web_research::CENTRAL_WEB_READINESS_REVISION,
+        |record| record.readiness.revision,
+    );
     let implicit_fresh_object_refs = readiness
-        .readiness
-        .context_references
-        .iter()
+        .as_ref()
+        .into_iter()
+        .flat_map(|record| record.readiness.context_references.iter())
         .filter(|reference| {
             matches!(
                 reference.object_ref.object_kind,
@@ -761,32 +856,35 @@ pub(crate) async fn decide_permission_on(
         })
         .map(|reference| reference.object_ref.clone())
         .collect::<Vec<_>>();
-    let reports = provider_readiness_reports(&readiness.readiness).map_err(|error| {
-        DeskSignalError::new_custom_error(
-            DeskErrorCode::PRECONDITION_FAILED,
-            &format!("invalid target capability readiness: {error}"),
-        )
-    })?;
+    let reports = readiness
+        .as_ref()
+        .map(|record| provider_readiness_reports(&record.readiness))
+        .transpose()
+        .map_err(|error| {
+            DeskSignalError::new_custom_error(
+                DeskErrorCode::PRECONDITION_FAILED,
+                &format!("invalid target capability readiness: {error}"),
+            )
+        })?
+        .unwrap_or_default();
     let search_config = crate::web_search_config::read(db).await?;
     let registry =
         ai_assistant_provider_registry().with_web_search_binding(search_config.binding());
-    let registry = match crate::command_policy::current(
-        db,
-        connection_map.as_ref(),
-        &body.connection,
-        &actor_id,
-    )
-    .await
+    let registry = if let Some(connection) = connection
+        && let Ok(policy) =
+            crate::command_policy::current(db, connection_map.as_ref(), connection, &actor_id).await
     {
-        Ok(policy) => registry.with_command_policy(policy),
-        Err(_) => registry,
+        registry.with_command_policy(policy)
+    } else {
+        registry
     };
     let inventory = project_capability_availability(
         &registry,
         desk_agent_protocol::capability_provider::ProductSurface::OssPersonalOwner,
         now_unix_ms,
-        crate::ai_assistant_orchestrator::oss_central_capability_readiness(
+        desk_diagnose_core::capability_availability::assistant_central_capability_readiness(
             search_config.configured(),
+            connection.is_some(),
         ),
         reports,
     )
@@ -799,18 +897,22 @@ pub(crate) async fn decide_permission_on(
     // An approved interactive command binds the owner's ready terminal carrier,
     // reserved before the decision is written and released if it fails. A
     // replay of a committed decision returned above and consumes nothing.
-    let pending_request = store
-        .read_snapshot_for_subject(&session_id, &actor_id, &target_audience)
-        .await
-        .map_err(|error| {
-            DeskSignalError::new_custom_error(DeskErrorCode::SYSTEM_ERROR, &error.message)
-        })?
-        .and_then(|snapshot| {
-            snapshot
-                .permission_requests
-                .into_iter()
-                .find(|request| request.request_id == body.request_id)
-        });
+    let pending_request = if personal_request.is_some() {
+        personal_request.clone()
+    } else {
+        store
+            .read_snapshot_for_subject(&session_id, &actor_id, &target_audience)
+            .await
+            .map_err(|error| {
+                DeskSignalError::new_custom_error(DeskErrorCode::SYSTEM_ERROR, &error.message)
+            })?
+            .and_then(|snapshot| {
+                snapshot
+                    .permission_requests
+                    .into_iter()
+                    .find(|request| request.request_id == body.request_id)
+            })
+    };
     let interactive = match pending_request.as_ref().map(|request| {
         desk_diagnose_core::command_confirmation::interactive_approval(
             &session_id,
@@ -889,7 +991,7 @@ pub(crate) async fn decide_permission_on(
             }
             DeskSignalError::new_custom_error(DeskErrorCode::PRECONDITION_FAILED, &error.message)
         })?;
-    let goal_wake = if decision.newly_recorded {
+    let goal_wake = if decision.newly_recorded && !target_audience.is_empty() {
         match crate::agent_goal_store::wake_for_permission_decision(
             db,
             &session_id,
@@ -948,6 +1050,7 @@ pub(crate) async fn decide_permission_on(
             .and_then(|(creation, _)| creation.response_locale.clone());
         let resume_request_id = format!("permission-resume-{}", body.request_id);
         let resume_ask = AiAssistantAsk {
+            target_refs: Vec::new(),
             client_timezone: String::new(),
             temporary_conversation: None,
             question,
@@ -963,7 +1066,11 @@ pub(crate) async fn decide_permission_on(
         };
         let resume_connections = connection_map.clone();
         let resume_db = db.clone();
-        let resume_target_connection = body.connection.clone();
+        let resume_target_connection = if target_audience.is_empty() {
+            String::new()
+        } else {
+            connection.unwrap_or_default().to_owned()
+        };
         let resume_target_audience = target_audience.clone();
         let resume_session_id = session_id.clone();
         let resume_permission_request_id = body.request_id.clone();
@@ -1076,9 +1183,9 @@ pub async fn cancel_ai_assistant_background_task(
 
 #[utoipa::path(
     tag = TAG,
-    summary = "List recent AI Assistant conversations for a device",
+    summary = "List recent AI Assistant conversations for the selected scope",
     params(
-        ("connection" = String, Query, description = "Target connection id"),
+        ("connection" = Option<String>, Query, description = "Target connection id; omit for personal conversations without a device"),
         ("limit" = Option<u64>, Query, description = "Maximum rows, default 30 and capped at 100"),
     ),
     responses((status = 200, description = "Authorized recent AI Assistant sessions",
@@ -1089,9 +1196,9 @@ pub async fn list_ai_assistant_sessions(
     connection_map: web::Data<SharedConnectionMap>,
     query: web::Query<AiAssistantSessionListQuery>,
 ) -> Result<HttpResponse, DeskSignalError> {
-    let target_audience = {
+    let target_audience = if let Some(connection) = query.connection.as_deref() {
         let map = connection_map.read().await;
-        let Some(target) = map.get(&query.connection) else {
+        let Some(target) = map.get(connection) else {
             return Ok(not_accessible());
         };
         if target.auth_context.auth_kind != AuthKind::TokenAuth
@@ -1103,6 +1210,8 @@ pub async fn list_ai_assistant_sessions(
             Some(id) if !id.is_empty() => id.to_string(),
             _ => return Ok(not_accessible()),
         }
+    } else {
+        String::new()
     };
     let actor_id = SINGLE_ACCOUNT_USER_ID.to_string();
     let limit = query.limit.unwrap_or(30).clamp(1, 100);
@@ -1158,6 +1267,9 @@ pub async fn delete_ai_assistant_session(
     } else {
         return Ok(not_accessible());
     };
+    if query.connection.is_none() != target_audience.is_empty() {
+        return Ok(not_accessible());
+    }
     let deleted = SignalAgentSessionStore::new(crate::db::get_db().clone())
         .delete_for_subject(&query.session, &actor_id, &target_audience)
         .await;
@@ -1169,26 +1281,27 @@ pub async fn delete_ai_assistant_session(
     if let Some(request) = request {
         crate::ai_assistant_orchestrator::cancellation::cancel(SINGLE_ACCOUNT_USER_ID, &request);
     }
-    let cancel_connections = connection_map.clone();
-    let cancel_session = query.session.clone();
-    let cancel_target = query.connection.clone();
-    actix_web::rt::spawn(async move {
-        let _ = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            crate::agent_exec::cancel_conversation_commands(
-                &cancel_connections,
-                crate::db::get_db(),
-                &cancel_session,
-                &cancel_target,
-                &actor_id,
-            ),
-        )
-        .await;
-    });
+    if let Some(cancel_target) = query.connection.clone() {
+        let cancel_connections = connection_map.clone();
+        let cancel_session = query.session.clone();
+        actix_web::rt::spawn(async move {
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                crate::agent_exec::cancel_conversation_commands(
+                    &cancel_connections,
+                    crate::db::get_db(),
+                    &cancel_session,
+                    &cancel_target,
+                    &actor_id,
+                ),
+            )
+            .await;
+        });
+    }
     Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(
         DeleteAiAssistantSessionResponse {
             deleted: true,
-            backup_cleanup_pending: true,
+            backup_cleanup_pending: !target_audience.is_empty(),
         },
     )))
 }

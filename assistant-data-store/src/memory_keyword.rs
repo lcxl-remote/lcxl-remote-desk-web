@@ -327,7 +327,7 @@ fn allowed_devices(
                 .iter()
                 .filter(|device| {
                     request.scope == AssistantDeviceScope::AllMyDevices
-                        || device.as_str() == context.current_device_ref
+                        || context.scope.current_device_refs().contains(device)
                 })
                 .cloned(),
         )

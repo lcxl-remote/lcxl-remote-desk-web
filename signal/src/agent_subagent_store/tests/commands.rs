@@ -258,7 +258,8 @@ async fn approved_child_with_source_on(
         .unwrap();
     super::paused_permission::assert_claim(&db, &child.conversation_id, true).await;
     let child = super::paused_permission::session(&db, &child.conversation_id).await;
-    CommandConfirmation::approved_for_call(&child, &call.arguments_json).unwrap();
+    CommandConfirmation::approved_request_for_call(&child, &child.device_id, &call.arguments_json)
+        .unwrap();
     let grant = SignalCapabilityGrantStore::new(db.clone())
         .list_for_subject(&child.conversation_id, &child.actor_id, &child.device_id)
         .await
@@ -345,6 +346,7 @@ async fn newly_created_child_owner_approval_prepares_and_claims_command_once() {
     let origin = ActionResultOrigin::capture_confirmed_command(
         &desk_diagnose_core::ai_assistant::ai_assistant_provider_registry(),
         &child,
+        &child.device_id,
         &call,
         now,
     )
@@ -580,8 +582,14 @@ async fn live_project_model_subagent_command() {
         panic!("initial delegated input must dispatch")
     };
     let now = chrono::Utc::now().timestamp_millis() as u64;
-    let origin =
-        ActionResultOrigin::capture_confirmed_command(&registry, &child, &call, now).unwrap();
+    let origin = ActionResultOrigin::capture_confirmed_command(
+        &registry,
+        &child,
+        &child.device_id,
+        &call,
+        now,
+    )
+    .unwrap();
     assert!(matches!(
         store
             .claim_command_dispatch(

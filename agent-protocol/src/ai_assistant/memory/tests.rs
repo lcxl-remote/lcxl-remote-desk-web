@@ -30,6 +30,35 @@ fn model_authored_writes_accept_content_without_extra_sources_and_reject_invalid
 }
 
 #[test]
+fn a_memory_write_device_selector_requires_device_scope() {
+    let mut value = serde_json::json!({
+        "operation":"remember","content":"Fixture fact","scope":"current_device","target_ref":"selected-device",
+    });
+    let request: MemoryWriteRequest = serde_json::from_value(value.clone()).unwrap();
+    request.validate().unwrap();
+    assert_eq!(
+        request.draft().unwrap().target_ref.as_deref(),
+        Some("selected-device")
+    );
+
+    value["scope"] = serde_json::json!("personal");
+    assert!(
+        serde_json::from_value::<MemoryWriteRequest>(value.clone())
+            .unwrap()
+            .validate()
+            .is_err()
+    );
+    value["scope"] = serde_json::json!("current_device");
+    value["target_ref"] = serde_json::json!(" selected-device");
+    assert!(
+        serde_json::from_value::<MemoryWriteRequest>(value)
+            .unwrap()
+            .validate()
+            .is_err()
+    );
+}
+
+#[test]
 fn successful_write_receipt_exposes_only_identity_and_version() {
     let result = MemoryWriteResult {
         outcome: MemoryWriteOutcome::Applied,

@@ -15,9 +15,6 @@ pub(super) async fn write_on(
     existing_binding: Option<binding::Model>,
     policy: &AssistantDataPolicy,
 ) -> Result<Written, AdmissionFailure> {
-    let directory = capture
-        .directory
-        .ok_or(AssistantStoreError::Invalid("missing OSS source directory"))?;
     let recorded = signed(capture.recorded_at_unix_ms)?;
     let expires = signed(prepared.proof.expires_at_unix_ms)?;
     let kind = enum_string(&capture.kind)?;
@@ -125,7 +122,7 @@ pub(super) async fn write_on(
             + 6 * 8
             + "active".len()) as i64;
     }
-    if existing_binding.is_none() {
+    if let Some(directory) = capture.directory.filter(|_| existing_binding.is_none()) {
         metadata += (capture.device_ref.len()
             + directory.instance_id.len()
             + directory.audience.len()
@@ -188,10 +185,15 @@ pub(super) async fn write_on(
     let mut next_runtime = runtime_row.clone();
     next_runtime.history_data_generation = admitted_generation;
     next_runtime.revision = increment(runtime_row.revision)?;
-    let next_binding = desk_diagnose_core::future::send_phase(|| {
-        write_binding_on(txn, capture, directory, existing_binding, recorded)
-    })
-    .await?;
+    let next_binding = match capture.directory {
+        Some(directory) => Some(
+            desk_diagnose_core::future::send_phase(|| {
+                write_binding_on(txn, capture, directory, existing_binding, recorded)
+            })
+            .await?,
+        ),
+        None => None,
+    };
     if existing_origin.is_none() {
         require_one(
             origin::Entity::insert(origin::ActiveModel {

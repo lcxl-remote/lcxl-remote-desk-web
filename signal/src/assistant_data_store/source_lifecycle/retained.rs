@@ -73,6 +73,9 @@ async fn device_matches_on(
     if actor != crate::control_authorizer::SINGLE_ACCOUNT_USER_ID.to_string() {
         return Ok(false);
     }
+    if native_device.is_empty() {
+        return Ok(source_device.is_empty());
+    }
     let instance = db.config_read().await.metadata.instance.clone();
     Ok(binding::Entity::find()
         .filter(binding::Column::BindingId.eq(source_device))

@@ -12,6 +12,7 @@ use crate::{
     capability_availability::CapabilityAvailability,
     capability_risk::{CapabilityRiskSignals, classify_capability_risk},
     context_attachment::{AttachmentState, ContextAttachment, ContextAttachmentKind},
+    dynamic_run::PermissionRequest,
     provider_registry::ProviderRegistry,
     session::PersistedAgentSession,
 };
@@ -222,6 +223,12 @@ pub fn build_permission_grants(
     if request.input_revision != session.input_revision {
         return Err(internal("permission request needs revalidation"));
     }
+    if !crate::assistant_policy::permits_permission_request(session, request) {
+        return Err(internal(
+            "permission request is outside the conversation authority",
+        ));
+    }
+    let device_id = permission_device_id(session, request);
     request
         .clone()
         .apply_user_decision(decisions)
@@ -245,6 +252,15 @@ pub fn build_permission_grants(
         else {
             continue;
         };
+        if device_id.is_empty()
+            && !original_reads.is_some_and(|selection| {
+                selection.is_host_web_only() && selection.tool_names.contains(&requested.tool_name)
+            })
+        {
+            return Err(internal(
+                "approved web tool was not selected on the original input",
+            ));
+        }
         let provider = context
             .registry
             .provider(&requested.provider_id)
@@ -272,7 +288,7 @@ pub fn build_permission_grants(
                 internal("command confirmation is missing; request permission again")
             })?;
             if confirmation.actor_id != session.actor_id
-                || confirmation.target_device_id != session.device_id
+                || confirmation.target_device_id != device_id
                 || confirmation.policy_revision != session.policy_revision
                 || confirmation.resource_scope()? != *resource_scope
             {
@@ -748,7 +764,7 @@ pub fn build_permission_grants(
             run_id: session.conversation_id.clone(),
             input_revision: request.input_revision,
             surface: context.surface,
-            target_device_id: session.device_id.clone(),
+            target_device_id: device_id.into(),
             target_session_id: None,
             provider_id: requested.provider_id.clone(),
             capability_id: capability.wire.capability_id.clone(),
@@ -878,6 +894,20 @@ pub fn permission_item_grant_id(
     )
 }
 
+/// Only a personal conversation's single exact command separates the grant
+/// target from the native session subject.
+pub fn permission_device_id<'a>(
+    session: &'a PersistedAgentSession,
+    request: &'a PermissionRequest,
+) -> &'a str {
+    if session.device_id.is_empty()
+        && let Some(command) = request.exact_command()
+    {
+        return &command.target_device_id;
+    }
+    &session.device_id
+}
+
 /// Renewal is a new owner decision, never restoration of previous authority.
 pub fn permission_request_can_renew(
     session: &PersistedAgentSession,
@@ -887,6 +917,7 @@ pub fn permission_request_can_renew(
 ) -> bool {
     request.state == crate::dynamic_run::PermissionRequestState::Approved
         && request.input_revision == session.input_revision
+        && crate::assistant_policy::permits_permission_request(session, request)
         && !request.items.is_empty()
         && request.items.iter().all(|item| {
             let id = permission_item_grant_id(&session.conversation_id, request, &item.item_id);
@@ -894,7 +925,7 @@ pub fn permission_request_can_renew(
                 grant.grant_id == id
                     && grant.run_id == session.conversation_id
                     && grant.actor_id == session.actor_id
-                    && grant.target_device_id == session.device_id
+                    && grant.target_device_id == permission_device_id(session, request)
 
                     && grant.revoked_at_unix_ms.is_none()
                     && (grant.remaining_uses == 0 || grant.expires_at_unix_ms <= now

@@ -85,6 +85,36 @@ impl ReadCallPreflight {
         call: &ToolCall,
         binding: &ObjectReadBinding<'_>,
     ) -> Result<Self, AgentError> {
+        Self::build_edge(registry, surface, call, binding, false)
+    }
+
+    /// Derive read bounds after the host has verified an exact selected device
+    /// against the immutable personal input. Selection never grants elevated reads.
+    pub fn build_selected_device(
+        registry: &ProviderRegistry,
+        surface: ProductSurface,
+        call: &ToolCall,
+        binding: &ObjectReadBinding<'_>,
+    ) -> Result<Self, AgentError> {
+        if call.name != crate::request_devices::SYSTEM_INFO_TOOL
+            || !binding.original.is_host_web_only()
+        {
+            return Err(unavailable());
+        }
+        let read = Self::build_edge(registry, surface, call, binding, true)?;
+        if read.risk_tier != CapabilityRiskTier::R0 {
+            return Err(unavailable());
+        }
+        Ok(read)
+    }
+
+    fn build_edge(
+        registry: &ProviderRegistry,
+        surface: ProductSurface,
+        call: &ToolCall,
+        binding: &ObjectReadBinding<'_>,
+        selected_device: bool,
+    ) -> Result<Self, AgentError> {
         binding.original.validate()?;
         let capability = registry
             .capability_for_tool(&call.name)
@@ -106,7 +136,7 @@ impl ReadCallPreflight {
             // Desktop reads may be selected by a later owner decision. This
             // preflight derives bounds only; the runtime must consume the R1
             // grant before dispatch, even when no object was attached.
-            || (!binding.original.tool_names.contains(&call.name)
+            || (!selected_device && !binding.original.tool_names.contains(&call.name)
                 && !crate::ai_assistant::is_requestable_desktop_read(&call.name))
             || call.id.trim().is_empty()
             || call.id.len() > 512
@@ -312,9 +342,13 @@ impl ReadCallPreflight {
         if subject.readiness_revision == 0
             || subject.now_unix_ms == 0
             || subject.now_unix_ms >= self.valid_until_unix_ms
-            || [subject.actor_id, subject.run_id, subject.target_device_id]
+            || [subject.actor_id, subject.run_id]
                 .iter()
                 .any(|id| id.trim().is_empty())
+            || (subject.target_device_id.trim().is_empty()
+                && !(subject.target_device_id.is_empty()
+                    && self.capability.wire.execution_locality == ExecutionLocality::Central
+                    && crate::web_research::is_web_tool(&self.capability.wire.tool_name)))
         {
             return Err(unavailable());
         }

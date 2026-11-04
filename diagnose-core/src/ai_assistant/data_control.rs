@@ -49,9 +49,17 @@ pub struct AssistantDataSession {
 }
 
 impl AssistantDataSession {
+    pub fn request_memory_devices(&self) -> &[String] {
+        self.memory_access_scope
+            .as_ref()
+            .map_or(&[], |scope| &scope.request_device_refs)
+    }
+
     pub fn validate(&self) -> Result<(), &'static str> {
         self.retrieval_budget.validate()?;
-        desk_agent_protocol::ai_assistant::source::validate_source_id(&self.source_device_ref)?;
+        desk_agent_protocol::ai_assistant::source::validate_optional_device_ref(
+            &self.source_device_ref,
+        )?;
         if (self.current_actor_input_seq == 0
             && (self.instructions.accepted_input_seq != 0
                 || self

@@ -16,6 +16,7 @@ use sea_orm::{PaginatorTrait, sea_query::Expr};
 
 mod native_send;
 mod request_manifest;
+mod selected_devices;
 
 // Real owner/device/source and running-session graphs before the first native
 // model send. Preparing this block must never itself create a native send grant.
@@ -49,7 +50,16 @@ async fn ready_request(
     desk_diagnose_core::seam::ModelRequest,
     Box<desk_diagnose_core::ai_assistant::read_projection::ReadProjectionProof>,
 ) {
-    let mut fixture = Fixture::new(label).await;
+    ready_request_for(Fixture::new(label).await).await
+}
+
+async fn ready_request_for(
+    mut fixture: Fixture,
+) -> (
+    Fixture,
+    desk_diagnose_core::seam::ModelRequest,
+    Box<desk_diagnose_core::ai_assistant::read_projection::ReadProjectionProof>,
+) {
     let memory_host =
         crate::agent_session_store::SignalAgentSessionStore::new(fixture.store.db.clone())
             .with_client_metadata(
@@ -121,6 +131,7 @@ async fn ready_request(
             actor_id: fixture.session.actor_id.clone(),
             conversation_id: fixture.session.conversation_id.clone(),
             source_device_ref: data.source_device_ref.clone(),
+            request_memory_device_refs: data.request_memory_devices().to_vec(),
             session_version: fixture.session.version,
             lease_token: fixture.session.lease_token,
             input_revision: fixture.session.input_revision,

@@ -32,7 +32,7 @@ use desk_diagnose_core::dynamic_run::{
 };
 use desk_diagnose_core::goal::GoalLedgerEvent;
 pub use desk_diagnose_core::permission_grant::PermissionGrantIssuanceContext;
-use desk_diagnose_core::permission_grant::build_permission_grants;
+use desk_diagnose_core::permission_grant::{build_permission_grants, permission_device_id};
 use desk_diagnose_core::seam::{ClaimError, ClaimTurnParams, SessionSeam};
 use desk_diagnose_core::session::{
     ActionIdentity, AgentSessionSurface, ExecutionState, PendingAutoTrigger, PersistedAgentSession,
@@ -71,6 +71,7 @@ pub struct SignalAgentSessionStore {
     surface: AgentSessionSurface,
     context_selection: Option<ContextSelectionClaim>,
     expected_input_revision: Option<u64>,
+    work_event: Option<String>,
     permission_resume: Option<permission_resume::ClaimBinding>,
 }
 
@@ -84,6 +85,7 @@ impl SignalAgentSessionStore {
             surface: AgentSessionSurface::Unknown,
             context_selection: None,
             expected_input_revision: None,
+            work_event: None,
             permission_resume: None,
         }
     }
@@ -107,6 +109,11 @@ impl SignalAgentSessionStore {
     /// follow-up that happens to win the session before the claim CAS.
     pub fn with_expected_input_revision(mut self, revision: u64) -> Self {
         self.expected_input_revision = Some(revision);
+        self
+    }
+
+    pub(crate) fn with_work_event(mut self, event_id: String) -> Self {
+        self.work_event = Some(event_id);
         self
     }
 
@@ -339,6 +346,14 @@ impl SignalAgentSessionStore {
             actor_id,
             device_id,
         } = subject;
+        if device_id.is_empty()
+            && (actor_id != crate::control_authorizer::SINGLE_ACCOUNT_USER_ID.to_string()
+                || !matches!(&authority, PermissionDecisionAuthority::Owner))
+        {
+            return Err(internal(
+                "targetless permission requires the personal owner",
+            ));
+        }
         for _ in 0..CLAIM_ATTEMPTS {
             let txn = crate::db::begin_write(&self.db, crate::entity::agent_session::Entity)
                 .await
@@ -358,6 +373,11 @@ impl SignalAgentSessionStore {
             };
             let mut session =
                 permission_receipt::session(&row, conversation_id, actor_id, device_id)?;
+            if device_id.is_empty() && !session.has_admitted_personal_input() {
+                return Err(internal(
+                    "targetless permission requires an admitted personal input",
+                ));
+            }
             permission_receipt::check_expected_request(&session, expected_run_request_id)?;
             if matches!(&authority, PermissionDecisionAuthority::Owner)
                 && let Some(state) =
@@ -401,6 +421,13 @@ impl SignalAgentSessionStore {
                 .position(|request| request.request_id == request_id)
                 .ok_or_else(|| internal("permission request was not found"))?;
             let requested = session.permission_requests[request_index].clone();
+            if !desk_diagnose_core::assistant_policy::permits_permission_request(
+                &session, &requested,
+            ) {
+                return Err(internal(
+                    "permission request is outside the conversation authority",
+                ));
+            }
             if permission_receipt::requested_on(&txn, &session, request_id)
                 .await?
                 .request
@@ -410,6 +437,7 @@ impl SignalAgentSessionStore {
                     "permission request differs from its original event",
                 ));
             }
+            permission_resume::validate_permission_device_on(&txn, &session, &requested).await?;
             let reviewed = match &authority {
                 PermissionDecisionAuthority::Owner => None,
                 PermissionDecisionAuthority::Ai {
@@ -451,15 +479,15 @@ impl SignalAgentSessionStore {
                 return Err(internal("permission request needs revalidation"));
             }
             let request_input_revision = request.input_revision;
-            let original_reads =
-                if desk_diagnose_core::permission_grant::requires_original_read_context(
+            let original_reads = if permission_device_id(&session, &requested).is_empty()
+                || desk_diagnose_core::permission_grant::requires_original_read_context(
                     &requested,
                     &decision_items,
                 ) {
-                    crate::agent_run_event_store::input_context::original_on(&txn, &session).await?
-                } else {
-                    None
-                };
+                crate::agent_run_event_store::input_context::original_on(&txn, &session).await?
+            } else {
+                None
+            };
             let mut grants = match build_permission_grants(
                 &session,
                 &requested,
@@ -1760,7 +1788,7 @@ impl SessionSeam for SignalAgentSessionStore {
                 .list_for_subject(
                     &session.conversation_id,
                     &session.actor_id,
-                    &session.device_id,
+                    permission_device_id(session, request),
                 )
                 .await
                 .map_err(|_| AgentError {
@@ -1878,6 +1906,15 @@ impl SessionSeam for SignalAgentSessionStore {
                     session
                         .check_surface(self.surface)
                         .map_err(ClaimError::Subject)?;
+                    if self.surface == AgentSessionSurface::AiAssistant
+                        && params.device_id.is_empty()
+                        && (!session.has_admitted_personal_input()
+                            || self.expected_input_revision != Some(session.input_revision))
+                    {
+                        return Err(ClaimError::Backend(internal(
+                            "targetless turn requires its admitted input revision",
+                        )));
+                    }
                     if self
                         .expected_input_revision
                         .is_some_and(|revision| revision != session.input_revision)
@@ -1886,12 +1923,21 @@ impl SessionSeam for SignalAgentSessionStore {
                             "prepared input was superseded before the turn claim",
                         )));
                     }
-                    desk_diagnose_core::assistant_policy::validate_claim(
-                        self.surface,
-                        Some(session.policy_revision),
-                        &params,
-                    )
-                    .map_err(ClaimError::Backend)?;
+                    if let (Some(event_id), Some(revision)) =
+                        (&self.work_event, self.expected_input_revision)
+                    {
+                        desk_diagnose_core::assistant_policy::validate_personal_work_claim(
+                            &session, &params, revision, event_id,
+                        )
+                        .map_err(|_| ClaimError::Busy)?;
+                    } else {
+                        desk_diagnose_core::assistant_policy::validate_claim(
+                            self.surface,
+                            Some(session.policy_revision),
+                            &params,
+                        )
+                        .map_err(ClaimError::Backend)?;
+                    }
                     session.adopt_client_metadata(
                         self.client_conversation_id.as_deref(),
                         self.surface,
@@ -2008,7 +2054,10 @@ impl SessionSeam for SignalAgentSessionStore {
                         &params,
                     )
                     .map_err(ClaimError::Backend)?;
-                    if self.expected_input_revision.is_some() {
+                    if self.expected_input_revision.is_some()
+                        || (self.surface == AgentSessionSurface::AiAssistant
+                            && params.device_id.is_empty())
+                    {
                         return Err(ClaimError::Backend(internal(
                             "prepared input session is missing",
                         )));
@@ -2439,6 +2488,14 @@ impl SessionSeam for SignalAgentSessionStore {
         update
             .validate()
             .map_err(|error| internal(format!("invalid permission event: {error}")))?;
+        if !desk_diagnose_core::assistant_policy::permits_permission_request(
+            session,
+            &update.request,
+        ) {
+            return Err(internal(
+                "permission request is outside the conversation authority",
+            ));
+        }
         if update.event.run_id != session.conversation_id
             || update.event.event_seq != session.last_event_seq
             || update.event.input_revision != session.input_revision
@@ -2453,6 +2510,7 @@ impl SessionSeam for SignalAgentSessionStore {
         let txn = crate::db::begin_write(&self.db, crate::entity::agent_session::Entity)
             .await
             .map_err(|error| internal(format!("begin permission transaction: {error}")))?;
+        permission_resume::validate_permission_device_on(&txn, session, &update.request).await?;
         if !session.agent_role.is_main() {
             let fence =
                 desk_diagnose_core::action_turn_fence::AssistantTurnFence::from_session(session)?
@@ -3664,6 +3722,7 @@ mod tests {
         );
         message.data_envelope = Some(envelope);
         AppendUserFollowupParams {
+            target_refs: Vec::new(),
             client_timezone: "UTC".into(),
             temporary_conversation: None,
             event_id: event_id.into(),

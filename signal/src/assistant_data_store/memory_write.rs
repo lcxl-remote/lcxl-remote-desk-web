@@ -6,7 +6,13 @@ use crate::entity::agent_assistant_origin as origin;
 use desk_agent_protocol::ai_assistant::{memory::*, source::*};
 use desk_assistant_data_store::memory_write::{self as shared, MemoryWrite, MemoryWriteSource};
 use desk_diagnose_core::ai_assistant::seam::{AssistantDataCall, AssistantDataRead};
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, TransactionTrait};
+use desk_diagnose_core::{
+    ai_assistant::memory_access::{request_memory_target, usable_memory_scope},
+    session::PersistedAgentSession,
+};
+use sea_orm::{
+    ColumnTrait, EntityTrait, QueryFilter, Set, TransactionTrait, sea_query::OnConflict,
+};
 
 pub(crate) async fn write(
     db: &DatabaseConnection,
@@ -142,6 +148,16 @@ async fn write_on(
     }
     let state = super::runtime_on(db, &context.session.actor_id).await?;
     let draft = request.draft().ok_or(AssistantStoreError::Inaccessible)?;
+    let Some((target_device, audience)) =
+        desk_diagnose_core::future::boxed(|| resolve_device_on(db, context.session, &draft, now))
+            .await?
+    else {
+        return Ok(skipped("source_out_of_scope"));
+    };
+    let personal_root = context
+        .session
+        .has_admitted_personal_input()
+        .then_some(context.session.conversation_id.as_str());
     let mut refs = draft.source_refs.clone();
     if data.current_actor_input_seq > 0 {
         let input = origin::Entity::find()
@@ -213,17 +229,30 @@ async fn write_on(
                 else {
                     return Ok(skipped("source_unavailable"));
                 };
-                let Some(device) = super::memory::source_device_on(
-                    db,
-                    &context.session.actor_id,
-                    &metadata.primary.device_ref,
-                )
-                .await?
-                else {
-                    return Ok(skipped("source_unavailable"));
+                let device = if metadata.primary.device_ref.is_empty() {
+                    None
+                } else {
+                    let Some(device) = super::memory::source_device_on(
+                        db,
+                        &context.session.actor_id,
+                        &metadata.primary.device_ref,
+                    )
+                    .await?
+                    else {
+                        return Ok(skipped("source_unavailable"));
+                    };
+                    Some(device)
                 };
-                if draft.scope == MemoryWriteScope::CurrentDevice
-                    && device.device_ref != data.source_device_ref
+                if !desk_diagnose_core::future::boxed(|| {
+                    shared::retained_source_matches_device_on(
+                        db,
+                        &row,
+                        &metadata.primary,
+                        &target_device,
+                        personal_root,
+                    )
+                })
+                .await?
                 {
                     return Ok(skipped("source_out_of_scope"));
                 }
@@ -232,7 +261,7 @@ async fn write_on(
                     policy: metadata.primary_policy,
                     body: row.body.clone(),
                     known: metadata.known,
-                    device: Some(device),
+                    device,
                     role: SourceRefRole::Background,
                 });
                 retained.push(row);
@@ -252,18 +281,21 @@ async fn write_on(
         {
             return Ok(skipped("source_unavailable"));
         }
-        let Some(device) = super::memory::source_device_on(
-            db,
-            &context.session.actor_id,
-            &source.origin.device_ref,
-        )
-        .await?
-        else {
-            return Ok(skipped("source_unavailable"));
+        let device = if source.origin.device_ref.is_empty() {
+            None
+        } else {
+            let Some(device) = super::memory::source_device_on(
+                db,
+                &context.session.actor_id,
+                &source.origin.device_ref,
+            )
+            .await?
+            else {
+                return Ok(skipped("source_unavailable"));
+            };
+            Some(device)
         };
-        if draft.scope == MemoryWriteScope::CurrentDevice
-            && device.device_ref != data.source_device_ref
-        {
+        if !shared::source_matches_device(&source.origin, &target_device, personal_root) {
             return Ok(skipped("source_out_of_scope"));
         }
         sources.push(source.snapshot(device, data.current_actor_input_seq));
@@ -301,11 +333,11 @@ async fn write_on(
     fence
         .finish_on(super::conversation_search::now_ms()?)
         .await?;
-    shared::apply_on(
+    let result = shared::apply_on(
         db,
         MemoryWrite {
             actor: &context.session.actor_id,
-            device: &data.source_device_ref,
+            device: &target_device,
             instance: data.source_instance_id.as_deref(),
             producer_call: call,
             tool_call: &context.tool_call.id,
@@ -319,7 +351,92 @@ async fn write_on(
             now,
         },
     )
-    .await
+    .await?;
+    if result.outcome == MemoryWriteOutcome::Applied
+        && let Some(audience) = audience
+    {
+        let instance = data
+            .source_instance_id
+            .as_deref()
+            .ok_or(AssistantStoreError::Inaccessible)?;
+        desk_diagnose_core::future::boxed(|| {
+            ensure_device_binding_on(db, &target_device, instance, &audience, now)
+        })
+        .await?;
+    }
+    Ok(result)
+}
+
+async fn resolve_device_on(
+    db: &DatabaseTransaction,
+    session: &PersistedAgentSession,
+    draft: &MemoryDraft,
+    now: u64,
+) -> Result<Option<(String, Option<String>)>, AssistantStoreError> {
+    if draft.scope == MemoryWriteScope::Personal {
+        return Ok(Some((String::new(), None)));
+    }
+    let Some(scope) = usable_memory_scope(session, now) else {
+        return Ok(None);
+    };
+    if !session.device_id.is_empty() {
+        return Ok(draft
+            .target_ref
+            .as_deref()
+            .is_none_or(|reference| reference == session.device_id)
+            .then(|| (scope.current_device_ref.clone(), None)));
+    }
+    let Some(audience) = request_memory_target(
+        session.assistant_request_devices().unwrap_or_default(),
+        draft.target_ref.as_deref(),
+    ) else {
+        return Ok(None);
+    };
+    let instance = session
+        .assistant_data
+        .as_ref()
+        .and_then(|data| data.source_instance_id.as_deref())
+        .ok_or(AssistantStoreError::Inaccessible)?;
+    let reference = super::source_device_ref(instance, audience);
+    let eligible = super::current_memory::fact_devices_on(db, session, scope).await?;
+    Ok(eligible
+        .contains(&reference)
+        .then(|| (reference, Some(audience.to_owned()))))
+}
+
+async fn ensure_device_binding_on(
+    db: &DatabaseTransaction,
+    reference: &str,
+    instance: &str,
+    audience: &str,
+    now: u64,
+) -> Result<(), AssistantStoreError> {
+    use crate::entity::agent_assistant_device_binding as binding;
+    binding::Entity::insert(binding::ActiveModel {
+        binding_id: Set(reference.into()),
+        instance_id: Set(instance.into()),
+        audience: Set(audience.into()),
+        first_seen_at_ms: Set(signed(now)?),
+        last_seen_at_ms: Set(signed(now)?),
+        ..Default::default()
+    })
+    .on_conflict(
+        OnConflict::columns([binding::Column::InstanceId, binding::Column::Audience])
+            .do_nothing()
+            .to_owned(),
+    )
+    .exec_without_returning(db)
+    .await?;
+    let bound = binding::Entity::find()
+        .filter(binding::Column::BindingId.eq(reference))
+        .filter(binding::Column::InstanceId.eq(instance))
+        .filter(binding::Column::Audience.eq(audience))
+        .one(db)
+        .await?;
+    if bound.is_none() {
+        return Err(AssistantStoreError::Inaccessible);
+    }
+    Ok(())
 }
 
 fn skipped(reason: &str) -> MemoryWriteResult {

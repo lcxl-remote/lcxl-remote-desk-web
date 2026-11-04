@@ -184,6 +184,7 @@ fn time_calls(session: &PersistedAgentSession, from: u64, until: u64) -> Vec<Too
         scope_sha256: scope_sha256(session).unwrap(),
         history_scope: data.history_access_scope.clone(),
         memory_device_rule: None,
+        request_memory_device_refs: Vec::new(),
         destination: super::model_sources::destination("model"),
         authority_expires_at_unix_ms: None,
     };

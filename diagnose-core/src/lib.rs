@@ -109,6 +109,7 @@ pub mod reasoning_display;
 pub mod redaction;
 pub mod registry;
 pub mod replay;
+pub mod request_devices;
 pub mod result_model_ids;
 pub mod retry_backoff;
 pub mod schedule;

@@ -1,18 +1,6 @@
-//! Server-side derivation of the storage key that identifies an agentic
-//! conversation.
-//!
-//! The control end supplies a *client* conversation id (`DiagnoseRequestData::
-//! conversation_id`) purely as continuation intent. The server NEVER uses that
-//! value as a storage key directly: a client could otherwise pre-create or
-//! collide with another subject's conversation by guessing the id. Instead the
-//! server derives a **subject-namespaced** key by hashing the trusted subject
-//! (`actor` / `device`, both server-injected) together with the validated client
-//! id. Two different subjects supplying the same client id land on different
-//! keys, so cross-subject preemption is impossible at the source (the per-session
-//! `check_subject` guard remains as defence in depth).
-//!
-//! An absent / empty / malformed client id falls back to the per-request id, so
-//! such a request transparently starts a fresh single-question conversation.
+//! Server-side derivation of conversation storage keys. A client continuation
+//! intent is never used as a storage key directly. The key includes the trusted
+//! subject, and storage still verifies that subject before accessing the row.
 
 use sha2::{Digest, Sha256};
 
@@ -20,6 +8,36 @@ use sha2::{Digest, Sha256};
 /// rejected (and falls back to the request id) so a client cannot bloat storage
 /// keys with an unbounded string.
 pub const MAX_CONVERSATION_ID_LEN: usize = 128;
+
+/// The access context in which the authenticated actor owns the conversation.
+/// The host resolves this before admission. Device access is checked separately
+/// for each request and action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssistantConversationScope {
+    Personal,
+    Organization(i32),
+}
+
+/// Derive an assistant conversation key from the authenticated actor, access
+/// context and validated client continuation intent. Device selection is per request.
+pub fn derive_assistant_conversation_key(
+    actor_id: &str,
+    scope: AssistantConversationScope,
+    conversation_id: &str,
+) -> String {
+    let mut hasher = Sha256::new();
+    absorb_field(&mut hasher, b"assistant-conversation");
+    absorb_field(&mut hasher, actor_id.as_bytes());
+    match scope {
+        AssistantConversationScope::Personal => absorb_field(&mut hasher, b"personal"),
+        AssistantConversationScope::Organization(org_id) => {
+            absorb_field(&mut hasher, b"organization");
+            absorb_field(&mut hasher, &org_id.to_le_bytes());
+        }
+    }
+    absorb_field(&mut hasher, conversation_id.as_bytes());
+    finish_key(hasher)
+}
 
 /// Whether a (already trimmed) client conversation id is well-formed: non-empty,
 /// within [`MAX_CONVERSATION_ID_LEN`], and limited to `[A-Za-z0-9_-]`.
@@ -39,7 +57,7 @@ fn absorb_field(hasher: &mut Sha256, field: &[u8]) {
     hasher.update(field);
 }
 
-/// Derive the subject-namespaced storage key for a conversation.
+/// Derive a storage key for a device-bound conversation.
 ///
 /// `client_conversation_id` is the non-authoritative value from the request; it
 /// is trimmed and validated, and on failure the `fallback_request_id` is used in
@@ -61,7 +79,10 @@ pub fn derive_conversation_key(
     absorb_field(&mut hasher, actor_id.as_bytes());
     absorb_field(&mut hasher, device_id.as_bytes());
     absorb_field(&mut hasher, client.as_bytes());
+    finish_key(hasher)
+}
 
+fn finish_key(hasher: Sha256) -> String {
     let digest = hasher.finalize();
     let mut hex = String::with_capacity(digest.len() * 2);
     for byte in digest {
@@ -133,5 +154,31 @@ mod tests {
     #[test]
     fn surrounding_whitespace_is_trimmed_before_use() {
         assert_eq!(key("a", "d", Some("  cv-1  ")), key("a", "d", Some("cv-1")));
+    }
+
+    #[test]
+    fn assistant_keys_isolate_actors_and_access_contexts_from_device_conversations() {
+        use AssistantConversationScope::{Organization, Personal};
+
+        let personal = derive_assistant_conversation_key("7", Personal, "thread");
+        let organization = derive_assistant_conversation_key("7", Organization(1), "thread");
+        assert_eq!(
+            personal,
+            derive_assistant_conversation_key("7", Personal, "thread")
+        );
+        assert_ne!(
+            personal,
+            derive_assistant_conversation_key("7", Personal, "other")
+        );
+        assert_ne!(
+            personal,
+            derive_assistant_conversation_key("8", Personal, "thread")
+        );
+        assert_ne!(personal, organization);
+        assert_ne!(
+            organization,
+            derive_assistant_conversation_key("7", Organization(2), "thread")
+        );
+        assert_ne!(personal, key("7", "device", Some("thread")));
     }
 }

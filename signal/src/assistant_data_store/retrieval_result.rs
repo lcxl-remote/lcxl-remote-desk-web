@@ -187,21 +187,15 @@ async fn validate_sources_on<C: ConnectionTrait + crate::config::ConfigConnectio
     proof: &ReadProjectionProof,
     now: u64,
 ) -> Result<(), AssistantStoreError> {
-    let data = context
-        .session
-        .assistant_data
-        .as_ref()
-        .ok_or(AssistantStoreError::Inaccessible)?;
-    let deadline = super::model_sources::validate_on(
+    let deadline = super::model_sources::validate_session_sources_on(
         db,
-        &context.session.actor_id,
-        &data.source_device_ref,
+        context.session,
         &proof.usage,
         access,
-        data.history_access_scope.as_deref(),
         context.destination,
         policy,
         now,
+        None,
     )
     .await?;
     // The label must already contain every current content deadline. Narrowing

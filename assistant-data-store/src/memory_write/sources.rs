@@ -35,13 +35,17 @@ impl MemorySourceRows {
         Ok(())
     }
 
-    pub fn snapshot(&self, device: AssistantSourceDevice, input_seq: u64) -> MemoryWriteSource {
+    pub fn snapshot(
+        &self,
+        device: Option<AssistantSourceDevice>,
+        input_seq: u64,
+    ) -> MemoryWriteSource {
         MemoryWriteSource {
             body: self.history.content.clone(),
             origin: self.origin.clone(),
             policy: self.policy.clone(),
             known: self.known.clone(),
-            device: Some(device),
+            device,
             role: if self.origin.accepted_input_seq == input_seq as i64
                 && matches!(self.origin.kind.as_str(), "input" | "receipt")
             {

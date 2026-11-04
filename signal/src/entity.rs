@@ -67,6 +67,7 @@ pub use desk_assistant_data_store::entity::agent_memory_tombstone;
 pub use desk_assistant_data_store::entity::agent_memory_use;
 
 pub use desk_assistant_data_store::entity::agent_assistant_data_authorization;
+pub use desk_assistant_data_store::entity::agent_assistant_device_roster;
 pub use desk_assistant_data_store::entity::agent_assistant_model_input_item;
 pub use desk_assistant_data_store::entity::agent_assistant_model_output;
 pub use desk_assistant_data_store::entity::agent_assistant_read_projection;

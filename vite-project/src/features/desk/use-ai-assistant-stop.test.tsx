@@ -4,7 +4,7 @@ import type { AiAssistantSubAgentSummary } from '@/services/types';
 import { deskErrorCodeEnum } from '@/services/types';
 import { useAiAssistantChat } from './use-ai-assistant-chat';
 import { AssistantStopConfirmation } from './assistant-stop-confirmation';
-import { SIGNALING_TYPE_CODE_AI_ASSISTANT_SESSION_SELECTED } from './constants';
+import { SIGNALING_TYPE_CODE_AI_ASSISTANT_SESSION_SELECTED, SIGNALING_TYPE_CODE_ASK_AI_ASSISTANT } from './constants';
 import type { SignalingSubscriber } from './use-desk-signaling';
 
 vi.mock('react-i18next', () => import('@/test-utils/i18n-mock').then(m => m.reactI18nextMock()));
@@ -35,6 +35,48 @@ function mount(connected = true) {
 describe('durable owner stop', () => {
     beforeEach(() => localStorage.clear());
     afterEach(() => vi.unstubAllGlobals());
+
+    it('submits a personal request without opening a desktop session', () => {
+        const sendMessage = vi.fn().mockReturnValue('personal-request');
+        const { result } = renderHook(() => useAiAssistantChat({ deskId: '', connected: true,
+            conversationStorageScope: 'personal:7', subscribe: () => () => undefined, sendMessage }));
+        expect(sendMessage).not.toHaveBeenCalled();
+        act(() => { expect(result.current.start('Summarize this question')).toBe(true); });
+        expect(sendMessage).toHaveBeenCalledOnce();
+        expect(sendMessage).toHaveBeenCalledWith(SIGNALING_TYPE_CODE_ASK_AI_ASSISTANT, expect.objectContaining({
+            question: 'Summarize this question', conversation_id: expect.any(String),
+            selected_capability_ids: [], selected_attachment_ids: [], start_goal: false,
+        }), undefined, expect.any(String));
+        expect(JSON.parse(JSON.stringify(sendMessage.mock.calls[0][1]))).not.toHaveProperty('temporary_conversation');
+        expect(localStorage.getItem('ai-assistant-conversation:personal:7')).toBe(result.current.conversationId);
+    });
+
+    it('restores and stops a personal conversation without a connection selector', async () => {
+        const sendMessage = vi.fn();
+        let snapshot = root();
+        const fetch = vi.fn(async (url: string, init?: RequestInit) => {
+            if (url.endsWith('/stop')) {
+                expect(JSON.parse(init!.body as string)).toEqual({
+                    conversation: 'personal-intent', session: 'main-session',
+                    control: { client_request_id: expect.any(String), expected_input_revision: 1,
+                        expected_control_revision: 1, subagent_choice: null },
+                });
+                snapshot = { ...snapshot, seq: 11, active: false, mainStopped: true, controlRevision: 2 };
+                return ok({ input_revision: 1, control_revision: 2, stopped_subagents: [] });
+            }
+            expect(url).toBe('/api/my/ai-assistant-session?conversation=personal-intent');
+            return ok(snapshot);
+        });
+        vi.stubGlobal('fetch', fetch);
+        localStorage.setItem('ai-assistant-conversation:personal:7', 'personal-intent');
+        const { result } = renderHook(() => useAiAssistantChat({ deskId: '', connected: true,
+            conversationStorageScope: 'personal:7', subscribe: () => () => undefined, sendMessage }));
+        await waitFor(() => expect(result.current.canStop).toBe(true));
+        act(() => result.current.stop());
+        await waitFor(() => expect(result.current.mainStopped).toBe(true));
+        expect(result.current.messages[0].text).toBe('Keep this request');
+        expect(sendMessage).not.toHaveBeenCalled();
+    });
 
     it('submits one fenced control and retains the transcript after a committed stop', async () => {
         let snapshot = root();

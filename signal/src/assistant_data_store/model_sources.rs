@@ -73,6 +73,45 @@ pub(crate) async fn validate_on<C: ConnectionTrait + crate::config::ConfigConnec
             now,
             SourceContentUse::ReadBody,
             None,
+            None,
+        )
+    })
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn validate_memory_devices_on<
+    C: ConnectionTrait + crate::config::ConfigConnection,
+>(
+    db: &C,
+    actor: &str,
+    devices: &BTreeSet<String>,
+    usage: &AssistantDataReadUse,
+    access: &AssistantDataToolAccess,
+    destination: &DestinationIdentity,
+    platform: &AssistantDataPolicy,
+    now: u64,
+) -> Result<Option<u64>, AssistantStoreError> {
+    if !matches!(
+        usage.purpose,
+        SourceReadPurpose::ModelMemory | SourceReadPurpose::MemoryEvidence
+    ) {
+        return Err(AssistantStoreError::Inaccessible);
+    }
+    desk_diagnose_core::future::boxed(|| {
+        validate_usage_on(
+            db,
+            actor,
+            "",
+            usage,
+            access,
+            None,
+            destination,
+            platform,
+            now,
+            SourceContentUse::ReadBody,
+            None,
+            Some(devices),
         )
     })
     .await
@@ -91,6 +130,7 @@ async fn validate_usage_on<C: ConnectionTrait + crate::config::ConfigConnection>
     now: u64,
     content_use: SourceContentUse,
     control: Option<&super::memory_control::PendingControl>,
+    memory_devices: Option<&BTreeSet<String>>,
 ) -> Result<Option<u64>, AssistantStoreError> {
     usage.validate().map_err(AssistantStoreError::Invalid)?;
     access.validate().map_err(AssistantStoreError::Invalid)?;
@@ -142,6 +182,7 @@ async fn validate_usage_on<C: ConnectionTrait + crate::config::ConfigConnection>
                         reference,
                         now,
                         control,
+                        memory_devices,
                     )
                 })
                 .await?
@@ -398,7 +439,7 @@ pub(super) async fn memory_sources_on<C: ConnectionTrait + crate::config::Config
     reference: &CurrentMemoryUse,
     now: u64,
 ) -> Result<(Vec<evidence::Model>, Vec<HistoryDependency>, Option<u64>), AssistantStoreError> {
-    memory_sources_with_control_on(db, actor, current_device, reference, now, None).await
+    memory_sources_with_control_on(db, actor, current_device, reference, now, None, None).await
 }
 
 async fn memory_sources_with_control_on<C: ConnectionTrait + crate::config::ConfigConnection>(
@@ -408,6 +449,7 @@ async fn memory_sources_with_control_on<C: ConnectionTrait + crate::config::Conf
     reference: &CurrentMemoryUse,
     now: u64,
     control: Option<&super::memory_control::PendingControl>,
+    memory_devices: Option<&BTreeSet<String>>,
 ) -> Result<(Vec<evidence::Model>, Vec<HistoryDependency>, Option<u64>), AssistantStoreError> {
     let fact = memory::Entity::find()
         .filter(memory::Column::ActorId.eq(actor))
@@ -436,6 +478,11 @@ async fn memory_sources_with_control_on<C: ConnectionTrait + crate::config::Conf
     {
         return Err(AssistantStoreError::Inaccessible);
     }
+    if !fact.device_ref.is_empty()
+        && memory_devices.is_some_and(|devices| !devices.contains(&fact.device_ref))
+    {
+        return Err(AssistantStoreError::Inaccessible);
+    }
     if reference.purpose == MemoryUsePurpose::CurrentFact
         && (fact.status != "active"
             || reference.revision != unsigned(fact.revision)?
@@ -444,7 +491,9 @@ async fn memory_sources_with_control_on<C: ConnectionTrait + crate::config::Conf
             || fact
                 .valid_until_ms
                 .is_some_and(|until| until <= 0 || until as u64 <= now)
-            || (!fact.device_ref.is_empty() && fact.device_ref != current_device))
+            || (memory_devices.is_none()
+                && !fact.device_ref.is_empty()
+                && fact.device_ref != current_device))
     {
         return Err(AssistantStoreError::Inaccessible);
     }
@@ -633,9 +682,10 @@ async fn origin_on<C: ConnectionTrait + crate::config::ConfigConnection>(
     if !super::source_lifecycle::origin_readable_on(db, actor, &row).await?
         || unsigned(row.deletion_generation)? != source.origin_deletion_generation
         || source.expires_at_unix_ms.is_some_and(|until| until <= now)
-        || super::memory::source_device_on(db, actor, &row.device_ref)
-            .await?
-            .is_none()
+        || (!row.device_ref.is_empty()
+            && super::memory::source_device_on(db, actor, &row.device_ref)
+                .await?
+                .is_none())
     {
         return Err(AssistantStoreError::Inaccessible);
     }
@@ -725,9 +775,10 @@ async fn validate_history_on<C: ConnectionTrait + crate::config::ConfigConnectio
         || original.native_id != row.native_id
         || original.kind != row.kind
         || original.statement_timezone != row.statement_timezone
-        || super::memory::source_device_on(db, actor, &row.device_ref)
-            .await?
-            .is_none()
+        || (!row.device_ref.is_empty()
+            && super::memory::source_device_on(db, actor, &row.device_ref)
+                .await?
+                .is_none())
         || !allows_model_use(&policy, destination, now)
         || proof.actor_id != actor
         || proof.origin_id != row.origin_id
@@ -789,37 +840,52 @@ fn earlier(a: Option<u64>, b: Option<u64>) -> Option<u64> {
     }
 }
 
-/// Revalidate a previously accepted producer through its own control writes.
-/// This returns no source body and creates no read or external-send permission.
-/// The native control fence checks the complete owned batch before and after it.
+/// Recheck the original session's source scope and live device access. The
+/// native control fence can also supply its own pre-control fact versions.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn validate_before_control_on<
+pub(crate) async fn validate_session_sources_on<
     C: ConnectionTrait + crate::config::ConfigConnection,
 >(
     db: &C,
-    actor: &str,
-    current_device: &str,
+    session: &desk_diagnose_core::session::PersistedAgentSession,
     usage: &AssistantDataReadUse,
     access: &AssistantDataToolAccess,
-    scope: Option<&HistoryAccessScope>,
     destination: &DestinationIdentity,
     platform: &AssistantDataPolicy,
     now: u64,
-    control: &super::memory_control::PendingControl,
+    control: Option<&super::memory_control::PendingControl>,
 ) -> Result<Option<u64>, AssistantStoreError> {
+    let data = session
+        .assistant_data
+        .as_ref()
+        .ok_or(AssistantStoreError::Inaccessible)?;
+    let devices = if session.has_admitted_personal_input() && !usage.memories.is_empty() {
+        let scope =
+            desk_diagnose_core::ai_assistant::memory_access::usable_memory_scope(session, now)
+                .ok_or(AssistantStoreError::Inaccessible)?;
+        Some(
+            desk_diagnose_core::future::boxed(|| {
+                super::current_memory::fact_devices_on(db, session, scope)
+            })
+            .await?,
+        )
+    } else {
+        None
+    };
     desk_diagnose_core::future::boxed(|| {
         validate_usage_on(
             db,
-            actor,
-            current_device,
+            &session.actor_id,
+            &data.source_device_ref,
             usage,
             access,
-            scope,
+            data.history_access_scope.as_deref(),
             destination,
             platform,
             now,
             SourceContentUse::ReadBody,
-            Some(control),
+            control,
+            devices.as_ref(),
         )
     })
     .await

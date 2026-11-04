@@ -342,6 +342,12 @@ async fn create_latest_schema<C: ConnectionTrait + crate::config::ConfigConnecti
     create_entity(
         db,
         &schema,
+        crate::entity::agent_assistant_device_roster::Entity,
+    )
+    .await?;
+    create_entity(
+        db,
+        &schema,
         crate::entity::agent_assistant_retrieval_query::Entity,
     )
     .await?;
@@ -731,6 +737,7 @@ async fn validate_latest_schema<C: ConnectionTrait + crate::config::ConfigConnec
     check_entity!(agent_assistant_citation);
     check_entity!(agent_assistant_quota);
     check_entity!(agent_assistant_runtime);
+    check_entity!(agent_assistant_device_roster);
     check_entity!(agent_assistant_retrieval_query);
     check_entity!(agent_assistant_read_projection);
     check_entity!(agent_assistant_data_authorization);
@@ -1171,6 +1178,7 @@ pub(crate) async fn ensure_lifecycle_tables(db: &DatabaseConnection) {
     use crate::entity::*;
     let schema = Schema::new(db.get_database_backend());
     for mut statement in [
+        schema.create_table_from_entity(agent_assistant_device_roster::Entity),
         schema.create_table_from_entity(agent_goal_run::Entity),
         schema.create_table_from_entity(agent_goal_open_request::Entity),
         schema.create_table_from_entity(agent_approval_delegation::Entity),

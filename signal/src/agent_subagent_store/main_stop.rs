@@ -34,6 +34,12 @@ impl SubAgentStore {
             parent_on(&txn, root, actor, device).await
         })
         .await?;
+        if device.is_empty()
+            && (!parent.has_admitted_personal_input()
+                || actor != crate::control_authorizer::SINGLE_ACCOUNT_USER_ID.to_string())
+        {
+            return Err(invalid());
+        }
         let key = format!(
             "{:x}",
             Sha256::digest(

@@ -31,7 +31,10 @@ pub async fn head_on<C: ConnectionTrait>(
         || (!head.device_ref.is_empty()
             && (!context.requested_devices.contains(&head.device_ref)
                 || (context.scope.device_rule == AssistantDeviceScope::CurrentDevice
-                    && head.device_ref != context.current_device_ref)))
+                    && !context
+                        .scope
+                        .current_device_refs()
+                        .contains(&head.device_ref))))
     {
         return Err(AssistantStoreError::Inaccessible);
     }

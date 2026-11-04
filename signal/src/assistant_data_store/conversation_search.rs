@@ -367,6 +367,9 @@ pub(super) async fn owner_devices_on(
     {
         return Err(AssistantStoreError::Inaccessible);
     }
+    if fence.context.session.has_admitted_personal_input() {
+        return Ok(BTreeSet::new());
+    }
     let maximum = fence
         .context
         .session

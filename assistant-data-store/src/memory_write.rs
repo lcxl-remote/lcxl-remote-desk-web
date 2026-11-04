@@ -28,6 +28,47 @@ use sha2::{Digest, Sha256};
 pub mod receipts;
 pub mod sources;
 
+pub fn source_matches_device(
+    origin: &origin::Model,
+    target: &str,
+    personal_root: Option<&str>,
+) -> bool {
+    target.is_empty()
+        || origin.device_ref == target
+        || (origin.device_ref.is_empty()
+            && origin.kind == "input"
+            && personal_root == Some(origin.conversation_id.as_str()))
+}
+
+/// A retained fact can be scoped to a device while its original owner message
+/// came from a personal conversation. Keep that message's provenance intact.
+pub async fn retained_source_matches_device_on<C: ConnectionTrait>(
+    db: &C,
+    row: &source::Model,
+    origin: &origin::Model,
+    target: &str,
+    personal_root: Option<&str>,
+) -> Result<bool, AssistantStoreError> {
+    if personal_root.is_none() || target.is_empty() {
+        return Ok(source_matches_device(origin, target, personal_root));
+    }
+    let fact = memory::Entity::find()
+        .filter(memory::Column::ActorId.eq(&row.actor_id))
+        .filter(memory::Column::MemoryId.eq(&row.memory_id))
+        .filter(memory::Column::Status.ne("forgotten"))
+        .one(db)
+        .await?;
+    Ok(fact.is_some_and(|fact| {
+        if fact.device_ref.is_empty() {
+            fact.scope_key == "personal" && source_matches_device(origin, target, personal_root)
+        } else {
+            fact.device_ref == target
+                && fact.scope_key == format!("device:{target}")
+                && (origin.device_ref.is_empty() || origin.device_ref == target)
+        }
+    }))
+}
+
 /// Native rows and policy already admitted by the host, never model-provided evidence.
 pub struct MemoryWriteSource {
     pub origin: origin::Model,

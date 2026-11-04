@@ -3,6 +3,7 @@
 //! A stored snapshot establishes content identity, never permission to use it.
 
 pub mod citations;
+pub mod device_roster;
 pub mod entity;
 pub mod evidence;
 pub mod history_native;

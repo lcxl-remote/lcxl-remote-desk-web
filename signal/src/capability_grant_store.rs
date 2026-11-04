@@ -374,11 +374,52 @@ impl SignalCapabilityGrantStore {
         Ok(())
     }
 
+    #[cfg(test)]
     pub async fn revoke(
         &self,
         grant_id: &str,
         actor_id: &str,
         target_device_id: &str,
+        now_unix_ms: u64,
+        reason: &str,
+    ) -> Result<CapabilityGrant, DbErr> {
+        self.revoke_inner(
+            grant_id,
+            actor_id,
+            target_device_id,
+            None,
+            now_unix_ms,
+            reason,
+        )
+        .await
+    }
+
+    pub async fn revoke_for_run(
+        &self,
+        grant_id: &str,
+        actor_id: &str,
+        target_device_id: &str,
+        run_id: &str,
+        now_unix_ms: u64,
+        reason: &str,
+    ) -> Result<CapabilityGrant, DbErr> {
+        self.revoke_inner(
+            grant_id,
+            actor_id,
+            target_device_id,
+            Some(run_id),
+            now_unix_ms,
+            reason,
+        )
+        .await
+    }
+
+    async fn revoke_inner(
+        &self,
+        grant_id: &str,
+        actor_id: &str,
+        target_device_id: &str,
+        run_id: Option<&str>,
         now_unix_ms: u64,
         reason: &str,
     ) -> Result<CapabilityGrant, DbErr> {
@@ -394,7 +435,10 @@ impl SignalCapabilityGrantStore {
             .await?
             .ok_or_else(|| DbErr::Custom("capability grant was not found".into()))?;
         let mut grant = decode_grant(&row)?;
-        if grant.actor_id != actor_id || grant.target_device_id != target_device_id {
+        if grant.actor_id != actor_id
+            || grant.target_device_id != target_device_id
+            || run_id.is_some_and(|run_id| grant.run_id != run_id)
+        {
             txn.rollback().await.ok();
             return Err(DbErr::Custom("capability grant subject mismatch".into()));
         }
@@ -668,6 +712,15 @@ impl SignalCapabilityGrantStore {
         &self,
         request: PrepareCapabilityCall<'_>,
     ) -> Result<DispatchIntentResult, DbErr> {
+        desk_diagnose_core::future::boxed(|| self.record_dispatch_intent_for_target(request, None))
+            .await
+    }
+
+    pub(crate) async fn record_dispatch_intent_for_target(
+        &self,
+        request: PrepareCapabilityCall<'_>,
+        selected: Option<&desk_diagnose_core::action_turn_fence::AssistantTurnFence>,
+    ) -> Result<DispatchIntentResult, DbErr> {
         validate_prepare(&request)?;
         let txn = desk_diagnose_core::future::boxed(|| async {
             crate::db::begin_write(&self.db, crate::entity::agent_session::Entity).await
@@ -741,10 +794,11 @@ impl SignalCapabilityGrantStore {
             PersistedAgentSession::decode_json(&session_row.state_json).map_err(|error| {
                 DbErr::Custom(format!("invalid authoritative agent session: {error}"))
             })?;
+        let session_device_id = selected.map_or(request.call.target_device_id, |_| "");
         if session.actor_id != request.call.actor_id
-            || session.device_id != request.call.target_device_id
+            || session.device_id != session_device_id
             || session_row.actor_id != request.call.actor_id
-            || session_row.device_id != request.call.target_device_id
+            || session_row.device_id != session_device_id
         {
             desk_diagnose_core::future::boxed(|| async { txn.rollback().await })
                 .await
@@ -752,6 +806,12 @@ impl SignalCapabilityGrantStore {
             return Err(DbErr::Custom(
                 "capability call no longer belongs to the authoritative session subject".into(),
             ));
+        }
+        if let Some(held) = selected {
+            desk_diagnose_core::future::boxed(|| {
+                validate_selected_dispatch(&txn, &request, &session_row, &session, held)
+            })
+            .await?;
         }
         let prepared_payload = decode_prepared_payload(&work)?;
         if session.input_revision != prepared_payload.input_revision
@@ -1196,6 +1256,18 @@ impl SignalCapabilityGrantStore {
         dispatch_id: &str,
         request: PrepareCapabilityCall<'_>,
     ) -> Result<CapabilityGrant, DbErr> {
+        desk_diagnose_core::future::boxed(|| {
+            self.validate_claimed_dispatch_for_target(dispatch_id, request, None)
+        })
+        .await
+    }
+
+    pub(crate) async fn validate_claimed_dispatch_for_target(
+        &self,
+        dispatch_id: &str,
+        request: PrepareCapabilityCall<'_>,
+        selected: Option<&desk_diagnose_core::action_turn_fence::AssistantTurnFence>,
+    ) -> Result<CapabilityGrant, DbErr> {
         validate_prepare(&request)?;
         // The scheduled-session fence below writes even though this check
         // ultimately rolls back. Reserve the WAL writer before reading the
@@ -1247,13 +1319,33 @@ impl SignalCapabilityGrantStore {
                 .ok_or_else(|| DbErr::Custom("claimed dispatch session is missing".into()))?;
             let session = PersistedAgentSession::decode_json(&session_row.state_json)
                 .map_err(|error| DbErr::Custom(format!("invalid claimed session: {error}")))?;
+            let session_device_id = selected.map_or(request.call.target_device_id, |_| "");
             if session.actor_id != request.call.actor_id
-                || session.device_id != request.call.target_device_id
+                || session.device_id != session_device_id
                 || session.input_revision != request.input_revision
                 || session.latest_input_seq != request.input_watermark
             {
                 return Err(DbErr::Custom(
                     "claimed dispatch input or subject changed".into(),
+                ));
+            }
+            if let Some(held) = selected {
+                desk_diagnose_core::future::boxed(|| {
+                    validate_selected_dispatch(&txn, &request, &session_row, &session, held)
+                })
+                .await?;
+            }
+            if request.call.target_device_id.is_empty()
+                && (!session.has_admitted_personal_input()
+                    || session.current_turn_id.as_deref() != Some(request.turn_id)
+                    || !session.turn_state.is_active()
+                    || session_row.lease_token != session.lease_token as i64
+                    || session_row
+                        .lease_deadline
+                        .is_none_or(|expiry| expiry <= chrono::Utc::now()))
+            {
+                return Err(DbErr::Custom(
+                    "targetless dispatch lease is unavailable".into(),
                 ));
             }
             let row = agent_capability_grant::Entity::find()
@@ -1656,6 +1748,61 @@ impl SignalCapabilityGrantStore {
         txn.commit().await?;
         Ok(recovered)
     }
+}
+
+async fn validate_selected_dispatch(
+    txn: &crate::config::connection::DatabaseTransaction,
+    request: &PrepareCapabilityCall<'_>,
+    row: &agent_session::Model,
+    session: &PersistedAgentSession,
+    held: &desk_diagnose_core::action_turn_fence::AssistantTurnFence,
+) -> Result<(), DbErr> {
+    use desk_agent_protocol::capability_grant::CapabilityRiskTier;
+    use desk_diagnose_core::action_turn_fence::AssistantTurnFence;
+
+    let unavailable = || DbErr::Custom("selected device authority changed".into());
+    let supported = match request.call.tool_name {
+        desk_diagnose_core::request_devices::SYSTEM_INFO_TOOL => request.call.risk_tier == CapabilityRiskTier::R0,
+        desk_diagnose_core::command_confirmation::COMMAND_TOOL => {
+            request.call.risk_tier == CapabilityRiskTier::R3
+                && session.trigger_origin == desk_diagnose_core::session::TriggerOrigin::PermissionDecision
+                && desk_diagnose_core::command_confirmation::CommandConfirmation::approved_request_for_call(
+                    session, request.call.target_device_id, request.canonical_input_json,
+                ).is_ok()
+        }
+        _ => false,
+    };
+    if !session.has_admitted_personal_input()
+        || !supported
+        || request.turn_id != held.turn_id
+        || request.input_revision != held.input_revision
+        || row.actor_id != held.actor_id
+        || !row.device_id.is_empty()
+        || row.lease_token != held.lease_token as i64
+        || row.lease_deadline.is_none_or(|expiry| expiry <= Utc::now())
+        || AssistantTurnFence::for_device(session, request.call.target_device_id)
+            .map_err(|_| unavailable())?
+            .as_ref()
+            != Some(held)
+    {
+        return Err(unavailable());
+    }
+    let references = std::slice::from_ref(&held.device_id);
+    if !desk_assistant_data_store::device_roster::permits_current_target(
+        txn,
+        session,
+        &held.device_id,
+    )
+    .await
+    .map_err(|_| unavailable())?
+        || crate::agent_run_event_store::eligible_request_device_ids(txn, references)
+            .await
+            .map_err(|_| unavailable())?
+            .is_empty()
+    {
+        return Err(unavailable());
+    }
+    Ok(())
 }
 
 async fn release_before_intent<C: sea_orm::ConnectionTrait + crate::config::ConfigConnection>(

@@ -210,10 +210,10 @@ impl SignalCapabilityGrantStore {
                 || task.tool_call_id != pending.tool_call_id
                 || work.conversation_id != session.conversation_id
                 || work.actor_id != session.actor_id
-                || work.target_device_id != session.device_id
+                || !session.admits_assistant_device(&work.target_device_id)
                 || origin.turn_fence.conversation_id != session.conversation_id
                 || origin.turn_fence.actor_id != session.actor_id
-                || origin.turn_fence.device_id != session.device_id
+                || origin.turn_fence.device_id != work.target_device_id
                 || origin.turn_fence.input_revision != session.input_revision
                 || origin.tool_call_id != task.tool_call_id
                 || origin.tool_name != desk_diagnose_core::command_confirmation::COMMAND_TOOL

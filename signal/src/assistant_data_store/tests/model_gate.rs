@@ -182,6 +182,7 @@ pub(super) async fn fixture_with_model(
         actor_id: session.actor_id.clone(),
         conversation_id: session.conversation_id.clone(),
         source_device_ref: data.source_device_ref.clone(),
+        request_memory_device_refs: data.request_memory_devices().to_vec(),
         session_version: session.version,
         lease_token: session.lease_token,
         input_revision: session.input_revision,

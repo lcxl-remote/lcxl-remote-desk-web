@@ -36,8 +36,8 @@ pub struct CommandPolicyContext {
     pub exec_pty_elevation: bool,
 }
 
-#[cfg(test)]
-pub(crate) fn test_policy() -> CommandPolicyContext {
+#[cfg(any(test, feature = "test-support"))]
+pub fn test_policy() -> CommandPolicyContext {
     CommandPolicyContext {
         actor_id: "1".into(),
         target_device_id: "device-1".into(),
@@ -96,6 +96,15 @@ mod tests {
         assert!(policy.revalidate(&confirmation, &canonical, 1).is_err());
         // Non-interactive commands never need the PTY capability.
         assert!(policy.prepare(&input("df -h"), 1).is_ok());
+    }
+
+    #[test]
+    fn command_target_separates_the_connection_from_the_worker_incarnation() {
+        let mut policy = test_policy();
+        policy.target_session_id = "device-connection:desktop:worker".into();
+        let sealed = policy.prepare(&input("df -h"), 1).unwrap();
+        assert_eq!(sealed.target_connection_id(), "device-connection");
+        assert_eq!(sealed.target_session_id, "device-connection:desktop:worker");
     }
 
     #[test]
@@ -413,14 +422,7 @@ pub fn interactive_approval(
                         &request.request_id,
                         &confirmation.canonical_input_digest_sha256,
                     ),
-                    target_connection_id: confirmation
-                        .target_session_id
-                        .rsplit_once(':')
-                        .map_or(
-                            confirmation.target_session_id.as_str(),
-                            |(connection, _)| connection,
-                        )
-                        .to_owned(),
+                    target_connection_id: confirmation.target_connection_id().to_owned(),
                 })
         })
         .next();
@@ -434,6 +436,16 @@ pub fn interactive_approval(
 }
 
 impl CommandConfirmation {
+    pub fn target_connection_id(&self) -> &str {
+        // Signaling connection IDs are UUIDs. Worker incarnation IDs can
+        // themselves contain separators.
+        self.target_session_id
+            .split_once(':')
+            .map_or(self.target_session_id.as_str(), |(connection, _)| {
+                connection
+            })
+    }
+
     pub fn is_interactive(&self) -> bool {
         self.plan.io_mode.is_pty()
     }
@@ -446,9 +458,13 @@ impl CommandConfirmation {
     /// the permission request that approved it.
     pub fn approved_request_for_call<'a>(
         session: &'a crate::session::PersistedAgentSession,
+        target_device_id: &str,
         canonical: &str,
     ) -> Result<(&'a str, &'a Self), AgentError> {
         use crate::dynamic_run::PermissionRequestState;
+        if !session.admits_assistant_device(target_device_id) {
+            return Err(denied("command target is outside the admitted request"));
+        }
         let digest = format!("{:x}", Sha256::digest(canonical.as_bytes()));
         session
             .permission_requests
@@ -479,7 +495,7 @@ impl CommandConfirmation {
             })
             .find(|(_, confirmation)| {
                 confirmation.actor_id == session.actor_id
-                    && confirmation.target_device_id == session.device_id
+                    && confirmation.target_device_id == target_device_id
                     && confirmation.input_revision == session.input_revision
                     && confirmation.policy_revision == session.policy_revision
                     && confirmation.validate(canonical).is_ok()
@@ -489,52 +505,10 @@ impl CommandConfirmation {
 
     /// Execution id for this approved call: the permission-derived id for an
     /// interactive command, `None` otherwise.
-    pub fn interactive_exec_request_id_for_call(
-        session: &crate::session::PersistedAgentSession,
-        canonical: &str,
-    ) -> Result<Option<String>, AgentError> {
-        let (request_id, confirmation) = Self::approved_request_for_call(session, canonical)?;
-        Ok(confirmation.is_interactive().then(|| {
-            interactive_exec_request_id(
-                &session.conversation_id,
-                request_id,
-                &confirmation.canonical_input_digest_sha256,
-            )
-        }))
-    }
-
-    pub fn approved_for_call<'a>(
-        session: &'a crate::session::PersistedAgentSession,
-        canonical: &str,
-    ) -> Result<&'a Self, AgentError> {
-        use crate::dynamic_run::PermissionRequestState;
-        let digest = format!("{:x}", Sha256::digest(canonical.as_bytes()));
-        session
-            .permission_requests
-            .iter()
-            .rev()
-            .filter(|request| {
-                request.input_revision == session.input_revision
-                    && matches!(
-                        request.state,
-                        PermissionRequestState::Approved
-                            | PermissionRequestState::PartiallyApproved
-                    )
-            })
-            .flat_map(|request| &request.items)
-            .filter(|item| {
-                item.tool_name == COMMAND_TOOL
-                    && item.canonical_input_digest_sha256.as_deref() == Some(digest.as_str())
-            })
-            .filter_map(|item| item.command_confirmation.as_ref())
-            .find(|confirmation| {
-                confirmation.actor_id == session.actor_id
-                    && confirmation.target_device_id == session.device_id
-                    && confirmation.input_revision == session.input_revision
-                    && confirmation.policy_revision == session.policy_revision
-                    && confirmation.validate(canonical).is_ok()
-            })
-            .ok_or_else(|| denied("command has no approved exact plan; request permission first"))
+    pub fn interactive_request_id(&self, run_id: &str, permission_id: &str) -> Option<String> {
+        self.is_interactive().then(|| {
+            interactive_exec_request_id(run_id, permission_id, &self.canonical_input_digest_sha256)
+        })
     }
 
     pub fn validate(&self, canonical: &str) -> Result<(), AgentError> {

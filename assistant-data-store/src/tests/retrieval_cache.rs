@@ -54,6 +54,7 @@ fn fixture(logical: &str, captured: u64) -> FrozenRetrievalQuery {
         )
         .unwrap(),
         memory_device_rule: Some(AssistantDeviceScope::AllMyDevices),
+        request_memory_device_refs: Vec::new(),
         destination: super::destination("model"),
         authority_expires_at_unix_ms: None,
     };

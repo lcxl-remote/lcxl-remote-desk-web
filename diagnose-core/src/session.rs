@@ -21,7 +21,7 @@ mod executions;
 pub mod management;
 pub use executions::{BackgroundExecution, UnknownExecution};
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use desk_agent_protocol::AgentScope;
 use serde::{Deserialize, Serialize};
@@ -590,6 +590,10 @@ pub struct PersistedAgentSession {
     // ---- Persistent security subject (validated each follow-up; never rebinds) ----
     pub actor_id: String,
     pub device_id: String,
+    /// Device references admitted with the current assistant input. These are
+    /// a ceiling on device selection, independent of the turn's policy scope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    assistant_request_targets: Option<Box<AssistantRequestTargets>>,
     /// Authorization anchor. A change is detected at turn boundaries (recompute)
     /// and mid-turn (narrow-only intersection); see [`Self::begin_turn`].
     pub policy_revision: i64,
@@ -723,6 +727,27 @@ pub enum SubjectMismatch {
     PersonalContext,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AssistantRequestTargets {
+    input_revision: u64,
+    device_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    member_generations: BTreeMap<String, u64>,
+}
+
+impl AssistantRequestTargets {
+    fn valid_membership(&self) -> bool {
+        self.member_generations.is_empty()
+            || (self.member_generations.len() == self.device_ids.len()
+                && self.device_ids.iter().all(|id| {
+                    self.member_generations
+                        .get(id)
+                        .is_some_and(|revision| *revision > 0 && *revision <= i64::MAX as u64)
+                }))
+    }
+}
+
 impl PersistedAgentSession {
     /// Own a complete rollback snapshot without copying it through the caller's frame.
     #[inline(never)]
@@ -826,6 +851,15 @@ impl PersistedAgentSession {
         // Decode the typed session directly from JSON. Deserializing the owned
         // Value adds large nested visitor frames to approval/execution polls.
         let mut session: Box<Self> = serde_json::from_str(input)?;
+        if session
+            .assistant_request_targets
+            .as_ref()
+            .is_some_and(|targets| !targets.valid_membership())
+        {
+            return Err(SessionDecodeError::InvalidDynamicRun(
+                "invalid assistant device membership snapshot".into(),
+            ));
+        }
         if session.surface == AgentSessionSurface::AiAssistant {
             if version < u64::from(CONVERSATION_SCHEMA_VERSION) {
                 return Err(SessionDecodeError::UnsupportedVersion(version));
@@ -843,6 +877,8 @@ impl PersistedAgentSession {
         if let Some(data) = &session.assistant_data {
             if session.surface != AgentSessionSurface::AiAssistant
                 || session.agent_role.binding().is_some()
+                || data.source_device_ref.is_empty() != session.device_id.is_empty()
+                || (data.source_device_ref.is_empty() && !session.has_admitted_personal_input())
                 || (data.instructions.accepted_input_seq == 0
                     && !session.conversation_id.starts_with("schedule-run-"))
                 || (data.current_actor_input_seq == 0
@@ -1262,6 +1298,7 @@ impl PersistedAgentSession {
             pending_visual_verification: None,
             actor_id,
             device_id,
+            assistant_request_targets: None,
             policy_revision,
             turn_start_scope: clone_initial_scope(&scope),
             scope_snapshot: scope,
@@ -1369,6 +1406,120 @@ impl PersistedAgentSession {
             .map_or(self.conversation_id.as_str(), |binding| {
                 binding.root_conversation_id.as_str()
             })
+    }
+
+    /// Freeze targets at native assistant input admission, before committing
+    /// the new input revision. Existing bindings for that revision are immutable.
+    pub fn bind_assistant_request_targets(
+        &mut self,
+        device_ids: Vec<String>,
+    ) -> Result<(), &'static str> {
+        self.bind_request_targets(device_ids, BTreeMap::new())
+    }
+
+    pub fn bind_personal_assistant_request_targets(
+        &mut self,
+        targets: &[crate::dynamic_run::AssistantInputTarget],
+    ) -> Result<(), &'static str> {
+        if !self.device_id.is_empty() {
+            return Err("personal assistant targets require an account-scoped conversation");
+        }
+        self.bind_request_targets(
+            targets
+                .iter()
+                .map(|target| target.device_id.clone())
+                .collect(),
+            targets
+                .iter()
+                .filter_map(|target| Some((target.device_id.clone(), target.member_generation?)))
+                .collect(),
+        )
+    }
+
+    fn bind_request_targets(
+        &mut self,
+        device_ids: Vec<String>,
+        member_generations: BTreeMap<String, u64>,
+    ) -> Result<(), &'static str> {
+        if self.surface != AgentSessionSurface::AiAssistant || self.input_revision == 0 {
+            return Err("device targets require an admitted assistant input");
+        }
+        let targets = AssistantRequestTargets {
+            input_revision: self.input_revision,
+            device_ids,
+            member_generations,
+        };
+        desk_agent_protocol::ai_assistant::validate_target_refs(
+            targets.device_ids.iter().map(String::as_str),
+        )?;
+        if !targets.valid_membership() {
+            return Err("invalid assistant device membership snapshot");
+        }
+        if let Some(current) = &self.assistant_request_targets
+            && current.input_revision >= targets.input_revision
+        {
+            return if **current == targets {
+                Ok(())
+            } else {
+                Err("assistant request device targets already frozen")
+            };
+        }
+        self.assistant_request_targets = Some(Box::new(targets));
+        Ok(())
+    }
+
+    /// Native input admission still carries at most one selected device.
+    pub fn bind_native_assistant_input_target(&mut self) -> Result<(), &'static str> {
+        let targets = if self.device_id.is_empty() {
+            Vec::new()
+        } else {
+            vec![self.device_id.clone()]
+        };
+        self.bind_assistant_request_targets(targets)
+    }
+
+    /// A personal input retains the account subject even when it selects devices.
+    pub fn has_admitted_personal_input(&self) -> bool {
+        self.surface == AgentSessionSurface::AiAssistant
+            && self.device_id.is_empty()
+            && self.input_revision > 0
+            && self.assistant_request_devices().is_some()
+    }
+
+    pub fn has_admitted_targetless_input(&self) -> bool {
+        self.has_admitted_personal_input()
+            && self
+                .assistant_request_devices()
+                .is_some_and(<[_]>::is_empty)
+    }
+
+    pub fn assistant_request_devices(&self) -> Option<&[String]> {
+        self.assistant_request_targets
+            .as_ref()
+            .filter(|targets| targets.input_revision == self.input_revision)
+            .map(|targets| targets.device_ids.as_slice())
+    }
+
+    pub fn assistant_request_device_generation(&self, device_id: &str) -> Option<u64> {
+        self.assistant_request_targets
+            .as_ref()
+            .filter(|targets| targets.input_revision == self.input_revision)?
+            .member_generations
+            .get(device_id)
+            .copied()
+    }
+
+    /// Check the admitted target ceiling. Native device-bound entry points
+    /// without independent target selection still use their fixed binding.
+    pub fn admits_assistant_device(&self, device_id: &str) -> bool {
+        !device_id.is_empty()
+            && self.assistant_request_targets.as_ref().map_or_else(
+                || self.device_id == device_id,
+                |targets| {
+                    targets.input_revision == self.input_revision
+                        && targets.device_ids.iter().any(|target| target == device_id)
+                },
+            )
     }
 
     pub fn bind_delegated_owner_requirement(

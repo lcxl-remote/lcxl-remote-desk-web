@@ -32,7 +32,7 @@ export function AssistantHistory({ deskId, deviceId, disabled, onSelect, onDelet
     const [cleanupPending, setCleanupPending] = useState(false);
     useEffect(() => {
         setBackupSummary('unknown');
-        if (!deleting?.sessionId) return;
+        if (!deskId || !deleting?.sessionId) return;
         const abort = new AbortController();
         void manageDeviceFileRecovery({ connection: deskId, device_id: deviceId,
             request: { command: { operation: 'query', conversation_id: deleting.sessionId } } },
@@ -50,7 +50,8 @@ export function AssistantHistory({ deskId, deviceId, disabled, onSelect, onDelet
         setError(false);
         const refresh = async () => {
             try {
-                const response = await fetch(`/api/my/ai-assistant-sessions?connection=${encodeURIComponent(deskId)}&limit=100`, {
+                const target = deskId ? `connection=${encodeURIComponent(deskId)}&` : '';
+                const response = await fetch(`/api/my/ai-assistant-sessions?${target}limit=100`, {
                     credentials: 'include', headers: { Accept: 'application/json' }, signal: abort.signal,
                 });
                 const body = response.ok ? await response.json() : null;
@@ -84,7 +85,7 @@ export function AssistantHistory({ deskId, deviceId, disabled, onSelect, onDelet
                     <MessageSquarePlus className="h-4 w-4" aria-hidden="true" />
                     {t('pages.aiAssistant.newConversation')}
                 </Button>}
-                {onNew && <Button type="button" variant="outline" className="w-full justify-start gap-2" disabled={disabled}
+                {onNew && deskId && <Button type="button" variant="outline" className="w-full justify-start gap-2" disabled={disabled}
                     onClick={() => { onNew(true); setOpen(false); }}>
                     {t('pages.aiAssistant.temporary.new')}
                 </Button>}
@@ -110,16 +111,16 @@ export function AssistantHistory({ deskId, deviceId, disabled, onSelect, onDelet
                             aria-label={t('pages.aiAssistant.history.delete')}
                             onClick={() => { setDeleting(session); setDeleteError(false); }}><Trash2 className="size-4" /></Button>
                     </div>)}
-                    <AssistantBackupCleanup />
+                    {deskId && <AssistantBackupCleanup />}
                 </div>
             </SheetContent>
         </Sheet>
         <Dialog open={!!deleting} onOpenChange={value => { if (!value && !busy) setDeleting(null); }}>
             <DialogContent>
                 <DialogHeader><DialogTitle>{t('pages.aiAssistant.history.deleteTitle')}</DialogTitle>
-                    <DialogDescription>{t('pages.aiAssistant.history.deleteHint')}</DialogDescription></DialogHeader>
+                    <DialogDescription>{t(deskId ? 'pages.aiAssistant.history.deleteHint' : 'pages.aiAssistant.history.personalDeleteHint')}</DialogDescription></DialogHeader>
                 <p className="break-words text-sm">{deleting?.title || t('pages.aiAssistant.history.untitled')}</p>
-                <p className="text-sm text-amber-700 dark:text-amber-300">{t(`pages.fileRecovery.deleteBackup.${backupSummary}`, { count: backupCount })}</p>
+                {deskId && <p className="text-sm text-amber-700 dark:text-amber-300">{t(`pages.fileRecovery.deleteBackup.${backupSummary}`, { count: backupCount })}</p>}
                 {(deleting?.active || sessions.some(value => value.sessionId === deleting?.sessionId && value.active)) && <p className="text-sm text-destructive">{t('pages.aiAssistant.history.deleteRunning')}</p>}
                 {deleteError && <p role="alert" className="text-sm text-destructive">{t('pages.aiAssistant.history.deleteError')}</p>}
                 <DialogFooter>
@@ -130,7 +131,7 @@ export function AssistantHistory({ deskId, deviceId, disabled, onSelect, onDelet
                         setBusy(true); setDeleteError(false);
                         try {
                             const response = await fetch('/api/my/ai-assistant-session/delete', { method: 'POST', credentials: 'include',
-                                headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ connection: deskId, session: selected.sessionId }) });
+                                headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ connection: deskId || undefined, session: selected.sessionId }) });
                             const body = response.ok ? await response.json() : null;
                             if (body?.data?.deleted !== true) throw new Error('Deletion failed');
                             setCleanupPending(body.data.backup_cleanup_pending === true);

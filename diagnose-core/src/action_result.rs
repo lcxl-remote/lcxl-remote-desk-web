@@ -43,20 +43,21 @@ impl ActionResultOrigin {
     pub fn capture_confirmed_command(
         registry: &ProviderRegistry,
         session: &PersistedAgentSession,
+        target_device_id: &str,
         call: &ToolCall,
         now_unix_ms: u64,
     ) -> Result<Self, AgentError> {
         if call.name != crate::command_confirmation::COMMAND_TOOL {
             return Err(invalid());
         }
-        let canonical = crate::permission_tools::canonical_tool_permission_input_json(
-            &call.name,
-            serde_json::from_str(&call.arguments_json).map_err(|_| invalid())?,
-        )
-        .map_err(|_| invalid())?;
-        let confirmation = crate::command_confirmation::CommandConfirmation::approved_for_call(
-            session, &canonical,
-        )?;
+        let (_, canonical) =
+            crate::request_devices::command_input(call, session.has_admitted_personal_input())?;
+        let (_, confirmation) =
+            crate::command_confirmation::CommandConfirmation::approved_request_for_call(
+                session,
+                target_device_id,
+                &canonical,
+            )?;
         let parent = session
             .conversation
             .iter()
@@ -89,7 +90,7 @@ impl ActionResultOrigin {
             now_unix_ms,
             confirmation.plan.timeout_ms,
         )?;
-        let mut origin = Self::capture(registry, session, call)?;
+        let mut origin = Self::capture_for_device(registry, session, target_device_id, call)?;
         origin.retention.expires_at_unix_ms = Some(completion.expires_at_unix_ms);
         origin.command_completion = Some(completion);
         origin.validate()?;
@@ -101,6 +102,15 @@ impl ActionResultOrigin {
     pub fn capture(
         registry: &ProviderRegistry,
         session: &PersistedAgentSession,
+        call: &ToolCall,
+    ) -> Result<Self, AgentError> {
+        Self::capture_for_device(registry, session, &session.device_id, call)
+    }
+
+    fn capture_for_device(
+        registry: &ProviderRegistry,
+        session: &PersistedAgentSession,
+        target_device_id: &str,
         call: &ToolCall,
     ) -> Result<Self, AgentError> {
         let capability = registry
@@ -186,11 +196,12 @@ impl ActionResultOrigin {
         let origin = Self {
             command_completion: None,
             schema_version: 1,
-            turn_fence: AssistantTurnFence::from_session(session)?.ok_or_else(invalid)?,
+            turn_fence: AssistantTurnFence::for_device(session, target_device_id)?
+                .ok_or_else(invalid)?,
             tool_call_id: call.id.clone(),
             provider_id: provider.wire.provider_id.clone(),
             tool_name: call.name.clone(),
-            source_object_id: format!("{}:{}", session.device_id, call.id),
+            source_object_id: format!("{target_device_id}:{}", call.id),
             source_envelope_ids: source.provenance.source_envelope_ids,
             sensitivity,
             retention,
@@ -473,8 +484,14 @@ mod tests {
         let old_envelope = proposal.data_envelope.clone();
         let registry = crate::ai_assistant::ai_assistant_provider_registry();
         assert!(
-            ActionResultOrigin::capture_confirmed_command(&registry, &session, &call, 1000)
-                .is_err()
+            ActionResultOrigin::capture_confirmed_command(
+                &registry,
+                &session,
+                &session.device_id,
+                &call,
+                1000,
+            )
+            .is_err()
         );
         session.permission_requests.push(PermissionRequest {
             schema_version: 1,
@@ -505,9 +522,45 @@ mod tests {
                 reason: "approved".into(),
             }],
         });
-        let origin =
-            ActionResultOrigin::capture_confirmed_command(&registry, &session, &call, 1000)
-                .unwrap();
+        let origin = ActionResultOrigin::capture_confirmed_command(
+            &registry,
+            &session,
+            &session.device_id,
+            &call,
+            1000,
+        )
+        .unwrap();
+        let mut personal = session.clone();
+        let approved_target = std::mem::take(&mut personal.device_id);
+        personal
+            .bind_assistant_request_targets(vec![approved_target.clone(), "other".into()])
+            .unwrap();
+        let mut selected_call = call.clone();
+        let mut args: serde_json::Value = serde_json::from_str(&call.arguments_json).unwrap();
+        args["target_ref"] = serde_json::json!("public-device-ref");
+        selected_call.arguments_json = args.to_string();
+        personal.conversation.last_mut().unwrap().tool_calls[0].arguments_json =
+            selected_call.arguments_json.clone();
+        let selected = ActionResultOrigin::capture_confirmed_command(
+            &registry,
+            &personal,
+            &approved_target,
+            &selected_call,
+            1000,
+        )
+        .unwrap();
+        assert_eq!(selected.turn_fence, origin.turn_fence);
+        assert_eq!(selected.source_object_id, origin.source_object_id);
+        assert!(
+            ActionResultOrigin::capture_confirmed_command(
+                &registry,
+                &personal,
+                "other",
+                &selected_call,
+                1000
+            )
+            .is_err()
+        );
         assert_eq!(origin.retention.expires_at_unix_ms, Some(901_000));
         assert_eq!(
             session.conversation.last().unwrap().data_envelope,

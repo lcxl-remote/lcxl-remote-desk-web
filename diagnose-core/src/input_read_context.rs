@@ -33,6 +33,15 @@ pub struct ReadContextSelection {
 }
 
 impl ReadContextSelection {
+    pub fn is_host_web_only(&self) -> bool {
+        self.object_attachments.is_empty()
+            && self.live_targets.is_empty()
+            && self
+                .tool_names
+                .iter()
+                .all(|name| crate::web_research::is_web_tool(name))
+    }
+
     /// Capture the final model-compatible tools actually exposed to this turn.
     pub fn capture(tools: &[RegisteredTool], scope: &AgentScope) -> Result<Self, AgentError> {
         let selection = Self {

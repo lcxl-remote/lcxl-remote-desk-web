@@ -63,11 +63,12 @@ impl PreparedVisibleHistory<'_> {
         &mut self,
         db: &DatabaseTransaction,
     ) -> Result<(), AssistantStoreError> {
-        if self
-            .expected
-            .assistant_data
-            .as_ref()
-            .is_some_and(|data| !data.temporary)
+        if !self.expected.has_admitted_personal_input()
+            && self
+                .expected
+                .assistant_data
+                .as_ref()
+                .is_some_and(|data| !data.temporary)
         {
             prepare_native_status_on(db, self).await?;
         }
@@ -87,7 +88,7 @@ impl PreparedVisibleHistory<'_> {
                 native: None,
                 actor_id: &self.expected.actor_id,
                 device_ref: &data.source_device_ref,
-                directory: Some(HistorySourceDirectory {
+                directory: (!data.source_device_ref.is_empty()).then_some(HistorySourceDirectory {
                     instance_id: &self.instance,
                     audience: &self.expected.device_id,
                     device_name: None,

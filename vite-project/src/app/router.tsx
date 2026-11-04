@@ -72,7 +72,7 @@ export const router = createBrowserRouter([
             },
             {
                 path: 'ai-assistant/conversation',
-                lazy: async () => ({ Component: (await import('@/features/desk/ai-assistant-page')).default }),
+                lazy: async () => ({ Component: (await import('@/features/desk/ai-assistant-page')).PersonalAiAssistantPage }),
             },
             {
                         path: 'ai-assistant/processing',

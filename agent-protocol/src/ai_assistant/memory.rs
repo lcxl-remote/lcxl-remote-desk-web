@@ -81,11 +81,15 @@ pub struct MemoryDraft {
     pub source_refs: Vec<AssistantSourceRef>,
     #[serde(default)]
     pub scope: MemoryWriteScope,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_ref: Option<String>,
 }
 
 fn validate_draft_fields(
     content: &str,
     source_refs: &[AssistantSourceRef],
+    scope: MemoryWriteScope,
+    target_ref: Option<&str>,
 ) -> Result<(), &'static str> {
     if content.trim().is_empty() {
         return Err("Invalid input at $.content: expected non-whitespace memory text");
@@ -96,6 +100,13 @@ fn validate_draft_fields(
         return Err(
             "Invalid input at $.source_refs: each source needs a valid observed id and a positive revision when supplied",
         );
+    }
+    if let Some(reference) = target_ref {
+        if scope != MemoryWriteScope::CurrentDevice {
+            return Err("Invalid input at $.target_ref: device scope is required");
+        }
+        super::validate_target_refs([reference])
+            .map_err(|_| "Invalid input at $.target_ref: use a selected device reference")?;
     }
     Ok(())
 }
@@ -124,7 +135,12 @@ fn validate_draft_limits(
 
 impl MemoryDraft {
     pub fn validate(&self) -> Result<(), &'static str> {
-        validate_draft_fields(&self.content, &self.source_refs)
+        validate_draft_fields(
+            &self.content,
+            &self.source_refs,
+            self.scope,
+            self.target_ref.as_deref(),
+        )
     }
     pub fn validate_with_limits(
         &self,
@@ -154,6 +170,8 @@ pub enum MemoryWriteRequest {
         source_refs: Vec<AssistantSourceRef>,
         #[serde(default)]
         scope: MemoryWriteScope,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_ref: Option<String>,
     },
     Update {
         memory_id: String,
@@ -166,6 +184,8 @@ pub enum MemoryWriteRequest {
         source_refs: Vec<AssistantSourceRef>,
         #[serde(default)]
         scope: MemoryWriteScope,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_ref: Option<String>,
     },
     Forget {
         memory_id: String,
@@ -182,6 +202,7 @@ impl MemoryWriteRequest {
                 context,
                 source_refs,
                 scope,
+                target_ref,
             }
             | Self::Update {
                 kind,
@@ -189,6 +210,7 @@ impl MemoryWriteRequest {
                 context,
                 source_refs,
                 scope,
+                target_ref,
                 ..
             } => Some(MemoryDraft {
                 kind: *kind,
@@ -196,6 +218,7 @@ impl MemoryWriteRequest {
                 context: context.clone(),
                 source_refs: source_refs.clone(),
                 scope: *scope,
+                target_ref: target_ref.clone(),
             }),
             Self::Forget { .. } => None,
         }
@@ -206,17 +229,21 @@ impl MemoryWriteRequest {
             Self::Remember {
                 content,
                 source_refs,
+                scope,
+                target_ref,
                 ..
-            } => validate_draft_fields(content, source_refs),
+            } => validate_draft_fields(content, source_refs, *scope, target_ref.as_deref()),
             Self::Update {
                 memory_id,
                 expected_revision,
                 content,
                 source_refs,
+                scope,
+                target_ref,
                 ..
             } => {
                 validate_target(memory_id, *expected_revision)?;
-                validate_draft_fields(content, source_refs)
+                validate_draft_fields(content, source_refs, *scope, target_ref.as_deref())
             }
             Self::Forget {
                 memory_id,

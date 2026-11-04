@@ -27,6 +27,7 @@ pub(super) async fn first_input(
 ) -> PersistedAgentSession {
     use crate::agent_run_event_store::{AppendUserFollowupParams, SignalAgentRunEventStore};
     let input = AppendUserFollowupParams {
+        target_refs: Vec::new(),
         client_timezone: "UTC".into(),
         temporary_conversation: None,
         event_id: "original-owner-input".into(),
@@ -112,6 +113,7 @@ pub(super) async fn append_input(db: &DatabaseConnection, start: bool, id: &str)
         AppendUserFollowupParams, SignalAgentRunEventStore, StartUserGoal,
     };
     let params = AppendUserFollowupParams {
+        target_refs: Vec::new(),
         client_timezone: "UTC".into(),
         temporary_conversation: None,
         event_id: format!("input-{id}"),

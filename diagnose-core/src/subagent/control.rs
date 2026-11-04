@@ -62,6 +62,13 @@ pub fn stop_main_session(
         next.conversation.push(message);
     }
     next.main_stopped = true;
+    if next.has_admitted_personal_input() {
+        for request in &mut next.permission_requests {
+            if request.state.can_user_decide() {
+                request.state = crate::dynamic_run::PermissionRequestState::Withdrawn;
+            }
+        }
+    }
     next.subagent_wait = None;
     next.ready_subagent_wait = None;
     next.ready_subagent_notification = None;

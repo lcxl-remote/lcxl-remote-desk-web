@@ -7,6 +7,11 @@ use crate::chat::ToolCall;
 
 pub const WEB_FETCH_TOOL_NAME: &str = "fetch_public_web_page";
 pub const WEB_SEARCH_TOOL_NAME: &str = "search_public_web";
+pub const CENTRAL_WEB_READINESS_REVISION: u64 = 1;
+
+pub fn is_web_tool(name: &str) -> bool {
+    matches!(name, WEB_FETCH_TOOL_NAME | WEB_SEARCH_TOOL_NAME)
+}
 pub const BRAVE_WEB_SEARCH_CONNECTOR_ID: &str = "brave_web_v1";
 
 /// Server-selected destination and configuration version, never model input.

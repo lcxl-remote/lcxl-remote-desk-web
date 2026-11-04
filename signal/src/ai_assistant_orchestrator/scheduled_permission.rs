@@ -74,7 +74,7 @@ pub async fn claim_scheduled_permission(
     let (providers, inventory, now, readiness) = current_capability_projection(
         db,
         connections,
-        &target_connection_id,
+        Some(&target_connection_id),
         ModelCapabilities {
             image_input: config.supports_image_input,
         },

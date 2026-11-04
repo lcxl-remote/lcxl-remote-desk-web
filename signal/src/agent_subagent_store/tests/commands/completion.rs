@@ -307,6 +307,7 @@ async fn completed_fixture_with_delivery(
     let mut origin = ActionResultOrigin::capture_confirmed_command(
         &desk_diagnose_core::ai_assistant::ai_assistant_provider_registry(),
         &child,
+        &child.device_id,
         &call,
         now,
     )

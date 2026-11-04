@@ -109,6 +109,7 @@ export type RehearsalConversation = Pick<RehearsalView,
 type Props = {
     rehearsal?: RehearsalConversation;
     deskId: string;
+    targetRefs?: readonly string[];
     connected?: boolean;
     /// Stable device identity for browser-side conversation intent. The OSS
     /// connection id changes after a server restart, while client_id does not.
@@ -125,6 +126,11 @@ type Props = {
 
 function storageKey(scope: string) {
     return `ai-assistant-conversation:${scope}`;
+}
+
+function sessionQuery(deskId: string, conversation: string) {
+    const target = deskId ? `connection=${encodeURIComponent(deskId)}&` : '';
+    return `/api/my/ai-assistant-session?${target}conversation=${encodeURIComponent(conversation)}`;
 }
 
 function parseDraft(raw: string | null | undefined): ComputerActionDraftPreview | null {
@@ -397,6 +403,7 @@ export function projectPersistedSnapshot(snapshot: Pick<PersistedSnapshot, 'mess
 export function useAiAssistantChat({
     rehearsal,
     deskId,
+    targetRefs,
     connected,
     conversationStorageScope = deskId,
     initialConversationId,
@@ -407,7 +414,7 @@ export function useAiAssistantChat({
     // Changing language must not reset the conversation or its snapshot requests.
     const translate = useRef(t);
     translate.current = t;
-    const targetSelectionEnabled = connected !== undefined;
+    const targetSelectionEnabled = Boolean(deskId) && connected !== undefined;
     const temporaryConversationRef = useRef(false);
     const [temporaryConversation, setTemporaryConversation] = useState(false);
     const [contextUsage, setContextUsage] = useState<AssistantContextUsage | null>(null);
@@ -568,7 +575,7 @@ export function useAiAssistantChat({
         const sessionId = snapshotWatermark.current?.conversationId === conversationId.current
             ? snapshotWatermark.current.sessionId : undefined;
         const preview = documentPreviews.find(item => item.descriptor.preview_id === previewId);
-        if (connected === false || !sessionId || !preview || preview.loading
+        if (!deskId || connected === false || !sessionId || !preview || preview.loading
             || !Number.isInteger(page) || page < 1 || page > preview.descriptor.page_count) return false;
         const requestId = sendMessage(
             SIGNALING_TYPE_CODE_REQUEST_DOCUMENT_PREVIEW_PAGE,
@@ -616,8 +623,7 @@ export function useAiAssistantChat({
         const timeout = window.setTimeout(() => controller.abort(), SNAPSHOT_TIMEOUT_MS);
         try {
             const response = await fetch(
-            `/api/my/ai-assistant-session?connection=${encodeURIComponent(deskId)}` +
-                `&conversation=${encodeURIComponent(expectedConversationId)}`,
+                sessionQuery(deskId, expectedConversationId),
             { credentials: 'include', headers: { Accept: 'application/json' }, signal: controller.signal },
             );
             const body = response.ok ? await response.json() : null;
@@ -822,8 +828,7 @@ export function useAiAssistantChat({
         setLoadingOlderMessages(true);
         try {
             const response = await fetch(
-                `/api/my/ai-assistant-session?connection=${encodeURIComponent(deskId)}`
-                + `&conversation=${encodeURIComponent(expectedConversationId)}`
+                sessionQuery(deskId, expectedConversationId)
                 + `&message_before=${encodeURIComponent(cursor)}&message_limit=100`,
                 { credentials: 'include', headers: { Accept: 'application/json' } },
             );
@@ -1421,15 +1426,16 @@ export function useAiAssistantChat({
         const requestId = v4();
         const payload = {
                 question: trimmed,
-                temporary_conversation: rehearsal ? undefined : temporaryConversationRef.current,
+                temporary_conversation: rehearsal || !deskId ? undefined : temporaryConversationRef.current,
                 client_message_id: clientMessageId,
                 client_timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
                 conversation_id: conversationId.current,
                 locale: rehearsal ? rehearsal.locale ?? undefined : locale,
-                selected_capability_ids: [...selectedCapabilityIds],
-                start_goal: !rehearsal && startGoal,
-                previous_completed_goal_id: !rehearsal && startGoal ? previousCompletedGoalId : null,
-                selected_attachment_ids: rehearsal ? [] : selectedObjects
+                ...(!deskId && targetRefs?.length ? { target_refs: [...targetRefs] } : {}),
+                selected_capability_ids: deskId ? [...selectedCapabilityIds] : [],
+                start_goal: Boolean(deskId) && !rehearsal && startGoal,
+                previous_completed_goal_id: deskId && !rehearsal && startGoal ? previousCompletedGoalId : null,
+                selected_attachment_ids: rehearsal || !deskId ? [] : selectedObjects
                     .map((attachment) => attachment.id),
             };
         pendingDelivery.current = { id: clientMessageId, question: trimmed,
@@ -1438,13 +1444,13 @@ export function useAiAssistantChat({
         activeRequest.current = requestId;
         console.info('[assistant-input] dispatch', { messageId: clientMessageId, requestId });
         try {
-            activeRequest.current = sendMessage(SIGNALING_TYPE_CODE_ASK_AI_ASSISTANT, payload, deskId, requestId);
+            activeRequest.current = sendMessage(SIGNALING_TYPE_CODE_ASK_AI_ASSISTANT, payload, deskId || undefined, requestId);
             if (pendingDelivery.current) pendingDelivery.current.requestId = activeRequest.current;
         } catch {
             setDeliveryState('unconfirmed');
         }
         return true;
-    }, [attachments, deskId, ensureConversation, sendMessage, sessionTargetReady, hydrating, historyRestoreFailed, approvalInitializing, rehearsal]);
+    }, [attachments, deskId, targetRefs, ensureConversation, sendMessage, sessionTargetReady, hydrating, historyRestoreFailed, approvalInitializing, rehearsal]);
 
     const retryDelivery = useCallback(async () => {
         const pending = pendingDelivery.current;
@@ -1457,7 +1463,7 @@ export function useAiAssistantChat({
         lastSeq.current = -1;
         console.info('[assistant-input] retry', { messageId: pending.id, requestId: pending.requestId });
         try {
-            sendMessage(SIGNALING_TYPE_CODE_ASK_AI_ASSISTANT, pending.payload, deskId, pending.requestId);
+            sendMessage(SIGNALING_TYPE_CODE_ASK_AI_ASSISTANT, pending.payload, deskId || undefined, pending.requestId);
         } catch { setDeliveryState('unconfirmed'); }
     }, [connected, sessionTargetReady, deliveryState, loadSnapshot, sendMessage, deskId]);
 
@@ -1480,7 +1486,7 @@ export function useAiAssistantChat({
         const isCurrent = () => permissionSubmission.current === submission
             && snapshotEpoch.current === submission.epoch && conversationId.current === currentConversationId;
         const body: PermissionDecisionBody = {
-            connection: deskId,
+            connection: deskId || undefined,
             conversation: currentConversationId,
             requestId: request.requestId,
             items,
@@ -1681,7 +1687,7 @@ export function useAiAssistantChat({
                 credentials: 'include',
                 headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    connection: deskId,
+                    connection: deskId || undefined,
                     conversation: currentConversationId,
                     grantId,
                     reason: 'revoked_by_owner',
@@ -1762,7 +1768,7 @@ export function useAiAssistantChat({
             const response = await fetch('/api/my/ai-assistant-session/stop', {
                 method: 'POST', credentials: 'include', signal: controller.signal,
                 headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
-                body: JSON.stringify({ connection: deskId, conversation: selection.conversation,
+                body: JSON.stringify({ connection: deskId || undefined, conversation: selection.conversation,
                     session: selection.session, control }),
             });
             const result = await response.json();

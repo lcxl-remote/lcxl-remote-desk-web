@@ -33,6 +33,7 @@ fn binding() -> RetrievalQueryBinding {
             retrieval_episode_id: "episode".into(),
         })),
         memory_device_rule: Some(AssistantDeviceScope::AllMyDevices),
+        request_memory_device_refs: Vec::new(),
         destination: destination("first"),
         authority_expires_at_unix_ms: None,
     }
@@ -291,6 +292,48 @@ fn cursor_locator_never_replaces_actor_root_episode_scope_task_or_recipient_chec
         assert!(QueryCursor::decode(&bad).is_err());
     }
     assert!(QueryCursor::new(&query.snapshot.query_id, &query.snapshot.query_id).is_err());
+}
+
+#[test]
+fn a_personal_memory_query_preserves_its_selected_devices_across_pages() {
+    let mut original = binding();
+    original.source_device_ref.clear();
+    original.history_scope = None;
+    original.memory_device_rule = Some(AssistantDeviceScope::CurrentDevice);
+    original.request_memory_device_refs = vec!["device-A".into(), "device-B".into()];
+    let request = FrozenRetrievalRequest::Memories {
+        request: serde_json::from_value(serde_json::json!({"queries": ["settings"]})).unwrap(),
+    };
+    let mut query = FrozenRetrievalQuery::prepare(
+        original.clone(),
+        &reservation(RetrievalCallKind::Relevance),
+        request.clone(),
+        selection(),
+        1100,
+        Default::default(),
+    )
+    .unwrap();
+    assert_eq!(query.snapshot.device_refs, ["device-A", "device-B"]);
+
+    let mut narrowed = selection();
+    narrowed.devices = vec!["device-B".into()];
+    query.refresh(narrowed, 1200).unwrap();
+    assert_eq!(query.snapshot.device_refs, ["device-B"]);
+    assert!(query.refresh(selection(), 1300).is_err());
+
+    let mut outside = selection();
+    outside.devices.push("device-C".into());
+    assert!(
+        FrozenRetrievalQuery::prepare(
+            original,
+            &reservation(RetrievalCallKind::Relevance),
+            request,
+            outside,
+            1100,
+            Default::default(),
+        )
+        .is_err()
+    );
 }
 
 #[test]

@@ -103,7 +103,7 @@ impl ReadProjectionProof {
                 memory
                     .source_device
                     .as_ref()
-                    .is_some_and(|device| device.device_ref != data.source_device_ref)
+                    .is_some_and(|device| !scope.current_device_refs().contains(&device.device_ref))
             })
         {
             return Err("current-memory payload generation or current device changed");

@@ -31,9 +31,10 @@ pub(crate) async fn inspect_on<C: ConnectionTrait + crate::config::ConfigConnect
     if now == 0
         || now > i64::MAX as u64
         || usage.expires_at_unix_ms.is_some_and(|until| until <= now)
-        || super::memory::source_device_on(db, view.actor_id(), view.source_device_ref())
-            .await?
-            .is_none()
+        || (!view.source_device_ref().is_empty()
+            && super::memory::source_device_on(db, view.actor_id(), view.source_device_ref())
+                .await?
+                .is_none())
     {
         return Ok(None);
     }
@@ -112,9 +113,10 @@ pub(crate) async fn inspect_on<C: ConnectionTrait + crate::config::ConfigConnect
             || original.deletion_generation != signed(source.origin_deletion_generation)?
             || original.accepted_input_seq <= 0
             || original.accepted_input_seq as u64 > view.actor_input_seq()
-            || super::memory::source_device_on(db, view.actor_id(), &original.device_ref)
-                .await?
-                .is_none()
+            || (!original.device_ref.is_empty()
+                && super::memory::source_device_on(db, view.actor_id(), &original.device_ref)
+                    .await?
+                    .is_none())
         {
             return Ok(None);
         }

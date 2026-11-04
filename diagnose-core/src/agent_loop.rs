@@ -3757,14 +3757,54 @@ async fn run_mutating<F: FnMut() -> String>(
         return Ok(None);
     }
 
+    let selected = if call.name == crate::command_confirmation::COMMAND_TOOL
+        && crate::request_devices::selected_command_turn(session)
+    {
+        match crate::future::boxed(|| {
+            crate::request_devices::resolve_approved_command(deps.tools, session, call)
+        })
+        .await
+        {
+            Ok(policy) => Some(policy),
+            Err(error) => {
+                observation
+                    .permission(crate::model_observability::PermissionOutcome::PolicyRejected);
+                let text = crate::model_input::describe_error(&call.name, &error.message);
+                append_mutating_result(
+                    deps,
+                    session,
+                    call,
+                    ChatMessage::tool_result(mint(), &call.id, text),
+                )?;
+                finish_tool(session, &call.id, false, sink);
+                *halted = Some("not executed: the approved command target or input changed".into());
+                return Ok(None);
+            }
+        }
+    } else {
+        None
+    };
+    let device = selected
+        .as_ref()
+        .map_or(session.device_id.as_str(), |policy| {
+            policy.target_device_id.as_str()
+        })
+        .to_owned();
+    let mut scope = session.scope_snapshot.clone();
+    if selected.is_some() {
+        scope.mode = desk_agent_protocol::ExecutionMode::ConfirmEachAction;
+        scope.granted = vec![desk_agent_protocol::Capability::ShellExecConfirmed];
+    }
     let ctx = ExecContext {
-        assistant_turn_fence: crate::action_turn_fence::AssistantTurnFence::from_session(session)?,
+        assistant_turn_fence: crate::action_turn_fence::AssistantTurnFence::for_device(
+            session, &device,
+        )?,
         conversation_id: session.conversation_id.clone(),
         turn_id: turn_id.to_string(),
         tool_call_id: call.id.clone(),
         actor_id: session.actor_id.clone(),
         policy_revision: session.policy_revision,
-        scope: session.scope_snapshot.clone(),
+        scope,
         // Route the approval preview back to the connection that started the turn.
         connection_id: session.active_control_connection_id.clone(),
     };
@@ -3774,11 +3814,20 @@ async fn run_mutating<F: FnMut() -> String>(
     session.turn_state = TurnState::AwaitingApproval;
     deps.session_seam.save(session).await?;
     sink.on_awaiting_approval(&call.name, &call.id, &call.arguments_json);
-    let version = crate::action_version::ActionVersion::capture(session, &call.id)?;
-    let completion = deps
-        .tools
-        .confirm_and_exec_versioned(call, &ctx, version.as_ref())
-        .await;
+    let version =
+        crate::action_version::ActionVersion::capture_for_device(session, &call.id, &device)?;
+    let completion = match &selected {
+        Some(policy) => {
+            deps.tools
+                .execute_selected_command(call, &ctx, version.as_ref(), policy)
+                .await
+        }
+        None => {
+            deps.tools
+                .confirm_and_exec_versioned(call, &ctx, version.as_ref())
+                .await
+        }
+    };
     if let Some(advance) = completion.version_advance {
         advance.apply(session, version.as_ref())?;
     }

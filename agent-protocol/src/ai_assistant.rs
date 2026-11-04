@@ -83,6 +83,9 @@ pub struct AiAssistantAsk {
     /// BCP-47 response locale (for example `zh-CN`).
     #[serde(default)]
     pub locale: Option<String>,
+    /// Stable device references selected for this personal-conversation input.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub target_refs: Vec<String>,
     /// Exact user-selected read contexts for this turn. Empty means the model
     /// receives the question but no device/Office read tool. The server matches
     /// these ids against the current Provider Registry and live readiness.
@@ -323,7 +326,25 @@ impl AiAssistantAsk {
         }
         validate_selected_capability_ids(&self.selected_capability_ids)
             .and_then(|_| validate_attachment_ids(&self.selected_attachment_ids))
+            .and_then(|_| validate_target_refs(self.target_refs.iter().map(String::as_str)))
     }
+}
+
+pub fn validate_target_refs<'a>(
+    refs: impl IntoIterator<Item = &'a str>,
+) -> Result<(), &'static str> {
+    let mut unique = std::collections::BTreeSet::new();
+    for reference in refs {
+        if reference.is_empty()
+            || reference.len() > 256
+            || reference.trim() != reference
+            || reference.chars().any(char::is_control)
+            || !unique.insert(reference)
+        {
+            return Err("invalid or duplicate AI Assistant target reference");
+        }
+    }
+    Ok(())
 }
 
 fn validate_selected_capability_ids(
@@ -383,6 +404,7 @@ mod tests {
     #[test]
     fn ask_round_trips_without_any_mutation_payload() {
         let ask = AiAssistantAsk {
+            target_refs: Vec::new(),
             client_timezone: "UTC".into(),
             temporary_conversation: None,
             question: "Inspect the active application and suggest a safe change.".into(),
@@ -399,6 +421,24 @@ mod tests {
         assert!(value.get("approval").is_none());
         let back: AiAssistantAsk = serde_json::from_value(value).unwrap();
         assert_eq!(back, ask);
+    }
+
+    #[test]
+    fn ask_round_trips_stable_target_references_and_rejects_duplicates() {
+        let mut ask: AiAssistantAsk = serde_json::from_value(serde_json::json!({
+            "question": "Compare these devices",
+            "client_message_id": "message-1",
+            "client_timezone": "UTC",
+            "target_refs": ["mac", "linux"]
+        }))
+        .unwrap();
+        assert!(ask.validate().is_ok());
+        assert_eq!(
+            serde_json::to_value(&ask).unwrap()["target_refs"],
+            serde_json::json!(["mac", "linux"])
+        );
+        ask.target_refs.push("mac".into());
+        assert!(ask.validate().is_err());
     }
 
     #[test]

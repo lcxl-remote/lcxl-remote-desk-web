@@ -69,12 +69,13 @@ impl AttachmentMetadata {
             &self.attachment_id,
             &self.conversation_id,
             &self.actor_id,
-            &self.device_id,
             &self.message_id,
             &self.tool_call_id,
         ]
         .iter()
         .any(|value| value.is_empty() || value.len() > 256)
+            || self.device_id.len() > 256
+            || (self.device_id.is_empty() && self.kind == ContentKind::Image)
             || self.part.is_empty()
             || self.part.len() > 32
             || self.media_type.len() > 128

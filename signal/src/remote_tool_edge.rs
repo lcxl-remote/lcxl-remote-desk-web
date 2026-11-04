@@ -9,6 +9,7 @@ mod application;
 pub(crate) mod directory;
 pub(crate) mod document_preview;
 mod object_read;
+mod request_devices;
 
 use std::collections::HashMap;
 use std::pin::Pin;
@@ -794,6 +795,7 @@ pub struct SignalAiAssistantToolState {
     pending: Arc<SignalRemoteToolPendingStore>,
     target_connection_id: String,
     target_device_id: String,
+    selected_device_fence: Option<desk_diagnose_core::action_turn_fence::AssistantTurnFence>,
     actor_id: String,
     model_provider: Option<String>,
     model_name: Option<String>,
@@ -1006,6 +1008,7 @@ impl SignalAiAssistantTools {
             pending,
             target_connection_id,
             target_device_id,
+            selected_device_fence: None,
             actor_id,
             model_provider,
             model_name,
@@ -1232,6 +1235,12 @@ impl SignalAiAssistantTools {
         }
     }
 
+    fn session_device_id(&self) -> &str {
+        self.selected_device_fence
+            .as_ref()
+            .map_or(self.target_device_id.as_str(), |_| "")
+    }
+
     async fn authoritative_session(
         &self,
     ) -> Result<desk_diagnose_core::session::PersistedAgentSession, AgentError> {
@@ -1267,12 +1276,43 @@ impl SignalAiAssistantTools {
                     )
                 })?;
         if session.actor_id != self.actor_id
-            || session.device_id != self.target_device_id
+            || session.device_id != self.session_device_id()
             || session.policy_revision != self.policy_revision
         {
             return Err(error(
                 AgentErrorKind::PermissionDenied,
                 "Provider authorization subject or policy changed",
+                false,
+                true,
+            ));
+        }
+        if self.session_device_id().is_empty()
+            && (!session.has_admitted_personal_input()
+                || session.current_turn_id.as_deref() != Some(self.turn_id.as_str())
+                || !session.turn_state.is_active()
+                || row.lease_token != session.lease_token as i64
+                || row
+                    .lease_deadline
+                    .is_none_or(|expiry| expiry <= chrono::Utc::now()))
+        {
+            return Err(error(
+                AgentErrorKind::PermissionDenied,
+                "Personal assistant read lease is unavailable",
+                false,
+                true,
+            ));
+        }
+        if let Some(held) = &self.selected_device_fence
+            && desk_diagnose_core::action_turn_fence::AssistantTurnFence::for_device(
+                &session,
+                &self.target_device_id,
+            )?
+            .as_ref()
+                != Some(held)
+        {
+            return Err(error(
+                AgentErrorKind::PermissionDenied,
+                "Selected device read input changed",
                 false,
                 true,
             ));
@@ -1375,6 +1415,16 @@ impl SignalAiAssistantTools {
     }
 
     async fn read_outcome_inner(&self, call: &ToolCall) -> Result<ReadOutcome, AgentError> {
+        if self.target_device_id.is_empty()
+            && !desk_diagnose_core::web_research::is_web_tool(&call.name)
+        {
+            return Err(error(
+                AgentErrorKind::PermissionDenied,
+                "Tool requires a device target",
+                false,
+                true,
+            ));
+        }
         self.verified_read_labels
             .lock()
             .map_err(|_| {
@@ -1433,6 +1483,7 @@ impl SignalAiAssistantTools {
     }
 
     async fn authorize_and_invoke_inner(&self, call: &ToolCall) -> Result<ReadOutcome, AgentError> {
+        let targetless = self.target_device_id.is_empty();
         let capability = self
             .provider_registry
             .capability_for_tool(&call.name)
@@ -1468,40 +1519,62 @@ impl SignalAiAssistantTools {
             &capability.wire.authorization_hint.resources,
             capability.wire.effect,
         );
-        let read_preflight =
-            if desk_diagnose_core::provider_preflight::text_file::uses_session_file_read(call)? {
-                desk_diagnose_core::future::boxed(|| async {
-                    self.validate_original_objects().await
-                })
+        let read_preflight = if targetless {
+            desk_diagnose_core::future::boxed(|| self.validate_original_objects()).await?;
+            let original_requirement = session.authorization_requirement().ok_or_else(|| {
+                error(
+                    AgentErrorKind::PermissionDenied,
+                    "Original web read input is missing",
+                    false,
+                    true,
+                )
+            })?;
+            Some(
+                desk_diagnose_core::provider_preflight::read::ReadCallPreflight::build_central_web(
+                    &self.provider_registry,
+                    ProductSurface::OssPersonalOwner,
+                    call,
+                    &self.object_binding()?,
+                    &original_requirement.text,
+                )?,
+            )
+        } else if self.selected_device_fence.is_some() {
+            desk_diagnose_core::future::boxed(|| self.validate_original_objects()).await?;
+            Some(desk_diagnose_core::provider_preflight::read::ReadCallPreflight::build_selected_device(
+                &self.provider_registry, ProductSurface::OssPersonalOwner, call, &self.object_binding()?,
+            )?)
+        } else if desk_diagnose_core::provider_preflight::text_file::uses_session_file_read(call)? {
+            desk_diagnose_core::future::boxed(|| async { self.validate_original_objects().await })
                 .await?;
-                Some(
+            Some(
                 desk_diagnose_core::provider_preflight::read::ReadCallPreflight::build_file_result(
                     &self.provider_registry,
                     ProductSurface::OssPersonalOwner,
                     call,
                     &self.object_binding()?,
                     &session,
-                ).inspect_err(|error| { self.observed(call).input_error(error); })?,
-            )
-            } else if capability.wire.execution_locality == ExecutionLocality::Edge {
-                desk_diagnose_core::future::boxed(|| async {
-                    self.validate_original_objects().await
-                })
-                .await?;
-                Some(
-                    desk_diagnose_core::provider_preflight::read::ReadCallPreflight::build(
-                        &self.provider_registry,
-                        ProductSurface::OssPersonalOwner,
-                        call,
-                        &self.object_binding()?,
-                    )
-                    .inspect_err(|error| {
-                        self.observed(call).input_error(error);
-                    })?,
                 )
-            } else {
-                None
-            };
+                .inspect_err(|error| {
+                    self.observed(call).input_error(error);
+                })?,
+            )
+        } else if capability.wire.execution_locality == ExecutionLocality::Edge {
+            desk_diagnose_core::future::boxed(|| async { self.validate_original_objects().await })
+                .await?;
+            Some(
+                desk_diagnose_core::provider_preflight::read::ReadCallPreflight::build(
+                    &self.provider_registry,
+                    ProductSurface::OssPersonalOwner,
+                    call,
+                    &self.object_binding()?,
+                )
+                .inspect_err(|error| {
+                    self.observed(call).input_error(error);
+                })?,
+            )
+        } else {
+            None
+        };
         let mut resource_scope = compiled_scope.as_ref().map_or_else(
             || vec!["target:current_device".to_string()],
             |scope| scope.resources.clone(),
@@ -1738,7 +1811,7 @@ impl SignalAiAssistantTools {
             }
         }
         let dispatch_id = match desk_diagnose_core::future::boxed(|| async {
-            store.record_dispatch_intent(prepare(now_unix_ms)).await
+            store.record_dispatch_intent_for_target(prepare(now_unix_ms), self.selected_device_fence.as_ref()).await
         })
         .await
         .map_err(|db_error| {
@@ -1802,7 +1875,7 @@ impl SignalAiAssistantTools {
         };
         let grant = desk_diagnose_core::future::boxed(|| async {
             store
-                .validate_claimed_dispatch(&dispatch_id, prepare(current_time()?))
+                .validate_claimed_dispatch_for_target(&dispatch_id, prepare(current_time()?), self.selected_device_fence.as_ref())
                 .await
                 .map_err(|db_error| {
                     error(
@@ -1843,7 +1916,7 @@ impl SignalAiAssistantTools {
                 let post_authority = async {
                     let post_grant = desk_diagnose_core::future::boxed(|| async {
                         store
-                            .validate_claimed_dispatch(&dispatch_id, prepare(post_now))
+                            .validate_claimed_dispatch_for_target(&dispatch_id, prepare(post_now), self.selected_device_fence.as_ref())
                             .await
                     })
                     .await
@@ -1860,6 +1933,8 @@ impl SignalAiAssistantTools {
                             self.verify_current_readiness(capability).await
                         })
                         .await?;
+                    }
+                    if targetless || capability.wire.execution_locality == ExecutionLocality::Edge {
                         desk_diagnose_core::future::boxed(|| async {
                             self.validate_original_objects().await
                         })
@@ -2046,14 +2121,19 @@ impl SignalAiAssistantTools {
                 false,
             ));
         }
-        let (canonical_input_json, canonical_input_digest_sha256) =
-            Self::canonical_call_input(call)?;
-        let confirmation =
-            desk_diagnose_core::command_confirmation::CommandConfirmation::approved_for_call(
+        let (_, canonical_input_json) = desk_diagnose_core::request_devices::command_input(
+            call,
+            self.selected_device_fence.is_some(),
+        )?;
+        let canonical_input_digest_sha256 =
+            format!("{:x}", Sha256::digest(canonical_input_json.as_bytes()));
+        let (permission_id, confirmation) =
+            desk_diagnose_core::command_confirmation::CommandConfirmation::approved_request_for_call(
                 &session,
+                &self.target_device_id,
                 &canonical_input_json,
-            )?
-            .clone();
+            )?;
+        let confirmation = confirmation.clone();
         let policy = desk_diagnose_core::future::boxed(|| async {
             crate::command_policy::current(
                 &self.db,
@@ -2102,13 +2182,15 @@ impl SignalAiAssistantTools {
         })?;
         // An interactive command runs under the id its approved permission
         // derived: the owner's carrier was prepared and consumed for that id.
-        let server_call_id = desk_diagnose_core::command_confirmation::CommandConfirmation::interactive_exec_request_id_for_call(
-            &session,
-            &canonical_input_json,
-        )?
-        .unwrap_or_else(|| desk_diagnose_core::native_ids::background_action(
-            &self.run_id, &self.turn_id, &call.id,
-        ));
+        let server_call_id = confirmation
+            .interactive_request_id(&session.conversation_id, permission_id)
+            .unwrap_or_else(|| {
+                desk_diagnose_core::native_ids::background_action(
+                    &self.run_id,
+                    &self.turn_id,
+                    &call.id,
+                )
+            });
         let call_authority = CapabilityGrantCall {
             actor_id: &self.actor_id,
             run_id: &self.run_id,
@@ -2220,7 +2302,9 @@ impl SignalAiAssistantTools {
             }
         };
         let dispatch_id = match desk_diagnose_core::future::boxed(|| async {
-            store.record_dispatch_intent(prepare()).await
+            store
+                .record_dispatch_intent_for_target(prepare(), self.selected_device_fence.as_ref())
+                .await
         })
         .await
         .map_err(|db_error| {
@@ -2253,6 +2337,7 @@ impl SignalAiAssistantTools {
             desk_diagnose_core::action_result::ActionResultOrigin::capture_confirmed_command(
                 &self.provider_registry,
                 &session,
+                &self.target_device_id,
                 call,
                 now_unix_ms,
             )?;
@@ -2324,7 +2409,11 @@ impl SignalAiAssistantTools {
 
         let checked = desk_diagnose_core::future::boxed(|| async {
             store
-                .validate_claimed_dispatch(&dispatch_id, prepare())
+                .validate_claimed_dispatch_for_target(
+                    &dispatch_id,
+                    prepare(),
+                    self.selected_device_fence.as_ref(),
+                )
                 .await
         })
         .await
@@ -6201,7 +6290,16 @@ impl SignalAiAssistantTools {
         let target = {
             let map =
                 desk_diagnose_core::future::boxed(|| async { self.connections.read().await }).await;
-            map.get(&self.target_connection_id).cloned()
+            if self.selected_device_fence.is_some() {
+                map.current_oss_server(&self.target_device_id)
+                    .filter(|state| {
+                        state.model.connection_id == self.target_connection_id
+                            && request_devices::selected_read_connection(state)
+                    })
+                    .cloned()
+            } else {
+                map.get(&self.target_connection_id).cloned()
+            }
         }
         .ok_or_else(|| {
             error(
@@ -6386,6 +6484,48 @@ impl SignalAiAssistantTools {
 
 #[async_trait(?Send)]
 impl ToolSeam for SignalAiAssistantTools {
+    async fn execute_selected_command(
+        &self,
+        call: &ToolCall,
+        ctx: &ExecContext,
+        _version: Option<&desk_diagnose_core::action_version::ActionVersion>,
+        policy: &desk_diagnose_core::command_confirmation::CommandPolicyContext,
+    ) -> desk_diagnose_core::seam::ExecCompletion {
+        desk_diagnose_core::seam::ExecCompletion {
+            outcome: desk_diagnose_core::future::boxed(|| {
+                self.execute_request_device_command(call, ctx, policy)
+            })
+            .await,
+            version_advance: None,
+        }
+    }
+
+    async fn request_devices(
+        &self,
+        session: &desk_diagnose_core::session::PersistedAgentSession,
+    ) -> Result<Vec<desk_diagnose_core::request_devices::RequestDevice>, AgentError> {
+        desk_diagnose_core::future::boxed(|| self.current_request_devices(session)).await
+    }
+
+    async fn selected_command_policy(
+        &self,
+        session: &desk_diagnose_core::session::PersistedAgentSession,
+        target_ref: &str,
+    ) -> Result<desk_diagnose_core::command_confirmation::CommandPolicyContext, AgentError> {
+        desk_diagnose_core::future::boxed(|| {
+            self.command_policy_for_request_device(session, target_ref)
+        })
+        .await
+    }
+
+    async fn run_request_device_read(
+        &self,
+        session: &desk_diagnose_core::session::PersistedAgentSession,
+        call: &ToolCall,
+    ) -> Result<ReadOutcome, AgentError> {
+        desk_diagnose_core::future::boxed(|| self.read_request_device(session, call)).await
+    }
+
     fn original_read_context(
         &self,
     ) -> Option<&desk_diagnose_core::input_read_context::ReadContextSelection> {
@@ -6416,9 +6556,13 @@ impl ToolSeam for SignalAiAssistantTools {
             })?;
         let current = crate::computer_use_readiness::global_computer_use_readiness_cache()
             .get_fresh(&self.target_connection_id, chrono::Utc::now());
-        let revision = current
-            .as_ref()
-            .map_or(0, |current| current.readiness.revision);
+        let revision = if self.target_device_id.is_empty() {
+            desk_diagnose_core::web_research::CENTRAL_WEB_READINESS_REVISION
+        } else {
+            current
+                .as_ref()
+                .map_or(0, |current| current.readiness.revision)
+        };
         let ready_capabilities = current
             .into_iter()
             .flat_map(|current| current.readiness.capabilities)

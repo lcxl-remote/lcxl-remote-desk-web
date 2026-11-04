@@ -476,6 +476,38 @@ export type AiAssistantDelegationSnapshot = {
     tasks?: (null | AiAssistantSubAgentPage);
 };
 
+export type AiAssistantDeviceRosterBody = {
+    /**
+     * @type string
+    */
+    conversation: string;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    expectedRevision: number;
+    /**
+     * @type array
+    */
+    targetRefs: string[];
+};
+
+export type AiAssistantDeviceRosterDto = {
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    revision: number;
+    /**
+     * @type string
+    */
+    sessionId: string;
+    /**
+     * @type array
+    */
+    targetRefs: string[];
+};
+
 export const aiAssistantDirectoryControlActionKindEnum = {
     select_directory: "select_directory"
 } as const;
@@ -2896,9 +2928,10 @@ export type AiAssistantStopControl = {
 
 export type AiAssistantStopBody = {
     /**
-     * @type string
+     * @description Omit for an owner conversation without a device target.
+     * @type string,null
     */
-    connection: string;
+    connection?: string | null;
     /**
      * @description Absence of a choice is valid only if the transaction finds no unfinished child.
      * @type object
@@ -5370,9 +5403,10 @@ export type CapabilityGrantLimits = {
 
 export type CapabilityGrantRevokeBody = {
     /**
-     * @type string
+     * @description Omit for an owner conversation without a device target.
+     * @type string,null
     */
-    connection: string;
+    connection?: string | null;
     /**
      * @type string,null
     */
@@ -5969,9 +6003,9 @@ export type CurrentUserDto = {
 
 export type DeleteAiAssistantSessionBody = {
     /**
-     * @type string
+     * @type string,null
     */
-    connection: string;
+    connection?: string | null;
     /**
      * @type string
     */
@@ -9433,9 +9467,10 @@ export type PermissionDecisionBody = {
     */
     carrierId?: string | null;
     /**
-     * @type string
+     * @description Omit for an owner conversation without a device target.
+     * @type string,null
     */
-    connection: string;
+    connection?: string | null;
     /**
      * @type string,null
     */
@@ -10426,6 +10461,39 @@ export type RestResponseAiAssistantAttentionListDto = {
          * @type boolean
         */
         offPageReminderAvailable: boolean;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponseAiAssistantDeviceRosterDto = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        revision: number;
+        /**
+         * @type string
+        */
+        sessionId: string;
+        /**
+         * @type array
+        */
+        targetRefs: string[];
     };
     /**
      * @type string,null
@@ -20715,6 +20783,36 @@ export type DeleteAiAssistantSessionMutation = {
     Errors: any;
 };
 
+export type GetAiAssistantDeviceRosterQueryParams = {
+    /**
+     * @description Personal conversation intent
+     * @type string
+    */
+    conversation: string;
+};
+
+export type GetAiAssistantDeviceRoster200 = RestResponseAiAssistantDeviceRosterDto;
+
+export type GetAiAssistantDeviceRosterQueryResponse = GetAiAssistantDeviceRoster200;
+
+export type GetAiAssistantDeviceRosterQuery = {
+    Response: GetAiAssistantDeviceRoster200;
+    QueryParams: GetAiAssistantDeviceRosterQueryParams;
+    Errors: any;
+};
+
+export type UpdateAiAssistantDeviceRoster200 = RestResponseAiAssistantDeviceRosterDto;
+
+export type UpdateAiAssistantDeviceRosterMutationRequest = AiAssistantDeviceRosterBody;
+
+export type UpdateAiAssistantDeviceRosterMutationResponse = UpdateAiAssistantDeviceRoster200;
+
+export type UpdateAiAssistantDeviceRosterMutation = {
+    Response: UpdateAiAssistantDeviceRoster200;
+    Request: UpdateAiAssistantDeviceRosterMutationRequest;
+    Errors: any;
+};
+
 export type ControlAiAssistantDirectory200 = RestResponseBool;
 
 export type ControlAiAssistantDirectoryMutationRequest = AiAssistantDirectoryControlBody;
@@ -20987,10 +21085,10 @@ export type GetAiAssistantSubagentStatusQuery = {
 
 export type ListAiAssistantSessionsQueryParams = {
     /**
-     * @description Target connection id
-     * @type string
+     * @description Target connection id; omit for personal conversations without a device
+     * @type string | undefined
     */
-    connection: string;
+    connection?: string;
     /**
      * @description Maximum rows, default 30 and capped at 100
      * @minLength 0

@@ -1323,6 +1323,64 @@ async fn answers_without_tools() {
 }
 
 #[tokio::test]
+async fn targetless_assistant_answers_without_advertising_device_tools() {
+    let mut claim = claim();
+    claim.device_id.clear();
+    claim.current_pdp_scope.granted.clear();
+    claim.current_pdp_scope.mode = ExecutionMode::ReadOnly;
+    let mut session = PersistedAgentSession::new(
+        &claim.conversation_id,
+        &claim.actor_id,
+        "",
+        claim.policy_revision,
+        claim.current_pdp_scope.clone(),
+        &claim.now,
+    );
+    session.surface = AgentSessionSurface::AiAssistant;
+    session.input_revision = 1;
+    session.latest_input_seq = 1;
+    session.bind_native_assistant_input_target().unwrap();
+    let sess = MemSession {
+        inner: RefCell::new(Some(session)),
+        ..MemSession::default()
+    };
+    let model = ScriptModel {
+        turns: RefCell::new([answer("I can help with that")].into()),
+        requests: Rc::new(RefCell::new(vec![])),
+    };
+    let tools = RecordingTools {
+        calls: Rc::new(RefCell::new(vec![])),
+        reply: "unexpected device tool".into(),
+    };
+    let registry = [read_tool("sysinfo", Capability::SystemInfo)];
+    let clock = || "2026-06-20T00:00:01Z".to_string();
+    let outcome = run_agent_turn(
+        &deps(&sess, &model, &tools, &registry, &clock),
+        claim,
+        ChatMessage::text("u", ChatRole::User, "Help me plan a test"),
+        &mut NullTurnSink,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        outcome,
+        LoopOutcome::Answered("I can help with that".into())
+    );
+    assert!(tools.calls.borrow().is_empty());
+    assert!(model.requests.borrow()[0].tools.is_empty());
+    let stored = sess.inner.borrow();
+    let stored = stored.as_ref().unwrap();
+    assert_eq!(stored.turn_state, TurnState::Idle);
+    assert!(stored.has_admitted_targetless_input());
+    assert!(
+        stored
+            .conversation
+            .iter()
+            .any(|message| message.text == "I can help with that")
+    );
+}
+
+#[tokio::test]
 async fn plain_answer_replay_survives_reopen_and_completion_resume() {
     let sess = MemSession::default();
     let model = ScriptModel {

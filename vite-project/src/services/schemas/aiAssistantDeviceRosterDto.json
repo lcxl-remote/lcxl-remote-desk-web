@@ -1,0 +1,1 @@
+{"type":"object","required":["sessionId","revision","targetRefs"],"properties":{"revision":{"type":"integer","format":"int64","minimum":0},"sessionId":{"type":"string"},"targetRefs":{"type":"array","items":{"type":"string"}}},"x-readme-ref-name":"AiAssistantDeviceRosterDto"}

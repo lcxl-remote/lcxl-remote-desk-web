@@ -3,7 +3,7 @@
 
 use super::{
     AssistantStoreError,
-    conversation_search::{now_ms, owner_devices_on, page_cursor, validate_final_time},
+    conversation_search::{now_ms, page_cursor, validate_final_time},
     memory_view::{self, AuthorizedMemoryView, MemoryReadAuthorization},
     retrieval_cache::{self, StoredQuery},
     retrieval_native::NativeAssistantDataFence,
@@ -96,7 +96,7 @@ async fn search_on(
             "original delivered memory response is unavailable",
         ));
     }
-    let devices = owner_devices_on(db, &fence).await?;
+    let devices = memory_view::retrieval_devices_on(db, &fence, now).await?;
     let mut query = desk_diagnose_core::future::boxed(|| {
         prepare_query_on(
             db,
@@ -270,7 +270,7 @@ async fn prepare_query_on(
         .iter()
         .filter(|device| {
             request.scope == AssistantDeviceScope::AllMyDevices
-                || device.as_str() == binding.source_device_ref
+                || scope.current_device_refs().contains(device)
         })
         .filter(|device| old.is_none_or(|old| old.proof.snapshot.device_refs.contains(device)))
         .cloned()

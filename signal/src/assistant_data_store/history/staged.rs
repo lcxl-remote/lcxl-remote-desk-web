@@ -24,7 +24,7 @@ struct Inspection {
 struct Written {
     runtime: runtime::Model,
     conversation: conversation::Model,
-    binding: binding::Model,
+    binding: Option<binding::Model>,
 }
 
 enum Unit<'a> {
@@ -263,7 +263,7 @@ impl PendingHistoryBatch<'_, '_> {
                         .insert(capture.conversation_id.into(), Some(written.conversation));
                     state
                         .bindings
-                        .insert(capture.device_ref.into(), Some(written.binding));
+                        .insert(capture.device_ref.into(), written.binding);
 
                     outcomes.push(admitted(*prepared));
                 }

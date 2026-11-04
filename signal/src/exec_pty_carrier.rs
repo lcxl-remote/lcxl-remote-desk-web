@@ -663,21 +663,14 @@ async fn pending_permission_matches(
     }) else {
         return false;
     };
-    let [item] = pending.items.as_slice() else {
-        return false;
-    };
-    let Some(confirmation) = item
-        .command_confirmation
-        .as_ref()
+    let Some(confirmation) = pending
+        .exact_command()
         .filter(|confirmation| confirmation.is_interactive())
     else {
         return false;
     };
-    let target = confirmation.target_session_id.rsplit_once(':').map_or(
-        confirmation.target_session_id.as_str(),
-        |(connection, _)| connection,
-    );
-    target == request.target_connection_id
+    confirmation.target_connection_id() == request.target_connection_id
+        && session.admits_assistant_device(&confirmation.target_device_id)
         && desk_diagnose_core::command_confirmation::interactive_exec_request_id(
             &permission.run_id,
             &permission.request_id,

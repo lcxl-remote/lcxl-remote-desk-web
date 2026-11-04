@@ -70,6 +70,37 @@ impl CentralCapabilityReadiness {
     }
 }
 
+/// Host-side web research is available independently of device selection.
+/// An action preview still needs a selected device even though it is prepared
+/// by the host.
+pub fn assistant_central_capability_readiness(
+    search_configured: bool,
+    device_selected: bool,
+) -> Vec<CentralCapabilityReadiness> {
+    use crate::ai_assistant::{
+        ACTION_PREVIEW_CAPABILITY_ID, WEB_RESEARCH_FETCH_CAPABILITY_ID,
+        WEB_RESEARCH_SEARCH_CAPABILITY_ID,
+    };
+
+    let mut readiness = vec![
+        CentralCapabilityReadiness::ready(WEB_RESEARCH_FETCH_CAPABILITY_ID),
+        if search_configured {
+            CentralCapabilityReadiness::ready(WEB_RESEARCH_SEARCH_CAPABILITY_ID)
+        } else {
+            CentralCapabilityReadiness::unavailable(
+                WEB_RESEARCH_SEARCH_CAPABILITY_ID,
+                CapabilityBlockedReason::AdapterUnavailable,
+            )
+        },
+    ];
+    if device_selected {
+        readiness.push(CentralCapabilityReadiness::ready(
+            ACTION_PREVIEW_CAPABILITY_ID,
+        ));
+    }
+    readiness
+}
+
 /// Build the stable inventory for one product surface. Every central capability
 /// requires an explicit runtime report from the hosting service. Every edge
 /// capability requires a fresh, exact report from the currently live connection.
@@ -373,6 +404,36 @@ mod tests {
         WEB_RESEARCH_FETCH_CAPABILITY_ID, WEB_RESEARCH_SEARCH_CAPABILITY_ID,
         ai_assistant_provider_registry,
     };
+
+    #[test]
+    fn targetless_assistant_projects_only_configured_web_research_on_both_hosts() {
+        let registry = ai_assistant_provider_registry();
+        for surface in [
+            ProductSurface::ManagerPersonalOwner,
+            ProductSurface::OssPersonalOwner,
+        ] {
+            for search_configured in [false, true] {
+                let inventory = project_capability_availability(
+                    &registry,
+                    surface,
+                    42,
+                    assistant_central_capability_readiness(search_configured, false),
+                    [],
+                )
+                .unwrap();
+                let available = inventory
+                    .iter()
+                    .filter(|entry| entry.callable())
+                    .map(|entry| entry.capability_id.as_str())
+                    .collect::<Vec<_>>();
+                let mut expected = vec![WEB_RESEARCH_FETCH_CAPABILITY_ID];
+                if search_configured {
+                    expected.push(WEB_RESEARCH_SEARCH_CAPABILITY_ID);
+                }
+                assert_eq!(available, expected);
+            }
+        }
+    }
 
     fn ready_central() -> Vec<CentralCapabilityReadiness> {
         [

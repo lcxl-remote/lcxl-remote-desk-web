@@ -41,7 +41,7 @@ it('keeps the context trigger below the input beside send or stop', () => {
 
 it('keeps standalone back navigation beside the conversation heading without the outer title or width cap', () => {
     const page = readFileSync('src/features/desk/ai-assistant-page.tsx', 'utf8');
-    const standalone = page.slice(page.indexOf('function AiAssistantDevicePage'));
+    const standalone = page.slice(page.indexOf('function AiAssistantLivePage'));
     expect(standalone).not.toContain("t('pages.aiAssistant.title')");
     expect(standalone).not.toContain("t('pages.aiAssistant.subtitle')");
     expect(page).not.toContain('max-w-4xl');
@@ -49,6 +49,6 @@ it('keeps standalone back navigation beside the conversation heading without the
     expect(standalone.match(/backTo=\{/g)).toHaveLength(2);
     const header = page.slice(page.indexOf('data-testid="assistant-title-row"'), page.indexOf('</CardHeader>', page.indexOf('data-testid="assistant-title-row"')));
     expect(header).toContain('{backTo && (');
-    expect(header).toContain("aria-label={t('pages.aiAssistant.backToDevice')}");
+    expect(header).toContain("aria-label={t(hasDevice ? 'pages.aiAssistant.backToDevice' : 'pages.aiAssistant.backToOverview')}");
     expect(header.indexOf('<Link to={backTo}')).toBeLessThan(header.indexOf('<CardTitle'));
 });

@@ -9,11 +9,11 @@ import type { QueryKey, QueryClient, QueryObserverOptions, UseQueryResult } from
 import { listAiAssistantSessions } from "../../clients.ts";
 import { queryOptions, useQuery } from "@tanstack/react-query";
 
-export const listAiAssistantSessionsQueryKey = (params: ListAiAssistantSessionsQueryParams) => [{ url: '/api/my/ai-assistant-sessions' }, ...(params ? [params] : [])] as const
+export const listAiAssistantSessionsQueryKey = (params?: ListAiAssistantSessionsQueryParams) => [{ url: '/api/my/ai-assistant-sessions' }, ...(params ? [params] : [])] as const
 
 export type ListAiAssistantSessionsQueryKey = ReturnType<typeof listAiAssistantSessionsQueryKey>
 
-export function listAiAssistantSessionsQueryOptions(params: ListAiAssistantSessionsQueryParams, config: Partial<RequestConfig> & { client?: Client } = {}) {
+export function listAiAssistantSessionsQueryOptions(params?: ListAiAssistantSessionsQueryParams, config: Partial<RequestConfig> & { client?: Client } = {}) {
 
         const queryKey = listAiAssistantSessionsQueryKey(params)
         return queryOptions<ListAiAssistantSessionsQueryResponse, ResponseErrorConfig<Error>, ListAiAssistantSessionsQueryResponse, typeof queryKey>({
@@ -27,10 +27,10 @@ export function listAiAssistantSessionsQueryOptions(params: ListAiAssistantSessi
 }
 
 /**
- * @summary List recent AI Assistant conversations for a device
+ * @summary List recent AI Assistant conversations for the selected scope
  * {@link /api/my/ai-assistant-sessions}
  */
-export function useListAiAssistantSessions<TData = ListAiAssistantSessionsQueryResponse, TQueryData = ListAiAssistantSessionsQueryResponse, TQueryKey extends QueryKey = ListAiAssistantSessionsQueryKey>(params: ListAiAssistantSessionsQueryParams, options: 
+export function useListAiAssistantSessions<TData = ListAiAssistantSessionsQueryResponse, TQueryData = ListAiAssistantSessionsQueryResponse, TQueryKey extends QueryKey = ListAiAssistantSessionsQueryKey>(params?: ListAiAssistantSessionsQueryParams, options: 
 {
   query?: Partial<QueryObserverOptions<ListAiAssistantSessionsQueryResponse, ResponseErrorConfig<Error>, TData, TQueryData, TQueryKey>> & { client?: QueryClient },
   client?: Partial<RequestConfig> & { client?: Client }

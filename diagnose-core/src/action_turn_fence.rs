@@ -58,10 +58,21 @@ impl AssistantTurnFence {
     /// Freeze the loop's held snapshot, not a newly loaded session that might
     /// already belong to a different input or leaseholder.
     pub fn from_session(session: &PersistedAgentSession) -> Result<Option<Self>, AgentError> {
+        Self::for_device(session, &session.device_id)
+    }
+
+    /// The action's device must be within the held input's admitted targets.
+    pub fn for_device(
+        session: &PersistedAgentSession,
+        device_id: &str,
+    ) -> Result<Option<Self>, AgentError> {
         if session.surface != AgentSessionSurface::AiAssistant {
             return Ok(None);
         }
-        if !session.turn_state.is_active() {
+        if !session.turn_state.is_active()
+            || (!session.device_id.is_empty() && session.device_id != device_id)
+            || !session.admits_assistant_device(device_id)
+        {
             return Err(invalid());
         }
         let fence = Self {
@@ -69,7 +80,7 @@ impl AssistantTurnFence {
             conversation_id: session.conversation_id.clone(),
             turn_id: session.current_turn_id.clone().ok_or_else(invalid)?,
             actor_id: session.actor_id.clone(),
-            device_id: session.device_id.clone(),
+            device_id: device_id.into(),
             input_revision: session.input_revision,
             lease_token: session.lease_token,
             control_revision: session.control_revision,
@@ -223,6 +234,10 @@ mod tests {
         session.input_revision = 1;
         session.latest_input_seq = 1;
         session
+            .bind_assistant_request_targets(vec!["device".into()])
+            .unwrap();
+        assert!(session.bind_assistant_request_targets(vec![]).is_err());
+        session
             .begin_turn("turn", None, None, 1, session.scope_snapshot.clone(), "now")
             .unwrap();
         let frozen = AssistantTurnFence::from_session(&session).unwrap().unwrap();
@@ -252,9 +267,57 @@ mod tests {
             AssistantTurnFence::computer_action_scope_for_session(Some(&frozen), &session).is_err()
         );
         assert_eq!(frozen.input_revision, 1);
+        assert!(AssistantTurnFence::from_session(&session).is_err());
+        assert!(
+            session
+                .bind_assistant_request_targets(vec!["device".into(), "device".into()])
+                .is_err()
+        );
+        session.bind_assistant_request_targets(vec![]).unwrap();
+        assert!(!session.admits_assistant_device("device"));
+        assert!(AssistantTurnFence::from_session(&session).is_err());
+    }
+
+    #[test]
+    fn personal_conversation_fences_each_admitted_device_independently() {
+        let mut session = crate::ai_assistant::test_support::personal_session("actor", "run", "");
+        session.input_revision = 1;
+        session.latest_input_seq = 1;
+        session
+            .bind_assistant_request_targets(vec!["mac".into(), "linux".into()])
+            .unwrap();
+        session.begin_focus_epoch(1, []).unwrap();
+        session
+            .begin_turn("turn", None, None, 1, session.scope_snapshot.clone(), "now")
+            .unwrap();
+        let mut session =
+            PersistedAgentSession::decode_json(&session.encode_json_for_storage().unwrap())
+                .unwrap();
+        assert!(session.device_id.is_empty());
+        assert!(!session.has_admitted_targetless_input());
+
+        let mac = AssistantTurnFence::for_device(&session, "mac")
+            .unwrap()
+            .unwrap();
+        let linux = AssistantTurnFence::for_device(&session, "linux")
+            .unwrap()
+            .unwrap();
+        assert_eq!(mac.device_id, "mac");
+        assert_eq!(linux.device_id, "linux");
+        assert_eq!(mac.conversation_id, linux.conversation_id);
+        assert_eq!(mac.input_revision, linux.input_revision);
+        assert_ne!(mac, linux);
+        assert!(AssistantTurnFence::for_device(&session, "windows").is_err());
+        assert!(AssistantTurnFence::from_session(&session).is_err());
+
+        session.input_revision += 1;
+        session
+            .bind_assistant_request_targets(vec!["linux".into()])
+            .unwrap();
+        assert!(AssistantTurnFence::for_device(&session, &mac.device_id).is_err());
         assert_ne!(
-            frozen,
-            AssistantTurnFence::from_session(&session).unwrap().unwrap()
+            AssistantTurnFence::for_device(&session, &linux.device_id).unwrap(),
+            Some(linux)
         );
     }
 }

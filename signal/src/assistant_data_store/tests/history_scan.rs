@@ -60,6 +60,7 @@ fn prepare(
             scope_sha256: frame.hash.clone(),
             history_scope: Some(Box::new(frame.scope.clone())),
             memory_device_rule: None,
+            request_memory_device_refs: Vec::new(),
             destination: frame.destination.clone(),
             authority_expires_at_unix_ms: frame.scope.expires_at_unix_ms,
         },

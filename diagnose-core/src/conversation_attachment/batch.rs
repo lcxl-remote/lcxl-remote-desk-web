@@ -218,10 +218,14 @@ pub fn prepare_delivery(
     created_at_unix_ms: u64,
 ) -> Result<PreparedDelivery, AgentError> {
     if parts.len() > MAX_PARTS
+        || identity.device_id.len() > 256
+        || (identity.device_id.is_empty()
+            && parts
+                .iter()
+                .any(|part| matches!(part.content, PartContent::ImageDataUrl(_))))
         || [
             identity.conversation_id,
             identity.actor_id,
-            identity.device_id,
             identity.message_id,
             identity.tool_call_id,
         ]

@@ -33,6 +33,7 @@ pub(in crate::capability_grant_store::tests::computer_binding) async fn owner_se
     let now = Utc::now().to_rfc3339();
     SignalAgentRunEventStore::new(db.clone())
         .append_user_followup(&AppendUserFollowupParams {
+            target_refs: Vec::new(),
             client_timezone: "UTC".into(),
             temporary_conversation: None,
             event_id: "original-owner-input".into(),

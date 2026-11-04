@@ -4,7 +4,9 @@ use super::seam::AssistantDataReadUse;
 use desk_agent_protocol::{
     ai_assistant::{
         memory::MemoryUsePurpose,
-        source::{SourceReadPurpose, SourceUsePolicy, validate_source_id},
+        source::{
+            SourceReadPurpose, SourceUsePolicy, validate_optional_device_ref, validate_source_id,
+        },
     },
     data_lineage::{ContentRef, DataEnvelope},
 };
@@ -128,12 +130,12 @@ impl ReadProjectionProof {
         for id in [
             &self.actor_id,
             &self.root_conversation_id,
-            &self.source_device_ref,
             &self.logical_call_id,
             &self.tool_name,
         ] {
             validate_source_id(id)?;
         }
+        validate_optional_device_ref(&self.source_device_ref)?;
         for id in [
             &self.task_id,
             &self.producer_message_id,

@@ -22,14 +22,12 @@ use desk_diagnose_core::agent_loop::{
     run_preclaimed_goal_slice,
 };
 use desk_diagnose_core::ai_assistant::{
-    ACTION_PREVIEW_CAPABILITY_ID, WEB_RESEARCH_FETCH_CAPABILITY_ID,
-    WEB_RESEARCH_SEARCH_CAPABILITY_ID, ai_assistant_provider_registry,
-    build_ai_assistant_system_message_with_catalog,
+    ai_assistant_provider_registry, build_ai_assistant_system_message_with_catalog,
 };
 use desk_diagnose_core::assistant_policy::PERSONAL_ASSISTANT_POLICY_REVISION;
 use desk_diagnose_core::capability_availability::{
-    CapabilityAvailability, CentralCapabilityReadiness, callable_tools, inventory_snapshot,
-    project_capability_availability,
+    CapabilityAvailability, assistant_central_capability_readiness, callable_tools,
+    inventory_snapshot, project_capability_availability,
 };
 #[cfg(test)]
 use desk_diagnose_core::chat::ChatMessage;
@@ -37,7 +35,8 @@ use desk_diagnose_core::chat::ChatMessage;
 use desk_diagnose_core::chat::ChatRole;
 use desk_diagnose_core::context_attachment::ContextAttachmentKind;
 use desk_diagnose_core::conversation_key::{
-    derive_conversation_key, is_valid_client_conversation_id,
+    AssistantConversationScope, derive_assistant_conversation_key, derive_conversation_key,
+    is_valid_client_conversation_id,
 };
 use desk_diagnose_core::goal::GoalModelBinding;
 use desk_diagnose_core::model_capability::{
@@ -69,27 +68,6 @@ pub use fresh::resume_fresh_task;
 pub use scheduled::resume_scheduled_turn;
 mod scheduled_permission;
 pub use scheduled_permission::{ClaimedScheduledPermission, claim_scheduled_permission};
-
-pub(crate) fn oss_central_capability_readiness(
-    search_configured: bool,
-) -> Vec<CentralCapabilityReadiness> {
-    let mut readiness = [
-        ACTION_PREVIEW_CAPABILITY_ID,
-        WEB_RESEARCH_FETCH_CAPABILITY_ID,
-    ]
-    .into_iter()
-    .map(CentralCapabilityReadiness::ready)
-    .collect::<Vec<_>>();
-    readiness.push(if search_configured {
-        CentralCapabilityReadiness::ready(WEB_RESEARCH_SEARCH_CAPABILITY_ID)
-    } else {
-        CentralCapabilityReadiness::unavailable(
-            WEB_RESEARCH_SEARCH_CAPABILITY_ID,
-            desk_agent_protocol::capability_provider::CapabilityBlockedReason::AdapterUnavailable,
-        )
-    });
-    readiness
-}
 
 mod rehearsal;
 pub use rehearsal::run_rehearsal_turn;
@@ -149,7 +127,7 @@ pub(crate) async fn current_capability_projection<
 >(
     db: &C,
     connections: &SharedConnectionMap,
-    target_connection_id: &str,
+    target_connection_id: Option<&str>,
     model_capabilities: ModelCapabilities,
 ) -> (
     desk_diagnose_core::provider_registry::ProviderRegistry,
@@ -166,15 +144,12 @@ pub(crate) async fn current_capability_projection<
     };
     let provider_registry =
         ai_assistant_provider_registry().with_web_search_binding(search_binding);
-    let target_is_live = {
-        let connections = connections.read().await;
-        connections.contains_key(target_connection_id)
-    };
-    let cached_readiness = if target_is_live {
-        crate::computer_use_readiness::global_computer_use_readiness_cache()
-            .get_fresh(target_connection_id, chrono::Utc::now())
-    } else {
-        None
+    let cached_readiness = match target_connection_id {
+        Some(target) if connections.read().await.contains_key(target) => {
+            crate::computer_use_readiness::global_computer_use_readiness_cache()
+                .get_fresh(target, chrono::Utc::now())
+        }
+        _ => None,
     };
     let provider_registry = provider_registry.with_service_platform(
         cached_readiness
@@ -202,7 +177,10 @@ pub(crate) async fn current_capability_projection<
         &provider_registry,
         desk_agent_protocol::capability_provider::ProductSurface::OssPersonalOwner,
         generated_at_unix_ms,
-        oss_central_capability_readiness(provider_registry.web_search_binding().is_some()),
+        assistant_central_capability_readiness(
+            provider_registry.web_search_binding().is_some(),
+            target_connection_id.is_some(),
+        ),
         readiness,
     )
     .expect("validated Computer Use readiness must match the static Provider registry");
@@ -356,7 +334,7 @@ pub async fn send_capability_inventory(
         current_capability_projection(
             &db,
             connections.as_ref(),
-            &target_connection_id,
+            Some(&target_connection_id),
             model_capabilities,
         )
     })
@@ -496,7 +474,7 @@ pub async fn update_context(
             desk_diagnose_core::future::boxed(|| current_capability_projection(
                 &db,
                 connections.as_ref(),
-                &target_connection_id,
+                Some(&target_connection_id),
                 ModelCapabilities {
                     image_input: config.supports_image_input,
                 },
@@ -854,24 +832,26 @@ pub async fn resume_after_permission_decision(
     permission_request_id: String,
     ask: AiAssistantAsk,
 ) {
-    match crate::agent_goal_store::wake_for_permission_decision(
-        &db,
-        &conversation_id,
-        &actor_user_id.to_string(),
-        &target_device_id,
-        &permission_request_id,
-        chrono::Utc::now(),
-    )
-    .await
-    {
-        Ok(desk_diagnose_core::goal::GoalPermissionWake::NoGoal) => {}
-        Ok(
-            desk_diagnose_core::goal::GoalPermissionWake::Queued
-            | desk_diagnose_core::goal::GoalPermissionWake::Held,
-        ) => return,
-        Err(error) => {
-            log::warn!("[ai-assistant-goal] permission decision routing deferred: {error}");
-            return;
+    if !target_device_id.is_empty() {
+        match crate::agent_goal_store::wake_for_permission_decision(
+            &db,
+            &conversation_id,
+            &actor_user_id.to_string(),
+            &target_device_id,
+            &permission_request_id,
+            chrono::Utc::now(),
+        )
+        .await
+        {
+            Ok(desk_diagnose_core::goal::GoalPermissionWake::NoGoal) => {}
+            Ok(
+                desk_diagnose_core::goal::GoalPermissionWake::Queued
+                | desk_diagnose_core::goal::GoalPermissionWake::Held,
+            ) => return,
+            Err(error) => {
+                log::warn!("[ai-assistant-goal] permission decision routing deferred: {error}");
+                return;
+            }
         }
     }
     run_turn_inner(
@@ -886,18 +866,20 @@ pub async fn resume_after_permission_decision(
         Some(PermissionResume {
             conversation_id,
             permission_request_id: Some(permission_request_id),
+            work_event: None,
         }),
     )
     .await;
 }
 
 /// Continue the owner's existing requirement after a durable background result.
-/// The caller already chose the single target connection for this device.
+/// The caller matched the persisted receipt to its target and original input.
 pub async fn resume_after_work_completion(
     connections: web::Data<SharedConnectionMap>,
     db: DatabaseConnection,
     target_connection_id: String,
     session: desk_diagnose_core::session::PersistedAgentSession,
+    selected_event_id: Option<String>,
 ) -> Result<LoopOutcome, AgentError> {
     let question =
         desk_diagnose_core::permission_resume::latest_user_requirement(&session.conversation)
@@ -929,6 +911,7 @@ pub async fn resume_after_work_completion(
         Some(PermissionResume {
             conversation_id: session.conversation_id,
             permission_request_id: None,
+            work_event: selected_event_id.map(|event| (session.input_revision, event)),
         }),
         None,
         None,
@@ -944,6 +927,7 @@ pub async fn resume_after_work_completion(
 struct PermissionResume {
     conversation_id: String,
     permission_request_id: Option<String>,
+    work_event: Option<(u64, String)>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1051,6 +1035,23 @@ async fn prepare_composed_turn(
     goal_resume: Option<desk_diagnose_core::goal::GoalRun>,
     delegated: Option<desk_diagnose_core::subagent::runtime::RuntimeTurn>,
 ) -> Result<PreparationStep, AgentError> {
+    let targetless = target_device_id.is_empty();
+    if targetless
+        && (!target_connection_id.is_empty()
+            || actor_user_id != crate::control_authorizer::SINGLE_ACCOUNT_USER_ID
+            || resume_conversation_id.as_ref().is_some_and(|resume| {
+                resume.permission_request_id.is_none() && resume.work_event.is_none()
+            })
+            || scheduled.is_some()
+            || goal_resume.is_some()
+            || delegated.is_some())
+    {
+        return Err(transport_error(
+            "targetless assistant input cannot carry device context",
+        ));
+    }
+    desk_diagnose_core::assistant_policy::validate_assistant_ask_scope(&ask, !targetless)
+        .map_err(transport_error)?;
     if let Some(runtime) = &delegated
         && (resume_conversation_id.is_some()
             || scheduled.is_some()
@@ -1166,32 +1167,51 @@ async fn prepare_composed_turn(
         .map(str::trim)
         .filter(|id| is_valid_client_conversation_id(id))
         .map(str::to_string);
-    let conversation_id = delegated
-        .as_ref()
-        .map(|runtime| runtime.session().conversation_id.clone())
-        .or_else(|| {
-            scheduled
-                .as_ref()
-                .map(|resume| resume.claimed.session.conversation_id.clone())
-        })
-        .or_else(|| {
-            resume_conversation_id
-                .as_ref()
-                .map(|resume| resume.conversation_id.clone())
-        })
-        .or_else(|| {
-            goal_resume
-                .as_ref()
-                .map(|goal| goal.conversation_id.clone())
-        })
-        .unwrap_or_else(|| {
-            derive_conversation_key(
-                &actor_id,
-                &target_device_id,
-                ask.conversation_id.as_deref(),
-                &request_id,
-            )
-        });
+    let conversation_id = if targetless {
+        let personal = derive_assistant_conversation_key(
+            &actor_id,
+            AssistantConversationScope::Personal,
+            client_conversation_id.as_deref().ok_or_else(|| {
+                transport_error("targetless input requires a valid continuation id")
+            })?,
+        );
+        if resume_conversation_id
+            .as_ref()
+            .is_some_and(|resume| resume.conversation_id != personal)
+        {
+            return Err(transport_error(
+                "permission resume does not match its personal conversation",
+            ));
+        }
+        personal
+    } else {
+        delegated
+            .as_ref()
+            .map(|runtime| runtime.session().conversation_id.clone())
+            .or_else(|| {
+                scheduled
+                    .as_ref()
+                    .map(|resume| resume.claimed.session.conversation_id.clone())
+            })
+            .or_else(|| {
+                resume_conversation_id
+                    .as_ref()
+                    .map(|resume| resume.conversation_id.clone())
+            })
+            .or_else(|| {
+                goal_resume
+                    .as_ref()
+                    .map(|goal| goal.conversation_id.clone())
+            })
+            .unwrap_or_else(|| {
+                derive_conversation_key(
+                    &actor_id,
+                    &target_device_id,
+                    ask.conversation_id.as_deref(),
+                    &request_id,
+                )
+            })
+    };
     let now_unix_ms = u64::try_from(chrono::Utc::now().timestamp_millis())
         .expect("current time is after the Unix epoch");
     let session_reader = crate::agent_session_store::SignalAgentSessionStore::new(db.clone())
@@ -1222,6 +1242,17 @@ async fn prepare_composed_turn(
             return Ok(PreparationStep::Ready(None));
         }
     };
+    if let Some((revision, _)) = resume_conversation_id
+        .as_ref()
+        .and_then(|resume| resume.work_event.as_ref())
+        && snapshot
+            .as_ref()
+            .is_some_and(|session| *revision != session.input_revision)
+    {
+        return Ok(PreparationStep::Ready(Some(Box::pin(async {
+            Ok(Some(LoopOutcome::TurnBusy))
+        }))));
+    }
     let permission_child_context = if resume_conversation_id
         .as_ref()
         .is_some_and(|resume| resume.permission_request_id.is_some())
@@ -1463,7 +1494,7 @@ async fn prepare_composed_turn(
                                 current_capability_projection(
                                     &db,
                                     connections.as_ref(),
-                                    &target_connection_id,
+                                    (!targetless).then_some(target_connection_id.as_str()),
                                     ModelCapabilities {
                                         image_input: config.supports_image_input,
                                     },
@@ -1472,23 +1503,25 @@ async fn prepare_composed_turn(
                             .await
                         })
                         .await;
-                    let readiness_revision = readiness
-                        .as_ref()
-                        .map(|readiness| readiness.revision)
-                        .unwrap_or(1);
-                    let provider_registry = match desk_diagnose_core::future::boxed(|| async {
-                        crate::command_policy::current(
-                            &db,
-                            connections.as_ref(),
-                            &target_connection_id,
-                            &actor_id,
-                        )
+                    let readiness_revision = readiness.as_ref().map_or(
+                        desk_diagnose_core::web_research::CENTRAL_WEB_READINESS_REVISION,
+                        |readiness| readiness.revision,
+                    );
+                    let provider_registry = if !targetless
+                        && let Ok(policy) = desk_diagnose_core::future::boxed(|| async {
+                            crate::command_policy::current(
+                                &db,
+                                connections.as_ref(),
+                                &target_connection_id,
+                                &actor_id,
+                            )
+                            .await
+                        })
                         .await
-                    })
-                    .await
                     {
-                        Ok(policy) => provider_registry.with_command_policy(policy),
-                        Err(_) => provider_registry,
+                        provider_registry.with_command_policy(policy)
+                    } else {
+                        provider_registry
                     };
                     let office_selected = ask.selected_capability_ids.iter().any(|capability_id| {
                         capability_id
@@ -1554,9 +1587,34 @@ async fn prepare_composed_turn(
     .await }).await;
                         return Ok(PreparationStep::Ready(None));
                     }
+                    let selected_command = targetless
+                        .then(|| {
+                            let permission_id = resume_conversation_id
+                                .as_ref()?
+                                .permission_request_id
+                                .as_deref()?;
+                            snapshot
+                                .as_ref()?
+                                .permission_requests
+                                .iter()
+                                .find(|request| request.request_id == permission_id)?
+                                .exact_command()
+                        })
+                        .flatten();
+                    let (grant_device, grant_readiness_revision) = selected_command.map_or(
+                        (target_device_id.as_str(), readiness_revision),
+                        |command| {
+                            let revision =
+                                crate::computer_use_readiness::global_computer_use_readiness_cache(
+                                )
+                                .get_fresh(command.target_connection_id(), chrono::Utc::now())
+                                .map_or(0, |current| current.readiness.revision);
+                            (command.target_device_id.as_str(), revision)
+                        },
+                    );
                     let capability_grants = match desk_diagnose_core::future::boxed(|| async {
                         crate::capability_grant_store::SignalCapabilityGrantStore::new(db.clone())
-                            .list_for_subject(&conversation_id, &actor_id, &target_device_id)
+                            .list_for_subject(&conversation_id, &actor_id, grant_device)
                             .await
                     })
                     .await
@@ -2075,7 +2133,7 @@ async fn prepare_composed_turn(
             snapshot
                 .as_ref()
                 .map_or(0, |session| session.input_revision),
-            readiness_revision,
+            grant_readiness_revision,
         );
                             let permission_continuation_exact_tools =
         desk_diagnose_core::permission_tools::active_exact_authorized_tool_names(
@@ -2085,7 +2143,7 @@ async fn prepare_composed_turn(
             snapshot
                 .as_ref()
                 .map_or(0, |session| session.input_revision),
-            readiness_revision,
+            grant_readiness_revision,
         );
                             // Internal run projection is not a Provider capability and grants no device
                             // authority. It is always callable so the model can keep the user-visible
@@ -2105,6 +2163,20 @@ async fn prepare_composed_turn(
         .extend(desk_diagnose_core::capability_disclosure::capability_discovery_tool_registry());
                             registry.extend(desk_diagnose_core::conversation_history::conversation_history_tool_registry());
                             registry.extend(desk_diagnose_core::wait_tools::wait_tool_registry());
+                            if targetless {
+                                registry.retain(
+                                    desk_diagnose_core::assistant_policy::is_targetless_web_tool,
+                                );
+                                if let Some(original) = original_read_context.as_ref() {
+                                    registry.retain(|tool| {
+                                        !desk_diagnose_core::web_research::is_web_tool(tool.name())
+                                            || original
+                                                .tool_names
+                                                .iter()
+                                                .any(|name| name == tool.name())
+                                    });
+                                }
+                            }
                             let context_selection = match context_selection_claim(
                                 &provider_registry,
                                 &inventory,
@@ -2150,7 +2222,12 @@ async fn prepare_composed_turn(
                                         snapshot.seq,
                                         capability_grants.clone(),
                                     ),
-                                    None => sessions,
+                                    None => match &resume.work_event {
+                                        Some((_, event_id)) => {
+                                            sessions.with_work_event(event_id.clone())
+                                        }
+                                        None => sessions,
+                                    },
                                 }
                             } else {
                                 sessions
@@ -2854,6 +2931,7 @@ async fn prepare_composed_turn(
         };
         let goal_id = goal_start.as_ref().map(|goal| goal.goal_id.clone());
         let input = Box::new(crate::agent_run_event_store::AppendUserFollowupParams {
+            target_refs: ask.target_refs,
             client_timezone: ask.client_timezone,
             temporary_conversation: ask.temporary_conversation,
             event_id: ask.client_message_id,

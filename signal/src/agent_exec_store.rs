@@ -534,37 +534,39 @@ impl SignalAgentExecStore {
                 EventAppend::Busy
             ));
         }
-        let action = desk_diagnose_core::session::ActionIdentity::agent_exec(
-            task.id,
-            &task.exec_request_id,
-            &task.execution_generation,
-        );
-        if let Some(goal) = crate::goal_work::owner_on(&self.db, &session, &action)
+        if !session.has_admitted_personal_input() {
+            let action = desk_diagnose_core::session::ActionIdentity::agent_exec(
+                task.id,
+                &task.exec_request_id,
+                &task.execution_generation,
+            );
+            if let Some(goal) = crate::goal_work::owner_on(&self.db, &session, &action)
+                .await
+                .map_err(|error| internal(format!("load completion source: {error}")))?
+            {
+                if !goal.state.is_terminal() {
+                    return Ok(false);
+                }
+                return Ok(!matches!(
+                    sessions
+                        .prune_auto_trigger(&task.conversation_id, &task.event_id, now)
+                        .await?,
+                    EventAppend::Busy
+                ));
+            }
+            // An unrelated result cannot create a second planner alongside a goal.
+            if crate::agent_goal_store::load_for_subject(
+                &self.db,
+                &task.conversation_id,
+                &session.actor_id,
+                &session.device_id,
+            )
             .await
-            .map_err(|error| internal(format!("load completion source: {error}")))?
-        {
-            if !goal.state.is_terminal() {
+            .map_err(|error| internal(format!("load active goal: {error}")))?
+            .is_some()
+            {
                 return Ok(false);
             }
-            return Ok(!matches!(
-                sessions
-                    .prune_auto_trigger(&task.conversation_id, &task.event_id, now)
-                    .await?,
-                EventAppend::Busy
-            ));
-        }
-        // An unrelated result cannot create a second planner alongside a goal.
-        if crate::agent_goal_store::load_for_subject(
-            &self.db,
-            &task.conversation_id,
-            &session.actor_id,
-            &session.device_id,
-        )
-        .await
-        .map_err(|error| internal(format!("load active goal: {error}")))?
-        .is_some()
-        {
-            return Ok(false);
         }
         if session.agent_role.binding().is_some()
             && !crate::agent_subagent_store::SubAgentStore::new(self.db.clone())
@@ -599,6 +601,7 @@ impl SignalAgentExecStore {
             self.db.clone(),
             session,
             desk_diagnose_core::session::WorkKind::AgentExec,
+            task.event_id.clone(),
         )
         .await
         {

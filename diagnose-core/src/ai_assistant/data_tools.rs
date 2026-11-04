@@ -52,6 +52,7 @@ pub fn memory_registry(
         "content":{"type":"string","minLength":1,"maxLength":limits.memory.draft_bytes},
         "context":{"type":"string","maxLength":limits.memory.draft_bytes},
         "scope":{"type":"string","enum":["personal","current_device"],"default":"personal"},
+        "target_ref":{"type":"string","minLength":1,"maxLength":256,"description":"For current_device scope, use the target_ref from this request's selected devices. Required when several devices are selected."},
         "source_refs":{"type":"array","maxItems":limits.memory.source_refs.saturating_sub(1),"items":{
             "type":"object","required":["kind","id","role"],"additionalProperties":false,"properties":{
                 "kind":{"type":"string","enum":["input","assistant_message","receipt","native_status","previous_memory"]},

@@ -155,6 +155,7 @@ pub(super) fn validate_replay(
         || params.message.data_envelope.as_ref() != Some(&event.message_envelope)
         || stored != expected
         || selection != params.read_context
+        || !event.matches_targets(&params.target_refs, session)
         || event.input_seq > session.latest_input_seq
         || event.event.input_revision > session.input_revision
         || event.event.event_seq > session.last_event_seq
@@ -430,6 +431,11 @@ async fn original_with_time_on(
         client_conversation_id: subject.client_conversation_id.map(str::to_string),
         actor_id: subject.actor_id.into(),
         device_id: subject.device_id.into(),
+        target_refs: event
+            .targets
+            .into_iter()
+            .map(|target| target.reference)
+            .collect(),
         surface: AgentSessionSurface::AiAssistant,
         policy_revision: session.policy_revision,
         current_scope: session.scope_snapshot.clone(),
@@ -475,6 +481,19 @@ impl SignalAgentRunEventStore {
             })
         {
             return Err(internal("original object input changed or expired"));
+        }
+        if subject.device_id.is_empty()
+            && (!session.has_admitted_personal_input()
+                || !original.is_host_web_only()
+                || !matches!(destination, DestinationIdentity::Model { .. })
+                || session
+                    .authorization_requirement()
+                    .and_then(|message| message.data_envelope.as_ref())
+                    .is_none_or(|envelope| {
+                        envelope.allowed_destinations.as_slice() != [destination.clone()]
+                    }))
+        {
+            return Err(internal("targetless read input or destination changed"));
         }
         if !original.live_targets.is_empty() {
             let input_created_at_unix_ms = u64::try_from(input_created_at.timestamp_millis())

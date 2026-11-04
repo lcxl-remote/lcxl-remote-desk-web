@@ -1,0 +1,1 @@
+{"type":"object","required":["conversation","expectedRevision","targetRefs"],"properties":{"conversation":{"type":"string"},"expectedRevision":{"type":"integer","format":"int64","minimum":0},"targetRefs":{"type":"array","items":{"type":"string"}}},"x-readme-ref-name":"AiAssistantDeviceRosterBody"}

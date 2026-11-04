@@ -494,6 +494,7 @@ mod tests {
         .unwrap();
         crate::agent_run_event_store::SignalAgentRunEventStore::new(db.clone())
             .append_user_followup(&crate::agent_run_event_store::AppendUserFollowupParams {
+                target_refs: Vec::new(),
                 client_timezone: "UTC".into(),
                 temporary_conversation: None,
                 event_id: "first-input-event".into(),

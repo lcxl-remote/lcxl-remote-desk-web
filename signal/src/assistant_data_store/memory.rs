@@ -220,6 +220,9 @@ pub(crate) async fn source_device_on<C: ConnectionTrait + ConfigConnection>(
     actor: &str,
     device_ref: &str,
 ) -> Result<Option<AssistantSourceDevice>, AssistantStoreError> {
+    if device_ref.is_empty() {
+        return Ok(None);
+    }
     if actor != crate::control_authorizer::SINGLE_ACCOUNT_USER_ID.to_string() {
         return Err(AssistantStoreError::Inaccessible);
     }

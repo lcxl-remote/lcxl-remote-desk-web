@@ -2,7 +2,7 @@
 
 use super::{
     AssistantStoreError,
-    conversation_search::{now_ms, owner_devices_on, page_cursor, validate_final_time},
+    conversation_search::{now_ms, page_cursor, validate_final_time},
     memory_view::{self, MemoryReadAuthorization},
     retrieval_cache,
     retrieval_native::NativeAssistantDataFence,
@@ -77,14 +77,14 @@ async fn read_on(
     }
     let binding = RetrievalQueryBinding::for_call(&context, SourceReadPurpose::ModelMemory)
         .map_err(AssistantStoreError::Invalid)?;
-    let devices = owner_devices_on(db, &fence).await?;
+    let devices = memory_view::retrieval_devices_on(db, &fence, now).await?;
     let scope =
         usable_memory_scope(context.session, now).ok_or(AssistantStoreError::Inaccessible)?;
     let mut devices = devices
         .into_iter()
         .filter(|device| {
             scope.device_rule == AssistantDeviceScope::AllMyDevices
-                || device == &scope.current_device_ref
+                || scope.current_device_refs().contains(device)
         })
         .collect::<BTreeSet<_>>();
     let authority = read_authority(&fence, &binding.scope_sha256, &devices, now)?;

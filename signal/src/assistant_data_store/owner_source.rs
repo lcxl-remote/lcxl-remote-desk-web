@@ -235,7 +235,7 @@ pub(super) async fn history_source_on<C: ConnectionTrait + ConfigConnection>(
     if !super::source_lifecycle::origin_readable_on(db, actor, &original).await?
         || !original.history_admitted
         || original.device_ref != row.device_ref
-        || device.is_none()
+        || (!row.device_ref.is_empty() && device.is_none())
         || original.conversation_id != row.conversation_id
         || original.root_conversation_id != row.root_conversation_id
         || original.native_id != row.native_id
@@ -328,9 +328,10 @@ pub(super) async fn history_source_on<C: ConnectionTrait + ConfigConnection>(
             || unsigned(origin.deletion_generation)? != dependency.origin_deletion_generation
             || source_policy_revision != dependency.policy_revision
             || !history_policy_allowed(&policy, now)
-            || super::memory::source_device_on(db, actor, &origin.device_ref)
-                .await?
-                .is_none()
+            || (!origin.device_ref.is_empty()
+                && super::memory::source_device_on(db, actor, &origin.device_ref)
+                    .await?
+                    .is_none())
         {
             return Ok(unavailable(&row.source_id));
         }

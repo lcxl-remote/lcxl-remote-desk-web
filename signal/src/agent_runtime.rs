@@ -405,14 +405,18 @@ pub fn resume_completion_turn(
     db: DatabaseConnection,
     session: PersistedAgentSession,
     work_kind: desk_diagnose_core::session::WorkKind,
+    event_id: String,
 ) -> std::pin::Pin<Box<impl std::future::Future<Output = Result<LoopOutcome, AgentError>>>> {
-    desk_diagnose_core::future::boxed(move || resume_completion_turn_inner(db, session, work_kind))
+    desk_diagnose_core::future::boxed(move || {
+        resume_completion_turn_inner(db, session, work_kind, event_id)
+    })
 }
 
 async fn resume_completion_turn_inner(
     db: DatabaseConnection,
     session: PersistedAgentSession,
     work_kind: desk_diagnose_core::session::WorkKind,
+    event_id: String,
 ) -> Result<LoopOutcome, AgentError> {
     if session.surface == AgentSessionSurface::AiAssistant
         && !crate::ai_assistant_gate::global_ai_assistant_gate().is_enabled()
@@ -434,14 +438,52 @@ async fn resume_completion_turn_inner(
         let Some(connections) = CONTINUATION_CONNECTIONS.get() else {
             return Ok(LoopOutcome::TurnBusy);
         };
-        let Some(target) = continuation_target(connections, &session.device_id).await else {
-            return Ok(LoopOutcome::TurnBusy);
+        let (target, selected_event_id) = if session.has_admitted_personal_input() {
+            let pending = session
+                .pending_auto_triggers
+                .iter()
+                .find(|pending| {
+                    pending.event_id == event_id
+                        && pending.kind == WorkKind::AgentExec
+                        && pending.chain_id == session.chain_id
+                })
+                .ok_or_else(export_denied)?;
+            let original = crate::capability_grant_store::computer_binding::original_on(
+                &db,
+                &pending.execution_id,
+            )
+            .await
+            .map_err(|_| export_denied())?;
+            let (_, work, payload) = original.as_ref();
+            let origin = payload.command_origin.as_ref().ok_or_else(export_denied)?;
+            if work.conversation_id != session.conversation_id
+                || work.actor_id != session.actor_id
+                || origin.tool_call_id != pending.tool_call_id
+                || origin.turn_fence.input_revision != session.input_revision
+                || origin.turn_fence.control_revision != session.control_revision
+                || !session.admits_assistant_device(&work.target_device_id)
+                || crate::agent_run_event_store::eligible_request_device_ids(
+                    &db,
+                    std::slice::from_ref(&work.target_device_id),
+                )
+                .await?
+                .is_empty()
+            {
+                return Err(export_denied());
+            }
+            (String::new(), Some(event_id))
+        } else {
+            let Some(target) = continuation_target(connections, &session.device_id).await else {
+                return Ok(LoopOutcome::TurnBusy);
+            };
+            (target, None)
         };
         return crate::ai_assistant_orchestrator::resume_after_work_completion(
             connections.clone(),
             db,
             target,
             session,
+            selected_event_id,
         )
         .await;
     }

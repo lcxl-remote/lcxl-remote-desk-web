@@ -8,6 +8,27 @@ vi.mock('@/services/clients', () => ({ manageDeviceFileRecovery: vi.fn().mockRej
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
 afterEach(() => vi.unstubAllGlobals());
 describe('assistant history', () => {
+    it('lists and deletes personal conversations without a connection or backup lookup', async () => {
+        vi.mocked(manageDeviceFileRecovery).mockClear();
+        const row = { sessionId: 'personal-session', conversationId: 'intent', title: 'Personal note', updatedAt: '' };
+        const fetcher = vi.fn(async (_url: string, options?: RequestInit) => ({ ok: true, json: async () =>
+            options?.method === 'POST' ? { data: { deleted: true } } : { data: { sessions: [row] } } }));
+        vi.stubGlobal('fetch', fetcher);
+        const deleted = vi.fn();
+        render(<AssistantHistory deskId="" disabled={false} onSelect={() => true} onDeleted={deleted} onNew={() => {}} />);
+        fireEvent.click(screen.getByRole('button', { name: 'pages.aiAssistant.history.title' }));
+        await screen.findByText('Personal note');
+        expect(fetcher).toHaveBeenCalledWith('/api/my/ai-assistant-sessions?limit=100', expect.anything());
+        expect(screen.queryByRole('button', { name: 'pages.aiAssistant.temporary.new' })).not.toBeInTheDocument();
+        fireEvent.click(screen.getByRole('button', { name: 'pages.aiAssistant.history.delete' }));
+        const dialog = screen.getByRole('dialog', { name: 'pages.aiAssistant.history.deleteTitle' });
+        fireEvent.click(within(dialog).getByRole('button', { name: 'pages.aiAssistant.history.delete' }));
+        await waitFor(() => expect(deleted).toHaveBeenCalledWith('intent'));
+        expect(fetcher).toHaveBeenCalledWith('/api/my/ai-assistant-session/delete', expect.objectContaining({
+            method: 'POST', body: JSON.stringify({ session: 'personal-session' }),
+        }));
+        expect(manageDeviceFileRecovery).not.toHaveBeenCalled();
+    });
     it('uses the server title in a single line and in deletion confirmation', async () => {
         const title = 'A generated title describing a question whose original text was much longer';
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: { sessions: [

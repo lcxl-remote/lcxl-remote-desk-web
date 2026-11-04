@@ -35,7 +35,7 @@ pub(crate) async fn tombstone_on<C: ConnectionTrait + crate::config::ConfigConne
         attempts: Set(0),
         lease_id: Set(None),
         lease_until_unix_ms: Set(None),
-        completed_at_unix_ms: Set(None),
+        completed_at_unix_ms: Set(device.is_empty().then_some(now_ms)),
         last_error: Set(None),
     })
     .on_conflict(

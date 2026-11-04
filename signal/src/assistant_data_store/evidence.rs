@@ -135,9 +135,10 @@ async fn validate_on<C: ConnectionTrait + crate::config::ConfigConnection>(
     if !super::source_lifecycle::origin_readable_on(db, actor, &primary).await?
         || primary.statement_timezone != row.statement_timezone
         || primary.created_at_ms != row.observed_at_ms
-        || super::memory::source_device_on(db, actor, &primary.device_ref)
-            .await?
-            .is_none()
+        || (!primary.device_ref.is_empty()
+            && super::memory::source_device_on(db, actor, &primary.device_ref)
+                .await?
+                .is_none())
     {
         return Ok(None);
     }
@@ -300,9 +301,10 @@ async fn validate_on<C: ConnectionTrait + crate::config::ConfigConnection>(
             || original.accepted_input_seq <= 0
             || original.accepted_input_seq > memory_revision.accepted_input_seq
             || unsigned(original.deletion_generation)? != dependency.origin_deletion_generation
-            || super::memory::source_device_on(db, actor, &original.device_ref)
-                .await?
-                .is_none()
+            || (!original.device_ref.is_empty()
+                && super::memory::source_device_on(db, actor, &original.device_ref)
+                    .await?
+                    .is_none())
         {
             return Ok(None);
         }
@@ -405,9 +407,10 @@ pub(crate) fn retained_origins_allowed_on<
                 || unsigned(original.accepted_input_seq)? != saved.accepted_input_seq
                 || saved.accepted_input_seq > input_seq
                 || original.original_sha256 != saved.content_sha256
-                || super::memory::source_device_on(db, actor, &original.device_ref)
-                    .await?
-                    .is_none()
+                || (!original.device_ref.is_empty()
+                    && super::memory::source_device_on(db, actor, &original.device_ref)
+                        .await?
+                        .is_none())
             {
                 return Ok(false);
             }

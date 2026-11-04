@@ -278,6 +278,76 @@ impl SignalControlAuthorizer {
         }
     }
 
+    async fn start_ai_assistant_turn(
+        &self,
+        actor: &ConnectionState,
+        model: &SignalingModel,
+        actor_user_id: i32,
+        target: Option<(String, String)>,
+    ) -> ControlFrameOutcome {
+        let (target_connection, device_id) = target.unwrap_or_default();
+        let ask = match model.get_data::<AiAssistantAsk>() {
+            Ok(ask) => ask,
+            Err(e) => {
+                return ControlFrameOutcome::Reject {
+                    code: DeskErrorCode::INVALID_PARAMS,
+                    message: format!("invalid AiAssistantAsk payload: {e}"),
+                };
+            }
+        };
+        if let Err(message) = desk_diagnose_core::assistant_policy::validate_assistant_ask_scope(
+            &ask,
+            !device_id.is_empty(),
+        ) {
+            return self
+                .reject_frame(actor, model, DeskErrorCode::INVALID_PARAMS, message.into())
+                .await;
+        }
+        let limits = crate::assistant_data_config::policy(&self.db)
+            .await
+            .limits
+            .conversation;
+        if let Err(message) = ask.validate_with_limits(&limits).and_then(|_| {
+            desk_diagnose_core::ai_assistant::source::valid_statement_timezone(&ask.client_timezone)
+                .then_some(())
+                .ok_or("invalid AI Assistant client timezone")
+        }) {
+            return ControlFrameOutcome::Reject {
+                code: DeskErrorCode::INVALID_PARAMS,
+                message: message.into(),
+            };
+        }
+        if desk_diagnose_core::ai_assistant::selected_context_capabilities(
+            &ask.selected_capability_ids,
+        )
+        .is_err()
+        {
+            return ControlFrameOutcome::Reject {
+                code: DeskErrorCode::INVALID_PARAMS,
+                message: "unknown or non-context AI Assistant capability".into(),
+            };
+        }
+        let cancellation = crate::ai_assistant_orchestrator::cancellation::register(
+            actor_user_id,
+            &model.request_id,
+        );
+        let turn = crate::ai_assistant_orchestrator::run_turn(
+            self.connection_map.clone(),
+            self.db.clone(),
+            model.request_id.clone(),
+            actor.model.connection_id.clone(),
+            target_connection,
+            actor_user_id,
+            device_id,
+            ask,
+        );
+        actix_web::rt::spawn(async move {
+            let _cancellation = cancellation;
+            turn.await;
+        });
+        ControlFrameOutcome::Handled
+    }
+
     /// Load the central execution-mode grant (the configured provider's
     /// `execution_mode`). On a load error, fail closed to the safe default
     /// (`SuggestOnly`) so a transient DB issue can never widen what the edge runs.
@@ -373,6 +443,14 @@ impl ControlFrameAuthorizer for SignalControlAuthorizer {
                     )
                     .await;
             };
+
+            if model.signaling_type == SignalingType::AskAiAssistant
+                && model.to_connection_id.is_none()
+            {
+                return self
+                    .start_ai_assistant_turn(actor, model, actor_user_id, None)
+                    .await;
+            }
 
             // Target device: resolved from the receiving connection's validated
             // state, never from a control-end self-report.
@@ -494,60 +572,13 @@ impl ControlFrameAuthorizer for SignalControlAuthorizer {
                     ControlFrameOutcome::Handled
                 }
                 SignalingType::AskAiAssistant => {
-                    let ask = match model.get_data::<AiAssistantAsk>() {
-                        Ok(ask) => ask,
-                        Err(e) => {
-                            return ControlFrameOutcome::Reject {
-                                code: DeskErrorCode::INVALID_PARAMS,
-                                message: format!("invalid AiAssistantAsk payload: {e}"),
-                            };
-                        }
-                    };
-                    let limits = crate::assistant_data_config::policy(&self.db)
-                        .await
-                        .limits
-                        .conversation;
-                    if let Err(message) = ask.validate_with_limits(&limits).and_then(|_| {
-                        desk_diagnose_core::ai_assistant::source::valid_statement_timezone(
-                            &ask.client_timezone,
-                        )
-                        .then_some(())
-                        .ok_or("invalid AI Assistant client timezone")
-                    }) {
-                        return ControlFrameOutcome::Reject {
-                            code: DeskErrorCode::INVALID_PARAMS,
-                            message: message.into(),
-                        };
-                    }
-                    if desk_diagnose_core::ai_assistant::selected_context_capabilities(
-                        &ask.selected_capability_ids,
+                    self.start_ai_assistant_turn(
+                        actor,
+                        model,
+                        actor_user_id,
+                        Some((to_id, audience)),
                     )
-                    .is_err()
-                    {
-                        return ControlFrameOutcome::Reject {
-                            code: DeskErrorCode::INVALID_PARAMS,
-                            message: "unknown or non-context AI Assistant capability".into(),
-                        };
-                    }
-                    let cancellation = crate::ai_assistant_orchestrator::cancellation::register(
-                        actor_user_id,
-                        &model.request_id,
-                    );
-                    let turn = crate::ai_assistant_orchestrator::run_turn(
-                        self.connection_map.clone(),
-                        self.db.clone(),
-                        model.request_id.clone(),
-                        actor.model.connection_id.clone(),
-                        to_id,
-                        actor_user_id,
-                        audience,
-                        ask,
-                    );
-                    actix_web::rt::spawn(async move {
-                        let _cancellation = cancellation;
-                        turn.await;
-                    });
-                    ControlFrameOutcome::Handled
+                    .await
                 }
                 SignalingType::GetAiAssistantCapabilities => {
                     actix_web::rt::spawn(

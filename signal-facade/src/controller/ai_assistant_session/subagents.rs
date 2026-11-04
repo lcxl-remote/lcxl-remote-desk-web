@@ -35,7 +35,8 @@ pub struct AiAssistantSubAgentControlBody {
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct AiAssistantStopBody {
-    pub connection: String,
+    /// Omit for an owner conversation without a device target.
+    pub connection: Option<String>,
     pub conversation: Option<String>,
     pub session: Option<String>,
     pub control: AiAssistantStopControl,

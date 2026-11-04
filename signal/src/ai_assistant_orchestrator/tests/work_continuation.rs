@@ -211,7 +211,7 @@ async fn finished_command_continues_with_history_and_tools_then_drains_its_trigg
 
     let outcome = tokio::time::timeout(
         SCENARIO_TIMEOUT,
-        resume_after_work_completion(connections.clone(), db.clone(), host, session),
+        resume_after_work_completion(connections.clone(), db.clone(), host, session, None),
     )
     .await
     .unwrap()

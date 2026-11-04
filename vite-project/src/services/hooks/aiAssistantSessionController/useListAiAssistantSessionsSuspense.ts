@@ -9,11 +9,11 @@ import type { QueryKey, QueryClient, UseSuspenseQueryOptions, UseSuspenseQueryRe
 import { listAiAssistantSessions } from "../../clients.ts";
 import { queryOptions, useSuspenseQuery } from "@tanstack/react-query";
 
-export const listAiAssistantSessionsSuspenseQueryKey = (params: ListAiAssistantSessionsQueryParams) => [{ url: '/api/my/ai-assistant-sessions' }, ...(params ? [params] : [])] as const
+export const listAiAssistantSessionsSuspenseQueryKey = (params?: ListAiAssistantSessionsQueryParams) => [{ url: '/api/my/ai-assistant-sessions' }, ...(params ? [params] : [])] as const
 
 export type ListAiAssistantSessionsSuspenseQueryKey = ReturnType<typeof listAiAssistantSessionsSuspenseQueryKey>
 
-export function listAiAssistantSessionsSuspenseQueryOptions(params: ListAiAssistantSessionsQueryParams, config: Partial<RequestConfig> & { client?: Client } = {}) {
+export function listAiAssistantSessionsSuspenseQueryOptions(params?: ListAiAssistantSessionsQueryParams, config: Partial<RequestConfig> & { client?: Client } = {}) {
 
         const queryKey = listAiAssistantSessionsSuspenseQueryKey(params)
         return queryOptions<ListAiAssistantSessionsQueryResponse, ResponseErrorConfig<Error>, ListAiAssistantSessionsQueryResponse, typeof queryKey>({
@@ -27,10 +27,10 @@ export function listAiAssistantSessionsSuspenseQueryOptions(params: ListAiAssist
 }
 
 /**
- * @summary List recent AI Assistant conversations for a device
+ * @summary List recent AI Assistant conversations for the selected scope
  * {@link /api/my/ai-assistant-sessions}
  */
-export function useListAiAssistantSessionsSuspense<TData = ListAiAssistantSessionsQueryResponse, TQueryKey extends QueryKey = ListAiAssistantSessionsSuspenseQueryKey>(params: ListAiAssistantSessionsQueryParams, options: 
+export function useListAiAssistantSessionsSuspense<TData = ListAiAssistantSessionsQueryResponse, TQueryKey extends QueryKey = ListAiAssistantSessionsSuspenseQueryKey>(params?: ListAiAssistantSessionsQueryParams, options: 
 {
   query?: Partial<UseSuspenseQueryOptions<ListAiAssistantSessionsQueryResponse, ResponseErrorConfig<Error>, TData, TQueryKey>> & { client?: QueryClient },
   client?: Partial<RequestConfig> & { client?: Client }

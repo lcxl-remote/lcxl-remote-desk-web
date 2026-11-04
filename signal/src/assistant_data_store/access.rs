@@ -9,7 +9,6 @@ use desk_diagnose_core::{
     ai_assistant::data_access::{
         AssistantDataToolAccess, retained_context_eligible, validate_persisted_access,
     },
-    native_ids::{self, Kind},
     session::PersistedAgentSession,
 };
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, TransactionTrait};
@@ -31,9 +30,9 @@ pub(crate) async fn context_access(
         .assistant_data
         .as_ref()
         .ok_or(AssistantStoreError::Inaccessible)?;
-    let binding = native_ids::stable(
-        Kind::AssistantDeviceBinding,
-        &(&config.metadata.instance, &session.device_id),
+    let binding = crate::assistant_data_store::source_device_ref(
+        &config.metadata.instance,
+        &session.device_id,
     );
     if data.source_instance_id.as_deref() != Some(config.metadata.instance.as_str())
         || data.source_device_ref != binding

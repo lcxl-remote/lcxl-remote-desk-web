@@ -83,7 +83,10 @@ async fn current_device_context(
         &registry,
         ProductSurface::OssPersonalOwner,
         now_unix_ms,
-        crate::ai_assistant_orchestrator::oss_central_capability_readiness(search.configured()),
+        desk_diagnose_core::capability_availability::assistant_central_capability_readiness(
+            search.configured(),
+            true,
+        ),
         reports,
     )
     .ok()?;

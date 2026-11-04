@@ -275,6 +275,11 @@ pub async fn externalize_with(
     now: Result<u64, AgentError>,
     extra: &[PreparedAttachment],
 ) -> Result<ChatMessage, AgentError> {
+    if session.device_id.is_empty() && !session.has_admitted_personal_input() {
+        return Err(invalid(
+            "Attachment delivery has no admitted personal conversation",
+        ));
+    }
     let identity = DeliveryIdentity {
         conversation_id: &session.conversation_id,
         actor_id: &session.actor_id,

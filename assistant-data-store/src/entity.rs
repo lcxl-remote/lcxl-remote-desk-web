@@ -3,6 +3,7 @@
 pub mod agent_assistant_citation;
 pub mod agent_assistant_control_receipt;
 pub mod agent_assistant_data_authorization;
+pub mod agent_assistant_device_roster;
 pub mod agent_assistant_history;
 pub mod agent_assistant_history_conversation;
 pub mod agent_assistant_history_coverage;
@@ -31,6 +32,7 @@ pub fn register_schema(schema: sea_orm::SchemaBuilder) -> sea_orm::SchemaBuilder
         .register(agent_assistant_citation::Entity)
         .register(agent_assistant_control_receipt::Entity)
         .register(agent_assistant_data_authorization::Entity)
+        .register(agent_assistant_device_roster::Entity)
         .register(agent_assistant_history::Entity)
         .register(agent_assistant_history_conversation::Entity)
         .register(agent_assistant_history_coverage::Entity)

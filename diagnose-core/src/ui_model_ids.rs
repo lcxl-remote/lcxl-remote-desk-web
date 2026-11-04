@@ -213,6 +213,12 @@ pub fn resolve_session_call_with_context(
     {
         return Ok(call.clone());
     }
+    if call.name == crate::command_confirmation::COMMAND_TOOL
+        && crate::request_devices::selected_command_turn(session)
+    {
+        crate::request_devices::command_input(call, true)?;
+        return Ok(call.clone());
+    }
     let mut prepared = call.clone();
     if call.name == "request_permissions" {
         let mut value: Value = serde_json::from_str(&call.arguments_json)

@@ -135,9 +135,9 @@ async fn check_device_on(
         .as_ref()
         .ok_or(AssistantStoreError::Inaccessible)?;
     let config = db.config_read().await;
-    let binding = desk_diagnose_core::native_ids::stable(
-        desk_diagnose_core::native_ids::Kind::AssistantDeviceBinding,
-        &(&config.metadata.instance, &session.device_id),
+    let binding = crate::assistant_data_store::source_device_ref(
+        &config.metadata.instance,
+        &session.device_id,
     );
     if session.actor_id != crate::control_authorizer::SINGLE_ACCOUNT_USER_ID.to_string()
         || data.source_device_ref != binding

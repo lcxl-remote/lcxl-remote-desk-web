@@ -27,6 +27,27 @@ pub const DEFAULT_SNAPSHOT_MESSAGE_PAGE_SIZE: usize = 100;
 pub const MAX_SNAPSHOT_MESSAGE_PAGE_SIZE: usize = 100;
 
 #[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AiAssistantDeviceRosterBody {
+    pub conversation: String,
+    pub expected_revision: u64,
+    pub target_refs: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AiAssistantDeviceRosterQuery {
+    pub conversation: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AiAssistantDeviceRosterDto {
+    pub session_id: String,
+    pub revision: u64,
+    pub target_refs: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct AiAssistantSessionQuery {
     pub connection: Option<String>,
     pub scheduled_task: Option<String>,
@@ -40,11 +61,33 @@ pub struct AiAssistantSessionQuery {
     pub message_limit: Option<usize>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AiAssistantSnapshotSelection<'a> {
+    Scheduled {
+        task: &'a str,
+        run: &'a str,
+    },
+    Saved {
+        session: &'a str,
+    },
+    PersonalIntent {
+        conversation: &'a str,
+    },
+    DeviceIntent {
+        connection: &'a str,
+        conversation: &'a str,
+    },
+}
+
 impl AiAssistantSessionQuery {
     /// Schedule selectors cannot be combined with connection/session selectors.
-    pub fn scheduled_selection(&self) -> Result<Option<(&str, &str)>, &'static str> {
-        match (&self.scheduled_task, &self.scheduled_run) {
-            (None, None) => Ok(None),
+    pub fn snapshot_selection(&self) -> Result<AiAssistantSnapshotSelection<'_>, &'static str> {
+        use AiAssistantSnapshotSelection::{DeviceIntent, PersonalIntent, Saved, Scheduled};
+
+        match (
+            self.scheduled_task.as_deref(),
+            self.scheduled_run.as_deref(),
+        ) {
             (Some(task), Some(run))
                 if self.connection.is_none()
                     && self.conversation.is_none()
@@ -54,22 +97,73 @@ impl AiAssistantSessionQuery {
                     && !run.is_empty()
                     && run.len() <= 256 =>
             {
-                Ok(Some((task, run)))
+                Ok(Scheduled { task, run })
+            }
+            (None, None) => {
+                if let Some(session) = self.session.as_deref().filter(|id| !id.is_empty()) {
+                    return Ok(Saved { session });
+                }
+                let conversation = self
+                    .conversation
+                    .as_deref()
+                    .ok_or("missing conversation intent")?;
+                if let Some(connection) = self.connection.as_deref() {
+                    return Ok(DeviceIntent {
+                        connection,
+                        conversation,
+                    });
+                }
+                let conversation = conversation.trim();
+                if !desk_diagnose_core::conversation_key::is_valid_client_conversation_id(
+                    conversation,
+                ) {
+                    return Err("invalid personal conversation intent");
+                }
+                Ok(PersonalIntent { conversation })
             }
             _ => Err("invalid scheduled conversation selector"),
         }
     }
 }
 
+pub fn selected_permission_session_id(
+    actor_id: &str,
+    device_id: &str,
+    session: Option<&str>,
+    conversation: Option<&str>,
+) -> Option<String> {
+    use desk_diagnose_core::conversation_key::{
+        AssistantConversationScope, derive_assistant_conversation_key, derive_conversation_key,
+        is_valid_client_conversation_id,
+    };
+    if let Some(id) = session.filter(|id| !id.is_empty()) {
+        return Some(id.to_owned());
+    }
+    let intent = conversation?;
+    if !device_id.is_empty() {
+        return Some(derive_conversation_key(
+            actor_id,
+            device_id,
+            Some(intent),
+            "",
+        ));
+    }
+    let intent = intent.trim();
+    is_valid_client_conversation_id(intent).then(|| {
+        derive_assistant_conversation_key(actor_id, AssistantConversationScope::Personal, intent)
+    })
+}
+
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct AiAssistantSessionListQuery {
-    pub connection: String,
+    pub connection: Option<String>,
     pub limit: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, ToSchema)]
 pub struct DeleteAiAssistantSessionBody {
-    pub connection: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connection: Option<String>,
     pub session: String,
 }
 
@@ -83,7 +177,8 @@ pub struct DeleteAiAssistantSessionResponse {
 #[derive(Clone, Debug, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PermissionDecisionBody {
-    pub connection: String,
+    /// Omit for an owner conversation without a device target.
+    pub connection: Option<String>,
     pub conversation: Option<String>,
     pub session: Option<String>,
     /// Optional concurrency fence: snapshot.requestId, or the selected scheduled
@@ -114,7 +209,8 @@ pub struct BackgroundCancelBody {
 #[derive(Clone, Debug, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CapabilityGrantRevokeBody {
-    pub connection: String,
+    /// Omit for an owner conversation without a device target.
+    pub connection: Option<String>,
     pub conversation: Option<String>,
     pub session: Option<String>,
     pub grant_id: String,
@@ -1955,12 +2051,7 @@ impl From<desk_diagnose_core::dynamic_run::PermissionRequest> for PermissionRequ
                                     InteractiveCommandDto {
                                         exec_request_id: String::new(),
                                         target_connection_id: confirmation
-                                            .target_session_id
-                                            .rsplit_once(':')
-                                            .map_or(
-                                                confirmation.target_session_id.as_str(),
-                                                |(connection, _)| connection,
-                                            )
+                                            .target_connection_id()
                                             .to_owned(),
                                         elevated: confirmation.is_elevated(),
                                     }
@@ -2661,26 +2752,67 @@ mod tests {
 mod scheduled_query_tests {
     use super::*;
     #[test]
+    fn personal_snapshot_accepts_a_valid_intent_without_a_connection() {
+        let query: AiAssistantSessionQuery =
+            serde_json::from_value(serde_json::json!({"conversation":" personal-thread "}))
+                .unwrap();
+        assert_eq!(
+            query.snapshot_selection().unwrap(),
+            AiAssistantSnapshotSelection::PersonalIntent {
+                conversation: "personal-thread"
+            }
+        );
+        let invalid: AiAssistantSessionQuery =
+            serde_json::from_value(serde_json::json!({"conversation":"invalid intent"})).unwrap();
+        assert!(invalid.snapshot_selection().is_err());
+    }
+    #[test]
     fn scheduled_selector_is_complete_and_excludes_other_selectors() {
         let valid = serde_json::json!({"scheduled_task":"task", "scheduled_run":"run"});
         let query: AiAssistantSessionQuery = serde_json::from_value(valid.clone()).unwrap();
-        assert_eq!(query.scheduled_selection().unwrap(), Some(("task", "run")));
+        assert_eq!(
+            query.snapshot_selection().unwrap(),
+            AiAssistantSnapshotSelection::Scheduled {
+                task: "task",
+                run: "run"
+            }
+        );
         for key in ["connection", "conversation", "session"] {
             let mut mixed = valid.clone();
             mixed[key] = serde_json::json!("");
             let query: AiAssistantSessionQuery = serde_json::from_value(mixed).unwrap();
-            assert!(query.scheduled_selection().is_err());
+            assert!(query.snapshot_selection().is_err());
         }
         for key in ["scheduled_task", "scheduled_run"] {
             let mut partial = valid.clone();
             partial.as_object_mut().unwrap().remove(key);
             let query: AiAssistantSessionQuery = serde_json::from_value(partial).unwrap();
-            assert!(query.scheduled_selection().is_err());
+            assert!(query.snapshot_selection().is_err());
         }
         let query: AiAssistantSessionQuery =
             serde_json::from_value(serde_json::json!({"connection":"host", "conversation":"chat"}))
                 .unwrap();
-        assert_eq!(query.scheduled_selection().unwrap(), None);
+        assert_eq!(
+            query.snapshot_selection().unwrap(),
+            AiAssistantSnapshotSelection::DeviceIntent {
+                connection: "host",
+                conversation: "chat"
+            }
+        );
+    }
+
+    #[test]
+    fn saved_snapshot_selection_uses_the_session_even_with_a_device_selected() {
+        let query: AiAssistantSessionQuery = serde_json::from_value(serde_json::json!({
+            "session": "saved-session", "connection": "another-device", "conversation": "chat"
+        }))
+        .unwrap();
+        assert_eq!(
+            query.snapshot_selection().unwrap(),
+            AiAssistantSnapshotSelection::Saved {
+                session: "saved-session"
+            }
+        );
     }
 }
 

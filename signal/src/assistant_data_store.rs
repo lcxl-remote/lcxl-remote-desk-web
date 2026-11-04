@@ -173,6 +173,32 @@ pub(crate) async fn reconcile_settings_on<C: ConnectionTrait + ConfigConnection>
     Ok(active.update(db).await?)
 }
 
+pub(crate) fn source_device_ref(instance: &str, device: &str) -> String {
+    if device.is_empty() {
+        String::new()
+    } else {
+        native_ids::stable(Kind::AssistantDeviceBinding, &(instance, device))
+    }
+}
+
+pub(crate) fn bind_input_memory_devices(
+    session: &mut PersistedAgentSession,
+    targets: &[desk_diagnose_core::dynamic_run::AssistantInputTarget],
+) -> Result<(), &'static str> {
+    let instance = session
+        .assistant_data
+        .as_ref()
+        .and_then(|data| data.source_instance_id.as_deref())
+        .ok_or("missing instance for assistant memory targets")?
+        .to_owned();
+    desk_diagnose_core::ai_assistant::memory_access::bind_request_memory_devices(
+        session,
+        targets
+            .iter()
+            .map(|target| source_device_ref(&instance, &target.device_id)),
+    )
+}
+
 pub(crate) async fn accept_input_on<C: ConnectionTrait + ConfigConnection>(
     db: &C,
     session: &mut PersistedAgentSession,
@@ -196,10 +222,7 @@ pub(crate) async fn accept_input_on<C: ConnectionTrait + ConfigConnection>(
         return Err(invalid("missing first-input assistant data state"));
     }
     let config = db.config_read().await;
-    let source_device_ref = native_ids::stable(
-        Kind::AssistantDeviceBinding,
-        &(&config.metadata.instance, &session.device_id),
-    );
+    let source_device_ref = source_device_ref(&config.metadata.instance, &session.device_id);
     if session.assistant_data.as_ref().is_some_and(|data| {
         data.source_device_ref != source_device_ref
             || data.source_instance_id.as_deref() != Some(config.metadata.instance.as_str())

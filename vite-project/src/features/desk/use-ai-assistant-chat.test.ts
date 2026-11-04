@@ -24,6 +24,21 @@ const snapshotFields = { controlRevision: 1, inputRevision: 1, mainStopped: fals
     subagents: { active_tasks: [], task: null, tasks: null, parent_session_id: null, attention_tasks: [], attention_count: 0 } };
 
 describe('useAiAssistantChat', () => {
+    it('retries a personal request with its original device selection', async () => {
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: null }) }));
+        const sendMessage = vi.fn((_type: number, _payload: unknown, _to?: string, request?: string) => request!)
+            .mockImplementationOnce(() => { throw new Error('offline'); });
+        const subscribe = () => () => undefined;
+        const { result, rerender } = renderHook(({ targets }) => useAiAssistantChat({
+            deskId: '', conversationStorageScope: 'personal:7', targetRefs: targets, subscribe, sendMessage,
+        }), { initialProps: { targets: ['mac', 'linux'] } });
+        act(() => { expect(result.current.start('Compare these devices')).toBe(true); });
+        rerender({ targets: ['linux'] });
+        await act(async () => { await result.current.retryDelivery(); });
+        expect(sendMessage.mock.calls[0][1]).toMatchObject({ target_refs: ['mac', 'linux'] });
+        expect(sendMessage.mock.calls[1]).toEqual(sendMessage.mock.calls[0]);
+    });
+
     it('samples the sending client timezone per input and freezes it for retries', async () => {
         let timezone = 'Asia/Shanghai';
         const options = Intl.DateTimeFormat().resolvedOptions();

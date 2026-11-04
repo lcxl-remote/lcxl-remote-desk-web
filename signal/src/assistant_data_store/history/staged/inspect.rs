@@ -46,18 +46,23 @@ pub(super) async fn inspect_on(
     {
         return Err(AdmissionFailure::Policy);
     }
-    let directory = capture
-        .directory
-        .ok_or(AssistantStoreError::Invalid("missing OSS source directory"))?;
-    let existing_binding = binding::Entity::find()
-        .filter(binding::Column::BindingId.eq(capture.device_ref))
-        .one(txn)
-        .await?;
-    if existing_binding.as_ref().is_some_and(|row| {
-        row.instance_id != directory.instance_id || row.audience != directory.audience
-    }) {
-        return Err(AdmissionFailure::Policy);
-    }
+    let existing_binding = if capture.device_ref.is_empty() {
+        None
+    } else {
+        let directory = capture
+            .directory
+            .ok_or(AssistantStoreError::Invalid("missing OSS source directory"))?;
+        let existing = binding::Entity::find()
+            .filter(binding::Column::BindingId.eq(capture.device_ref))
+            .one(txn)
+            .await?;
+        if existing.as_ref().is_some_and(|row| {
+            row.instance_id != directory.instance_id || row.audience != directory.audience
+        }) {
+            return Err(AdmissionFailure::Policy);
+        }
+        existing
+    };
     let mut new_parts = Vec::new();
     for (index, (fragment, source_id)) in prepared
         .index

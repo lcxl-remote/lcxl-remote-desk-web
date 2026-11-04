@@ -10,16 +10,27 @@ pub async fn stop_ai_assistant_session(
 ) -> Result<HttpResponse, DeskSignalError> {
     let db = crate::db::get_db();
     let actor = SINGLE_ACCOUNT_USER_ID.to_string();
-    let Some((root, device)) = recovery::resolve(
-        &SignalAgentSessionStore::new(db.clone()),
-        &connection_map,
-        &actor,
-        &body.connection,
-        body.session.as_deref(),
-        body.conversation.as_deref(),
-    )
-    .await?
-    else {
+    let subject = match body.connection.as_deref() {
+        Some(connection) => {
+            recovery::resolve(
+                &SignalAgentSessionStore::new(db.clone()),
+                &connection_map,
+                &actor,
+                connection,
+                body.session.as_deref(),
+                body.conversation.as_deref(),
+            )
+            .await?
+        }
+        None => selected_permission_session_id(
+            &actor,
+            "",
+            body.session.as_deref(),
+            body.conversation.as_deref(),
+        )
+        .map(|root| (root, String::new())),
+    };
+    let Some((root, device)) = subject else {
         return Ok(not_accessible());
     };
     let outcome = crate::agent_subagent_store::SubAgentStore::new(db.clone())

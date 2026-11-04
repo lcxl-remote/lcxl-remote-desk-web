@@ -25,12 +25,14 @@ export function AiAssistantConversationChoices({
     error,
     refreshing,
     onRefresh,
+    personalEnabled,
 }: {
     devices: AssistantDeviceChoice[];
     loading: boolean;
     error: boolean;
     refreshing: boolean;
     onRefresh: () => void;
+    personalEnabled?: boolean;
 }) {
     const { t } = useTranslation();
 
@@ -40,10 +42,15 @@ export function AiAssistantConversationChoices({
                 <h1 className="text-xl font-semibold">{t('pages.aiAssistant.overview.conversationsTitle')}</h1>
                 <p className="text-sm text-muted-foreground">{t('pages.aiAssistant.overview.conversationsDescription')}</p>
             </div>
-            <Button variant="outline" size="sm" onClick={onRefresh} disabled={refreshing}>
-                <RefreshCw className={`mr-2 h-4 w-4 ${refreshing ? 'animate-spin' : ''}`} aria-hidden="true" />
-                {t('pages.aiAssistant.conversations.refresh')}
-            </Button>
+            <div className="flex flex-wrap gap-2">
+                {personalEnabled && <Button asChild size="sm">
+                    <Link to="/ai-assistant/conversation">{t('pages.aiAssistant.conversations.personal')}</Link>
+                </Button>}
+                <Button variant="outline" size="sm" onClick={onRefresh} disabled={refreshing}>
+                    <RefreshCw className={`mr-2 h-4 w-4 ${refreshing ? 'animate-spin' : ''}`} aria-hidden="true" />
+                    {t('pages.aiAssistant.conversations.refresh')}
+                </Button>
+            </div>
         </div>
         {loading ? <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
             {[0, 1, 2].map(index => <Skeleton key={index} className="h-32 rounded-xl" />)}
@@ -87,6 +94,7 @@ export default function AiAssistantConversations() {
         })) : [];
 
     return <AiAssistantConversationChoices
+        personalEnabled={enabled}
         devices={devices}
         loading={connections.isLoading || serverInfo.isLoading}
         error={connections.isError || serverInfo.isError}

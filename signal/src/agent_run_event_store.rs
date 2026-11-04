@@ -9,7 +9,8 @@ use chrono::{DateTime, Utc};
 use desk_agent_protocol::{AgentError, AgentErrorKind, AgentScope};
 use desk_diagnose_core::chat::{ChatMessage, ChatRole};
 use desk_diagnose_core::dynamic_run::{
-    AGENT_RUN_EVENT_SCHEMA_VERSION, AgentRunEvent, AgentRunEventKind, UserFollowupEvent,
+    AGENT_RUN_EVENT_SCHEMA_VERSION, AgentRunEvent, AgentRunEventKind, AssistantInputTarget,
+    UserFollowupEvent,
 };
 use desk_diagnose_core::goal::{
     GoalLedgerEvent, GoalLimits, GoalModelBinding, GoalOpenRequestEvent, GoalOpenRequestState,
@@ -36,6 +37,7 @@ pub struct AppendUserFollowupParams {
     pub client_conversation_id: Option<String>,
     pub actor_id: String,
     pub device_id: String,
+    pub target_refs: Vec<String>,
     pub surface: AgentSessionSurface,
     pub policy_revision: i64,
     pub current_scope: AgentScope,
@@ -97,6 +99,12 @@ impl SignalAgentRunEventStore {
         goal_start: Option<StartUserGoal>,
     ) -> Result<UserFollowupAck, AgentError> {
         validate_append_params(params)?;
+        let targetless = params.device_id.is_empty();
+        if targetless && (goal_start.is_some() || params.temporary_conversation.is_some()) {
+            return Err(internal(
+                "targetless input requires the personal input path",
+            ));
+        }
         for _ in 0..APPEND_ATTEMPTS {
             let txn = crate::db::begin_write(&self.db, crate::entity::agent_session::Entity)
                 .await
@@ -108,16 +116,18 @@ impl SignalAgentRunEventStore {
             {
                 return Err(internal("conversation was deleted"));
             }
-            crate::schedule_store::validate_rehearsal_input_on(
-                &txn,
-                &params.actor_id,
-                &params.device_id,
-                &params.run_id,
-                params.client_conversation_id.as_deref(),
-                &params.message,
-            )
-            .await
-            .map_err(|_| internal("rehearsal input changed or not admitted"))?;
+            if !targetless {
+                crate::schedule_store::validate_rehearsal_input_on(
+                    &txn,
+                    &params.actor_id,
+                    &params.device_id,
+                    &params.run_id,
+                    params.client_conversation_id.as_deref(),
+                    &params.message,
+                )
+                .await
+                .map_err(|_| internal("rehearsal input changed or not admitted"))?;
+            }
 
             if let Some(existing) = agent_run_event::Entity::find()
                 .filter(agent_run_event::Column::EventId.eq(&params.event_id))
@@ -174,6 +184,29 @@ impl SignalAgentRunEventStore {
                 return Ok(ack);
             }
 
+            let mut targets = if params.target_refs.is_empty() {
+                Vec::new()
+            } else {
+                desk_diagnose_core::future::send_phase(|| {
+                    resolve_targets_on(&txn, &params.target_refs)
+                })
+                .await?
+            };
+            if !targets.is_empty()
+                && let Some(roster) = desk_diagnose_core::future::boxed(|| {
+                    desk_assistant_data_store::device_roster::lock(
+                        &txn,
+                        &params.actor_id,
+                        &params.run_id,
+                    )
+                })
+                .await
+                .map_err(|error| error.into_agent_error())?
+            {
+                roster
+                    .freeze(&mut targets)
+                    .map_err(|_| internal("selected device is outside the coordinator roster"))?;
+            }
             let row = agent_session::Entity::find()
                 .filter(agent_session::Column::ConversationId.eq(&params.run_id))
                 .one(&txn)
@@ -219,23 +252,17 @@ impl SignalAgentRunEventStore {
             }
             let prior_task_retrieval =
                 desk_diagnose_core::ai_assistant::data_access::task_retrieval_snapshot(&session);
-            let accepted_memory_input = if session.surface == AgentSessionSurface::AiAssistant {
-                Some(
-                    desk_diagnose_core::future::send_phase(|| {
-                        crate::assistant_data_store::accept_input_on(
-                            &txn,
-                            &mut session,
-                            &params.client_timezone,
-                            params.temporary_conversation,
-                            now.timestamp_millis().max(0) as u64,
-                        )
-                    })
-                    .await
-                    .map_err(|_| internal("assistant data input could not be committed"))?,
+            desk_diagnose_core::future::send_phase(|| {
+                crate::assistant_data_store::accept_input_on(
+                    &txn,
+                    &mut session,
+                    &params.client_timezone,
+                    params.temporary_conversation,
+                    now.timestamp_millis().max(0) as u64,
                 )
-            } else {
-                None
-            };
+            })
+            .await
+            .map_err(|_| internal("assistant data input could not be committed"))?;
             session.latest_input_seq = session
                 .latest_input_seq
                 .checked_add(1)
@@ -244,6 +271,16 @@ impl SignalAgentRunEventStore {
                 .input_revision
                 .checked_add(1)
                 .ok_or_else(|| internal("user input revision exhausted"))?;
+            if targetless {
+                session.bind_personal_assistant_request_targets(&targets)
+            } else {
+                session.bind_native_assistant_input_target()
+            }
+            .map_err(internal)?;
+            if targetless {
+                crate::assistant_data_store::bind_input_memory_devices(&mut session, &targets)
+                    .map_err(internal)?;
+            }
             // The new message and the approval fence commit atomically. Once the
             // ACK is visible, no permission request proposed against an older
             // requirement remains user-approvable.
@@ -288,6 +325,7 @@ impl SignalAgentRunEventStore {
                 input_seq: session.latest_input_seq,
                 message_id: params.message.message_id.clone(),
                 message_envelope: envelope.clone(),
+                targets,
             };
             followup
                 .validate()
@@ -311,19 +349,21 @@ impl SignalAgentRunEventStore {
             } else {
                 0
             };
-            crate::agent_subagent_store::initialize_input_group_on(
-                &txn,
-                &mut session,
-                params.message.clone(),
-                params.read_context.clone(),
-                goals
-                    .opened_goal
-                    .as_ref()
-                    .or_else(|| goals.revised_goal.as_ref().map(|(goal, _)| goal)),
-                now.timestamp_millis(),
-            )
-            .await
-            .map_err(|error| internal(format!("initialize delegation source: {error}")))?;
+            if !targetless {
+                crate::agent_subagent_store::initialize_input_group_on(
+                    &txn,
+                    &mut session,
+                    params.message.clone(),
+                    params.read_context.clone(),
+                    goals
+                        .opened_goal
+                        .as_ref()
+                        .or_else(|| goals.revised_goal.as_ref().map(|(goal, _)| goal)),
+                    now.timestamp_millis(),
+                )
+                .await
+                .map_err(|error| internal(format!("initialize delegation source: {error}")))?;
+            }
             let state_json = session
                 .encode_json_for_storage()
                 .map_err(|error| internal(format!("encode user follow-up run: {error}")))?;
@@ -408,18 +448,16 @@ impl SignalAgentRunEventStore {
                 txn.rollback().await.ok();
                 continue;
             }
-            if accepted_memory_input.is_some() {
-                desk_diagnose_core::future::boxed(|| {
-                    crate::assistant_data_store::history::capture_user_input_on(
-                        &txn,
-                        &session,
-                        &params.message,
-                        now.timestamp_millis().max(0) as u64,
-                    )
-                })
-                .await
-                .map_err(|_| internal("assistant input history could not be committed"))?;
-            }
+            desk_diagnose_core::future::boxed(|| {
+                crate::assistant_data_store::history::capture_user_input_on(
+                    &txn,
+                    &session,
+                    &params.message,
+                    now.timestamp_millis().max(0) as u64,
+                )
+            })
+            .await
+            .map_err(|_| internal("assistant input history could not be committed"))?;
             txn.commit()
                 .await
                 .map_err(|error| internal(format!("commit user follow-up: {error}")))?;
@@ -777,6 +815,51 @@ async fn write_input_goal_events_on(
 }
 
 fn validate_append_params(params: &AppendUserFollowupParams) -> Result<(), AgentError> {
+    desk_agent_protocol::ai_assistant::validate_target_refs(
+        params.target_refs.iter().map(String::as_str),
+    )
+    .map_err(internal)?;
+    if !params.device_id.is_empty() && !params.target_refs.is_empty() {
+        return Err(internal(
+            "device-bound input cannot select personal conversation targets",
+        ));
+    }
+    if params.device_id.is_empty() {
+        if params.actor_id != crate::control_authorizer::SINGLE_ACCOUNT_USER_ID.to_string()
+            || params
+                .read_context
+                .as_ref()
+                .is_some_and(|selection| !selection.is_host_web_only())
+        {
+            return Err(internal(
+                "targetless input requires an owner without device context",
+            ));
+        }
+        desk_diagnose_core::assistant_policy::validate_targetless_input(
+            &params.actor_id,
+            &params.run_id,
+            params.client_conversation_id.as_deref(),
+            &params.current_scope,
+        )
+        .map_err(internal)?;
+        if let Some(selection) = &params.read_context {
+            let registry = desk_diagnose_core::ai_assistant::ai_assistant_provider_registry_ref();
+            if selection.expires_at != params.current_scope.expires_at
+                || selection.tool_names.iter().any(|name| {
+                    registry.capability_for_tool(name).is_none_or(|capability| {
+                        !params
+                            .current_scope
+                            .granted
+                            .contains(&capability.required_capability)
+                    })
+                })
+            {
+                return Err(internal(
+                    "targetless read context exceeds its original scope",
+                ));
+            }
+        }
+    }
     if let Some(selection) = &params.read_context {
         selection.validate()?;
     }
@@ -802,14 +885,57 @@ fn validate_append_params(params: &AppendUserFollowupParams) -> Result<(), Agent
         ("event_id", params.event_id.as_str()),
         ("run_id", params.run_id.as_str()),
         ("actor_id", params.actor_id.as_str()),
-        ("device_id", params.device_id.as_str()),
-    ] {
+    ]
+    .into_iter()
+    .chain((!params.device_id.is_empty()).then_some(("device_id", params.device_id.as_str())))
+    {
         if value.trim().is_empty() || value.len() > 256 {
             return Err(internal(format!("invalid {name}")));
         }
     }
     parse_time(&params.created_at)?;
     Ok(())
+}
+
+pub(crate) async fn resolve_targets_on(
+    txn: &DatabaseTransaction,
+    references: &[String],
+) -> Result<Vec<AssistantInputTarget>, AgentError> {
+    let ids = eligible_request_device_ids(txn, references).await?;
+    if ids.len() != references.len() {
+        return Err(internal("selected assistant device is unavailable"));
+    }
+    Ok(references
+        .iter()
+        .map(|reference| AssistantInputTarget {
+            reference: reference.clone(),
+            device_id: reference.clone(),
+            member_generation: None,
+        })
+        .collect())
+}
+
+pub(crate) async fn eligible_request_device_ids<C: sea_orm::ConnectionTrait>(
+    db: &C,
+    references: &[String],
+) -> Result<std::collections::HashSet<String>, AgentError> {
+    use crate::entity::{device_code, host_remote_access_state};
+    use sea_orm::QueryTrait;
+    let locked = host_remote_access_state::Entity::find()
+        .select_only()
+        .column(host_remote_access_state::Column::ClientId)
+        .filter(host_remote_access_state::Column::Locked.eq(true));
+    Ok(device_code::Entity::find()
+        .select_only()
+        .column(device_code::Column::ClientId)
+        .filter(device_code::Column::ClientId.is_in(references.iter().cloned()))
+        .filter(device_code::Column::ClientId.not_in_subquery(locked.into_query()))
+        .into_tuple::<String>()
+        .all(db)
+        .await
+        .map_err(|_| internal("assistant device directory unavailable"))?
+        .into_iter()
+        .collect())
 }
 
 fn ack_from_existing(
@@ -930,6 +1056,7 @@ mod tests {
         let mut message = ChatMessage::text(message_id, ChatRole::User, text);
         message.data_envelope = Some(envelope);
         AppendUserFollowupParams {
+            target_refs: Vec::new(),
             client_timezone: "UTC".into(),
             temporary_conversation: None,
             event_id: event_id.into(),
@@ -953,6 +1080,928 @@ mod tests {
             .unwrap();
         crate::db::initialize_schema(&db).await.unwrap();
         db
+    }
+
+    #[tokio::test]
+    async fn selected_command_decision_keeps_the_personal_session_and_rechecks_the_device() {
+        verify_selected_command_device(false).await;
+    }
+
+    #[tokio::test]
+    async fn device_roster_removal_fences_an_approved_command_resume() {
+        verify_selected_command_device(true).await;
+    }
+
+    async fn verify_selected_command_device(managed: bool) {
+        use crate::agent_session_store::{SignalAgentSessionStore, permission_resume};
+        use crate::controller::ai_assistant_session::{AiAssistantDeviceRosterBody, update_roster};
+        use desk_diagnose_core::{
+            ai_assistant::ai_assistant_provider_registry,
+            capability_availability::CapabilityAvailability,
+            chat::ToolCall,
+            command_confirmation::test_policy,
+            conversation_key::{AssistantConversationScope, derive_assistant_conversation_key},
+            dynamic_run::{
+                PermissionDecisionItem, PermissionItemDecision, PermissionRequestState,
+                PermissionRequestedEvent,
+            },
+            permission_grant::PermissionGrantIssuanceContext,
+            permission_tools::{REQUEST_CAPABILITY_GRANTS_TOOL_NAME, build_permission_request},
+            seam::{ClaimTurnParams, SessionSeam},
+            session::{TriggerOrigin, TurnState},
+        };
+
+        let db = crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap();
+        crate::db::initialize_schema(&db).await.unwrap();
+        crate::device_code_store::get_or_create(&db, "device-1")
+            .await
+            .unwrap();
+        let now = Utc::now();
+        let mut input = params("command-input", "command-user", "Check disk space");
+        input.device_id.clear();
+        input.target_refs = vec!["device-1".into()];
+        input.policy_revision =
+            desk_diagnose_core::assistant_policy::PERSONAL_ASSISTANT_POLICY_REVISION;
+        input.created_at = now.to_rfc3339();
+        input.run_id = derive_assistant_conversation_key(
+            &input.actor_id,
+            AssistantConversationScope::Personal,
+            input.client_conversation_id.as_deref().unwrap(),
+        );
+        let roster = |expected_revision, target_refs| AiAssistantDeviceRosterBody {
+            conversation: input.client_conversation_id.clone().unwrap(),
+            expected_revision,
+            target_refs,
+        };
+        if managed {
+            update_roster(&db, &roster(0, input.target_refs.clone()))
+                .await
+                .unwrap();
+        }
+        let admitted = SignalAgentRunEventStore::new(db.clone())
+            .append_user_followup(&input)
+            .await
+            .unwrap();
+        let sessions = SignalAgentSessionStore::new(db.clone())
+            .with_client_metadata(
+                input.client_conversation_id.clone(),
+                AgentSessionSurface::AiAssistant,
+            )
+            .with_expected_input_revision(admitted.input_revision);
+        let mut claim = ClaimTurnParams {
+            conversation_id: input.run_id.clone(),
+            actor_id: input.actor_id.clone(),
+            device_id: String::new(),
+            policy_revision: input.policy_revision,
+            current_pdp_scope: input.current_scope.clone(),
+            turn_id: "selected-command-turn".into(),
+            request_id: None,
+            connection_id: None,
+            trigger_origin: TriggerOrigin::User,
+            now: input.created_at.clone(),
+        };
+        let mut session = sessions.claim_turn(claim.clone()).await.unwrap();
+        let mut policy = test_policy();
+        policy.actor_id = input.actor_id.clone();
+        let registry = ai_assistant_provider_registry().with_command_policy(policy.clone());
+        let request = build_permission_request(
+            &ToolCall {
+                id: "propose".into(),
+                name: REQUEST_CAPABILITY_GRANTS_TOOL_NAME.into(),
+                arguments_json:
+                    serde_json::json!({"items":[{"item_id":"command","tool_name":"exec_command",
+                    "exact_input":{"schema_version":1,"shell":"bash","command":"df -h","timeout_ms":1000},
+                    "reason":"Check available disk space"}]})
+                    .to_string(),
+            },
+            &registry,
+            "selected-command".into(),
+            admitted.input_revision,
+            input.created_at.clone(),
+        )
+        .unwrap();
+        session.add_permission_request(request.clone()).unwrap();
+        session.last_event_seq += 1;
+        let event = PermissionRequestedEvent {
+            event: AgentRunEvent {
+                schema_version: AGENT_RUN_EVENT_SCHEMA_VERSION,
+                event_id: "selected-command-event".into(),
+                run_id: input.run_id.clone(),
+                event_seq: session.last_event_seq,
+                input_revision: admitted.input_revision,
+                kind: AgentRunEventKind::PermissionRequested,
+                correlation_id: Some(request.request_id.clone()),
+                source_envelope_ids: vec![],
+                result_envelope_ids: vec![],
+                created_at: input.created_at.clone(),
+            },
+            request,
+        };
+        sessions
+            .save_permission_request(&mut session, &event)
+            .await
+            .unwrap();
+        session.finish_turn(TurnState::Idle, input.created_at.clone());
+        sessions.save(&mut session).await.unwrap();
+
+        let item = &event.request.items[0];
+        let capability = registry.capability_for_tool(&item.tool_name).unwrap();
+        let inventory = [CapabilityAvailability {
+            provider_id: item.provider_id.clone(),
+            capability_id: capability.wire.capability_id.clone(),
+            tool_name: item.tool_name.clone(),
+            compiled: true,
+            enabled: true,
+            connected: true,
+            ready: true,
+            reason: None,
+        }];
+        let decide =
+            |registry| {
+                sessions.decide_permission_request(
+            &input.run_id, &input.actor_id, "", &event.request.request_id,
+            vec![PermissionDecisionItem {
+                item_id: item.item_id.clone(),
+                decision: PermissionItemDecision::Approve {
+                    resource_scope: item.resource_scope.clone(),
+                    operation_scope: item.operation_scope.clone(),
+                    export_destinations: vec![],
+                    ttl_seconds: 60,
+                    max_uses: 1,
+                },
+            }],
+            PermissionGrantIssuanceContext {
+                surface: desk_agent_protocol::capability_provider::ProductSurface::OssPersonalOwner,
+                registry,
+                inventory: &inventory,
+                readiness_revision: 1,
+                now_unix_ms: now.timestamp_millis() as u64,
+                implicit_fresh_object_refs: &[],
+            },
+            &input.created_at,
+        )
+            };
+        policy.target_device_id = "other".into();
+        let wrong = registry.clone().with_command_policy(policy);
+        assert!(decide(&wrong).await.is_err());
+        assert_eq!(
+            decide(&registry).await.unwrap().state,
+            PermissionRequestState::Approved
+        );
+        let candidates = sessions.permission_resume_candidates(0, 1).await.unwrap();
+        let pending = sessions
+            .pending_permission_resume(&candidates[0], now)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(pending.device_id.is_empty());
+        let grants = crate::capability_grant_store::SignalCapabilityGrantStore::new(db.clone())
+            .list_for_subject(&input.run_id, &input.actor_id, "device-1")
+            .await
+            .unwrap();
+        assert_eq!(grants.len(), 1);
+        assert_eq!(grants[0].run_id, input.run_id);
+        assert_eq!(grants[0].target_device_id, "device-1");
+
+        claim.turn_id = permission_resume::turn_id(&input.run_id, &event.request.request_id);
+        claim.trigger_origin = TriggerOrigin::PermissionDecision;
+        let unbound = sessions.clone().with_permission_resume(
+            event.request.request_id.clone(),
+            pending.version,
+            Vec::new(),
+        );
+        assert!(unbound.claim_turn(claim.clone()).await.is_err());
+        let resume = sessions.with_permission_resume(
+            event.request.request_id.clone(),
+            pending.version,
+            grants,
+        );
+        if managed {
+            update_roster(&db, &roster(1, vec![])).await.unwrap();
+            update_roster(&db, &roster(2, input.target_refs.clone()))
+                .await
+                .unwrap();
+            assert!(matches!(
+                resume.claim_turn(claim).await,
+                Err(desk_diagnose_core::seam::ClaimError::Busy)
+            ));
+            assert!(
+                resume
+                    .permission_resume_candidates(0, 1)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            return;
+        }
+        use crate::entity::device_code;
+        device_code::Entity::delete_many()
+            .filter(device_code::Column::ClientId.eq("device-1"))
+            .exec(&db)
+            .await
+            .unwrap();
+        assert!(resume.claim_turn(claim).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn personal_input_freezes_selected_devices_and_replays_without_reresolving() {
+        verify_personal_device_selection(false).await;
+    }
+
+    #[tokio::test]
+    async fn coordinator_device_roster_removal_is_not_reversed_by_rejoining() {
+        verify_personal_device_selection(true).await;
+    }
+
+    async fn verify_personal_device_selection(managed: bool) {
+        use crate::controller::ai_assistant_session::{AiAssistantDeviceRosterBody, update_roster};
+        use desk_diagnose_core::conversation_key::{
+            AssistantConversationScope, derive_assistant_conversation_key,
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("roster.sqlite");
+        let db = if managed {
+            file_db(&path).await
+        } else {
+            let db = crate::config::test_support::Database::connect("sqlite::memory:")
+                .await
+                .unwrap();
+            crate::db::initialize_schema(&db).await.unwrap();
+            db
+        };
+        for reference in ["mac", "linux"] {
+            crate::device_code_store::get_or_create(&db, reference)
+                .await
+                .unwrap();
+        }
+        let store = SignalAgentRunEventStore::new(db.clone());
+        let mut first = params("first-event", "first-input", "Compare these two devices");
+        first.device_id.clear();
+        first.policy_revision =
+            desk_diagnose_core::assistant_policy::PERSONAL_ASSISTANT_POLICY_REVISION;
+        first.run_id = derive_assistant_conversation_key(
+            &first.actor_id,
+            AssistantConversationScope::Personal,
+            first.client_conversation_id.as_deref().unwrap(),
+        );
+        first.target_refs = vec!["mac".into(), "linux".into()];
+        let roster = |expected_revision, target_refs| AiAssistantDeviceRosterBody {
+            conversation: first.client_conversation_id.clone().unwrap(),
+            expected_revision,
+            target_refs,
+        };
+        if managed {
+            let result = update_roster(&db, &roster(0, first.target_refs.clone()))
+                .await
+                .unwrap();
+            assert_eq!(result.session_id, first.run_id);
+            assert_eq!(result.revision, 1);
+        }
+        let receipt = store.append_user_followup(&first).await.unwrap();
+        let row = agent_session::Entity::find()
+            .filter(agent_session::Column::ConversationId.eq(&first.run_id))
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        let current = input_context::decode_session(&row, InputSubject::from(&first)).unwrap();
+        assert!(current.has_admitted_personal_input());
+        assert!(current.admits_assistant_device("mac"));
+        assert!(current.admits_assistant_device("linux"));
+
+        if managed {
+            use desk_assistant_data_store::device_roster;
+            assert_eq!(current.assistant_request_device_generation("mac"), Some(1));
+            let removed = update_roster(&db, &roster(1, vec!["linux".into()]))
+                .await
+                .unwrap();
+            assert_eq!(removed.revision, 2);
+            let replay = store.append_user_followup(&first).await.unwrap();
+            assert!(!replay.newly_appended);
+            assert_eq!(replay.input_revision, receipt.input_revision);
+            let mut next = params(
+                "managed-next-event",
+                "managed-next-input",
+                "Use both devices again",
+            );
+            next.device_id.clear();
+            next.policy_revision = first.policy_revision;
+            next.run_id.clone_from(&first.run_id);
+            next.target_refs.clone_from(&first.target_refs);
+            assert!(store.append_user_followup(&next).await.is_err());
+            let restored = update_roster(&db, &roster(2, first.target_refs.clone()))
+                .await
+                .unwrap();
+            assert_eq!(restored.revision, 3);
+            drop(store);
+            drop(db);
+            let db = file_db(&path).await;
+            let store = SignalAgentRunEventStore::new(db.clone());
+            assert_eq!(
+                device_roster::current_request_devices(&db, &current)
+                    .await
+                    .unwrap(),
+                vec!["linux"]
+            );
+            assert!(
+                !device_roster::permits_current_target(&db, &current, "mac")
+                    .await
+                    .unwrap()
+            );
+            assert!(
+                device_roster::permits_current_target(&db, &current, "linux")
+                    .await
+                    .unwrap()
+            );
+            let next_receipt = store.append_user_followup(&next).await.unwrap();
+            assert_eq!(next_receipt.input_revision, receipt.input_revision + 1);
+            let row = agent_session::Entity::find()
+                .filter(agent_session::Column::ConversationId.eq(&next.run_id))
+                .one(&db)
+                .await
+                .unwrap()
+                .unwrap();
+            let fresh = input_context::decode_session(&row, InputSubject::from(&next)).unwrap();
+            assert_eq!(fresh.assistant_request_device_generation("mac"), Some(3));
+            assert_eq!(fresh.assistant_request_device_generation("linux"), Some(1));
+            return;
+        }
+
+        use crate::entity::device_code;
+        device_code::Entity::delete_many()
+            .filter(device_code::Column::ClientId.eq("mac"))
+            .exec(&db)
+            .await
+            .unwrap();
+        let mut next = params("second-event", "second-input", "Check only Linux");
+        next.device_id.clear();
+        next.policy_revision = first.policy_revision;
+        next.run_id.clone_from(&first.run_id);
+        next.target_refs.clone_from(&first.target_refs);
+        assert!(store.append_user_followup(&next).await.is_err());
+        next.target_refs.remove(0);
+        let next_receipt = store.append_user_followup(&next).await.unwrap();
+        let row = agent_session::Entity::find()
+            .filter(agent_session::Column::ConversationId.eq(&next.run_id))
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        let current = input_context::decode_session(&row, InputSubject::from(&next)).unwrap();
+        assert_eq!(next_receipt.input_revision, receipt.input_revision + 1);
+        assert!(!current.admits_assistant_device("mac"));
+        assert!(current.admits_assistant_device("linux"));
+        assert!(
+            !store
+                .append_user_followup(&first)
+                .await
+                .unwrap()
+                .newly_appended
+        );
+        first.target_refs.remove(0);
+        assert!(store.append_user_followup(&first).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn targetless_input_requires_its_personal_key_and_claim_revision() {
+        use desk_diagnose_core::{
+            conversation_key::{AssistantConversationScope, derive_assistant_conversation_key},
+            seam::{ClaimTurnParams, SessionSeam},
+            session::TriggerOrigin,
+        };
+
+        let db = crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap();
+        crate::db::initialize_schema(&db).await.unwrap();
+        let store = SignalAgentRunEventStore::new(db.clone());
+        let mut input = params("targetless-event", "targetless-input", "No device required");
+        input.device_id.clear();
+        input.policy_revision =
+            desk_diagnose_core::assistant_policy::PERSONAL_ASSISTANT_POLICY_REVISION;
+        assert!(store.append_user_followup(&input).await.is_err());
+        input.run_id = derive_assistant_conversation_key(
+            &input.actor_id,
+            AssistantConversationScope::Personal,
+            input.client_conversation_id.as_deref().unwrap(),
+        );
+        input.read_context = Some(ReadContextSelection {
+            tool_names: vec![desk_diagnose_core::web_research::WEB_FETCH_TOOL_NAME.into()],
+            expires_at: None,
+            object_attachments: vec![],
+            live_targets: vec![],
+        });
+        assert!(store.append_user_followup(&input).await.is_err());
+        input.current_scope.granted = vec![desk_agent_protocol::Capability::WebResearchFetch];
+        let receipt = store.append_user_followup(&input).await.unwrap();
+        assert!(receipt.newly_appended);
+        assert!(
+            !store
+                .append_user_followup(&input)
+                .await
+                .unwrap()
+                .newly_appended
+        );
+
+        let sessions = crate::agent_session_store::SignalAgentSessionStore::new(db.clone())
+            .with_client_metadata(
+                input.client_conversation_id.clone(),
+                AgentSessionSurface::AiAssistant,
+            );
+        let mut claim = ClaimTurnParams {
+            conversation_id: input.run_id.clone(),
+            actor_id: input.actor_id.clone(),
+            device_id: String::new(),
+            policy_revision: input.policy_revision,
+            current_pdp_scope: input.current_scope.clone(),
+            turn_id: "targetless-turn".into(),
+            request_id: None,
+            connection_id: None,
+            trigger_origin: TriggerOrigin::User,
+            now: input.created_at.clone(),
+        };
+        assert!(sessions.claim_turn(claim.clone()).await.is_err());
+        let sessions = sessions.with_expected_input_revision(receipt.input_revision);
+        claim.current_pdp_scope.mode = ExecutionMode::ConfirmEachAction;
+        assert!(sessions.claim_turn(claim.clone()).await.is_err());
+        claim.current_pdp_scope = input.current_scope.clone();
+        let mut session = sessions.claim_turn(claim).await.unwrap();
+        assert!(session.turn_state.is_active());
+        assert!(session.has_admitted_targetless_input());
+        assert!(!session.admits_assistant_device("device-1"));
+
+        let snapshot = sessions
+            .read_assistant_snapshot_for_subject(&input.run_id, &input.actor_id, "")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(snapshot.session.input_revision, receipt.input_revision);
+        assert!(snapshot.capability_grants.is_empty());
+        assert!(
+            sessions
+                .read_assistant_snapshot_for_subject(&input.run_id, "another-actor", "")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let listed = sessions
+            .list_ai_assistant_sessions(&input.actor_id, "", 10)
+            .await
+            .unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].session_id, input.run_id);
+        assert!(
+            sessions
+                .list_ai_assistant_sessions("another-actor", "", 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            sessions
+                .list_ai_assistant_sessions(&input.actor_id, "device-1", 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            sessions
+                .delete_for_subject(&input.run_id, "another-actor", "")
+                .await
+                .is_err()
+        );
+        sessions
+            .delete_for_subject(&input.run_id, &input.actor_id, "")
+            .await
+            .unwrap();
+        assert_eq!(
+            sessions
+                .delete_for_subject(&input.run_id, &input.actor_id, "")
+                .await
+                .unwrap(),
+            None
+        );
+        assert!(
+            sessions
+                .list_ai_assistant_sessions(&input.actor_id, "", 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(sessions.save(&mut session).await.is_err());
+        assert!(store.append_user_followup(&input).await.is_err());
+        let marker = crate::entity::agent_file_recovery_cleanup::Entity::find_by_id(&input.run_id)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(marker.history_deleted_at_unix_ms.is_some());
+        assert!(marker.completed_at_unix_ms.is_some());
+    }
+
+    #[actix_web::test]
+    async fn targetless_web_owner_decision_issues_only_the_frozen_web_grant() {
+        check_targetless_web_permission(false).await;
+    }
+
+    #[actix_web::test]
+    async fn targetless_stop_fences_web_permission_and_allows_new_input() {
+        check_targetless_web_permission(true).await;
+    }
+
+    async fn check_targetless_web_permission(stop_before_resume: bool) {
+        use crate::remote_tool_edge::{SignalAiAssistantTools, SignalRemoteToolPendingStore};
+        use desk_agent_protocol::ai_assistant::subagent::AiAssistantStopControl;
+        use desk_agent_protocol::capability_provider::ProductSurface;
+        use desk_diagnose_core::{
+            capability_availability::CapabilityAvailability,
+            chat::ToolCall,
+            conversation_key::{AssistantConversationScope, derive_assistant_conversation_key},
+            dynamic_run::{
+                PermissionDecisionItem, PermissionItemDecision, PermissionRequestState,
+                PermissionRequestedEvent,
+            },
+            permission_grant::PermissionGrantIssuanceContext,
+            permission_tools::{REQUEST_CAPABILITY_GRANTS_TOOL_NAME, build_permission_request},
+            seam::{ClaimTurnParams, SessionSeam, ToolSeam},
+            session::{TriggerOrigin, TurnState},
+        };
+        use desk_signal_facade::model::connection::SharedConnectionMap;
+        use std::sync::Arc;
+
+        let db = crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap();
+        crate::db::initialize_schema(&db).await.unwrap();
+        let store = SignalAgentRunEventStore::new(db.clone());
+        let now = Utc::now();
+        let mut input = params("web-input-event", "web-input", "Read public documentation");
+        input.device_id.clear();
+        input.policy_revision =
+            desk_diagnose_core::assistant_policy::PERSONAL_ASSISTANT_POLICY_REVISION;
+        input.run_id = derive_assistant_conversation_key(
+            &input.actor_id,
+            AssistantConversationScope::Personal,
+            input.client_conversation_id.as_deref().unwrap(),
+        );
+        input.created_at = now.to_rfc3339();
+        let tool = desk_diagnose_core::web_research::WEB_FETCH_TOOL_NAME;
+        input.current_scope.granted = vec![desk_agent_protocol::Capability::WebResearchFetch];
+        input.read_context = Some(ReadContextSelection {
+            tool_names: vec![tool.into()],
+            expires_at: None,
+            object_attachments: vec![],
+            live_targets: vec![],
+        });
+        let receipt = store.append_user_followup(&input).await.unwrap();
+        let sessions = crate::agent_session_store::SignalAgentSessionStore::new(db.clone())
+            .with_client_metadata(
+                input.client_conversation_id.clone(),
+                AgentSessionSurface::AiAssistant,
+            )
+            .with_expected_input_revision(receipt.input_revision);
+        let mut session = sessions
+            .claim_turn(ClaimTurnParams {
+                conversation_id: input.run_id.clone(),
+                actor_id: input.actor_id.clone(),
+                device_id: String::new(),
+                policy_revision: input.policy_revision,
+                current_pdp_scope: input.current_scope.clone(),
+                turn_id: "targetless-web-turn".into(),
+                request_id: None,
+                connection_id: None,
+                trigger_origin: TriggerOrigin::User,
+                now: now.to_rfc3339(),
+            })
+            .await
+            .unwrap();
+        let registry = desk_diagnose_core::ai_assistant::ai_assistant_provider_registry_ref();
+        let tools = SignalAiAssistantTools::new(
+            db.clone(),
+            registry.clone(),
+            Arc::new(SharedConnectionMap::default()),
+            Arc::new(SignalRemoteToolPendingStore::default()),
+            String::new(),
+            String::new(),
+            input.actor_id.clone(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            vec![],
+            vec![],
+            vec![],
+            None,
+            None,
+            input.message.text.clone(),
+            input.run_id.clone(),
+            session.current_turn_id.clone().unwrap(),
+            input.policy_revision,
+            1,
+            vec![],
+            30_000,
+        );
+        let destination = input
+            .message
+            .data_envelope
+            .as_ref()
+            .unwrap()
+            .allowed_destinations[0]
+            .clone();
+        tools
+            .bind_original_input(
+                receipt.input_revision,
+                input.read_context.clone().unwrap(),
+                destination,
+                input.client_conversation_id.clone(),
+            )
+            .unwrap();
+        let fetch = ToolCall {
+            id: "fetch".into(),
+            name: tool.into(),
+            arguments_json: r#"{"url":"https://example.com/docs"}"#.into(),
+        };
+        let denied = tools.run_read(&fetch).await.unwrap_err();
+        assert!(
+            denied.message.contains("no active capability grant"),
+            "{denied:?}"
+        );
+        let forged = ToolCall {
+            id: "edge".into(),
+            name: "browser_take_snapshot".into(),
+            arguments_json: "{}".into(),
+        };
+        assert_eq!(
+            tools.run_read(&forged).await.unwrap_err().kind,
+            desk_agent_protocol::AgentErrorKind::PermissionDenied
+        );
+        let request = build_permission_request(&ToolCall {
+            id: "web-plan".into(),
+            name: REQUEST_CAPABILITY_GRANTS_TOOL_NAME.into(),
+            arguments_json: serde_json::json!({"items":[{"item_id":"web", "tool_name":tool, "exact_input":{"url":"https://example.com/docs"}, "reason":"Read public documentation"}]}).to_string(),
+        }, registry, "web-permission".into(), session.input_revision, now.to_rfc3339()).unwrap();
+        session.add_permission_request(request.clone()).unwrap();
+        session.last_event_seq += 1;
+        let event = PermissionRequestedEvent {
+            event: AgentRunEvent {
+                schema_version: AGENT_RUN_EVENT_SCHEMA_VERSION,
+                event_id: "web-permission-event".into(),
+                run_id: input.run_id.clone(),
+                event_seq: session.last_event_seq,
+                input_revision: session.input_revision,
+                kind: AgentRunEventKind::PermissionRequested,
+                correlation_id: Some(request.request_id.clone()),
+                source_envelope_ids: vec![],
+                result_envelope_ids: vec![],
+                created_at: now.to_rfc3339(),
+            },
+            request,
+        };
+        sessions
+            .save_permission_request(&mut session, &event)
+            .await
+            .unwrap();
+        if stop_before_resume {
+            let mut unapproved = event.clone();
+            unapproved.request.request_id = "unapproved-web-permission".into();
+            unapproved.event.event_id = "unapproved-web-permission-event".into();
+            unapproved.event.correlation_id = Some(unapproved.request.request_id.clone());
+            session.last_event_seq += 1;
+            unapproved.event.event_seq = session.last_event_seq;
+            session
+                .add_permission_request(unapproved.request.clone())
+                .unwrap();
+            sessions
+                .save_permission_request(&mut session, &unapproved)
+                .await
+                .unwrap();
+        }
+        session.finish_turn(TurnState::Idle, now.to_rfc3339());
+        sessions.save(&mut session).await.unwrap();
+        let item = &event.request.items[0];
+        let inventory = [CapabilityAvailability {
+            provider_id: item.provider_id.clone(),
+            capability_id: registry
+                .capability_for_tool(tool)
+                .unwrap()
+                .wire
+                .capability_id
+                .clone(),
+            tool_name: tool.into(),
+            compiled: true,
+            enabled: true,
+            connected: true,
+            ready: true,
+            reason: None,
+        }];
+        let decide = |actor, request_id| {
+            sessions.decide_permission_request(
+                &input.run_id,
+                actor,
+                "",
+                request_id,
+                vec![PermissionDecisionItem {
+                    item_id: item.item_id.clone(),
+                    decision: PermissionItemDecision::Approve {
+                        resource_scope: item.resource_scope.clone(),
+                        operation_scope: item.operation_scope.clone(),
+                        export_destinations: vec![],
+                        ttl_seconds: 60,
+                        max_uses: 1,
+                    },
+                }],
+                PermissionGrantIssuanceContext {
+                    surface: ProductSurface::OssPersonalOwner,
+                    registry,
+                    inventory: &inventory,
+                    readiness_revision: 1,
+                    now_unix_ms: now.timestamp_millis() as u64,
+                    implicit_fresh_object_refs: &[],
+                },
+                &input.created_at,
+            )
+        };
+        let request_id = &event.request.request_id;
+        assert!(decide("another-owner", request_id).await.is_err());
+        let first = decide(&input.actor_id, request_id).await.unwrap();
+        assert!(first.newly_recorded);
+        assert_eq!(first.state, PermissionRequestState::Approved);
+        assert!(
+            !decide(&input.actor_id, request_id)
+                .await
+                .unwrap()
+                .newly_recorded
+        );
+        let snapshot = sessions
+            .read_assistant_snapshot_for_subject(&input.run_id, &input.actor_id, "")
+            .await
+            .unwrap()
+            .unwrap();
+        let [grant] = snapshot.capability_grants.as_slice() else {
+            panic!("expected a single web grant")
+        };
+        assert_eq!(grant.tool_name, tool);
+        assert!(grant.target_device_id.is_empty());
+        assert_eq!(
+            grant.issued_by,
+            desk_agent_protocol::capability_grant::CapabilityGrantIssuer::UserDecision
+        );
+        assert!(
+            tools
+                .run_read(&fetch)
+                .await
+                .unwrap_err()
+                .message
+                .contains("lease is unavailable")
+        );
+        let candidates = sessions.permission_resume_candidates(0, 1).await.unwrap();
+        let [candidate] = candidates.as_slice() else {
+            panic!("expected a single pending decision")
+        };
+        let pending = sessions
+            .pending_permission_resume(candidate, now)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut claim = ClaimTurnParams {
+            conversation_id: input.run_id.clone(),
+            actor_id: input.actor_id.clone(),
+            device_id: String::new(),
+            policy_revision: input.policy_revision,
+            current_pdp_scope: input.current_scope.clone(),
+            turn_id: crate::agent_session_store::permission_resume::turn_id(
+                &input.run_id,
+                &event.request.request_id,
+            ),
+            request_id: None,
+            connection_id: None,
+            trigger_origin: TriggerOrigin::PermissionDecision,
+            now: now.to_rfc3339(),
+        };
+        assert!(sessions.claim_turn(claim.clone()).await.is_err());
+        let resume = sessions.clone().with_permission_resume(
+            request_id.clone(),
+            pending.version,
+            snapshot.capability_grants,
+        );
+        if stop_before_resume {
+            let stops = crate::agent_subagent_store::SubAgentStore::new(db);
+            let control = AiAssistantStopControl {
+                client_request_id: "stop-personal-web".into(),
+                expected_input_revision: pending.input_revision,
+                expected_control_revision: pending.control_revision,
+                subagent_choice: None,
+            };
+            assert!(
+                stops
+                    .stop_for_owner(&input.run_id, "another-owner", "", &control)
+                    .await
+                    .is_err()
+            );
+            let stopped = stops
+                .stop_for_owner(&input.run_id, &input.actor_id, "", &control)
+                .await
+                .unwrap();
+            assert_eq!(
+                stopped,
+                stops
+                    .stop_for_owner(&input.run_id, &input.actor_id, "", &control)
+                    .await
+                    .unwrap()
+            );
+            assert_eq!(
+                stopped.result.control_revision,
+                control.expected_control_revision + 1
+            );
+            assert!(resume.claim_turn(claim.clone()).await.is_err());
+            assert!(
+                sessions
+                    .pending_permission_resume(candidate, Utc::now())
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                sessions
+                    .permission_resume_candidates(0, 1)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            let snapshot = sessions
+                .read_assistant_snapshot_for_subject(&input.run_id, &input.actor_id, "")
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(snapshot.session.main_stopped);
+            assert_eq!(
+                snapshot.session.permission_requests[1].state,
+                PermissionRequestState::Withdrawn
+            );
+            assert_eq!(snapshot.capability_grants.len(), 1);
+            assert!(
+                decide(&input.actor_id, "unapproved-web-permission")
+                    .await
+                    .is_err()
+            );
+            assert!(
+                !decide(&input.actor_id, request_id)
+                    .await
+                    .unwrap()
+                    .newly_recorded
+            );
+            let next = AppendUserFollowupParams {
+                event_id: "after-personal-stop".into(),
+                message: params("new-event", "after-stop", "A new personal request").message,
+                created_at: Utc::now().to_rfc3339(),
+                ..input.clone()
+            };
+            let receipt = store.append_user_followup(&next).await.unwrap();
+            claim.trigger_origin = TriggerOrigin::User;
+            claim.turn_id = "after-stop-turn".into();
+            claim.request_id = Some("after-stop-request".into());
+            claim.now = next.created_at;
+            let mut claimed = sessions
+                .clone()
+                .with_expected_input_revision(receipt.input_revision)
+                .claim_turn(claim)
+                .await
+                .unwrap();
+            assert!(!claimed.main_stopped);
+            assert_eq!(claimed.input_revision, pending.input_revision + 1);
+            assert_eq!(claimed.control_revision, stopped.result.control_revision);
+            let active_control = AiAssistantStopControl {
+                client_request_id: "stop-active-personal-web".into(),
+                expected_input_revision: claimed.input_revision,
+                expected_control_revision: claimed.control_revision,
+                subagent_choice: None,
+            };
+            let stopped = stops
+                .stop_for_owner(&input.run_id, &input.actor_id, "", &active_control)
+                .await
+                .unwrap();
+            assert_eq!(stopped.cancel_request_ids, ["after-stop-request"]);
+            claimed.finish_turn(TurnState::Idle, Utc::now().to_rfc3339());
+            assert!(sessions.save(&mut claimed).await.is_err());
+            return;
+        }
+        let mut resumed = resume.claim_turn(claim.clone()).await.unwrap();
+        assert_eq!(resumed.input_revision, session.input_revision);
+        assert_eq!(resumed.chain_id, session.chain_id);
+        assert!(resume.claim_turn(claim).await.is_err());
+        resumed.finish_turn(TurnState::Idle, now.to_rfc3339());
+        resume.save(&mut resumed).await.unwrap();
+        assert!(
+            resume
+                .pending_permission_resume(candidate, now)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -993,6 +2042,12 @@ mod tests {
             .unwrap()
             .unwrap();
         let session = PersistedAgentSession::decode_json(&row.state_json).unwrap();
+        assert_eq!(
+            serde_json::to_value(&session).unwrap()["assistant_request_targets"],
+            serde_json::json!({"input_revision": 2, "device_ids": ["device-1"]})
+        );
+        assert!(session.admits_assistant_device("device-1"));
+        assert!(!session.admits_assistant_device("other-device"));
         assert_eq!(session.latest_input_seq, 2);
         assert_eq!(session.input_revision, 2);
         assert_eq!(session.handled_input_seq, 0);

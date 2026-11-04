@@ -8,6 +8,54 @@ mod memory_quota;
 mod projection;
 mod retrieval_cache;
 
+#[tokio::test]
+async fn device_roster_preserves_retained_generations_and_fences_stale_writes() {
+    let TestStore { db } = setup().await;
+    let txn = db.begin().await.unwrap();
+    let initial = device_roster::replace(&txn, "owner", "root", 0, vec!["a".into(), "b".into()])
+        .await
+        .unwrap();
+    txn.commit().await.unwrap();
+    assert_eq!(initial.revision, 1);
+    assert_eq!(initial.members["a"], 1);
+    assert_eq!(initial.members["b"], 1);
+
+    let txn = db.begin().await.unwrap();
+    let reordered = device_roster::replace(&txn, "owner", "root", 1, vec!["b".into(), "a".into()])
+        .await
+        .unwrap();
+    assert_eq!(initial, reordered);
+    let removed = device_roster::replace(&txn, "owner", "root", 1, vec!["b".into()])
+        .await
+        .unwrap();
+    txn.commit().await.unwrap();
+    assert_eq!(removed.revision, 2);
+    assert_eq!(removed.members["b"], 1);
+    assert!(matches!(
+        device_roster::load(&db, "another-owner", "root").await,
+        Err(AssistantStoreError::Inaccessible)
+    ));
+
+    let txn = db.begin().await.unwrap();
+    assert!(matches!(
+        device_roster::replace(&txn, "owner", "root", 1, vec![]).await,
+        Err(AssistantStoreError::Stale {
+            current_revision: 2
+        })
+    ));
+    let rejoined = device_roster::replace(&txn, "owner", "root", 2, vec!["a".into(), "b".into()])
+        .await
+        .unwrap();
+    txn.commit().await.unwrap();
+    assert_eq!(rejoined.revision, 3);
+    assert_eq!(rejoined.members["a"], 3);
+    assert_eq!(rejoined.members["b"], 1);
+    assert_eq!(
+        device_roster::load(&db, "owner", "root").await.unwrap(),
+        Some(rejoined)
+    );
+}
+
 #[test]
 fn unavailable_sources_are_tool_errors_but_authorization_and_storage_failures_are_not() {
     let source = AssistantStoreError::SourceUnavailable.into_agent_error();

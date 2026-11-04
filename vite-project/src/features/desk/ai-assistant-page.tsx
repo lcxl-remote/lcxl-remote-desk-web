@@ -18,6 +18,7 @@ import { AssistantBackgroundTasks } from './assistant-background-tasks';
 import { AssistantSubagentApprovalNotice, AssistantSubagents, AssistantConversationTabs, type AssistantSubagentPanel } from './assistant-subagents';
 import { AssistantStopConfirmation } from './assistant-stop-confirmation';
 import { AssistantComposerActions } from './assistant-composer-actions';
+import { AssistantRequestDevices, type AssistantRequestDevice } from './assistant-request-devices';
 import { AssistantAutomaticApproval } from './assistant-automatic-approval';
 import { useAiAssistantSubagents } from './use-ai-assistant-subagents';
 import { ScheduleProposalCards } from '@/features/schedules/proposal-card';
@@ -46,6 +47,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Skeleton } from '@/components/ui/skeleton';
 import { MarkdownContent } from '@/components/markdown-content';
 import { useGetModelProvider } from '@/services/hooks/modelProviderController/useGetModelProvider';
+import { useGetCurrentUser } from '@/services/hooks/userController/useGetCurrentUser';
 import { AssistantBrowserPairing } from './assistant-browser-pairing';
 import { canPairLocalDevice } from './local-device-pairing';
 import { useQueryServerInfo } from '@/services/hooks/systemController/useQueryServerInfo';
@@ -238,6 +240,7 @@ export function AiAssistantWorkspace({
     initialConversationId,
     deskId,
     stableDeviceId,
+    personalScope,
     localPairingAvailable,
     featureProfile,
     assistantEnabled,
@@ -247,6 +250,7 @@ export function AiAssistantWorkspace({
     initialConversationId?: string | null;
     deskId: string;
     stableDeviceId: string;
+    personalScope?: string;
     localPairingAvailable: boolean;
     featureProfile: AiAssistantFeatureProfile;
     assistantEnabled: boolean;
@@ -254,10 +258,12 @@ export function AiAssistantWorkspace({
 }) {
     const { t } = useTranslation();
     const { i18n } = useTranslation();
-    const { isConnected, subscribe, sendMessage } = useDeskSignaling({ usePrepared: true });
+    const hasDevice = Boolean(deskId);
+    const [requestDevices, setRequestDevices] = useState<AssistantRequestDevice[]>([]);
+    const { isConnected, subscribe, sendMessage } = useDeskSignaling({ usePrepared: hasDevice });
     const { entries, inspectSession, inspectUi, scheduleUi, cancelDelayedUi, remainingSeconds, applications, listApplications, applicationSelectionAvailable } = useAiAssistantObservation({
         deskId,
-        enabled: assistantEnabled && isConnected,
+        enabled: hasDevice && assistantEnabled && isConnected,
         subscribe,
         sendMessage,
     });
@@ -267,15 +273,16 @@ export function AiAssistantWorkspace({
         rehearsal,
         initialConversationId,
         deskId,
+        targetRefs: requestDevices.map(device => device.id),
         connected: isConnected,
-        conversationStorageScope: stableDeviceId,
+        conversationStorageScope: personalScope ?? stableDeviceId,
         subscribe,
         sendMessage,
     });
     const subagents = useAiAssistantSubagents({ connection: deskId, conversation: chat.conversationId,
         session: chat.sessionId, snapshot: chat.subagents, connected: isConnected, onChanged: chat.refreshSnapshot });
     const capabilities = useAiAssistantCapabilities({
-        deskId, subscribe, sendMessage, enabled: assistantEnabled && isConnected,
+        deskId, subscribe, sendMessage, enabled: hasDevice && assistantEnabled && isConnected,
     });
     const target = useOptionalDeviceTarget();
     const recoveryConnection = target?.connection;
@@ -298,7 +305,7 @@ export function AiAssistantWorkspace({
         deviceId: stableDeviceId,
         subscribe,
         sendMessage,
-        acceptUnsolicitedPreviews: true,
+        acceptUnsolicitedPreviews: hasDevice,
     });
     const provider = useGetModelProvider();
     const providerConfig = provider.data?.data;
@@ -394,11 +401,11 @@ export function AiAssistantWorkspace({
         return () => abort.abort();
     }, []);
 
-    const contextCapabilities = featureProfile.object_context
+    const contextCapabilities = hasDevice && featureProfile.object_context
         ? (capabilities.snapshot?.entries ?? []).filter((entry) => entry.context_selectable)
         : [];
 
-    const browserTakeoverRequired = requiresBrowserRemoteTakeover(
+    const browserTakeoverRequired = hasDevice && requiresBrowserRemoteTakeover(
         capabilities.snapshot?.entries,
     );
     const externalSendReceipts = chat.tools.flatMap((tool) => {
@@ -428,7 +435,7 @@ export function AiAssistantWorkspace({
     }, [chat.attachments, featureProfile.object_context]);
 
     const toggleContext = (capabilityId: string) => {
-        if (!assistantEnabled || !featureProfile.object_context) return;
+        if (!hasDevice || !assistantEnabled || !featureProfile.object_context) return;
         const next = selectedCapabilityIds.includes(capabilityId)
             ? selectedCapabilityIds.filter((id) => id !== capabilityId)
             : [...selectedCapabilityIds, capabilityId];
@@ -610,11 +617,13 @@ export function AiAssistantWorkspace({
         { label: t('pages.aiAssistant.workspace.resources'), actions: [
             { label: t('pages.aiAssistant.attachments.title'), icon: Paperclip,
                 disabled: !chat.sessionId, onSelect: () => setAttachmentsOpen(true) },
-            { label: t('pages.aiAssistant.directories.title'), icon: FolderKey,
-                onSelect: () => setDirectorySession(permissionHistoryKey) },
-            { label: t('pages.aiAssistant.schedules.title'), icon: CalendarClock,
-                onSelect: () => setSchedulesOpen(true) },
-            ...(!rehearsal ? [{ label: t('schedules.createResume'), icon: CalendarClock,
+            ...(hasDevice ? [
+                { label: t('pages.aiAssistant.directories.title'), icon: FolderKey,
+                    onSelect: () => setDirectorySession(permissionHistoryKey) },
+                { label: t('pages.aiAssistant.schedules.title'), icon: CalendarClock,
+                    onSelect: () => setSchedulesOpen(true) },
+            ] : []),
+            ...(hasDevice && !rehearsal ? [{ label: t('schedules.createResume'), icon: CalendarClock,
                 disabled: !assistantEnabled || chat.running || chat.hydrating || !chat.conversationId || !chat.inputRevision,
                 onSelect: () => { if (chat.conversationId && chat.inputRevision) navigate(`/schedules?${new URLSearchParams({
                     resume_conversation: chat.conversationId, resume_device: stableDeviceId,
@@ -626,12 +635,12 @@ export function AiAssistantWorkspace({
                 icon: ListTodo, onSelect: () => setTaskPanelSession(permissionHistoryKey) },
             { label: t('pages.aiAssistant.permissionHistory'), icon: ShieldCheck,
                 onSelect: () => setPermissionHistorySession(permissionHistoryKey) },
-            ...(featureProfile.approval_delegation ? [{ label: t('pages.aiAssistant.autoApprovalTitle'), icon: Bot,
+            ...(hasDevice && featureProfile.approval_delegation ? [{ label: t('pages.aiAssistant.autoApprovalTitle'), icon: Bot,
                 onSelect: () => setApprovalSettingsOpen(true) }] : []),
             { label: t('pages.aiAssistant.personalization.title'), icon: SlidersHorizontal,
                 onSelect: () => navigate('/ai-assistant/personalization') },
-            { label: t('pages.aiAssistant.workspace.deviceSettings'), icon: Settings2,
-                onSelect: () => setDeviceSettingsOpen(true) },
+            ...(hasDevice ? [{ label: t('pages.aiAssistant.workspace.deviceSettings'), icon: Settings2,
+                onSelect: () => setDeviceSettingsOpen(true) }] : []),
         ] },
         { label: t('pages.aiAssistant.workspace.troubleshoot'), actions: [
             { label: t('pages.aiAssistant.workspace.details'), icon: ListTree, onSelect: () => setPanel('details') },
@@ -642,6 +651,7 @@ export function AiAssistantWorkspace({
         <>
             <AssistantDetailsSheet panel={panel} onPanelChange={setPanel} sections={{
                 details: detailsContent,
+                ...(hasDevice ? {
                 capabilities: <AssistantCapabilityList entries={capabilities.snapshot?.entries ?? []}
                     loading={capabilities.loading} error={Boolean(capabilities.error)}
                     refreshDisabled={!assistantEnabled || !isConnected} onRefresh={capabilities.refresh} />,
@@ -773,11 +783,12 @@ export function AiAssistantWorkspace({
                 />
             </div>
 </>,
+                } : {}),
             }} />
-            <SessionTargetDialog
+            {hasDevice && <SessionTargetDialog
                 targets={chat.sessionTargets}
                 onSelect={(targetId) => chat.selectSessionTarget(targetId)}
-            />
+            />}
             {!assistantEnabled && (
                 <Alert data-testid="ai-assistant-disabled">
                     <AlertTitle>{t('pages.aiAssistant.disabledTitle')}</AlertTitle>
@@ -788,7 +799,7 @@ export function AiAssistantWorkspace({
                     </AlertDescription>
                 </Alert>
             )}
-            {[
+            {hasDevice && [
                 featureProfile.permission_decision,
                 featureProfile.approval_delegation,
                 featureProfile.grant_revoke,
@@ -817,7 +828,8 @@ export function AiAssistantWorkspace({
                         <div className="flex min-w-0 flex-1 items-center gap-2">
                             {backTo && (
                                 <Button asChild variant="ghost" size="icon" className="assistant-header-back h-8 w-8 shrink-0">
-                                    <Link to={backTo} aria-label={t('pages.aiAssistant.backToDevice')} title={t('pages.aiAssistant.backToDevice')}>
+                                    <Link to={backTo} aria-label={t(hasDevice ? 'pages.aiAssistant.backToDevice' : 'pages.aiAssistant.backToOverview')}
+                                        title={t(hasDevice ? 'pages.aiAssistant.backToDevice' : 'pages.aiAssistant.backToOverview')}>
                                         <ArrowLeft className="h-4 w-4" aria-hidden="true" />
                                     </Link>
                                 </Button>
@@ -869,8 +881,8 @@ export function AiAssistantWorkspace({
                         loading={chat.hydrating} hasMore={chat.hasMoreMessages} loadingOlder={chat.loadingOlderMessages}
                         onOlder={() => void chat.loadOlderMessages()}
                         before={<AssistantDocumentPreviews previews={chat.documentPreviews} requestPage={chat.requestDocumentPreviewPage} />}>
-                        <ScheduleProposalCards key={`${deskId}:${chat.conversationId}`} tools={chat.tools} running={chat.running}
-                            deviceId={stableDeviceId} connectionId={deskId} onPendingCountChange={setPendingScheduleCount} />
+                        {hasDevice && <ScheduleProposalCards key={`${deskId}:${chat.conversationId}`} tools={chat.tools} running={chat.running}
+                            deviceId={stableDeviceId} connectionId={deskId} onPendingCountChange={setPendingScheduleCount} />}
                         {chat.partial && (
                             <MarkdownContent disableLinks className="w-full max-w-full rounded-lg bg-muted px-3 py-2 text-sm sm:max-w-[90%]">
                                 {chat.partial}
@@ -951,13 +963,13 @@ export function AiAssistantWorkspace({
                         commands={chat.commandTasks} providers={chat.backgroundTasks} tools={chat.tools}
                         connected={isConnected} canCancelProvider={featureProfile.background_task_cancel}
                         cancelling={chat.taskCancelling} onCancel={chat.cancelTask} />
-                    <AssistantFileScope key={`directories:${permissionHistoryKey}`} scope={chat.fileScope} automaticApproval={automaticApproval}
+                    {hasDevice && <AssistantFileScope key={`directories:${permissionHistoryKey}`} scope={chat.fileScope} automaticApproval={automaticApproval}
                         deskId={deskId} sessionTargetId={chat.sessionTargetReady ? (chat.sessionTarget?.target_id ?? null) : undefined}
                         open={directorySession === permissionHistoryKey} onOpenChange={open => setDirectorySession(open ? permissionHistoryKey : null)}
                         disabled={!assistantEnabled || !isConnected || chat.hydrating || chat.contextUpdating} onUpdate={chat.updateDirectory}
-                        showPendingActions={false} onPendingJump={id => jumpToPending(`assistant-directory-${id}`)} />
+                        showPendingActions={false} onPendingJump={id => jumpToPending(`assistant-directory-${id}`)} />}
                     <div data-assistant-pending={pendingPermissionCount > 0 ? '' : undefined} tabIndex={-1}>
-                    <AssistantPermissionRecords approvalRecords={!rehearsal && featureProfile.approval_delegation ? <ApprovalReviews onLocate={record => {
+                    <AssistantPermissionRecords approvalRecords={hasDevice && !rehearsal && featureProfile.approval_delegation ? <ApprovalReviews onLocate={record => {
                             if (record.task) {
                                 subagents.openDetail(record.task);
                                 if (record.source_kind === 'directory_proposal') setChildPanel({ taskId: record.task.task_id, panel: 'directories' });
@@ -974,7 +986,7 @@ export function AiAssistantWorkspace({
                                     request={request} canDecide={featureProfile.permission_decision && request.inputRevision === chat.inputRevision}
                                     disabled={!assistantEnabled || !isConnected || chat.hydrating || chat.turnRunning}
                                     busy={chat.permissionUpdating} waitingForTurn={chat.turnRunning}
-                                    interactive={featureProfile.exec_pty ? {
+                                    interactive={hasDevice && featureProfile.exec_pty ? {
                                         runId: chat.runId,
                                         browserConnectionId: chat.browserConnectionId,
                                         deviceId: stableDeviceId,
@@ -983,7 +995,7 @@ export function AiAssistantWorkspace({
                             )}
                     </AssistantPermissionRecords>
                     </div>
-                    {featureProfile.exec_pty && Object.entries(exec.entries).map(([row, entry]) => {
+                    {hasDevice && featureProfile.exec_pty && Object.entries(exec.entries).map(([row, entry]) => {
                         const rowIndex = Number(row);
                         return (
                             <div key={row} data-testid="ai-assistant-exec">
@@ -1057,15 +1069,16 @@ export function AiAssistantWorkspace({
                             className="min-h-16 max-h-40 w-full resize-y rounded-md border-0 bg-background px-3 py-2 shadow-sm outline-none placeholder:text-muted-foreground focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
                         />
                         <div className="flex min-w-0 items-center gap-1">
-                            <AssistantComposerMenu key={`${permissionHistoryKey}:${subagents.selected?.task_id ?? 'main'}`} sections={menuSections} onContext={() => setPanel('context')}
-                                goal={!rehearsal ? {
+                            <AssistantComposerMenu key={`${permissionHistoryKey}:${subagents.selected?.task_id ?? 'main'}`} sections={menuSections} onContext={hasDevice ? () => setPanel('context') : undefined}
+                                goal={hasDevice && !rehearsal ? {
                                     checked: startGoal, disabled: !assistantEnabled || chat.turnRunning || !!chat.deliveryState,
                                     onCheckedChange: checked => { setStartGoal(checked); setPreviousCompletedGoalId(null); },
                                     summary: startGoal && goalBudgetPolicy ? <GoalLimitsSummary policy={goalBudgetPolicy} /> : undefined,
                                 } : undefined} />
-                            <AssistantComposerStatus automaticApproval={automaticApproval} onApprovalSettings={() => setApprovalSettingsOpen(true)}
+                            {personalScope && <AssistantRequestDevices selected={requestDevices} onChange={setRequestDevices} />}
+                            {hasDevice && <AssistantComposerStatus automaticApproval={automaticApproval} onApprovalSettings={() => setApprovalSettingsOpen(true)}
                                 contextCount={selectedContextCount} onContext={() => setPanel('context')} startGoal={startGoal}
-                                onClearGoal={() => { setStartGoal(false); setPreviousCompletedGoalId(null); }} />
+                                onClearGoal={() => { setStartGoal(false); setPreviousCompletedGoalId(null); }} />}
                             <div className="ml-auto flex shrink-0 items-center gap-1">
                                 <AssistantContextMeter usage={chat.contextUsage} draft={question} />
                                 <AssistantComposerActions turnRunning={chat.turnRunning} canStop={chat.canStop}
@@ -1092,7 +1105,7 @@ export function AiAssistantWorkspace({
                         mainStopped={chat.mainStopped}
                         exportBackup={exportSessionBackup}
                         canDecide={assistantEnabled && featureProfile.permission_decision}
-                        interactive={featureProfile.exec_pty ? { browserConnectionId: chat.browserConnectionId, deviceId: stableDeviceId } : undefined} />
+                        interactive={hasDevice && featureProfile.exec_pty ? { browserConnectionId: chat.browserConnectionId, deviceId: stableDeviceId } : undefined} />
                     </div>
                     <AssistantConversationTabs agents={subagents} attentionTasks={chat.subagents.attention_tasks}
                         mainNeedsApproval={pendingCount > 0 || Object.values(exec.entries).some(entry => entry.phase === 'awaiting')} />
@@ -1192,17 +1205,19 @@ export function AiAssistantWorkspace({
                             <p className="mt-2 text-sm text-muted-foreground">{t('pages.aiAssistant.workspace.deviceSettingsOwnerOnly')}</p>
                         </SheetContent>
                     </Sheet>
-                    <AssistantSchedules key={permissionHistoryKey} sessionId={chat.sessionId ?? null} open={schedulesOpen} onOpenChange={setSchedulesOpen} deviceId={stableDeviceId} />
+                    {hasDevice && <AssistantSchedules key={permissionHistoryKey} sessionId={chat.sessionId ?? null} open={schedulesOpen} onOpenChange={setSchedulesOpen} deviceId={stableDeviceId} />}
                 </CardContent>
             </Card>
         </>
     );
 }
 
-function AiAssistantDevicePage({
+function AiAssistantLivePage({
     featureProfile: suppliedFeatureProfile,
+    personalScope,
 }: {
     featureProfile?: AiAssistantFeatureProfile | null;
+    personalScope?: string;
 }) {
     const target = useOptionalDeviceTarget();
     const deskId = target?.connectionId;
@@ -1214,7 +1229,6 @@ function AiAssistantDevicePage({
         : suppliedFeatureProfile;
     const restricted = useRestrictedSession(deskId);
     const connection = target?.connection;
-    const isLoading = false;
     const localPairingAvailable = canPairLocalDevice(connection?.device_id, serverInfo);
 
     if (suppliedFeatureProfile === undefined && serverInfo.isLoading) {
@@ -1245,8 +1259,13 @@ function AiAssistantDevicePage({
         );
     }
 
-    if (isLoading) {
-        return <div className="p-6"><Skeleton className="h-64 w-full" /></div>;
+    if (personalScope) {
+        return <div className="absolute inset-0 flex min-w-0 flex-col gap-2 overflow-hidden">
+            <AiAssistantWorkspace key={personalScope} personalScope={personalScope}
+                initialConversationId={searchParams.get('conversation')} backTo="/ai-assistant/conversations"
+                deskId="" stableDeviceId="" localPairingAvailable={false}
+                featureProfile={featureProfile} assistantEnabled />
+        </div>;
     }
 
     if (!deskId || !connection) {
@@ -1292,8 +1311,19 @@ function AiAssistantDevicePage({
 }
 
 /** History is selected before mounting any live connection or approval hook. */
-export default function AiAssistantPage(props: { featureProfile?: AiAssistantFeatureProfile | null }) {
+export default function AiAssistantPage(props: { featureProfile?: AiAssistantFeatureProfile | null; personalScope?: string }) {
     const [query] = useSearchParams();
     return query.has('source') ? <AssistantConversationHistory sourceId={query.get('source') ?? ''}
-        expectedRevision={query.has('revision') ? Number(query.get('revision')) : undefined} /> : <AiAssistantDevicePage {...props} />;
+        expectedRevision={query.has('revision') ? Number(query.get('revision')) : undefined} /> : <AiAssistantLivePage {...props} />;
+}
+
+export function PersonalAiAssistantPage({ enabled = true }: { enabled?: boolean }) {
+    const user = useGetCurrentUser();
+    const [query] = useSearchParams();
+    if (query.has('source')) return <AiAssistantPage />;
+    if (enabled && user.isLoading) return <div className="p-6"><Skeleton className="h-64 w-full" /></div>;
+    const account = user.data?.data;
+    const personalScope = enabled && account && account.target_connection_id == null
+        ? `personal:${account.user_id ?? 'owner'}` : undefined;
+    return <AiAssistantPage personalScope={personalScope} />;
 }

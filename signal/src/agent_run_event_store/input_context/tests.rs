@@ -211,6 +211,7 @@ async fn detach(store: &SignalAgentRunEventStore, object: &ContextAttachment) {
 fn input(id: &str, mut objects: Vec<ContextAttachment>) -> AppendUserFollowupParams {
     objects.sort_by(|a, b| a.attachment_id.cmp(&b.attachment_id));
     AppendUserFollowupParams {
+        target_refs: Vec::new(),
         client_timezone: "UTC".into(),
         temporary_conversation: None,
         event_id: id.into(),

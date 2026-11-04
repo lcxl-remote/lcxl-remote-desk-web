@@ -129,6 +129,7 @@ impl AssistantModelDataManifest {
             actor_id: session.actor_id.clone(),
             conversation_id: session.conversation_id.clone(),
             source_device_ref: data.source_device_ref.clone(),
+            request_memory_device_refs: Self::selected_memory_devices(data, &selected_ids).to_vec(),
             session_version: session.version,
             lease_token: session.lease_token,
             input_revision: session.input_revision,

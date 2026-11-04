@@ -233,6 +233,9 @@ pub(crate) async fn cleanup_agent_sessions(
             .filter(crate::agent_subagent_store::reclaim_condition(
                 cutoff.timestamp_millis(),
             ))
+            .filter(agent_session::Column::ConversationId.not_in_subquery(
+                desk_assistant_data_store::device_roster::configured_conversation_ids(),
+            ))
             .filter(agent_session::Column::UpdatedAt.lt(cutoff))
             .filter(agent_session::Column::Id.gt(delete_after))
             .filter(
@@ -405,6 +408,9 @@ async fn delete_expired_session_candidates(
     let result = async {
         let rows = agent_session::Entity::find()
             .filter(agent_session::Column::Id.is_in(ids.iter().copied()))
+            .filter(agent_session::Column::ConversationId.not_in_subquery(
+                desk_assistant_data_store::device_roster::configured_conversation_ids(),
+            ))
             .filter(crate::agent_subagent_store::reclaim_condition(
                 cutoff.timestamp_millis(),
             ))
@@ -997,6 +1003,10 @@ mod tests {
         let db = cleanup_db().await;
         seed_session(&db, "recent", days_ago(5), false, None).await;
         seed_session(&db, "old-settled", days_ago(40), false, None).await;
+        seed_session(&db, "coordinator", days_ago(40), false, None).await;
+        desk_assistant_data_store::device_roster::replace(&db, "1", "coordinator", 0, vec![])
+            .await
+            .unwrap();
         seed_session(
             &db,
             "old-live",
@@ -1024,7 +1034,8 @@ mod tests {
             .iter()
             .map(|row| row.conversation_id.as_str())
             .collect();
-        assert_eq!(ids.len(), 3);
+        assert_eq!(ids.len(), 4);
+        assert!(ids.contains(&"coordinator"));
         assert!(ids.contains(&"recent"));
         assert!(ids.contains(&"old-live"));
         assert!(ids.contains(&"old-lapsed"));

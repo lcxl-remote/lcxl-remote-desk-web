@@ -238,6 +238,36 @@ fn text_part(name: &str, count: usize) -> batch::OutputPart {
 }
 
 #[test]
+fn personal_conversation_without_device_keeps_web_result_attachments() {
+    let identity = batch::DeliveryIdentity {
+        conversation_id: "personal-conversation",
+        actor_id: "owner",
+        device_id: "",
+        message_id: "message",
+        tool_call_id: "web-read",
+    };
+    let delivery =
+        batch::prepare_delivery(&identity, vec![text_part("body", INLINE_BYTES + 1)], 1).unwrap();
+    let [attachment] = delivery.attachments.as_slice() else {
+        panic!("expected one externalized body")
+    };
+    assert!(attachment.metadata.device_id.is_empty());
+    assert_eq!(attachment.metadata.actor_id, identity.actor_id);
+    assert_eq!(
+        attachment.metadata.conversation_id,
+        identity.conversation_id
+    );
+    attachment.metadata.verify(&attachment.content).unwrap();
+
+    let mut image = attachment.metadata.clone();
+    image.kind = ContentKind::Image;
+    assert_eq!(
+        image.verify(&attachment.content).unwrap_err().message,
+        "Attachment metadata exceeds its identity bounds"
+    );
+}
+
+#[test]
 fn streams_are_externalized_individually_without_envelope_recursion() {
     let small = delivery(
         vec![text_part("stdout", 4096), text_part("stderr", 4096)],

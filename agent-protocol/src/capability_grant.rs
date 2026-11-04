@@ -213,12 +213,43 @@ impl CapabilityGrant {
             ("grant_id", self.grant_id.as_str()),
             ("actor_id", self.actor_id.as_str()),
             ("run_id", self.run_id.as_str()),
-            ("target_device_id", self.target_device_id.as_str()),
             ("provider_id", self.provider_id.as_str()),
             ("capability_id", self.capability_id.as_str()),
             ("tool_name", self.tool_name.as_str()),
         ] {
             validate_id(field, value)?;
+        }
+        if self.target_device_id.is_empty() {
+            if !matches!(
+                self.surface,
+                ProductSurface::ManagerPersonalOwner | ProductSurface::OssPersonalOwner
+            ) || self.target_session_id.is_some()
+                || self.risk_tier != CapabilityRiskTier::R1
+                || !matches!(self.issued_by, CapabilityGrantIssuer::UserDecision)
+                || !matches!(
+                    (
+                        self.provider_id.as_str(),
+                        self.capability_id.as_str(),
+                        self.tool_name.as_str(),
+                        self.effect
+                    ),
+                    (
+                        "web.research",
+                        "web.research.fetch",
+                        "fetch_public_web_page",
+                        CapabilityEffect::ReadExternal
+                    ) | (
+                        "web.search",
+                        "web.research.search",
+                        "search_public_web",
+                        CapabilityEffect::ExportData
+                    )
+                )
+            {
+                return Err(CapabilityGrantError::InvalidId("target_device_id"));
+            }
+        } else {
+            validate_id("target_device_id", &self.target_device_id)?;
         }
         if let Some(session_id) = &self.target_session_id {
             validate_id("target_session_id", session_id)?;

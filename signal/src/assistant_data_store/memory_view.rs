@@ -2,6 +2,7 @@
 //! neither an owner DTO nor an index hit grants permission to send its body.
 
 use super::{AssistantStoreError, unsigned};
+use crate::config::connection::DatabaseTransaction;
 use crate::entity::agent_memory as memory;
 use desk_agent_protocol::ai_assistant::{
     history::AssistantDeviceScope,
@@ -57,6 +58,27 @@ impl<C: ConnectionTrait + crate::config::ConfigConnection>
     }
 }
 
+/// The personal entry exposes the selected request's devices to memory tools.
+/// A fixed-device entry keeps its existing owner-wide retrieval authority.
+pub(super) async fn retrieval_devices_on(
+    db: &DatabaseTransaction,
+    fence: &super::retrieval_native::NativeAssistantDataFence<'_>,
+    now: u64,
+) -> Result<std::collections::BTreeSet<String>, AssistantStoreError> {
+    let session = fence.context.session;
+    let scope = desk_diagnose_core::ai_assistant::memory_access::usable_memory_scope(session, now)
+        .ok_or(AssistantStoreError::Inaccessible)?;
+    if scope.request_device_refs.is_empty() {
+        super::conversation_search::owner_devices_on(db, fence).await
+    } else {
+        Ok(super::current_memory::fact_devices_on(db, session, scope)
+            .await?
+            .into_iter()
+            .take(fence.policy.limits.retrieval.episode.query_devices as usize)
+            .collect())
+    }
+}
+
 pub(crate) struct AuthorizedMemoryView {
     pub row: memory::Model,
     pub record: MemoryRecord,
@@ -84,8 +106,12 @@ pub(crate) async fn read_on<C: ConnectionTrait + crate::config::ConfigConnection
         || unsigned(row.state_generation)? > context.observation_generation
         || (!row.device_ref.is_empty()
             && (!context.requested_devices.contains(&row.device_ref)
-                || (context.scope.device_rule == AssistantDeviceScope::CurrentDevice
-                    && row.device_ref != context.current_device_ref)))
+                || ((purpose == MemoryUsePurpose::CurrentFact
+                    || context.scope.device_rule == AssistantDeviceScope::CurrentDevice)
+                    && !context
+                        .scope
+                        .current_device_refs()
+                        .contains(&row.device_ref))))
     {
         return Err(AssistantStoreError::Inaccessible);
     }
@@ -125,7 +151,11 @@ async fn read_proof_on<C: ConnectionTrait + crate::config::ConfigConnection>(
     let (sources, producer, until) = super::model_sources::memory_sources_on(
         db,
         context.actor_id,
-        context.current_device_ref,
+        if purpose == MemoryUsePurpose::CurrentFact {
+            &row.device_ref
+        } else {
+            context.current_device_ref
+        },
         &reference,
         context.now_unix_ms,
     )
@@ -190,18 +220,34 @@ async fn read_proof_on<C: ConnectionTrait + crate::config::ConfigConnection>(
         memories: vec![reference],
         expires_at_unix_ms: expiry,
     };
-    usage.expires_at_unix_ms = super::model_sources::validate_on(
-        db,
-        context.actor_id,
-        context.current_device_ref,
-        &usage,
-        context.access,
-        None,
-        context.destination,
-        context.platform,
-        context.now_unix_ms,
-    )
-    .await?;
+    usage.expires_at_unix_ms = if purpose == MemoryUsePurpose::CurrentFact
+        || !context.scope.request_device_refs.is_empty()
+    {
+        super::model_sources::validate_memory_devices_on(
+            db,
+            context.actor_id,
+            context.requested_devices,
+            &usage,
+            context.access,
+            context.destination,
+            context.platform,
+            context.now_unix_ms,
+        )
+        .await?
+    } else {
+        super::model_sources::validate_on(
+            db,
+            context.actor_id,
+            context.current_device_ref,
+            &usage,
+            context.access,
+            None,
+            context.destination,
+            context.platform,
+            context.now_unix_ms,
+        )
+        .await?
+    };
     // Pending values are historical control candidates, not current facts.
     // Their ended truth interval is distinct from retained-body eligibility.
 

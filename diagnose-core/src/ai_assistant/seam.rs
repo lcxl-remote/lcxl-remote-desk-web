@@ -235,6 +235,8 @@ pub struct AssistantModelDataManifest {
     pub actor_id: String,
     pub conversation_id: String,
     pub source_device_ref: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub request_memory_device_refs: Vec<String>,
     pub session_version: i64,
     pub lease_token: u64,
     pub input_revision: u64,
@@ -252,6 +254,24 @@ pub struct AssistantModelDataManifest {
 }
 
 impl AssistantModelDataManifest {
+    fn selected_memory_devices<'a>(
+        data: &'a super::data_control::AssistantDataSession,
+        projection_ids: &[String],
+    ) -> &'a [String] {
+        use desk_agent_protocol::ai_assistant::source::SourceReadPurpose;
+        if data.read_uses.iter().any(|usage| {
+            projection_ids.contains(&usage.projection_id)
+                && matches!(
+                    usage.purpose,
+                    SourceReadPurpose::ModelMemory | SourceReadPurpose::MemoryEvidence
+                )
+        }) {
+            data.request_memory_devices()
+        } else {
+            &[]
+        }
+    }
+
     pub fn validate_absence(request: &crate::seam::ModelRequest) -> Result<(), &'static str> {
         if request.messages.iter().any(|message| {
             message.data_envelope.as_ref().is_some_and(|envelope| {
@@ -278,9 +298,11 @@ impl AssistantModelDataManifest {
             .assistant_data
             .as_ref()
             .ok_or("missing assistant model scope")?;
+        let memory_devices = Self::selected_memory_devices(data, &self.read_projection_ids);
         if self.actor_id != session.actor_id
             || self.conversation_id != session.conversation_id
             || self.source_device_ref != data.source_device_ref
+            || self.request_memory_device_refs != memory_devices
             || self.session_version != session.version
             || self.lease_token == 0
             || self.lease_token != session.lease_token

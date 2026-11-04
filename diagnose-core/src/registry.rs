@@ -309,31 +309,49 @@ pub fn lookup_for_session<'a>(
     name: &str,
     session: &crate::session::PersistedAgentSession,
 ) -> Option<&'a RegisteredTool> {
-    lookup_exposed(
-        registry,
-        name,
-        &session.scope_snapshot,
-        &session.execution_state,
-        session.trigger_origin,
-    )
-    .filter(|tool| {
-        session.agent_role.allows_effect(tool.effect)
-            && crate::ai_assistant::data_tools::session_allows(tool, session)
-            && (!session.is_subagent_result_turn()
-                || matches!(
-                    tool.effect,
-                    ToolEffect::SubAgentQuery
-                        | ToolEffect::SubAgentWait
-                        | ToolEffect::RunProjection
-                        | ToolEffect::ConversationHistory
-                ))
-            && (tool.effect != ToolEffect::ScheduleQuery
-                || !session.agent_role.is_main()
-                || matches!(
-                    session.trigger_origin,
-                    TriggerOrigin::User | TriggerOrigin::SubAgentCompletion
-                ))
-    })
+    let selected_read = name == crate::request_devices::SYSTEM_INFO_TOOL
+        && crate::request_devices::accepts_device_reads(session);
+    let selected_command = name == crate::command_confirmation::COMMAND_TOOL
+        && crate::request_devices::selected_command_turn(session);
+    registry
+        .iter()
+        .find(|tool| {
+            tool.name() == name
+                && ((selected_read
+                    && tool.effect == ToolEffect::ReadOnly
+                    && tool.required_device_capability == Some(Capability::SystemInfo))
+                    || (selected_command
+                        && tool.effect == ToolEffect::Mutating
+                        && tool
+                            .spec
+                            .parameters_schema
+                            .pointer("/properties/target_ref")
+                            .is_some())
+                    || is_exposed(
+                        tool,
+                        &session.scope_snapshot,
+                        &session.execution_state,
+                        session.trigger_origin,
+                    ))
+        })
+        .filter(|tool| {
+            session.agent_role.allows_effect(tool.effect)
+                && crate::ai_assistant::data_tools::session_allows(tool, session)
+                && (!session.is_subagent_result_turn()
+                    || matches!(
+                        tool.effect,
+                        ToolEffect::SubAgentQuery
+                            | ToolEffect::SubAgentWait
+                            | ToolEffect::RunProjection
+                            | ToolEffect::ConversationHistory
+                    ))
+                && (tool.effect != ToolEffect::ScheduleQuery
+                    || !session.agent_role.is_main()
+                    || matches!(
+                        session.trigger_origin,
+                        TriggerOrigin::User | TriggerOrigin::SubAgentCompletion
+                    ))
+        })
 }
 
 #[cfg(test)]

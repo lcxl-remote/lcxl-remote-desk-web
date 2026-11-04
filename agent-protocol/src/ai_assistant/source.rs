@@ -195,3 +195,11 @@ pub fn validate_source_id(value: &str) -> Result<(), &'static str> {
     }
     Ok(())
 }
+
+/// An empty device reference denotes account-owned data with no device binding.
+pub fn validate_optional_device_ref(value: &str) -> Result<(), &'static str> {
+    if !value.is_empty() {
+        validate_source_id(value)?;
+    }
+    Ok(())
+}

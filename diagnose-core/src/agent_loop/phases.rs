@@ -173,6 +173,12 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
         None
     };
     let mut step_inventory = deps.capability_inventory.map(|items| items.to_vec());
+    if session.has_admitted_personal_input()
+        && let Some(inventory) = step_inventory.as_mut()
+    {
+        // The fixed-device inventory cannot describe per-request readiness.
+        inventory.retain(|item| item.tool_name != crate::request_devices::SYSTEM_INFO_TOOL);
+    }
     if let Some((snapshot, inventory)) = authority.as_ref().zip(step_inventory.as_mut()) {
         snapshot.narrow_inventory(
             deps.provider_registry.expect("disclosure registry"),
@@ -499,6 +505,53 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
         });
     }
 
+    let request_devices = if session.has_admitted_personal_input()
+        && !session.has_admitted_targetless_input()
+        && deps.model.command_completion_event_id().is_none()
+    {
+        crate::future::boxed(|| deps.tools.request_devices(session)).await?
+    } else {
+        Vec::new()
+    };
+    let selected_device_read = if !goal_control_only
+        && planning_goal.is_none()
+        && crate::request_devices::accepts_device_reads(session)
+    {
+        crate::request_devices::system_info_tool(&request_devices)
+    } else {
+        None
+    };
+    if let Some(tool) = &selected_device_read {
+        exposed.retain(|candidate| candidate.name() != tool.name());
+        exposed.push(tool);
+    }
+    let selected_permission_tool = exposed
+        .iter()
+        .find(|tool| tool.name() == crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME)
+        .and_then(|tool| {
+            crate::request_devices::command_permission_tool(session, &request_devices, tool)
+        });
+    if let Some(tool) = &selected_permission_tool {
+        exposed.retain(|candidate| candidate.name() != tool.name());
+        exposed.push(tool);
+    }
+    let selected_command_tool = if state.permission_continuation_pending
+        && deps
+            .permission_continuation_exact_tools
+            .iter()
+            .any(|name| name == crate::command_confirmation::COMMAND_TOOL)
+    {
+        deps.provider_registry.and_then(|registry| {
+            crate::request_devices::command_tool(session, &request_devices, registry)
+        })
+    } else {
+        None
+    };
+    if let Some(tool) = &selected_command_tool {
+        exposed.retain(|candidate| candidate.name() != tool.name());
+        exposed.push(tool);
+    }
+
     // Approval cannot override execution-state or scope restrictions. Keep
     // recovery tools available if none of the approved tools can run.
     let permission_continuation_blocked = state.permission_continuation_pending
@@ -706,6 +759,9 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                 system_prompt.text.push_str(&projection.detail_prompt);
             }
             disclosure_projection = Some(projection);
+        }
+        if !request_devices.is_empty() {
+            crate::request_devices::append_catalogue(&mut system_prompt.text, &request_devices);
         }
         if system_prompt
             .data_envelope
@@ -962,6 +1018,10 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                         .join(", ");
                     format!(
                         "PERMISSION CONTINUATION BLOCKED (server authoritative): {reasons}. Approval does not override this restriction. Do not retry the mutation or request the same permission. Available read/discovery tools remain usable. Explain the specific blocker instead of claiming the approved action ran."
+                    )
+                } else if selected_command_tool.is_some() {
+                    format!(
+                        "{marker_text} For the approved selected-device command, copy target_ref from the original permission proposal and use the exact_input from its exec_command item as the remaining arguments. The server checks both the target and command before dispatch."
                     )
                 } else {
                     marker_text.to_string()
@@ -2767,8 +2827,16 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                                         );
                                     }
                                     let call = &resolved_call;
+                                    let selected_device_read = call.name
+                                        == crate::request_devices::SYSTEM_INFO_TOOL
+                                        && crate::request_devices::accepts_device_reads(session);
 
+                                    let selected_device_command = call.name
+                                        == crate::command_confirmation::COMMAND_TOOL
+                                        && crate::request_devices::selected_command_turn(session);
                                     if disclosure_enabled
+                                        && !selected_device_read
+                                        && !selected_device_command
                                         && let Some(providers) = deps.provider_registry
                                         && let Some(capability) =
                                             providers.capability_for_tool(&call.name)
@@ -3065,27 +3133,10 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                                                 &call.id,
                                                 &call.arguments_json,
                                             );
-                                            let ctx = ExecContext {
-                                    assistant_turn_fence:
-                                        crate::action_turn_fence::AssistantTurnFence::from_session(
-                                            session,
-                                        )?,
-                                    conversation_id: session.conversation_id.clone(),
-                                    turn_id: turn_id.to_string(),
-                                    tool_call_id: call.id.clone(),
-                                    actor_id: session.actor_id.clone(),
-                                    policy_revision: session.policy_revision,
-                                    scope: session.scope_snapshot.clone(),
-                                    connection_id: session.active_control_connection_id.clone(),
-                                };
-                                            let read_requires_version =
-                                                deps.tools.read_requires_version(call);
+                                            let read_requires_version = !selected_device_read
+                                                && deps.tools.read_requires_version(call);
                                             let version = if read_requires_version {
-                                                // The remote Provider work transaction compares a
-                                                // persisted action boundary. Reuse the existing
-                                                // awaiting-action state without emitting a second
-                                                // permission prompt: the exact read grant was
-                                                // already compiled before this tool was exposed.
+                                                // Durable Provider work compares this persisted action boundary.
                                                 session.turn_state = TurnState::AwaitingApproval;
                                                 deps.session_seam.save(session).await?;
                                                 crate::action_version::ActionVersion::capture(
@@ -3094,10 +3145,48 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                                             } else {
                                                 None
                                             };
-                                            let completion = deps
-                                                .tools
-                                                .run_read_versioned(call, &ctx, version.as_ref())
-                                                .await;
+                                            let completion = if selected_device_read {
+                                                crate::seam::ReadCompletion {
+                                                    outcome: crate::future::boxed(|| {
+                                                        deps.tools
+                                                            .run_request_device_read(session, call)
+                                                    })
+                                                    .await,
+                                                    version_advance: None,
+                                                }
+                                            } else {
+                                                let ctx = ExecContext {
+                                                    // Central web reads use the host's original input and lease
+                                                    // checks. A device action fence always needs a real device.
+                                                    assistant_turn_fence: if session
+                                                        .has_admitted_personal_input()
+                                                        && crate::web_research::is_web_tool(
+                                                            &call.name,
+                                                        ) {
+                                                        None
+                                                    } else {
+                                                        crate::action_turn_fence::AssistantTurnFence::from_session(session)?
+                                                    },
+                                                    conversation_id: session
+                                                        .conversation_id
+                                                        .clone(),
+                                                    turn_id: turn_id.to_string(),
+                                                    tool_call_id: call.id.clone(),
+                                                    actor_id: session.actor_id.clone(),
+                                                    policy_revision: session.policy_revision,
+                                                    scope: session.scope_snapshot.clone(),
+                                                    connection_id: session
+                                                        .active_control_connection_id
+                                                        .clone(),
+                                                };
+                                                deps.tools
+                                                    .run_read_versioned(
+                                                        call,
+                                                        &ctx,
+                                                        version.as_ref(),
+                                                    )
+                                                    .await
+                                            };
                                             if let Some(advance) = completion.version_advance {
                                                 advance.apply(session, version.as_ref())?;
                                             }
@@ -3190,6 +3279,14 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                                                         .validate()
                                                         .map_err(|_| invalid_original_result())?;
                                                     Some(envelope)
+                                                }
+                                                None if selected_device_read && !ok => {
+                                                    derive_internal_tool_result_envelope(
+                                                        turn.provider_meta.data_envelope.as_ref(),
+                                                        &call.id,
+                                                        &out.content,
+                                                        &call.name,
+                                                    )?
                                                 }
                                                 None => {
                                                     deps.tools.read_data_envelope(call, &out)?
@@ -4110,7 +4207,18 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                                                         &call.id,
                                                     ),
                                                 );
-                                                let request = deps.provider_registry.ok_or_else(|| AgentError {
+                                                let selected_request = crate::future::boxed(|| {
+                                                    crate::request_devices::plan_command_permission(
+                                                        deps.tools,
+                                                        deps.provider_registry,
+                                                        session,
+                                                        call,
+                                                        &request_id,
+                                                        &created_at,
+                                                    )
+                                                })
+                                                .await;
+                                                let request = selected_request.unwrap_or_else(|| deps.provider_registry.ok_or_else(|| AgentError {
                                 kind: AgentErrorKind::Internal,
                                 message: "permission planning has no Provider catalog".into(),
                                 retryable: false,
@@ -4190,7 +4298,7 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                                     )?;
                                 }
                                 Ok(request)
-                            });
+                            }));
                                                 let request = match request {
                                             Ok(mut request) => {
                                                 crate::application_launch::bind_permission_request(

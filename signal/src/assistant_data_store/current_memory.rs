@@ -17,7 +17,7 @@ use desk_diagnose_core::{
     ai_assistant::{
         current_memory::CurrentMemoryPayload,
         data_access::scope_sha256,
-        memory_access::usable_memory_scope,
+        memory_access::{MemoryAccessScope, usable_memory_scope},
         read_projection::{CurrentMemoryPreparation, ReadProjectionKind, ReadProjectionProof},
         retrieval_query::QuerySourceVersion,
         seam::{AssistantDataReadUse, CurrentMemoryBlock},
@@ -25,13 +25,41 @@ use desk_diagnose_core::{
     session::{AgentSessionSurface, PersistedAgentSession},
 };
 use sea_orm::{
-    ColumnTrait, EntityTrait, FromQueryResult, QueryFilter, QueryOrder, QuerySelect,
-    TransactionTrait, sea_query::Condition,
+    ColumnTrait, ConnectionTrait, EntityTrait, FromQueryResult, QueryFilter, QueryOrder,
+    QuerySelect, TransactionTrait, sea_query::Condition,
 };
 use std::{
     collections::BTreeSet,
     time::{Duration, Instant},
 };
+
+pub(super) async fn fact_devices_on<C: ConnectionTrait>(
+    db: &C,
+    session: &PersistedAgentSession,
+    scope: &MemoryAccessScope,
+) -> Result<BTreeSet<String>, AssistantStoreError> {
+    if scope.request_device_refs.is_empty() {
+        return Ok(scope.current_device_refs().iter().cloned().collect());
+    }
+    if !session.has_admitted_personal_input() {
+        return Err(AssistantStoreError::Inaccessible);
+    }
+    let ids =
+        desk_assistant_data_store::device_roster::current_request_devices(db, session).await?;
+    let instance = session
+        .assistant_data
+        .as_ref()
+        .and_then(|data| data.source_instance_id.as_deref())
+        .ok_or(AssistantStoreError::Inaccessible)?;
+    let devices = crate::agent_run_event_store::eligible_request_device_ids(db, &ids)
+        .await
+        .map_err(|_| AssistantStoreError::Inaccessible)?;
+    Ok(devices
+        .iter()
+        .map(|id| super::source_device_ref(instance, id))
+        .filter(|reference| scope.request_device_refs.contains(reference))
+        .collect())
+}
 
 pub(crate) async fn prepare(
     db: &DatabaseConnection,
@@ -89,6 +117,26 @@ async fn prepare_on(
         fence.finish_on(now_ms()?.max(now)).await?;
         return Ok(empty(fence.access.memory_state_generation));
     }
+    let scope = usable_memory_scope(session, now).ok_or(AssistantStoreError::Inaccessible)?;
+    let scope_hash = scope_sha256(session).map_err(AssistantStoreError::Invalid)?;
+    let devices = desk_diagnose_core::future::boxed(|| fact_devices_on(db, session, scope))
+        .await?
+        .into_iter()
+        .take(fence.policy.limits.retrieval.episode.query_devices as usize)
+        .collect();
+    // A withdrawn device changes the allowed fact set even within the same
+    // input and memory generation. Keep the original preparation immutable.
+    let selected_preparation_id;
+    let preparation_id = if scope.request_device_refs.is_empty() {
+        preparation_id
+    } else {
+        use desk_diagnose_core::native_ids::{self, Kind};
+        selected_preparation_id = native_ids::stable(
+            Kind::AssistantReadProjection,
+            &("selected-memory-devices", preparation_id, &devices),
+        );
+        &selected_preparation_id
+    };
     let logical = ReadProjectionProof::current_logical_id(session, preparation_id)
         .map_err(AssistantStoreError::Invalid)?;
     let episode = &session
@@ -104,16 +152,9 @@ async fn prepare_on(
         .filter(projection::Column::LogicalCallId.eq(&logical))
         .one(db)
         .await?;
-    let data = session
-        .assistant_data
-        .as_ref()
-        .ok_or(AssistantStoreError::Inaccessible)?;
-    let scope = usable_memory_scope(session, now).ok_or(AssistantStoreError::Inaccessible)?;
-    let scope_hash = scope_sha256(session).map_err(AssistantStoreError::Invalid)?;
-    let devices = BTreeSet::from([data.source_device_ref.clone()]);
     let authority = MemoryReadAuthorization {
         actor_id: &session.actor_id,
-        current_device_ref: &data.source_device_ref,
+        current_device_ref: &scope.current_device_ref,
         scope_sha256: &scope_hash,
         scope,
         access: &fence.access,
@@ -251,9 +292,9 @@ async fn select_on(
             ])
             .filter(memory::Column::ActorId.eq(context.actor_id))
             .filter(memory::Column::Status.eq("active"))
-            .filter(
-                memory::Column::DeviceRef.is_in([String::new(), context.current_device_ref.into()]),
-            )
+            .filter(memory::Column::DeviceRef.is_in(
+                std::iter::once(String::new()).chain(context.requested_devices.iter().cloned()),
+            ))
             .filter(memory::Column::StateGeneration.lte(signed(context.observation_generation)?))
             .filter(memory::Column::ValidFromMs.gt(0))
             .filter(memory::Column::ValidFromMs.lte(signed(context.now_unix_ms)?))
@@ -373,13 +414,12 @@ async fn validate_payload_on(
             return Err(AssistantStoreError::Inaccessible);
         }
     }
-    let expiry = super::model_sources::validate_on(
+    let expiry = super::model_sources::validate_memory_devices_on(
         db,
         context.actor_id,
-        context.current_device_ref,
+        context.requested_devices,
         usage,
         context.access,
-        None,
         context.destination,
         context.platform,
         context.now_unix_ms,

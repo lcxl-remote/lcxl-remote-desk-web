@@ -6,7 +6,7 @@ use crate::{
     session::PersistedAgentSession,
 };
 use desk_agent_protocol::{
-    ai_assistant::source::{SourceReadPurpose, validate_source_id},
+    ai_assistant::source::{SourceReadPurpose, validate_optional_device_ref, validate_source_id},
     data_lineage::DestinationIdentity,
 };
 use serde::{Deserialize, Serialize};
@@ -145,12 +145,12 @@ impl AssistantNativeSourceSet {
         for id in [
             &self.actor_id,
             &self.consumer_conversation_id,
-            &self.source_device_ref,
             &self.physical_call_id,
             &self.model_export_authorization_id,
         ] {
             validate_source_id(id)?;
         }
+        validate_optional_device_ref(&self.source_device_ref)?;
         self.destination
             .validate()
             .map_err(|_| "invalid native source-set destination")?;
@@ -477,12 +477,12 @@ impl AssistantDataExportAuthorization {
         for id in [
             &self.actor_id,
             &self.consumer_conversation_id,
-            &self.source_device_ref,
             &self.retrieval_episode_id,
             &self.source_envelope_id,
         ] {
             validate_source_id(id)?;
         }
+        validate_optional_device_ref(&self.source_device_ref)?;
         if let Some(id) = &self.task_id {
             validate_source_id(id)?;
         }
@@ -632,6 +632,7 @@ mod tests {
             actor_id: session.actor_id.clone(),
             conversation_id: session.conversation_id.clone(),
             source_device_ref: data.source_device_ref.clone(),
+            request_memory_device_refs: Vec::new(),
             session_version: session.version,
             lease_token: session.lease_token,
             input_revision: session.input_revision,

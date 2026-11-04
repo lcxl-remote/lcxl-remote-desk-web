@@ -97,9 +97,9 @@ async fn prepare_data_on<'a>(
         return Err(AssistantStoreError::Inaccessible);
     }
     let config = db.config_read().await;
-    let binding = desk_diagnose_core::native_ids::stable(
-        desk_diagnose_core::native_ids::Kind::AssistantDeviceBinding,
-        &(&config.metadata.instance, &session.device_id),
+    let binding = crate::assistant_data_store::source_device_ref(
+        &config.metadata.instance,
+        &session.device_id,
     );
     if data.source_device_ref != binding
         || data.source_instance_id.as_deref() != Some(config.metadata.instance.as_str())
@@ -734,38 +734,17 @@ async fn producer_on(
         }
 
         if !metadata_only
-            && let Some(until) = desk_diagnose_core::future::boxed(|| async {
-                match control {
-                    Some((control, _)) => {
-                        super::model_sources::validate_before_control_on(
-                            db,
-                            &context.session.actor_id,
-                            &data.source_device_ref,
-                            &source.proof.usage,
-                            access,
-                            data.history_access_scope.as_deref(),
-                            context.destination,
-                            policy,
-                            now,
-                            control,
-                        )
-                        .await
-                    }
-                    None => {
-                        super::model_sources::validate_on(
-                            db,
-                            &context.session.actor_id,
-                            &data.source_device_ref,
-                            &source.proof.usage,
-                            access,
-                            data.history_access_scope.as_deref(),
-                            context.destination,
-                            policy,
-                            now,
-                        )
-                        .await
-                    }
-                }
+            && let Some(until) = desk_diagnose_core::future::boxed(|| {
+                super::model_sources::validate_session_sources_on(
+                    db,
+                    context.session,
+                    &source.proof.usage,
+                    access,
+                    context.destination,
+                    policy,
+                    now,
+                    control.map(|(control, _)| control),
+                )
             })
             .await?
         {

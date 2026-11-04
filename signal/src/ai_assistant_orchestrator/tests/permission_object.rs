@@ -476,7 +476,7 @@ async fn run_case_with_live_inner(change: Option<&str>, mode: ResumeMode, live: 
     let (registry, inventory, _, _) = current_capability_projection(
         &db,
         connections.as_ref(),
-        &host,
+        Some(&host),
         ModelCapabilities { image_input: false },
     )
     .await;
@@ -946,6 +946,7 @@ async fn run_case_with_live_inner(change: Option<&str>, mode: ResumeMode, live: 
                     .unwrap();
                 crate::agent_run_event_store::SignalAgentRunEventStore::new(db.clone()).append_user_followup(&
                     crate::agent_run_event_store::AppendUserFollowupParams {
+                        target_refs: Vec::new(),
                         client_timezone: "UTC".into(),
                         temporary_conversation: None,
                         event_id:"new-input".into(), run_id:run_id.clone(), client_conversation_id:Some(client_id.into()),

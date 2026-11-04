@@ -404,7 +404,7 @@ async fn run_desktop_history_case(
     let (registry, inventory, _, _) = current_capability_projection(
         &db,
         connections.as_ref(),
-        &host,
+        Some(&host),
         ModelCapabilities { image_input: false },
     )
     .await;

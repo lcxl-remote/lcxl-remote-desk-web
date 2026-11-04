@@ -2,7 +2,8 @@
 
 use crate::session::{PersistedAgentSession, TriggerOrigin};
 use desk_agent_protocol::ai_assistant::{
-    history::AssistantDeviceScope, source::validate_source_id,
+    history::AssistantDeviceScope,
+    source::{validate_optional_device_ref, validate_source_id},
     user_instructions::AssistantDataSettings,
 };
 use serde::{Deserialize, Serialize};
@@ -17,6 +18,8 @@ pub struct MemoryAccessScope {
     pub accepted_at_unix_ms: u64,
     pub device_rule: AssistantDeviceScope,
     pub current_device_ref: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub request_device_refs: Vec<String>,
     pub policy_revision: u64,
     /// Preserve an original fixed bound when present. Every task read still
     /// requires its host's current native task and lease authority.
@@ -29,10 +32,21 @@ impl MemoryAccessScope {
         for id in [
             &self.actor_id,
             &self.root_conversation_id,
-            &self.current_device_ref,
             &self.retrieval_episode_id,
         ] {
             validate_source_id(id)?;
+        }
+        validate_optional_device_ref(&self.current_device_ref)?;
+        desk_agent_protocol::ai_assistant::validate_target_refs(
+            self.request_device_refs.iter().map(String::as_str),
+        )?;
+        if self.current_device_ref.is_empty()
+            && self.device_rule != AssistantDeviceScope::CurrentDevice
+        {
+            return Err("account-only memory access cannot include devices");
+        }
+        if !self.current_device_ref.is_empty() && !self.request_device_refs.is_empty() {
+            return Err("fixed-device memory access cannot carry request targets");
         }
         if let Some(task) = &self.task_id {
             validate_source_id(task)?;
@@ -50,6 +64,15 @@ impl MemoryAccessScope {
             return Err("invalid original memory access scope");
         }
         Ok(())
+    }
+
+    /// Current facts use the original request's targets or its fixed device.
+    pub fn current_device_refs(&self) -> &[String] {
+        if self.current_device_ref.is_empty() {
+            &self.request_device_refs
+        } else {
+            std::slice::from_ref(&self.current_device_ref)
+        }
     }
 }
 
@@ -74,14 +97,51 @@ pub fn owner_memory_scope(
         task_id: None,
         authorized_input_seq: input_seq,
         accepted_at_unix_ms: accepted_at,
-        device_rule: AssistantDeviceScope::AllMyDevices,
+        device_rule: if device.is_empty() {
+            AssistantDeviceScope::CurrentDevice
+        } else {
+            AssistantDeviceScope::AllMyDevices
+        },
         current_device_ref: device.into(),
+        request_device_refs: Vec::new(),
         policy_revision,
         expires_at_unix_ms: None,
         retrieval_episode_id: episode.into(),
     };
     scope.validate()?;
     Ok(Some(Box::new(scope)))
+}
+
+pub fn bind_request_memory_devices(
+    session: &mut PersistedAgentSession,
+    device_refs: impl IntoIterator<Item = String>,
+) -> Result<(), &'static str> {
+    if let Some(scope) = session
+        .assistant_data
+        .as_mut()
+        .and_then(|data| data.memory_access_scope.as_mut())
+    {
+        scope.request_device_refs = device_refs.into_iter().collect();
+        scope.validate()?;
+    }
+    Ok(())
+}
+
+/// Select an explicit request target, or the sole target when it is unambiguous.
+pub fn request_memory_target<'a>(
+    choices: &'a [String],
+    requested: Option<&str>,
+) -> Option<&'a str> {
+    match requested {
+        Some(reference) => choices
+            .iter()
+            .find(|choice| *choice == reference)
+            .map(String::as_str),
+        None => match choices {
+            [only] => Some(only.as_str()),
+            _ => None,
+        },
+    }
 }
 
 /// Current settings and each actual source still require fresh host validation.

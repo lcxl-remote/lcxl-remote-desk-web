@@ -58,7 +58,7 @@ impl SignalScheduleExecutor {
             crate::ai_assistant_orchestrator::current_capability_projection(
                 &self.db,
                 self.connections.get_ref(),
-                &target,
+                Some(&target),
                 ModelCapabilities {
                     image_input: config.supports_image_input,
                 },

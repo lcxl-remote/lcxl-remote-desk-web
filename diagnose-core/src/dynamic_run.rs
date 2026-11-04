@@ -508,6 +508,16 @@ pub struct UserFollowupEvent {
     pub input_seq: u64,
     pub message_id: String,
     pub message_envelope: DataEnvelope,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub targets: Vec<AssistantInputTarget>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssistantInputTarget {
+    pub reference: String,
+    pub device_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member_generation: Option<u64>,
 }
 
 /// Append-only evidence for a model-maintained task-status projection update.
@@ -534,6 +544,43 @@ impl TaskStatusUpdatedEvent {
 }
 
 impl UserFollowupEvent {
+    pub fn matches_targets(
+        &self,
+        requested: &[String],
+        session: &crate::session::PersistedAgentSession,
+    ) -> bool {
+        self.targets
+            .iter()
+            .map(|target| &target.reference)
+            .eq(requested)
+            && if session.device_id.is_empty() {
+                self.event.input_revision != session.input_revision
+                    || self.is_current_personal_target_snapshot(session)
+            } else {
+                self.targets.is_empty()
+            }
+    }
+
+    pub fn is_current_personal_target_snapshot(
+        &self,
+        session: &crate::session::PersistedAgentSession,
+    ) -> bool {
+        session.has_admitted_personal_input()
+            && self.event.run_id == session.conversation_id
+            && self.actor_id == session.actor_id
+            && self.event.input_revision == session.input_revision
+            && session.assistant_request_devices().is_some_and(|devices| {
+                self.targets
+                    .iter()
+                    .map(|target| &target.device_id)
+                    .eq(devices)
+            })
+            && self.targets.iter().all(|target| {
+                target.member_generation
+                    == session.assistant_request_device_generation(&target.device_id)
+            })
+    }
+
     pub fn validate(&self) -> Result<(), DynamicRunContractError> {
         self.event.validate()?;
         if !crate::ai_assistant::source::valid_statement_timezone(&self.client_timezone) {
@@ -549,6 +596,27 @@ impl UserFollowupEvent {
         }
         validate_id("actor_id", &self.actor_id)?;
         validate_id("message_id", &self.message_id)?;
+        use desk_agent_protocol::ai_assistant::validate_target_refs;
+        validate_target_refs(self.targets.iter().map(|target| target.reference.as_str()))
+            .and_then(|_| {
+                validate_target_refs(self.targets.iter().map(|target| target.device_id.as_str()))
+            })
+            .map_err(|message| DynamicRunContractError::InvalidEnvelope(message.into()))?;
+        if self.targets.iter().any(|target| {
+            target
+                .member_generation
+                .is_some_and(|generation| generation == 0 || generation > i64::MAX as u64)
+        }) || (self
+            .targets
+            .iter()
+            .any(|target| target.member_generation.is_some())
+            && self
+                .targets
+                .iter()
+                .any(|target| target.member_generation.is_none()))
+        {
+            return Err(DynamicRunContractError::InvalidRevision);
+        }
         self.message_envelope
             .validate()
             .map_err(|error| DynamicRunContractError::InvalidEnvelope(error.to_string()))?;
@@ -714,6 +782,17 @@ pub struct PermissionRequest {
 }
 
 impl PermissionRequest {
+    /// A selected device command uses the device already sealed into its plan.
+    /// Web permissions and mixed batches have no selected command target.
+    pub fn exact_command(&self) -> Option<&crate::command_confirmation::CommandConfirmation> {
+        let [item] = self.items.as_slice() else {
+            return None;
+        };
+        (item.tool_name == crate::command_confirmation::COMMAND_TOOL)
+            .then_some(item.command_confirmation.as_ref())
+            .flatten()
+    }
+
     pub fn validate(&self) -> Result<(), DynamicRunContractError> {
         if self.schema_version != PERMISSION_REQUEST_SCHEMA_VERSION {
             return Err(DynamicRunContractError::UnsupportedPermissionVersion(

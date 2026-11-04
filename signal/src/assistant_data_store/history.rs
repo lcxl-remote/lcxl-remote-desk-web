@@ -13,7 +13,6 @@ use desk_agent_protocol::ai_assistant::{
 use desk_diagnose_core::ai_assistant::source::{
     HistoryCapture, PreparedHistoryCapture, prepare_capture,
 };
-use desk_diagnose_core::native_ids::{self, Kind};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseBackend, EntityTrait, QueryFilter,
     QuerySelect, Set, TransactionTrait, sea_query::OnConflict,
@@ -58,12 +57,10 @@ pub(crate) async fn capture_user_input_on(
         return Ok(());
     }
     let config = txn.config_read().await;
-    let source_device_ref = native_ids::stable(
-        Kind::AssistantDeviceBinding,
-        &(&config.metadata.instance, &session.device_id),
-    );
+    let source_device_ref = super::source_device_ref(&config.metadata.instance, &session.device_id);
     if data.source_device_ref != source_device_ref
         || data.source_instance_id.as_deref() != Some(config.metadata.instance.as_str())
+        || (source_device_ref.is_empty() && !session.has_admitted_personal_input())
     {
         return Err(AssistantStoreError::Inaccessible);
     }
@@ -81,7 +78,7 @@ pub(crate) async fn capture_user_input_on(
         native: None,
         actor_id: &session.actor_id,
         device_ref: &source_device_ref,
-        directory: Some(
+        directory: (!source_device_ref.is_empty()).then_some(
             desk_diagnose_core::ai_assistant::source::HistorySourceDirectory {
                 instance_id: &config.metadata.instance,
                 audience: &session.device_id,

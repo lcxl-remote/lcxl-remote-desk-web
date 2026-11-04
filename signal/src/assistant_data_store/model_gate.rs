@@ -65,9 +65,9 @@ pub(crate) async fn prepare_on(
         .assistant_data
         .as_ref()
         .ok_or(AssistantStoreError::Inaccessible)?;
-    let binding = desk_diagnose_core::native_ids::stable(
-        desk_diagnose_core::native_ids::Kind::AssistantDeviceBinding,
-        &(&config.metadata.instance, &session.device_id),
+    let binding = crate::assistant_data_store::source_device_ref(
+        &config.metadata.instance,
+        &session.device_id,
     );
     if data.source_device_ref != binding
         || data.source_instance_id.as_deref() != Some(config.metadata.instance.as_str())
@@ -112,11 +112,6 @@ pub(crate) fn authorize_on<'a>(
         }
         let now = chrono::Utc::now().timestamp_millis() as u64;
         validate_session(&row, &prepared.session, request, now)?;
-        let data = prepared
-            .session
-            .assistant_data
-            .as_ref()
-            .ok_or(AssistantStoreError::Inaccessible)?;
         let runtime = super::reconcile_settings_on(db, &manifest.actor_id).await?;
         let config = db.config_read().await;
         let access = AssistantDataToolAccess {
@@ -201,16 +196,15 @@ pub(crate) fn authorize_on<'a>(
                 )
                 .await?;
             }
-            if let Some(until) = super::model_sources::validate_on(
+            if let Some(until) = super::model_sources::validate_session_sources_on(
                 db,
-                &manifest.actor_id,
-                &manifest.source_device_ref,
+                &prepared.session,
                 &source.proof.usage,
                 &access,
-                data.history_access_scope.as_deref(),
                 &audit.destination,
                 &prepared.policy,
                 now,
+                None,
             )
             .await?
             {

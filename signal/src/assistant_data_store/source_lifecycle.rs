@@ -96,5 +96,9 @@ pub(crate) async fn mark_manual_delete_on(
         return Err(AssistantStoreError::Inaccessible);
     }
 
+    if device.is_empty() {
+        desk_assistant_data_store::device_roster::delete(db, actor, conversation).await?;
+    }
+
     desk_assistant_data_store::source_lifecycle::revoke_deleted_conversation_on(db, actor).await
 }

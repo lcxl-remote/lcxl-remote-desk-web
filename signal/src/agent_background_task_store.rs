@@ -877,8 +877,13 @@ impl SignalBackgroundTaskStore {
                 EventAppend::Busy
             ));
         }
-        match crate::agent_runtime::resume_completion_turn(self.db.clone(), session, work_kind)
-            .await
+        match crate::agent_runtime::resume_completion_turn(
+            self.db.clone(),
+            session,
+            work_kind,
+            row.completion_event_id.clone(),
+        )
+        .await
         {
             Ok(desk_diagnose_core::agent_loop::LoopOutcome::TurnBusy) => Ok(false),
             Ok(_) => {

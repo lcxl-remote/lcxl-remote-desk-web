@@ -785,6 +785,36 @@ pub struct ExecContext {
 /// approval + real execution via [`confirm_and_exec`](ToolSeam::confirm_and_exec).
 #[async_trait(?Send)]
 pub trait ToolSeam {
+    /// Project current routing metadata without expanding any device authority.
+    async fn request_devices(
+        &self,
+        _session: &PersistedAgentSession,
+    ) -> Result<Vec<crate::request_devices::RequestDevice>, AgentError> {
+        Ok(Vec::new())
+    }
+
+    async fn selected_command_policy(
+        &self,
+        _session: &PersistedAgentSession,
+        _target_ref: &str,
+    ) -> Result<crate::command_confirmation::CommandPolicyContext, AgentError> {
+        Err(crate::subagent::invalid(
+            "Selected device command policy is unavailable",
+        ))
+    }
+
+    /// Use the loop's held personal input to resolve and authorize the model's
+    /// target selector before dispatching a read.
+    async fn run_request_device_read(
+        &self,
+        _session: &PersistedAgentSession,
+        _call: &ToolCall,
+    ) -> Result<ReadOutcome, AgentError> {
+        Err(crate::subagent::invalid(
+            "selected device reads are unavailable",
+        ))
+    }
+
     /// Immutable selection loaded from the accepted input, not available attachments.
     /// Durable runtimes independently recheck this evidence before dispatch.
     fn original_read_context(&self) -> Option<&crate::input_read_context::ReadContextSelection> {
@@ -903,6 +933,16 @@ pub trait ToolSeam {
             outcome: self.confirm_and_exec(call, ctx).await,
             version_advance: None,
         }
+    }
+
+    async fn execute_selected_command(
+        &self,
+        call: &ToolCall,
+        ctx: &ExecContext,
+        version: Option<&crate::action_version::ActionVersion>,
+        _policy: &crate::command_confirmation::CommandPolicyContext,
+    ) -> ExecCompletion {
+        self.confirm_and_exec_versioned(call, ctx, version).await
     }
 
     /// Label a successful mutating result before it is persisted or projected

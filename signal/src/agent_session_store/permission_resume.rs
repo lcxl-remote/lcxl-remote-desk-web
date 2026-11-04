@@ -2,7 +2,10 @@
 use super::*;
 use crate::config::connection::DatabaseTransaction;
 use crate::entity::agent_permission_resume as resume;
-use desk_diagnose_core::{dynamic_run::PermissionDecidedEvent, session::TriggerOrigin};
+use desk_diagnose_core::{
+    dynamic_run::{PermissionDecidedEvent, PermissionRequest},
+    session::TriggerOrigin,
+};
 use sea_orm::ConnectionTrait;
 
 #[derive(Clone)]
@@ -125,15 +128,64 @@ async fn transition(
     Ok(())
 }
 
-fn current_decision(
-    session: &PersistedAgentSession,
+fn current_decision<'a>(
+    session: &'a PersistedAgentSession,
     decision: &PermissionDecidedEvent,
+) -> Result<&'a PermissionRequest, AgentError> {
+    session
+        .permission_requests
+        .iter()
+        .find(|request| {
+            request.request_id == decision.request_id
+                && request.input_revision == decision.request_input_revision
+                && request.state == decision.resulting_state
+        })
+        .ok_or_else(invalid)
+}
+
+pub(super) async fn validate_permission_device_on(
+    txn: &DatabaseTransaction,
+    session: &PersistedAgentSession,
+    request: &PermissionRequest,
 ) -> Result<(), AgentError> {
-    if !session.permission_requests.iter().any(|request| {
-        request.request_id == decision.request_id
-            && request.input_revision == decision.request_input_revision
-            && request.state == decision.resulting_state
-    }) {
+    if !permission_roster_current(txn, session, request).await? {
+        return Err(invalid());
+    }
+    validate_permission_target_on(txn, session, request).await
+}
+
+async fn permission_roster_current(
+    txn: &DatabaseTransaction,
+    session: &PersistedAgentSession,
+    request: &PermissionRequest,
+) -> Result<bool, AgentError> {
+    let Some(command) = request.exact_command() else {
+        return Ok(true);
+    };
+    desk_assistant_data_store::device_roster::permits_current_target(
+        txn,
+        session,
+        &command.target_device_id,
+    )
+    .await
+    .map_err(|error| error.into_agent_error())
+}
+
+async fn validate_permission_target_on(
+    txn: &DatabaseTransaction,
+    session: &PersistedAgentSession,
+    request: &PermissionRequest,
+) -> Result<(), AgentError> {
+    if session.device_id.is_empty()
+        && let Some(command) = request.exact_command()
+        && (!session.admits_assistant_device(&command.target_device_id)
+            || crate::agent_run_event_store::eligible_request_device_ids(
+                txn,
+                std::slice::from_ref(&command.target_device_id),
+            )
+            .await?
+            .is_empty())
+    {
         return Err(invalid());
     }
     Ok(())
@@ -288,12 +340,20 @@ impl SignalAgentSessionStore {
         if resume.state != "pending" {
             return Ok(None);
         }
-        if session.input_revision != decision.request_input_revision {
+        if (session.device_id.is_empty() && session.main_stopped)
+            || session.input_revision != decision.request_input_revision
+        {
             transition(&txn, &resume, "superseded", false, now).await?;
             txn.commit().await.map_err(storage)?;
             return Ok(None);
         }
-        current_decision(&session, &decision)?;
+        let request = current_decision(&session, &decision)?;
+        if !permission_roster_current(&txn, &session, request).await? {
+            transition(&txn, &resume, "superseded", false, now).await?;
+            txn.commit().await.map_err(storage)?;
+            return Ok(None);
+        }
+        validate_permission_target_on(&txn, &session, request).await?;
         if !crate::agent_subagent_store::child_resume_admitted_on(
             &txn,
             &session,
@@ -359,7 +419,9 @@ impl SignalAgentSessionStore {
         if resume.state != "pending" {
             return Err(ClaimError::Busy);
         }
-        if session.input_revision != decision.request_input_revision {
+        if (session.device_id.is_empty() && session.main_stopped)
+            || session.input_revision != decision.request_input_revision
+        {
             transition(&txn, &resume, "superseded", false, now)
                 .await
                 .map_err(ClaimError::Backend)?;
@@ -376,7 +438,22 @@ impl SignalAgentSessionStore {
         {
             return Err(ClaimError::Busy);
         }
-        current_decision(&session, &decision).map_err(ClaimError::Backend)?;
+        let request = current_decision(&session, &decision).map_err(ClaimError::Backend)?;
+        if !permission_roster_current(&txn, &session, request)
+            .await
+            .map_err(ClaimError::Backend)?
+        {
+            transition(&txn, &resume, "superseded", false, now)
+                .await
+                .map_err(ClaimError::Backend)?;
+            txn.commit()
+                .await
+                .map_err(|error| ClaimError::Backend(storage(error)))?;
+            return Err(ClaimError::Busy);
+        }
+        validate_permission_target_on(&txn, &session, request)
+            .await
+            .map_err(ClaimError::Backend)?;
         if !crate::agent_subagent_store::child_resume_admitted_on(
             &txn,
             &session,
@@ -392,17 +469,15 @@ impl SignalAgentSessionStore {
                 &txn,
                 &session.conversation_id,
                 &session.actor_id,
-                &session.device_id,
+                permission_device_id(&session, request),
             )
             .await
             .map_err(|e| ClaimError::Backend(storage(e)))?;
         if &current_grants != grants {
             return Err(ClaimError::Busy);
         }
-        desk_diagnose_core::assistant_policy::validate_claim(
-            self.surface,
-            Some(session.policy_revision),
-            &params,
+        desk_diagnose_core::assistant_policy::validate_permission_resume_claim(
+            &session, &params, &decision,
         )
         .map_err(ClaimError::Backend)?;
         self.reconcile_context_selection(&mut session)

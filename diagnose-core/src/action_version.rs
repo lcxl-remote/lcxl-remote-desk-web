@@ -22,7 +22,15 @@ impl ActionVersion {
         session: &PersistedAgentSession,
         tool_call_id: &str,
     ) -> Result<Option<Self>, AgentError> {
-        let Some(turn_fence) = AssistantTurnFence::from_session(session)? else {
+        Self::capture_for_device(session, tool_call_id, &session.device_id)
+    }
+
+    pub fn capture_for_device(
+        session: &PersistedAgentSession,
+        tool_call_id: &str,
+        device_id: &str,
+    ) -> Result<Option<Self>, AgentError> {
+        let Some(turn_fence) = AssistantTurnFence::for_device(session, device_id)? else {
             return Ok(None);
         };
         if session.turn_state != TurnState::AwaitingApproval
@@ -93,7 +101,12 @@ impl ActionVersionAdvance {
         expected: Option<&ActionVersion>,
     ) -> Result<(), AgentError> {
         if expected != Some(&self.before)
-            || ActionVersion::capture(session, &self.before.tool_call_id)?.as_ref()
+            || ActionVersion::capture_for_device(
+                session,
+                &self.before.tool_call_id,
+                &self.before.turn_fence.device_id,
+            )?
+            .as_ref()
                 != Some(&self.before)
             || self.version <= self.before.version
         {
@@ -184,6 +197,34 @@ mod tests {
                 .chain(next.committed(13).unwrap())
                 .is_err()
         );
+    }
+
+    #[test]
+    fn selected_device_receipt_cannot_advance_another_devices_action() {
+        let mut held = session();
+        held.device_id.clear();
+        held.latest_input_seq = 3;
+        held.bind_assistant_request_targets(vec!["mac".into(), "linux".into()])
+            .unwrap();
+        let mac = ActionVersion::capture_for_device(&held, "call", "mac")
+            .unwrap()
+            .unwrap();
+        let linux = ActionVersion::capture_for_device(&held, "call", "linux")
+            .unwrap()
+            .unwrap();
+        assert!(ActionVersion::capture_for_device(&held, "call", "windows").is_err());
+        let committed = mac.committed(11).unwrap();
+        assert!(committed.apply(&mut held, Some(&linux)).is_err());
+        assert_eq!(held.version, 10);
+        let mut next_input = held.clone();
+        next_input.input_revision += 1;
+        next_input
+            .bind_assistant_request_targets(vec!["linux".into()])
+            .unwrap();
+        assert!(committed.apply(&mut next_input, Some(&mac)).is_err());
+        committed.apply(&mut held, Some(&mac)).unwrap();
+        assert_eq!(held.version, 11);
+        assert!(held.device_id.is_empty());
     }
 
     #[test]

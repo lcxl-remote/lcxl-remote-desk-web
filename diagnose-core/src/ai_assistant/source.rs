@@ -359,13 +359,24 @@ pub fn prepare_capture(
     let native_metadata_sha256 = super::native_history::metadata_sha256(capture.native)?;
     for identity in [
         capture.actor_id,
-        capture.device_ref,
         capture.conversation_id,
         capture.root_conversation_id,
         capture.native_id,
     ] {
         desk_agent_protocol::ai_assistant::source::validate_source_id(identity)?;
     }
+    if capture.device_ref.is_empty()
+        && (capture.directory.is_some()
+            || capture.native.is_some()
+            || capture.conversation_id != capture.root_conversation_id
+            || !matches!(
+                capture.kind,
+                AssistantSourceKind::Input | AssistantSourceKind::AssistantMessage
+            ))
+    {
+        return Err("device data requires its original device reference");
+    }
+    desk_agent_protocol::ai_assistant::source::validate_optional_device_ref(capture.device_ref)?;
     if let Some(directory) = capture.directory {
         for identity in [directory.instance_id, directory.audience] {
             desk_agent_protocol::ai_assistant::source::validate_source_id(identity)?;

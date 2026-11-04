@@ -123,26 +123,65 @@ fn web_host_grants_reuse_urls_until_expiry_on_both_surfaces() {
         ProductSurface::OssPersonalOwner,
         ProductSurface::ManagerPersonalOwner,
     ] {
-        let grant = build_permission_grants(
-            &session,
-            &request,
-            &decisions,
-            &PermissionGrantIssuanceContext {
-                surface,
-                registry: &registry,
-                inventory: &inventory,
-                readiness_revision: 7,
-                now_unix_ms: 1_000,
-                implicit_fresh_object_refs: &[],
-            },
-            None,
-        )
-        .unwrap()
-        .remove(0);
+        let context = PermissionGrantIssuanceContext {
+            surface,
+            registry: &registry,
+            inventory: &inventory,
+            readiness_revision: 7,
+            now_unix_ms: 1_000,
+            implicit_fresh_object_refs: &[],
+        };
+        let grant = build_permission_grants(&session, &request, &decisions, &context, None)
+            .unwrap()
+            .remove(0);
         assert_eq!(grant.use_policy, CapabilityGrantUsePolicy::UntilExpiry);
         assert!(!grant.use_policy.consumes_uses());
         assert_eq!(grant.canonical_input_digest_sha256, None);
         assert_eq!(grant.resource_scope, ["external_web_host:example.com"]);
+
+        let mut targetless = session.clone();
+        targetless.device_id.clear();
+        targetless.surface = AgentSessionSurface::AiAssistant;
+        targetless.bind_native_assistant_input_target().unwrap();
+        let targetless_grant =
+            build_permission_grants(&targetless, &request, &decisions, &context, Some(&original))
+                .unwrap()
+                .remove(0);
+        assert!(targetless_grant.target_device_id.is_empty());
+        assert_eq!(
+            targetless_grant.issued_by,
+            CapabilityGrantIssuer::UserDecision
+        );
+        let mut policy_grant = targetless_grant.clone();
+        policy_grant.issued_by = CapabilityGrantIssuer::PolicyAuto;
+        assert!(policy_grant.validate().is_err());
+        let mut bound_to_device_session = targetless_grant;
+        bound_to_device_session.target_session_id = Some("device-session".into());
+        assert!(bound_to_device_session.validate().is_err());
+        let mut other_selection = original.clone();
+        other_selection.tool_names = vec![crate::web_research::WEB_SEARCH_TOOL_NAME.into()];
+        for selection in [None, Some(&other_selection)] {
+            assert!(
+                build_permission_grants(&targetless, &request, &decisions, &context, selection)
+                    .is_err()
+            );
+        }
+        let (_, device_request, device_decisions) = decision_fixture();
+        assert!(!crate::assistant_policy::permits_permission_request(
+            &targetless,
+            &device_request
+        ));
+        assert!(
+            build_permission_grants(
+                &targetless,
+                &device_request,
+                &device_decisions,
+                &context,
+                Some(&original)
+            )
+            .is_err()
+        );
+
         for change in 0..4 {
             let mut invalid = grant.clone();
             match change {
@@ -548,9 +587,11 @@ fn owner_freeform_approval_is_exact_one_shot_and_rechecks_the_frozen_policy() {
         ProductSurface::OssPersonalOwner,
         ProductSurface::ManagerPersonalOwner,
     ] {
-        let build = |registry: &ProviderRegistry, request: &PermissionRequest| {
+        let build_for = |session: &PersistedAgentSession,
+                         registry: &ProviderRegistry,
+                         request: &PermissionRequest| {
             build_permission_grants(
-                &session,
+                session,
                 request,
                 &decisions,
                 &PermissionGrantIssuanceContext {
@@ -564,11 +605,38 @@ fn owner_freeform_approval_is_exact_one_shot_and_rechecks_the_frozen_policy() {
                 None,
             )
         };
+        let build = |registry: &ProviderRegistry, request: &PermissionRequest| {
+            build_for(&session, registry, request)
+        };
         let grants = build(&registry, &request).unwrap();
         assert_eq!(grants.len(), 1);
         assert_eq!(grants[0].remaining_uses, 1);
         assert_eq!(grants[0].risk_tier, CapabilityRiskTier::R3);
         assert_eq!(grants[0].resource_scope, request.items[0].resource_scope);
+        let mut personal = session.clone();
+        personal.surface = AgentSessionSurface::AiAssistant;
+        personal.device_id.clear();
+        personal.scope_snapshot.mode = ExecutionMode::ReadOnly;
+        personal
+            .bind_assistant_request_targets(vec![policy.target_device_id.clone(), "other".into()])
+            .unwrap();
+        let selected = build_for(&personal, &registry, &request).unwrap();
+        assert_eq!(selected, grants);
+        let mut other = policy.clone();
+        other.target_device_id = "other".into();
+        assert!(
+            build_for(
+                &personal,
+                &registry.clone().with_command_policy(other),
+                &request
+            )
+            .is_err()
+        );
+        personal.input_revision += 1;
+        personal
+            .bind_assistant_request_targets(vec!["other".into()])
+            .unwrap();
+        assert!(build_for(&personal, &registry, &request).is_err());
         let mut changed = policy.clone();
         changed.target_session_id.push_str("-new");
         let changed_registry = registry.clone().with_command_policy(changed);

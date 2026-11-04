@@ -9,6 +9,8 @@ export type { DecideAiAssistantPermissionMutationKey } from "./useDecideAiAssist
 export type { DeleteAiAssistantSessionMutationKey } from "./useDeleteAiAssistantSession.ts";
 export type { DeleteAssistantAttachmentsMutationKey } from "./useDeleteAssistantAttachments.ts";
 export type { DeleteAssistantImageMutationKey } from "./useDeleteAssistantImage.ts";
+export type { GetAiAssistantDeviceRosterQueryKey } from "./useGetAiAssistantDeviceRoster.ts";
+export type { GetAiAssistantDeviceRosterSuspenseQueryKey } from "./useGetAiAssistantDeviceRosterSuspense.ts";
 export type { GetAiAssistantSessionQueryKey } from "./useGetAiAssistantSession.ts";
 export type { GetAiAssistantSessionSuspenseQueryKey } from "./useGetAiAssistantSessionSuspense.ts";
 export type { GetAiAssistantSubagentStatusQueryKey } from "./useGetAiAssistantSubagentStatus.ts";
@@ -34,6 +36,7 @@ export type { ReadAiAssistantSubagentResultSuspenseQueryKey } from "./useReadAiA
 export type { ReadAssistantAttachmentMutationKey } from "./useReadAssistantAttachment.ts";
 export type { RevokeAiAssistantCapabilityGrantMutationKey } from "./useRevokeAiAssistantCapabilityGrant.ts";
 export type { StopAiAssistantSessionMutationKey } from "./useStopAiAssistantSession.ts";
+export type { UpdateAiAssistantDeviceRosterMutationKey } from "./useUpdateAiAssistantDeviceRoster.ts";
 export { cancelAiAssistantBackgroundTaskMutationKey } from "./useCancelAiAssistantBackgroundTask.ts";
 export { cancelAiAssistantBackgroundTaskMutationOptions } from "./useCancelAiAssistantBackgroundTask.ts";
 export { useCancelAiAssistantBackgroundTask } from "./useCancelAiAssistantBackgroundTask.ts";
@@ -67,6 +70,12 @@ export { useDeleteAssistantAttachments } from "./useDeleteAssistantAttachments.t
 export { deleteAssistantImageMutationKey } from "./useDeleteAssistantImage.ts";
 export { deleteAssistantImageMutationOptions } from "./useDeleteAssistantImage.ts";
 export { useDeleteAssistantImage } from "./useDeleteAssistantImage.ts";
+export { getAiAssistantDeviceRosterQueryKey } from "./useGetAiAssistantDeviceRoster.ts";
+export { getAiAssistantDeviceRosterQueryOptions } from "./useGetAiAssistantDeviceRoster.ts";
+export { useGetAiAssistantDeviceRoster } from "./useGetAiAssistantDeviceRoster.ts";
+export { getAiAssistantDeviceRosterSuspenseQueryKey } from "./useGetAiAssistantDeviceRosterSuspense.ts";
+export { getAiAssistantDeviceRosterSuspenseQueryOptions } from "./useGetAiAssistantDeviceRosterSuspense.ts";
+export { useGetAiAssistantDeviceRosterSuspense } from "./useGetAiAssistantDeviceRosterSuspense.ts";
 export { getAiAssistantSessionQueryKey } from "./useGetAiAssistantSession.ts";
 export { getAiAssistantSessionQueryOptions } from "./useGetAiAssistantSession.ts";
 export { useGetAiAssistantSession } from "./useGetAiAssistantSession.ts";
@@ -142,3 +151,6 @@ export { useRevokeAiAssistantCapabilityGrant } from "./useRevokeAiAssistantCapab
 export { stopAiAssistantSessionMutationKey } from "./useStopAiAssistantSession.ts";
 export { stopAiAssistantSessionMutationOptions } from "./useStopAiAssistantSession.ts";
 export { useStopAiAssistantSession } from "./useStopAiAssistantSession.ts";
+export { updateAiAssistantDeviceRosterMutationKey } from "./useUpdateAiAssistantDeviceRoster.ts";
+export { updateAiAssistantDeviceRosterMutationOptions } from "./useUpdateAiAssistantDeviceRoster.ts";
+export { useUpdateAiAssistantDeviceRoster } from "./useUpdateAiAssistantDeviceRoster.ts";

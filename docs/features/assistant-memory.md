@@ -1,5 +1,7 @@
 # Long-term memory
 
+On Web and Tauri, open **AI Assistant → Conversations → Personal conversation**. On Android, select **Personal conversation** from the device list menu. On iOS, select it in the device list. You can chat without selecting a device. With automatic memory enabled, the assistant can save and retrieve your personal memories. Open **History** to resume, start or delete a personal conversation.
+
 On Web and Tauri, reopening the assistant restores the conversation last selected in that browser. A failed restore shows **Retry** and **New conversation**. Sending resumes after a successful restore or an explicit new conversation; starting a new conversation preserves the old stored data.
 
 Conversations saved in an unsupported format remain in History, marked “Cannot continue this conversation,” with deletion available after confirmation. They follow the same idle-session retention period. Work still in flight, unknown outcomes and unsettled usage keep their required evidence under the existing rules.

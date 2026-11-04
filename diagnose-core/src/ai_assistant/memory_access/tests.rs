@@ -6,6 +6,28 @@ use crate::ai_assistant::{
 };
 
 #[test]
+fn account_memory_scope_cannot_be_extended_to_devices() {
+    let mut scope = owner_memory_scope(
+        "actor",
+        "root",
+        "",
+        1,
+        100,
+        "episode",
+        1,
+        &AssistantDataSettings::default(),
+        false,
+    )
+    .unwrap()
+    .unwrap();
+    assert!(scope.current_device_ref.is_empty());
+    assert_eq!(scope.device_rule, AssistantDeviceScope::CurrentDevice);
+    assert!(scope.validate().is_ok());
+    scope.device_rule = AssistantDeviceScope::AllMyDevices;
+    assert!(scope.validate().is_err());
+}
+
+#[test]
 #[allow(clippy::field_reassign_with_default)]
 fn memory_consent_is_independent_of_history_settings_and_temporary_conversations() {
     let mut settings = AssistantDataSettings::default();
