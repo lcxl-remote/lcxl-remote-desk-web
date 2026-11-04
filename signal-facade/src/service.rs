@@ -404,10 +404,18 @@ impl<U: SignalingUser> SignalingHandler<U> {
             auth_context,
         };
 
-        let retired = connection_map
-            .write()
-            .await
-            .insert(connection_id.clone(), connection_state.clone());
+        #[cfg(feature = "test-support")]
+        let waiting = std::time::Instant::now();
+        let retired = {
+            let mut registry = connection_map.write().await;
+            #[cfg(feature = "test-support")]
+            let acquired = std::time::Instant::now();
+            let retired = registry.insert(connection_id.clone(), connection_state.clone());
+            drop(registry);
+            #[cfg(feature = "test-support")]
+            connection_map.record_publication(acquired.duration_since(waiting), acquired.elapsed());
+            retired
+        };
         if let Some(retired) = retired {
             let map = connection_map.clone();
             tokio::spawn(async move {

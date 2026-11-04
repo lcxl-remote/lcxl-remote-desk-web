@@ -1,7 +1,7 @@
 //! Device-code allocation; unique indexes arbitrate concurrent registrations.
 use crate::{config::ConfigConnection, entity::device_code};
 use desk_signal_facade::device_code::MAX_ATTEMPTS;
-use sea_orm::{ColumnTrait, DbErr, EntityTrait, QueryFilter, Set, SqlErr};
+use sea_orm::{ColumnTrait, DbErr, EntityTrait, QueryFilter, QuerySelect, Set, SqlErr};
 
 pub async fn get_or_create<C: ConfigConnection>(db: &C, client_id: &str) -> Result<String, DbErr> {
     get_or_create_with(db, client_id, desk_utils::string::generate_device_code).await
@@ -119,7 +119,30 @@ pub async fn resolve_online<C: sea_orm::ConnectionTrait>(
     connections: &crate::model::SharedConnectionMap,
     code: &str,
 ) -> Result<Option<(String, device_code::Model)>, DbErr> {
+    let Some((id, client_id, created_at)) = device_code::Entity::find()
+        .select_only()
+        .columns([
+            device_code::Column::Id,
+            device_code::Column::ClientId,
+            device_code::Column::CreatedAt,
+        ])
+        .filter(device_code::Column::DeviceCode.eq(code))
+        .into_tuple::<(i32, String, chrono::DateTime<chrono::Utc>)>()
+        .one(db)
+        .await?
+    else {
+        return Ok(None);
+    };
+    let _identity = crate::device_code_lifecycle::global()
+        .lock(&client_id)
+        .await;
+    // The first lookup only identifies the lock. Re-read the exact incarnation
+    // under that lock so deletion/recreation cannot bind an old code snapshot
+    // to a new connection, even if the owner reused the same code string.
     let Some(row) = device_code::Entity::find()
+        .filter(device_code::Column::Id.eq(id))
+        .filter(device_code::Column::ClientId.eq(client_id))
+        .filter(device_code::Column::CreatedAt.eq(created_at))
         .filter(device_code::Column::DeviceCode.eq(code))
         .one(db)
         .await?

@@ -51,6 +51,7 @@ actix-tls = { version = "3.5", default-features = false, features = ["connect"] 
 windows = { workspace = true }
 
 [dev-dependencies]
+desk-signal-facade = { workspace = true, features = ["test-support"] }
 desk-assistant-data-store = { workspace = true, features = ["schema-sync"] }
 desk-diagnose-core = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["test-util"] }

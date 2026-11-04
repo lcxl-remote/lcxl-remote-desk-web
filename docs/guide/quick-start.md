@@ -103,6 +103,8 @@ Pages opened from the device list use a stable device address. After a reboot or
 
 A changed connection closes the previous desktop, file and terminal channels and clears pending confirmations and upload queues. Unfinished transfers and commands are not replayed. Check their actual outcome before starting again. If device discovery temporarily fails, refresh later; a failed status query does not establish that the device is offline.
 
-When a device is not online, OSS signaling reports the target as unavailable. Code redemption opens a limited session bound to one connection. Redeem a still-valid code again after a reconnect; that session address is not a permanent device entry.
+OSS signaling distinguishes a registered device that is offline from an unknown device. A reboot or network interruption keeps the registration, so the page shows the device as offline. If the owner deletes its record from device-code management while it is offline, the old bookmark points to an unknown device. Resetting an identity leaves the old address offline while its registration remains; the new identity has its own address.
+
+Code redemption opens a limited session bound to one connection. Redeem a still-valid code again after a reconnect; that session address is not a permanent device entry.
 
 Android and iOS device pages also retain the stable device identity. Once the device is online again, use the page’s refresh button. A terminal on a new connection shows the shell list for you to choose again. Assistant sessions from the previous connection remain available through recovery; their pending operations do not automatically continue on the new connection.

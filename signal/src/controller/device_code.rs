@@ -1,6 +1,5 @@
 #[cfg(test)]
 use crate::config::connection::DatabaseConnection;
-use std::collections::HashSet;
 
 use actix_web::{HttpResponse, delete, get, post, put, web};
 use desk_utils::{error::DeskErrorCode, rest::RestResponse};
@@ -12,6 +11,7 @@ use desk_signal_facade::model::security_settings::SecuritySettings;
 
 use crate::{entity::device_code, error::DeskSignalError, model::SharedConnectionMap};
 
+#[cfg(test)]
 fn is_online_client(
     state: &desk_signal_facade::model::connection::ConnectionState,
     client_id: &str,
@@ -127,20 +127,12 @@ pub async fn list_device_codes(
         .await?;
 
     let connection_map_guard = connection_map.read().await;
-    let mut online_clients = HashSet::new();
-    for (_cid, cstate) in connection_map_guard.iter() {
-        if cstate.model.peer.remote_desk_type
-            == desk_signal_facade::model::signal::RemoteDeskTypeEnum::Server
-            && let Some(client) = &cstate.client_id
-        {
-            online_clients.insert(client.clone());
-        }
-    }
-
     let items = db_items
         .into_iter()
         .map(|model| {
-            let is_online = online_clients.contains(&model.client_id);
+            let is_online = connection_map_guard
+                .current_oss_server(&model.client_id)
+                .is_some();
             DeviceCodeItem::from_model(model, is_online)
         })
         .collect();
@@ -164,6 +156,20 @@ pub async fn create_device_code(
     let db = crate::db::get_db();
     let params = body.into_inner();
 
+    let result = create_code(db, crate::device_code_lifecycle::global(), params).await?;
+    Ok(
+        HttpResponse::Ok().json(RestResponse::succeed_with_data(DeviceCodeItem::from_model(
+            result, false,
+        ))),
+    )
+}
+
+pub(crate) async fn create_code<C: crate::config::ConfigConnection>(
+    db: &C,
+    lifecycle: &std::sync::Arc<crate::device_code_lifecycle::DeviceCodeLifecycle>,
+    params: DeviceCodeCreateParams,
+) -> Result<device_code::Model, DeskSignalError> {
+    let _identity = lifecycle.lock(&params.client_id).await;
     let explicit = params.device_code.filter(|code| !code.is_empty());
     let result = crate::device_code_store::create(
         db,
@@ -172,11 +178,7 @@ pub async fn create_device_code(
         encode_capabilities(params.capabilities.as_ref()),
     )
     .await?;
-    Ok(
-        HttpResponse::Ok().json(RestResponse::succeed_with_data(DeviceCodeItem::from_model(
-            result, false,
-        ))),
-    )
+    Ok(result)
 }
 
 #[utoipa::path(
@@ -196,7 +198,30 @@ pub async fn update_device_code(
     let db = crate::db::get_db();
     let id = path.into_inner();
     let params = body.into_inner();
+    let result = update_code(db, crate::device_code_lifecycle::global(), id, params).await?;
+    let is_online = connection_map
+        .read()
+        .await
+        .current_oss_server(&result.client_id)
+        .is_some();
+    Ok(
+        HttpResponse::Ok().json(RestResponse::succeed_with_data(DeviceCodeItem::from_model(
+            result, is_online,
+        ))),
+    )
+}
 
+pub(crate) async fn update_code<C: crate::config::ConfigConnection + TransactionTrait>(
+    db: &C,
+    lifecycle: &std::sync::Arc<crate::device_code_lifecycle::DeviceCodeLifecycle>,
+    id: i32,
+    params: DeviceCodeUpdateParams,
+) -> Result<device_code::Model, DeskSignalError> {
+    let row = device_code::Entity::find_by_id(id).one(db).await?;
+    let Some(row) = row else {
+        return DeskSignalError::custom_error(DeskErrorCode::SYSTEM_ERROR, "Device code not found");
+    };
+    let _identity = lifecycle.lock(&row.client_id).await;
     let Some(result) = apply_device_code_update_generated(
         db,
         id,
@@ -211,19 +236,7 @@ pub async fn update_device_code(
             "Device code not found",
         ));
     };
-    let connection_map_guard = connection_map.read().await;
-    let mut is_online = false;
-    for (_cid, cstate) in connection_map_guard.iter() {
-        if is_online_client(cstate, &result.client_id) {
-            is_online = true;
-            break;
-        }
-    }
-    Ok(
-        HttpResponse::Ok().json(RestResponse::succeed_with_data(DeviceCodeItem::from_model(
-            result, is_online,
-        ))),
-    )
+    Ok(result)
 }
 
 /// Apply a device-code edit: rotate the stored code, replace the capability
@@ -341,30 +354,56 @@ pub async fn delete_device_code(
     path: web::Path<i32>,
     connection_map: web::Data<SharedConnectionMap>,
 ) -> Result<HttpResponse, DeskSignalError> {
-    let db = crate::db::get_db();
-    let id = path.into_inner();
+    delete_code(
+        crate::db::get_db(),
+        &connection_map,
+        crate::device_code_lifecycle::global(),
+        path.into_inner(),
+    )
+    .await?;
+    Ok(HttpResponse::Ok().json(RestResponse::succeed()))
+}
 
-    let model = device_code::Entity::find_by_id(id).one(db).await?;
-
-    if let Some(m) = model {
-        let connection_map_guard = connection_map.read().await;
-        for (_cid, cstate) in connection_map_guard.iter() {
-            if is_online_client(cstate, &m.client_id) {
-                return Err(DeskSignalError::new_custom_error(
-                    DeskErrorCode::SYSTEM_ERROR,
-                    "Cannot delete an online device code",
-                ));
-            }
-        }
-
-        device_code::Entity::delete_by_id(id).exec(db).await?;
-        Ok(HttpResponse::Ok().json(RestResponse::succeed()))
-    } else {
-        Err(DeskSignalError::new_custom_error(
+pub(crate) async fn delete_code<C: ConnectionTrait>(
+    db: &C,
+    connections: &SharedConnectionMap,
+    lifecycle: &std::sync::Arc<crate::device_code_lifecycle::DeviceCodeLifecycle>,
+    id: i32,
+) -> Result<(), DeskSignalError> {
+    let row = device_code::Entity::find_by_id(id)
+        .one(db)
+        .await?
+        .ok_or_else(|| {
+            DeskSignalError::new_custom_error(DeskErrorCode::SYSTEM_ERROR, "Device code not found")
+        })?;
+    let _identity = lifecycle.lock(&row.client_id).await;
+    if connections
+        .read()
+        .await
+        .current_oss_server(&row.client_id)
+        .is_some()
+    {
+        return DeskSignalError::custom_error(
             DeskErrorCode::SYSTEM_ERROR,
-            "Device code not found",
-        ))
+            "Cannot delete an online device code",
+        );
     }
+    // Match the observed incarnation as well as its row id. An earlier deletion
+    // followed by recreation must never make this operation delete the new row.
+    let deleted = device_code::Entity::delete_many()
+        .filter(device_code::Column::Id.eq(row.id))
+        .filter(device_code::Column::ClientId.eq(row.client_id))
+        .filter(device_code::Column::CreatedAt.eq(row.created_at))
+        .filter(device_code::Column::Generation.eq(row.generation))
+        .exec(db)
+        .await?;
+    if deleted.rows_affected == 0 {
+        return DeskSignalError::custom_error(
+            DeskErrorCode::REVISION_CONFLICT,
+            "Device code changed; refresh and try again",
+        );
+    }
+    Ok(())
 }
 
 #[derive(Serialize, Deserialize, ToSchema, Debug)]
@@ -385,40 +424,70 @@ pub async fn batch_delete_device_codes(
     body: web::Json<DeviceCodeBatchDeleteParams>,
     connection_map: web::Data<SharedConnectionMap>,
 ) -> Result<HttpResponse, DeskSignalError> {
-    let db = crate::db::get_db();
-    let params = body.into_inner();
+    delete_codes(
+        crate::db::get_db(),
+        &connection_map,
+        crate::device_code_lifecycle::global(),
+        body.into_inner().ids,
+    )
+    .await?;
+    Ok(HttpResponse::Ok().json(RestResponse::succeed()))
+}
 
-    let models = device_code::Entity::find()
-        .filter(device_code::Column::Id.is_in(params.ids))
+pub(crate) async fn delete_codes<C: ConnectionTrait + TransactionTrait>(
+    db: &C,
+    connections: &SharedConnectionMap,
+    lifecycle: &std::sync::Arc<crate::device_code_lifecycle::DeviceCodeLifecycle>,
+    ids: Vec<i32>,
+) -> Result<(), DeskSignalError> {
+    let rows = device_code::Entity::find()
+        .filter(device_code::Column::Id.is_in(ids))
         .all(db)
         .await?;
-
-    let connection_map_guard = connection_map.read().await;
-    let mut online_clients = std::collections::HashSet::new();
-    for (_cid, cstate) in connection_map_guard.iter() {
-        if cstate.model.peer.remote_desk_type
-            == desk_signal_facade::model::signal::RemoteDeskTypeEnum::Server
-            && let Some(client) = &cstate.client_id
-        {
-            online_clients.insert(client.clone());
-        }
+    let mut clients: Vec<_> = rows.iter().map(|row| row.client_id.as_str()).collect();
+    clients.sort_unstable();
+    clients.dedup();
+    let mut identities = Vec::with_capacity(clients.len());
+    // Acquire in one order, before taking a database transaction or map lock.
+    // Batch deletion stays a bulk write rather than one durable commit per row.
+    for client in clients {
+        identities.push(lifecycle.lock(client).await);
     }
-
-    let mut to_delete = vec![];
-    for m in models {
-        if !online_clients.contains(&m.client_id) {
-            to_delete.push(m.id);
-        }
+    let eligible: Vec<_> = {
+        let registry = connections.read().await;
+        rows.into_iter()
+            .filter(|row| registry.current_oss_server(&row.client_id).is_none())
+            .collect()
+    };
+    if !eligible.is_empty() {
+        db.transaction::<_, (), DbErr>(|txn| {
+            Box::pin(async move {
+                for chunk in eligible.chunks(128) {
+                    let mut selected = Condition::any();
+                    for row in chunk {
+                        selected = selected.add(
+                            Condition::all()
+                                .add(device_code::Column::Id.eq(row.id))
+                                .add(device_code::Column::ClientId.eq(&row.client_id))
+                                .add(device_code::Column::CreatedAt.eq(row.created_at))
+                                .add(device_code::Column::Generation.eq(row.generation)),
+                        );
+                    }
+                    device_code::Entity::delete_many()
+                        .filter(selected)
+                        .exec(txn)
+                        .await?;
+                }
+                Ok(())
+            })
+        })
+        .await
+        .map_err(|error| match error {
+            TransactionError::Connection(error) | TransactionError::Transaction(error) => error,
+        })?;
     }
-
-    if !to_delete.is_empty() {
-        device_code::Entity::delete_many()
-            .filter(device_code::Column::Id.is_in(to_delete))
-            .exec(db)
-            .await?;
-    }
-
-    Ok(HttpResponse::Ok().json(RestResponse::succeed()))
+    drop(identities);
+    Ok(())
 }
 
 #[cfg(test)]

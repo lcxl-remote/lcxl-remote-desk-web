@@ -272,7 +272,9 @@ mod tests {
         assert_eq!(target.status(), StatusCode::OK);
         assert_eq!(target.headers().get("cache-control").unwrap(), "no-store");
         let target: serde_json::Value = at::read_body_json(target).await;
-        assert_eq!(target["code"], DeskErrorCode::DEVICE_NOT_FOUND.code());
+        // This fixture has no directory database. Owner authorization succeeds,
+        // but an unavailable directory cannot classify the target as unknown.
+        assert_eq!(target["code"], DeskErrorCode::SYSTEM_ERROR.code());
         assert!(target["data"].is_null());
     }
 }

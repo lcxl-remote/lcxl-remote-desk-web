@@ -5,32 +5,12 @@ use actix_web::web;
 use actix_ws::{AggregatedMessageStream, Session};
 use desk_server_user::model::CurrentUser;
 use desk_signal_facade::{
-    error::DeskSignalFacadeError,
     model::{connection::SharedConnectionMap, signal::TurnProvider},
-    service::{DeviceCodeService, SignalingHandler},
+    service::SignalingHandler,
 };
 use uuid::Uuid;
 
 use crate::error::DeskSignalError;
-
-struct SignalDeviceCodeService;
-
-impl DeviceCodeService for SignalDeviceCodeService {
-    async fn get_or_create_device_code(
-        &self,
-        client_id: &str,
-    ) -> Result<Option<String>, DeskSignalFacadeError> {
-        crate::device_code_store::get_or_create(crate::db::get_db(), client_id)
-            .await
-            .map(Some)
-            .map_err(|error| {
-                DeskSignalFacadeError::new_custom_error(
-                    desk_utils::error::DeskErrorCode::SYSTEM_ERROR,
-                    &error.to_string(),
-                )
-            })
-    }
-}
 
 /// Removes a `connection_id → device_code` binding from the usage map when the
 /// signaling connection ends, regardless of how `handle_signaling` returns.
@@ -104,14 +84,15 @@ pub async fn handle_signaling(
     let random_uuid = Uuid::new_v4();
     let connection_id = String::from(random_uuid);
 
-    let device_code_service = SignalDeviceCodeService;
-    let device_code = if let Some(registration) = client_version_info.server.as_ref() {
-        device_code_service
-            .get_or_create_device_code(&registration.client_id)
-            .await?
-    } else {
-        None
-    };
+    let (registration, device_code) =
+        if let Some(registration) = client_version_info.server.as_ref() {
+            let (guard, code) = crate::device_code_lifecycle::global()
+                .prepare_registration(crate::db::get_db(), &registration.client_id)
+                .await?;
+            (Some(guard), Some(code))
+        } else {
+            (None, None)
+        };
 
     // Publish the connection's device binding before the handler enters the
     // connection map (so the TURN usage collector can resolve bytes the moment
@@ -197,22 +178,26 @@ pub async fn handle_signaling(
         desk_server_version::SERVER_API_VERSION,
         None,
     )
-    .await?
-    .with_control_authorizer(control_authorizer)
-    .with_request_remote_authorizer(request_remote_authorizer)
-    .with_computer_use_readiness_observer(std::sync::Arc::new(
-        crate::computer_use_readiness::SignalComputerUseReadinessObserver::new(
-            computer_use_readiness,
-        ),
-    ))
-    .with_edge_exec_observer(edge_exec_observer)
-    .with_binary_frame_observer(crate::exec_pty_carrier::global_exec_pty_carriers())
-    .with_exec_state_reply_observer(exec_state_reply_observer)
-    .with_remote_tool_observer(remote_tool_observer)
-    .with_computer_action_observer(computer_action_observer)
-    .with_file_recovery_observer(desk_signal_facade::service::file_recovery::global_hub())
-    .with_remote_access_admission_authorizer(remote_access_control.clone())
-    .with_host_remote_access_controller(remote_access_control);
+    .await?;
+    // Registration and code edits are ordered only through publication, never
+    // for the lifetime of the WebSocket or while closing a retired transport.
+    drop(registration);
+    handler = handler
+        .with_control_authorizer(control_authorizer)
+        .with_request_remote_authorizer(request_remote_authorizer)
+        .with_computer_use_readiness_observer(std::sync::Arc::new(
+            crate::computer_use_readiness::SignalComputerUseReadinessObserver::new(
+                computer_use_readiness,
+            ),
+        ))
+        .with_edge_exec_observer(edge_exec_observer)
+        .with_binary_frame_observer(crate::exec_pty_carrier::global_exec_pty_carriers())
+        .with_exec_state_reply_observer(exec_state_reply_observer)
+        .with_remote_tool_observer(remote_tool_observer)
+        .with_computer_action_observer(computer_action_observer)
+        .with_file_recovery_observer(desk_signal_facade::service::file_recovery::global_hub())
+        .with_remote_access_admission_authorizer(remote_access_control.clone())
+        .with_host_remote_access_controller(remote_access_control);
 
     handler = handler.with_fetch_connections_resolver(Arc::new(
         crate::connection_resolver::SignalFetchConnectionsResolver::new(

@@ -305,7 +305,10 @@ impl ConnectionRegistry {
 }
 
 /// No mutable map dereference: mutations must maintain the identity index.
-pub struct SharedConnectionMap(RwLock<ConnectionRegistry>);
+pub struct SharedConnectionMap(
+    RwLock<ConnectionRegistry>,
+    #[cfg(feature = "test-support")] std::sync::Mutex<Vec<(u64, u64)>>,
+);
 impl Default for SharedConnectionMap {
     fn default() -> Self {
         Self::new()
@@ -316,18 +319,40 @@ impl SharedConnectionMap {
         Self::from(BTreeMap::new())
     }
     pub fn new_oss() -> Self {
-        Self(RwLock::new(ConnectionRegistry {
-            connections: BTreeMap::new(),
-            current_clients: HashMap::new(),
-            exclusive_oss: true,
-        }))
+        Self(
+            RwLock::new(ConnectionRegistry {
+                connections: BTreeMap::new(),
+                current_clients: HashMap::new(),
+                exclusive_oss: true,
+            }),
+            #[cfg(feature = "test-support")]
+            Default::default(),
+        )
     }
     pub fn from(connections: BTreeMap<String, ConnectionState>) -> Self {
-        Self(RwLock::new(ConnectionRegistry {
-            connections,
-            current_clients: HashMap::new(),
-            exclusive_oss: false,
-        }))
+        Self(
+            RwLock::new(ConnectionRegistry {
+                connections,
+                current_clients: HashMap::new(),
+                exclusive_oss: false,
+            }),
+            #[cfg(feature = "test-support")]
+            Default::default(),
+        )
+    }
+
+    /// Explicit test instrumentation; absent from production builds.
+    #[cfg(feature = "test-support")]
+    pub fn take_publication_timings(&self) -> Vec<(u64, u64)> {
+        std::mem::take(&mut *self.1.lock().unwrap())
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(crate) fn record_publication(&self, wait: std::time::Duration, hold: std::time::Duration) {
+        self.1
+            .lock()
+            .unwrap()
+            .push((wait.as_nanos() as u64, hold.as_nanos() as u64));
     }
 }
 impl Deref for SharedConnectionMap {
