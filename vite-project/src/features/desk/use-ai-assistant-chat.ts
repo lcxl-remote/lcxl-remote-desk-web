@@ -20,6 +20,7 @@ import type {
     PermissionDecisionBody,
     PermissionRequestDto,
     RehearsalView,
+    AiAssistantMainRequestsDto,
 } from '@/services/types';
 import { deskErrorCodeEnum } from '@/services/types';
 import type { AiAssistantDocumentPreview, AiAssistantDocumentPreviewPageResponse, AiAssistantEvent, AiAssistantVisualEvidence } from './ai-assistant-event';
@@ -44,6 +45,7 @@ import {
 const PREVIEW_TOOL = 'preview_computer_action';
 
 const SNAPSHOT_TIMEOUT_MS = 30_000;
+const REQUEST_QUEUE_PATH = '/api/my/ai-assistant-session/requests';
 
 export type AiAssistantMessage = {
     citations?: AssistantCitation[];
@@ -286,6 +288,7 @@ export type PersistedSnapshot = {
     latestInputSeq?: number;
     inputRevision?: number;
     handledInputSeq?: number;
+    mainRequests?: AiAssistantMainRequestsDto['items'];
     taskStatusProjection?: AiAssistantTaskStatusProjection | null;
     permissionRequests?: PermissionRequestDto[];
     backgroundTasks?: BackgroundTaskDto[];
@@ -414,6 +417,7 @@ export function useAiAssistantChat({
     // Changing language must not reset the conversation or its snapshot requests.
     const translate = useRef(t);
     translate.current = t;
+    const queueEnabled = !rehearsal;
     const targetSelectionEnabled = Boolean(deskId) && connected !== undefined;
     const temporaryConversationRef = useRef(false);
     const [temporaryConversation, setTemporaryConversation] = useState(false);
@@ -490,6 +494,19 @@ export function useAiAssistantChat({
     }, [deskId, connected]);
     const [grantRevoking, setGrantRevoking] = useState<string | null>(null);
     const [pendingInputCount, setPendingInputCount] = useState(0);
+    const [requestQueue, setRequestQueue] = useState<(AiAssistantMainRequestsDto & { conversation: string }) | null>(null);
+    const [resumingQueue, setResumingQueue] = useState(false);
+    const queueReadOrder = useRef(0);
+    const queuedSession = useRef<{ conversation: string; sessionId: string } | null>(null);
+    const queueStreamIds = useRef(new Set<string>());
+    const rememberQueueStream = useCallback((id: string) => {
+        const ids = queueStreamIds.current;
+        ids.add(id);
+        if (ids.size > 64) {
+            const oldest = ids.values().next().value;
+            if (oldest !== undefined) ids.delete(oldest);
+        }
+    }, []);
     const [messagePage, setMessagePage] = useState<{
         hasMore: boolean;
         nextBeforeMessageId: string | null;
@@ -559,6 +576,66 @@ export function useAiAssistantChat({
     const previewArgs = useRef(new Map<string, string>());
     const sessionTargetRequest = useRef<string | null>(null);
 
+    const observeQueue = useCallback((conversation: string, queue: AiAssistantMainRequestsDto) => {
+        queuedSession.current = { conversation, sessionId: queue.sessionId };
+        setRequestQueue({ ...queue, conversation });
+        for (const item of queue.items) {
+            if (item.state === 'queued' || item.state === 'activated') rememberQueueStream(item.requestId);
+            else queueStreamIds.current.delete(item.requestId);
+        }
+        const pending = pendingDelivery.current;
+        if (pending?.conversation === conversation
+            && queue.items.some(item => item.clientMessageId === pending.id)
+            && !pending.payload.start_goal) {
+            acknowledgeDelivery();
+        }
+    }, [acknowledgeDelivery, rememberQueueStream]);
+
+    const loadRequestQueue = useCallback(async (expectedConversation: string) => {
+        if (!queueEnabled) return;
+        const order = ++queueReadOrder.current;
+        const epoch = snapshotEpoch.current;
+        const saved = queuedSession.current;
+        const query = saved?.conversation === expectedConversation
+            ? new URLSearchParams({ session: saved.sessionId })
+            : new URLSearchParams(deskId
+                ? { connection: deskId, conversation: expectedConversation }
+                : { conversation: expectedConversation });
+        try {
+            const response = await fetch(`${REQUEST_QUEUE_PATH}?${query}`, {
+                credentials: 'include', headers: { Accept: 'application/json' },
+                signal: AbortSignal.timeout(SNAPSHOT_TIMEOUT_MS),
+            });
+            const queue = response.ok ? (await response.json())?.data as AiAssistantMainRequestsDto | undefined : undefined;
+            if (conversationId.current !== expectedConversation || epoch !== snapshotEpoch.current
+                || order !== queueReadOrder.current || !Array.isArray(queue?.items)
+                || typeof queue.sessionId !== 'string') return;
+            observeQueue(expectedConversation, queue);
+        } catch { /* Keep the last authoritative queue view on a failed read. */ }
+    }, [deskId, observeQueue, queueEnabled]);
+
+    const cancelQueuedRequest = useCallback(async (requestId: string) => {
+        const saved = queuedSession.current;
+        if (!saved || conversationId.current !== saved.conversation) return;
+        try {
+            const response = await fetch(`${REQUEST_QUEUE_PATH}/cancel`, {
+                method: 'POST', credentials: 'include',
+                headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+                body: JSON.stringify({ session: saved.sessionId, requestId }),
+                signal: AbortSignal.timeout(SNAPSHOT_TIMEOUT_MS),
+            });
+            const body = response.ok ? await response.json() : null;
+            if (conversationId.current !== saved.conversation) return;
+            if (body?.success !== true) {
+                setError(agentErrorMessage(translate.current, body?.code, body?.message,
+                    'The AI Assistant request could not be cancelled.'));
+            }
+        } catch {
+            if (conversationId.current === saved.conversation) setError('The AI Assistant request could not be cancelled.');
+        }
+        if (conversationId.current === saved.conversation) await loadRequestQueue(saved.conversation);
+    }, [loadRequestQueue]);
+
     const selectSessionTarget = useCallback((targetId?: string) => {
         if (!targetSelectionEnabled || !connected || sessionTargetRequest.current) return false;
         setSessionTargetResolving(true);
@@ -609,6 +686,7 @@ export function useAiAssistantChat({
     ): Promise<'ready' | 'missing' | 'ignored' | 'failed'> => {
         const expectedEpoch = snapshotEpoch.current;
         const expectedRequestOrder = ++snapshotRequestOrder.current;
+        const expectedQueueOrder = queueReadOrder.current;
         if (showHydrating) setHydrating(true);
         const failed = () => {
             if ((reportFailure || showHydrating) && snapshotEpoch.current === expectedEpoch
@@ -638,8 +716,14 @@ export function useAiAssistantChat({
                 return missing && !reportFailure ? 'missing' : failed();
             }
             const snapshot = body.data as PersistedSnapshot;
-            if (pendingDelivery.current?.conversation === expectedConversationId
-                && snapshot.messages.some(message => message.id === pendingDelivery.current?.id && message.role === 'user')) {
+            const pending = pendingDelivery.current;
+            if (pending?.conversation === expectedConversationId
+                && snapshot.messages.some(message => message.id === pending.id && message.role === 'user')) {
+                if (queueEnabled && !pending.payload.start_goal && snapshot.requestId !== pending.requestId
+                    && activeRequest.current === pending.requestId) {
+                    activeRequest.current = null;
+                    activeRequestAck.current = null;
+                }
                 acknowledgeDelivery();
             }
             if (
@@ -683,6 +767,10 @@ export function useAiAssistantChat({
                 inputRevision: snapshot.inputRevision,
                 controlRevision: snapshot.controlRevision,
             };
+            if (queueEnabled && expectedQueueOrder === queueReadOrder.current && Array.isArray(snapshot.mainRequests)) {
+                queueReadOrder.current += 1;
+                observeQueue(expectedConversationId, { sessionId: snapshot.sessionId, items: snapshot.mainRequests });
+            }
             setHistoryRestoreFailed(false);
             setStopConfirmation(current => current && (current.session !== snapshot.sessionId
                 || current.inputRevision !== snapshot.inputRevision || current.controlRevision !== snapshot.controlRevision)
@@ -813,7 +901,7 @@ export function useAiAssistantChat({
                 setHydrating(false);
             }
         }
-    }, [deskId]);
+    }, [acknowledgeDelivery, deskId, observeQueue, queueEnabled]);
 
     const loadOlderMessages = useCallback(async () => {
         const cursor = messagePage.nextBeforeMessageId;
@@ -878,6 +966,9 @@ export function useAiAssistantChat({
         }
         snapshotEpoch.current += 1;
         snapshotWatermark.current = null;
+        queuedSession.current = null;
+        queueStreamIds.current.clear();
+        setRequestQueue(null);
         historyWindow.current = null;
         olderRequest.current = null;
         pendingDelivery.current = null;
@@ -936,19 +1027,26 @@ export function useAiAssistantChat({
         previewArgs.current.clear();
         if (!stored) return;
 
-        void loadSnapshot(stored, true);
-    }, [conversationStorageScope, initialConversationId, loadSnapshot, rehearsal?.client_conversation_id]);
+        void loadSnapshot(stored, true).then(outcome => {
+            if (outcome === 'missing') return loadRequestQueue(stored);
+        });
+    }, [conversationStorageScope, initialConversationId, loadRequestQueue, loadSnapshot, rehearsal?.client_conversation_id]);
 
     useEffect(() => {
         // A slow snapshot must not stack further requests behind it.
         let polling = false;
-        const interval = window.setInterval(() => {
+        const poll = () => {
             if (!conversationId.current || polling) return;
             polling = true;
-            void loadSnapshot(conversationId.current).finally(() => { polling = false; });
-        }, 2_000);
+            const selected = conversationId.current;
+            void loadSnapshot(selected).then(outcome => {
+                if (outcome === 'missing' || !snapshotWatermark.current) return loadRequestQueue(selected);
+            })
+                .finally(() => { polling = false; });
+        };
+        const interval = window.setInterval(poll, 2_000);
         return () => window.clearInterval(interval);
-    }, [loadSnapshot]);
+    }, [loadRequestQueue, loadSnapshot]);
 
     useEffect(() => {
         const onStorage = (event: StorageEvent) => {
@@ -987,6 +1085,9 @@ export function useAiAssistantChat({
             setPendingInputCount(0);
             snapshotEpoch.current += 1;
             snapshotWatermark.current = null;
+            queuedSession.current = null;
+            queueStreamIds.current.clear();
+            setRequestQueue(null);
             historyWindow.current = null;
             olderRequest.current = null;
             setMessagePage({ hasMore: false, nextBeforeMessageId: null });
@@ -1013,11 +1114,16 @@ export function useAiAssistantChat({
             setContextNotices([]);
             setRemoteActive(false);
             setStatus('idle');
-            if (event.newValue) void loadSnapshot(event.newValue, true);
+            if (event.newValue) {
+                const selected = event.newValue;
+                void loadSnapshot(selected, true).then(outcome => {
+                    if (outcome === 'missing') return loadRequestQueue(selected);
+                });
+            }
         };
         window.addEventListener('storage', onStorage);
         return () => window.removeEventListener('storage', onStorage);
-    }, [conversationStorageScope, loadSnapshot, rehearsal]);
+    }, [conversationStorageScope, loadRequestQueue, loadSnapshot, rehearsal]);
 
     useEffect(() => () => {
         if (contextTimer.current !== null) window.clearTimeout(contextTimer.current);
@@ -1105,22 +1211,58 @@ export function useAiAssistantChat({
             return;
         }
         if (message.signaling_type !== SIGNALING_TYPE_CODE_AI_ASSISTANT_UPDATED) return;
-        if (!activeRequest.current || message.request_id !== activeRequest.current) return;
         const event = message.signaling_data as AiAssistantEvent;
+        if (!event || message.request_id !== event.request_id) return;
+        const pending = pendingDelivery.current;
+        const currentSubmission = pending?.requestId === event.request_id;
+        if (event.kind === 'status' && event.status === 'queued' && currentSubmission
+            && event.main_request_id && event.main_request_session_id && conversationId.current) {
+            const selected = conversationId.current;
+            queuedSession.current = { conversation: selected, sessionId: event.main_request_session_id };
+            rememberQueueStream(event.main_request_id);
+            acknowledgeDelivery();
+            if (!activeRequest.current && !snapshotActiveRequest.current) setStatus('queued');
+            void loadRequestQueue(selected);
+            void loadSnapshot(selected);
+            return;
+        }
+        if (currentSubmission && !pending.payload.start_goal && !rehearsal
+            && event.kind === 'error' && event.seq <= 1 && !stopPending.current) {
+            const failure = agentErrorMessage(translate.current, event.error?.error_code,
+                event.error?.message, 'The AI Assistant turn could not complete.');
+            deliveryFailure.current = failure;
+            pendingDelivery.current = null;
+            setDeliveryState(null);
+            setMessages(current => current.filter(message => message.id !== pending.id));
+            setError(failure);
+            if (!activeRequest.current && !snapshotActiveRequest.current) setStatus('error');
+            if (conversationId.current) void loadSnapshot(conversationId.current);
+            return;
+        }
+        const beginsQueuedStream = queueStreamIds.current.has(event.request_id)
+            && (event.kind === 'turn_started' || (event.kind === 'status' && event.status === 'accepted'));
+        if (!activeRequest.current && (currentSubmission || beginsQueuedStream)) {
+            activeRequest.current = event.request_id;
+            lastSeq.current = -1;
+            currentTurnId.current = null;
+            setPartial('');
+            setRemoteActive(true);
+        }
+        if (message.request_id !== activeRequest.current) return;
         if (event.seq <= lastSeq.current) return;
         lastSeq.current = event.seq;
-        acknowledgeActiveRequest(message.request_id);
+        if (event.status !== 'accepting') acknowledgeActiveRequest(message.request_id);
 
-        if (event.kind === 'status' && event.status === 'accepted') acknowledgeDelivery();
-        if (event.kind === 'error' && event.seq === 1 && pendingDelivery.current && !stopPending.current) {
+        if (event.kind === 'status' && event.status === 'accepted' && currentSubmission) acknowledgeDelivery();
+        if (event.kind === 'error' && event.seq <= 1 && currentSubmission && !stopPending.current) {
             deliveryFailure.current = agentErrorMessage(translate.current, event.error?.error_code,
                 event.error?.message, 'The AI Assistant turn could not complete.');
-            const rejectedId = pendingDelivery.current.id;
+            const rejectedId = pending.id;
             pendingDelivery.current = null;
             setDeliveryState(null);
             setMessages(current => current.filter(message => message.id !== rejectedId));
         }
-        if ((event.kind === 'error' || event.kind === 'retracted') && pendingDelivery.current) setDeliveryState('unconfirmed');
+        if ((event.kind === 'error' || event.kind === 'retracted') && currentSubmission && pendingDelivery.current) setDeliveryState('unconfirmed');
         switch (event.kind) {
             case 'status':
                 setStatus(event.status ?? 'running');
@@ -1188,8 +1330,9 @@ export function useAiAssistantChat({
                 }
                 break;
             case 'answer':
+                queueStreamIds.current.delete(event.request_id);
                 setMessages((current) => [...current, {
-                    id: `assistant-${event.seq}`,
+                    id: `assistant-${event.request_id}-${event.seq}`,
                     role: 'assistant',
                     text: event.answer ?? '',
                     provenance: event.provenance,
@@ -1202,6 +1345,7 @@ export function useAiAssistantChat({
                 if (conversationId.current) void loadSnapshot(conversationId.current);
                 break;
             case 'permission_required':
+                queueStreamIds.current.delete(event.request_id);
                 setPartial('');
                 setStatus('permission_required');
                 activeRequest.current = null;
@@ -1211,6 +1355,7 @@ export function useAiAssistantChat({
                 break;
             case 'error':
             case 'retracted':
+                queueStreamIds.current.delete(event.request_id);
                 setError(agentErrorMessage(translate.current, event.error?.error_code,
                     event.error?.message, 'The AI Assistant turn could not complete.'));
                 setPartial('');
@@ -1221,7 +1366,7 @@ export function useAiAssistantChat({
                 if (conversationId.current) void loadSnapshot(conversationId.current);
                 break;
         }
-    }), [acknowledgeDelivery, loadSnapshot, subscribe]);
+    }), [acknowledgeDelivery, loadRequestQueue, loadSnapshot, rehearsal, rememberQueueStream, subscribe]);
 
     const ensureConversation = useCallback(() => {
         if (!conversationId.current) {
@@ -1392,10 +1537,10 @@ export function useAiAssistantChat({
     ) => {
         if (rehearsal && (rehearsal.status !== 'pending' || rehearsalSent.current || question !== rehearsal.prompt || conversationId.current !== rehearsal.client_conversation_id)) return false;
         const trimmed = rehearsal ? rehearsal.prompt : question.trim();
-        // A follow-up is durable input, not a second foreground workflow. Replace
-        // the locally observed request stream with the newest request; the server
-        // supersedes the older model turn under its input-revision fence.
-        if (!trimmed || hydrating || historyRestoreFailed || approvalInitializing || contextRequest.current || !sessionTargetReady) return false;
+        if (!trimmed || hydrating || historyRestoreFailed || approvalInitializing || contextRequest.current
+            || !sessionTargetReady || pendingDelivery.current || stopPending.current) return false;
+        const nativeTurn = Boolean(rehearsal || (deskId && startGoal));
+        if (nativeTurn && (activeRequest.current || remoteActive)) return false;
         const selectedObjects = attachments.filter(attachment => attachment.state === 'active' && attachment.kind !== 'interactive_session');
         if (selectedObjects.some(attachment => attachment.expiresAtUnixMs <= Date.now())) {
             deliveryFailure.current = 'selected_context_expired';
@@ -1414,15 +1559,17 @@ export function useAiAssistantChat({
             role: 'user',
             text: trimmed,
         }]);
-        setTools([]);
-        setDraft(null);
-        setPartial('');
+        if (nativeTurn) {
+            setTools([]);
+            setDraft(null);
+            setPartial('');
+            setRemoteActive(true);
+            previewArgs.current.clear();
+            documentPreviewPageRequests.current.clear();
+        }
         setError(null);
-        setStatus('starting');
-        setRemoteActive(true);
-        lastSeq.current = -1;
-        previewArgs.current.clear();
-        documentPreviewPageRequests.current.clear();
+        if (nativeTurn || (!activeRequest.current && !snapshotActiveRequest.current)) setStatus('starting');
+        if (nativeTurn) lastSeq.current = -1;
         const requestId = v4();
         const payload = {
                 question: trimmed,
@@ -1441,16 +1588,17 @@ export function useAiAssistantChat({
         pendingDelivery.current = { id: clientMessageId, question: trimmed,
             conversation: conversationId.current!, requestId, payload, sentAt: Date.now() };
         setDeliveryState('sending');
-        activeRequest.current = requestId;
+        if (nativeTurn) activeRequest.current = requestId;
         console.info('[assistant-input] dispatch', { messageId: clientMessageId, requestId });
         try {
-            activeRequest.current = sendMessage(SIGNALING_TYPE_CODE_ASK_AI_ASSISTANT, payload, deskId || undefined, requestId);
-            if (pendingDelivery.current) pendingDelivery.current.requestId = activeRequest.current;
+            const sent = sendMessage(SIGNALING_TYPE_CODE_ASK_AI_ASSISTANT, payload, deskId || undefined, requestId);
+            if (nativeTurn) activeRequest.current = sent;
+            if (pendingDelivery.current) pendingDelivery.current.requestId = sent;
         } catch {
             setDeliveryState('unconfirmed');
         }
         return true;
-    }, [attachments, deskId, targetRefs, ensureConversation, sendMessage, sessionTargetReady, hydrating, historyRestoreFailed, approvalInitializing, rehearsal]);
+    }, [attachments, deskId, targetRefs, ensureConversation, sendMessage, sessionTargetReady, hydrating, historyRestoreFailed, approvalInitializing, rehearsal, remoteActive]);
 
     const retryDelivery = useCallback(async () => {
         const pending = pendingDelivery.current;
@@ -1459,13 +1607,15 @@ export function useAiAssistantChat({
         pending.sentAt = Date.now();
         await loadSnapshot(pending.conversation);
         if (pendingDelivery.current !== pending || conversationId.current !== pending.conversation) return;
-        activeRequest.current = pending.requestId;
-        lastSeq.current = -1;
+        if (rehearsal || pending.payload.start_goal) {
+            activeRequest.current = pending.requestId;
+            lastSeq.current = -1;
+        }
         console.info('[assistant-input] retry', { messageId: pending.id, requestId: pending.requestId });
         try {
             sendMessage(SIGNALING_TYPE_CODE_ASK_AI_ASSISTANT, pending.payload, deskId || undefined, pending.requestId);
         } catch { setDeliveryState('unconfirmed'); }
-    }, [connected, sessionTargetReady, deliveryState, loadSnapshot, sendMessage, deskId]);
+    }, [connected, sessionTargetReady, deliveryState, loadSnapshot, sendMessage, deskId, rehearsal]);
 
     const submitPermissionDecision = useCallback(async (
         request: PermissionRequestDto,
@@ -1834,6 +1984,9 @@ export function useAiAssistantChat({
         contextTimer.current = null;
         snapshotEpoch.current += 1;
         snapshotWatermark.current = null;
+        queuedSession.current = null;
+        queueStreamIds.current.clear();
+        setRequestQueue(null);
         historyWindow.current = null;
         olderRequest.current = null;
         conversationId.current = null;
@@ -1903,13 +2056,42 @@ export function useAiAssistantChat({
             localStorage.setItem(storageKey(conversationStorageScope), id);
         } catch { /* Continuation still works without local storage. */ }
         void loadSnapshot(id, true, true);
+        void loadRequestQueue(id);
         return true;
     }, [remoteActive, contextUpdating, permissionUpdating, grantRevoking,
-        hydrating, reset, conversationStorageScope, loadSnapshot, rehearsal]);
+        hydrating, reset, conversationStorageScope, loadRequestQueue, loadSnapshot, rehearsal]);
 
     const refreshSnapshot = useCallback(() => {
         if (conversationId.current) void loadSnapshot(conversationId.current);
     }, [loadSnapshot]);
+
+    const resumeQueue = useCallback(async () => {
+        const view = snapshotWatermark.current;
+        if (!view || conversationId.current !== view.conversationId || resumingQueue || stopPending.current) return;
+        const epoch = snapshotEpoch.current;
+        setResumingQueue(true);
+        try {
+            const response = await fetch(`${REQUEST_QUEUE_PATH}/resume`, {
+                method: 'POST', credentials: 'include',
+                headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+                body: JSON.stringify({ session: view.sessionId, expectedControlRevision: view.controlRevision }),
+                signal: AbortSignal.timeout(SNAPSHOT_TIMEOUT_MS),
+            });
+            const body = response.ok ? await response.json() : null;
+            if (conversationId.current !== view.conversationId || epoch !== snapshotEpoch.current) return;
+            await loadSnapshot(view.conversationId);
+            if (body?.success !== true && conversationId.current === view.conversationId && epoch === snapshotEpoch.current) {
+                setError(agentErrorMessage(translate.current, body?.code, body?.message,
+                    translate.current('pages.aiAssistant.resumeQueueFailed')));
+            }
+        } catch {
+            if (conversationId.current === view.conversationId && epoch === snapshotEpoch.current) {
+                setError(translate.current('pages.aiAssistant.resumeQueueFailed'));
+            }
+        } finally {
+            setResumingQueue(false);
+        }
+    }, [loadSnapshot, resumingQueue]);
 
     return {
         temporaryConversation,
@@ -1961,7 +2143,14 @@ export function useAiAssistantChat({
         capabilityGrants,
         permissionUpdating,
         grantRevoking,
-        pendingInputCount,
+        pendingInputCount: pendingInputCount
+            + (requestQueue?.conversation === conversationId.current ? requestQueue.items.filter(item => item.state === 'queued').length : 0),
+        queuedRequests: requestQueue?.conversation === conversationId.current ? requestQueue.items.filter(item => item.state === 'queued') : [],
+        failedRequests: requestQueue?.conversation === conversationId.current
+            ? requestQueue.items.filter(item => item.state === 'failed') : [],
+        cancelQueuedRequest,
+        resumeQueue,
+        resumingQueue,
         hasMoreMessages: messagePage.hasMore,
         loadingOlderMessages,
         sessionTarget,
@@ -1979,7 +2168,8 @@ export function useAiAssistantChat({
             || backgroundTasks.some(task => task.state === 'running')
             || (!mainStopped && !!goal && ['queued', 'running', 'waiting_approval', 'waiting_work', 'waiting_device', 'waiting_model'].includes(goal.state))),
         turnRunning: activeRequest.current !== null || remoteActive,
-        running: activeRequest.current !== null || remoteActive || contextUpdating || approvalInitializing || permissionUpdating || outcomeDisposing,
+        running: activeRequest.current !== null || remoteActive || deliveryState === 'sending'
+            || contextUpdating || approvalInitializing || permissionUpdating || outcomeDisposing,
         start,
         deliveryState,
         acceptedInput,

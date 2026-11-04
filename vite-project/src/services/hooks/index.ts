@@ -21,6 +21,7 @@ export type { GetMySubagentPolicyQueryKey } from "./aiAssistantController/useGet
 export type { GetMySubagentPolicySuspenseQueryKey } from "./aiAssistantController/useGetMySubagentPolicySuspense.ts";
 export type { CancelAiAssistantBackgroundTaskMutationKey } from "./aiAssistantSessionController/useCancelAiAssistantBackgroundTask.ts";
 export type { CancelAiAssistantCommandMutationKey } from "./aiAssistantSessionController/useCancelAiAssistantCommand.ts";
+export type { CancelAiAssistantMainRequestMutationKey } from "./aiAssistantSessionController/useCancelAiAssistantMainRequest.ts";
 export type { CloseAiAssistantApprovalDelegationMutationKey } from "./aiAssistantSessionController/useCloseAiAssistantApprovalDelegation.ts";
 export type { ControlAiAssistantDirectoryMutationKey } from "./aiAssistantSessionController/useControlAiAssistantDirectory.ts";
 export type { ControlAiAssistantGoalMutationKey } from "./aiAssistantSessionController/useControlAiAssistantGoal.ts";
@@ -42,6 +43,8 @@ export type { GetAssistantImageQueryKey } from "./aiAssistantSessionController/u
 export type { GetAssistantImageSuspenseQueryKey } from "./aiAssistantSessionController/useGetAssistantImageSuspense.ts";
 export type { ListAiAssistantAttentionQueryKey } from "./aiAssistantSessionController/useListAiAssistantAttention.ts";
 export type { ListAiAssistantAttentionSuspenseQueryKey } from "./aiAssistantSessionController/useListAiAssistantAttentionSuspense.ts";
+export type { ListAiAssistantMainRequestsQueryKey } from "./aiAssistantSessionController/useListAiAssistantMainRequests.ts";
+export type { ListAiAssistantMainRequestsSuspenseQueryKey } from "./aiAssistantSessionController/useListAiAssistantMainRequestsSuspense.ts";
 export type { ListAiAssistantSessionsQueryKey } from "./aiAssistantSessionController/useListAiAssistantSessions.ts";
 export type { ListAiAssistantSessionsSuspenseQueryKey } from "./aiAssistantSessionController/useListAiAssistantSessionsSuspense.ts";
 export type { ListAiAssistantSubagentsQueryKey } from "./aiAssistantSessionController/useListAiAssistantSubagents.ts";
@@ -55,6 +58,7 @@ export type { OpenAiAssistantApprovalDelegationMutationKey } from "./aiAssistant
 export type { ReadAiAssistantSubagentResultQueryKey } from "./aiAssistantSessionController/useReadAiAssistantSubagentResult.ts";
 export type { ReadAiAssistantSubagentResultSuspenseQueryKey } from "./aiAssistantSessionController/useReadAiAssistantSubagentResultSuspense.ts";
 export type { ReadAssistantAttachmentMutationKey } from "./aiAssistantSessionController/useReadAssistantAttachment.ts";
+export type { ResumeAiAssistantMainRequestsMutationKey } from "./aiAssistantSessionController/useResumeAiAssistantMainRequests.ts";
 export type { RevokeAiAssistantCapabilityGrantMutationKey } from "./aiAssistantSessionController/useRevokeAiAssistantCapabilityGrant.ts";
 export type { StopAiAssistantSessionMutationKey } from "./aiAssistantSessionController/useStopAiAssistantSession.ts";
 export type { UpdateAiAssistantDeviceRosterMutationKey } from "./aiAssistantSessionController/useUpdateAiAssistantDeviceRoster.ts";
@@ -319,6 +323,9 @@ export { useCancelAiAssistantBackgroundTask } from "./aiAssistantSessionControll
 export { cancelAiAssistantCommandMutationKey } from "./aiAssistantSessionController/useCancelAiAssistantCommand.ts";
 export { cancelAiAssistantCommandMutationOptions } from "./aiAssistantSessionController/useCancelAiAssistantCommand.ts";
 export { useCancelAiAssistantCommand } from "./aiAssistantSessionController/useCancelAiAssistantCommand.ts";
+export { cancelAiAssistantMainRequestMutationKey } from "./aiAssistantSessionController/useCancelAiAssistantMainRequest.ts";
+export { cancelAiAssistantMainRequestMutationOptions } from "./aiAssistantSessionController/useCancelAiAssistantMainRequest.ts";
+export { useCancelAiAssistantMainRequest } from "./aiAssistantSessionController/useCancelAiAssistantMainRequest.ts";
 export { closeAiAssistantApprovalDelegationMutationKey } from "./aiAssistantSessionController/useCloseAiAssistantApprovalDelegation.ts";
 export { closeAiAssistantApprovalDelegationMutationOptions } from "./aiAssistantSessionController/useCloseAiAssistantApprovalDelegation.ts";
 export { useCloseAiAssistantApprovalDelegation } from "./aiAssistantSessionController/useCloseAiAssistantApprovalDelegation.ts";
@@ -382,6 +389,12 @@ export { useListAiAssistantAttention } from "./aiAssistantSessionController/useL
 export { listAiAssistantAttentionSuspenseQueryKey } from "./aiAssistantSessionController/useListAiAssistantAttentionSuspense.ts";
 export { listAiAssistantAttentionSuspenseQueryOptions } from "./aiAssistantSessionController/useListAiAssistantAttentionSuspense.ts";
 export { useListAiAssistantAttentionSuspense } from "./aiAssistantSessionController/useListAiAssistantAttentionSuspense.ts";
+export { listAiAssistantMainRequestsQueryKey } from "./aiAssistantSessionController/useListAiAssistantMainRequests.ts";
+export { listAiAssistantMainRequestsQueryOptions } from "./aiAssistantSessionController/useListAiAssistantMainRequests.ts";
+export { useListAiAssistantMainRequests } from "./aiAssistantSessionController/useListAiAssistantMainRequests.ts";
+export { listAiAssistantMainRequestsSuspenseQueryKey } from "./aiAssistantSessionController/useListAiAssistantMainRequestsSuspense.ts";
+export { listAiAssistantMainRequestsSuspenseQueryOptions } from "./aiAssistantSessionController/useListAiAssistantMainRequestsSuspense.ts";
+export { useListAiAssistantMainRequestsSuspense } from "./aiAssistantSessionController/useListAiAssistantMainRequestsSuspense.ts";
 export { listAiAssistantSessionsQueryKey } from "./aiAssistantSessionController/useListAiAssistantSessions.ts";
 export { listAiAssistantSessionsQueryOptions } from "./aiAssistantSessionController/useListAiAssistantSessions.ts";
 export { useListAiAssistantSessions } from "./aiAssistantSessionController/useListAiAssistantSessions.ts";
@@ -421,6 +434,9 @@ export { useReadAiAssistantSubagentResultSuspense } from "./aiAssistantSessionCo
 export { readAssistantAttachmentMutationKey } from "./aiAssistantSessionController/useReadAssistantAttachment.ts";
 export { readAssistantAttachmentMutationOptions } from "./aiAssistantSessionController/useReadAssistantAttachment.ts";
 export { useReadAssistantAttachment } from "./aiAssistantSessionController/useReadAssistantAttachment.ts";
+export { resumeAiAssistantMainRequestsMutationKey } from "./aiAssistantSessionController/useResumeAiAssistantMainRequests.ts";
+export { resumeAiAssistantMainRequestsMutationOptions } from "./aiAssistantSessionController/useResumeAiAssistantMainRequests.ts";
+export { useResumeAiAssistantMainRequests } from "./aiAssistantSessionController/useResumeAiAssistantMainRequests.ts";
 export { revokeAiAssistantCapabilityGrantMutationKey } from "./aiAssistantSessionController/useRevokeAiAssistantCapabilityGrant.ts";
 export { revokeAiAssistantCapabilityGrantMutationOptions } from "./aiAssistantSessionController/useRevokeAiAssistantCapabilityGrant.ts";
 export { useRevokeAiAssistantCapabilityGrant } from "./aiAssistantSessionController/useRevokeAiAssistantCapabilityGrant.ts";

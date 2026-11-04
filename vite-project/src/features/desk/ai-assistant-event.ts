@@ -21,6 +21,8 @@ export type AiAssistantEvent = {
     kind: AiAssistantEventKind;
     turn_id?: string | null;
     status?: string | null;
+    main_request_id?: string | null;
+    main_request_session_id?: string | null;
     partial_summary?: string | null;
     error?: { message?: string | null; error_code?: number | null } | null;
     tool_name?: string | null;

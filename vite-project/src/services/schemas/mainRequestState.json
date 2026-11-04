@@ -1,0 +1,1 @@
+{"type":"string","description":"Owner-visible queue state. Native turn and approval state live in the session.","enum":["queued","activated","cancelled","superseded","failed"],"x-readme-ref-name":"MainRequestState"}

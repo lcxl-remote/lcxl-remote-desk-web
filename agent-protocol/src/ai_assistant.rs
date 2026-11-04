@@ -24,6 +24,36 @@ pub mod subagent;
 pub mod subagent_policy;
 pub mod user_instructions;
 
+/// Owner-visible queue state. Native turn and approval state live in the session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MainRequestState {
+    Queued,
+    Activated,
+    Cancelled,
+    Superseded,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MainRequestFailure {
+    SourceUnavailable,
+    DestinationChanged,
+    CoordinationExhausted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct MainRequestReceipt {
+    pub request_id: String,
+    pub client_message_id: String,
+    pub state: MainRequestState,
+    pub failure: Option<MainRequestFailure>,
+    pub input_revision: Option<i64>,
+    pub accepted_at_ms: i64,
+}
+
 /// Device-owned product switch projected to trusted central orchestrators.
 ///
 /// The device is the only authority for this value. Central services may cache

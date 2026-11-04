@@ -201,6 +201,7 @@ async fn finished_command_continues_with_history_and_tools_then_drains_its_trigg
             "command-finished-marker",
             envelope,
             desk_diagnose_core::seam::ToolOutputFormat::Text,
+            None,
             &chrono::Utc::now().to_rfc3339(),
         )
         .await

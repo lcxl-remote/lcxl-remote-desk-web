@@ -3,6 +3,7 @@ use desk_agent_protocol::ai_assistant::user_instructions::AssistantDataPolicy;
 use sea_orm::{
     ColumnTrait, ConnectionTrait, Database, EntityTrait, QueryFilter, Schema, TransactionTrait,
 };
+mod main_request;
 mod memory_index;
 mod memory_quota;
 mod projection;

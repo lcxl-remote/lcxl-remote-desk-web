@@ -2,6 +2,7 @@
 
 use crate::config::connection::DatabaseConnection;
 pub(crate) mod cancellation;
+pub mod main_requests;
 
 use actix_web::web;
 use desk_agent_protocol::agent_event::AgentEvent;
@@ -742,7 +743,11 @@ impl Drop for SignalHeartbeatGuard {
 
 use crate::assistant_model::MeteredModel;
 
+use desk_assistant_data_store::main_request::{
+    self, OwnerAdmission, OwnerAdmissionResult, OwnerQueueTurn,
+};
 use desk_diagnose_core::model_message_labels::model_bound_user_message;
+
 #[allow(clippy::too_many_arguments)]
 pub async fn run_turn(
     connections: web::Data<SharedConnectionMap>,
@@ -753,6 +758,63 @@ pub async fn run_turn(
     actor_user_id: i32,
     target_device_id: String,
     ask: AiAssistantAsk,
+) {
+    run_incoming_turn(
+        connections,
+        db,
+        request_id,
+        browser_connection_id,
+        target_connection_id,
+        actor_user_id,
+        target_device_id,
+        ask,
+        None,
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn submit_owner_turn(
+    connections: web::Data<SharedConnectionMap>,
+    db: DatabaseConnection,
+    request_id: String,
+    browser_connection_id: String,
+    target_connection_id: String,
+    actor_user_id: i32,
+    target_device_id: String,
+    ask: AiAssistantAsk,
+) {
+    let queue = main_request::accepts_owner_ask(&ask).then(|| {
+        Box::new(OwnerQueueTurn::Submit {
+            ask: ask.clone(),
+            reply_connection_id: browser_connection_id.clone(),
+        })
+    });
+    run_incoming_turn(
+        connections,
+        db,
+        request_id,
+        browser_connection_id,
+        target_connection_id,
+        actor_user_id,
+        target_device_id,
+        ask,
+        queue,
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_incoming_turn(
+    connections: web::Data<SharedConnectionMap>,
+    db: DatabaseConnection,
+    request_id: String,
+    browser_connection_id: String,
+    target_connection_id: String,
+    actor_user_id: i32,
+    target_device_id: String,
+    ask: AiAssistantAsk,
+    owner_queue: Option<Box<OwnerQueueTurn>>,
 ) {
     log::info!(
         "[assistant-input] received request_id={} message_id={} conversation_id={:?}",
@@ -802,7 +864,7 @@ pub async fn run_turn(
         }
         Ok(None) => {}
     }
-    run_turn_inner(
+    run_turn_inner_with_queue(
         connections,
         db,
         request_id,
@@ -812,6 +874,7 @@ pub async fn run_turn(
         target_device_id,
         ask,
         None,
+        owner_queue,
     )
     .await;
 }
@@ -854,7 +917,7 @@ pub async fn resume_after_permission_decision(
             }
         }
     }
-    run_turn_inner(
+    run_turn_inner_with_queue(
         connections,
         db,
         request_id,
@@ -868,6 +931,7 @@ pub async fn resume_after_permission_decision(
             permission_request_id: Some(permission_request_id),
             work_event: None,
         }),
+        None,
     )
     .await;
 }
@@ -931,6 +995,7 @@ struct PermissionResume {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 async fn run_turn_inner(
     connections: web::Data<SharedConnectionMap>,
     db: DatabaseConnection,
@@ -942,7 +1007,7 @@ async fn run_turn_inner(
     ask: AiAssistantAsk,
     resume_conversation_id: Option<PermissionResume>,
 ) {
-    let _ = compose_turn(
+    run_turn_inner_with_queue(
         connections,
         db,
         request_id,
@@ -953,10 +1018,53 @@ async fn run_turn_inner(
         ask,
         resume_conversation_id,
         None,
-        None,
-        None,
     )
     .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_turn_inner_with_queue(
+    connections: web::Data<SharedConnectionMap>,
+    db: DatabaseConnection,
+    request_id: String,
+    browser_connection_id: String,
+    target_connection_id: String,
+    actor_user_id: i32,
+    target_device_id: String,
+    ask: AiAssistantAsk,
+    resume_conversation_id: Option<PermissionResume>,
+    owner_queue: Option<Box<OwnerQueueTurn>>,
+) {
+    let result = compose_turn_with_queue(
+        connections.clone(),
+        db,
+        request_id.clone(),
+        browser_connection_id.clone(),
+        target_connection_id,
+        actor_user_id,
+        target_device_id,
+        ask,
+        resume_conversation_id,
+        None,
+        None,
+        None,
+        owner_queue,
+    )
+    .await;
+    if let Err(error) = result {
+        log::warn!(
+            "[assistant-input] turn preparation failed: {:?}",
+            error.kind
+        );
+        if !browser_connection_id.is_empty() {
+            stream_event(
+                connections.as_ref(),
+                &browser_connection_id,
+                &AgentEvent::error(&request_id, 1, error),
+            )
+            .await;
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -977,6 +1085,41 @@ fn compose_turn(
     delegated: Option<desk_diagnose_core::subagent::runtime::RuntimeTurn>,
 ) -> std::pin::Pin<Box<impl std::future::Future<Output = Result<Option<LoopOutcome>, AgentError>>>>
 {
+    compose_turn_with_queue(
+        connections,
+        db,
+        request_id,
+        browser_connection_id,
+        target_connection_id,
+        actor_user_id,
+        target_device_id,
+        ask,
+        resume_conversation_id,
+        scheduled,
+        goal_resume,
+        delegated,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline(never)]
+fn compose_turn_with_queue(
+    connections: web::Data<SharedConnectionMap>,
+    db: DatabaseConnection,
+    request_id: String,
+    browser_connection_id: String,
+    target_connection_id: String,
+    actor_user_id: i32,
+    target_device_id: String,
+    ask: AiAssistantAsk,
+    resume_conversation_id: Option<PermissionResume>,
+    scheduled: Option<scheduled::PreparedResume>,
+    goal_resume: Option<desk_diagnose_core::goal::GoalRun>,
+    delegated: Option<desk_diagnose_core::subagent::runtime::RuntimeTurn>,
+    owner_queue: Option<Box<OwnerQueueTurn>>,
+) -> std::pin::Pin<Box<impl std::future::Future<Output = Result<Option<LoopOutcome>, AgentError>>>>
+{
     let preparation = desk_diagnose_core::future::boxed(|| {
         prepare_composed_turn(
             connections,
@@ -991,6 +1134,7 @@ fn compose_turn(
             scheduled,
             goal_resume,
             delegated,
+            owner_queue,
         )
     });
     Box::pin(async move {
@@ -1034,6 +1178,7 @@ async fn prepare_composed_turn(
     scheduled: Option<scheduled::PreparedResume>,
     goal_resume: Option<desk_diagnose_core::goal::GoalRun>,
     delegated: Option<desk_diagnose_core::subagent::runtime::RuntimeTurn>,
+    owner_queue: Option<Box<OwnerQueueTurn>>,
 ) -> Result<PreparationStep, AgentError> {
     let targetless = target_device_id.is_empty();
     if targetless
@@ -1214,6 +1359,22 @@ async fn prepare_composed_turn(
     };
     let now_unix_ms = u64::try_from(chrono::Utc::now().timestamp_millis())
         .expect("current time is after the Unix epoch");
+    if let Some(OwnerQueueTurn::Activate {
+        request_id,
+        conversation_id: expected,
+        destination: original,
+    }) = owner_queue.as_deref()
+    {
+        if expected != &conversation_id {
+            return Err(model_rejected("queued input changed its conversation"));
+        }
+        if original != &destination {
+            main_requests::fail_destination(&db, &actor_id, expected, request_id).await?;
+            return Err(main_request::failure_error(
+                desk_agent_protocol::ai_assistant::MainRequestFailure::DestinationChanged,
+            ));
+        }
+    }
     let session_reader = crate::agent_session_store::SignalAgentSessionStore::new(db.clone())
         .with_client_metadata(
             client_conversation_id.clone(),
@@ -2947,18 +3108,26 @@ async fn prepare_composed_turn(
             created_at: accepted_at.clone(),
         });
         let event_store = crate::agent_run_event_store::SignalAgentRunEventStore::new(db.clone());
-        let append_result = match goal_start {
-            Some(goal) => {
-                desk_diagnose_core::future::boxed(|| event_store.append_user_goal(&input, goal))
-                    .await
-            }
-            None => {
-                desk_diagnose_core::future::boxed(|| event_store.append_user_followup(&input)).await
-            }
-        };
+        let admission = owner_queue.as_deref().map_or(OwnerAdmission::Native, OwnerQueueTurn::admission);
+        let append_result = desk_diagnose_core::future::boxed(|| event_store.admit_user_input(&input, goal_start, admission)).await;
         let ack = match append_result {
-            Ok(ack) => ack,
+            Ok(OwnerAdmissionResult::Native(ack)) => ack,
+            Ok(OwnerAdmissionResult::Queued(row)) => {
+                let event = AgentEvent::queued(&request_id, 1, &row.request_id, &row.conversation_id);
+                desk_diagnose_core::future::boxed(|| stream_event(
+                    connections.as_ref(), &browser_connection_id,
+                    &event,
+                )).await;
+                return Ok(Some(LoopOutcome::RequestQueued {
+                    request_id: row.request_id,
+                    session_id: row.conversation_id,
+                }));
+            }
+            Ok(OwnerAdmissionResult::Waiting) => return Ok(Some(LoopOutcome::TurnBusy)),
             Err(error) => {
+                if matches!(admission, OwnerAdmission::Activate { .. }) {
+                    return Err(error);
+                }
                 desk_diagnose_core::future::boxed(|| async { stream_event(
                     connections.as_ref(),
                     &browser_connection_id,
@@ -2996,9 +3165,14 @@ async fn prepare_composed_turn(
             .await }).await;
             return Ok(None);
         }
-        let input_sessions = sessions
+        let mut input_sessions = sessions
             .clone()
             .with_expected_input_revision(ack.input_revision);
+        if let Some(request_id) = &ack.main_request_id {
+            input_sessions = input_sessions.with_queued_input(
+                request_id.clone(), input.message.message_id.clone(),
+            );
+        }
         let deps = LoopDeps {
             session_seam: &input_sessions,
             ..deps
@@ -3102,6 +3276,9 @@ async fn prepare_composed_turn(
             .await
             {
                 Ok(LoopOutcome::TurnBusy) => {
+                    if matches!(admission, OwnerAdmission::Activate { .. }) {
+                        break;
+                    }
                     match desk_diagnose_core::future::boxed(|| event_store.handled_outcome(
                         &input,
                         &ack,

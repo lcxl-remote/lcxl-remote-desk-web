@@ -111,6 +111,7 @@ async fn original_receipt_backfills_paused_child_and_claim_waits_for_goal_resume
                     &output.content,
                     Some(receipt.envelope.clone()),
                     output.format,
+                    None,
                     &now,
                 )
                 .await

@@ -62,6 +62,7 @@ pub fn stop_main_session(
         next.conversation.push(message);
     }
     next.main_stopped = true;
+    next.main_coordination = None;
     if next.has_admitted_personal_input() {
         for request in &mut next.permission_requests {
             if request.state.can_user_decide() {

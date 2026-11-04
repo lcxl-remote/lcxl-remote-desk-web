@@ -135,6 +135,23 @@ impl<S: AgentFrameSink> StreamingTurnSink<S> {
     /// is sent. Committed platform waits close without model text;
     /// rejected outcomes receive a terminal error.
     pub fn finish_outcome(&mut self, outcome: &LoopOutcome) {
+        if let LoopOutcome::RequestQueued {
+            request_id,
+            session_id,
+        } = outcome
+        {
+            if !self.terminated {
+                let seq = self.next_seq();
+                self.sink.emit(AgentEvent::queued(
+                    &self.request_id,
+                    seq,
+                    request_id,
+                    session_id,
+                ));
+                self.terminated = true;
+            }
+            return;
+        }
         if let LoopOutcome::ContentRejected(decision) = outcome
             && let Some(reason) = stream_retraction_reason_for(*decision)
         {
@@ -362,6 +379,7 @@ pub fn terminal_error_for(outcome: &LoopOutcome) -> Option<AgentError> {
         | LoopOutcome::GoalControlled { .. }
         | LoopOutcome::Superseded { .. }
         | LoopOutcome::PermissionRequested { .. }
+        | LoopOutcome::RequestQueued { .. }
         | LoopOutcome::GoalOpenRequested { .. }
         | LoopOutcome::SubAgentsWaiting { .. }
         | LoopOutcome::DelegationSourcePaused => return None,

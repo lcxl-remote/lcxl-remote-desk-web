@@ -32,6 +32,7 @@ pub enum Kind {
     AssistantDeviceBinding,
     AssistantRetrievalQuery,
     AssistantPageCursor,
+    AssistantMainRequest,
 }
 
 impl Kind {
@@ -63,6 +64,7 @@ impl Kind {
             Self::AssistantDeviceBinding => "dev",
             Self::AssistantRetrievalQuery => "query",
             Self::AssistantPageCursor => "page",
+            Self::AssistantMainRequest => "request",
         }
     }
 }

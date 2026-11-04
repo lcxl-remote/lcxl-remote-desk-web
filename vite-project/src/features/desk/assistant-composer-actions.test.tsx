@@ -44,6 +44,15 @@ describe('assistant composer actions', () => {
         expect(view.getByRole('button', { name: send })).toBeEnabled();
     });
 
+    it('keeps both stop and send available when the current turn accepts queued input', () => {
+        const view = render(<AssistantComposerActions {...defaults} turnRunning canStop allowQueue />);
+        expect(view.getByRole('button', { name: stop })).toBeEnabled();
+        expect(view.getByRole('button', { name: send })).toBeEnabled();
+        view.rerender(<AssistantComposerActions {...defaults} turnRunning canStop allowQueue sendDisabled />);
+        expect(view.getByRole('button', { name: send })).toBeDisabled();
+        expect(view.getByRole('button', { name: stop })).toBeEnabled();
+    });
+
     it('retains input and rehearsal eligibility controls', () => {
         const view = render(<AssistantComposerActions {...defaults} sendDisabled />);
         expect(view.getByRole('button', { name: send })).toBeDisabled();

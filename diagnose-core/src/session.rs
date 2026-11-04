@@ -497,6 +497,15 @@ pub struct PendingWorkTrigger {
 /// exec-only automatic trigger to a generic work-completion trigger.
 pub type PendingAutoTrigger = PendingWorkTrigger;
 
+/// A bounded model coordination call uses the conversation's lease token while
+/// leaving the native turn and its history untouched.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MainCoordinationLease {
+    pub batch_id: String,
+    pub expires_at_ms: i64,
+}
+
 /// One agent conversation + session, in the shape the manager persists (and the
 /// Direct runtime keeps in memory).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -511,6 +520,8 @@ pub struct PersistedAgentSession {
     /// Explicit owner stop blocks automatic claims until a new owner input or
     /// an explicit goal resume. Children use their independent task control.
     pub main_stopped: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub main_coordination: Option<MainCoordinationLease>,
     pub delegation_group_id: Option<String>,
     pub subagent_wait: Option<crate::subagent::wait::ParentWait>,
     /// Resolved wait awaiting its source-qualified coordinator, never owner input.
@@ -851,6 +862,21 @@ impl PersistedAgentSession {
         // Decode the typed session directly from JSON. Deserializing the owned
         // Value adds large nested visitor frames to approval/execution polls.
         let mut session: Box<Self> = serde_json::from_str(input)?;
+        if session.main_coordination.as_ref().is_some_and(|lease| {
+            session.surface != AgentSessionSurface::AiAssistant
+                || !session.agent_role.is_main()
+                || session.main_stopped
+                || session.turn_state.is_active()
+                || lease.expires_at_ms <= 0
+                || !crate::native_ids::is(
+                    crate::native_ids::Kind::AssistantMainRequest,
+                    &lease.batch_id,
+                )
+        }) {
+            return Err(SessionDecodeError::InvalidDynamicRun(
+                "invalid main coordination lease".into(),
+            ));
+        }
         if session
             .assistant_request_targets
             .as_ref()
@@ -1266,6 +1292,7 @@ impl PersistedAgentSession {
             delegated_owner_requirement: None,
             control_revision: 1,
             main_stopped: false,
+            main_coordination: None,
             delegation_group_id: None,
             subagent_wait: None,
             ready_subagent_wait: None,
@@ -1917,6 +1944,16 @@ impl PersistedAgentSession {
         if self.main_stopped || !self.turn_state.can_claim() {
             return Err(TurnClaimError::Busy);
         }
+        let now = now.into();
+        if self.main_coordination.is_some() {
+            let now_ms = chrono::DateTime::parse_from_rfc3339(&now)
+                .map_err(|_| TurnClaimError::Busy)?
+                .timestamp_millis();
+            if self.has_live_main_coordination(now_ms) {
+                return Err(TurnClaimError::Busy);
+            }
+            self.main_coordination = None;
+        }
         // Rotate the fencing token: this claim becomes the sole owner, and any
         // prior owner whose lease was taken over now holds a stale token.
         self.lease_token = self.lease_token.wrapping_add(1);
@@ -1934,8 +1971,14 @@ impl PersistedAgentSession {
         // Reset the turn-level circuit-breaker counters.
         self.current_turn_steps = 0;
         self.current_turn_tokens = TokenUsage::default();
-        self.updated_at = now.into();
+        self.updated_at = now;
         Ok(())
+    }
+
+    pub fn has_live_main_coordination(&self, now_ms: i64) -> bool {
+        self.main_coordination
+            .as_ref()
+            .is_some_and(|lease| now_ms < lease.expires_at_ms)
     }
 
     #[cfg(test)]

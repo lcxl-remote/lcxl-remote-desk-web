@@ -35,9 +35,14 @@ mod device_roster;
 pub(crate) use device_roster::update_roster;
 pub use device_roster::{get_ai_assistant_device_roster, update_ai_assistant_device_roster};
 mod directories;
+mod main_requests;
 mod stop;
 mod subagents;
 pub use directories::control_ai_assistant_directory;
+pub use main_requests::{
+    cancel_ai_assistant_main_request, list_ai_assistant_main_requests,
+    resume_ai_assistant_main_requests,
+};
 pub use stop::stop_ai_assistant_session;
 pub use subagents::{
     control_ai_assistant_subagent, get_ai_assistant_subagent_status, list_ai_assistant_subagents,
@@ -582,6 +587,19 @@ pub async fn get_ai_assistant_session(
                     latest_input_seq: snapshot.latest_input_seq,
                     input_revision: snapshot.input_revision,
                     handled_input_seq: snapshot.handled_input_seq,
+                    main_requests: desk_assistant_data_store::main_request::receipts(
+                        crate::db::get_db(),
+                        &actor_id,
+                        &session_id,
+                        None,
+                    )
+                    .await
+                    .map_err(|error| {
+                        DeskSignalError::new_custom_error(
+                            DeskErrorCode::SYSTEM_ERROR,
+                            &error.into_agent_error().message,
+                        )
+                    })?,
                     task_status_projection: snapshot.task_status_projection.map(Into::into),
                     permission_requests,
                     background_tasks: background_tasks.into_iter().map(Into::into).collect(),

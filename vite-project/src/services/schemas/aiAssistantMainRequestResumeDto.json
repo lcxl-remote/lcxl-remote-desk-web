@@ -1,0 +1,1 @@
+{"type":"object","required":["controlRevision"],"properties":{"controlRevision":{"type":"integer","format":"int64","minimum":0}},"x-readme-ref-name":"AiAssistantMainRequestResumeDto"}

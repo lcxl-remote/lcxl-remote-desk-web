@@ -1,0 +1,1 @@
+{"type":"object","required":["session","expectedControlRevision"],"properties":{"expectedControlRevision":{"type":"integer","format":"int64","minimum":0},"session":{"type":"string"}},"x-readme-ref-name":"AiAssistantMainRequestResumeBody"}

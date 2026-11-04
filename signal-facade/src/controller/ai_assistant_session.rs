@@ -3,6 +3,7 @@
 mod subagents;
 pub use subagents::*;
 
+pub use desk_agent_protocol::ai_assistant::{MainRequestReceipt, MainRequestState};
 use desk_agent_protocol::communication::{
     CommunicationChannel, CommunicationDraftHandoff, GmailWebExactSendInput, SlackWebExactSendInput,
 };
@@ -45,6 +46,71 @@ pub struct AiAssistantDeviceRosterDto {
     pub session_id: String,
     pub revision: u64,
     pub target_refs: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AiAssistantMainRequestQuery {
+    pub connection: Option<String>,
+    pub conversation: Option<String>,
+    pub session: Option<String>,
+    pub request: Option<String>,
+}
+
+impl AiAssistantMainRequestQuery {
+    pub fn session_selector(&self) -> Option<AiAssistantSnapshotSelection<'_>> {
+        use AiAssistantSnapshotSelection::{DeviceIntent, PersonalIntent, Saved};
+        match (
+            self.session.as_deref(),
+            self.conversation.as_deref(),
+            self.connection.as_deref(),
+        ) {
+            (Some(session), None, None) if desk_diagnose_core::subagent::valid_id(session) => {
+                Some(Saved { session })
+            }
+            (None, Some(intent), connection)
+                if desk_diagnose_core::conversation_key::is_valid_client_conversation_id(
+                    intent.trim(),
+                ) =>
+            {
+                let conversation = intent.trim();
+                Some(match connection {
+                    Some(connection) => DeviceIntent {
+                        connection,
+                        conversation,
+                    },
+                    None => PersonalIntent { conversation },
+                })
+            }
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AiAssistantMainRequestsDto {
+    pub session_id: String,
+    pub items: Vec<MainRequestReceipt>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AiAssistantMainRequestCancelBody {
+    pub session: String,
+    pub request_id: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AiAssistantMainRequestResumeBody {
+    pub session: String,
+    pub expected_control_revision: u64,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AiAssistantMainRequestResumeDto {
+    pub control_revision: u64,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -838,6 +904,8 @@ pub struct AiAssistantSessionSnapshotDto {
     pub latest_input_seq: u64,
     pub input_revision: u64,
     pub handled_input_seq: u64,
+    /// Pending main requests have their own receipt even before native activation.
+    pub main_requests: Vec<MainRequestReceipt>,
     /// AI-maintained UX projection; never an authorization or execution fact.
     pub task_status_projection: Option<TaskStatusProjectionDto>,
     /// Model-proposed, server-normalized requests. Pending is approvable;

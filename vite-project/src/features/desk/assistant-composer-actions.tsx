@@ -2,12 +2,13 @@ import { useTranslation } from 'react-i18next';
 import { LoaderCircle, Send, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
-export function AssistantComposerActions({ turnRunning, canStop, stopping, sendDisabled, rehearsal, onStop }: {
+export function AssistantComposerActions({ turnRunning, canStop, stopping, sendDisabled, rehearsal, allowQueue = false, onStop }: {
     turnRunning: boolean;
     canStop: boolean;
     stopping: boolean;
     sendDisabled: boolean;
     rehearsal: boolean;
+    allowQueue?: boolean;
     onStop: () => void;
 }) {
     const { t } = useTranslation();
@@ -20,7 +21,7 @@ export function AssistantComposerActions({ turnRunning, canStop, stopping, sendD
                 : <X aria-hidden="true" className="h-4 w-4 shrink-0" />}
             <span className="assistant-action-label">{stopLabel}</span>
         </Button>}
-        {!turnRunning && !stopping && <Button type="submit" className="assistant-action assistant-primary-action"
+        {(!turnRunning || allowQueue) && !stopping && <Button type="submit" className="assistant-action assistant-primary-action"
             aria-label={sendLabel} disabled={sendDisabled}>
             <Send aria-hidden="true" className="h-4 w-4 shrink-0" />
             <span className="assistant-action-label">{sendLabel}</span>

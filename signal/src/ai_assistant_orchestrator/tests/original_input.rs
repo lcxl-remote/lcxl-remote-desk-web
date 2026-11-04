@@ -15,6 +15,246 @@ async fn personal_input_with_selected_targets_runs_under_the_same_account() {
     personal_input_roundtrip(vec!["selected-mac".into(), "selected-linux".into()]).await;
 }
 
+#[actix_web::test]
+async fn queued_owner_input_runs_after_reopen_without_the_submitting_connection() {
+    use sea_orm::{ColumnTrait, QueryFilter};
+    crate::ai_assistant_gate::enable_test_host();
+    let listener = std::sync::Arc::new(TcpListener::bind("127.0.0.1:0").await.unwrap());
+    let directory = tempfile::tempdir().unwrap();
+    let url = format!(
+        "sqlite://{}?mode=rwc",
+        directory.path().join("queued.db").display()
+    );
+    let connect = || crate::config::test_support::Database::connect(&url);
+    let db = connect().await.unwrap();
+    crate::db::initialize_schema(&db).await.unwrap();
+    crate::model_provider::save(
+        &db,
+        crate::model_provider::ModelProviderConfig {
+            wire_protocol: Some(
+                desk_diagnose_core::model_profile::WireProtocol::OpenAiChatCompletions,
+            ),
+            model: Some("queue-fixture".into()),
+            base_url: Some(format!("http://{}", listener.local_addr().unwrap())),
+            api_key: Some("test-only-key".into()),
+            max_context_bytes: Some(131_072),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let owner = crate::control_authorizer::SINGLE_ACCOUNT_USER_ID;
+    let ask = AiAssistantAsk {
+        question: "Resume the queued work".into(),
+        client_message_id: "durable-queued-message".into(),
+        conversation_id: Some("durable-queued-conversation".into()),
+        client_timezone: "UTC".into(),
+        ..Default::default()
+    };
+    submit_owner_turn(
+        web::Data::new(SharedConnectionMap::new_oss()),
+        db.clone(),
+        "submission-frame".into(),
+        "closed-browser".into(),
+        String::new(),
+        owner,
+        String::new(),
+        ask.clone(),
+    )
+    .await;
+    assert!(
+        crate::entity::agent_session::Entity::find()
+            .one(&db)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let [row]: [_; 1] = main_request::recovery_heads(&db, 0, 2)
+        .await
+        .unwrap()
+        .try_into()
+        .unwrap();
+    assert_eq!(row.client_message_id, ask.client_message_id);
+    drop(db);
+
+    let db = connect().await.unwrap();
+    let gate = std::sync::Arc::new(crate::ai_assistant_gate::AiAssistantGate::new(
+        desk_agent_protocol::ai_assistant::AiAssistantSettings {
+            revision: 1,
+            enabled: true,
+        },
+    ));
+    let executor = main_requests::SignalMainRequestExecutor::new(
+        db.clone(),
+        web::Data::new(SharedConnectionMap::new_oss()),
+        gate,
+    );
+    let answer_gateway = listener.clone();
+    let answer = actix_web::rt::spawn(async move {
+        let sse = memory_sse(serde_json::json!({"content":"Resumed by the host"}), "stop");
+        capture_openai_answer_with_title(answer_gateway.as_ref(), &sse).await
+    });
+    tokio::time::timeout(SCENARIO_TIMEOUT, executor.scan_once(0))
+        .await
+        .unwrap()
+        .unwrap();
+    let (body, _) = tokio::time::timeout(MODEL_IO_TIMEOUT, answer)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(String::from_utf8(body).unwrap().contains(&ask.question));
+    let snapshot = crate::agent_session_store::SignalAgentSessionStore::new(db.clone())
+        .read_snapshot_for_subject(&row.conversation_id, &row.actor_id, "")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(snapshot.input_revision, 1);
+    assert_eq!(
+        latest_committed_answer(&snapshot).as_deref(),
+        Some("Resumed by the host")
+    );
+    assert!(
+        main_request::recovery_heads(&db, 0, 2)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let native_state = || async {
+        let row = crate::entity::agent_session::Entity::find()
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        desk_diagnose_core::session::PersistedAgentSession::decode_boxed_json(&row.state_json)
+            .unwrap()
+    };
+    let before = native_state().await;
+    for (id, question) in [
+        ("queued-b", "Coordinate request B"),
+        ("queued-c", "Coordinate request C"),
+    ] {
+        submit_owner_turn(
+            web::Data::new(SharedConnectionMap::new_oss()),
+            db.clone(),
+            id.to_owned(),
+            "closed-browser".into(),
+            String::new(),
+            owner,
+            String::new(),
+            AiAssistantAsk {
+                question: question.into(),
+                client_message_id: id.into(),
+                ..ask.clone()
+            },
+        )
+        .await;
+    }
+    let b = main_request::first_pending(&db, &row.actor_id, &row.conversation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let c = crate::entity::agent_main_request::Entity::find()
+        .filter(crate::entity::agent_main_request::Column::ClientMessageId.eq("queued-c"))
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    let reply = serde_json::json!({"decisions":[
+        {"request_id":b.request_id,"route":"native"},
+        {"request_id":c.request_id,"route":"native"},
+    ]})
+    .to_string();
+    let batch = actix_web::rt::spawn({
+        let listener = listener.clone();
+        async move {
+            capture_one_openai_request_with_reply(listener.as_ref(), |_| {
+                memory_sse(serde_json::json!({"content":reply}), "stop")
+            })
+            .await
+        }
+    });
+    tokio::time::timeout(SCENARIO_TIMEOUT, executor.scan_once(0))
+        .await
+        .unwrap()
+        .unwrap();
+    let captured = tokio::time::timeout(MODEL_IO_TIMEOUT, batch)
+        .await
+        .unwrap()
+        .unwrap();
+    let batch_body: serde_json::Value = serde_json::from_slice(&captured).unwrap();
+    let projected = batch_body["messages"].to_string();
+    assert!(projected.contains("Coordinate request B"));
+    assert!(projected.contains("Coordinate request C"));
+    assert!(!projected.contains(&ask.question));
+    assert!(batch_body["tools"].as_array().is_none_or(Vec::is_empty));
+    let decided = native_state().await;
+    assert_eq!(decided.input_revision, before.input_revision);
+    assert_eq!(decided.focus_epoch, before.focus_epoch);
+    assert_eq!(decided.conversation, before.conversation);
+    assert!(decided.main_coordination.is_none());
+    for pending in [&b, &c] {
+        assert!(
+            main_request::load(
+                &db,
+                &row.actor_id,
+                &row.conversation_id,
+                &pending.request_id
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .coordinated
+        );
+    }
+    let gateway = actix_web::rt::spawn(async move {
+        capture_one_openai_request_with_reply(listener.as_ref(), |_| {
+            memory_sse(serde_json::json!({"content":"Request B handled"}), "stop")
+        })
+        .await
+    });
+    tokio::time::timeout(SCENARIO_TIMEOUT, executor.scan_once(0))
+        .await
+        .unwrap()
+        .unwrap();
+    let native = tokio::time::timeout(MODEL_IO_TIMEOUT, gateway)
+        .await
+        .unwrap()
+        .unwrap();
+    let native = String::from_utf8(native).unwrap();
+    assert!(native.contains("Coordinate request B"));
+    assert!(!native.contains("Coordinate request C"));
+    assert_eq!(native_state().await.input_revision, 2);
+    assert_eq!(
+        main_request::recovery_heads(&db, 0, 2).await.unwrap()[0].request_id,
+        c.request_id
+    );
+    let mut changed_model = crate::model_provider::load(&db).await.unwrap();
+    changed_model.model = Some("different-destination".into());
+    crate::model_provider::save(&db, changed_model)
+        .await
+        .unwrap();
+    executor.scan_once(0).await.unwrap();
+    let receipt = main_request::receipts(
+        &db,
+        &row.actor_id,
+        &row.conversation_id,
+        Some(&c.request_id),
+    )
+    .await
+    .unwrap()
+    .pop()
+    .unwrap();
+    assert_eq!(
+        receipt.state,
+        desk_agent_protocol::ai_assistant::MainRequestState::Failed
+    );
+    assert_eq!(
+        receipt.failure,
+        Some(desk_agent_protocol::ai_assistant::MainRequestFailure::DestinationChanged)
+    );
+    assert_eq!(native_state().await.input_revision, 2);
+}
+
 async fn personal_input_roundtrip(target_refs: Vec<String>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -257,19 +497,33 @@ async fn register_request_device(
 
 #[actix_web::test]
 async fn personal_input_seals_command_only_for_the_selected_device() {
-    run_selected_command(false).await;
+    run_selected_command(SelectedCommandFinish::Foreground).await;
 }
 
 #[actix_web::test]
 async fn personal_input_seals_command_and_continues_after_background_result() {
-    run_selected_command(true).await;
+    run_selected_command(SelectedCommandFinish::Background).await;
 }
 
-async fn run_selected_command(background: bool) {
+#[actix_web::test]
+async fn personal_input_seals_command_but_retires_a_late_receipt_after_supersession() {
+    run_selected_command(SelectedCommandFinish::Retired).await;
+}
+
+enum SelectedCommandFinish {
+    Foreground,
+    Background,
+    Retired,
+}
+
+async fn run_selected_command(finish: SelectedCommandFinish) {
+    let background = !matches!(finish, SelectedCommandFinish::Foreground);
+    let retired = matches!(finish, SelectedCommandFinish::Retired);
     static DEVICE_FIXTURE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     let _fixture = DEVICE_FIXTURE.lock().await;
     use crate::controller::ai_assistant_session::decide_permission_on;
     use desk_agent_protocol::{Capability, computer_use::*};
+    use desk_assistant_data_store::main_request::{OwnerAdmission, OwnerAdmissionResult};
     use desk_signal_facade::controller::ai_assistant_session::{
         PermissionDecisionBody, PermissionDecisionItemBody, PermissionItemDecisionBody,
     };
@@ -414,7 +668,7 @@ async fn run_selected_command(background: bool) {
             memory_sse(json!({"content":"Received the disk report."}), "stop")
         })
         .await;
-        if background {
+        if background && !retired {
             let mut received_result = false;
             while !received_result {
                 capture_one_openai_request_with_reply(&listener, |body| {
@@ -532,12 +786,103 @@ async fn run_selected_command(background: bool) {
         .unwrap();
     let decision: Value = serde_json::from_slice(&decision).unwrap();
     assert_eq!(decision["data"]["state"], "approved", "{decision}");
+    let queued = if background {
+        let ask = AiAssistantAsk {
+            question: "Check the next request".into(),
+            client_message_id: "queued-after-command".into(),
+            conversation_id: Some(intent.into()),
+            client_timezone: "UTC".into(),
+            ..Default::default()
+        };
+        let scope = desk_agent_protocol::AgentScope {
+            granted: vec![],
+            mode: desk_agent_protocol::ExecutionMode::ReadOnly,
+            expires_at: None,
+            policy_name: None,
+        };
+        let destination = crate::model_provider::load(&db)
+            .await
+            .unwrap()
+            .destination_identity()
+            .unwrap();
+        let next = crate::agent_run_event_store::AppendUserFollowupParams {
+            client_timezone: ask.client_timezone.clone(),
+            temporary_conversation: None,
+            event_id: ask.client_message_id.clone(),
+            run_id: run.clone(),
+            client_conversation_id: ask.conversation_id.clone(),
+            actor_id: actor.clone(),
+            device_id: String::new(),
+            target_refs: vec![],
+            surface: AgentSessionSurface::AiAssistant,
+            policy_revision:
+                desk_diagnose_core::assistant_policy::PERSONAL_ASSISTANT_POLICY_REVISION,
+            read_context: Some(
+                crate::agent_run_event_store::ReadContextSelection::capture(&[], &scope).unwrap(),
+            ),
+            current_scope: scope,
+            message: model_bound_user_message(
+                ask.client_message_id.clone(),
+                ask.question.clone(),
+                destination,
+            )
+            .unwrap(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+        };
+        let request_id = if retired {
+            None
+        } else {
+            let OwnerAdmissionResult::Queued(receipt) = SignalAgentRunEventStore::new(db.clone())
+                .admit_user_input(
+                    &next,
+                    None,
+                    OwnerAdmission::Enqueue {
+                        ask: &ask,
+                        limit: 4,
+                        reply_connection_id: None,
+                    },
+                )
+                .await
+                .unwrap()
+            else {
+                panic!("expected a queued request")
+            };
+            Some(receipt.request_id.clone())
+        };
+        Some((next, request_id))
+    } else {
+        None
+    };
     tokio::time::timeout(SCENARIO_TIMEOUT, async {
         tokio::join!(
             async {
                 respond_to_selected_command(&connections, db.clone(), peers.remove(0), background)
                     .await;
-                if background {
+                if let Some((next, request_id)) = &queued {
+                    let events = SignalAgentRunEventStore::new(db.clone());
+                    if let Some(request_id) = request_id {
+                        assert!(matches!(
+                            events
+                                .admit_user_input(
+                                    next,
+                                    None,
+                                    OwnerAdmission::Activate { request_id }
+                                )
+                                .await
+                                .unwrap(),
+                            OwnerAdmissionResult::Waiting
+                        ));
+                    } else {
+                        // An explicit correction may retire A before its receipt is published.
+                        assert_eq!(
+                            events
+                                .append_user_followup(next)
+                                .await
+                                .unwrap()
+                                .input_revision,
+                            snapshot.input_revision + 1
+                        );
+                    }
                     crate::agent_exec_store::SignalAgentExecStore::new(db.clone())
                         .publish_once()
                         .await
@@ -574,9 +919,41 @@ async fn run_selected_command(background: bool) {
         let session =
             desk_diagnose_core::session::PersistedAgentSession::decode_json(&row.state_json)
                 .unwrap();
+        assert!(session.pending_auto_triggers.is_empty());
+        if retired {
+            assert_eq!(session.input_revision, snapshot.input_revision + 1);
+            assert_eq!(session.automation_turns_used, 0);
+            assert!(
+                !session
+                    .conversation
+                    .iter()
+                    .any(|message| message.text.contains("SELECTED_DISK_RECEIPT"))
+            );
+            assert!(
+                task.result_text
+                    .as_deref()
+                    .unwrap()
+                    .contains("SELECTED_DISK_RECEIPT")
+            );
+            return;
+        }
         assert_eq!(session.input_revision, snapshot.input_revision);
         assert_eq!(session.automation_turns_used, 1);
-        assert!(session.pending_auto_triggers.is_empty());
+        let (next, request_id) = queued.unwrap();
+        let request_id = request_id.unwrap();
+        let receipt = SignalAgentRunEventStore::new(db)
+            .admit_user_input(
+                &next,
+                None,
+                OwnerAdmission::Activate {
+                    request_id: &request_id,
+                },
+            )
+            .await
+            .unwrap()
+            .native()
+            .unwrap();
+        assert_eq!(receipt.input_revision, session.input_revision + 1);
     }
 }
 

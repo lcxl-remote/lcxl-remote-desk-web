@@ -297,6 +297,11 @@ pub enum LoopOutcome {
     ProtocolError(ModelTurnError),
     /// A turn is already running for this conversation.
     TurnBusy,
+    /// The owner input was durably accepted for later execution.
+    RequestQueued {
+        request_id: String,
+        session_id: String,
+    },
     /// The follow-up came from a different subject than the session.
     SubjectRejected(SubjectMismatch),
     /// New durable user input superseded this planning revision. No stale model

@@ -11,8 +11,9 @@ use sea_orm::{
     ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set,
 };
 
-use crate::agent_session_store::{EventAppend, SignalAgentSessionStore};
+use crate::agent_session_store::{CompletionInput, EventAppend, SignalAgentSessionStore};
 use crate::entity::agent_exec_task;
+use desk_diagnose_core::{action_result::ActionResultReceipt, seam::ToolRunOutput};
 
 pub const STATUS_DISPATCHING: &str = "dispatching";
 pub const STATUS_RUNNING: &str = "running";
@@ -21,6 +22,12 @@ pub const STATUS_UNKNOWN: &str = "unknown";
 pub const DELIVERY_PENDING: &str = "pending";
 pub const DELIVERY_PUBLISHED: &str = "published";
 pub const DELIVERY_CONSUMED: &str = "consumed";
+
+struct CommandResult {
+    output: ToolRunOutput,
+    receipt: ActionResultReceipt,
+    input: CompletionInput,
+}
 
 pub(crate) fn output_format(
     task: &agent_exec_task::Model,
@@ -103,6 +110,17 @@ impl SignalAgentExecStore {
         )>,
         AgentError,
     > {
+        Ok(Self::command_result_with_input_on(db, task)
+            .await?
+            .map(|result| (result.output, result.receipt)))
+    }
+
+    async fn command_result_with_input_on<
+        C: sea_orm::ConnectionTrait + crate::config::ConfigConnection,
+    >(
+        db: &C,
+        task: &agent_exec_task::Model,
+    ) -> Result<Option<CommandResult>, AgentError> {
         use crate::{
             capability_grant_store::CapabilityDispatchPayload,
             entity::agent_capability_dispatch_outbox as outbox,
@@ -165,9 +183,17 @@ impl SignalAgentExecStore {
                 &task.exec_request_id,
                 &task.execution_generation,
             );
+            let input = CompletionInput::Command {
+                input_revision: origin.turn_fence.input_revision,
+                control_revision: origin.turn_fence.control_revision,
+            };
             if let Some(receipt) = payload.command_receipt {
                 receipt.validate_for(origin, action, 1, &output)?;
-                return Ok(Some((output, receipt)));
+                return Ok(Some(CommandResult {
+                    output,
+                    receipt,
+                    input,
+                }));
             }
             let receipt = origin.receipt(
                 action,
@@ -193,7 +219,11 @@ impl SignalAgentExecStore {
                 .await
                 .map_err(|_| internal("command receipt could not be saved"))?;
             if saved.rows_affected == 1 {
-                return Ok(Some((output, receipt)));
+                return Ok(Some(CommandResult {
+                    output,
+                    receipt,
+                    input,
+                }));
             }
         }
         Err(internal("command receipt changed concurrently"))
@@ -420,7 +450,9 @@ impl SignalAgentExecStore {
                     )
                     .await?
             } else {
-                let envelope = if let Some((_, receipt)) = self.command_result(&task).await? {
+                let (envelope, input) = if let Some(CommandResult { receipt, input, .. }) =
+                    Self::command_result_with_input_on(&self.db, &task).await?
+                {
                     use crate::capability_grant_store::{
                         CapabilityDispatchCompletion, CapabilityDispatchOutcome,
                         SignalCapabilityGrantStore,
@@ -443,9 +475,9 @@ impl SignalAgentExecStore {
                         .map_err(|_| {
                             internal("command completion authority could not be settled")
                         })?;
-                    Some(receipt.envelope)
+                    (Some(receipt.envelope), Some(input))
                 } else {
-                    None
+                    (None, None)
                 };
                 sessions
                     .deliver_work_completion_with_envelope(
@@ -459,6 +491,7 @@ impl SignalAgentExecStore {
                         task.result_text.as_deref().unwrap_or("execution completed"),
                         envelope,
                         output_format(&task),
+                        input,
                         &now,
                     )
                     .await?

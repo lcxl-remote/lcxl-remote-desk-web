@@ -331,7 +331,7 @@ impl SignalControlAuthorizer {
             actor_user_id,
             &model.request_id,
         );
-        let turn = crate::ai_assistant_orchestrator::run_turn(
+        let turn = crate::ai_assistant_orchestrator::submit_owner_turn(
             self.connection_map.clone(),
             self.db.clone(),
             model.request_id.clone(),

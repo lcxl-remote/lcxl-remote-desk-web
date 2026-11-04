@@ -458,7 +458,8 @@ export function AiAssistantWorkspace({
         setSelectedCapabilityIds(current => current.filter(id => id !== CURRENT_SCREEN_CAPABILITY_ID));
     }, [chat.acceptedInput]);
 
-    const sendDisabled = chat.turnRunning || chat.stopping || !!chat.deliveryState || !rehearsalCanStart
+    const canQueueInput = !rehearsal && !startGoal;
+    const sendDisabled = (!canQueueInput && chat.turnRunning) || chat.stopping || !!chat.deliveryState || !rehearsalCanStart
         || !assistantEnabled || !question.trim() || !isConnected || chat.hydrating || chat.historyRestoreFailed || !chat.sessionTargetReady
         || chat.sessionTargetResolving || chat.contextUpdating || !providerConfig?.api_key_set
         || !providerConfig?.model || (startGoal && !goalBudgetPolicy);
@@ -1058,6 +1059,38 @@ export function AiAssistantWorkspace({
                             </p>
                         )}
                         <AssistantSubagentApprovalNotice agents={subagents} />
+                        {!rehearsal && chat.mainStopped && <Button type="button" variant="outline" size="sm"
+                            disabled={chat.resumingQueue} onClick={() => void chat.resumeQueue()}>
+                            {t('pages.aiAssistant.resumeQueue')}
+                        </Button>}
+                        {chat.queuedRequests.length > 0 && (
+                            <details className="text-sm text-muted-foreground">
+                                <summary className="cursor-pointer">{t('pages.aiAssistant.pendingInputs', { count: chat.queuedRequests.length })}</summary>
+                                <ol className="space-y-1 px-2">
+                                    {chat.queuedRequests.map((request, index) => (
+                                        <li key={request.requestId} className="flex items-center justify-between gap-2">
+                                            <span>{t('pages.aiAssistant.queuedRequest', { position: index + 1 })}</span>
+                                            <Button type="button" variant="ghost" size="sm" onClick={() => void chat.cancelQueuedRequest(request.requestId)}>
+                                                {t('pages.aiAssistant.cancelQueuedRequest')}
+                                            </Button>
+                                        </li>
+                                    ))}
+                                </ol>
+                            </details>
+                        )}
+                        {chat.failedRequests.length > 0 && (
+                            <details className="text-sm text-muted-foreground">
+                                <summary className="cursor-pointer">{t('pages.aiAssistant.failedQueuedRequests', { count: chat.failedRequests.length })}</summary>
+                                <ul className="space-y-1 px-2">
+                                    {chat.failedRequests.map(request => (
+                                        <li key={request.requestId} className="flex gap-2">
+                                            <span>{new Date(request.acceptedAtMs).toLocaleString()}</span>
+                                            <span>{t(`pages.aiAssistant.queueFailure.${request.failure ?? 'unknown'}`)}</span>
+                                        </li>
+                                    ))}
+                                </ul>
+                            </details>
+                        )}
                         <AssistantComposerInput
                             ref={goalReplyRef}
                             sendDisabled={sendDisabled}
@@ -1083,6 +1116,7 @@ export function AiAssistantWorkspace({
                                 <AssistantContextMeter usage={chat.contextUsage} draft={question} />
                                 <AssistantComposerActions turnRunning={chat.turnRunning} canStop={chat.canStop}
                                     stopping={chat.stopping} onStop={chat.stop} rehearsal={!!rehearsal}
+                                    allowQueue={canQueueInput}
                                     sendDisabled={sendDisabled} />
                             </div>
                         </div>

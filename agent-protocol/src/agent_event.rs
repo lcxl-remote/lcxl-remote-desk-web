@@ -71,6 +71,12 @@ pub struct AgentEvent {
     /// `kind = Status`: the lifecycle phase name.
     #[serde(default)]
     pub status: Option<String>,
+    /// Stable id of the durable receipt for a queued assistant input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub main_request_id: Option<String>,
+    /// Conversation that owns the queued receipt, including before its first turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub main_request_session_id: Option<String>,
     /// `kind = Partial`: an incremental summary fragment.
     #[serde(default)]
     pub partial_summary: Option<String>,
@@ -154,6 +160,8 @@ impl AgentEvent {
             seq,
             kind,
             status: None,
+            main_request_id: None,
+            main_request_session_id: None,
             partial_summary: None,
             error: None,
             retraction_reason: None,
@@ -189,6 +197,19 @@ impl AgentEvent {
         Self {
             status: Some(phase.into()),
             ..Self::base(request_id, seq, AgentEventKind::Status)
+        }
+    }
+
+    pub fn queued(
+        request_id: impl Into<String>,
+        seq: u32,
+        main_request_id: &str,
+        session_id: &str,
+    ) -> Self {
+        Self {
+            main_request_id: Some(main_request_id.into()),
+            main_request_session_id: Some(session_id.into()),
+            ..Self::status(request_id, seq, "queued")
         }
     }
 

@@ -4,6 +4,8 @@ On Web and Tauri, open **AI Assistant → Conversations → Personal conversatio
 
 On Web and Tauri, reopening the assistant restores the conversation last selected in that browser. A failed restore shows **Retry** and **New conversation**. Sending resumes after a successful restore or an explicit new conversation; starting a new conversation preserves the old stored data.
 
+You can submit separate requests while the assistant is busy. Pending messages stay with the original conversation. The current request finishes its approvals and background follow-up before another request starts. Reopen the conversation to see the queue. Expand the pending messages above the composer to cancel an individual request. After stopping the conversation, select **Resume queue** to process the remaining requests.
+
 Conversations saved in an unsupported format remain in History, marked “Cannot continue this conversation,” with deletion available after confirmation. They follow the same idle-session retention period. Work still in flight, unknown outcomes and unsettled usage keep their required evidence under the existing rules.
 
 The conversation list uses short titles. During the first exchange, the assistant uses the selected model to name the conversation from your first message. A short excerpt appears while the title is being generated or if generation fails. Title generation counts toward normal model usage.

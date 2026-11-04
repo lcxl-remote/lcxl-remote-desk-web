@@ -2,11 +2,15 @@
 
 use crate::config::connection::{DatabaseConnection, DatabaseTransaction};
 pub(crate) mod input_context;
+pub(crate) mod main_requests;
 pub use desk_diagnose_core::input_read_context::ReadContextSelection;
 pub use input_context::InputSubject;
 
 use chrono::{DateTime, Utc};
 use desk_agent_protocol::{AgentError, AgentErrorKind, AgentScope};
+use desk_assistant_data_store::main_request::{
+    self, FrozenOwnerInput, OwnerAdmission, OwnerAdmissionResult,
+};
 use desk_diagnose_core::chat::{ChatMessage, ChatRole};
 use desk_diagnose_core::dynamic_run::{
     AGENT_RUN_EVENT_SCHEMA_VERSION, AgentRunEvent, AgentRunEventKind, AssistantInputTarget,
@@ -61,6 +65,7 @@ pub struct UserFollowupAck {
     pub input_revision: u64,
     pub newly_appended: bool,
     pub already_handled: bool,
+    pub main_request_id: Option<String>,
 }
 
 #[derive(Clone)]
@@ -80,7 +85,10 @@ impl SignalAgentRunEventStore {
         &self,
         params: &AppendUserFollowupParams,
     ) -> Result<UserFollowupAck, AgentError> {
-        self.append_user_followup_inner(params, None).await
+        self.admit_user_input(params, None, OwnerAdmission::Native)
+            .await?
+            .native()
+            .map_err(|error| error.into_agent_error())
     }
 
     /// The first user message, queued goal, and both ledger events become
@@ -90,15 +98,22 @@ impl SignalAgentRunEventStore {
         params: &AppendUserFollowupParams,
         goal: StartUserGoal,
     ) -> Result<UserFollowupAck, AgentError> {
-        self.append_user_followup_inner(params, Some(goal)).await
+        self.admit_user_input(params, Some(goal), OwnerAdmission::Native)
+            .await?
+            .native()
+            .map_err(|error| error.into_agent_error())
     }
 
-    async fn append_user_followup_inner(
+    pub async fn admit_user_input(
         &self,
         params: &AppendUserFollowupParams,
         goal_start: Option<StartUserGoal>,
-    ) -> Result<UserFollowupAck, AgentError> {
+        admission: OwnerAdmission<'_>,
+    ) -> Result<OwnerAdmissionResult<UserFollowupAck>, AgentError> {
         validate_append_params(params)?;
+        if goal_start.is_some() && !matches!(admission, OwnerAdmission::Native) {
+            return Err(internal("Goal input requires its native admission"));
+        }
         let targetless = params.device_id.is_empty();
         if targetless && (goal_start.is_some() || params.temporary_conversation.is_some()) {
             return Err(internal(
@@ -128,6 +143,24 @@ impl SignalAgentRunEventStore {
                 .await
                 .map_err(|_| internal("rehearsal input changed or not admitted"))?;
             }
+            if let OwnerAdmission::Enqueue { ask, .. } = admission {
+                check_queue_intent(params, ask)?;
+                if let Some(queued) = main_request::replay(
+                    &txn,
+                    &params.actor_id,
+                    &params.run_id,
+                    ask,
+                    &params.device_id,
+                )
+                .await
+                .map_err(|error| error.into_agent_error())?
+                {
+                    txn.commit()
+                        .await
+                        .map_err(|_| internal("commit queued input replay"))?;
+                    return Ok(OwnerAdmissionResult::Queued(Box::new(queued)));
+                }
+            }
 
             if let Some(existing) = agent_run_event::Entity::find()
                 .filter(agent_run_event::Column::EventId.eq(&params.event_id))
@@ -155,7 +188,21 @@ impl SignalAgentRunEventStore {
                         "temporary mode differs from the accepted conversation",
                     ));
                 }
-                let ack = ack_from_existing(&existing, params, &session)?;
+                let mut ack = ack_from_existing(&existing, params, &session)?;
+                if let OwnerAdmission::Activate { request_id } = admission
+                    && !main_request::load(&txn, &params.actor_id, &params.run_id, request_id)
+                        .await
+                        .map_err(|error| error.into_agent_error())?
+                        .is_some_and(|queued| {
+                            queued.client_message_id == params.message.message_id
+                                && queued.input_revision == Some(ack.input_revision as i64)
+                        })
+                {
+                    return Err(internal("native input is not linked to this queue request"));
+                }
+                if let OwnerAdmission::Activate { request_id } = admission {
+                    ack.main_request_id = Some(request_id.into());
+                }
                 if let Some(start) = &goal_start {
                     let row = agent_goal_run::Entity::find()
                         .filter(agent_goal_run::Column::GoalId.eq(&start.goal_id))
@@ -181,7 +228,7 @@ impl SignalAgentRunEventStore {
                 txn.commit().await.map_err(|error| {
                     internal(format!("commit idempotent user follow-up: {error}"))
                 })?;
-                return Ok(ack);
+                return Ok(OwnerAdmissionResult::Native(ack));
             }
 
             let mut targets = if params.target_refs.is_empty() {
@@ -250,6 +297,76 @@ impl SignalAgentRunEventStore {
             if let Some(selection) = &params.read_context {
                 input_context::validate_selection(&session, selection, &params.message, now)?;
             }
+            if !matches!(admission, OwnerAdmission::Enqueue { .. })
+                && session.has_live_main_coordination(now.timestamp_millis())
+            {
+                return Ok(OwnerAdmissionResult::Waiting);
+            }
+            let activation = match admission {
+                OwnerAdmission::Native => None,
+                OwnerAdmission::Enqueue {
+                    ask,
+                    limit,
+                    reply_connection_id,
+                } => {
+                    let frozen = FrozenOwnerInput::capture(
+                        ask,
+                        &params.device_id,
+                        &targets,
+                        params.read_context.as_ref(),
+                        &params.message,
+                    )
+                    .map_err(|error| error.into_agent_error())?;
+                    let queued = main_request::enqueue(
+                        &txn,
+                        &params.actor_id,
+                        &params.run_id,
+                        &frozen,
+                        reply_connection_id,
+                        limit,
+                        now.timestamp_millis(),
+                    )
+                    .await
+                    .map_err(|error| error.into_agent_error())?;
+                    txn.commit()
+                        .await
+                        .map_err(|_| internal("commit queued assistant input"))?;
+                    return Ok(OwnerAdmissionResult::Queued(Box::new(queued)));
+                }
+                OwnerAdmission::Activate { request_id } => {
+                    let head = main_request::first_pending(&txn, &params.actor_id, &params.run_id)
+                        .await
+                        .map_err(|error| error.into_agent_error())?;
+                    let Some(head) = head.filter(|row| row.request_id == request_id) else {
+                        return Ok(OwnerAdmissionResult::Waiting);
+                    };
+                    if desk_diagnose_core::future::boxed(|| {
+                        main_requests::slot_held(&txn, &session)
+                    })
+                    .await?
+                    {
+                        return Ok(OwnerAdmissionResult::Waiting);
+                    }
+                    let frozen = FrozenOwnerInput::decode(&head)
+                        .map_err(|error| error.into_agent_error())?;
+                    check_queue_intent(params, &frozen.ask)?;
+                    if frozen
+                        != FrozenOwnerInput::capture(
+                            &frozen.ask,
+                            &params.device_id,
+                            &targets,
+                            params.read_context.as_ref(),
+                            &params.message,
+                        )
+                        .map_err(|error| error.into_agent_error())?
+                    {
+                        return Err(internal(
+                            "queued assistant input scope or destination changed",
+                        ));
+                    }
+                    Some(head)
+                }
+            };
             let prior_task_retrieval =
                 desk_diagnose_core::ai_assistant::data_access::task_retrieval_snapshot(&session);
             desk_diagnose_core::future::send_phase(|| {
@@ -448,6 +565,18 @@ impl SignalAgentRunEventStore {
                 txn.rollback().await.ok();
                 continue;
             }
+            if let Some(queued) = &activation
+                && !main_request::activate(
+                    &txn,
+                    queued,
+                    session.input_revision,
+                    now.timestamp_millis(),
+                )
+                .await
+                .map_err(|error| error.into_agent_error())?
+            {
+                return Err(internal("queued assistant input changed before activation"));
+            }
             desk_diagnose_core::future::boxed(|| {
                 crate::assistant_data_store::history::capture_user_input_on(
                     &txn,
@@ -473,14 +602,15 @@ impl SignalAgentRunEventStore {
                     crate::model_metrics::runtime::submit,
                 );
             }
-            return Ok(UserFollowupAck {
+            return Ok(OwnerAdmissionResult::Native(UserFollowupAck {
                 event_id: event.event_id,
                 event_seq: event.event_seq,
                 input_seq: followup.input_seq,
                 input_revision: event.input_revision,
                 newly_appended: true,
                 already_handled: false,
-            });
+                main_request_id: activation.map(|queued| queued.request_id),
+            }));
         }
         Err(transport(
             "user follow-up conflicted; retry with the same event id",
@@ -814,6 +944,19 @@ async fn write_input_goal_events_on(
     Ok(true)
 }
 
+fn check_queue_intent(
+    params: &AppendUserFollowupParams,
+    ask: &desk_agent_protocol::ai_assistant::AiAssistantAsk,
+) -> Result<(), AgentError> {
+    if ask.conversation_id.as_deref().map(str::trim) != params.client_conversation_id.as_deref()
+        || ask.client_timezone != params.client_timezone
+        || ask.temporary_conversation != params.temporary_conversation
+    {
+        return Err(internal("queued assistant conversation intent changed"));
+    }
+    Ok(())
+}
+
 fn validate_append_params(params: &AppendUserFollowupParams) -> Result<(), AgentError> {
     desk_agent_protocol::ai_assistant::validate_target_refs(
         params.target_refs.iter().map(String::as_str),
@@ -962,6 +1105,7 @@ fn ack_from_existing(
         input_revision: to_u64("input_revision", row.input_revision)?,
         newly_appended: false,
         already_handled: session.handled_input_seq >= input_seq,
+        main_request_id: None,
     })
 }
 
@@ -1780,8 +1924,59 @@ mod tests {
                 .await
                 .unwrap();
         }
+        session
+            .conversation
+            .iter_mut()
+            .find(|message| message.message_id == input.message.message_id)
+            .unwrap()
+            .turn_id = session.current_turn_id.clone();
         session.finish_turn(TurnState::Idle, now.to_rfc3339());
         sessions.save(&mut session).await.unwrap();
+        let queued = if stop_before_resume {
+            None
+        } else {
+            let next = AppendUserFollowupParams {
+                event_id: "queued-personal-web".into(),
+                message: params("new-event", "queued-personal-web", "Check the next item").message,
+                ..input.clone()
+            };
+            let ask = desk_agent_protocol::ai_assistant::AiAssistantAsk {
+                question: next.message.text.clone(),
+                client_message_id: next.message.message_id.clone(),
+                client_timezone: next.client_timezone.clone(),
+                conversation_id: next.client_conversation_id.clone(),
+                ..Default::default()
+            };
+            let OwnerAdmissionResult::Queued(queued) = store
+                .admit_user_input(
+                    &next,
+                    None,
+                    OwnerAdmission::Enqueue {
+                        ask: &ask,
+                        limit: 4,
+                        reply_connection_id: None,
+                    },
+                )
+                .await
+                .unwrap()
+            else {
+                panic!("expected a durable queued request")
+            };
+            assert!(matches!(
+                store
+                    .admit_user_input(
+                        &next,
+                        None,
+                        OwnerAdmission::Activate {
+                            request_id: &queued.request_id
+                        }
+                    )
+                    .await
+                    .unwrap(),
+                OwnerAdmissionResult::Waiting
+            ));
+            Some((next, queued.request_id.clone()))
+        };
         let item = &event.request.items[0];
         let inventory = [CapabilityAvailability {
             provider_id: item.provider_id.clone(),
@@ -1867,6 +2062,15 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+        if let Some((next, request_id)) = &queued {
+            assert!(matches!(
+                store
+                    .admit_user_input(next, None, OwnerAdmission::Activate { request_id })
+                    .await
+                    .unwrap(),
+                OwnerAdmissionResult::Waiting
+            ));
+        }
         let mut claim = ClaimTurnParams {
             conversation_id: input.run_id.clone(),
             actor_id: input.actor_id.clone(),
@@ -1992,7 +2196,7 @@ mod tests {
         let mut resumed = resume.claim_turn(claim.clone()).await.unwrap();
         assert_eq!(resumed.input_revision, session.input_revision);
         assert_eq!(resumed.chain_id, session.chain_id);
-        assert!(resume.claim_turn(claim).await.is_err());
+        assert!(resume.claim_turn(claim.clone()).await.is_err());
         resumed.finish_turn(TurnState::Idle, now.to_rfc3339());
         resume.save(&mut resumed).await.unwrap();
         assert!(
@@ -2001,6 +2205,194 @@ mod tests {
                 .await
                 .unwrap()
                 .is_none()
+        );
+        let (next, request_id) = queued.unwrap();
+        let next_receipt = store
+            .admit_user_input(
+                &next,
+                None,
+                OwnerAdmission::Activate {
+                    request_id: &request_id,
+                },
+            )
+            .await
+            .unwrap()
+            .native()
+            .unwrap();
+        assert_eq!(next_receipt.input_revision, resumed.input_revision + 1);
+        let saved = main_request::load(&db, &next.actor_id, &next.run_id, &request_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            saved.input_revision,
+            Some(next_receipt.input_revision as i64)
+        );
+        assert!(saved.pending_input_json.is_some());
+        let queued_sessions = sessions
+            .with_expected_input_revision(next_receipt.input_revision)
+            .with_queued_input(request_id.clone(), next.message.message_id.clone());
+        claim.trigger_origin = TriggerOrigin::User;
+        claim.turn_id = "queued-owner-turn".into();
+        let next_claim = queued_sessions.claim_turn(claim).await.unwrap();
+        assert_eq!(next_claim.input_revision, next_receipt.input_revision);
+        assert!(
+            main_request::load(&db, &next.actor_id, &next.run_id, &request_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .pending_input_json
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn main_request_queue_recovers_activated_input_after_file_reopen() {
+        verify_main_request_recovery(false).await;
+    }
+
+    #[tokio::test]
+    async fn main_request_queue_stop_and_resume_preserve_the_unclaimed_activation() {
+        verify_main_request_recovery(true).await;
+    }
+
+    async fn verify_main_request_recovery(stopped: bool) {
+        use desk_diagnose_core::{
+            seam::{ClaimTurnParams, SessionSeam},
+            session::TriggerOrigin,
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("main-requests.sqlite");
+        let db = file_db(&path).await;
+        let events = SignalAgentRunEventStore::new(db.clone());
+        let mut next = params("queued-event", "queued-input", "Analyze next");
+        next.device_id.clear();
+        next.policy_revision =
+            desk_diagnose_core::assistant_policy::PERSONAL_ASSISTANT_POLICY_REVISION;
+        next.run_id = desk_diagnose_core::conversation_key::derive_assistant_conversation_key(
+            &next.actor_id,
+            desk_diagnose_core::conversation_key::AssistantConversationScope::Personal,
+            next.client_conversation_id.as_deref().unwrap(),
+        );
+        next.read_context = Some(ReadContextSelection::capture(&[], &next.current_scope).unwrap());
+        let ask = desk_agent_protocol::ai_assistant::AiAssistantAsk {
+            question: next.message.text.clone(),
+            client_message_id: next.message.message_id.clone(),
+            client_timezone: next.client_timezone.clone(),
+            conversation_id: next.client_conversation_id.clone(),
+            ..Default::default()
+        };
+        let OwnerAdmissionResult::Queued(row) = events
+            .admit_user_input(
+                &next,
+                None,
+                OwnerAdmission::Enqueue {
+                    ask: &ask,
+                    limit: 4,
+                    reply_connection_id: None,
+                },
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("expected queued input")
+        };
+        let activation = OwnerAdmission::Activate {
+            request_id: &row.request_id,
+        };
+        let admitted = events
+            .admit_user_input(&next, None, activation)
+            .await
+            .unwrap()
+            .native()
+            .unwrap();
+        drop(events);
+        drop(db);
+
+        let db = file_db(&path).await;
+        let heads = main_request::recovery_heads(&db, 0, 4).await.unwrap();
+        assert_eq!(heads.len(), 1);
+        assert_eq!(heads[0].request_id, row.request_id);
+        assert_eq!(FrozenOwnerInput::decode(&heads[0]).unwrap().ask, ask);
+        let events = SignalAgentRunEventStore::new(db.clone());
+        let replay = events
+            .admit_user_input(&next, None, activation)
+            .await
+            .unwrap()
+            .native()
+            .unwrap();
+        assert!(!replay.newly_appended);
+        assert_eq!(replay.input_revision, admitted.input_revision);
+        let sessions = crate::agent_session_store::SignalAgentSessionStore::new(db.clone())
+            .with_client_metadata(next.client_conversation_id.clone(), next.surface)
+            .with_expected_input_revision(replay.input_revision)
+            .with_queued_input(
+                replay.main_request_id.unwrap(),
+                next.message.message_id.clone(),
+            );
+        let claim = ClaimTurnParams {
+            conversation_id: next.run_id.clone(),
+            actor_id: next.actor_id.clone(),
+            device_id: next.device_id.clone(),
+            policy_revision: next.policy_revision,
+            current_pdp_scope: next.current_scope.clone(),
+            turn_id: "first-queued-turn".into(),
+            request_id: None,
+            connection_id: None,
+            trigger_origin: TriggerOrigin::User,
+            now: next.created_at.clone(),
+        };
+        if stopped {
+            let controls = crate::agent_subagent_store::SubAgentStore::new(db.clone());
+            let stop = controls
+                .stop_for_owner(
+                    &next.run_id,
+                    &next.actor_id,
+                    "",
+                    &desk_agent_protocol::ai_assistant::subagent::AiAssistantStopControl {
+                        client_request_id: "pause-queued-input".into(),
+                        expected_input_revision: admitted.input_revision,
+                        expected_control_revision: 1,
+                        subagent_choice: None,
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(matches!(
+                sessions.claim_turn(claim.clone()).await,
+                Err(desk_diagnose_core::seam::ClaimError::Busy)
+            ));
+            let heads = main_request::recovery_heads(&db, 0, 4).await.unwrap();
+            assert_eq!(heads.len(), 1);
+            assert_eq!(heads[0].request_id, row.request_id);
+            assert!(
+                controls
+                    .resume_main_queue_for_owner(&next.run_id, &next.actor_id, "", 1)
+                    .await
+                    .is_err()
+            );
+            let stopped_revision = stop.result.control_revision;
+            let resumed = controls
+                .resume_main_queue_for_owner(&next.run_id, &next.actor_id, "", stopped_revision)
+                .await
+                .unwrap();
+            assert_eq!(resumed, stopped_revision + 1);
+            assert_eq!(
+                controls
+                    .resume_main_queue_for_owner(&next.run_id, &next.actor_id, "", stopped_revision)
+                    .await
+                    .unwrap(),
+                resumed
+            );
+        }
+        let owner = sessions.claim_turn(claim.clone()).await.unwrap();
+        assert_eq!(owner.input_revision, admitted.input_revision);
+        assert!(sessions.claim_turn(claim).await.is_err());
+        assert!(
+            main_request::recovery_heads(&db, 0, 4)
+                .await
+                .unwrap()
+                .is_empty()
         );
     }
 

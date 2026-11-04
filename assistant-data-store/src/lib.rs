@@ -9,6 +9,7 @@ pub mod evidence;
 pub mod history_native;
 pub mod history_query;
 pub mod keyword_search;
+pub mod main_request;
 pub mod memory_control;
 pub mod memory_history;
 pub mod memory_index;

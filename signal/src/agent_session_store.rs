@@ -36,7 +36,7 @@ use desk_diagnose_core::permission_grant::{build_permission_grants, permission_d
 use desk_diagnose_core::seam::{ClaimError, ClaimTurnParams, SessionSeam};
 use desk_diagnose_core::session::{
     ActionIdentity, AgentSessionSurface, ExecutionState, PendingAutoTrigger, PersistedAgentSession,
-    RecoveryVerdict, TurnClaimError, TurnState, WorkKind,
+    RecoveryVerdict, TriggerOrigin, TurnClaimError, TurnState, WorkKind,
 };
 use sea_orm::DbErr;
 use sea_orm::QueryTrait;
@@ -71,6 +71,7 @@ pub struct SignalAgentSessionStore {
     surface: AgentSessionSurface,
     context_selection: Option<ContextSelectionClaim>,
     expected_input_revision: Option<u64>,
+    queued_input: Option<(String, String)>,
     work_event: Option<String>,
     permission_resume: Option<permission_resume::ClaimBinding>,
 }
@@ -85,6 +86,7 @@ impl SignalAgentSessionStore {
             surface: AgentSessionSurface::Unknown,
             context_selection: None,
             expected_input_revision: None,
+            queued_input: None,
             work_event: None,
             permission_resume: None,
         }
@@ -109,6 +111,11 @@ impl SignalAgentSessionStore {
     /// follow-up that happens to win the session before the claim CAS.
     pub fn with_expected_input_revision(mut self, revision: u64) -> Self {
         self.expected_input_revision = Some(revision);
+        self
+    }
+
+    pub fn with_queued_input(mut self, request_id: String, message_id: String) -> Self {
+        self.queued_input = Some((request_id, message_id));
         self
     }
 
@@ -1101,6 +1108,7 @@ impl SignalAgentSessionStore {
             result_text,
             None,
             desk_diagnose_core::seam::ToolOutputFormat::Text,
+            None,
             now,
         )
         .await
@@ -1119,6 +1127,7 @@ impl SignalAgentSessionStore {
         result_text: &str,
         result_envelope: Option<desk_agent_protocol::data_lineage::DataEnvelope>,
         result_format: desk_diagnose_core::seam::ToolOutputFormat,
+        input: Option<CompletionInput>,
         now: &str,
     ) -> Result<EventAppend, AgentError> {
         let now_dt = now_from(now);
@@ -1170,7 +1179,32 @@ impl SignalAgentSessionStore {
                     return Ok(EventAppend::AlreadyPresent);
                 }
             }
-            if !session.apply_completion_with_envelope(
+            let retired = session.agent_role.is_main()
+                && input.is_some_and(|input| {
+                    let (input_revision, control_revision) = match input {
+                        CompletionInput::Command {
+                            input_revision,
+                            control_revision,
+                        } => (input_revision, Some(control_revision)),
+                        CompletionInput::Provider { input_revision } => (input_revision, None),
+                    };
+                    session.main_stopped
+                        || input_revision != session.input_revision
+                        || control_revision
+                            .is_some_and(|revision| revision != session.control_revision)
+                });
+            if retired && matches!(input, Some(CompletionInput::Command { .. })) {
+                let action = desk_diagnose_core::session::ActionIdentity::new(
+                    work_id,
+                    background_task_id,
+                    execution_id,
+                    work_kind,
+                );
+                if !session.execution_state.contains(&action) {
+                    return Ok(EventAppend::AlreadyPresent);
+                }
+                session.execution_state.remove(&action);
+            } else if !session.apply_completion_with_envelope(
                 event_id,
                 execution_id,
                 tool_call_id,
@@ -1182,16 +1216,18 @@ impl SignalAgentSessionStore {
             ) {
                 return Ok(EventAppend::AlreadyPresent);
             }
-            session.add_pending_auto_trigger(PendingAutoTrigger {
-                work_id,
-                kind: work_kind,
-                execution_id: execution_id.to_string(),
-                tool_call_id: tool_call_id.to_string(),
-                event_id: event_id.to_string(),
-                chain_id: session.chain_id.clone(),
-                resolution_org_id: None,
-                since: now.to_string(),
-            });
+            if !retired {
+                session.add_pending_auto_trigger(PendingAutoTrigger {
+                    work_id,
+                    kind: work_kind,
+                    execution_id: execution_id.to_string(),
+                    tool_call_id: tool_call_id.to_string(),
+                    event_id: event_id.to_string(),
+                    chain_id: session.chain_id.clone(),
+                    resolution_org_id: None,
+                    since: now.to_string(),
+                });
+            }
             let new_version = row.version + 1;
             session.version = new_version;
             let state_json = session
@@ -1347,6 +1383,17 @@ pub enum EventAppend {
     Appended,
     AlreadyPresent,
     Busy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompletionInput {
+    Command {
+        input_revision: u64,
+        control_revision: u64,
+    },
+    Provider {
+        input_revision: u64,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -1923,6 +1970,9 @@ impl SessionSeam for SignalAgentSessionStore {
                             "prepared input was superseded before the turn claim",
                         )));
                     }
+                    if self.queued_input.is_some() && session.main_stopped {
+                        return Err(ClaimError::Busy);
+                    }
                     if let (Some(event_id), Some(revision)) =
                         (&self.work_event, self.expected_input_revision)
                     {
@@ -2018,13 +2068,32 @@ impl SessionSeam for SignalAgentSessionStore {
                         return Err(ClaimError::Busy);
                     }
                     session.adopt_trigger(params.trigger_origin, &params.turn_id);
+                    if let Some((_, message_id)) = &self.queued_input {
+                        if params.trigger_origin != TriggerOrigin::User
+                            || self.expected_input_revision != Some(session.input_revision)
+                        {
+                            return Err(ClaimError::Busy);
+                        }
+                        let message = session
+                            .conversation
+                            .iter_mut()
+                            .find(|message| {
+                                message.message_id == *message_id
+                                    && message.role == desk_diagnose_core::chat::ChatRole::User
+                            })
+                            .ok_or(ClaimError::Busy)?;
+                        if message.turn_id.is_some() {
+                            return Err(ClaimError::Busy);
+                        }
+                        message.turn_id = Some(params.turn_id.clone());
+                    }
                     let old_version = row.version;
                     let new_version = old_version + 1;
                     session.version = new_version;
                     let state_json = session.encode_json_for_storage().map_err(|e| {
                         ClaimError::Backend(internal(format!("encode agent session state: {e}")))
                     })?;
-                    let result = agent_session::Entity::update_many()
+                    let update = agent_session::Entity::update_many()
                         .col_expr(agent_session::Column::StateJson, Expr::value(state_json))
                         .col_expr(agent_session::Column::Version, Expr::value(new_version))
                         .col_expr(
@@ -2037,12 +2106,37 @@ impl SessionSeam for SignalAgentSessionStore {
                         )
                         .col_expr(agent_session::Column::UpdatedAt, Expr::value(now))
                         .filter(agent_session::Column::Id.eq(row.id))
-                        .filter(agent_session::Column::Version.eq(old_version))
-                        .exec(&self.db)
-                        .await
-                        .map_err(|e| {
+                        .filter(agent_session::Column::Version.eq(old_version));
+                    let result = if let Some((request_id, message_id)) = &self.queued_input {
+                        let txn = crate::db::begin_write(&self.db, agent_session::Entity)
+                            .await
+                            .map_err(|error| ClaimError::Backend(internal(error.to_string())))?;
+                        let result = update
+                            .exec(&txn)
+                            .await
+                            .map_err(|error| ClaimError::Backend(internal(error.to_string())))?;
+                        if result.rows_affected == 1
+                            && !desk_assistant_data_store::main_request::mark_claimed(
+                                &txn,
+                                request_id,
+                                &session,
+                                message_id,
+                                now.timestamp_millis(),
+                            )
+                            .await
+                            .map_err(|error| ClaimError::Backend(error.into_agent_error()))?
+                        {
+                            return Err(ClaimError::Busy);
+                        }
+                        txn.commit()
+                            .await
+                            .map_err(|error| ClaimError::Backend(internal(error.to_string())))?;
+                        result
+                    } else {
+                        update.exec(&self.db).await.map_err(|e| {
                             ClaimError::Backend(internal(format!("claim agent session: {e}")))
-                        })?;
+                        })?
+                    };
                     if result.rows_affected == 1 {
                         return Ok(session);
                     }

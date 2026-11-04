@@ -53,6 +53,12 @@ pub struct AuthContext {
 }
 
 impl AuthContext {
+    pub fn is_browser_user(&self, user_id: i32) -> bool {
+        self.auth_kind == AuthKind::CookieAuth
+            && self.remote_desk_type == RemoteDeskTypeEnum::Browser
+            && self.user_id == Some(user_id)
+    }
+
     /// An unauthenticated context (no identity resolved).
     pub fn anonymous(remote_desk_type: RemoteDeskTypeEnum) -> Self {
         Self {
@@ -198,5 +204,13 @@ mod tests {
         let ctx = AuthContext::default();
         assert_eq!(ctx.auth_kind, AuthKind::None);
         assert_eq!(ctx.remote_desk_type, RemoteDeskTypeEnum::Browser);
+    }
+
+    #[test]
+    fn queued_stream_recipient_is_the_original_browser_account() {
+        assert!(AuthContext::cookie(7, RemoteDeskTypeEnum::Browser).is_browser_user(7));
+        assert!(!AuthContext::cookie(8, RemoteDeskTypeEnum::Browser).is_browser_user(7));
+        assert!(!AuthContext::token_auth(7, 1, RemoteDeskTypeEnum::Server).is_browser_user(7));
+        assert!(!AuthContext::code_session("guest").is_browser_user(7));
     }
 }

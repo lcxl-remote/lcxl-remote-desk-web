@@ -1,0 +1,1 @@
+{"type":"object","required":["session","requestId"],"properties":{"requestId":{"type":"string"},"session":{"type":"string"}},"x-readme-ref-name":"AiAssistantMainRequestCancelBody"}

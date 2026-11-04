@@ -780,6 +780,9 @@ impl SignalBackgroundTaskStore {
                     &result_text,
                     result_envelope,
                     desk_diagnose_core::seam::ToolOutputFormat::Json,
+                    Some(crate::agent_session_store::CompletionInput::Provider {
+                        input_revision: record.task.input_revision,
+                    }),
                     &now,
                 )
                 .await
@@ -1697,6 +1700,7 @@ mod tests {
                     &output.text,
                     Some(output.envelope.clone()),
                     desk_diagnose_core::seam::ToolOutputFormat::Json,
+                    None,
                     "2026-08-26T00:00:03Z",
                 )
                 .await

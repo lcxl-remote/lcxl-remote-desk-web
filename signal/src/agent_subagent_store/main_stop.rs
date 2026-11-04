@@ -5,7 +5,7 @@ use crate::entity::agent_delegation_reservation as receipt_row;
 use desk_agent_protocol::ai_assistant::subagent::{
     AiAssistantStopControl, AiAssistantStopResult, SubAgentStopChoice,
 };
-use sea_orm::ActiveModelTrait;
+use sea_orm::{ActiveModelTrait, ExprTrait, sea_query::Expr};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -17,6 +17,96 @@ pub struct MainStopOutcome {
 }
 
 impl SubAgentStore {
+    pub async fn resume_main_queue_for_owner(
+        &self,
+        root: &str,
+        actor: &str,
+        device: &str,
+        expected_control_revision: u64,
+    ) -> Result<u64, DbErr> {
+        use crate::entity::agent_permission_resume as resume;
+        let txn = crate::db::begin_write(&self.db, session_row::Entity).await?;
+        let row = session_row::Entity::find()
+            .filter(session_row::Column::ConversationId.eq(root))
+            .filter(session_row::Column::ActorId.eq(actor))
+            .filter(session_row::Column::DeviceId.eq(device))
+            .one(&txn)
+            .await?
+            .ok_or_else(invalid)?;
+        let mut parent =
+            PersistedAgentSession::decode_boxed_json(&row.state_json).map_err(|_| invalid())?;
+        if actor != crate::control_authorizer::SINGLE_ACCOUNT_USER_ID.to_string()
+            || parent.conversation_id != root
+            || parent.actor_id != actor
+            || parent.device_id != device
+            || parent.version != row.version
+            || i64::try_from(parent.lease_token).ok() != Some(row.lease_token)
+            || (device.is_empty() && !parent.has_admitted_personal_input())
+        {
+            return Err(invalid());
+        }
+        let now = chrono::Utc::now();
+        if desk_assistant_data_store::main_request::resume_queue_control(
+            &mut parent,
+            expected_control_revision,
+            &now.to_rfc3339(),
+        )
+        .map_err(|_| invalid())?
+        {
+            let resumes = resume::Entity::find()
+                .filter(resume::Column::RunId.eq(root))
+                .filter(resume::Column::ActorId.eq(actor))
+                .filter(resume::Column::DeviceId.eq(device))
+                .filter(resume::Column::InputRevision.eq(parent.input_revision as i64))
+                .filter(resume::Column::State.eq("pending"));
+            if resumes
+                .clone()
+                .filter(resume::Column::Version.eq(i64::MAX))
+                .one(&txn)
+                .await?
+                .is_some()
+            {
+                return Err(invalid());
+            }
+            use sea_orm::{QuerySelect, QueryTrait};
+            resume::Entity::update_many()
+                .col_expr(resume::Column::State, Expr::value("superseded"))
+                .col_expr(resume::Column::UpdatedAt, Expr::value(now))
+                .col_expr(
+                    resume::Column::Version,
+                    Expr::col(resume::Column::Version).add(1_i64),
+                )
+                .filter(
+                    resume::Column::Id.in_subquery(
+                        resumes
+                            .select_only()
+                            .column(resume::Column::Id)
+                            .into_query(),
+                    ),
+                )
+                .exec(&txn)
+                .await?;
+            parent.version = row.version.checked_add(1).ok_or_else(invalid)?;
+            let updated = session_row::Entity::update_many()
+                .set(session_row::ActiveModel {
+                    state_json: Set(parent.encode_json_for_storage().map_err(|_| invalid())?),
+                    version: Set(parent.version),
+                    updated_at: Set(now),
+                    ..Default::default()
+                })
+                .filter(session_row::Column::Id.eq(row.id))
+                .filter(session_row::Column::Version.eq(row.version))
+                .filter(session_row::Column::LeaseToken.eq(row.lease_token))
+                .exec(&txn)
+                .await?;
+            if updated.rows_affected != 1 {
+                return Err(invalid());
+            }
+        }
+        txn.commit().await?;
+        Ok(parent.control_revision)
+    }
+
     pub async fn stop_for_owner(
         &self,
         root: &str,
@@ -101,6 +191,12 @@ impl SubAgentStore {
         let now = chrono::Utc::now();
         let mut cancel_request_ids: Vec<String> =
             parent.current_request_id.iter().cloned().collect();
+        cancel_request_ids.extend(
+            parent
+                .main_coordination
+                .iter()
+                .map(|lease| lease.batch_id.clone()),
+        );
         let mut stopped_subagents = Vec::new();
         let mut permission_ends =
             desk_diagnose_core::model_observability::permission::PendingEnds::waiting(

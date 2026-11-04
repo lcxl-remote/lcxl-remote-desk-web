@@ -282,6 +282,9 @@ pub fn configure_api_surface(
                     cfg.service(create_token)
                         .service(get_ai_assistant_session)
                         .service(desk_signal::controller::ai_assistant_session::get_ai_assistant_device_roster)
+                        .service(desk_signal::controller::ai_assistant_session::list_ai_assistant_main_requests)
+                        .service(desk_signal::controller::ai_assistant_session::cancel_ai_assistant_main_request)
+                        .service(desk_signal::controller::ai_assistant_session::resume_ai_assistant_main_requests)
                         .service(desk_signal::controller::ai_assistant_session::update_ai_assistant_device_roster)
                         .service(desk_signal::controller::ai_assistant_session::list_ai_assistant_subagents)
                         .service(desk_signal::controller::ai_assistant_session::get_ai_assistant_subagent_status)
@@ -783,6 +786,14 @@ pub async fn run_with_hub(
             connection_map.clone(),
         ));
         desk_signal::agent_runtime::register_continuation_connections(connection_map.clone());
+        actix_web::rt::spawn(
+            desk_signal::ai_assistant_orchestrator::main_requests::SignalMainRequestExecutor::new(
+                desk_signal::db::get_db().clone(),
+                connection_map.clone(),
+                desk_signal::ai_assistant_gate::global_ai_assistant_gate(),
+            )
+            .run(),
+        );
         actix_web::rt::spawn(
             desk_signal::permission_resume_executor::SignalPermissionResumeExecutor::new(
                 desk_signal::db::get_db().clone(),

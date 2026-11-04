@@ -395,6 +395,7 @@ async fn completed_fixture_with_delivery(
                 &output.content,
                 Some(receipt.envelope),
                 output.format,
+                None,
                 &chrono::Utc::now().to_rfc3339(),
             )
             .await

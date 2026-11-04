@@ -856,6 +856,98 @@ export type AiAssistantGoalOpenRequestDto = {
     targetGoalRevision?: number | null;
 };
 
+export type AiAssistantMainRequestCancelBody = {
+    /**
+     * @type string
+    */
+    requestId: string;
+    /**
+     * @type string
+    */
+    session: string;
+};
+
+export type AiAssistantMainRequestResumeBody = {
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    expectedControlRevision: number;
+    /**
+     * @type string
+    */
+    session: string;
+};
+
+export type AiAssistantMainRequestResumeDto = {
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    controlRevision: number;
+};
+
+export const mainRequestFailureEnum = {
+    source_unavailable: "source_unavailable",
+    destination_changed: "destination_changed",
+    coordination_exhausted: "coordination_exhausted"
+} as const;
+
+export type MainRequestFailureEnumKey = (typeof mainRequestFailureEnum)[keyof typeof mainRequestFailureEnum];
+
+export type MainRequestFailure = MainRequestFailureEnumKey;
+
+export const mainRequestStateEnum = {
+    queued: "queued",
+    activated: "activated",
+    cancelled: "cancelled",
+    superseded: "superseded",
+    failed: "failed"
+} as const;
+
+export type MainRequestStateEnumKey = (typeof mainRequestStateEnum)[keyof typeof mainRequestStateEnum];
+
+/**
+ * @description Owner-visible queue state. Native turn and approval state live in the session.
+*/
+export type MainRequestState = MainRequestStateEnumKey;
+
+export type MainRequestReceipt = {
+    /**
+     * @type integer, int64
+    */
+    acceptedAtMs: number;
+    /**
+     * @type string
+    */
+    clientMessageId: string;
+    failure?: (null | MainRequestFailure);
+    /**
+     * @type integer,null, int64
+    */
+    inputRevision?: number | null;
+    /**
+     * @type string
+    */
+    requestId: string;
+    /**
+     * @description Owner-visible queue state. Native turn and approval state live in the session.
+     * @type string
+    */
+    state: MainRequestState;
+};
+
+export type AiAssistantMainRequestsDto = {
+    /**
+     * @type array
+    */
+    items: MainRequestReceipt[];
+    /**
+     * @type string
+    */
+    sessionId: string;
+};
+
 export type AiAssistantSessionSummaryDto = {
     /**
      * @type boolean
@@ -2808,6 +2900,11 @@ export type AiAssistantSessionSnapshotDto = {
      * @type integer, int64
     */
     latestInputSeq: number;
+    /**
+     * @description Pending main requests have their own receipt even before native activation.
+     * @type array
+    */
+    mainRequests: MainRequestReceipt[];
     /**
      * @type boolean
     */
@@ -10664,6 +10761,59 @@ export type RestResponseAiAssistantGoalOpenDecisionDto = {
     success: boolean;
 };
 
+export type RestResponseAiAssistantMainRequestResumeDto = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        controlRevision: number;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponseAiAssistantMainRequestsDto = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @type array
+        */
+        items: MainRequestReceipt[];
+        /**
+         * @type string
+        */
+        sessionId: string;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
 export type RestResponseAiAssistantSessionListDto = {
     /**
      * @type integer, int32
@@ -10776,6 +10926,11 @@ export type RestResponseAiAssistantSessionSnapshotDto = {
          * @type integer, int64
         */
         latestInputSeq: number;
+        /**
+         * @description Pending main requests have their own receipt even before native activation.
+         * @type array
+        */
+        mainRequests: MainRequestReceipt[];
         /**
          * @type boolean
         */
@@ -13044,6 +13199,48 @@ export type RestResponseMacosAutologin = {
          * @type boolean
         */
         supported: boolean;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponseMainRequestReceipt = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @type integer, int64
+        */
+        acceptedAtMs: number;
+        /**
+         * @type string
+        */
+        clientMessageId: string;
+        failure?: (null | MainRequestFailure);
+        /**
+         * @type integer,null, int64
+        */
+        inputRevision?: number | null;
+        /**
+         * @type string
+        */
+        requestId: string;
+        /**
+         * @description Owner-visible queue state. Native turn and approval state live in the session.
+         * @type string
+        */
+        state: MainRequestState;
     };
     /**
      * @type string,null
@@ -20938,6 +21135,63 @@ export type DecideAiAssistantPermissionMutationResponse = DecideAiAssistantPermi
 export type DecideAiAssistantPermissionMutation = {
     Response: DecideAiAssistantPermission200;
     Request: DecideAiAssistantPermissionMutationRequest;
+    Errors: any;
+};
+
+export type ListAiAssistantMainRequestsQueryParams = {
+    /**
+     * @description Device connection for an original conversation intent
+     * @type string | undefined
+    */
+    connection?: string;
+    /**
+     * @description Client conversation intent
+     * @type string | undefined
+    */
+    conversation?: string;
+    /**
+     * @description Opaque assistant session id
+     * @type string | undefined
+    */
+    session?: string;
+    /**
+     * @description Durable request id
+     * @type string | undefined
+    */
+    request?: string;
+};
+
+export type ListAiAssistantMainRequests200 = RestResponseAiAssistantMainRequestsDto;
+
+export type ListAiAssistantMainRequestsQueryResponse = ListAiAssistantMainRequests200;
+
+export type ListAiAssistantMainRequestsQuery = {
+    Response: ListAiAssistantMainRequests200;
+    QueryParams: ListAiAssistantMainRequestsQueryParams;
+    Errors: any;
+};
+
+export type CancelAiAssistantMainRequest200 = RestResponseMainRequestReceipt;
+
+export type CancelAiAssistantMainRequestMutationRequest = AiAssistantMainRequestCancelBody;
+
+export type CancelAiAssistantMainRequestMutationResponse = CancelAiAssistantMainRequest200;
+
+export type CancelAiAssistantMainRequestMutation = {
+    Response: CancelAiAssistantMainRequest200;
+    Request: CancelAiAssistantMainRequestMutationRequest;
+    Errors: any;
+};
+
+export type ResumeAiAssistantMainRequests200 = RestResponseAiAssistantMainRequestResumeDto;
+
+export type ResumeAiAssistantMainRequestsMutationRequest = AiAssistantMainRequestResumeBody;
+
+export type ResumeAiAssistantMainRequestsMutationResponse = ResumeAiAssistantMainRequests200;
+
+export type ResumeAiAssistantMainRequestsMutation = {
+    Response: ResumeAiAssistantMainRequests200;
+    Request: ResumeAiAssistantMainRequestsMutationRequest;
     Errors: any;
 };
 

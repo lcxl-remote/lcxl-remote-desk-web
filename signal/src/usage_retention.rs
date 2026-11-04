@@ -236,6 +236,9 @@ pub(crate) async fn cleanup_agent_sessions(
             .filter(agent_session::Column::ConversationId.not_in_subquery(
                 desk_assistant_data_store::device_roster::configured_conversation_ids(),
             ))
+            .filter(agent_session::Column::ConversationId.not_in_subquery(
+                desk_assistant_data_store::main_request::pending_conversation_ids(),
+            ))
             .filter(agent_session::Column::UpdatedAt.lt(cutoff))
             .filter(agent_session::Column::Id.gt(delete_after))
             .filter(
@@ -410,6 +413,9 @@ async fn delete_expired_session_candidates(
             .filter(agent_session::Column::Id.is_in(ids.iter().copied()))
             .filter(agent_session::Column::ConversationId.not_in_subquery(
                 desk_assistant_data_store::device_roster::configured_conversation_ids(),
+            ))
+            .filter(agent_session::Column::ConversationId.not_in_subquery(
+                desk_assistant_data_store::main_request::pending_conversation_ids(),
             ))
             .filter(crate::agent_subagent_store::reclaim_condition(
                 cutoff.timestamp_millis(),
@@ -621,6 +627,12 @@ async fn delete_expired_session_candidates(
             .await?;
         agent_run_event::Entity::delete_many()
             .filter(agent_run_event::Column::RunId.is_in(run_ids.clone()))
+            .exec(&txn)
+            .await?;
+        crate::entity::agent_main_request::Entity::delete_many()
+            .filter(
+                crate::entity::agent_main_request::Column::ConversationId.is_in(run_ids.clone()),
+            )
             .exec(&txn)
             .await?;
         crate::entity::agent_permission_resume::Entity::delete_many()
@@ -1004,9 +1016,28 @@ mod tests {
         seed_session(&db, "recent", days_ago(5), false, None).await;
         seed_session(&db, "old-settled", days_ago(40), false, None).await;
         seed_session(&db, "coordinator", days_ago(40), false, None).await;
+        seed_session(&db, "old-with-queue", days_ago(40), false, None).await;
         desk_assistant_data_store::device_roster::replace(&db, "1", "coordinator", 0, vec![])
             .await
             .unwrap();
+        for (conversation, state) in [("old-with-queue", "queued"), ("old-settled", "cancelled")] {
+            crate::entity::agent_main_request::ActiveModel {
+                request_id: Set(format!("request-{conversation}")),
+                conversation_id: Set(conversation.into()),
+                actor_id: Set("1".into()),
+                client_message_id: Set("message".into()),
+                submission_sha256: Set("0".repeat(64)),
+                state: Set(state.into()),
+                pending_input_json: Set(None),
+                input_revision: Set(None),
+                accepted_at_ms: Set(days_ago(40).timestamp_millis()),
+                updated_at_ms: Set(days_ago(40).timestamp_millis()),
+                ..Default::default()
+            }
+            .insert(&db)
+            .await
+            .unwrap();
+        }
         seed_session(
             &db,
             "old-live",
@@ -1034,8 +1065,15 @@ mod tests {
             .iter()
             .map(|row| row.conversation_id.as_str())
             .collect();
-        assert_eq!(ids.len(), 4);
+        assert_eq!(ids.len(), 5);
         assert!(ids.contains(&"coordinator"));
+        assert!(ids.contains(&"old-with-queue"));
+        let requests = crate::entity::agent_main_request::Entity::find()
+            .all(&db)
+            .await
+            .unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].conversation_id, "old-with-queue");
         assert!(ids.contains(&"recent"));
         assert!(ids.contains(&"old-live"));
         assert!(ids.contains(&"old-lapsed"));

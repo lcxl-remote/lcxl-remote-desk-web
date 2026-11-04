@@ -23,6 +23,12 @@ vi.mock('react-i18next', () => import('@/test-utils/i18n-mock').then(m => m.reac
 const snapshotFields = { controlRevision: 1, inputRevision: 1, mainStopped: false,
     subagents: { active_tasks: [], task: null, tasks: null, parent_session_id: null, attention_tasks: [], attention_count: 0 } };
 
+function stubSnapshotFetch<Args extends unknown[]>(fetchSnapshot: (...args: Args) => unknown) {
+    vi.stubGlobal('fetch', (...args: Args) => String(args[0]).includes('/ai-assistant-session/requests?')
+        ? Promise.resolve({ ok: true, json: async () => ({ success: true, data: { sessionId: 'session', items: [] } }) })
+        : fetchSnapshot(...args));
+}
+
 describe('useAiAssistantChat', () => {
     it('retries a personal request with its original device selection', async () => {
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: null }) }));
@@ -213,7 +219,7 @@ describe('useAiAssistantChat', () => {
             const sent = sendMessage.mock.calls.find(([type]) => type === SIGNALING_TYPE_CODE_ASK_AI_ASSISTANT);
             expect(sent?.[1]).toMatchObject({ question: text });
             await act(async () => subscriber?.({ request_id: 'turn-request', signaling_type: SIGNALING_TYPE_CODE_AI_ASSISTANT_UPDATED,
-                signaling_data: { seq: 1, kind: 'error', error: { message: failure } } }));
+                signaling_data: { request_id: 'turn-request', seq: 1, kind: 'error', error: { message: failure } } }));
             expect(result.current.error).toBe(failure);
             expect(result.current.acceptedInput).toBeNull();
             expect(result.current.deliveryState).toBeNull();
@@ -322,7 +328,7 @@ describe('useAiAssistantChat', () => {
             act(() => { result.current.start('Continue after recovery'); });
             const requestId = sendMessage.mock.calls.at(-1)![3]!;
             act(() => subscriber?.({ request_id: requestId, signaling_type: SIGNALING_TYPE_CODE_AI_ASSISTANT_UPDATED,
-                signaling_data: { seq: 1, kind: 'status', status: 'accepted' } }));
+                signaling_data: { request_id: requestId, seq: 1, kind: 'status', status: 'accepted' } }));
             expect(result.current.canStop).toBe(true);
             await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
             expect(result.current.turnRunning).toBe(false);
@@ -334,7 +340,7 @@ describe('useAiAssistantChat', () => {
         localStorage.setItem('ai-assistant-conversation:desk-1', 'conversation-1');
         const pending: Array<(value: unknown) => void> = [];
         const goal = { goalId: 'goal', state: 'running', stateVersion: 1, goalText: 'Calculate 6+8' };
-        vi.stubGlobal('fetch', vi.fn((url: string) => url.endsWith('/goal/control')
+        stubSnapshotFetch(vi.fn((url: string) => url.endsWith('/goal/control')
             ? Promise.resolve({ ok: true, json: async () => ({ success: true, data: { ...goal, state: 'paused', stateVersion: 2 } }) })
             : new Promise(resolve => pending.push(resolve))));
         const { result, unmount } = renderHook(() => useAiAssistantChat({ deskId: 'desk-1', subscribe: () => () => undefined, sendMessage: () => 'request' }));
@@ -385,7 +391,7 @@ describe('useAiAssistantChat', () => {
                 expect(result.current.acceptedInput).toBeNull();
             }
             act(() => subscriber?.({ request_id, signaling_type: SIGNALING_TYPE_CODE_AI_ASSISTANT_UPDATED,
-                signaling_data: { seq: 1, kind: 'status', status: 'accepted' } }));
+                signaling_data: { request_id, seq: 1, kind: 'status', status: 'accepted' } }));
             expect(result.current.deliveryState).toBeNull();
             expect(result.current.acceptedInput?.question).toBe('Pending controller input');
         } finally { unmount(); }
@@ -420,7 +426,7 @@ describe('useAiAssistantChat', () => {
         act(() => { result.current.start('New requirement'); });
         const original = sendMessage.mock.calls.at(-1)!;
         await act(async () => subscriber?.({ request_id: original[3], signaling_type: SIGNALING_TYPE_CODE_AI_ASSISTANT_UPDATED,
-            signaling_data: { seq: 1, kind: 'error', error: { message: 'selected attachment is unavailable' } } }));
+            signaling_data: { request_id: original[3], seq: 1, kind: 'error', error: { message: 'selected attachment is unavailable' } } }));
         expect(result.current.error).toBe('selected attachment is unavailable');
         expect(result.current.deliveryState).toBeNull();
         expect(result.current.acceptedInput).toBeNull();
@@ -489,7 +495,7 @@ describe('useAiAssistantChat', () => {
         expect(sendMessage.mock.calls[1]).toEqual(original);
         expect(result.current.messages.filter(m => m.role === 'user')).toHaveLength(1);
         act(() => subscriber?.({ request_id: original[3], signaling_type: SIGNALING_TYPE_CODE_AI_ASSISTANT_UPDATED,
-            signaling_data: { seq: 1, kind: 'status', status: 'accepted' } }));
+            signaling_data: { request_id: original[3], seq: 1, kind: 'status', status: 'accepted' } }));
         expect(result.current.deliveryState).toBeNull();
         expect(result.current.acceptedInput?.question).toBe('Keep this message');
         unmount();
@@ -591,7 +597,7 @@ describe('useAiAssistantChat', () => {
         act(() => { expect(result.current.start('continue')).toBe(true); });
         await act(async () => subscriber?.({ request_id: 'turn-request',
             signaling_type: SIGNALING_TYPE_CODE_AI_ASSISTANT_UPDATED,
-            signaling_data: { seq: 1, kind: 'error', error: { message: 'Context authorization expired.', error_code: errorCode } },
+            signaling_data: { request_id: 'turn-request', seq: 1, kind: 'error', error: { message: 'Context authorization expired.', error_code: errorCode } },
         }));
         await waitFor(() => expect(result.current.messages.at(-1)?.text).toBe('continue'));
         expect(result.current.deliveryState).toBeNull();
@@ -935,7 +941,7 @@ describe('useAiAssistantChat', () => {
                     contextAttachments: [],
                 } }),
             });
-        vi.stubGlobal('fetch', fetchMock);
+        stubSnapshotFetch(fetchMock);
         const { result } = renderHook(() => useAiAssistantChat({
             deskId: 'desk-1',
             subscribe: () => () => undefined,
@@ -969,7 +975,7 @@ describe('useAiAssistantChat', () => {
             .mockResolvedValueOnce(response(8, ['m4', 'm5'], true, 'm4'))
             .mockResolvedValueOnce(response(8, ['m1', 'm2'], false))
             .mockResolvedValue(response(9, ['m4', 'm5'], true, 'm4'));
-        vi.stubGlobal('fetch', fetchMock);
+        stubSnapshotFetch(fetchMock);
         const { result, unmount } = renderHook(() => useAiAssistantChat({
             deskId: 'desk-1', subscribe: () => () => undefined, sendMessage: () => 'request',
         }));
@@ -1002,7 +1008,7 @@ describe('useAiAssistantChat', () => {
             .mockResolvedValueOnce(response('session-1', 7, ['m2']))
             .mockImplementationOnce(() => new Promise(resolve => { resolveOlder = resolve; }))
             .mockResolvedValue(response(switchConversation ? 'session-2' : 'session-1', 8, ['m2', 'm3']));
-        vi.stubGlobal('fetch', fetchMock);
+        stubSnapshotFetch(fetchMock);
         const { result, unmount } = renderHook(() => useAiAssistantChat({
             deskId: 'desk-1', subscribe: () => () => undefined, sendMessage: () => 'request',
         }));
@@ -1033,7 +1039,7 @@ describe('useAiAssistantChat', () => {
             ok: boolean;
             json: () => Promise<unknown>;
         }) => void> = [];
-        vi.stubGlobal('fetch', vi.fn(() => new Promise((resolve) => pending.push(resolve))));
+        stubSnapshotFetch(vi.fn(() => new Promise((resolve) => pending.push(resolve))));
         const { result } = renderHook(() => useAiAssistantChat({
             deskId: 'desk-1',
             subscribe: () => () => undefined,
@@ -1126,7 +1132,7 @@ describe('useAiAssistantChat', () => {
             ok: boolean;
             json: () => Promise<unknown>;
         }) => void> = [];
-        vi.stubGlobal('fetch', vi.fn(() => new Promise((resolve) => pending.push(resolve))));
+        stubSnapshotFetch(vi.fn(() => new Promise((resolve) => pending.push(resolve))));
         const { result } = renderHook(() => useAiAssistantChat({
             deskId: 'desk-1',
             subscribe: () => () => undefined,
@@ -1220,7 +1226,7 @@ describe('useAiAssistantChat', () => {
             ok: boolean;
             json: () => Promise<unknown>;
         }) => void> = [];
-        vi.stubGlobal('fetch', vi.fn(() => new Promise((resolve) => pending.push(resolve))));
+        stubSnapshotFetch(vi.fn(() => new Promise((resolve) => pending.push(resolve))));
         const { result } = renderHook(() => useAiAssistantChat({
             deskId: 'desk-1',
             subscribe: () => () => undefined,
@@ -1287,7 +1293,7 @@ describe('useAiAssistantChat', () => {
             ok: boolean;
             json: () => Promise<unknown>;
         }) => void> = [];
-        vi.stubGlobal('fetch', vi.fn(() => new Promise((resolve) => pending.push(resolve))));
+        stubSnapshotFetch(vi.fn(() => new Promise((resolve) => pending.push(resolve))));
         const { result } = renderHook(() => useAiAssistantChat({
             deskId: 'desk-1',
             subscribe: () => () => undefined,
@@ -1715,7 +1721,7 @@ describe('useAiAssistantChat', () => {
                     request_id: 'assistant-request-1',
                     seq: 0,
                     kind: 'status',
-                    status: 'modeling',
+                    status: 'accepted',
                 },
             });
             subscriber?.({
@@ -1917,57 +1923,122 @@ describe('useAiAssistantChat', () => {
         unmount();
     });
 
-    it('accepts a follow-up while running and observes only the newest request stream', () => {
+    it('streams the stable queued request while another submission awaits acknowledgement', async () => {
         let subscriber: SignalingSubscriber | null = null;
-        const sendMessage = vi
-            .fn()
-            .mockReturnValueOnce('request-1')
-            .mockReturnValueOnce('request-2');
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({
+            success: false, code: deskErrorCodeEnum.PERMISSION_ERROR, data: null,
+        }) }));
+        const sendMessage = vi.fn((_type: number, _payload: unknown, _to?: string, id?: string) => id!);
+        const { result, unmount } = renderHook(() => useAiAssistantChat({ deskId: '', connected: true,
+            subscribe: handler => { subscriber = handler; return () => { subscriber = null; }; }, sendMessage }));
+        const deliver = (requestId: string, data: Record<string, unknown>) => subscriber?.({
+            request_id: requestId, signaling_type: SIGNALING_TYPE_CODE_AI_ASSISTANT_UPDATED,
+            signaling_data: { request_id: requestId, ...data },
+        });
+        const receipt = (submission: string, request: string) => deliver(submission, { seq: 1,
+            kind: 'status', status: 'queued', main_request_id: request, main_request_session_id: 'root' });
+        try {
+            act(() => { expect(result.current.start('A')).toBe(true); });
+            act(() => receipt(sendMessage.mock.calls[0][3]!, 'request-a'));
+            act(() => {
+                deliver('request-a', { seq: 0, kind: 'turn_started' });
+                deliver('request-a', { seq: 1, kind: 'partial', partial_summary: 'Part ' });
+            });
+            act(() => { expect(result.current.start('B')).toBe(true); });
+            act(() => deliver('request-a', { seq: 2, kind: 'partial', partial_summary: 'one' }));
+            expect(result.current.partial).toBe('Part one');
+            expect(result.current.deliveryState).toBe('sending');
+            act(() => deliver('request-a', { seq: 3, kind: 'answer', answer: 'A done' }));
+            expect(result.current.deliveryState).toBe('sending');
+            expect(result.current.messages.at(-1)?.text).toBe('A done');
+            act(() => receipt(sendMessage.mock.calls[1][3]!, 'request-b'));
+            act(() => {
+                deliver('request-a', { seq: 4, kind: 'partial', partial_summary: 'late' });
+                deliver('request-b', { seq: 1, kind: 'status', status: 'accepted' });
+                deliver('request-b', { seq: 2, kind: 'partial', partial_summary: 'B only' });
+            });
+            expect(result.current.partial).toBe('B only');
+            expect(result.current.acceptedInput?.question).toBe('B');
+        } finally { unmount(); }
+    });
+
+    it('accepts B and C while A runs, and cancels only the selected queued request', async () => {
+        let subscriber: SignalingSubscriber | null = null;
+        const items: { requestId: string; clientMessageId: string; state: 'queued'; acceptedAtMs: number }[] = [];
+        const fetchMock = vi.fn(async (url: string, options?: RequestInit) => {
+            if (url.endsWith('/requests/cancel')) {
+                const { requestId } = JSON.parse(String(options?.body));
+                items.splice(items.findIndex(item => item.requestId === requestId), 1);
+                return { ok: true, json: async () => ({ success: true }) };
+            }
+            return {
+                ok: true,
+                json: async () => ({ success: true, data: url.includes('/requests?')
+                    ? { sessionId: 'original-session', items: [...items] }
+                    : { ...snapshotFields, sessionId: 'original-session', seq: 1, active: true,
+                        requestId: 'a', messages: [{ id: 'message-a', role: 'user', text: 'A' }] } }),
+            };
+        });
+        vi.stubGlobal('fetch', fetchMock);
+        const sendMessage = vi.fn((_type: number, _payload: { client_message_id: string }, _to?: string, id?: string) => id!);
         const { result } = renderHook(() => useAiAssistantChat({
-            deskId: 'desk-1',
-            subscribe: (handler) => {
+            deskId: 'queue-test',
+            initialConversationId: 'queue-conversation',
+            subscribe: handler => {
                 subscriber = handler;
                 return () => { subscriber = null; };
             },
-            sendMessage,
+            sendMessage: sendMessage as Parameters<typeof useAiAssistantChat>[0]['sendMessage'],
         }));
+        await waitFor(() => expect(result.current.turnRunning).toBe(true));
+        for (const [index, question] of ['B', 'C'].entries()) {
+            act(() => {
+                expect(result.current.start(question)).toBe(true);
+                expect(result.current.start('No receipt yet')).toBe(false);
+            });
+            const [, payload, , requestId] = sendMessage.mock.calls[index];
+            items.push({ requestId: question, clientMessageId: payload.client_message_id,
+                state: 'queued', acceptedAtMs: index });
+            act(() => subscriber?.({
+                request_id: requestId!, signaling_type: SIGNALING_TYPE_CODE_AI_ASSISTANT_UPDATED,
+                signaling_data: { request_id: requestId!, seq: 1, kind: 'status', status: 'queued',
+                    main_request_id: question, main_request_session_id: 'original-session' },
+            }));
+            await waitFor(() => expect(result.current.queuedRequests.map(item => item.requestId))
+                .toEqual(items.map(item => item.requestId)));
+            expect(result.current.deliveryState).toBeNull();
+            expect(result.current.turnRunning).toBe(true);
+        }
+        await act(async () => { await result.current.cancelQueuedRequest('B'); });
+        expect(result.current.queuedRequests.map(item => item.requestId)).toEqual(['C']);
+        expect(result.current.messages.map(message => message.text)).toEqual(['A']);
+        expect(result.current.turnRunning).toBe(true);
+    });
 
-        act(() => {
-            expect(result.current.start('first request')).toBe(true);
-            expect(result.current.start('new requirement')).toBe(true);
+    it('continues the stopped queue using the observed control revision', async () => {
+        let stopped = true;
+        const fetchMock = vi.fn(async (url: string, options?: RequestInit) => {
+            if (url.endsWith('/requests/resume')) {
+                expect(JSON.parse(String(options?.body))).toEqual({ session: 'original-session', expectedControlRevision: 2 });
+                stopped = false;
+                return { ok: true, json: async () => ({ success: true, data: { controlRevision: 3 } }) };
+            }
+            return { ok: true, json: async () => ({ success: true, data: {
+                ...snapshotFields, sessionId: 'original-session', seq: stopped ? 5 : 6,
+                controlRevision: stopped ? 2 : 3, mainStopped: stopped, active: false, messages: [],
+                mainRequests: [{ requestId: 'b', clientMessageId: 'message-b', state: 'queued', acceptedAtMs: 1 }],
+            } }) };
         });
-        expect(result.current.messages.map((message) => message.text)).toEqual([
-            'first request',
-            'new requirement',
-        ]);
-        act(() => {
-            subscriber?.({
-                request_id: 'request-1',
-                signaling_type: SIGNALING_TYPE_CODE_AI_ASSISTANT_UPDATED,
-                signaling_data: {
-                    request_id: 'request-1',
-                    seq: 9,
-                    kind: 'answer',
-                    answer: 'stale answer',
-                },
-            });
-            subscriber?.({
-                request_id: 'request-2',
-                signaling_type: SIGNALING_TYPE_CODE_AI_ASSISTANT_UPDATED,
-                signaling_data: {
-                    request_id: 'request-2',
-                    seq: 1,
-                    kind: 'answer',
-                    answer: 'new answer',
-                },
-            });
-        });
-        expect(result.current.messages.map((message) => message.text)).toEqual([
-            'first request',
-            'new requirement',
-            'new answer',
-        ]);
-        expect(result.current.running).toBe(false);
+        vi.stubGlobal('fetch', fetchMock);
+        const sendMessage = vi.fn(() => 'unneeded');
+        const { result } = renderHook(() => useAiAssistantChat({ deskId: 'resume-test', initialConversationId: 'resume-conversation',
+            sendMessage, subscribe: () => () => undefined }));
+        await waitFor(() => expect(result.current.mainStopped).toBe(true));
+        await act(async () => { await result.current.resumeQueue(); });
+        expect(result.current.mainStopped).toBe(false);
+        expect(result.current.queuedRequests.map(item => item.requestId)).toEqual(['b']);
+        expect(fetchMock.mock.calls.filter(([url]) => url.endsWith('/requests/resume'))).toHaveLength(1);
+        expect(sendMessage).not.toHaveBeenCalled();
     });
 
     it('hydrates a durable permission request and posts one complete mixed decision', async () => {
