@@ -4,7 +4,8 @@ use super::*;
 use crate::{config::connection::DatabaseConnection, entity::agent_session, issue_connections};
 use actix_web::put;
 use desk_agent_protocol::ai_assistant::issue_subscription::{
-    IssueSubscriptionEnable, IssueSubscriptionSave, IssueSubscriptionView,
+    IssueSubscriptionAccounts, IssueSubscriptionEnable, IssueSubscriptionSave,
+    IssueSubscriptionView,
 };
 use desk_assistant_data_store::{
     AssistantStoreError,
@@ -21,6 +22,41 @@ use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter};
 #[derive(serde::Deserialize)]
 pub struct IssueSubscriptionsQuery {
     workbench: String,
+}
+
+#[derive(serde::Deserialize)]
+pub struct IssueSubscriptionAccountsQuery {
+    workbench: String,
+    connection: String,
+    login: Option<String>,
+}
+
+#[utoipa::path(tag = TAG, params(("workbench" = String, Query), ("connection" = String, Query), ("login" = Option<String>, Query)), responses((status = 200, body = RestResponse<IssueSubscriptionAccounts>)))]
+#[get("/my/ai-assistant-session/issue-subscriptions/accounts")]
+pub async fn get_ai_assistant_issue_subscription_accounts(
+    session: Session,
+    query: web::Query<IssueSubscriptionAccountsQuery>,
+) -> Result<HttpResponse, DeskSignalError> {
+    if !super::device_roster::owner(&session)? {
+        return Ok(not_accessible());
+    }
+    let actor = SINGLE_ACCOUNT_USER_ID.to_string();
+    let db = crate::db::get_db();
+    let result = async {
+        check_workbench(db, &actor, &query.workbench).await?;
+        let connection = read_connection(db, &actor, &query.connection).await?;
+        connection
+            .subscription_accounts(query.login.as_deref())
+            .await
+            .map_err(|_| AssistantStoreError::SourceUnavailable)
+    }
+    .await;
+    match result {
+        Ok(accounts) => Ok(HttpResponse::Ok()
+            .insert_header(("Cache-Control", "no-store"))
+            .json(RestResponse::succeed_with_data(accounts))),
+        Err(error) => error_response(error),
+    }
 }
 
 #[utoipa::path(tag = TAG, params(("workbench" = String, Query)), responses((status = 200, body = RestResponse<Vec<IssueSubscriptionView>>)))]
@@ -112,6 +148,12 @@ pub(crate) async fn save(
         .resolve_subscription(&body.owner, &body.repository, body.issue_number)
         .await
         .map_err(|_| AssistantStoreError::SourceUnavailable)?;
+    if body
+        .expected_outbound_account_id
+        .is_some_and(|expected| expected != scope.account_id)
+    {
+        return Err(AssistantStoreError::SourceUnavailable);
+    }
     let candidate = settings::candidate(actor.into(), id, body, scope, filter);
     commit(db, candidate, Some(&connection)).await
 }
@@ -199,7 +241,7 @@ async fn commit(
     Ok(result)
 }
 
-async fn check_workbench(
+pub(super) async fn check_workbench(
     db: &impl ConnectionTrait,
     actor: &str,
     workbench: &str,

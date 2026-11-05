@@ -110,6 +110,18 @@ pub async fn list_goal_attention(
             .flatten();
     }
     crate::agent_subagent_store::augment_owner_attention_on(db, actor_id, None, &mut items).await?;
+    let deliveries =
+        desk_assistant_data_store::workbench::tasks::delivery_attention_on(db, actor_id, now)
+            .await?;
+    items.extend(
+        deliveries
+            .into_iter()
+            .map(|(workbench, request, artifact, updated)| {
+                AiAssistantAttentionItemDto::from_issue_reply(
+                    actor_id, &workbench, &request, &artifact, updated,
+                )
+            }),
+    );
     items.sort_by(|left, right| {
         right
             .updated_at_unix_ms

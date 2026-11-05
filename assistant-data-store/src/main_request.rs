@@ -894,7 +894,6 @@ pub async fn receipts(
         ])
         .filter(Column::ActorId.eq(actor_id))
         .filter(Column::ConversationId.eq(conversation_id));
-    type ReceiptRow = (String, String, String, Option<String>, Option<i64>, i64);
     let rows: Vec<ReceiptRow> = match request_id {
         Some(id) => {
             query
@@ -925,45 +924,45 @@ pub async fn receipts(
             rows
         }
     };
-    rows.into_iter()
-        .map(
-            |(request_id, client_message_id, state, failure, input_revision, accepted_at_ms)| {
-                let state = match state.as_str() {
-                    QUEUED => MainRequestState::Queued,
-                    ACTIVATED => MainRequestState::Activated,
-                    CANCELLED => MainRequestState::Cancelled,
-                    SUPERSEDED => MainRequestState::Superseded,
-                    FAILED => MainRequestState::Failed,
-                    _ => {
-                        return Err(AssistantStoreError::Invalid(
-                            "Invalid assistant request state",
-                        ));
-                    }
-                };
-                let failure = match failure.as_deref() {
-                    None => None,
-                    Some("source_unavailable") => Some(MainRequestFailure::SourceUnavailable),
-                    Some("destination_changed") => Some(MainRequestFailure::DestinationChanged),
-                    Some("coordination_exhausted") => {
-                        Some(MainRequestFailure::CoordinationExhausted)
-                    }
-                    Some(_) => {
-                        return Err(AssistantStoreError::Invalid(
-                            "Invalid assistant request failure",
-                        ));
-                    }
-                };
-                Ok(MainRequestReceipt {
-                    request_id,
-                    client_message_id,
-                    state,
-                    failure,
-                    input_revision,
-                    accepted_at_ms,
-                })
-            },
-        )
-        .collect()
+    rows.into_iter().map(decode_receipt).collect()
+}
+
+pub(crate) type ReceiptRow = (String, String, String, Option<String>, Option<i64>, i64);
+
+pub(crate) fn decode_receipt(
+    (request_id, client_message_id, state, failure, input_revision, accepted_at_ms): ReceiptRow,
+) -> Result<MainRequestReceipt, AssistantStoreError> {
+    let state = match state.as_str() {
+        QUEUED => MainRequestState::Queued,
+        ACTIVATED => MainRequestState::Activated,
+        CANCELLED => MainRequestState::Cancelled,
+        SUPERSEDED => MainRequestState::Superseded,
+        FAILED => MainRequestState::Failed,
+        _ => {
+            return Err(AssistantStoreError::Invalid(
+                "Invalid assistant request state",
+            ));
+        }
+    };
+    let failure = match failure.as_deref() {
+        None => None,
+        Some("source_unavailable") => Some(MainRequestFailure::SourceUnavailable),
+        Some("destination_changed") => Some(MainRequestFailure::DestinationChanged),
+        Some("coordination_exhausted") => Some(MainRequestFailure::CoordinationExhausted),
+        Some(_) => {
+            return Err(AssistantStoreError::Invalid(
+                "Invalid assistant request failure",
+            ));
+        }
+    };
+    Ok(MainRequestReceipt {
+        request_id,
+        client_message_id,
+        state,
+        failure,
+        input_revision,
+        accepted_at_ms,
+    })
 }
 
 /// Compare against the live queued state. A retry of a successful cancellation

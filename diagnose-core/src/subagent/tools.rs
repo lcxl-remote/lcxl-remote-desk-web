@@ -27,6 +27,7 @@ pub const ACK_REPORTS: &str = "acknowledge_subagent_reports";
 pub const REPORT: &str = "report_subagent_status";
 pub const WAIT_DEVICE: &str = "wait_for_subagent_device";
 pub const REPLY: &str = "reply_subagent_request";
+pub const HANDOFF: &str = "ask_owner_for_subagent";
 
 pub const DELEGATION_TASK_GUIDANCE: &str = "\nWhen send_subagent_request is available, delegate the desired deliverable and only context specific to that task. The child already receives the shared tool, permission, command-safety and reporting rules. Do not copy those rules, tool schemas or routine approval steps into its task. For a simple execution task, one short objective and one observable acceptance criterion normally suffice; request a brief actual outcome, relevant elapsed time or blocker. Add detail only when the task itself or the owner's requested deliverable requires it.";
 pub const WAIT_REPORTS: &str = "wait_subagent_reports";
@@ -125,6 +126,10 @@ pub enum Operation {
         question_id: String,
         message: String,
     },
+    HandoffQuestion {
+        request_id: String,
+        question_id: String,
+    },
     WaitReports(ReportWait),
     Cancel {
         task_id: String,
@@ -202,7 +207,7 @@ pub fn reply_exposed(session: &PersistedAgentSession) -> bool {
 pub fn effect(name: &str) -> Option<ToolEffect> {
     match name {
         SPAWN => Some(ToolEffect::SubAgentPlanning),
-        CANCEL | ADJUST | REPLY => Some(ToolEffect::SubAgentControl),
+        CANCEL | ADJUST | REPLY | HANDOFF => Some(ToolEffect::SubAgentControl),
         LIST | STATUS | REPORTS | ACK_REPORTS => Some(ToolEffect::SubAgentQuery),
         REPORT | WAIT_DEVICE => Some(ToolEffect::SubAgentReport),
         WAIT_REPORTS => Some(ToolEffect::SubAgentWait),
@@ -213,6 +218,7 @@ pub fn effect(name: &str) -> Option<ToolEffect> {
 pub fn available_for_session(name: &str, session: &PersistedAgentSession) -> bool {
     match name {
         REPLY => reply_exposed(session),
+        HANDOFF => session.has_workbench_report_notification() && reply_exposed(session),
         WAIT_DEVICE => session
             .agent_role
             .binding()
@@ -378,6 +384,13 @@ pub fn registry() -> Vec<RegisteredTool> {
                 "request_id":task_id.clone(),
                 "question_id":id.clone(),
                 "message":{"type":"string","minLength":1,"maxLength":MAX_QUESTION_BYTES}
+            }}),
+        ),
+        tool(
+            HANDOFF,
+            "Ask the owner to answer one open Worker question from the current report when the work cannot proceed without the owner. Copy request_id and question_id from that report. The Workbench will surface the original question and resume the same Worker request when the owner replies.",
+            json!({"type":"object","additionalProperties":false,"required":["request_id","question_id"],"properties":{
+                "request_id":task_id.clone(), "question_id":id.clone()
             }}),
         ),
         tool(
@@ -591,6 +604,29 @@ pub fn parse_observed(
                 request_id,
                 question_id,
                 message,
+            })
+        }
+        HANDOFF => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Handoff {
+                request_id: String,
+                question_id: String,
+            }
+            let Handoff {
+                request_id,
+                question_id,
+            } = decode(call)?;
+            if !session.has_workbench_report_notification()
+                || report_question_sequence(session, &request_id, &question_id).is_none()
+            {
+                return Err(invalid(
+                    "the question is outside this workbench report wake",
+                ));
+            }
+            Ok(Operation::HandoffQuestion {
+                request_id,
+                question_id,
             })
         }
         REPORT => {

@@ -2196,6 +2196,8 @@ pub enum AiAssistantAttentionReason {
     GoalBlocked,
     GoalDeadlineSoon,
     SubAgentResult,
+    WorkerQuestion,
+    IssueReplyNeedsAttention,
 }
 
 impl AiAssistantAttentionReason {
@@ -2209,6 +2211,8 @@ impl AiAssistantAttentionReason {
             Self::GoalBlocked => "goal_blocked",
             Self::GoalDeadlineSoon => "goal_deadline_soon",
             Self::SubAgentResult => "subagent_result",
+            Self::WorkerQuestion => "worker_question",
+            Self::IssueReplyNeedsAttention => "issue_reply_needs_attention",
         }
     }
 }
@@ -2226,9 +2230,69 @@ pub struct AiAssistantAttentionItemDto {
     pub state_version: u64,
     pub updated_at_unix_ms: u64,
     pub deadline_unix_ms: Option<u64>,
+    pub workbench: Option<AiAssistantAttentionWorkRef>,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AiAssistantAttentionWorkRef {
+    pub workbench_id: String,
+    pub request_id: String,
+    pub worker_task_id: Option<String>,
+}
+
+impl AiAssistantAttentionWorkRef {
+    pub fn from_session(
+        parent: &desk_diagnose_core::session::PersistedAgentSession,
+        worker_task_id: Option<String>,
+    ) -> Option<Self> {
+        let workbench_id = parent.agent_role.workbench_id()?;
+        let request_id = parent.agent_role.workbench_request_id()?;
+        (parent.conversation_id
+            == desk_diagnose_core::native_ids::workbench_work_conversation(
+                &parent.actor_id,
+                workbench_id,
+                request_id,
+            ))
+        .then(|| Self {
+            workbench_id: workbench_id.into(),
+            request_id: request_id.into(),
+            worker_task_id,
+        })
+    }
 }
 
 impl AiAssistantAttentionItemDto {
+    pub fn from_issue_reply(
+        actor: &str,
+        workbench: &str,
+        request: &str,
+        artifact: &str,
+        updated_at: i64,
+    ) -> Self {
+        let updated_at = u64::try_from(updated_at).unwrap_or_default();
+        let identity = format!("issue-reply:{artifact}:{updated_at}");
+        Self {
+            attention_id: format!("attention-{:x}", Sha256::digest(identity.as_bytes())),
+            session_id: desk_diagnose_core::native_ids::workbench_work_conversation(
+                actor, workbench, request,
+            ),
+            client_conversation_id: None,
+            device_id: String::new(),
+            goal_id: None,
+            request_id: Some(artifact.to_owned()),
+            reason: AiAssistantAttentionReason::IssueReplyNeedsAttention,
+            state_version: updated_at,
+            updated_at_unix_ms: updated_at,
+            deadline_unix_ms: None,
+            workbench: Some(AiAssistantAttentionWorkRef {
+                workbench_id: workbench.to_owned(),
+                request_id: request.to_owned(),
+                worker_task_id: None,
+            }),
+        }
+    }
+
     pub fn for_goal(goal: &desk_diagnose_core::goal::GoalRun, now_unix_ms: u64) -> Vec<Self> {
         use desk_diagnose_core::goal::{GoalPauseReason, GoalState, GoalWaitReason};
         let reason = match goal.state {
@@ -2289,6 +2353,7 @@ impl AiAssistantAttentionItemDto {
             updated_at_unix_ms: goal.updated_at_unix_ms,
             deadline_unix_ms: (goal.deadline_unix_ms != i64::MAX as u64)
                 .then_some(goal.deadline_unix_ms),
+            workbench: None,
         }
     }
 
@@ -2308,6 +2373,7 @@ impl AiAssistantAttentionItemDto {
             state_version: request.input_revision,
             updated_at_unix_ms: request.created_at_unix_ms,
             deadline_unix_ms: Some(request.expires_at_unix_ms),
+            workbench: None,
         }
     }
 
@@ -2332,6 +2398,7 @@ impl AiAssistantAttentionItemDto {
             state_version: request.input_revision,
             updated_at_unix_ms,
             deadline_unix_ms: None,
+            workbench: None,
         }
     }
 
@@ -2354,6 +2421,7 @@ impl AiAssistantAttentionItemDto {
             state_version: 1,
             updated_at_unix_ms,
             deadline_unix_ms,
+            workbench: None,
         }
     }
 }

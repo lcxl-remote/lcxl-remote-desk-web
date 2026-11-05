@@ -70,7 +70,7 @@ export function AssistantSubagentMenu({ onSelect, onDeviceSettings, onApprovalSe
 
 export function AssistantSubagents({ agents, connected, canDecide, interactive, exportBackup, panel: externalPanel,
     onPanelChange, deskId, sessionTargetId, capabilityList, adjustment: externalAdjustment, onAdjustmentChange,
-    onDeviceSettings, onApprovalSettings }: {
+    onDeviceSettings, onApprovalSettings, focusPermissionId }: {
     agents: ReturnType<typeof useAiAssistantSubagents>; connected: boolean; canDecide: boolean;
     interactive?: Omit<InteractiveCommandContext, 'runId'>;
     mainStopped: boolean; exportBackup?: (session: string, id: string) => Promise<void>;
@@ -79,6 +79,7 @@ export function AssistantSubagents({ agents, connected, canDecide, interactive, 
     capabilityList?: ReactNode;
     adjustment?: string; onAdjustmentChange?: (text: string) => void;
     onDeviceSettings?: () => void; onApprovalSettings?: () => void;
+    focusPermissionId?: string;
 }) {
     const { t } = useTranslation();
     const [localAdjustment, setLocalAdjustment] = useState('');
@@ -98,6 +99,17 @@ export function AssistantSubagents({ agents, connected, canDecide, interactive, 
     const child = agents.detail?.session;
     const report = agents.detail?.result.report;
     const { scrollRef, contentRef, onScroll, showJumpToLatest, jumpToLatest } = useFollowLatest(true, child?.sessionId ?? task?.child_session_id ?? '');
+    const focusedPermission = useRef<string | undefined>(undefined);
+    useEffect(() => {
+        if (!focusPermissionId || focusedPermission.current === focusPermissionId) return;
+        const card = [...(contentRef.current?.querySelectorAll<HTMLElement>('[data-permission-id]') ?? [])]
+            .find(element => element.dataset.permissionId === focusPermissionId);
+        if (card) {
+            focusedPermission.current = focusPermissionId;
+            card.scrollIntoView?.({ block: 'center' });
+            card.focus({ preventScroll: true });
+        }
+    }, [child?.sessionId, child?.permissionRequests, contentRef, focusPermissionId]);
     if (!task) return null;
     const automaticApproval = child?.approvalDelegation?.status === 'active';
     const pendingDirectories = child?.fileScope?.directories.filter(directory => directory.state === 'pending'
@@ -113,7 +125,8 @@ export function AssistantSubagents({ agents, connected, canDecide, interactive, 
     };
     const detailsContent = <div className="space-y-4">
                     {task && <>
-                        <Badge variant="outline">{t(`pages.aiAssistant.subagents.states.${task.state}`)}</Badge>
+                        <Badge variant="outline">{t(question && task.state === 'waiting_input'
+                            ? 'pages.aiAssistantAttention.reasons.worker_question' : `pages.aiAssistant.subagents.states.${task.state}`)}</Badge>
                         <p className="text-xs text-muted-foreground">{t(`pages.aiAssistant.subagents.sources.${task.source.kind}`)} · {formatLocalTime(task.updated_at)}</p>
                         {task.source.kind === 'user_input' && <p className="text-xs text-muted-foreground">
                             {t('pages.aiAssistant.subagents.sourceInput', { revision: task.source.input_revision })}
@@ -208,10 +221,11 @@ export function AssistantSubagents({ agents, connected, canDecide, interactive, 
                         <div data-assistant-pending={pendingPermissions.length > 0 ? '' : undefined} tabIndex={-1}>
                         <AssistantPermissionRecords approvalRecords={<ApprovalReviews session={child.sessionId} open={panel === 'permissions'} includeChildren={false}/>} key={child.sessionId} requests={child.permissionRequests ?? []} automaticApproval={automaticApproval}
                             open={panel === 'permissions'} onOpenChange={open => setPanel(open ? 'permissions' : null)}>
-                            {permission => <AssistantPermissionRequest key={`${child.sessionId}:${permission.requestId}:${permission.inputRevision}`}
+                            {permission => <div key={`${child.sessionId}:${permission.requestId}:${permission.inputRevision}`}
+                                data-permission-id={permission.requestId} tabIndex={-1}><AssistantPermissionRequest
                                 request={permission} canDecide={canDecide && !subagentIsTerminal(task) && permission.inputRevision === child.inputRevision}
                                 disabled={!connected || child.active || agents.updating} busy={agents.updating} waitingForTurn={child.active}
-                                interactive={interactive ? { ...interactive, runId: child.sessionId } : undefined} onDecide={agents.decidePermission} />}
+                                interactive={interactive ? { ...interactive, runId: child.sessionId } : undefined} onDecide={agents.decidePermission} /></div>}
                         </AssistantPermissionRecords>
                         </div>
                         {child.terminalError && <p role="alert" className="text-sm text-destructive">{child.terminalError.message}</p>}

@@ -36,13 +36,14 @@ pub(crate) mod issue_subscriptions;
 pub(crate) use device_roster::update_roster;
 pub use device_roster::{get_ai_assistant_device_roster, update_ai_assistant_device_roster};
 pub use issue_subscriptions::{
-    list_ai_assistant_issue_subscriptions, save_ai_assistant_issue_subscription,
-    set_ai_assistant_issue_subscription_enabled,
+    get_ai_assistant_issue_subscription_accounts, list_ai_assistant_issue_subscriptions,
+    save_ai_assistant_issue_subscription, set_ai_assistant_issue_subscription_enabled,
 };
 mod directories;
 mod main_requests;
 mod stop;
 mod subagents;
+mod workbenches;
 pub use directories::control_ai_assistant_directory;
 pub use main_requests::{
     cancel_ai_assistant_main_request, list_ai_assistant_main_requests,
@@ -52,6 +53,9 @@ pub use stop::stop_ai_assistant_session;
 pub use subagents::{
     control_ai_assistant_subagent, get_ai_assistant_subagent_status, list_ai_assistant_subagents,
     mark_ai_assistant_subagent_read, read_ai_assistant_subagent_result,
+};
+pub use workbenches::{
+    create_ai_assistant_workbench, list_ai_assistant_workbench_tasks, list_ai_assistant_workbenches,
 };
 pub(crate) mod recovery;
 pub use desk_signal_facade::controller::ai_assistant_session::*;

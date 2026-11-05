@@ -374,3 +374,9 @@ history_capture_batch_size = 64
 history_scan_page_size = 128
 current_memory_page_size = 64
 ```
+
+## Super Agent issue subscriptions
+
+Add a Gitea or GitHub connection on the standalone server's **Issue connections** page. Enter HTTPS URLs for the instance and MCP service, provide a token with access to the intended issues, and enable the connection. Test it to check the account and the available read and comment tools. The server stores connections under `issue_connections` in `config.toml` and keeps subscription and task state in its runtime database.
+
+Create an agent under **AI Assistant → Super Agent**. Under **Subscriptions**, select a connection, repository, and eligible accounts. You can limit a subscription to one issue and authorize automatic replies to the original issue with the account shown on the form. Choose devices for investigations under **Settings**. **Tasks** shows progress and delivery receipts. **Attention** opens questions and approvals.

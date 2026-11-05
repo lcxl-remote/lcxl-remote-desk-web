@@ -146,6 +146,10 @@ async fn begin_main_tool(
         | Operation::Reply {
             request_id: task_id,
             ..
+        }
+        | Operation::HandoffQuestion {
+            request_id: task_id,
+            ..
         } => Some(
             task_for_parent_observed_on(&txn, held, task_id, input_observation)
                 .await?
@@ -587,6 +591,31 @@ impl SubAgentStore {
                 labels.extend(task_labels(&row)?);
                 serde_json::to_value(reply).map_err(|_| invalid())?
             }
+            Operation::HandoffQuestion {
+                request_id,
+                question_id,
+            } => {
+                let seq = tools::report_question_sequence(&parent, &request_id, &question_id)
+                    .ok_or_else(invalid)?;
+                let row = desk_diagnose_core::future::boxed(|| {
+                    task_for_parent_observed_on(&txn, &parent, &request_id, input_observation)
+                })
+                .await?;
+                let run = decode_run(&row)?;
+                let turn = parent.current_turn_id.as_deref().ok_or_else(invalid)?;
+                desk_diagnose_core::future::boxed(|| {
+                    desk_assistant_data_store::worker_report::handoff_question_on(
+                        &txn,
+                        &run,
+                        &question_id,
+                        seq,
+                        turn,
+                        now.timestamp_millis(),
+                    )
+                })
+                .await?;
+                serde_json::json!({"request_id": request_id, "question_id": question_id, "status": "waiting_owner"})
+            }
             Operation::Report(_) | Operation::WaitDevice { .. } => return Err(invalid()),
             Operation::AcknowledgeReports(report_ids) => {
                 let turn_id = parent.current_turn_id.as_deref().ok_or_else(invalid)?;
@@ -756,7 +785,7 @@ impl SubAgentStore {
         };
         if matches!(
             call.name.as_str(),
-            tools::STATUS | tools::REPORTS | tools::REPLY | tools::WAIT_REPORTS
+            tools::STATUS | tools::REPORTS | tools::REPLY | tools::HANDOFF | tools::WAIT_REPORTS
         ) {
             input_observation.stage(Stage::Reference, StageOutcome::Passed);
         }

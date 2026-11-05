@@ -33,6 +33,7 @@ pub fn validate_save(body: &IssueSubscriptionSave) -> Result<(), AssistantStoreE
             .issue_number
             .is_some_and(|number| number == 0 || number > i64::MAX as u64)
         || (body.enabled && body.allowed_sender_ids.is_empty())
+        || (body.auto_reply && body.expected_outbound_account_id.is_none())
         || body
             .allowed_sender_ids
             .iter()
@@ -223,6 +224,7 @@ pub async fn view_on(
         workbench_id: policy.conversation_id,
         connection_ref: policy.repository.connection_ref,
         platform: policy.repository.platform,
+        outbound_account_id: policy.repository.account_id,
         owner: policy.repository.owner,
         repository: policy.repository.repository,
         issue_number: policy.issue_filter.map(|filter| filter.issue_number),

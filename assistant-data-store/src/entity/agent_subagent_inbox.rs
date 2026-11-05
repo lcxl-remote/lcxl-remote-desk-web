@@ -30,6 +30,7 @@ pub struct Model {
     pub coordination_attempts: Option<i32>,
     pub coordination_retry_at_ms: Option<i64>,
     pub coordinated_at_ms: Option<i64>,
+    pub owner_handoff_at_ms: Option<i64>,
     pub event_kind: String,
     pub event_json: String,
     pub parent_input_revision: i64,

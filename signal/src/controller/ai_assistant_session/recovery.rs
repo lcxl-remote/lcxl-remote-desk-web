@@ -9,6 +9,16 @@ pub(crate) async fn resolve(
     session: Option<&str>,
     conversation: Option<&str>,
 ) -> Result<Option<(String, String)>, DeskSignalError> {
+    if connection.is_empty()
+        && let Some(work) = session.filter(|id| {
+            desk_diagnose_core::native_ids::is(
+                desk_diagnose_core::native_ids::Kind::WorkbenchWorkConversation,
+                id,
+            )
+        })
+    {
+        return Ok(Some((work.to_owned(), String::new())));
+    }
     let live = {
         let map = connections.read().await;
         match map.get(connection) {

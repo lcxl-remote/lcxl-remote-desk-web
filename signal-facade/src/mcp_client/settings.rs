@@ -1,5 +1,6 @@
 //! Host-owned external connections. Public projections never include credentials.
 
+use desk_agent_protocol::ai_assistant::issue_subscription::IssueSubscriptionAccounts;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -159,6 +160,22 @@ impl IssueConnectionConfig {
         tokio::time::timeout(
             std::time::Duration::from_secs(20),
             client.bind_subscription(&self.connection_ref, owner, repository, issue_number),
+        )
+        .await
+        .map_err(|_| McpClientError::Unavailable)?
+    }
+
+    pub async fn subscription_accounts(
+        &self,
+        login: Option<&str>,
+    ) -> Result<IssueSubscriptionAccounts, McpClientError> {
+        let config = self.clone();
+        let client = tokio::task::spawn_blocking(move || config.client())
+            .await
+            .map_err(|_| McpClientError::Unavailable)??;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            client.subscription_accounts(login),
         )
         .await
         .map_err(|_| McpClientError::Unavailable)?

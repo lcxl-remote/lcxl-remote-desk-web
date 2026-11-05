@@ -799,6 +799,7 @@ impl SignalAgentSessionStore {
                     || session.check_subject(actor_id, device_id).is_err()
                     || session.surface != AgentSessionSurface::AiAssistant
                     || !session.agent_role.is_main()
+                    || session.agent_role.workbench_id().is_some()
                 {
                     return None;
                 }

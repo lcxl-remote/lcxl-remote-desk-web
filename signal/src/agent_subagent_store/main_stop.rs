@@ -208,22 +208,28 @@ impl SubAgentStore {
         };
         let now = chrono::Utc::now();
         if control.subagent_choice == Some(SubAgentStopChoice::IncludeSubAgents) {
-            desk_assistant_data_store::issue_authority::stop_conversation(
-                &txn,
-                actor,
-                root,
-                now.timestamp_millis(),
-            )
-            .await
-            .map_err(|_| invalid())?;
-            desk_assistant_data_store::issue_reply::lifecycle::cancel_conversation_on(
-                &txn,
-                actor,
-                root,
-                now.timestamp_millis(),
-            )
-            .await
-            .map_err(|_| invalid())?;
+            let now = now.timestamp_millis();
+            if let (Some(workbench), Some(request)) = (
+                parent.agent_role.workbench_id(),
+                parent.agent_role.workbench_request_id(),
+            ) {
+                desk_assistant_data_store::workbench::tasks::stop_issue_round_on(
+                    &txn, actor, workbench, request, now,
+                )
+                .await
+                .map_err(|_| invalid())?;
+            } else {
+                desk_assistant_data_store::issue_authority::stop_conversation(
+                    &txn, actor, root, now,
+                )
+                .await
+                .map_err(|_| invalid())?;
+                desk_assistant_data_store::issue_reply::lifecycle::cancel_conversation_on(
+                    &txn, actor, root, now,
+                )
+                .await
+                .map_err(|_| invalid())?;
+            }
         }
         let scope = StopScope {
             children: &children,

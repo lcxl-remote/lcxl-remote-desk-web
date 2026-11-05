@@ -320,3 +320,9 @@ history_capture_batch_size = 64
 history_scan_page_size = 128
 current_memory_page_size = 64
 ```
+
+## Super Agent 工单订阅
+
+在开源服务的 **工单连接** 页面添加 Gitea 或 GitHub 连接。填写 HTTPS 实例和 MCP 服务地址，提供可访问目标工单的令牌并启用。测试连接时核对读工单、发评论工具及实际账号。保存的连接位于 `config.toml` 的 `issue_connections` 配置，订阅及任务状态保存在运行数据库。
+
+从 **AI 助手 → Super Agent** 创建主 Agent，再在 **订阅** 选择连接、仓库和可触发的人员账号。可限定一个工单，并授权以表单展示的账号自动回复原工单。**设置** 中的设备列表供需要设备的任务使用。**任务** 显示处理进展和送达回执，**待处理** 提供答复和审批入口。

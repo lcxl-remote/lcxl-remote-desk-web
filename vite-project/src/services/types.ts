@@ -231,7 +231,9 @@ export const aiAssistantAttentionReasonEnum = {
     goal_stalled: "goal_stalled",
     goal_blocked: "goal_blocked",
     goal_deadline_soon: "goal_deadline_soon",
-    sub_agent_result: "sub_agent_result"
+    sub_agent_result: "sub_agent_result",
+    worker_question: "worker_question",
+    issue_reply_needs_attention: "issue_reply_needs_attention"
 } as const;
 
 export type AiAssistantAttentionReasonEnumKey = (typeof aiAssistantAttentionReasonEnum)[keyof typeof aiAssistantAttentionReasonEnum];
@@ -240,6 +242,21 @@ export type AiAssistantAttentionReasonEnumKey = (typeof aiAssistantAttentionReas
  * @description Durable owner action needed outside the currently open conversation. The\nidentifier changes with the authoritative state version, so clients can\ndeduplicate reminders without persisting a second copy of session content.
 */
 export type AiAssistantAttentionReason = AiAssistantAttentionReasonEnumKey;
+
+export type AiAssistantAttentionWorkRef = {
+    /**
+     * @type string
+    */
+    requestId: string;
+    /**
+     * @type string
+    */
+    workbenchId: string;
+    /**
+     * @type string,null
+    */
+    workerTaskId?: string | null;
+};
 
 export type AiAssistantAttentionItemDto = {
     /**
@@ -286,6 +303,7 @@ export type AiAssistantAttentionItemDto = {
      * @type integer, int64
     */
     updatedAtUnixMs: number;
+    workbench?: (null | AiAssistantAttentionWorkRef);
 };
 
 export type AiAssistantAttentionListDto = {
@@ -3484,6 +3502,99 @@ export type AiAssistantSubAgentResult = {
     task: AiAssistantSubAgentSummary;
 };
 
+export type AiAssistantWorkbenchDelivery = {
+    /**
+     * @type string
+    */
+    artifactId: string;
+    /**
+     * @type integer,null, int64
+    */
+    commentId?: number | null;
+    /**
+     * @type string
+    */
+    instance: string;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    issueNumber: number;
+    /**
+     * @type string
+    */
+    owner: string;
+    /**
+     * @type string,null
+    */
+    reason?: string | null;
+    /**
+     * @type string
+    */
+    repository: string;
+    /**
+     * @type string
+    */
+    state: string;
+    /**
+     * @type integer, int64
+    */
+    updatedAtMs: number;
+};
+
+export type AiAssistantWorkbenchTask = {
+    /**
+     * @type array
+    */
+    deliveries: AiAssistantWorkbenchDelivery[];
+    /**
+     * @type string,null
+    */
+    executionSessionId?: string | null;
+    /**
+     * @type integer,null, int64
+    */
+    issueNumber?: number | null;
+    /**
+     * @type object
+    */
+    receipt: MainRequestReceipt;
+    /**
+     * @type integer, int64
+    */
+    updatedAtMs: number;
+    /**
+     * @type array
+    */
+    workerStates: string[];
+};
+
+export type AiAssistantWorkbenchTasks = {
+    /**
+     * @type array
+    */
+    items: AiAssistantWorkbenchTask[];
+    /**
+     * @type string,null
+    */
+    nextBefore?: string | null;
+};
+
+export type AiAssistantWorkbenchView = {
+    /**
+     * @type string
+    */
+    conversationId: string;
+    /**
+     * @type string
+    */
+    name: string;
+    /**
+     * @type string
+    */
+    workbenchId: string;
+};
+
 export const executionModeEnum = {
     suggest_only: "suggest_only",
     read_only: "read_only",
@@ -6300,6 +6411,18 @@ export type CpuInfo = {
     vendor_id: string;
 };
 
+export type CreateAiAssistantWorkbench = {
+    /**
+     * @description Stable client-generated id for retrying this creation.
+     * @type string
+    */
+    creationId: string;
+    /**
+     * @type string
+    */
+    name: string;
+};
+
 /**
  * @description Request body for issuing a host signaling token. Mirrors the manager\'s\n`POST /api/tokens` wire shape so a single mobile-client contract drives both\nends with no server-type probe. The open-source desk-server ignores `name`:\nit returns the static `local_signaling_token` rather than minting a\nper-name token in a database.
 */
@@ -8106,6 +8229,30 @@ export type IssueConnectionsUpdate = {
     expected_revision: number;
 };
 
+export type IssueSubscriptionAccount = {
+    /**
+     * @type boolean
+    */
+    automation: boolean;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    id: number;
+    /**
+     * @type string
+    */
+    login: string;
+};
+
+export type IssueSubscriptionAccounts = {
+    /**
+     * @type object
+    */
+    outbound: IssueSubscriptionAccount;
+    sender?: (null | IssueSubscriptionAccount);
+};
+
 export type IssueSubscriptionEnable = {
     /**
      * @type boolean
@@ -8185,6 +8332,12 @@ export type IssueSubscriptionSave = {
     */
     enabled: boolean;
     /**
+     * @description The authenticated account shown when the owner authorizes replies.
+     * @minLength 0
+     * @type integer,null, int64
+    */
+    expectedOutboundAccountId?: number | null;
+    /**
      * @minLength 0
      * @type integer, int64
     */
@@ -8248,6 +8401,11 @@ export type IssueSubscriptionView = {
     */
     lastCheckedAtMs?: number | null;
     latestIntake?: (null | IssueSubscriptionIntake);
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    outboundAccountId: number;
     /**
      * @type string
     */
@@ -11838,6 +11996,66 @@ export type RestResponseAiAssistantSubAgentSummary = {
     success: boolean;
 };
 
+export type RestResponseAiAssistantWorkbenchTasks = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @type array
+        */
+        items: AiAssistantWorkbenchTask[];
+        /**
+         * @type string,null
+        */
+        nextBefore?: string | null;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponseAiAssistantWorkbenchView = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @type string
+        */
+        conversationId: string;
+        /**
+         * @type string
+        */
+        name: string;
+        /**
+         * @type string
+        */
+        workbenchId: string;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
 export type RestResponseAiExecutionPolicyPublic = {
     /**
      * @type integer, int32
@@ -13744,6 +13962,31 @@ export type RestResponseIssueConnectionsPublic = {
     success: boolean;
 };
 
+export type RestResponseIssueSubscriptionAccounts = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @type object
+        */
+        outbound: IssueSubscriptionAccount;
+        sender?: (null | IssueSubscriptionAccount);
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
 export type RestResponseIssueSubscriptionView = {
     /**
      * @type integer, int32
@@ -13783,6 +14026,11 @@ export type RestResponseIssueSubscriptionView = {
         */
         lastCheckedAtMs?: number | null;
         latestIntake?: (null | IssueSubscriptionIntake);
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        outboundAccountId: number;
         /**
          * @type string
         */
@@ -15989,6 +16237,38 @@ export type RestResponseUserInstructions = {
     success: boolean;
 };
 
+export type RestResponseVecAiAssistantWorkbenchView = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type array | undefined
+    */
+    data?: {
+        /**
+         * @type string
+        */
+        conversationId: string;
+        /**
+         * @type string
+        */
+        name: string;
+        /**
+         * @type string
+        */
+        workbenchId: string;
+    }[];
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
 export type RestResponseVecConnectionModel = {
     /**
      * @type integer, int32
@@ -16116,6 +16396,11 @@ export type RestResponseVecIssueSubscriptionView = {
         */
         lastCheckedAtMs?: number | null;
         latestIntake?: (null | IssueSubscriptionIntake);
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        outboundAccountId: number;
         /**
          * @type string
         */
@@ -22102,6 +22387,31 @@ export type SaveAiAssistantIssueSubscriptionMutation = {
     Errors: any;
 };
 
+export type GetAiAssistantIssueSubscriptionAccountsQueryParams = {
+    /**
+     * @type string
+    */
+    workbench: string;
+    /**
+     * @type string
+    */
+    connection: string;
+    /**
+     * @type string | undefined
+    */
+    login?: string;
+};
+
+export type GetAiAssistantIssueSubscriptionAccounts200 = RestResponseIssueSubscriptionAccounts;
+
+export type GetAiAssistantIssueSubscriptionAccountsQueryResponse = GetAiAssistantIssueSubscriptionAccounts200;
+
+export type GetAiAssistantIssueSubscriptionAccountsQuery = {
+    Response: GetAiAssistantIssueSubscriptionAccounts200;
+    QueryParams: GetAiAssistantIssueSubscriptionAccountsQueryParams;
+    Errors: any;
+};
+
 export type SetAiAssistantIssueSubscriptionEnabledPathParams = {
     /**
      * @type string
@@ -22424,6 +22734,56 @@ export type UpdateAssistantUserInstructionsMutationResponse = UpdateAssistantUse
 export type UpdateAssistantUserInstructionsMutation = {
     Response: UpdateAssistantUserInstructions200;
     Request: UpdateAssistantUserInstructionsMutationRequest;
+    Errors: any;
+};
+
+export type ListAiAssistantWorkbenches200 = RestResponseVecAiAssistantWorkbenchView;
+
+export type ListAiAssistantWorkbenchesQueryResponse = ListAiAssistantWorkbenches200;
+
+export type ListAiAssistantWorkbenchesQuery = {
+    Response: ListAiAssistantWorkbenches200;
+    Errors: any;
+};
+
+export type CreateAiAssistantWorkbench200 = RestResponseAiAssistantWorkbenchView;
+
+export type CreateAiAssistantWorkbenchMutationRequest = CreateAiAssistantWorkbench;
+
+export type CreateAiAssistantWorkbenchMutationResponse = CreateAiAssistantWorkbench200;
+
+export type CreateAiAssistantWorkbenchMutation = {
+    Response: CreateAiAssistantWorkbench200;
+    Request: CreateAiAssistantWorkbenchMutationRequest;
+    Errors: any;
+};
+
+export type ListAiAssistantWorkbenchTasksPathParams = {
+    /**
+     * @type string
+    */
+    workbench_id: string;
+};
+
+export type ListAiAssistantWorkbenchTasksQueryParams = {
+    /**
+     * @type string | undefined
+    */
+    request?: string;
+    /**
+     * @type string | undefined
+    */
+    before?: string;
+};
+
+export type ListAiAssistantWorkbenchTasks200 = RestResponseAiAssistantWorkbenchTasks;
+
+export type ListAiAssistantWorkbenchTasksQueryResponse = ListAiAssistantWorkbenchTasks200;
+
+export type ListAiAssistantWorkbenchTasksQuery = {
+    Response: ListAiAssistantWorkbenchTasks200;
+    PathParams: ListAiAssistantWorkbenchTasksPathParams;
+    QueryParams: ListAiAssistantWorkbenchTasksQueryParams;
     Errors: any;
 };
 

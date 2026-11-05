@@ -24,6 +24,7 @@ pub mod source;
 pub mod subagent;
 pub mod subagent_policy;
 pub mod user_instructions;
+pub mod workbench;
 
 /// Owner-visible queue state. Native turn and approval state live in the session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]

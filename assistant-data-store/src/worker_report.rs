@@ -176,7 +176,7 @@ pub async fn owner_result_on(
     if run.state == SubAgentState::WaitingInput
         && now_ms < run.binding.deadline_ms
         && let Some(question_id) = run.pending_question_id.as_deref()
-        && let Some(question) = open_question_on(db, run, question_id, now_ms).await?
+        && let Some(question) = open_question_on(db, run, question_id, now_ms, true).await?
     {
         result.open_question = Some(AiAssistantSubAgentQuestion {
             question_id: question_id.into(),
@@ -481,7 +481,27 @@ pub async fn settle_projected_on<C: ConnectionTrait>(
         return Err(invalid());
     }
     for row in rows {
-        decode_record(&row)?;
+        let stored = decode_record(&row)?;
+        if group.source.workbench_id().is_some()
+            && row.owner_handoff_at_ms.is_none()
+            && let Some(question) = stored.report.question_id.as_deref()
+        {
+            use crate::entity::agent_subagent_run as run;
+            let task = run::Entity::find()
+                .filter(run::Column::TaskId.eq(&row.task_id))
+                .filter(run::Column::GroupId.eq(&group.group_id))
+                .filter(run::Column::ActorId.eq(&group.actor_id))
+                .one(txn)
+                .await?;
+            if let Some(task) = task
+                && crate::worker_request::decode_run(&task)?
+                    .pending_question_id
+                    .as_deref()
+                    == Some(question)
+            {
+                return Err(invalid());
+            }
+        }
         if row.interpreted_at_ms.is_none() {
             let mut update: inbox::ActiveModel = row.into();
             update.interpreted_at_ms = Set(Some(now_ms));
@@ -598,7 +618,7 @@ pub async fn read_open_question_on<C: ConnectionTrait>(
     question_id: &str,
     now_ms: i64,
 ) -> Result<StoredReport, DbErr> {
-    open_question_on(txn, run, question_id, now_ms)
+    open_question_on(txn, run, question_id, now_ms, false)
         .await?
         .ok_or_else(invalid)
 }
@@ -608,15 +628,17 @@ async fn open_question_on(
     run: &SubAgentRun,
     question_id: &str,
     now_ms: i64,
+    owner_view: bool,
 ) -> Result<Option<StoredReport>, DbErr> {
     if run.pending_question_id.as_deref() != Some(question_id) {
         return Err(invalid());
     }
-    let Some(row) = retained_at(report_rows(run), now_ms)
-        .filter(inbox::Column::EventId.eq(question_id))
-        .one(txn)
-        .await?
-    else {
+    let mut query =
+        retained_at(report_rows(run), now_ms).filter(inbox::Column::EventId.eq(question_id));
+    if owner_view && run.binding.source.workbench_id().is_some() {
+        query = query.filter(inbox::Column::OwnerHandoffAtMs.is_not_null());
+    }
+    let Some(row) = query.one(txn).await? else {
         return Ok(None);
     };
     let stored = decode_report(&row, run)?;
@@ -624,6 +646,57 @@ async fn open_question_on(
         return Err(invalid());
     }
     Ok(Some(stored))
+}
+
+/// The model has a native observation of this exact question and the caller
+/// holds the parent/child control transaction. Keep the report open for reply.
+pub async fn handoff_question_on(
+    txn: &impl ConnectionTrait,
+    run: &SubAgentRun,
+    question_id: &str,
+    observed_seq: u64,
+    turn_id: &str,
+    now_ms: i64,
+) -> Result<(), DbErr> {
+    if run.binding.source.workbench_id().is_none()
+        || run.state != SubAgentState::WaitingInput
+        || now_ms >= run.binding.deadline_ms
+        || read_open_question_on(txn, run, question_id, now_ms)
+            .await?
+            .report
+            .seq
+            != observed_seq
+    {
+        return Err(invalid());
+    }
+    inbox::Entity::update_many()
+        .filter(inbox::Column::EventId.eq(question_id))
+        .filter(inbox::Column::OwnerHandoffAtMs.is_null())
+        .set(inbox::ActiveModel {
+            owner_handoff_at_ms: Set(Some(now_ms)),
+            interpreted_at_ms: Set(Some(now_ms)),
+            interpreted_turn_id: Set(Some(turn_id.into())),
+            ..Default::default()
+        })
+        .exec(txn)
+        .await?;
+    Ok(())
+}
+
+pub fn owner_handoff_is_open(
+    row: &inbox::Model,
+    run: &SubAgentRun,
+    now_ms: i64,
+) -> Result<bool, DbErr> {
+    if row.owner_handoff_at_ms.is_none()
+        || row.report_expires_at_ms.is_some_and(|at| at <= now_ms)
+        || now_ms >= run.binding.deadline_ms
+        || run.state != SubAgentState::WaitingInput
+        || run.pending_question_id.as_deref() != Some(row.event_id.as_str())
+    {
+        return Ok(false);
+    }
+    Ok(decode_report(row, run)?.report.question_id.as_deref() == Some(row.event_id.as_str()))
 }
 
 pub async fn first_matching_report_on<C: ConnectionTrait>(

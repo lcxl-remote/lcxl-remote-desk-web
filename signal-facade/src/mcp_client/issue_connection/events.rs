@@ -1,6 +1,9 @@
 //! REST source reads do not depend on the MCP server being available.
 
 use super::*;
+use desk_agent_protocol::ai_assistant::issue_subscription::{
+    IssueSubscriptionAccount, IssueSubscriptionAccounts,
+};
 use desk_diagnose_core::issue_authority::IssueRepositoryScope;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,6 +58,44 @@ pub struct RestIssueSnapshot {
 }
 
 impl IssueConnection {
+    pub async fn subscription_accounts(
+        &self,
+        login: Option<&str>,
+    ) -> Result<IssueSubscriptionAccounts, McpClientError> {
+        let outbound = self.get::<RestAuthor>(&["user"]);
+        let sender = async {
+            let Some(login) = login else { return Ok(None) };
+            if !valid_account(login) {
+                return Err(McpClientError::InvalidConfiguration);
+            }
+            let account: RestAuthor = self.get(&["users", login]).await?;
+            if !account.login.eq_ignore_ascii_case(login) {
+                return Err(McpClientError::TargetChanged);
+            }
+            self.subscription_account(account).map(Some)
+        };
+        let (outbound, sender) = tokio::try_join!(outbound, sender)?;
+        Ok(IssueSubscriptionAccounts {
+            outbound: self.subscription_account(outbound)?,
+            sender,
+        })
+    }
+
+    fn subscription_account(
+        &self,
+        account: RestAuthor,
+    ) -> Result<IssueSubscriptionAccount, McpClientError> {
+        if account.id == 0 || !valid_account(&account.login) {
+            return Err(McpClientError::TargetChanged);
+        }
+        Ok(IssueSubscriptionAccount {
+            id: account.id,
+            login: account.login,
+            automation: self.platform == IssuePlatform::Github
+                && account.account_type.as_deref() != Some("User"),
+        })
+    }
+
     /// Bind a user-selected issue locator using only identities returned by the forge.
     pub async fn bind_subscription(
         &self,

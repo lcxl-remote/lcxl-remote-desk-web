@@ -115,6 +115,7 @@ type Props = {
     deskId: string;
     targetRefs?: readonly string[];
     connected?: boolean;
+    queueOnly?: boolean;
     /// Stable device identity for browser-side conversation intent. The OSS
     /// connection id changes after a server restart, while client_id does not.
     conversationStorageScope?: string;
@@ -410,6 +411,7 @@ export function useAiAssistantChat({
     deskId,
     targetRefs,
     connected,
+    queueOnly = false,
     conversationStorageScope = deskId,
     initialConversationId,
     subscribe,
@@ -686,6 +688,8 @@ export function useAiAssistantChat({
         reportFailure = false,
         requireApprovalState = false,
     ): Promise<'ready' | 'missing' | 'ignored' | 'failed'> => {
+        // A workbench root accepts durable requests but has no chat turn of its own.
+        if (queueOnly) return 'missing';
         const expectedEpoch = snapshotEpoch.current;
         const expectedRequestOrder = ++snapshotRequestOrder.current;
         const expectedQueueOrder = queueReadOrder.current;
@@ -903,7 +907,7 @@ export function useAiAssistantChat({
                 setHydrating(false);
             }
         }
-    }, [acknowledgeDelivery, deskId, observeQueue, queueEnabled]);
+    }, [acknowledgeDelivery, deskId, observeQueue, queueEnabled, queueOnly]);
 
     const loadOlderMessages = useCallback(async () => {
         const cursor = messagePage.nextBeforeMessageId;
@@ -1609,7 +1613,8 @@ export function useAiAssistantChat({
         if (!pending || connected === false || !sessionTargetReady || deliveryState === 'sending') return;
         setDeliveryState('sending');
         pending.sentAt = Date.now();
-        await loadSnapshot(pending.conversation);
+        if (queueOnly) await loadRequestQueue(pending.conversation);
+        else await loadSnapshot(pending.conversation);
         if (pendingDelivery.current !== pending || conversationId.current !== pending.conversation) return;
         if (rehearsal || pending.payload.start_goal) {
             activeRequest.current = pending.requestId;
@@ -1619,7 +1624,7 @@ export function useAiAssistantChat({
         try {
             sendMessage(SIGNALING_TYPE_CODE_ASK_AI_ASSISTANT, pending.payload, deskId || undefined, pending.requestId);
         } catch { setDeliveryState('unconfirmed'); }
-    }, [connected, sessionTargetReady, deliveryState, loadSnapshot, sendMessage, deskId, rehearsal]);
+    }, [connected, sessionTargetReady, deliveryState, loadSnapshot, loadRequestQueue, queueOnly, sendMessage, deskId, rehearsal]);
 
     const submitPermissionDecision = useCallback(async (
         request: PermissionRequestDto,

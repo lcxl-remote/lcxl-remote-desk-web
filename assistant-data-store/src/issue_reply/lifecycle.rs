@@ -27,6 +27,27 @@ pub async fn cancel_conversation_on(
     .await
 }
 
+/// Stop every executor of one workbench round while preserving dispatch facts.
+pub(crate) async fn cancel_logical_request_on(
+    db: &impl ConnectionTrait,
+    actor: &str,
+    workbench: &str,
+    request: &str,
+    now_ms: i64,
+) -> Result<(), AssistantStoreError> {
+    cancel_on(
+        db,
+        Condition::all()
+            .add(reply::Column::ActorId.eq(actor))
+            .add(reply::Column::RootConversationId.eq(workbench))
+            .add(reply::Column::RequestId.eq(request))
+            .add(reply::Column::RetiredAtMs.is_null()),
+        "work_stopped",
+        now_ms,
+    )
+    .await
+}
+
 /// Stops only this executor's original input. Earlier independent deliveries
 /// in the same conversation and other executors keep their own authority.
 pub async fn cancel_request_on(

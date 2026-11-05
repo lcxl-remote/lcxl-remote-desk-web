@@ -26,6 +26,8 @@ pub struct IssueSubscriptionSave {
     pub automation_sender_ids: Vec<u64>,
     pub work_kind: IssueWorkKind,
     pub auto_reply: bool,
+    /// The authenticated account shown when the owner authorizes replies.
+    pub expected_outbound_account_id: Option<u64>,
     pub enabled: bool,
 }
 
@@ -38,12 +40,28 @@ pub struct IssueSubscriptionEnable {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
+pub struct IssueSubscriptionAccount {
+    pub id: u64,
+    pub login: String,
+    pub automation: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct IssueSubscriptionAccounts {
+    pub outbound: IssueSubscriptionAccount,
+    pub sender: Option<IssueSubscriptionAccount>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct IssueSubscriptionView {
     pub subscription_id: String,
     pub revision: u64,
     pub workbench_id: String,
     pub connection_ref: String,
     pub platform: IssuePlatform,
+    pub outbound_account_id: u64,
     pub owner: String,
     pub repository: String,
     pub issue_number: Option<u64>,

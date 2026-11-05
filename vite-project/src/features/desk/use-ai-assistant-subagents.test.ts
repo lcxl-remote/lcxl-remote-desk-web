@@ -27,6 +27,26 @@ const props = { connection: 'original-device', conversation: 'owner-conversation
 describe('owner subagent views', () => {
     afterEach(() => { vi.unstubAllGlobals(); vi.clearAllMocks(); });
 
+    it('opens the exact Workbench Worker and native approval outside the loaded task page', async () => {
+        const fetch = vi.fn(async (url: string, _init?: RequestInit) => {
+            if (url.includes('/subagents/status?')) return ok(task);
+            if (url.includes('/subagents/result?')) return ok(report);
+            if (url.endsWith('/subagents/read')) return ok(true);
+            return ok(child);
+        });
+        vi.stubGlobal('fetch', fetch);
+        const { result, unmount } = renderHook(() => useAiAssistantSubagents({
+            ...props, connection: '', conversation: null,
+            snapshot: { ...snapshot, active_tasks: [], attention_tasks: [], tasks: null },
+        }));
+        expect(result.current.tasks).toEqual([]);
+        await act(async () => { await result.current.openDetailById(task.task_id); });
+        await waitFor(() => expect(result.current.detail?.session.permissionRequests).toEqual([permission]));
+        expect(result.current.selected?.task_id).toBe(task.task_id);
+        expect(fetch.mock.calls[0][0]).toBe('/api/my/ai-assistant-session/subagents/status?connection=&session=root-1&task_id=task-1');
+        unmount();
+    });
+
     it('adds the sending client timezone to an owner adjustment', async () => {
         const fetch = vi.fn(async (_url: string, _init?: RequestInit) => ok(task));
         vi.stubGlobal('fetch', fetch);

@@ -30,6 +30,31 @@ function stubSnapshotFetch<Args extends unknown[]>(fetchSnapshot: (...args: Args
 }
 
 describe('useAiAssistantChat', () => {
+    it('submits to a workbench queue without a root chat snapshot and recovers its receipt', async () => {
+        let accepted: { clientMessageId: string; requestId: string; state: 'queued' } | undefined;
+        const fetchMock = vi.fn(async (_url: string) => ({
+            ok: true,
+            json: async () => ({ success: true, data: { sessionId: 'workbench-session', items: accepted ? [accepted] : [] } }),
+        }));
+        vi.stubGlobal('fetch', fetchMock);
+        const sendMessage = vi.fn((_type: number, _data: unknown, _to?: string, _request?: string): string => {
+            throw new Error('Receipt lost');
+        });
+        const { result } = renderHook(() => useAiAssistantChat({
+            deskId: '', initialConversationId: 'workbench-created', conversationStorageScope: 'workbench:created',
+            queueOnly: true, targetRefs: ['mac'], subscribe: () => () => undefined, sendMessage,
+        }));
+        await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+        act(() => { expect(result.current.start('Reproduce the issue')).toBe(true); });
+        const input = sendMessage.mock.calls[0][1] as { client_message_id: string };
+        expect(input).toMatchObject({ conversation_id: 'workbench-created', target_refs: ['mac'] });
+        accepted = { clientMessageId: input.client_message_id, requestId: 'durable-request', state: 'queued' };
+        await act(async () => { await result.current.retryDelivery(); });
+        expect(result.current.acceptedInput?.question).toBe('Reproduce the issue');
+        expect(sendMessage).toHaveBeenCalledTimes(1);
+        expect(fetchMock.mock.calls.every(([url]) => url.includes('/ai-assistant-session/requests?'))).toBe(true);
+    });
+
     it('freezes issue selections with the original message when delivery is retried', async () => {
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: null }) }));
         const sendMessage = vi.fn((_type: number, _payload: unknown, _to?: string, request?: string) => request!)

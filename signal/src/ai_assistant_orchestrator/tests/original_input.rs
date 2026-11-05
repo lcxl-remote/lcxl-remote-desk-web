@@ -835,7 +835,7 @@ async fn queued_owner_input_roundtrip(workbench: bool, delete_workbench: bool, w
         );
         let work = execution(&row.request_id);
         desk_diagnose_core::future::boxed(|| {
-            exercise_workbench_report_wake(&db, &listener, &work, &row.actor_id, task)
+            exercise_workbench_report_wake(&db, &listener, &work, &row.actor_id, task, with_issues)
         })
         .await;
         let ready = store
@@ -1466,6 +1466,7 @@ async fn exercise_workbench_report_wake(
     work: &str,
     actor: &str,
     task: crate::entity::agent_subagent_run::Model,
+    handoff: bool,
 ) {
     use crate::agent_subagent_store::{ParentWaitResolution, SubAgentStore};
     use crate::entity::agent_subagent_run as run;
@@ -1478,6 +1479,16 @@ async fn exercise_workbench_report_wake(
     let reports = || workbench_report_rows(db, &task.task_id);
     let first_reports = reports().await;
     let question = &first_reports[1];
+    if handoff {
+        assert!(
+            store
+                .result_for_owner(work, actor, "", &task.task_id, None)
+                .await
+                .unwrap()
+                .open_question
+                .is_none()
+        );
+    }
     let (eligible, _) = store.root_wait_candidates(0, 32).await.unwrap();
     assert!(
         eligible
@@ -1525,11 +1536,18 @@ async fn exercise_workbench_report_wake(
                             .to_string()
                             .contains("reply_subagent_request")
                     );
+                    let reply = if handoff {
+                        assert!(input["tools"].to_string().contains("ask_owner_for_subagent"));
+                        report_test_call("handoff-exact-question", "ask_owner_for_subagent", json!({
+                            "request_id":task.task_id, "question_id":question.event_id,
+                        }))
+                    } else {
+                        report_test_call("reply-exact-question", "reply_subagent_request", json!({
+                            "request_id": task.task_id, "question_id": question.event_id, "message":"Use version 15",
+                        }))
+                    };
                     memory_sse(
-                        json!({"tool_calls":[report_test_call("reply-exact-question",
-                        "reply_subagent_request", json!({"request_id": task.task_id,
-                            "question_id": question.event_id, "message":"Use version 15"})),
-                        acknowledge]}),
+                        json!({"tool_calls":[reply, acknowledge]}),
                         "tool_calls",
                     )
                 })
@@ -1547,11 +1565,82 @@ async fn exercise_workbench_report_wake(
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(latest.state, "queued");
+    assert_eq!(
+        latest.state,
+        if handoff { "waiting_input" } else { "queued" }
+    );
     let delivered = reports().await;
     assert!(delivered[0].interpreted_at_ms.is_some());
     assert!(delivered[1].model_notified_at_ms.is_some());
-    assert!(delivered[1].interpreted_at_ms.is_none());
+    assert_eq!(delivered[1].interpreted_at_ms.is_some(), handoff);
+    if handoff {
+        use desk_agent_protocol::ai_assistant::subagent::{
+            AiAssistantSubAgentControl, SubAgentControlAction,
+        };
+        use desk_signal_facade::controller::ai_assistant_session::AiAssistantAttentionReason;
+        let attention = || {
+            crate::agent_owner_attention::list_goal_attention(
+                db,
+                actor,
+                chrono::Utc::now().timestamp_millis() as u64,
+            )
+        };
+        let items = attention().await.unwrap();
+        let item = items
+            .iter()
+            .find(|item| item.reason == AiAssistantAttentionReason::WorkerQuestion)
+            .unwrap();
+        assert_eq!(item.request_id.as_deref(), Some(question.event_id.as_str()));
+        let reference = item.workbench.as_ref().unwrap();
+        assert_eq!(
+            reference.worker_task_id.as_deref(),
+            Some(task.task_id.as_str())
+        );
+        assert_eq!(
+            reference.workbench_id,
+            task.workbench_id.as_deref().unwrap()
+        );
+        let result = store
+            .result_for_owner(work, actor, "", &task.task_id, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            result.open_question.as_ref().unwrap().question_id,
+            question.event_id
+        );
+        let mut control = AiAssistantSubAgentControl {
+            client_request_id: "handoff-owner-reply".into(),
+            task_id: task.task_id.clone(),
+            expected_input_revision: result.task.input_revision,
+            expected_control_revision: result.task.control_revision,
+            action: SubAgentControlAction::Reply {
+                question_id: question.event_id.clone(),
+                message: "Use version 15".into(),
+            },
+        };
+        store
+            .control_for_owner(work, actor, "", &control)
+            .await
+            .unwrap();
+        store
+            .control_for_owner(work, actor, "", &control)
+            .await
+            .unwrap();
+        control.client_request_id = "late-handoff-reply".into();
+        assert!(
+            store
+                .control_for_owner(work, actor, "", &control)
+                .await
+                .is_err()
+        );
+        assert!(
+            !attention()
+                .await
+                .unwrap()
+                .iter()
+                .any(|pending| pending.attention_id == item.attention_id)
+        );
+    }
     assert!(
         store
             .parent_runtime_candidate(work, actor, "")

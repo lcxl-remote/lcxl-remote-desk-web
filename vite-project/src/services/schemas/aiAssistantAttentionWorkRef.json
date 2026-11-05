@@ -1,0 +1,1 @@
+{"type":"object","required":["workbenchId","requestId"],"properties":{"requestId":{"type":"string"},"workbenchId":{"type":"string"},"workerTaskId":{"type":["string","null"]}},"x-readme-ref-name":"AiAssistantAttentionWorkRef"}

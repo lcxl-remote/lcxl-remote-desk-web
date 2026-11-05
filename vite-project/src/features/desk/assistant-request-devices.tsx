@@ -11,9 +11,11 @@ export type AssistantRequestDevice = {
     platform: string;
 };
 
-export function AssistantRequestDevices({ selected, onChange }: {
+export function AssistantRequestDevices({ selected, onChange, disabled, showStatus }: {
     selected: AssistantRequestDevice[];
     onChange: (devices: AssistantRequestDevice[]) => void;
+    disabled?: boolean;
+    showStatus?: boolean;
 }) {
     const { t } = useTranslation();
     const connections = useListConnections();
@@ -27,10 +29,11 @@ export function AssistantRequestDevices({ selected, onChange }: {
             });
         }
     }
+    const connected = new Set(connections.data?.data?.map(item => item.device_id));
     const choices = new Map([...selected.map(device => [device.id, device] as const), ...available]);
     return <DropdownMenu>
         <DropdownMenuTrigger asChild>
-            <Button type="button" variant="ghost" size="sm" className="min-w-0">
+            <Button type="button" variant="ghost" size="sm" className="min-w-0" disabled={disabled}>
                 <Monitor className="h-4 w-4 shrink-0" aria-hidden="true" />
                 <span className="truncate">{t('pages.aiAssistant.requestDevices')}</span>
                 {selected.length > 0 && <span>{selected.length}</span>}
@@ -49,6 +52,10 @@ export function AssistantRequestDevices({ selected, onChange }: {
                     }}>
                     <Check className={checked ? 'text-primary' : 'invisible'} aria-hidden="true" />
                     {device.name}<span className="text-muted-foreground">{device.platform}</span>
+                    {showStatus && connections.isSuccess && <span className="text-muted-foreground">
+                        {t(connected.has(device.id) ? 'pages.aiAssistant.workbench.deviceOnline'
+                            : 'pages.aiAssistant.workbench.deviceOffline')}
+                    </span>}
                 </DropdownMenuItem>;
             })}
         </DropdownMenuContent>

@@ -101,6 +101,13 @@ impl IssueFixture {
                                 }),
                             )
                             .route(
+                                "/users/Reporter",
+                                web::get().to(|| async {
+                                    HttpResponse::Ok()
+                                        .json(json!({"id":7,"login":"Reporter","type":"User"}))
+                                }),
+                            )
+                            .route(
                                 "/repos/Org/Project",
                                 web::get().to(|| async {
                                     HttpResponse::Ok().json(

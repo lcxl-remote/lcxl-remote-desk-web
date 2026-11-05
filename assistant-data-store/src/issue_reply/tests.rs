@@ -214,6 +214,111 @@ fn receipt(artifact: &FrozenIssueReply, id: u64) -> IssueReplyReceipt {
 }
 
 #[tokio::test]
+async fn workbench_history_keeps_delivery_on_the_original_request() {
+    use crate::{entity::agent_main_request as request, workbench::tasks::list_on};
+    use desk_diagnose_core::native_ids::{self, Kind};
+
+    let db = setup().await;
+    let saved = |index: u32| {
+        let id = native_ids::stable(Kind::AssistantMainRequest, &index);
+        request::Entity::insert(request::ActiveModel {
+            request_id: Set(id),
+            conversation_id: Set("root".into()),
+            actor_id: Set("owner".into()),
+            client_message_id: Set(format!("input-{index}")),
+            submission_sha256: Set("hash".into()),
+            state: Set("activated".into()),
+            coordinated: Set(true),
+            coordination_attempts: Set(0),
+            input_revision: Set(Some(1)),
+            accepted_at_ms: Set(i64::from(index)),
+            updated_at_ms: Set(i64::from(index)),
+            ..Default::default()
+        })
+    };
+    for index in 1..=21 {
+        saved(index).exec(&db).await.unwrap();
+    }
+    let id = native_ids::stable(Kind::AssistantMainRequest, &1_u32);
+    let artifact = artifact_for(false, &id);
+    freeze(&db, &artifact, DeliveryMode::Automatic, 1002)
+        .await
+        .unwrap();
+    let claim = claim_next(&db, "node-a", "claim-a", 1002, 2002)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(mark_dispatched(&db, &claim, 3, 1003).await.unwrap());
+    recover(&db, 2002).await.unwrap();
+    let later = artifact_for(
+        false,
+        &native_ids::stable(Kind::AssistantMainRequest, &2_u32),
+    );
+    freeze(&db, &later, DeliveryMode::Automatic, 2002)
+        .await
+        .unwrap();
+    let txn = sea_orm::TransactionTrait::begin(&db).await.unwrap();
+    crate::workbench::tasks::stop_issue_round_on(&txn, "owner", "root", &id, 2002)
+        .await
+        .unwrap();
+    txn.commit().await.unwrap();
+    assert_eq!(
+        load(&db, "owner", &later.artifact_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        READY
+    );
+    let selected = || list_on(&db, "owner", "root", Some(&id), None);
+    let task = selected().await.unwrap().items.remove(0);
+    assert_eq!(task.receipt.request_id, id);
+    assert_eq!(task.deliveries[0].state, UNKNOWN);
+    assert_eq!(task.deliveries[0].comment_id, None);
+
+    let page = list_on(&db, "owner", "root", None, None).await.unwrap();
+    assert_eq!(page.items.len(), 20);
+    assert!(page.items.iter().all(|row| row.deliveries.is_empty()));
+    saved(22).exec(&db).await.unwrap();
+    let older = list_on(&db, "owner", "root", None, page.next_before.as_deref())
+        .await
+        .unwrap();
+    assert_eq!(older.items.len(), 1);
+    assert_eq!(older.items[0].receipt.request_id, id);
+    assert!(older.next_before.is_none());
+    assert!(
+        list_on(&db, "other", "root", Some(&id), None)
+            .await
+            .is_err()
+    );
+    assert!(
+        list_on(&db, "owner", "other-workbench", Some(&id), None)
+            .await
+            .is_err()
+    );
+
+    let claim = claim_next(&db, "node-b", "claim-b", 2002, 3002)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        record_receipt(&db, &claim, "claim-a", &receipt(&artifact, 17), 2003)
+            .await
+            .unwrap()
+    );
+    let delivered = selected()
+        .await
+        .unwrap()
+        .items
+        .remove(0)
+        .deliveries
+        .remove(0);
+    assert_eq!(delivered.state, DELIVERED);
+    assert_eq!(delivered.comment_id, Some(17));
+    assert_eq!(delivered.issue_number, 4);
+}
+
+#[tokio::test]
 async fn first_freeze_owns_the_marker_and_unpublishable_sources_stay_internal() {
     let db = setup().await;
     let original = artifact(false);
@@ -578,6 +683,20 @@ async fn a_corrupt_artifact_does_not_block_other_work_or_rearm_unknown_effects()
     assert_eq!(invalid.state, UNKNOWN);
     assert_eq!(invalid.dispatch_token.as_deref(), Some("claim-a"));
     assert_eq!(invalid.reason.as_deref(), Some("artifact_invalid"));
+    use crate::workbench::tasks::{delivery_attention_on, delivery_attention_owners_on};
+    assert_eq!(
+        delivery_attention_owners_on(&db, 1005).await.unwrap(),
+        ["owner"]
+    );
+    assert!(
+        delivery_attention_on(&db, "other", 1005)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let needs_attention = delivery_attention_on(&db, "owner", 1005).await.unwrap();
+    assert_eq!(needs_attention.len(), 1);
+    assert_eq!(needs_attention[0].2, a.artifact_id);
     assert!(
         claim_next(&db, "node-c", "claim-c", 1005, 2005)
             .await

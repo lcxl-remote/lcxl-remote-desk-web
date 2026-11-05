@@ -1,0 +1,1 @@
+{"type":"object","required":["creationId","name"],"properties":{"creationId":{"type":"string","description":"Stable client-generated id for retrying this creation."},"name":{"type":"string"}},"additionalProperties":false,"x-readme-ref-name":"CreateAiAssistantWorkbench"}

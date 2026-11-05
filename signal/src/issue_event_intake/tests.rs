@@ -586,6 +586,26 @@ async fn frozen_comment_uses_native_queue_and_cannot_claim_as_owner() {
     let paused_worker = worker_row().await;
     assert_eq!(paused_worker.state, SubAgentState::WaitingSource.as_str());
     assert_eq!(paused_worker.input_revision, worker.input_revision as i64);
+    let work = desk_assistant_data_store::workbench::tasks::list_on(
+        &db,
+        ACTOR,
+        &policy.conversation_id,
+        Some(&queued.request_id),
+        None,
+    )
+    .await
+    .unwrap()
+    .items
+    .remove(0);
+    assert_eq!(
+        work.execution_session_id.as_deref(),
+        Some(admitted.execution_root_id.as_str())
+    );
+    assert_eq!(work.issue_number, Some(4));
+    assert_eq!(
+        work.worker_states,
+        vec![SubAgentState::WaitingSource.as_str()]
+    );
     let grant_context = PermissionGrantIssuanceContext {
         surface: desk_agent_protocol::capability_provider::ProductSurface::OssPersonalOwner,
         registry: &registry,
@@ -688,6 +708,38 @@ async fn frozen_comment_uses_native_queue_and_cannot_claim_as_owner() {
             .text
             .contains("A second report during the same round")
     );
+    let stop = desk_agent_protocol::ai_assistant::subagent::AiAssistantStopControl {
+        client_request_id: "stop-current-issue-round".into(),
+        expected_input_revision: resumed.input_revision,
+        expected_control_revision: resumed.control_revision,
+        subagent_choice: Some(
+            desk_agent_protocol::ai_assistant::subagent::SubAgentStopChoice::IncludeSubAgents,
+        ),
+    };
+    let outcome = crate::agent_subagent_store::SubAgentStore::new(db.clone())
+        .stop_for_owner(&admitted.execution_root_id, ACTOR, "", &stop)
+        .await
+        .unwrap();
+    assert_eq!(outcome.result.stopped_subagents[0].task_id, worker.task_id);
+    let row = desk_assistant_data_store::entity::agent_issue_admission::Entity::find()
+        .filter(
+            desk_assistant_data_store::entity::agent_issue_admission::Column::RequestId
+                .eq(&queued.request_id),
+        )
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(row.stopped_at_ms.is_some());
+    assert!(
+        agent_issue_event::Entity::find()
+            .filter(agent_issue_event::Column::RequestId.eq(&queued.request_id))
+            .filter(agent_issue_event::Column::State.eq("stopped"))
+            .one(&db)
+            .await
+            .unwrap()
+            .is_some()
+    );
     assert_eq!(fixture.reads(), 0);
     assert_eq!(fixture.writes(), 0);
     fixture.stop().await;
@@ -722,8 +774,20 @@ async fn issue_subscription_settings_bind_native_identity_and_pause_without_conn
         automation_sender_ids: vec![8],
         work_kind: IssueWorkKind::Analysis,
         auto_reply: true,
+        expected_outbound_account_id: Some(3),
         enabled: true,
     };
+    let accounts = issue_connections::read(&db)
+        .await
+        .unwrap()
+        .connection_for_actor(ACTOR, "forge")
+        .unwrap()
+        .subscription_accounts(Some("Reporter"))
+        .await
+        .unwrap();
+    assert_eq!(accounts.outbound.login, "issue-bot");
+    assert_eq!(accounts.outbound.id, 3);
+    assert_eq!(accounts.sender.unwrap().id, 7);
     assert!(matches!(
         save(&db, "foreign-owner", input.clone()).await,
         Err(AssistantStoreError::Inaccessible)
@@ -733,6 +797,12 @@ async fn issue_subscription_settings_bind_native_identity_and_pause_without_conn
     assert!(matches!(
         save(&db, ACTOR, invalid).await,
         Err(AssistantStoreError::Inaccessible)
+    ));
+    let mut changed_account = input.clone();
+    changed_account.expected_outbound_account_id = Some(77);
+    assert!(matches!(
+        save(&db, ACTOR, changed_account).await,
+        Err(AssistantStoreError::SourceUnavailable)
     ));
     let WriteResult::Saved {
         view: saved,

@@ -166,6 +166,20 @@ export function useAiAssistantSubagents({ connection, conversation, session, sna
         setSelected(task); setDetail(null); setError(null);
         void loadDetail(task, true);
     }, [scope, dataScope, loadDetail, showLatestReports]);
+    const openDetailById = useCallback(async (taskId: string) => {
+        if (!session || currentScope.current !== scope || dataScope !== scope) return;
+        const epoch = selectionEpoch.current;
+        try {
+            const task = await request<AiAssistantSubAgentSummary>(listUrl('/status', { task_id: taskId }));
+            if (currentScope.current !== scope || selectionEpoch.current !== epoch || task.task_id !== taskId) return;
+            setOlderTasks(prior => mergeTasks(prior, [task]));
+            openDetail(task);
+        } catch (reason) {
+            if (currentScope.current === scope && selectionEpoch.current === epoch) {
+                setError(reason instanceof Error ? reason.message : t('pages.aiAssistant.subagents.readFailed'));
+            }
+        }
+    }, [session, scope, dataScope, listUrl, openDetail, t]);
     const closeDetail = useCallback(() => {
         if (currentScope.current !== scope) return;
         selectionEpoch.current += 1; detailRef.current = null;
@@ -312,7 +326,7 @@ export function useAiAssistantSubagents({ connection, conversation, session, sna
         const isCurrent = () => currentScope.current === scope && selectedId.current === selected.task_id && operation.current === token
             && selectionEpoch.current === epoch;
         try {
-            const body: PermissionDecisionBody = { connection, session: current.session.sessionId,
+            const body: PermissionDecisionBody = { connection: connection || undefined, session: current.session.sessionId,
                 requestId: permission.requestId, items, expectedRunRequestId: current.session.requestId,
                 ...(carrierId ? { carrierId } : {}) };
             await request('/api/my/ai-assistant-session/permission-decision', body);
@@ -383,11 +397,11 @@ export function useAiAssistantSubagents({ connection, conversation, session, sna
     }, [detail, connection, mutateChild]);
 
     const visible = dataScope === scope && !!session;
-    return { tasks: visible ? tasks : [], total: visible ? snapshot.tasks?.total ?? page?.total ?? tasks.length : 0,
+    return { ready: visible, tasks: visible ? tasks : [], total: visible ? snapshot.tasks?.total ?? page?.total ?? tasks.length : 0,
         attentionCount: visible ? snapshot.attention_count : 0,
         unfinished: visible ? snapshot.tasks?.unfinished ?? snapshot.active_tasks.length : 0,
         hasMore: visible && ((page ?? snapshot.tasks)?.has_more ?? false), loading, loadMore,
-        selected: visible ? selected : null, detail: visible ? detail : null, detailLoading, openDetail, closeDetail, updating, error: visible ? error : null, control, decidePermission,
+        selected: visible ? selected : null, detail: visible ? detail : null, detailLoading, openDetail, openDetailById, closeDetail, updating, error: visible ? error : null, control, decidePermission,
         updateDirectory, revokeGrant, cancelProviderTask, cancelCommandTask,
         historyLoading, hasMoreMessages: visible && (history?.hasMore ?? false), loadOlderMessages,
         reports: visible ? reports : undefined, viewingOlderReports: visible && !!activeOlderReports,

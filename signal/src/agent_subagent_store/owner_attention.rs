@@ -2,7 +2,7 @@
 use super::*;
 use crate::entity::agent_subagent_inbox as inbox;
 use desk_signal_facade::controller::ai_assistant_session::{
-    AiAssistantAttentionItemDto, AiAssistantAttentionReason,
+    AiAssistantAttentionItemDto, AiAssistantAttentionReason, AiAssistantAttentionWorkRef,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -64,14 +64,25 @@ pub(crate) async fn augment_owner_attention_on<
             };
             item.session_id = parent.conversation_id.clone();
             item.client_conversation_id = parent.client_conversation_id.clone();
+            item.workbench =
+                AiAssistantAttentionWorkRef::from_session(parent, Some(binding.task_id.clone()));
+        } else if let Some(parent) = roots.get(&item.session_id) {
+            item.workbench = AiAssistantAttentionWorkRef::from_session(parent, None);
         }
         routed.push(item);
     }
     *items = routed;
     let mut event_query = inbox::Entity::find()
         .filter(inbox::Column::ActorId.eq(actor))
-        .filter(inbox::Column::UiReadAtMs.is_null())
-        .filter(inbox::Column::EventKind.is_in(["completed", "failed", "cancelled"]));
+        .filter(
+            sea_orm::Condition::any()
+                .add(inbox::Column::OwnerHandoffAtMs.is_not_null())
+                .add(
+                    sea_orm::Condition::all()
+                        .add(inbox::Column::UiReadAtMs.is_null())
+                        .add(inbox::Column::EventKind.is_in(["completed", "failed", "cancelled"])),
+                ),
+        );
     if let Some(devices) = devices {
         event_query = event_query.filter(inbox::Column::DeviceId.is_in(devices.iter().cloned()));
     }
@@ -87,6 +98,7 @@ pub(crate) async fn augment_owner_attention_on<
         .into_iter()
         .map(|row| (row.task_id.clone(), row))
         .collect::<HashMap<_, _>>();
+    let now = chrono::Utc::now().timestamp_millis();
     for event in events {
         let Some(parent) = roots
             .get(&event.root_conversation_id)
@@ -98,12 +110,39 @@ pub(crate) async fn augment_owner_attention_on<
             continue;
         };
         let run = decode_run(row)?;
-        if !run.state.is_terminal()
-            || row.root_conversation_id != event.root_conversation_id
+        if row.root_conversation_id != event.root_conversation_id
             || row.device_id != event.device_id
             || row.group_id != event.group_id
             || run.state_revision < u64::try_from(event.state_revision).map_err(|_| invalid())?
         {
+            continue;
+        }
+        if let Some(handoff) = event.owner_handoff_at_ms {
+            let Some(workbench) =
+                AiAssistantAttentionWorkRef::from_session(parent, Some(event.task_id.clone()))
+            else {
+                continue;
+            };
+            if !desk_assistant_data_store::worker_report::owner_handoff_is_open(&event, &run, now)?
+            {
+                continue;
+            }
+            items.push(AiAssistantAttentionItemDto {
+                attention_id: format!("worker-question:{}", event.event_id),
+                session_id: parent.conversation_id.clone(),
+                client_conversation_id: None,
+                device_id: parent.device_id.clone(),
+                goal_id: None,
+                request_id: Some(event.event_id),
+                reason: AiAssistantAttentionReason::WorkerQuestion,
+                state_version: u64::try_from(event.state_revision).map_err(|_| invalid())?,
+                updated_at_unix_ms: u64::try_from(handoff).map_err(|_| invalid())?,
+                deadline_unix_ms: u64::try_from(run.binding.deadline_ms).ok(),
+                workbench: Some(workbench),
+            });
+            continue;
+        }
+        if !run.state.is_terminal() || parent.agent_role.workbench_id().is_some() {
             continue;
         }
         items.push(AiAssistantAttentionItemDto {
@@ -117,6 +156,7 @@ pub(crate) async fn augment_owner_attention_on<
             state_version: u64::try_from(event.state_revision).map_err(|_| invalid())?,
             updated_at_unix_ms: u64::try_from(event.created_at).map_err(|_| invalid())?,
             deadline_unix_ms: None,
+            workbench: None,
         });
     }
     Ok(())

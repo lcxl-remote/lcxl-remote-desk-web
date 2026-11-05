@@ -41,7 +41,7 @@ pub async fn update_ai_assistant_device_roster(
     roster_response(update_roster(crate::db::get_db(), &body).await)
 }
 
-fn owner(session: &Session) -> Result<bool, DeskSignalError> {
+pub(super) fn owner(session: &Session) -> Result<bool, DeskSignalError> {
     Ok(session
         .get_current_user::<CurrentUser>()
         .map_err(|error| {

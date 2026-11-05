@@ -1,0 +1,1 @@
+{"type":"object","required":["id","login","automation"],"properties":{"automation":{"type":"boolean"},"id":{"type":"integer","format":"int64","minimum":0},"login":{"type":"string"}},"x-readme-ref-name":"IssueSubscriptionAccount"}
