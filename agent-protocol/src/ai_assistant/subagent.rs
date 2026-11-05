@@ -163,6 +163,11 @@ pub enum SubAgentSource {
         schedule_id: String,
         occurrence_id: String,
     },
+    IssueSubscription {
+        subscription_id: String,
+        work_id: String,
+        request_id: String,
+    },
 }
 
 #[derive(

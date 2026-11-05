@@ -1787,6 +1787,9 @@ async fn validate_selected_dispatch(
     {
         return Err(unavailable());
     }
+    crate::issue_connections::check_work_on(txn, session, true, Utc::now().timestamp_millis())
+        .await
+        .map_err(|_| unavailable())?;
     let references = std::slice::from_ref(&held.device_id);
     if !desk_assistant_data_store::device_roster::permits_current_target(
         txn,

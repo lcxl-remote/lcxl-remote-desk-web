@@ -6,8 +6,12 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 
+mod work_source;
+pub use work_source::IssueWorkSource;
 mod workset;
-pub use workset::{IssueCommentSnapshot, IssueWorkset, is_issue_workset_label};
+pub use workset::{
+    IssueCommentSnapshot, IssueWorkset, is_issue_supplement_label, is_issue_workset_label,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

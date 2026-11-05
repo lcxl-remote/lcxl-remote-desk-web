@@ -98,10 +98,10 @@ impl SignalAiAssistantTools {
         )
         .await
         .map_err(|error| error.into_agent_error())?;
-        let result = if let Some((snapshot, _)) = snapshot {
-            let remote = tokio::time::timeout(
+        let result = if let Some((mut snapshot, policy)) = snapshot {
+            tokio::time::timeout(
                 std::time::Duration::from_secs(30),
-                client.reopen_issue(&access.target),
+                client.verify_issue_target(&access.target),
             )
             .await
             .map_err(|_| issue_unavailable())?
@@ -113,10 +113,15 @@ impl SignalAiAssistantTools {
                     true,
                 )
             })?;
-            external_tools::IssueReadOutput {
-                content: snapshot.workset.read(method),
-                tool_signature: remote.read_signature().into(),
-            }
+            desk_assistant_data_store::issue_events::supplements::include_on(
+                &self.db,
+                &mut snapshot,
+                &policy,
+                false,
+            )
+            .await
+            .map_err(|error| error.into_agent_error())?;
+            snapshot.workset.read_output(method)
         } else if original
             .external_issue_sources
             .iter()

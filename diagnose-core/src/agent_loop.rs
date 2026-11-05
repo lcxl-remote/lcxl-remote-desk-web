@@ -838,7 +838,7 @@ async fn drive_claimed_inner(
         }
     }
     if newer_user_inputs_after_request == 0
-        && session.trigger_origin == crate::session::TriggerOrigin::User
+        && session.trigger_origin.is_request_input()
         && let Some(locale) = deps.response_locale.as_deref().filter(|locale| {
             !locale.is_empty()
                 && locale.len() <= 64

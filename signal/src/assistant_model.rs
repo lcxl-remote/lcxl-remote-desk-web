@@ -111,6 +111,20 @@ impl ModelSeam for MeteredModel {
         }))
     }
 
+    async fn issue_supplements(
+        &self,
+        session: &desk_diagnose_core::session::PersistedAgentSession,
+    ) -> Result<Vec<desk_diagnose_core::chat::ChatMessage>, AgentError> {
+        desk_assistant_data_store::issue_events::supplements::model_material_on(
+            &self.db,
+            session,
+            &self.destination,
+            chrono::Utc::now().timestamp_millis(),
+        )
+        .await
+        .map_err(|error| error.into_agent_error())
+    }
+
     async fn context_policy(
         &self,
         requirements: desk_diagnose_core::model_capability::ModelRequirements,

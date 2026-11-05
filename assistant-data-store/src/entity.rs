@@ -19,7 +19,9 @@ pub mod agent_assistant_search_term;
 pub mod agent_assistant_source_suppression;
 pub mod agent_assistant_source_use;
 pub mod agent_issue_admission;
+pub mod agent_issue_event;
 pub mod agent_issue_reply;
+pub mod agent_issue_source;
 pub mod agent_issue_subscription;
 pub mod agent_main_request;
 pub mod agent_memory;
@@ -57,6 +59,8 @@ pub fn register_schema(schema: sea_orm::SchemaBuilder) -> sea_orm::SchemaBuilder
         .register(agent_issue_reply::Entity)
         .register(agent_issue_subscription::Entity)
         .register(agent_issue_admission::Entity)
+        .register(agent_issue_event::Entity)
+        .register(agent_issue_source::Entity)
         .register(agent_memory::Entity)
         .register(agent_memory_commit::Entity)
         .register(agent_memory_revision::Entity)

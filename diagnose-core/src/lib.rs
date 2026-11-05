@@ -83,6 +83,7 @@ pub mod grant_disclosure;
 pub mod image_input;
 pub mod input_read_context;
 pub mod issue_authority;
+pub mod issue_events;
 pub mod issue_reply;
 pub mod live_context;
 mod model_actions;

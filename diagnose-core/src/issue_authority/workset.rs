@@ -15,6 +15,8 @@ const MAX_WORKSET_BYTES: usize = 1024 * 1024;
 const PROVIDER: &str = "ai-assistant-external-issue";
 const TOOL: &str = "issue_workset_snapshot";
 const PREFIX: &str = "external-issue-workset-";
+const COMMENT_TOOL: &str = "issue_comment_snapshot";
+const COMMENT_PREFIX: &str = "external-issue-comment-";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -68,9 +70,91 @@ impl IssueWorkset {
         }
         .to_string()
     }
+
+    /// Frozen subscription material is served by the compiled snapshot reader,
+    /// not by a live MCP method whose catalog or response may have changed.
+    pub fn read_output(&self, method: IssueReadMethod) -> crate::external_tools::IssueReadOutput {
+        crate::external_tools::IssueReadOutput {
+            content: self.read(method),
+            tool_signature: format!(
+                "{:x}",
+                Sha256::digest(match method {
+                    IssueReadMethod::Get => b"issue-workset-reader:v1:get".as_slice(),
+                    IssueReadMethod::GetComments =>
+                        b"issue-workset-reader:v1:get_comments".as_slice(),
+                })
+            ),
+        }
+    }
 }
 
 impl IssueAdmission {
+    /// The active request may read new comments as evidence. The label binds
+    /// the frozen comment and request, and gives only the selected model access.
+    pub fn supplemental_material(
+        &self,
+        comment: &crate::issue_events::IssueSourceComment,
+        destination: &DestinationIdentity,
+    ) -> Result<ChatMessage, desk_agent_protocol::AgentError> {
+        let invalid = || crate::subagent::invalid("Invalid supplemental issue material");
+        let sender = comment.sender_id.ok_or_else(invalid)?;
+        if comment.repository != self.subscription.repository
+            || comment.issue_number != Some(self.issue.target.issue_number)
+            || !self
+                .subscription
+                .allows_event(&self.issue, sender, comment.automation, false)
+            || !matches!(destination, DestinationIdentity::Model { .. })
+        {
+            return Err(invalid());
+        }
+        destination.validate().map_err(|_| invalid())?;
+        let text = serde_json::json!({
+            "comment_id": comment.comment_id,
+            "author_id": sender,
+            "created_at_ms": comment.created_at_ms,
+            "body": comment.body,
+        })
+        .to_string();
+        let digest = format!("{:x}", Sha256::digest(text.as_bytes()));
+        let identity = serde_json::to_vec(&(
+            &self.authorization_id,
+            &self.request_id,
+            comment.event_id(),
+            &digest,
+        ))
+        .map_err(|_| invalid())?;
+        let id = format!("{COMMENT_PREFIX}{:x}", Sha256::digest(identity));
+        let mut message = ChatMessage::text(id.clone(), ChatRole::UntrustedOutput, text.clone());
+        message.data_envelope = Some(DataEnvelope {
+            schema_version: DATA_ENVELOPE_SCHEMA_VERSION,
+            envelope_id: id.clone(),
+            content: ContentRef::ImmutableBlob {
+                blob_id: format!("issue-comment-{digest}"),
+                sha256: digest.clone(),
+                size_bytes: text.len() as u64,
+                media_type: "application/json;charset=utf-8".into(),
+            },
+            provenance: DataProvenance {
+                source_provider_id: PROVIDER.into(),
+                source_tool_name: COMMENT_TOOL.into(),
+                source_object_id: Some(comment.event_id()),
+                source_envelope_ids: vec![],
+            },
+            digest_sha256: digest,
+            sensitivity: if self.issue.target.private || self.issue.target.internal {
+                Sensitivity::UserContent
+            } else {
+                Sensitivity::Public
+            },
+            allowed_destinations: vec![destination.clone()],
+            retention: RetentionBoundary {
+                expires_at_unix_ms: self.expires_at_ms.and_then(|at| u64::try_from(at).ok()),
+                delete_with_run: true,
+            },
+        });
+        Ok(message)
+    }
+
     /// The host reads this immutable snapshot only after checking the native
     /// source and current subscription. The label never grants publication.
     pub fn publication_material(
@@ -130,6 +214,12 @@ impl IssueAdmission {
         });
         Ok(message)
     }
+}
+
+pub fn is_issue_supplement_label(label: &DataEnvelope) -> bool {
+    label.provenance.source_provider_id == PROVIDER
+        && label.provenance.source_tool_name == COMMENT_TOOL
+        && label.envelope_id.starts_with(COMMENT_PREFIX)
 }
 
 pub fn is_issue_workset_label(label: &DataEnvelope) -> bool {

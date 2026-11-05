@@ -5,7 +5,7 @@ use crate::{
     agent_run_event_store, agent_session_store::SignalAgentSessionStore, entity::agent_session,
 };
 use desk_agent_protocol::ai_assistant::MainRequestFailure;
-use desk_assistant_data_store::{entity::agent_main_request, main_request::FrozenOwnerInput};
+use desk_assistant_data_store::{entity::agent_main_request, main_request::FrozenRequestInput};
 use desk_diagnose_core::session::PersistedAgentSession;
 use futures_util::{StreamExt, stream};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, TransactionTrait};
@@ -36,7 +36,27 @@ impl SignalMainRequestExecutor {
     }
 
     pub async fn run(self) {
-        tokio::join!(self.run_requests(), self.run_replies());
+        tokio::join!(self.run_requests(), self.run_replies(), self.run_sources());
+    }
+
+    async fn run_sources(&self) {
+        let mut cursor = 0;
+        let mut routing_cursor = 0;
+        loop {
+            let (scan, routing) = tokio::join!(
+                crate::issue_event_intake::scan_once(&self.db, &self.gate, cursor),
+                crate::issue_event_intake::scan_routing_once(&self.db, &self.gate, routing_cursor),
+            );
+            cursor = scan.unwrap_or_else(|_| {
+                log::warn!("[issue-source] durable scan deferred");
+                0
+            });
+            routing_cursor = routing.unwrap_or_else(|_| {
+                log::warn!("[issue-source] durable routing deferred");
+                0
+            });
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
     }
 
     async fn run_replies(&self) {
@@ -98,11 +118,22 @@ impl SignalMainRequestExecutor {
         let Some(execution_conversation_id) = self.ready(&row).await? else {
             return Ok(());
         };
-        let frozen = FrozenOwnerInput::decode(&row).map_err(|error| error.into_agent_error())?;
+        let frozen = FrozenRequestInput::decode(&row).map_err(|error| error.into_agent_error())?;
         let now_ms = chrono::Utc::now().timestamp_millis();
+        let issue_authority = frozen
+            .issue_queue_authority(&self.db, &row.actor_id, now_ms)
+            .await
+            .map_err(|error| error.into_agent_error())?;
+        if issue_authority == main_request::IssueQueueAuthority::Paused {
+            main_request::defer_paused_source(&self.db, &row, now_ms)
+                .await
+                .map_err(|error| error.into_agent_error())?;
+            return Ok(());
+        }
         let failure = if main_request::coordination::exhausted(&row) {
             Some(MainRequestFailure::CoordinationExhausted)
         } else if frozen.authorization_expired(now_ms)
+            || issue_authority == main_request::IssueQueueAuthority::Unavailable
             || !self.targets_authorized(&row, &frozen).await?
             || !crate::issue_connections::permits_issues(
                 &self.db,
@@ -170,6 +201,7 @@ impl SignalMainRequestExecutor {
             conversation_id: row.conversation_id,
             execution_conversation_id,
             destination: frozen.destination,
+            issue_source: frozen.issue_source,
         });
         compose_turn_with_queue(
             self.connections.clone(),
@@ -193,7 +225,7 @@ impl SignalMainRequestExecutor {
     async fn targets_authorized(
         &self,
         row: &agent_main_request::Model,
-        input: &FrozenOwnerInput,
+        input: &FrozenRequestInput,
     ) -> Result<bool, AgentError> {
         let references = if input.device_id.is_empty() {
             input

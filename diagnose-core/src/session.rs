@@ -34,7 +34,7 @@ use crate::context_attachment::{
 use crate::model_context::{ContextNotice, MAX_CONTEXT_NOTICES, ModelContextState};
 use crate::replay::{ReplayDisposition, ReplayUnavailableReason};
 
-pub const CONVERSATION_SCHEMA_VERSION: u16 = 25;
+pub const CONVERSATION_SCHEMA_VERSION: u16 = 26;
 /// Opaque replay is bounded independently from visible transcript text.
 pub const MAX_REPLAY_ENVELOPE_BYTES: usize = 256 * 1024;
 pub const MAX_SESSION_REPLAY_BYTES: usize = 2 * 1024 * 1024;
@@ -383,6 +383,8 @@ pub enum TriggerOrigin {
     /// A control-end (browser / app) request. The default for any turn.
     #[default]
     User,
+    /// A new native request admitted by a configured issue subscription.
+    IssueSubscription,
     /// An owner decision resumes the existing requirement. It may consume a
     /// matching grant, but does not reset the task's automation chain.
     PermissionDecision,
@@ -426,6 +428,9 @@ pub enum AgentSessionSurface {
 }
 
 impl TriggerOrigin {
+    pub fn is_request_input(self) -> bool {
+        matches!(self, Self::User | Self::IssueSubscription)
+    }
     /// A permission decision can lead to another legitimate request under the
     /// same owner task, as can a continuation of that task after its background
     /// result. Interpretation and schedule origins never inherit the session's
@@ -434,6 +439,7 @@ impl TriggerOrigin {
         matches!(
             self,
             TriggerOrigin::User
+                | TriggerOrigin::IssueSubscription
                 | TriggerOrigin::PermissionDecision
                 | TriggerOrigin::WorkContinuation
                 | TriggerOrigin::GoalContinuation
@@ -451,6 +457,7 @@ impl TriggerOrigin {
         matches!(
             self,
             TriggerOrigin::User
+                | TriggerOrigin::IssueSubscription
                 | TriggerOrigin::PermissionDecision
                 | TriggerOrigin::WorkContinuation
                 | TriggerOrigin::ScheduledContinuation
@@ -946,6 +953,23 @@ impl PersistedAgentSession {
                 "invalid delegation control state".into(),
             ));
         }
+        if let crate::subagent::AgentRole::Coordinator {
+            issue_source: Some(source),
+            workbench_id,
+            request_id,
+        } = &session.agent_role
+        {
+            source
+                .validate()
+                .map_err(|error| SessionDecodeError::InvalidDynamicRun(error.into()))?;
+            if source.workbench_id != *workbench_id
+                || request_id.as_deref() != Some(source.request_id.as_str())
+            {
+                return Err(SessionDecodeError::InvalidDynamicRun(
+                    "invalid subscribed coordinator source".into(),
+                ));
+            }
+        }
         if session.agent_role.workbench_id().is_some_and(|id| {
             !crate::subagent::valid_id(id)
                 || session.surface != AgentSessionSurface::AiAssistant
@@ -1353,9 +1377,48 @@ impl PersistedAgentSession {
         session.surface = AgentSessionSurface::AiAssistant;
         session.agent_role = crate::subagent::AgentRole::Coordinator {
             workbench_id: workbench_id.into(),
+            issue_source: None,
             request_id: request_id.map(str::to_owned),
         };
         Ok(session)
+    }
+
+    /// Bind an authenticated subscription before accepting its first input.
+    pub fn bind_issue_work_source(
+        &mut self,
+        admission: &crate::issue_authority::IssueAdmission,
+    ) -> Result<bool, &'static str> {
+        let source = crate::issue_authority::IssueWorkSource::from_admission(admission)?;
+        if self.actor_id != admission.subscription.actor_id
+            || self.conversation_id != admission.execution_root_id
+        {
+            return Err("subscribed work subject differs");
+        }
+        let crate::subagent::AgentRole::Coordinator {
+            workbench_id,
+            request_id,
+            issue_source,
+        } = &mut self.agent_role
+        else {
+            return Err("subscribed work requires its queued coordinator");
+        };
+        if *workbench_id != source.workbench_id
+            || request_id.as_deref() != Some(source.request_id.as_str())
+        {
+            return Err("subscribed work request differs");
+        }
+        if let Some(existing) = issue_source {
+            return if **existing == source {
+                Ok(false)
+            } else {
+                Err("subscribed work source changed")
+            };
+        }
+        if self.input_revision != 0 {
+            return Err("subscribed work source must precede native input");
+        }
+        *issue_source = Some(Box::new(source));
+        Ok(true)
     }
 
     /// Start a brand-new session bound to a subject, with a turn-boundary scope.
@@ -1524,6 +1587,19 @@ impl PersistedAgentSession {
         } else {
             self.delegated_owner_requirement.as_deref()
         }
+    }
+
+    pub fn validate_request_origin(&self, origin: TriggerOrigin) -> Result<(), &'static str> {
+        if !origin.is_request_input() {
+            return Ok(());
+        }
+        let subscribed = self.agent_role.issue_source().is_some();
+        if (origin == TriggerOrigin::IssueSubscription) != subscribed
+            || (subscribed && !self.agent_role.is_main())
+        {
+            return Err("request input origin changed");
+        }
+        Ok(())
     }
 
     /// The owner switch belongs to the root; requests and grants stay local.
@@ -2255,7 +2331,9 @@ impl PersistedAgentSession {
             TriggerOrigin::PermissionDecision
             | TriggerOrigin::ScheduledContinuation
             | TriggerOrigin::GoalContinuation => {}
-            TriggerOrigin::DelegatedTask | TriggerOrigin::SubAgentCompletion => {
+            TriggerOrigin::IssueSubscription
+            | TriggerOrigin::DelegatedTask
+            | TriggerOrigin::SubAgentCompletion => {
                 if self.chain_id.is_empty() {
                     self.chain_id = turn_id.to_string();
                 }

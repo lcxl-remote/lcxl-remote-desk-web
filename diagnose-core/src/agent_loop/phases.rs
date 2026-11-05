@@ -1327,6 +1327,12 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                 messages.push(*stable_system);
             }
             messages.extend(runtime_messages);
+            if session.agent_role.issue_source().is_some()
+                && deps.model.command_completion_event_id().is_none()
+            {
+                messages
+                    .extend(crate::future::boxed(|| deps.model.issue_supplements(session)).await?);
+            }
             if session.trigger_origin == TriggerOrigin::GoalContinuation {
                 let goal = deps.session_seam.load_claimed_goal(session).await?;
                 if goal.goal_revision > 1 {

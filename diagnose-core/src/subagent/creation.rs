@@ -423,7 +423,7 @@ impl CreationEnvelope {
             || self.actor_id.is_empty()
             || (!self.device_id.is_empty() && !self.targets.is_empty())
             || self.main_request_id.as_ref().is_some_and(|id| {
-                self.source.owner_input_revision().is_none()
+                self.source.request_input_revision().is_none()
                     || !crate::native_ids::is(crate::native_ids::Kind::AssistantMainRequest, id)
             })
             || self.source.workbench_id().is_some_and(|workbench| {
@@ -440,14 +440,14 @@ impl CreationEnvelope {
                         ) != self.root_conversation_id
                     })
             })
-            || (self.device_id.is_empty() && self.source.owner_input_revision().is_none())
+            || (self.device_id.is_empty() && self.source.request_input_revision().is_none())
             || self.parent_input_revision == 0
             || self.parent_control_revision == 0
             || self.parent_input_revision > i64::MAX as u64
             || self.parent_control_revision > i64::MAX as u64
             || self
                 .source
-                .owner_input_revision()
+                .request_input_revision()
                 .is_some_and(|revision| revision != self.parent_input_revision)
             || !matches!(self.model_destination, DestinationIdentity::Model { .. })
             || message.role != ChatRole::User
@@ -499,6 +499,25 @@ impl CreationEnvelope {
                 return Err(super::invalid(
                     "delegation source evidence does not match its kind",
                 ));
+            }
+            (DelegationSource::IssueWork { source }, None) => {
+                let expected = source.purpose_message(&self.model_destination)?;
+                if self.main_request_id.as_deref() != Some(source.request_id.as_str())
+                    || message.message_id != expected.message_id
+                    || message.text != expected.text
+                    || message.data_envelope != expected.data_envelope
+                    || self.original_read_context.as_ref().is_none_or(|selection| {
+                        selection.external_issue_sources.as_slice() != [source.reference.clone()]
+                            || selection.external_issues.len() != 1
+                            || selection.external_issues[0].tool_ref() != source.reference.tool_ref
+                    })
+                    || (source.work_kind == crate::issue_authority::IssueWorkKind::Analysis
+                        && !self.targets.is_empty())
+                {
+                    return Err(super::invalid(
+                        "subscription delegation differs from its original purpose or source",
+                    ));
+                }
             }
             (_, None) => {
                 if label.provenance.source_provider_id != "ai-assistant-user"

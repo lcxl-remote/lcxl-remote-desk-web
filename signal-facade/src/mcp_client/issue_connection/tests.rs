@@ -46,7 +46,7 @@ async fn github_typed_and_legacy_tools_verify_compact_receipts_without_reposting
             .comment_page(&target, std::num::NonZeroU32::new(1).unwrap())
             .await
             .unwrap();
-        assert_eq!(page[0].body, "Frozen reply");
+        assert_eq!(page.comments[0].body, "Frozen reply");
         let mut changed = target.clone();
         changed.platform = IssuePlatform::Gitea;
         assert!(matches!(
@@ -73,7 +73,7 @@ async fn github_typed_and_legacy_tools_verify_compact_receipts_without_reposting
             .comment_page(&target, std::num::NonZeroU32::new(1).unwrap())
             .await
             .unwrap();
-        assert_eq!(page[2].body, "Lost receipt");
+        assert_eq!(page.comments[2].body, "Lost receipt");
         assert_eq!(fixture.writes(), 3);
         fixture.stop().await;
     }
@@ -224,10 +224,10 @@ async fn bound_https_issue_checks_identity_signature_and_exact_reply() {
             .route("/api/v1/repos/Org/Project/issues/4", web::get().to(|fixture: web::Data<Fixture>| async move {
                 HttpResponse::Ok().json(json!({"id":82,"number":4,"html_url":fixture.issue_url}))
             }))
-            .route("/api/v1/repos/Org/Project/issues/4/comments", web::get().to(|req: HttpRequest| async move {
+            .route("/api/v1/repos/Org/Project/issues/comments", web::get().to(|req: HttpRequest, fixture: web::Data<Fixture>| async move {
                 assert_eq!(req.query_string(), "page=2&limit=30");
                 HttpResponse::Ok().json(json!([{
-                    "id":90,"body":"Frozen comment <!-- marker -->","user":{"id":3,"login":"bot","type":"Bot"},
+                    "issue_url":fixture.issue_url, "id":90,"body":"Frozen comment <!-- marker -->","user":{"id":3,"login":"bot","type":"Bot"},
                     "created_at":"2026-08-25T00:00:00Z","updated_at":"2026-08-25T00:00:00Z"
                 }]))
             }))
@@ -352,7 +352,11 @@ async fn bound_https_issue_checks_identity_signature_and_exact_reply() {
         .await
         .unwrap();
     assert_eq!(
-        (page[0].id, page[0].body.as_str(), page[0].user.id),
+        (
+            page.comments[0].id,
+            page.comments[0].body.as_str(),
+            page.comments[0].user.as_ref().unwrap().id
+        ),
         (90, body, 3)
     );
     fixture.mcp_account_id.store(8, Ordering::SeqCst);
@@ -372,6 +376,228 @@ async fn bound_https_issue_checks_identity_signature_and_exact_reply() {
     );
     assert_eq!(fixture.writes.load(Ordering::SeqCst), 1);
     handle.stop(false).await;
+}
+
+#[actix_web::test]
+async fn repository_sources_read_without_mcp_and_keep_platform_identity_and_author_types() {
+    use crate::mcp_client::test_support::IssueFixture;
+    for platform in [IssuePlatform::Gitea, IssuePlatform::Github] {
+        let fixture = IssueFixture::start_for(platform).await;
+        let connection = IssueConnection::new(
+            platform,
+            &fixture.base_url,
+            &format!("{}/missing-mcp", fixture.base_url),
+            "fixture-token",
+            Some(fixture.ca_pem.as_bytes()),
+        )
+        .unwrap();
+        let repository = connection
+            .bind_repository("forge", "Org", "Project")
+            .await
+            .unwrap();
+        assert_eq!(
+            (
+                repository.platform,
+                repository.account_id,
+                repository.repository_id
+            ),
+            (platform, 3, 42)
+        );
+        let snapshot = connection
+            .read_issue_snapshot(&repository, 4)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(snapshot.target.issue_id, 82);
+        assert_eq!(snapshot.body, "Reproduce the macOS problem");
+        fixture.seed_comment(7, "First version".into());
+        let page = connection
+            .repository_comments_page(&repository, 0, 1.try_into().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(page.comments[0].issue_number, Some(4));
+        assert_eq!(page.comments[0].comment.body, "First version");
+        assert!(!page.comments[0].automation);
+        assert_eq!(page.comments[0].created_at_ms, 1793750400000);
+        let frozen = page.comments[0].clone().freeze(&repository).unwrap();
+        assert_eq!(frozen.sender_id, Some(7));
+        assert_eq!(frozen.body, "First version");
+        let end = connection
+            .repository_comments_page(&repository, 0, page.next_page.unwrap())
+            .await
+            .unwrap();
+        assert!(end.comments.is_empty() && end.next_page.is_none());
+        for (id, author, app, expected_bot) in [
+            (
+                91,
+                json!({"id":8,"login":"automation","type":"Bot"}),
+                Value::Null,
+                true,
+            ),
+            (92, Value::Null, Value::Null, true),
+            (
+                93,
+                json!({"id":7,"login":"human","type":"User"}),
+                json!({"id":2}),
+                true,
+            ),
+        ] {
+            fixture.seed_raw_comment(json!({"id":id,"body":"Untrusted data","user":author,
+                "performed_via_github_app":app,"created_at":"2026-11-04T00:00:00Z","updated_at":"2026-11-04T00:00:00Z"}));
+            let page = connection
+                .repository_comments_page(&repository, 0, 1.try_into().unwrap())
+                .await
+                .unwrap();
+            assert_eq!(
+                page.comments.last().unwrap().automation,
+                platform == IssuePlatform::Github && expected_bot
+            );
+            let frozen = page
+                .comments
+                .last()
+                .unwrap()
+                .clone()
+                .freeze(&repository)
+                .unwrap();
+            if id == 92 {
+                assert!(frozen.sender_id.is_none());
+            }
+        }
+        let mut changed = repository.clone();
+        changed.account_id += 1;
+        assert_eq!(
+            connection
+                .repository_comments_page(&changed, 0, 1.try_into().unwrap())
+                .await,
+            Err(McpClientError::TargetChanged)
+        );
+        changed = repository.clone();
+        changed.private = false;
+        assert_eq!(
+            connection.read_issue_snapshot(&changed, 4).await,
+            Err(McpClientError::TargetChanged)
+        );
+        assert_eq!(fixture.writes(), 0);
+        fixture.make_issue_pull_request();
+        assert!(
+            connection
+                .read_issue_snapshot(&repository, 4)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        fixture.stop().await;
+    }
+}
+
+#[test]
+fn repository_comment_urls_never_expand_the_bound_source() {
+    use desk_diagnose_core::issue_authority::IssueRepositoryScope;
+    for platform in [IssuePlatform::Gitea, IssuePlatform::Github] {
+        let connection = IssueConnection::new(
+            platform,
+            "https://forge.example",
+            "https://forge.example/mcp",
+            "token",
+            None,
+        )
+        .unwrap();
+        let repository = IssueRepositoryScope {
+            platform,
+            connection_ref: "forge".into(),
+            instance: "https://forge.example/".into(),
+            account_id: 3,
+            repository_id: 42,
+            owner: "Org".into(),
+            repository: "Project".into(),
+            private: true,
+            internal: false,
+        };
+        let prefix = match platform {
+            IssuePlatform::Gitea => "https://forge.example/Org/Project/issues/",
+            IssuePlatform::Github => "https://forge.example/api/v3/repos/Org/Project/issues/",
+        };
+        assert_eq!(
+            connection
+                .comment_issue_number(&repository, &format!("{prefix}4"))
+                .unwrap(),
+            4
+        );
+        for suffix in [
+            "",
+            "0",
+            "-1",
+            "4?token=x",
+            "4/../../other",
+            "4#fragment",
+            "4%2f5",
+        ] {
+            assert!(
+                connection
+                    .comment_issue_number(&repository, &format!("{prefix}{suffix}"))
+                    .is_err()
+            );
+        }
+        assert!(
+            connection
+                .comment_issue_number(&repository, "https://other.example/Org/Project/issues/4")
+                .is_err()
+        );
+    }
+}
+
+#[actix_web::test]
+async fn gitea_repository_pagination_continues_past_pages_without_the_bound_issue() {
+    use crate::mcp_client::test_support::{IssueFixture, reply_artifact};
+    let fixture = IssueFixture::start().await;
+    let connection = IssueConnection::new(
+        IssuePlatform::Gitea,
+        &fixture.base_url,
+        &format!("{}/missing-mcp", fixture.base_url),
+        "fixture-token",
+        Some(fixture.ca_pem.as_bytes()),
+    )
+    .unwrap();
+    let (target, _, _) = connection
+        .resolve_issue("Org", "Project", 4, None)
+        .await
+        .unwrap();
+    let artifact = reply_artifact(
+        desk_diagnose_core::external_tools::IssueAccess {
+            connection_ref: "forge".into(),
+            target,
+        },
+        "a".repeat(64),
+    );
+    for _ in 0..COMMENT_PAGE_SIZE {
+        // Even an exact marker/body on another issue cannot acknowledge this reply.
+        fixture.seed_issue_comment(5, 3, artifact.wire_body());
+    }
+    fixture.seed_comment(3, artifact.wire_body());
+    let page = connection
+        .comment_page(&artifact.access.target, 1.try_into().unwrap())
+        .await
+        .unwrap();
+    assert!(page.comments.is_empty());
+    assert_eq!(page.next_page.unwrap().get(), 2);
+    let first = connection
+        .reconcile_reply_page(&artifact.receipt_key(), 1.try_into().unwrap())
+        .await
+        .unwrap();
+    assert!(first.receipt.is_none());
+    let second = connection
+        .reconcile_reply_page(&artifact.receipt_key(), first.next_page.unwrap())
+        .await
+        .unwrap();
+    assert_eq!(second.receipt.unwrap().comment_id, 120);
+    assert!(second.next_page.is_none());
+    let final_page = connection
+        .comment_page(&artifact.access.target, 3.try_into().unwrap())
+        .await
+        .unwrap();
+    assert!(final_page.comments.is_empty() && final_page.next_page.is_none());
+    assert_eq!(fixture.writes(), 0);
+    fixture.stop().await;
 }
 
 #[actix_web::test]

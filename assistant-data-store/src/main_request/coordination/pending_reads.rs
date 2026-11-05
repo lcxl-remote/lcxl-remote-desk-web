@@ -46,7 +46,7 @@ impl Batch {
         request_id: &str,
         read_devices: &impl AsyncFn(
             &request::Model,
-            &FrozenOwnerInput,
+            &FrozenRequestInput,
         ) -> Result<Option<Vec<RequestDevice>>, AssistantStoreError>,
     ) -> Result<Option<PendingRead>, AssistantStoreError> {
         let Some(item) = self.items.iter().find(|item| item.request_id == request_id) else {
@@ -69,7 +69,7 @@ impl Batch {
         else {
             return Ok(None);
         };
-        let frozen = FrozenOwnerInput::decode(&row)?;
+        let frozen = FrozenRequestInput::decode(&row)?;
         if frozen.destination != self.destination
             || !frozen.device_id.is_empty()
             || frozen.ask.target_refs != item.target_refs
@@ -133,7 +133,7 @@ impl Batch {
         call: &ToolCall,
         read_devices: &impl AsyncFn(
             &request::Model,
-            &FrozenOwnerInput,
+            &FrozenRequestInput,
         ) -> Result<Option<Vec<RequestDevice>>, AssistantStoreError>,
     ) -> Result<Option<PendingRead>, AssistantStoreError> {
         let Ok(selector) = serde_json::from_str::<RequestSelector>(&call.arguments_json) else {
@@ -178,7 +178,8 @@ mod tests {
         crate::device_roster::replace(&db, "owner", "root", 0, vec!["mac".into(), "linux".into()])
             .await
             .unwrap();
-        let selected = |id: &str, target: &str| FrozenOwnerInput {
+        let selected = |id: &str, target: &str| FrozenRequestInput {
+            issue_source: None,
             ask: AiAssistantAsk {
                 question: format!("Inspect {id}"),
                 client_message_id: id.into(),
@@ -221,7 +222,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(request.tools[0].name, READ_PENDING);
-        let directory = async |_: &request::Model, input: &FrozenOwnerInput| {
+        let directory = async |_: &request::Model, input: &FrozenRequestInput| {
             Ok(Some(
                 input
                     .targets

@@ -3086,11 +3086,13 @@ async fn prepare_composed_turn(
                                         let tools = &tools;
                                         let sessions = &sessions;
                                         desk_diagnose_core::future::phase(|| async move {
-        let user = match model_bound_user_message(
-            ask.client_message_id.clone(),
-            ask.question,
-            destination.clone(),
-        ) {
+        let issue_source = owner_queue.as_deref().and_then(OwnerQueueTurn::issue_source);
+        let request_origin = if issue_source.is_some() { TriggerOrigin::IssueSubscription } else { TriggerOrigin::User };
+        let user = match if let Some(source) = issue_source {
+            source.purpose_message(&destination)
+        } else {
+            model_bound_user_message(ask.client_message_id.clone(), ask.question, destination.clone())
+        } {
             Ok(user) => user,
             Err(error) => {
                 desk_diagnose_core::future::boxed(|| async { stream_event(
@@ -3258,7 +3260,7 @@ async fn prepare_composed_turn(
             trigger_origin: if ask.start_goal {
                 TriggerOrigin::GoalContinuation
             } else {
-                TriggerOrigin::User
+                request_origin
             },
             now: accepted_at,
         };

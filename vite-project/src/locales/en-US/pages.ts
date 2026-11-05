@@ -1947,6 +1947,7 @@ export default {
   'pages.aiAssistant.subagents.sources.user_input': 'Conversation input',
   'pages.aiAssistant.subagents.sources.goal': 'Goal',
   'pages.aiAssistant.subagents.sources.scheduled_occurrence': 'Scheduled run',
+  'pages.aiAssistant.subagents.sources.issue_subscription': 'Issue subscription',
   'pages.aiAssistant.subagents.states.queued': 'Queued',
   'pages.aiAssistant.subagents.states.running': 'Running',
   'pages.aiAssistant.subagents.states.waiting_approval': 'Awaiting approval',

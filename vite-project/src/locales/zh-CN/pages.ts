@@ -1945,6 +1945,7 @@ export default {
   'pages.aiAssistant.subagents.sources.user_input': '会话输入',
   'pages.aiAssistant.subagents.sources.goal': '目标',
   'pages.aiAssistant.subagents.sources.scheduled_occurrence': '定时任务运行',
+  'pages.aiAssistant.subagents.sources.issue_subscription': '工单订阅',
   'pages.aiAssistant.subagents.states.queued': '排队中',
   'pages.aiAssistant.subagents.states.running': '运行中',
   'pages.aiAssistant.subagents.states.waiting_approval': '等待审批',

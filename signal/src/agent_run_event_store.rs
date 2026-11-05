@@ -10,7 +10,7 @@ pub use input_context::InputSubject;
 use chrono::{DateTime, Utc};
 use desk_agent_protocol::{AgentError, AgentErrorKind, AgentScope};
 use desk_assistant_data_store::main_request::{
-    self, FrozenOwnerInput, OwnerAdmission, OwnerAdmissionResult,
+    self, FrozenRequestInput, OwnerAdmission, OwnerAdmissionResult,
 };
 use desk_diagnose_core::chat::{ChatMessage, ChatRole};
 use desk_diagnose_core::dynamic_run::{
@@ -112,6 +112,9 @@ impl SignalAgentRunEventStore {
         admission: OwnerAdmission<'_>,
     ) -> Result<OwnerAdmissionResult<UserFollowupAck>, AgentError> {
         validate_append_params(params)?;
+        if let Some(source) = admission.issue_source() {
+            source.validate_purpose_message(&params.message)?;
+        }
         if goal_start.is_some() && !matches!(admission, OwnerAdmission::Native) {
             return Err(internal("Goal input requires its native admission"));
         }
@@ -220,7 +223,7 @@ impl SignalAgentRunEventStore {
                     ));
                 }
                 let mut ack = ack_from_existing(&existing, params, &session)?;
-                if let OwnerAdmission::Activate { request_id } = admission {
+                if let OwnerAdmission::Activate { request_id, .. } = admission {
                     let queued = main_request::load(&txn, &params.actor_id, queue_id, request_id)
                         .await
                         .map_err(|error| error.into_agent_error())?
@@ -311,7 +314,7 @@ impl SignalAgentRunEventStore {
                 }
                 None => {
                     let mut session = if let Some(workbench_id) = &workbench_id {
-                        let OwnerAdmission::Activate { request_id } = admission else {
+                        let OwnerAdmission::Activate { request_id, .. } = admission else {
                             unreachable!()
                         };
                         PersistedAgentSession::new_workbench_coordinator(
@@ -373,7 +376,7 @@ impl SignalAgentRunEventStore {
                     limit,
                     reply_connection_id,
                 } => {
-                    let frozen = FrozenOwnerInput::capture(
+                    let frozen = FrozenRequestInput::capture(
                         ask,
                         &params.device_id,
                         &targets,
@@ -397,7 +400,7 @@ impl SignalAgentRunEventStore {
                         .map_err(|_| internal("commit queued assistant input"))?;
                     return Ok(OwnerAdmissionResult::Queued(Box::new(queued)));
                 }
-                OwnerAdmission::Activate { request_id } => {
+                OwnerAdmission::Activate { request_id, .. } => {
                     let head = main_request::first_pending(&txn, &params.actor_id, queue_id)
                         .await
                         .map_err(|error| error.into_agent_error())?;
@@ -411,22 +414,36 @@ impl SignalAgentRunEventStore {
                     {
                         return Ok(OwnerAdmissionResult::Waiting);
                     }
-                    let frozen = FrozenOwnerInput::decode(&head)
+                    let frozen = FrozenRequestInput::decode(&head)
                         .map_err(|error| error.into_agent_error())?;
+                    if frozen.issue_source.as_deref() != admission.issue_source() {
+                        return Err(internal("queued subscription source changed"));
+                    }
                     check_queue_intent(params, &frozen.ask)?;
                     if frozen
-                        != FrozenOwnerInput::capture(
-                            &frozen.ask,
-                            &params.device_id,
-                            &targets,
-                            params.read_context.as_ref(),
-                            &params.message,
-                        )
-                        .map_err(|error| error.into_agent_error())?
+                        != frozen
+                            .capture_activation(
+                                &params.device_id,
+                                &targets,
+                                params.read_context.as_ref(),
+                                &params.message,
+                            )
+                            .map_err(|error| error.into_agent_error())?
                     {
                         return Err(internal(
                             "queued assistant input scope or destination changed",
                         ));
+                    }
+                    if let Some(source) = frozen
+                        .authorized_issue_on(
+                            &txn,
+                            &params.actor_id,
+                            chrono::Utc::now().timestamp_millis(),
+                        )
+                        .await
+                        .map_err(|error| error.into_agent_error())?
+                    {
+                        session.bind_issue_work_source(&source).map_err(internal)?;
                     }
                     Some(head)
                 }
@@ -2343,6 +2360,7 @@ mod tests {
                         &next,
                         None,
                         OwnerAdmission::Activate {
+                            issue_source: None,
                             request_id: &queued.request_id
                         }
                     )
@@ -2440,7 +2458,14 @@ mod tests {
         if let Some((next, request_id)) = &queued {
             assert!(matches!(
                 store
-                    .admit_user_input(next, None, OwnerAdmission::Activate { request_id })
+                    .admit_user_input(
+                        next,
+                        None,
+                        OwnerAdmission::Activate {
+                            request_id,
+                            issue_source: None
+                        }
+                    )
                     .await
                     .unwrap(),
                 OwnerAdmissionResult::Waiting
@@ -2587,6 +2612,7 @@ mod tests {
                 &next,
                 None,
                 OwnerAdmission::Activate {
+                    issue_source: None,
                     request_id: &request_id,
                 },
             )
@@ -2719,9 +2745,11 @@ mod tests {
             request_ids.push(row.request_id);
         }
         let activation_a = OwnerAdmission::Activate {
+            issue_source: None,
             request_id: &request_ids[0],
         };
         let activation_b = OwnerAdmission::Activate {
+            issue_source: None,
             request_id: &request_ids[1],
         };
         assert!(
@@ -2948,6 +2976,7 @@ mod tests {
             panic!("expected queued input")
         };
         let activation = OwnerAdmission::Activate {
+            issue_source: None,
             request_id: &row.request_id,
         };
         let admitted = events
@@ -2963,7 +2992,7 @@ mod tests {
         let heads = main_request::recovery_heads(&db, 0, 4).await.unwrap();
         assert_eq!(heads.len(), 1);
         assert_eq!(heads[0].request_id, row.request_id);
-        assert_eq!(FrozenOwnerInput::decode(&heads[0]).unwrap().ask, ask);
+        assert_eq!(FrozenRequestInput::decode(&heads[0]).unwrap().ask, ask);
         use crate::entity::agent_delegation_group as group;
         let persisted = group::Entity::find().one(&db).await.unwrap().unwrap();
         let source = crate::agent_subagent_store::decode_creation(&persisted).unwrap();

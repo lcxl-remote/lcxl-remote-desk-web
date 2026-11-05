@@ -328,6 +328,7 @@ fn publication_exposure_and_arguments_use_the_same_role_boundary() {
     );
     session.agent_role = crate::subagent::role::AgentRole::Coordinator {
         workbench_id: "workbench".into(),
+        issue_source: None,
         request_id: None,
     };
     assert!(

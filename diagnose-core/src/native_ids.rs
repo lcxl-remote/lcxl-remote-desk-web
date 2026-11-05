@@ -38,6 +38,8 @@ pub enum Kind {
     IssueReply,
     IssueSubscription,
     IssueAdmission,
+    IssueComment,
+    IssueWork,
 }
 
 impl Kind {
@@ -75,6 +77,8 @@ impl Kind {
             Self::IssueReply => "reply",
             Self::IssueSubscription => "subscription",
             Self::IssueAdmission => "admission",
+            Self::IssueComment => "comment",
+            Self::IssueWork => "issue-work",
         }
     }
 }

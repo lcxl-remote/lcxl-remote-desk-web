@@ -44,7 +44,7 @@ impl FirstDispatch {
         }
         let proposal: Self =
             serde_json::from_str(proposal).map_err(|_| AssistantStoreError::Inaccessible)?;
-        let input = FrozenOwnerInput::decode(row)?;
+        let input = FrozenRequestInput::decode(row)?;
         if !proposal.validate(&input.ask.target_refs) {
             return Err(AssistantStoreError::Inaccessible);
         }

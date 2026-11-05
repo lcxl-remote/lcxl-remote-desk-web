@@ -1,6 +1,8 @@
 //! Typed issue operations on the repository verified through REST and MCP.
 
+mod events;
 mod github;
+pub use events::{RepositoryComment, RepositoryCommentPage, RestIssueSnapshot};
 
 use rmcp::model::{JsonObject, Tool};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -40,9 +42,19 @@ pub struct Comment {
 pub struct RestComment {
     pub id: u64,
     pub body: String,
-    pub user: RestAuthor,
+    pub user: Option<RestAuthor>,
     pub created_at: String,
     pub updated_at: String,
+    pub issue_url: String,
+    #[serde(default)]
+    pub pull_request_url: String,
+    pub performed_via_github_app: Option<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RestCommentPage {
+    pub comments: Vec<RestComment>,
+    pub next_page: Option<std::num::NonZeroU32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -122,25 +134,22 @@ impl IssueConnection {
     ) -> Result<ReplyReconciliationPage, McpClientError> {
         let comments = self.comment_page(&key.access.target, page).await?;
         let receipt = comments
+            .comments
             .iter()
-            .find(|comment| key.matches_receipt(comment.user.id, &comment.body))
+            .find(|comment| {
+                comment
+                    .user
+                    .as_ref()
+                    .is_some_and(|user| key.matches_receipt(user.id, &comment.body))
+            })
             .map(
                 |comment| desk_diagnose_core::issue_reply::IssueReplyReceipt {
                     comment_id: comment.id,
-                    account_id: comment.user.id,
+                    account_id: comment.user.as_ref().expect("matched receipt author").id,
                     body: comment.body.clone(),
                 },
             );
-        let next_page = if receipt.is_none() && comments.len() == COMMENT_PAGE_SIZE {
-            Some(
-                page.get()
-                    .checked_add(1)
-                    .and_then(std::num::NonZeroU32::new)
-                    .ok_or(McpClientError::Unavailable)?,
-            )
-        } else {
-            None
-        };
+        let next_page = receipt.is_none().then_some(comments.next_page).flatten();
         Ok(ReplyReconciliationPage { receipt, next_page })
     }
 
@@ -220,13 +229,8 @@ impl IssueConnection {
         .await
     }
 
-    /// REST pages retain the original comment text and immutable author ID.
-    /// Intake and delivery reconciliation remain available when MCP is offline.
-    pub async fn comment_page(
-        &self,
-        expected: &IssueTarget,
-        page: std::num::NonZeroU32,
-    ) -> Result<Vec<RestComment>, McpClientError> {
+    /// Recheck the saved REST identity and access without depending on MCP.
+    pub async fn verify_issue_target(&self, expected: &IssueTarget) -> Result<(), McpClientError> {
         self.resolve_issue(
             &expected.owner,
             &expected.repository,
@@ -234,14 +238,44 @@ impl IssueConnection {
             Some(expected),
         )
         .await?;
-        let mut url = self.rest_url(&[
-            "repos",
-            &expected.owner,
-            &expected.repository,
-            "issues",
-            &expected.issue_number.to_string(),
-            "comments",
-        ])?;
+        Ok(())
+    }
+
+    /// REST pages retain the original comment text and immutable author ID.
+    /// Intake and delivery reconciliation remain available when MCP is offline.
+    pub async fn comment_page(
+        &self,
+        expected: &IssueTarget,
+        page: std::num::NonZeroU32,
+    ) -> Result<RestCommentPage, McpClientError> {
+        let (_, _, original) = self
+            .resolve_issue(
+                &expected.owner,
+                &expected.repository,
+                expected.issue_number,
+                Some(expected),
+            )
+            .await?;
+        // Gitea's per-issue comments endpoint does not paginate. Its timeline
+        // endpoint filters rows after pagination, so even an empty page is not
+        // an EOF proof. Repository comments paginate the unfiltered row set.
+        let mut url = match self.platform {
+            IssuePlatform::Gitea => self.rest_url(&[
+                "repos",
+                &expected.owner,
+                &expected.repository,
+                "issues",
+                "comments",
+            ])?,
+            IssuePlatform::Github => self.rest_url(&[
+                "repos",
+                &expected.owner,
+                &expected.repository,
+                "issues",
+                &expected.issue_number.to_string(),
+                "comments",
+            ])?,
+        };
         url.query_pairs_mut()
             .append_pair("page", &page.to_string())
             .append_pair(
@@ -251,7 +285,7 @@ impl IssueConnection {
                 },
                 &COMMENT_PAGE_SIZE.to_string(),
             );
-        let comments: Vec<RestComment> = self
+        let mut comments: Vec<RestComment> = self
             .mcp
             .client
             .get_json(url, &self.mcp.bearer_token)
@@ -259,7 +293,40 @@ impl IssueConnection {
         if comments.len() > COMMENT_PAGE_SIZE || comments.iter().any(|comment| comment.id == 0) {
             return Err(McpClientError::Unavailable);
         }
-        Ok(comments)
+        let more = match self.platform {
+            // An extra empty page also handles a server-side page-size cap.
+            IssuePlatform::Gitea => !comments.is_empty(),
+            IssuePlatform::Github => comments.len() == COMMENT_PAGE_SIZE,
+        };
+        let next_page = if more {
+            Some(
+                page.get()
+                    .checked_add(1)
+                    .and_then(std::num::NonZeroU32::new)
+                    .ok_or(McpClientError::Unavailable)?,
+            )
+        } else {
+            None
+        };
+        let issue_url = match self.platform {
+            IssuePlatform::Gitea => original.html_url,
+            IssuePlatform::Github => self
+                .rest_url(&[
+                    "repos",
+                    &expected.owner,
+                    &expected.repository,
+                    "issues",
+                    &expected.issue_number.to_string(),
+                ])?
+                .to_string(),
+        };
+        comments.retain(|comment| {
+            comment.pull_request_url.is_empty() && comment.issue_url == issue_url
+        });
+        Ok(RestCommentPage {
+            comments,
+            next_page,
+        })
     }
 
     async fn get<T: DeserializeOwned>(&self, segments: &[&str]) -> Result<T, McpClientError> {
@@ -304,43 +371,20 @@ impl IssueConnection {
         {
             return Err(McpClientError::InvalidConfiguration);
         }
+        let (repo, account) = self.resolve_repository("", owner, repository).await?;
         let number_segment = number.to_string();
-        let account_path = ["user"];
-        let repository_path = ["repos", owner, repository];
         let issue_path = ["repos", owner, repository, "issues", &number_segment];
-        let (account, repo): (Account, Repository) =
-            tokio::try_join!(self.get(&account_path), self.get(&repository_path),)?;
-        let (canonical_owner, canonical_repo) = repo
-            .full_name
-            .split_once('/')
-            .filter(|(owner, repo)| valid_name(owner) && valid_name(repo))
-            .ok_or(McpClientError::TargetChanged)?;
-        if account.id == 0
-            || !valid_account(&account.login)
-            || repo.id == 0
-            || !canonical_owner.eq_ignore_ascii_case(owner)
-            || !canonical_repo.eq_ignore_ascii_case(repository)
-        {
-            return Err(McpClientError::TargetChanged);
-        }
-        if repo
-            .visibility
-            .as_deref()
-            .is_some_and(|value| !matches!(value, "public" | "private" | "internal"))
-        {
-            return Err(McpClientError::TargetChanged);
-        }
         let mut target = IssueTarget {
             platform: self.platform,
             instance: self.instance.to_string(),
             account_id: account.id,
-            repository_id: repo.id,
-            owner: canonical_owner.into(),
-            repository: canonical_repo.into(),
+            repository_id: repo.repository_id,
+            owner: repo.owner,
+            repository: repo.repository,
             issue_number: number,
             issue_id: expected.map_or(0, |saved| saved.issue_id),
             private: repo.private,
-            internal: repo.internal || repo.visibility.as_deref() == Some("internal"),
+            internal: repo.internal,
         };
         // Verify the names still resolve to the saved repository before reading its issue.
         if expected.is_some_and(|saved| *saved != target) {

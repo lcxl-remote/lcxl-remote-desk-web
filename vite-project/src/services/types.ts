@@ -396,6 +396,12 @@ export const subAgentSourceKindEnum3 = {
 
 export type SubAgentSourceKindEnum3Key = (typeof subAgentSourceKindEnum3)[keyof typeof subAgentSourceKindEnum3];
 
+export const subAgentSourceKindEnum4 = {
+    issue_subscription: "issue_subscription"
+} as const;
+
+export type SubAgentSourceKindEnum4Key = (typeof subAgentSourceKindEnum4)[keyof typeof subAgentSourceKindEnum4];
+
 export type SubAgentSource = ({
     /**
      * @minLength 0
@@ -428,6 +434,23 @@ export type SubAgentSource = ({
      * @type string
     */
     schedule_id: string;
+} | {
+    /**
+     * @type string
+    */
+    kind: SubAgentSourceKindEnum4Key;
+    /**
+     * @type string
+    */
+    request_id: string;
+    /**
+     * @type string
+    */
+    subscription_id: string;
+    /**
+     * @type string
+    */
+    work_id: string;
 });
 
 export const subAgentStateEnum = {

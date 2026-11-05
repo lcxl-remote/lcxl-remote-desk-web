@@ -74,7 +74,9 @@ pub(crate) async fn prepare_on(
     {
         return Err(AssistantStoreError::Inaccessible);
     }
-    task_deadline_on(db, &session, chrono::Utc::now().timestamp_millis() as u64).await?;
+    let now = chrono::Utc::now().timestamp_millis();
+    crate::issue_connections::check_work_on(db, &session, false, now).await?;
+    task_deadline_on(db, &session, now as u64).await?;
     Ok(Some(Box::new(PreparedModelData {
         row,
         session,
@@ -138,6 +140,17 @@ pub(crate) fn authorize_on<'a>(
             return Err(AssistantStoreError::Inaccessible);
         }
         let (audit, inputs, input_snapshot) = crate::model_egress_store::receipt_inputs(&native)?;
+        desk_diagnose_core::future::boxed(|| {
+            desk_assistant_data_store::issue_events::supplements::verify_model_material_on(
+                db,
+                &prepared.session,
+                &audit.destination,
+                &input_snapshot.envelopes,
+                now as i64,
+                false,
+            )
+        })
+        .await?;
         let started = unsigned(native.authorized_at.timestamp_millis())?;
         if started > now {
             return Err(AssistantStoreError::Inaccessible);

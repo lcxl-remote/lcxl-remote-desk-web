@@ -9,6 +9,7 @@ pub mod evidence;
 pub mod history_native;
 pub mod history_query;
 pub mod issue_authority;
+pub mod issue_events;
 pub mod issue_reply;
 pub mod keyword_search;
 pub mod main_request;

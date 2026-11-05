@@ -152,6 +152,23 @@ impl SubAgentStore {
             let mut session = PersistedAgentSession::decode_json(&session_row.state_json)
                 .map_err(|_| invalid())?;
             run.validate_session(&session).map_err(|_| invalid())?;
+            match crate::issue_connections::check_work_on(
+                &txn,
+                &session,
+                false,
+                chrono::Utc::now().timestamp_millis(),
+            )
+            .await
+            {
+                Ok(()) => {}
+                Err(desk_assistant_data_store::AssistantStoreError::Inaccessible) => {
+                    return Ok(SubAgentClaimOutcome::Blocked(
+                        SubAgentClaimBlock::SourcePaused,
+                    ));
+                }
+                Err(_) => return Err(invalid()),
+            }
+
             if session.version != session_row.version
                 || i64::try_from(session.lease_token).ok() != Some(session_row.lease_token)
                 || session.response_locale != creation.response_locale

@@ -470,6 +470,13 @@ pub trait ModelSeam {
         Ok(None)
     }
 
+    async fn issue_supplements(
+        &self,
+        _session: &PersistedAgentSession,
+    ) -> Result<Vec<ChatMessage>, AgentError> {
+        Ok(Vec::new())
+    }
+
     /// Resolve and pin the model/source/profile needed to build a safe history
     /// view before the provider body is rendered.
     async fn context_policy(

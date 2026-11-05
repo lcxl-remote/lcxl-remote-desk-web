@@ -36,7 +36,7 @@ use desk_diagnose_core::permission_grant::{build_permission_grants, permission_d
 use desk_diagnose_core::seam::{ClaimError, ClaimTurnParams, SessionSeam};
 use desk_diagnose_core::session::{
     ActionIdentity, AgentSessionSurface, ExecutionState, PendingAutoTrigger, PersistedAgentSession,
-    RecoveryVerdict, TriggerOrigin, TurnClaimError, TurnState, WorkKind,
+    RecoveryVerdict, TurnClaimError, TurnState, WorkKind,
 };
 use sea_orm::DbErr;
 use sea_orm::QueryTrait;
@@ -445,6 +445,12 @@ impl SignalAgentSessionStore {
                 ));
             }
             permission_resume::validate_permission_device_on(&txn, &session, &requested).await?;
+            if !matches!(&authority, PermissionDecisionAuthority::Owner)
+                && !permission_resume::permission_work_current(&txn, &session, &requested).await?
+            {
+                return Err(internal("subscription work is unavailable"));
+            }
+
             let reviewed = match &authority {
                 PermissionDecisionAuthority::Owner => None,
                 PermissionDecisionAuthority::Ai {
@@ -1953,8 +1959,11 @@ impl SessionSeam for SignalAgentSessionStore {
                     session
                         .check_surface(self.surface)
                         .map_err(ClaimError::Subject)?;
+                    session
+                        .validate_request_origin(params.trigger_origin)
+                        .map_err(|error| ClaimError::Backend(internal(error)))?;
                     if session.agent_role.workbench_id().is_some()
-                        && params.trigger_origin == desk_diagnose_core::session::TriggerOrigin::User
+                        && params.trigger_origin.is_request_input()
                         && (session.agent_role.workbench_request_id().is_none()
                             || session.agent_role.workbench_request_id()
                                 != self.queued_input.as_ref().map(|(id, _)| id.as_str()))
@@ -2079,7 +2088,7 @@ impl SessionSeam for SignalAgentSessionStore {
                     }
                     session.adopt_trigger(params.trigger_origin, &params.turn_id);
                     if let Some((_, message_id)) = &self.queued_input {
-                        if params.trigger_origin != TriggerOrigin::User
+                        if !params.trigger_origin.is_request_input()
                             || self.expected_input_revision != Some(session.input_revision)
                         {
                             return Err(ClaimError::Busy);
@@ -2121,6 +2130,14 @@ impl SessionSeam for SignalAgentSessionStore {
                         let txn = crate::db::begin_write(&self.db, agent_session::Entity)
                             .await
                             .map_err(|error| ClaimError::Backend(internal(error.to_string())))?;
+                        crate::issue_connections::check_work_on(
+                            &txn,
+                            &session,
+                            false,
+                            Utc::now().timestamp_millis(),
+                        )
+                        .await
+                        .map_err(|error| ClaimError::Backend(error.into_agent_error()))?;
                         if let Some(workbench_id) = session.agent_role.workbench_id()
                             && !crate::agent_run_event_store::main_requests::claim_workbench_on(
                                 &txn,
@@ -2628,10 +2645,21 @@ impl SessionSeam for SignalAgentSessionStore {
             .await
             .map_err(|error| internal(format!("begin permission transaction: {error}")))?;
         permission_resume::validate_permission_device_on(&txn, session, &update.request).await?;
+        if !permission_resume::permission_work_current(&txn, session, &update.request).await? {
+            return Err(internal("subscription work is unavailable"));
+        }
+
         if !session.agent_role.is_main() {
-            let fence =
-                desk_diagnose_core::action_turn_fence::AssistantTurnFence::from_session(session)?
-                    .ok_or_else(|| internal("missing delegated planning fence"))?;
+            let target = update
+                .request
+                .exact_command()
+                .map_or(session.device_id.as_str(), |command| {
+                    &command.target_device_id
+                });
+            let fence = desk_diagnose_core::action_turn_fence::AssistantTurnFence::for_device(
+                session, target,
+            )?
+            .ok_or_else(|| internal("missing delegated planning fence"))?;
             if !crate::agent_subagent_store::check_child_action_on(
                 &txn,
                 session,

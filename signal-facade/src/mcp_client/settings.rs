@@ -171,6 +171,20 @@ impl IssueConnectionConfig {
 }
 
 impl IssueConnectionsConfig {
+    pub fn connection_for_repository(
+        &self,
+        actor: &str,
+        repository: &desk_diagnose_core::issue_authority::IssueRepositoryScope,
+    ) -> Option<&IssueConnectionConfig> {
+        self.connections.iter().find(|connection| {
+            connection.connection_ref == repository.connection_ref
+                && connection.platform == repository.platform
+                && connection.permits(actor)
+                && super::endpoint_url(&connection.instance_url)
+                    .is_ok_and(|url| url.as_str() == repository.instance)
+        })
+    }
+
     pub fn connection_for_issue(
         &self,
         actor: &str,

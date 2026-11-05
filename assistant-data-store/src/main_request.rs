@@ -53,10 +53,17 @@ pub enum OwnerQueueTurn {
         conversation_id: String,
         execution_conversation_id: String,
         destination: DestinationIdentity,
+        issue_source: Option<Box<desk_diagnose_core::issue_authority::IssueWorkSource>>,
     },
 }
 
 impl OwnerQueueTurn {
+    pub fn issue_source(&self) -> Option<&desk_diagnose_core::issue_authority::IssueWorkSource> {
+        match self {
+            Self::Activate { issue_source, .. } => issue_source.as_deref(),
+            Self::Submit { .. } => None,
+        }
+    }
     /// The client continuation still resolves the queue's subject. Only the
     /// executor can route an item to its separate native work conversation.
     pub fn execution_conversation<'a>(
@@ -93,7 +100,14 @@ impl OwnerQueueTurn {
                 limit: PENDING_PER_CONVERSATION,
                 reply_connection_id: Some(reply_connection_id),
             },
-            Self::Activate { request_id, .. } => OwnerAdmission::Activate { request_id },
+            Self::Activate {
+                request_id,
+                issue_source,
+                ..
+            } => OwnerAdmission::Activate {
+                request_id,
+                issue_source: issue_source.as_deref(),
+            },
         }
     }
 }
@@ -108,7 +122,17 @@ pub enum OwnerAdmission<'a> {
     },
     Activate {
         request_id: &'a str,
+        issue_source: Option<&'a desk_diagnose_core::issue_authority::IssueWorkSource>,
     },
+}
+
+impl<'a> OwnerAdmission<'a> {
+    pub fn issue_source(self) -> Option<&'a desk_diagnose_core::issue_authority::IssueWorkSource> {
+        match self {
+            Self::Activate { issue_source, .. } => issue_source,
+            Self::Native | Self::Enqueue { .. } => None,
+        }
+    }
 }
 
 pub enum OwnerAdmissionResult<R> {
@@ -152,7 +176,10 @@ pub async fn frozen_read_selection(
     if row.pending_input_json.is_none() {
         return Ok(Some(ReadContextSelection::default()));
     }
-    let frozen = FrozenOwnerInput::decode(&row)?;
+    let frozen = FrozenRequestInput::decode(&row)?;
+    if frozen.issue_source.as_deref() != queue.and_then(OwnerQueueTurn::issue_source) {
+        return Err(AssistantStoreError::Inaccessible);
+    }
     if frozen.ask.selected_issues != ask.selected_issues {
         return Err(AssistantStoreError::Inaccessible);
     }
@@ -274,7 +301,8 @@ pub async fn recovery_heads(
     let now_ms = chrono::Utc::now().timestamp_millis();
     let active = Condition::all()
         .add(Column::State.eq(ACTIVATED))
-        .add(Column::PendingInputJson.is_not_null());
+        .add(Column::PendingInputJson.is_not_null())
+        .add(retry_due(now_ms));
     let heads = request::Entity::find()
         .select_only()
         .expr(Func::coalesce([
@@ -427,9 +455,18 @@ pub async fn delete_for_conversation(
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IssueQueueAuthority {
+    Ready,
+    Paused,
+    Unavailable,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct FrozenOwnerInput {
+pub struct FrozenRequestInput {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_source: Option<Box<desk_diagnose_core::issue_authority::IssueWorkSource>>,
     pub ask: AiAssistantAsk,
     pub device_id: String,
     pub targets: Vec<AssistantInputTarget>,
@@ -437,7 +474,7 @@ pub struct FrozenOwnerInput {
     pub destination: DestinationIdentity,
 }
 
-impl FrozenOwnerInput {
+impl FrozenRequestInput {
     pub fn authorization_expired(&self, now_ms: i64) -> bool {
         self.reads
             .expires_at
@@ -508,6 +545,7 @@ impl FrozenOwnerInput {
             return Err(invalid());
         }
         Ok(Self {
+            issue_source: None,
             ask: ask.clone(),
             device_id: device_id.into(),
             targets: targets.to_vec(),
@@ -529,10 +567,154 @@ impl FrozenOwnerInput {
         {
             return Err(invalid());
         }
+        input.validate_issue_source(&row.conversation_id, &row.request_id)?;
         Ok(input)
     }
 
+    pub fn capture_issue(
+        ask: &AiAssistantAsk,
+        targets: &[AssistantInputTarget],
+        reads: &ReadContextSelection,
+        message: &ChatMessage,
+        source: desk_diagnose_core::issue_authority::IssueWorkSource,
+    ) -> Result<Self, AssistantStoreError> {
+        let mut input = Self::capture(ask, "", targets, Some(reads), message)?;
+        let purpose = source
+            .purpose_message(&input.destination)
+            .map_err(|_| AssistantStoreError::Inaccessible)?;
+        if message.message_id != purpose.message_id
+            || message.text != purpose.text
+            || message.data_envelope != purpose.data_envelope
+        {
+            return Err(AssistantStoreError::Inaccessible);
+        }
+        input.issue_source = Some(Box::new(source));
+        Ok(input)
+    }
+
+    pub fn capture_activation(
+        &self,
+        device: &str,
+        targets: &[AssistantInputTarget],
+        reads: Option<&ReadContextSelection>,
+        message: &ChatMessage,
+    ) -> Result<Self, AssistantStoreError> {
+        match &self.issue_source {
+            Some(source) if device.is_empty() => Self::capture_issue(
+                &self.ask,
+                targets,
+                reads.ok_or(AssistantStoreError::Inaccessible)?,
+                message,
+                *source.clone(),
+            ),
+            Some(_) => Err(AssistantStoreError::Inaccessible),
+            None => Self::capture(&self.ask, device, targets, reads, message),
+        }
+    }
+
+    pub async fn issue_authority_current(
+        &self,
+        db: &impl ConnectionTrait,
+        actor: &str,
+        now: i64,
+    ) -> Result<bool, AssistantStoreError> {
+        Ok(self.issue_queue_authority(db, actor, now).await? == IssueQueueAuthority::Ready)
+    }
+
+    /// A paused rule may later resume its exact original request. A revoked
+    /// sender, changed scope or elapsed deadline is not a temporary pause.
+    pub async fn issue_queue_authority(
+        &self,
+        db: &impl ConnectionTrait,
+        actor: &str,
+        now: i64,
+    ) -> Result<IssueQueueAuthority, AssistantStoreError> {
+        use desk_diagnose_core::issue_authority::IssueWorkSource;
+        let Some(source) = &self.issue_source else {
+            return Ok(IssueQueueAuthority::Ready);
+        };
+        let Some((admission, mut policy)) =
+            crate::issue_authority::reference_scope_on(db, actor, &source.reference).await?
+        else {
+            return Ok(IssueQueueAuthority::Unavailable);
+        };
+        if self.reads.external_issues.as_slice() != std::slice::from_ref(&admission.issue)
+            || IssueWorkSource::from_admission(&admission).map_err(AssistantStoreError::Invalid)?
+                != **source
+        {
+            return Ok(IssueQueueAuthority::Unavailable);
+        }
+        let enabled = policy.enabled;
+        policy.enabled = true;
+        if !admission.usable(&policy, now)
+            || (!self.targets.is_empty() && !admission.can_use_devices(&policy, now))
+        {
+            return Ok(IssueQueueAuthority::Unavailable);
+        }
+        Ok(if enabled {
+            IssueQueueAuthority::Ready
+        } else {
+            IssueQueueAuthority::Paused
+        })
+    }
+
+    pub async fn authorized_issue_on(
+        &self,
+        db: &impl ConnectionTrait,
+        actor: &str,
+        now: i64,
+    ) -> Result<Option<desk_diagnose_core::issue_authority::IssueAdmission>, AssistantStoreError>
+    {
+        let Some(source) = &self.issue_source else {
+            return Ok(None);
+        };
+        let [issue] = self.reads.external_issues.as_slice() else {
+            return Err(AssistantStoreError::Inaccessible);
+        };
+        let (admission, current) =
+            crate::issue_authority::resolve_work_source(db, actor, source, issue, now)
+                .await?
+                .ok_or(AssistantStoreError::Inaccessible)?;
+        if !self.targets.is_empty() && !admission.can_use_devices(&current, now) {
+            return Err(AssistantStoreError::Inaccessible);
+        }
+        Ok(Some(admission))
+    }
+
+    fn validate_issue_source(
+        &self,
+        conversation: &str,
+        request: &str,
+    ) -> Result<(), AssistantStoreError> {
+        let Some(source) = &self.issue_source else {
+            return Ok(());
+        };
+        source.validate().map_err(AssistantStoreError::Invalid)?;
+        let purpose = source
+            .purpose_message(&self.destination)
+            .map_err(|_| AssistantStoreError::Inaccessible)?;
+        if source.workbench_id != conversation
+            || source.request_id != request
+            || !self.device_id.is_empty()
+            || self.ask.question != purpose.text
+            || self.ask.client_message_id != purpose.message_id
+            || self.reads.external_issue_sources.as_slice() != [source.reference.clone()]
+            || self.reads.external_issues.len() != 1
+            || self.reads.external_issues[0].tool_ref() != source.reference.tool_ref
+            || (source.work_kind == desk_diagnose_core::issue_authority::IssueWorkKind::Analysis
+                && !self.targets.is_empty())
+        {
+            return Err(AssistantStoreError::Inaccessible);
+        }
+        Ok(())
+    }
+
     fn submission_sha256(&self) -> Result<String, AssistantStoreError> {
+        if let Some(source) = &self.issue_source {
+            let bytes = serde_json::to_vec(&(&self.ask, &self.device_id, source))
+                .map_err(|_| AssistantStoreError::Invalid("Could not encode subscribed request"))?;
+            return Ok(format!("{:x}", Sha256::digest(bytes)));
+        }
         submission_sha256(&self.ask, &self.device_id)
     }
 }
@@ -575,7 +757,7 @@ pub async fn workbench_for_activation(
     if !native_ids::is(Kind::WorkbenchWorkConversation, work_conversation_id) {
         return Ok(None);
     }
-    let OwnerAdmission::Activate { request_id } = admission else {
+    let OwnerAdmission::Activate { request_id, .. } = admission else {
         return Err(AssistantStoreError::Inaccessible);
     };
     let workbench_id = request::Entity::find()
@@ -793,7 +975,7 @@ pub async fn cancel_owner_request(
     request_id: &str,
     now_ms: i64,
 ) -> Result<MainRequestReceipt, AssistantStoreError> {
-    clear_payload(request::Entity::update_many(), now_ms)
+    let cancelled = clear_payload(request::Entity::update_many(), now_ms)
         .col_expr(request::Column::State, Expr::value(CANCELLED))
         .filter(request::Column::ActorId.eq(actor_id))
         .filter(request::Column::ConversationId.eq(conversation_id))
@@ -801,6 +983,9 @@ pub async fn cancel_owner_request(
         .filter(request::Column::State.eq(QUEUED))
         .exec(txn)
         .await?;
+    if cancelled.rows_affected == 1 {
+        crate::issue_authority::stop_request(txn, actor_id, request_id, now_ms).await?;
+    }
     let Some(receipt) = receipts(txn, actor_id, conversation_id, Some(request_id))
         .await?
         .pop()
@@ -821,17 +1006,31 @@ pub async fn enqueue(
     txn: &impl ConnectionTrait,
     actor_id: &str,
     conversation_id: &str,
-    input: &FrozenOwnerInput,
+    input: &FrozenRequestInput,
     reply_connection_id: Option<&str>,
     pending_limit: u64,
     now_ms: i64,
 ) -> Result<request::Model, AssistantStoreError> {
     let message_id = &input.ask.client_message_id;
-    let request_id = owner_request_id(actor_id, conversation_id, message_id);
+    let request_id = input.issue_source.as_ref().map_or_else(
+        || owner_request_id(actor_id, conversation_id, message_id),
+        |source| source.request_id.clone(),
+    );
+    input.validate_issue_source(conversation_id, &request_id)?;
     let submission_sha256 = input.submission_sha256()?;
-    if let Some(existing) =
+    let existing = if input.issue_source.is_some() {
+        load(txn, actor_id, conversation_id, &request_id).await?
+    } else {
         replay(txn, actor_id, conversation_id, &input.ask, &input.device_id).await?
-    {
+    };
+    if let Some(existing) = existing {
+        if existing.client_message_id != *message_id
+            || existing.submission_sha256 != submission_sha256
+        {
+            return Err(AssistantStoreError::Invalid(
+                "Assistant request differs from its original source",
+            ));
+        }
         return Ok(existing);
     }
     if pending_for(actor_id, conversation_id).count(txn).await? >= pending_limit {
@@ -892,11 +1091,38 @@ fn pending_for(actor_id: &str, conversation_id: &str) -> sea_orm::Select<request
 }
 
 fn queued_and_due(now_ms: i64) -> Condition {
-    Condition::all().add(request::Column::State.eq(QUEUED)).add(
-        Condition::any()
-            .add(request::Column::RetryAtMs.is_null())
-            .add(request::Column::RetryAtMs.lte(now_ms)),
-    )
+    Condition::all()
+        .add(request::Column::State.eq(QUEUED))
+        .add(retry_due(now_ms))
+}
+
+fn retry_due(now_ms: i64) -> Condition {
+    Condition::any()
+        .add(request::Column::RetryAtMs.is_null())
+        .add(request::Column::RetryAtMs.lte(now_ms))
+}
+
+/// Leave a paused subscription's request recoverable without blocking other
+/// sources routed to the same coordinator. This does not spend a model attempt.
+pub async fn defer_paused_source(
+    db: &impl ConnectionTrait,
+    row: &request::Model,
+    now_ms: i64,
+) -> Result<(), AssistantStoreError> {
+    request::Entity::update_many()
+        .filter(request::Column::Id.eq(row.id))
+        .filter(request::Column::RequestId.eq(&row.request_id))
+        .filter(request::Column::State.eq(&row.state))
+        .filter(request::Column::PendingInputJson.is_not_null())
+        .filter(request::Column::UpdatedAtMs.eq(row.updated_at_ms))
+        .col_expr(
+            request::Column::RetryAtMs,
+            Expr::value(Some(now_ms.saturating_add(5_000))),
+        )
+        .col_expr(request::Column::UpdatedAtMs, Expr::value(now_ms))
+        .exec(db)
+        .await?;
+    Ok(())
 }
 
 fn eligible_pending(

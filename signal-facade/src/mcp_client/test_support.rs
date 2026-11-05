@@ -17,9 +17,11 @@ struct State {
     platform: settings::IssuePlatform,
     typed_responses: AtomicBool,
     invalid_receipt_body: AtomicBool,
+    issue_is_pull: AtomicBool,
     reads: AtomicUsize,
     writes: AtomicUsize,
     pause_next: AtomicBool,
+    pause_issue_check: AtomicBool,
     allow_replies: AtomicBool,
     pause_reply: AtomicBool,
     expire_after_reply: AtomicBool,
@@ -67,9 +69,11 @@ impl IssueFixture {
             platform,
             typed_responses: AtomicBool::new(true),
             invalid_receipt_body: AtomicBool::new(false),
+            issue_is_pull: AtomicBool::new(false),
             reads: AtomicUsize::new(0),
             writes: AtomicUsize::new(0),
             pause_next: AtomicBool::new(false),
+            pause_issue_check: AtomicBool::new(false),
             allow_replies: AtomicBool::new(false),
             pause_reply: AtomicBool::new(false),
             expire_after_reply: AtomicBool::new(false),
@@ -105,40 +109,25 @@ impl IssueFixture {
                                 }),
                             )
                             .route(
+                                "/repos/Org/Project/issues/comments",
+                                web::get().to(rest_comments),
+                            )
+                            .route(
                                 "/repos/Org/Project/issues/4/comments",
-                                web::get().to(
-                                    |state: web::Data<State>,
-                                     query: web::Query<
-                                        std::collections::HashMap<String, String>,
-                                    >| async move {
-                                        let page =
-                                            query.get("page").unwrap().parse::<usize>().unwrap();
-                                        assert_eq!(
-                                            query
-                                                .get(match state.platform {
-                                                    settings::IssuePlatform::Gitea => "limit",
-                                                    settings::IssuePlatform::Github => "per_page",
-                                                })
-                                                .unwrap(),
-                                            "30"
-                                        );
-                                        let comments = state
-                                            .comments
-                                            .lock()
-                                            .unwrap()
-                                            .iter()
-                                            .skip((page - 1) * issue_connection::COMMENT_PAGE_SIZE)
-                                            .take(issue_connection::COMMENT_PAGE_SIZE)
-                                            .cloned()
-                                            .collect::<Vec<_>>();
-                                        HttpResponse::Ok().json(comments)
-                                    },
-                                ),
+                                web::get().to(rest_comments),
                             )
                             .route(
                                 "/repos/Org/Project/issues/4",
                                 web::get().to(|state: web::Data<State>| async move {
-                                    HttpResponse::Ok().json(issue(&state.base))
+                                    if state.pause_issue_check.swap(false, Ordering::SeqCst) {
+                                        state.started.notify_one();
+                                        state.release.notified().await;
+                                    }
+                                    let mut value = issue(&state.base);
+                                    if state.issue_is_pull.load(Ordering::SeqCst) {
+                                        value["pull_request"] = json!({"url":"untrusted metadata"});
+                                    }
+                                    HttpResponse::Ok().json(value)
                                 }),
                             )
                             .route(
@@ -223,6 +212,9 @@ impl IssueFixture {
     pub fn pause_next_read(&self) {
         self.state.pause_next.store(true, Ordering::SeqCst);
     }
+    pub fn pause_next_issue_check(&self) {
+        self.state.pause_issue_check.store(true, Ordering::SeqCst);
+    }
     pub async fn wait_for_read(&self) {
         tokio::time::timeout(Duration::from_secs(10), self.state.started.notified())
             .await
@@ -241,12 +233,30 @@ impl IssueFixture {
             .store(expire_after_reply, Ordering::SeqCst);
     }
     pub fn seed_comment(&self, account_id: u64, body: String) {
+        self.seed_issue_comment(4, account_id, body);
+    }
+    pub fn seed_issue_comment(&self, issue_number: u64, account_id: u64, body: String) {
         let mut comments = self.state.comments.lock().unwrap();
         let id = 90 + comments.len();
+        let issue_url = match self.state.platform {
+            settings::IssuePlatform::Gitea => {
+                format!("{}/Org/Project/issues/{issue_number}", self.base_url)
+            }
+            settings::IssuePlatform::Github => format!(
+                "{}/api/v3/repos/Org/Project/issues/{issue_number}",
+                self.base_url
+            ),
+        };
         comments.push(
-            json!({"id":id,"body":body,"user":{"id":account_id,"login":"fixture-user"},
+            json!({"id":id,"body":body,"issue_url":issue_url,"user":{"id":account_id,"login":"fixture-user","type":"User"},
             "created_at":"2026-11-04T00:00:00Z","updated_at":"2026-11-04T00:00:00Z"}),
         );
+    }
+    pub fn seed_raw_comment(&self, comment: Value) {
+        self.state.comments.lock().unwrap().push(comment);
+    }
+    pub fn make_issue_pull_request(&self) {
+        self.state.issue_is_pull.store(true, Ordering::SeqCst);
     }
     pub fn reads(&self) -> usize {
         self.state.reads.load(Ordering::SeqCst)
@@ -257,6 +267,45 @@ impl IssueFixture {
     pub async fn stop(self) {
         self.server.stop(false).await;
     }
+}
+
+async fn rest_comments(
+    state: web::Data<State>,
+    query: web::Query<std::collections::HashMap<String, String>>,
+) -> HttpResponse {
+    let page = query.get("page").unwrap().parse::<usize>().unwrap();
+    assert_eq!(
+        query
+            .get(match state.platform {
+                settings::IssuePlatform::Gitea => "limit",
+                settings::IssuePlatform::Github => "per_page",
+            })
+            .unwrap(),
+        "30"
+    );
+    let comments = state
+        .comments
+        .lock()
+        .unwrap()
+        .iter()
+        .skip((page - 1) * issue_connection::COMMENT_PAGE_SIZE)
+        .take(issue_connection::COMMENT_PAGE_SIZE)
+        .cloned()
+        .map(|mut comment| {
+            if comment.get("issue_url").is_none() {
+                comment["issue_url"] = match state.platform {
+                    settings::IssuePlatform::Gitea => {
+                        json!(format!("{}/Org/Project/issues/4", state.base))
+                    }
+                    settings::IssuePlatform::Github => {
+                        json!(format!("{}/api/v3/repos/Org/Project/issues/4", state.base))
+                    }
+                };
+            }
+            comment
+        })
+        .collect::<Vec<_>>();
+    HttpResponse::Ok().json(comments)
 }
 
 fn issue(base: &str) -> Value {

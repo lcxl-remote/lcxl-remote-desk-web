@@ -39,6 +39,14 @@ impl SignalAiAssistantTools {
         {
             return Err(unavailable());
         }
+        crate::issue_connections::check_work_on(
+            &self.db,
+            session,
+            true,
+            chrono::Utc::now().timestamp_millis(),
+        )
+        .await
+        .map_err(|error| error.into_agent_error())?;
         let held = AssistantTurnFence::for_device(session, reference)
             .map_err(|_| unavailable())?
             .ok_or_else(unavailable)?;
@@ -244,6 +252,18 @@ impl SignalAiAssistantTools {
             || session.conversation_id != self.run_id
         {
             return Err(unavailable());
+        }
+        match crate::issue_connections::check_work_on(
+            &self.db,
+            session,
+            true,
+            chrono::Utc::now().timestamp_millis(),
+        )
+        .await
+        {
+            Ok(()) => {}
+            Err(desk_assistant_data_store::AssistantStoreError::Inaccessible) => return Ok(vec![]),
+            Err(error) => return Err(error.into_agent_error()),
         }
         let selected =
             desk_assistant_data_store::device_roster::current_request_devices(&self.db, session)

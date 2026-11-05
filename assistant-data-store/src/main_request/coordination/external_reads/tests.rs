@@ -100,7 +100,7 @@ async fn batch_skill_load_projects_first_party_text_and_rechecks_its_original_le
                 },
                 async |_, _, _, _| Ok(None),
                 RequestReadPorts {
-                    devices: async |_: &request::Model, _: &FrozenOwnerInput| Ok(None),
+                    devices: async |_: &request::Model, _: &FrozenRequestInput| Ok(None),
                     issues: &reader,
                 },
             )
@@ -151,8 +151,12 @@ impl ExternalIssueReader for Reader {
         &self,
         _: &IssueReadScope,
         _: IssueReadMethod,
+        snapshot: Option<IssueReadOutput>,
     ) -> Result<IssueReadOutput, AgentError> {
         self.reads.fetch_add(1, Ordering::SeqCst);
+        if let Some(snapshot) = snapshot {
+            return Ok(snapshot);
+        }
         Ok(IssueReadOutput {
             content: r#"{"issue":{"title":"macOS regression"}}"#.into(),
             tool_signature: "a".repeat(64),
@@ -179,6 +183,17 @@ fn access(number: u64) -> IssueAccess {
 }
 
 async fn setup() -> (
+    DatabaseConnection,
+    PersistedAgentSession,
+    Batch,
+    ModelRequest,
+) {
+    setup_with_subscription(false).await
+}
+
+async fn setup_with_subscription(
+    subscription: bool,
+) -> (
     DatabaseConnection,
     PersistedAgentSession,
     Batch,
@@ -214,7 +229,8 @@ async fn setup() -> (
         } else {
             vec![access(4), access(5)]
         };
-        let input = FrozenOwnerInput {
+        let mut input = FrozenRequestInput {
+            issue_source: None,
             ask: AiAssistantAsk {
                 question: "Investigate the selected issue".into(),
                 client_message_id: message_id.into(),
@@ -249,6 +265,78 @@ async fn setup() -> (
                 profile_revision: 1,
             },
         };
+        if subscription && message_id == "b" {
+            use desk_diagnose_core::issue_authority::{
+                IssueAdmission, IssueCommentSnapshot, IssueRepositoryScope, IssueSourceRef,
+                IssueSubscription, IssueWorkKind, IssueWorkset,
+            };
+            let issue = &input.reads.external_issues[0];
+            let target = &issue.target;
+            let policy = IssueSubscription {
+                subscription_id: native_ids::stable(
+                    native_ids::Kind::IssueSubscription,
+                    &"frozen-batch",
+                ),
+                revision: 1,
+                actor_id: "owner".into(),
+                conversation_id: "root".into(),
+                enabled: true,
+                repository: IssueRepositoryScope {
+                    platform: target.platform,
+                    connection_ref: issue.connection_ref.clone(),
+                    instance: target.instance.clone(),
+                    account_id: target.account_id,
+                    repository_id: target.repository_id,
+                    owner: target.owner.clone(),
+                    repository: target.repository.clone(),
+                    private: target.private,
+                    internal: target.internal,
+                },
+                issue_filter: None,
+                allowed_sender_ids: vec![7],
+                automation_sender_ids: vec![],
+                work_kind: IssueWorkKind::Analysis,
+                auto_reply: true,
+            };
+            let policy = crate::issue_authority::put(&db, policy, 0, now.timestamp_millis())
+                .await
+                .unwrap();
+            let request_id = crate::main_request::owner_request_id("owner", "root", message_id);
+            let admission = IssueAdmission {
+                authorization_id: IssueAdmission::id(&policy, "comment-90"),
+                subscription: policy,
+                event_id: "comment-90".into(),
+                sender_id: 7,
+                sender_automation: false,
+                echo: false,
+                issue: issue.clone(),
+                workset: IssueWorkset {
+                    title: "Frozen subscribed issue".into(),
+                    body: "Original accepted body".into(),
+                    comments: vec![IssueCommentSnapshot {
+                        id: 90,
+                        author_id: 7,
+                        body: "Original authorized comment".into(),
+                    }],
+                },
+                request_id: request_id.clone(),
+                execution_root_id: native_ids::workbench_work_conversation(
+                    "owner",
+                    "root",
+                    &request_id,
+                ),
+                admitted_at_ms: now.timestamp_millis(),
+                expires_at_ms: None,
+            };
+            crate::issue_authority::admit(&db, &admission)
+                .await
+                .unwrap();
+            input.reads.external_issue_sources.push(IssueSourceRef {
+                authorization_id: admission.authorization_id,
+                subscription_revision: 1,
+                tool_ref: issue.tool_ref(),
+            });
+        }
         let row = enqueue(
             &db,
             "owner",
@@ -365,6 +453,57 @@ async fn reads_bind_the_queued_request_without_advancing_the_active_input() {
 }
 
 #[tokio::test]
+async fn subscribed_batch_reads_use_the_original_workset_and_stop_when_its_authority_is_withdrawn()
+{
+    let (db, session, batch, _) = setup_with_subscription(true).await;
+    let reader = Reader {
+        allowed: AtomicBool::new(true),
+        reads: AtomicUsize::new(0),
+    };
+    let request = &batch.items[0].request_id;
+    let issue = batch
+        .issue_call(&db, &reader, &call(request, 4, "get"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(issue.content.contains("Frozen subscribed issue"));
+    assert!(issue.content.contains("Original accepted body"));
+    assert!(!issue.content.contains("macOS regression"));
+    let comments = batch
+        .issue_call(&db, &reader, &call(request, 4, "get_comments"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(comments.content.contains("Original authorized comment"));
+    assert!(external_tools::is_issue_read_label(&comments.label));
+    let selected = batch
+        .issue_call(&db, &reader, &call(&batch.items[1].request_id, 4, "get"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(selected.content.contains("macOS regression"));
+    let reads = reader.reads.load(Ordering::SeqCst);
+    crate::issue_authority::stop_request(
+        &db,
+        "owner",
+        request,
+        chrono::Utc::now().timestamp_millis(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        batch
+            .issue_call(&db, &reader, &call(request, 4, "get"))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(reader.reads.load(Ordering::SeqCst), reads);
+    assert_eq!(session.input_revision, 0);
+    assert_eq!(session.automation_turns_used, 0);
+}
+
+#[tokio::test]
 async fn an_edit_to_the_frozen_request_invalidates_the_result_source() {
     let (db, _, batch, _) = setup().await;
     let reader = Reader {
@@ -381,7 +520,7 @@ async fn an_edit_to_the_frozen_request_invalidates_the_result_source() {
         .await
         .unwrap()
         .unwrap();
-    let mut input = FrozenOwnerInput::decode(&row).unwrap();
+    let mut input = FrozenRequestInput::decode(&row).unwrap();
     input.reads.external_issues[0].target.issue_id += 1;
     request::Entity::update_many()
         .filter(request::Column::Id.eq(row.id))

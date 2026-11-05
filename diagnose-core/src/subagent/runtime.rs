@@ -84,7 +84,7 @@ impl RuntimeTurn {
                     || session.control_revision != source.parent_control_revision
                     || !session.has_ready_subagent_completion()
                     || session.subagent_wait.is_some()
-                    || source.source.owner_input_revision().is_none()
+                    || source.source.request_input_revision().is_none()
                     || source.source.workbench_id() != session.agent_role.workbench_id()
                 {
                     return Err(super::invalid("root interpretation source changed"));

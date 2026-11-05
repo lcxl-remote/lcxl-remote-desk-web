@@ -150,7 +150,7 @@ impl Batch {
             '_,
             impl AsyncFn(
                 &request::Model,
-                &FrozenOwnerInput,
+                &FrozenRequestInput,
             ) -> Result<Option<Vec<RequestDevice>>, AssistantStoreError>,
             impl ExternalIssueReader,
         >,
@@ -262,7 +262,7 @@ impl Batch {
             '_,
             impl AsyncFn(
                 &request::Model,
-                &FrozenOwnerInput,
+                &FrozenRequestInput,
             ) -> Result<Option<Vec<RequestDevice>>, AssistantStoreError>,
             impl ExternalIssueReader,
         >,

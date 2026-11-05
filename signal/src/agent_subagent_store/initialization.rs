@@ -129,7 +129,7 @@ pub(crate) async fn initialize_input_group_on(
         Some(goal) => DelegationSource::Goal {
             goal_id: goal.goal_id.clone(),
         },
-        None => DelegationSource::owner_input(session),
+        None => DelegationSource::request_input(session),
     };
     let creation =
         CreationEnvelope::capture(session, source, owner_requirement, read_context, admitted)
@@ -196,7 +196,16 @@ async fn persist_source_group_inner(
         return Ok(());
     }
     let policy = crate::subagent_policy::read(db).await?;
-    let group = build_group(policy.limits.max_task_duration_minutes)?;
+    let mut group = build_group(policy.limits.max_task_duration_minutes)?;
+    if let Some(admission) = desk_assistant_data_store::issue_authority::authorized_session_on(
+        db, session, false, now_ms,
+    )
+    .await
+    .map_err(|_| invalid())?
+        && let Some(deadline) = admission.expires_at_ms
+    {
+        group.limits.deadline_ms = group.limits.deadline_ms.min(deadline);
+    }
     let (source_schedule_id, source_occurrence_id) = match &group.source {
         DelegationSource::ScheduledOccurrence {
             schedule_id,

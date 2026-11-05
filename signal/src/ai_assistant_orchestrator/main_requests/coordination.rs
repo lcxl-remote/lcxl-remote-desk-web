@@ -24,7 +24,7 @@ async fn report_candidates_on(
     let Some(workbench) = session.agent_role.workbench_id() else {
         return Ok(Vec::new());
     };
-    let frozen = FrozenOwnerInput::decode(head).map_err(|error| error.into_agent_error())?;
+    let frozen = FrozenRequestInput::decode(head).map_err(|error| error.into_agent_error())?;
     let mut reports = Vec::new();
     for row in desk_assistant_data_store::worker_report::batch_candidates_on(
         db,
@@ -122,7 +122,7 @@ pub(crate) async fn fail_destination(
         .await
         .map_err(|error| error.into_agent_error());
     }
-    let frozen = FrozenOwnerInput::decode(&row).map_err(|error| error.into_agent_error())?;
+    let frozen = FrozenRequestInput::decode(&row).map_err(|error| error.into_agent_error())?;
     close_unclaimed(
         db,
         &row,
@@ -275,7 +275,7 @@ impl SignalMainRequestExecutor {
                     .await
                 },
                 coordination::RequestReadPorts {
-                    devices: async |row: &agent_main_request::Model, input: &FrozenOwnerInput| {
+                    devices: async |row: &agent_main_request::Model, input: &FrozenRequestInput| {
                         self.pending_devices(row, input).await
                     },
                     issues: &issue_reads::Reader {
@@ -291,7 +291,7 @@ impl SignalMainRequestExecutor {
     async fn pending_devices(
         &self,
         row: &agent_main_request::Model,
-        input: &FrozenOwnerInput,
+        input: &FrozenRequestInput,
     ) -> Result<Option<Vec<RequestDevice>>, AssistantStoreError> {
         if row.actor_id != crate::control_authorizer::SINGLE_ACCOUNT_USER_ID.to_string()
             || input

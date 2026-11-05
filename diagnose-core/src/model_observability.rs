@@ -83,6 +83,7 @@ closed_enum!(Purpose {
 });
 closed_enum!(Origin {
     User,
+    IssueSubscription,
     PermissionResume,
     WorkCompletion,
     Subagent,
@@ -276,6 +277,7 @@ impl From<crate::session::TriggerOrigin> for Origin {
         use crate::session::TriggerOrigin as Trigger;
         match value {
             Trigger::User => Self::User,
+            Trigger::IssueSubscription => Self::IssueSubscription,
             Trigger::PermissionDecision => Self::PermissionResume,
             Trigger::ScheduledContinuation | Trigger::ScheduledTask => Self::ScheduledTask,
             Trigger::GoalContinuation => Self::GoalContinuation,

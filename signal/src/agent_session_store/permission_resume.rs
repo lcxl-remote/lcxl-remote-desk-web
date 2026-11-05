@@ -154,6 +154,26 @@ pub(super) async fn validate_permission_device_on(
     validate_permission_target_on(txn, session, request).await
 }
 
+pub(super) async fn permission_work_current(
+    txn: &DatabaseTransaction,
+    session: &PersistedAgentSession,
+    request: &PermissionRequest,
+) -> Result<bool, AgentError> {
+    match crate::issue_connections::check_work_on(
+        txn,
+        session,
+        request.exact_command().is_some() || !session.device_id.is_empty(),
+        chrono::Utc::now().timestamp_millis(),
+    )
+    .await
+    {
+        Ok(()) => {}
+        Err(desk_assistant_data_store::AssistantStoreError::Inaccessible) => return Ok(false),
+        Err(error) => return Err(error.into_agent_error()),
+    }
+    Ok(true)
+}
+
 async fn permission_roster_current(
     txn: &DatabaseTransaction,
     session: &PersistedAgentSession,
@@ -353,6 +373,9 @@ impl SignalAgentSessionStore {
             txn.commit().await.map_err(storage)?;
             return Ok(None);
         }
+        if !permission_work_current(&txn, &session, request).await? {
+            return Ok(None);
+        }
         validate_permission_target_on(&txn, &session, request).await?;
         if !crate::agent_subagent_store::child_resume_admitted_on(
             &txn,
@@ -449,6 +472,12 @@ impl SignalAgentSessionStore {
             txn.commit()
                 .await
                 .map_err(|error| ClaimError::Backend(storage(error)))?;
+            return Err(ClaimError::Busy);
+        }
+        if !permission_work_current(&txn, &session, request)
+            .await
+            .map_err(ClaimError::Backend)?
+        {
             return Err(ClaimError::Busy);
         }
         validate_permission_target_on(&txn, &session, request)

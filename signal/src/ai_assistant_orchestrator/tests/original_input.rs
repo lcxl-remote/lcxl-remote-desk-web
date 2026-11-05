@@ -332,7 +332,7 @@ async fn queued_owner_input_roundtrip(workbench: bool, delete_workbench: bool, w
         None
     };
     let pending_delivery = if let Some(fixture) = &issue_fixture {
-        let destination = desk_assistant_data_store::main_request::FrozenOwnerInput::decode(&b)
+        let destination = desk_assistant_data_store::main_request::FrozenRequestInput::decode(&b)
             .unwrap()
             .destination;
         let (admitted, artifact) = fixture
@@ -635,7 +635,7 @@ async fn queued_owner_input_roundtrip(workbench: bool, delete_workbench: bool, w
         let db = &db;
         let execution = execution(&row.request_id);
         async move {
-            let frozen = main_request::FrozenOwnerInput::decode(&row).unwrap();
+            let frozen = main_request::FrozenRequestInput::decode(&row).unwrap();
             let providers = ai_assistant_provider_registry();
             let scope = AgentScope {
                 granted: frozen
@@ -680,6 +680,7 @@ async fn queued_owner_input_roundtrip(workbench: bool, delete_workbench: bool, w
                     &input,
                     None,
                     OwnerAdmission::Activate {
+                        issue_source: None,
                         request_id: &row.request_id,
                     },
                 )
@@ -2217,7 +2218,10 @@ async fn run_selected_command(finish: SelectedCommandFinish) {
                                 .admit_user_input(
                                     next,
                                     None,
-                                    OwnerAdmission::Activate { request_id }
+                                    OwnerAdmission::Activate {
+                                        request_id,
+                                        issue_source: None
+                                    }
                                 )
                                 .await
                                 .unwrap(),
@@ -2297,6 +2301,7 @@ async fn run_selected_command(finish: SelectedCommandFinish) {
                 &next,
                 None,
                 OwnerAdmission::Activate {
+                    issue_source: None,
                     request_id: &request_id,
                 },
             )

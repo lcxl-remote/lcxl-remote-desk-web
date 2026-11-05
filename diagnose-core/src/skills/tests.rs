@@ -155,6 +155,7 @@ fn loading_a_skill_cannot_expand_a_coordinator_or_worker_tool_authority() {
     let mut session = PersistedAgentSession::new("session", "owner", "", 1, scope, "now");
     session.agent_role = AgentRole::Coordinator {
         workbench_id: "root".into(),
+        issue_source: None,
         request_id: None,
     };
     let tool = session.skills.tool(1);

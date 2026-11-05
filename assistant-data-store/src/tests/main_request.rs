@@ -1,10 +1,11 @@
 use super::*;
-use crate::main_request::{self as queue, FrozenOwnerInput};
+use crate::main_request::{self as queue, FrozenRequestInput};
 use desk_agent_protocol::ai_assistant::{AiAssistantAsk, MainRequestFailure, MainRequestState};
 use desk_diagnose_core::input_read_context::ReadContextSelection;
 
-fn input(message_id: &str, text: &str) -> FrozenOwnerInput {
-    FrozenOwnerInput {
+fn input(message_id: &str, text: &str) -> FrozenRequestInput {
+    FrozenRequestInput {
+        issue_source: None,
         ask: AiAssistantAsk {
             question: text.into(),
             client_message_id: message_id.into(),
@@ -73,7 +74,7 @@ async fn queued_issue_access_keeps_its_original_native_target_after_activation()
         .await
         .unwrap()
         .unwrap();
-    let frozen = FrozenOwnerInput::decode(&restored).unwrap();
+    let frozen = FrozenRequestInput::decode(&restored).unwrap();
     assert_eq!(frozen.reads.external_issues[0].target.issue_id, 82);
     assert!(frozen.reads.external_issues[0].matches_selection(&frozen.ask.selected_issues[0]));
     let txn = db.begin().await.unwrap();
@@ -83,12 +84,13 @@ async fn queued_issue_access_keeps_its_original_native_target_after_activation()
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(FrozenOwnerInput::decode(&activated).unwrap(), frozen);
+    assert_eq!(FrozenRequestInput::decode(&activated).unwrap(), frozen);
     let activation = queue::OwnerQueueTurn::Activate {
         request_id: queued.request_id.clone(),
         conversation_id: "root".into(),
         execution_conversation_id: "root".into(),
         destination: frozen.destination.clone(),
+        issue_source: None,
     };
     let selected =
         queue::frozen_read_selection(&db, Some(&activation), "owner", "root", "", &original.ask)
@@ -444,7 +446,8 @@ async fn duplicate_intake_keeps_the_first_frozen_input_and_fifo_order() {
     let second = queue::enqueue(&txn, "owner", "root", &c, None, 2, 100)
         .await
         .unwrap();
-    let retry = FrozenOwnerInput {
+    let retry = FrozenRequestInput {
+        issue_source: None,
         destination: destination("new-default-model"),
         ..b.clone()
     };
@@ -496,7 +499,7 @@ async fn duplicate_intake_keeps_the_first_frozen_input_and_fifo_order() {
         .unwrap()
         .unwrap();
     assert_eq!(claimed, first);
-    assert_eq!(FrozenOwnerInput::decode(&claimed).unwrap(), b);
+    assert_eq!(FrozenRequestInput::decode(&claimed).unwrap(), b);
     assert!(
         queue::load(&txn, "other-owner", "root", &first.request_id)
             .await
@@ -517,7 +520,7 @@ async fn duplicate_intake_keeps_the_first_frozen_input_and_fifo_order() {
     let heads = queue::recovery_heads(&txn, 0, 10).await.unwrap();
     assert_eq!(heads.len(), 1);
     assert_eq!(heads[0].request_id, first.request_id);
-    assert_eq!(FrozenOwnerInput::decode(&heads[0]).unwrap(), b);
+    assert_eq!(FrozenRequestInput::decode(&heads[0]).unwrap(), b);
     let mut session = desk_diagnose_core::session::PersistedAgentSession::new(
         "root",
         "owner",
@@ -557,7 +560,7 @@ async fn duplicate_intake_keeps_the_first_frozen_input_and_fifo_order() {
         .unwrap()
         .unwrap();
     assert_eq!(claimed, second);
-    assert_eq!(FrozenOwnerInput::decode(&claimed).unwrap(), c);
+    assert_eq!(FrozenRequestInput::decode(&claimed).unwrap(), c);
     let receipts = queue::receipts(&txn, "owner", "root", None).await.unwrap();
     assert_eq!(receipts.len(), 1);
     assert_eq!(receipts[0].request_id, second.request_id);
@@ -591,7 +594,7 @@ async fn duplicate_intake_keeps_the_first_frozen_input_and_fifo_order() {
         assert_eq!(stored.input_revision, revision);
         assert!(stored.pending_input_json.is_none());
         assert!(stored.reply_connection_id.is_none());
-        assert!(FrozenOwnerInput::decode(&stored).is_err());
+        assert!(FrozenRequestInput::decode(&stored).is_err());
     }
     assert!(
         queue::first_pending(&db, "owner", "root")

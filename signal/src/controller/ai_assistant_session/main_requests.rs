@@ -85,7 +85,11 @@ pub async fn cancel_ai_assistant_main_request(
         chrono::Utc::now().timestamp_millis(),
     )
     .await;
-    txn.commit().await?;
+    if result.is_ok() {
+        txn.commit().await?;
+    } else {
+        txn.rollback().await?;
+    }
     response(result)
 }
 

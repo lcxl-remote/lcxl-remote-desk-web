@@ -29,7 +29,7 @@ async fn native_issue_transport(platform: desk_agent_protocol::external_tools::I
     };
     use std::sync::Arc;
     let fixture = IssueFixture::start_for(platform).await;
-    for interruption in 0..4 {
+    for interruption in 0..5 {
         let store = setup("sqlite::memory:").await;
         issue_connections::update(&store.db, &fixture.update("1"))
             .await
@@ -146,10 +146,18 @@ async fn native_issue_transport(platform: desk_agent_protocol::external_tools::I
         let reads = fixture.reads();
         assert!(tools.run_external_read(&held, &forged).await.is_err());
         assert_eq!(fixture.reads(), reads);
-        let result = if interruption == 0 {
+        if interruption == 4 {
+            let mut offline = fixture.update("1");
+            offline.expected_revision = 1;
+            offline.connections[0].mcp_url = format!("{}/missing-mcp", fixture.base_url);
+            issue_connections::update(&store.db, &offline)
+                .await
+                .unwrap();
+        }
+        let result = if matches!(interruption, 0 | 4) {
             tools.run_external_read(&held, &call).await
         } else {
-            fixture.pause_next_read();
+            fixture.pause_next_issue_check();
             let revoke = async {
                 fixture.wait_for_read().await;
                 if interruption == 1 {
@@ -189,7 +197,7 @@ async fn native_issue_transport(platform: desk_agent_protocol::external_tools::I
             let (result, ()) = tokio::join!(tools.run_external_read(&held, &call), revoke);
             result
         };
-        if interruption == 0 {
+        if matches!(interruption, 0 | 4) {
             let ReadOutcome::Completed {
                 output,
                 data_envelope: Some(label),
@@ -199,6 +207,7 @@ async fn native_issue_transport(platform: desk_agent_protocol::external_tools::I
             else {
                 panic!("Expected a labeled native read");
             };
+            assert_eq!(fixture.reads(), reads);
             assert!(output.content.contains("Reproduce the macOS problem"));
             assert!(output.content.contains("Linux succeeds"));
             assert!(external_tools::is_issue_read_label(&label));
@@ -243,6 +252,13 @@ async fn native_issue_transport(platform: desk_agent_protocol::external_tools::I
                 .unwrap();
             assert_eq!(result.text, output.content);
             assert_eq!(result.data_envelope.as_ref(), Some(&label));
+            if interruption == 4 {
+                let mut restored = fixture.update("1");
+                restored.expected_revision = 2;
+                issue_connections::update(&store.db, &restored)
+                    .await
+                    .unwrap();
+            }
             freeze_publication(&store, &mut held, &tools, access[0].clone(), destination()).await;
         } else {
             assert!(result.is_err());

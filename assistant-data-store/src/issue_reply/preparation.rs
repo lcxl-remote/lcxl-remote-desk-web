@@ -60,10 +60,14 @@ pub async fn prepare_on(
 ) -> Result<Preparation, AssistantStoreError> {
     let access = desk_diagnose_core::issue_reply::resolve(&original.external_issues, call)
         .map_err(|_| invalid())?;
-    let (snapshot, policy) = crate::issue_authority::resolve_input(db, held, original, access, now)
-        .await?
-        .ok_or(AssistantStoreError::Inaccessible)?;
-    if !snapshot.can_publish(&policy, now) {
+    let (mut snapshot, policy) =
+        crate::issue_authority::resolve_input(db, held, original, access, now)
+            .await?
+            .ok_or(AssistantStoreError::Inaccessible)?;
+    if !snapshot.can_publish(&policy, now)
+        || !crate::issue_events::supplements::publication_content_current(db, &snapshot, &policy)
+            .await?
+    {
         return Err(AssistantStoreError::Inaccessible);
     }
     let origin = ReplyOrigin {
@@ -94,6 +98,7 @@ pub async fn prepare_on(
         }
         return Ok(Preparation::Existing(tool_receipt(&row)));
     }
+    crate::issue_events::supplements::include_on(db, &mut snapshot, &policy, true).await?;
     Ok(Preparation::Generate(Box::new(IssueReplyWork {
         origin,
         access: access.clone(),

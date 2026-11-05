@@ -17,6 +17,9 @@ pub enum DelegationSource {
         workbench_id: String,
         input_revision: u64,
     },
+    IssueWork {
+        source: Box<crate::issue_authority::IssueWorkSource>,
+    },
     Goal {
         goal_id: String,
     },
@@ -39,15 +42,24 @@ impl DelegationSource {
                 schedule_id,
                 occurrence_id,
             } if valid_id(schedule_id) && valid_id(occurrence_id) => Ok(()),
+            Self::IssueWork { source } => source.validate(),
             _ => Err("invalid delegation source"),
         }
     }
 
     pub fn allows_delegated_review(&self) -> bool {
-        self.owner_input_revision().is_some() || self.goal_id().is_some()
+        if let Self::IssueWork { source } = self {
+            return source.work_kind == crate::issue_authority::IssueWorkKind::DeviceInvestigation;
+        }
+        self.request_input_revision().is_some() || self.goal_id().is_some()
     }
 
-    pub fn owner_input(session: &crate::session::PersistedAgentSession) -> Self {
+    pub fn request_input(session: &crate::session::PersistedAgentSession) -> Self {
+        if let Some(source) = session.agent_role.issue_source() {
+            return Self::IssueWork {
+                source: Box::new(source.clone()),
+            };
+        }
         let input_revision = session.input_revision;
         match session.agent_role.workbench_id() {
             Some(workbench_id) => Self::WorkbenchOwner {
@@ -58,11 +70,12 @@ impl DelegationSource {
         }
     }
 
-    pub fn owner_input_revision(&self) -> Option<u64> {
+    pub fn request_input_revision(&self) -> Option<u64> {
         match self {
             Self::UserInput { input_revision } | Self::WorkbenchOwner { input_revision, .. } => {
                 Some(*input_revision)
             }
+            Self::IssueWork { .. } => Some(1),
             _ => None,
         }
     }
@@ -70,6 +83,7 @@ impl DelegationSource {
     pub fn workbench_id(&self) -> Option<&str> {
         match self {
             Self::WorkbenchOwner { workbench_id, .. } => Some(workbench_id),
+            Self::IssueWork { source } => Some(&source.workbench_id),
             _ => None,
         }
     }
@@ -141,6 +155,8 @@ pub enum AgentRole {
     Coordinator {
         workbench_id: String,
         request_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        issue_source: Option<Box<crate::issue_authority::IssueWorkSource>>,
     },
     SubAgent {
         binding: Box<DelegatedTaskBinding>,
@@ -148,6 +164,16 @@ pub enum AgentRole {
 }
 
 impl AgentRole {
+    pub fn issue_source(&self) -> Option<&crate::issue_authority::IssueWorkSource> {
+        match self {
+            Self::Coordinator { issue_source, .. } => issue_source.as_deref(),
+            Self::SubAgent { binding } => match &binding.source {
+                DelegationSource::IssueWork { source } => Some(source),
+                _ => None,
+            },
+            Self::Main => None,
+        }
+    }
     pub fn is_main(&self) -> bool {
         self.binding().is_none()
     }

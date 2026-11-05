@@ -21,6 +21,7 @@ pub trait ExternalIssueReader: Sync {
         &self,
         source: &IssueReadScope,
         method: IssueReadMethod,
+        snapshot: Option<IssueReadOutput>,
     ) -> Result<IssueReadOutput, AgentError>;
 }
 
@@ -44,18 +45,31 @@ pub(super) struct IssueRead {
     pub label: desk_agent_protocol::data_lineage::DataEnvelope,
 }
 
+enum ReadAuthority {
+    Selected,
+    Subscription(Box<desk_diagnose_core::issue_authority::IssueAdmission>),
+}
+
 impl Batch {
     pub async fn issue_source_current(
         &self,
         db: &impl ConnectionTrait,
         source: &IssueReadScope,
     ) -> Result<bool, AssistantStoreError> {
+        Ok(self.issue_authority_on(db, source).await?.is_some())
+    }
+
+    async fn issue_authority_on(
+        &self,
+        db: &impl ConnectionTrait,
+        source: &IssueReadScope,
+    ) -> Result<Option<ReadAuthority>, AssistantStoreError> {
         let Some(item) = self.items.iter().find(|item| {
             item.request_id == source.request_id
                 && item.frozen_sha256 == source.frozen_sha256
                 && item.external_issues.contains(&source.access)
         }) else {
-            return Ok(false);
+            return Ok(None);
         };
         let Some(row) = request::Entity::find_by_id(item.id)
             .filter(request::Column::RequestId.eq(&item.request_id))
@@ -69,26 +83,26 @@ impl Batch {
             .one(db)
             .await?
         else {
-            return Ok(false);
+            return Ok(None);
         };
         if !row.pending_input_json.as_ref().is_some_and(|raw| {
             format!("{:x}", Sha256::digest(raw.as_bytes())) == source.frozen_sha256
         }) {
-            return Ok(false);
+            return Ok(None);
         }
-        let input = FrozenOwnerInput::decode(&row)?;
+        let input = FrozenRequestInput::decode(&row)?;
         let now = chrono::Utc::now().timestamp_millis();
-        if let Some(reference) = input
+        let authority = if let Some(reference) = input
             .reads
             .external_issue_sources
             .iter()
             .find(|reference| reference.tool_ref == source.access.tool_ref())
         {
-            let Some((snapshot, _)) =
+            let Some((mut snapshot, policy)) =
                 crate::issue_authority::resolve(db, &self.actor_id, reference, &source.access, now)
                     .await?
             else {
-                return Ok(false);
+                return Ok(None);
             };
             let execution_root = if self.workbench {
                 native_ids::workbench_work_conversation(
@@ -103,10 +117,17 @@ impl Batch {
                 || snapshot.subscription.conversation_id != self.conversation_id
                 || snapshot.execution_root_id != execution_root
             {
-                return Ok(false);
+                return Ok(None);
             }
-        }
-        Ok(input.destination == self.destination && !input.authorization_expired(now))
+            crate::issue_events::supplements::include_on(db, &mut snapshot, &policy, false).await?;
+            ReadAuthority::Subscription(Box::new(snapshot))
+        } else {
+            ReadAuthority::Selected
+        };
+        Ok(
+            (input.destination == self.destination && !input.authorization_expired(now))
+                .then_some(authority),
+        )
     }
 
     pub(super) async fn issue_tool(
@@ -196,15 +217,23 @@ impl Batch {
             access: access.clone(),
             frozen_sha256: item.frozen_sha256.clone(),
         };
-        if !self
-            .issue_source_current(db, &source)
+        let Some(authority) = self
+            .issue_authority_on(db, &source)
             .await
             .map_err(|error| error.into_agent_error())?
-            || !reader.permitted(access).await?
-        {
+        else {
+            return Ok(None);
+        };
+        if !reader.permitted(access).await? {
             return Ok(None);
         }
-        let result = reader.read(&source, selector.args.method).await?;
+        let snapshot = match authority {
+            ReadAuthority::Selected => None,
+            ReadAuthority::Subscription(snapshot) => {
+                Some(snapshot.workset.read_output(selector.args.method))
+            }
+        };
+        let result = reader.read(&source, selector.args.method, snapshot).await?;
         if !self
             .issue_source_current(db, &source)
             .await

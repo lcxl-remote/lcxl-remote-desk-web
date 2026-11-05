@@ -130,6 +130,9 @@ impl SubAgentRun {
                 | super::role::DelegationSource::WorkbenchOwner { input_revision, .. } => desk_agent_protocol::ai_assistant::subagent::SubAgentSource::UserInput { input_revision: *input_revision },
                 super::role::DelegationSource::Goal { goal_id } => desk_agent_protocol::ai_assistant::subagent::SubAgentSource::Goal { goal_id: goal_id.clone() },
                 super::role::DelegationSource::ScheduledOccurrence { schedule_id, occurrence_id } => desk_agent_protocol::ai_assistant::subagent::SubAgentSource::ScheduledOccurrence { schedule_id: schedule_id.clone(), occurrence_id: occurrence_id.clone() },
+                super::role::DelegationSource::IssueWork { source } => desk_agent_protocol::ai_assistant::subagent::SubAgentSource::IssueSubscription {
+                    subscription_id: source.subscription_id.clone(), work_id: source.work_id.clone(), request_id: source.request_id.clone(),
+                },
             },
             created_at: self.created_at.clone(), updated_at: self.updated_at.clone(),
         }
@@ -155,7 +158,7 @@ impl SubAgentRun {
         if !valid_id(&self.worker_id)
             || !valid_id(&self.child_conversation_id)
             || self.actor_id.is_empty()
-            || (self.device_id.is_empty() && self.binding.source.owner_input_revision().is_none())
+            || (self.device_id.is_empty() && self.binding.source.request_input_revision().is_none())
             || (!self.device_id.is_empty() && !self.binding.targets.is_empty())
             || self.name.trim().is_empty()
             || self.name.chars().count() > super::MAX_SUBAGENT_NAME_CHARS

@@ -91,7 +91,7 @@ pub(crate) fn validate_on<'a>(
         {
             return Err(AssistantStoreError::Inaccessible);
         }
-        let (audit, inputs, _) = crate::model_egress_store::receipt_inputs(native)?;
+        let (audit, inputs, input_snapshot) = crate::model_egress_store::receipt_inputs(native)?;
         if set.model_export_authorization_id != native.export_authorization_id
             || set.destination != audit.destination
             || set.input_lineage_sha256
@@ -122,6 +122,18 @@ pub(crate) fn validate_on<'a>(
         if deadline <= chrono::Utc::now().timestamp_millis() as u64 {
             return Err(rejected("acceptance_deadline_elapsed"));
         }
+        crate::issue_connections::check_work_on(db, &prepared.session, false, now as i64).await?;
+        desk_diagnose_core::future::boxed(|| {
+            desk_assistant_data_store::issue_events::supplements::verify_model_material_on(
+                db,
+                &prepared.session,
+                &audit.destination,
+                &input_snapshot.envelopes,
+                now as i64,
+                true,
+            )
+        })
+        .await?;
         Ok(Some(deadline))
     })
 }

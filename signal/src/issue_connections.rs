@@ -45,6 +45,29 @@ pub async fn select_issues(
     Ok(issues)
 }
 
+/// Current subscription and connection checks at the existing dispatch fence.
+pub(crate) async fn check_work_on(
+    db: &impl crate::config::ConfigConnection,
+    session: &desk_diagnose_core::session::PersistedAgentSession,
+    requires_device: bool,
+    now: i64,
+) -> Result<(), desk_assistant_data_store::AssistantStoreError> {
+    use desk_assistant_data_store::{AssistantStoreError, issue_authority};
+    let Some(admission) =
+        issue_authority::authorized_session_on(db, session, requires_device, now).await?
+    else {
+        return Ok(());
+    };
+    let config = read(db).await?;
+    if config
+        .connection_for_issue(&session.actor_id, &admission.issue)
+        .is_none()
+    {
+        return Err(AssistantStoreError::Inaccessible);
+    }
+    Ok(())
+}
+
 pub async fn permits_issues(
     db: &impl ConfigConnection,
     actor: &str,

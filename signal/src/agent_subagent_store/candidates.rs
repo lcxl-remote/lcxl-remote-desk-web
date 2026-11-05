@@ -177,6 +177,18 @@ impl SubAgentStore {
         if session.version != row.version || session.turn_state.is_active() {
             return Ok(None);
         }
+        match crate::issue_connections::check_work_on(
+            &txn,
+            &session,
+            false,
+            chrono::Utc::now().timestamp_millis(),
+        )
+        .await
+        {
+            Ok(()) => {}
+            Err(desk_assistant_data_store::AssistantStoreError::Inaccessible) => return Ok(None),
+            Err(_) => return Err(invalid()),
+        }
         let candidate = RuntimeTurn::Child {
             session,
             run,
@@ -209,6 +221,18 @@ impl SubAgentStore {
         {
             return Ok(None);
         }
+        match crate::issue_connections::check_work_on(
+            &txn,
+            &session,
+            false,
+            chrono::Utc::now().timestamp_millis(),
+        )
+        .await
+        {
+            Ok(()) => {}
+            Err(desk_assistant_data_store::AssistantStoreError::Inaccessible) => return Ok(None),
+            Err(_) => return Err(invalid()),
+        }
         let source = if session.ready_subagent_wait.is_some() {
             super::parent_wait::ready_parent_source_on(&txn, &session).await?
         } else if session.agent_role.workbench_request_id().is_some() {
@@ -220,7 +244,7 @@ impl SubAgentStore {
             txn.commit().await?;
             return Ok(None);
         };
-        if group.source.owner_input_revision().is_none() {
+        if group.source.request_input_revision().is_none() {
             return Ok(None);
         }
         let candidate = RuntimeTurn::ParentCompletion {

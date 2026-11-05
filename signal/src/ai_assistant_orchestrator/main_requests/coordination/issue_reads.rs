@@ -39,6 +39,7 @@ impl ExternalIssueReader for Reader<'_> {
         &self,
         source: &IssueReadScope,
         method: IssueReadMethod,
+        snapshot: Option<IssueReadOutput>,
     ) -> Result<IssueReadOutput, AgentError> {
         let config = crate::issue_connections::read(&self.executor.db)
             .await
@@ -59,10 +60,18 @@ impl ExternalIssueReader for Reader<'_> {
         if config.connection_for_issue(&self.head.actor_id, &source.access) != Some(&saved) {
             return Err(unavailable());
         }
-        let result = client
-            .read_issue(&source.access.target, method)
-            .await
-            .map_err(|_| unavailable())?;
+        let result = if let Some(snapshot) = snapshot {
+            client
+                .verify_issue_target(&source.access.target)
+                .await
+                .map_err(|_| unavailable())?;
+            snapshot
+        } else {
+            client
+                .read_issue(&source.access.target, method)
+                .await
+                .map_err(|_| unavailable())?
+        };
         self.check(source).await?;
         let config = crate::issue_connections::read(&self.executor.db)
             .await

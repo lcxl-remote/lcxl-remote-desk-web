@@ -151,6 +151,15 @@ async fn worker_exists_on(
     .is_some())
 }
 
+fn requested_worker_id(request: &SpawnRequest, creation_key: &str) -> String {
+    request.worker_id.clone().unwrap_or_else(|| {
+        desk_diagnose_core::native_ids::stable(
+            desk_diagnose_core::native_ids::Kind::Worker,
+            &creation_key,
+        )
+    })
+}
+
 async fn create_request_on(
     txn: &DatabaseTransaction,
     held: &PersistedAgentSession,
@@ -188,12 +197,6 @@ async fn create_request_on(
         desk_diagnose_core::native_ids::Kind::ChildConversation,
         &creation_key,
     );
-    let worker_id = request.worker_id.clone().unwrap_or_else(|| {
-        desk_diagnose_core::native_ids::stable(
-            desk_diagnose_core::native_ids::Kind::Worker,
-            &creation_key,
-        )
-    });
     let task_id = desk_diagnose_core::native_ids::stable(
         desk_diagnose_core::native_ids::Kind::Task,
         &creation_key,
@@ -232,7 +235,8 @@ async fn create_request_on(
         if existing.creation_arguments_sha256 != arguments_sha256
             || run.binding.task_id != task_id
             || run.child_conversation_id != child_id
-            || run.worker_id != worker_id
+            || (held.agent_role.issue_source().is_none()
+                && run.worker_id != requested_worker_id(request, &creation_key))
             || run.binding.group_id != group_id
             || run.binding.root_conversation_id != held.conversation_id
             || run.actor_id != held.actor_id
@@ -248,7 +252,31 @@ async fn create_request_on(
         }
         return Ok(run.summary());
     }
+    let issue_source = held.agent_role.issue_source();
+    let preferred = if let Some(source) = issue_source {
+        crate::issue_connections::check_work_on(
+            txn,
+            held,
+            !request.target_refs.is_empty(),
+            now.timestamp_millis(),
+        )
+        .await
+        .map_err(|_| invalid())?;
+        desk_assistant_data_store::issue_events::routing::preferred_worker_on(
+            txn,
+            &held.actor_id,
+            source,
+        )
+        .await
+        .map_err(|_| invalid())?
+    } else {
+        None
+    };
+    let worker_id = preferred
+        .clone()
+        .unwrap_or_else(|| requested_worker_id(request, &creation_key));
     if matches!(origin, SpawnOrigin::NativeTool(_))
+        && preferred.is_none()
         && let Some(worker_id) = &request.worker_id
         && !worker_exists_on(txn, held, worker_id).await?
     {
@@ -463,6 +491,16 @@ async fn create_request_on(
             append_state_event_on(txn, &group, &run, now.timestamp_millis()).await
         })
         .await?;
+        if let Some(source) = issue_source {
+            desk_assistant_data_store::issue_events::routing::record_first_worker_on(
+                txn,
+                &held.actor_id,
+                source,
+                &run.worker_id,
+            )
+            .await
+            .map_err(|_| invalid())?;
+        }
         Ok(run.summary())
     })
     .await

@@ -130,7 +130,6 @@ pub fn permits_permission_request(
     }
     let registry = crate::ai_assistant::ai_assistant_provider_registry_ref();
     session.has_admitted_personal_input()
-        && session.agent_role.is_main()
         && (request.exact_command().is_some_and(|command| {
             session
                 .agent_role
@@ -140,19 +139,20 @@ pub fn permits_permission_request(
                 && command.actor_id == session.actor_id
                 && command.input_revision == request.input_revision
                 && command.policy_revision == session.policy_revision
-        }) || request.items.iter().all(|item| {
-            crate::web_research::is_web_tool(&item.tool_name)
-                && registry
-                    .capability_for_tool(&item.tool_name)
-                    .is_some_and(|capability| {
-                        capability.wire.effect == item.expected_effect
-                            && registry
-                                .provider_for_capability(&capability.wire.capability_id)
-                                .is_some_and(|provider| {
-                                    provider.wire.provider_id == item.provider_id
-                                })
-                    })
-        }))
+        }) || (session.agent_role.is_main()
+            && request.items.iter().all(|item| {
+                crate::web_research::is_web_tool(&item.tool_name)
+                    && registry
+                        .capability_for_tool(&item.tool_name)
+                        .is_some_and(|capability| {
+                            capability.wire.effect == item.expected_effect
+                                && registry
+                                    .provider_for_capability(&capability.wire.capability_id)
+                                    .is_some_and(|provider| {
+                                        provider.wire.provider_id == item.provider_id
+                                    })
+                        })
+            })))
 }
 
 pub fn require_current_policy(revision: i64) -> Result<(), AgentError> {
@@ -195,7 +195,7 @@ pub fn validate_claim(
     }
     require_current_policy(params.policy_revision)?;
     if params.device_id.is_empty()
-        && (params.trigger_origin != TriggerOrigin::User
+        && (!params.trigger_origin.is_request_input()
             || !is_targetless_scope(&params.current_pdp_scope))
     {
         return Err(AgentError {
@@ -224,8 +224,16 @@ pub fn validate_permission_resume_claim(
     }
     require_current_policy(params.policy_revision)?;
     require_current_policy(session.policy_revision)?;
+    let selected_worker_command = session.agent_role.binding().is_some()
+        && session.permission_requests.iter().any(|request| {
+            request.request_id == decision.request_id
+                && request.input_revision == decision.request_input_revision
+                && request.state == decision.resulting_state
+                && request.exact_command().is_some()
+                && permits_permission_request(session, request)
+        });
     if session.has_admitted_personal_input()
-        && session.agent_role.is_main()
+        && (session.agent_role.is_main() || selected_worker_command)
         && params.trigger_origin == TriggerOrigin::PermissionDecision
         && session.input_revision == decision.request_input_revision
         && matches!(
@@ -238,7 +246,7 @@ pub fn validate_permission_resume_claim(
     }
     Err(AgentError {
         kind: AgentErrorKind::PermissionDenied,
-        message: "Targetless resume requires the original owner decision and web-only authority"
+        message: "Personal assistant resume requires the original owner decision and request scope"
             .into(),
         retryable: false,
         safe_for_model: false,

@@ -343,7 +343,8 @@ impl SubAgentStore {
         else {
             return Ok(None);
         };
-        if group.source.owner_input_revision().is_none() || source.model_destination != *destination
+        if group.source.request_input_revision().is_none()
+            || source.model_destination != *destination
         {
             return Ok(None);
         }

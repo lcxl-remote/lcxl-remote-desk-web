@@ -83,9 +83,7 @@ pub async fn put(
         None if expected != 0 => return Err(AssistantStoreError::Inaccessible),
         _ => {}
     }
-    if let Some(row) = &original {
-        decode_subscription(row)?;
-    }
+    let previous = original.as_ref().map(decode_subscription).transpose()?;
     let others = subscription::Entity::find()
         .filter(subscription::Column::ActorId.eq(&policy.actor_id))
         .filter(subscription::Column::ConversationId.eq(&policy.conversation_id))
@@ -150,6 +148,7 @@ pub async fn put(
                 .revision,
         });
     }
+    crate::issue_events::policy_changed_on(db, previous.as_ref(), &policy, now).await?;
     Ok(policy)
 }
 
@@ -186,10 +185,6 @@ pub async fn admit(
     snapshot: &IssueAdmission,
 ) -> Result<admission::Model, AssistantStoreError> {
     snapshot.validate().map_err(AssistantStoreError::Invalid)?;
-    let json = serde_json::to_string(snapshot).map_err(|_| invalid())?;
-    if json.len() > MAX_POLICY_BYTES + 1024 * 1024 {
-        return Err(AssistantStoreError::Capacity);
-    }
     if let Some(existing) = admission::Entity::find()
         .filter(admission::Column::AuthorizationId.eq(&snapshot.authorization_id))
         .one(db)
@@ -210,6 +205,22 @@ pub async fn admit(
     if policy != snapshot.subscription {
         return Err(AssistantStoreError::Inaccessible);
     }
+    insert_admission_on(db, snapshot).await
+}
+
+// A persisted source observation may have been accepted under an earlier
+// revision. The intake transaction proves its frozen original rule and the
+// intersection with the current rule before calling this writer.
+pub(crate) async fn insert_admission_on(
+    db: &impl ConnectionTrait,
+    snapshot: &IssueAdmission,
+) -> Result<admission::Model, AssistantStoreError> {
+    snapshot.validate().map_err(AssistantStoreError::Invalid)?;
+    let json = serde_json::to_string(snapshot).map_err(|_| invalid())?;
+    if json.len() > MAX_POLICY_BYTES + 1024 * 1024 {
+        return Err(AssistantStoreError::Capacity);
+    }
+    let policy = &snapshot.subscription;
     admission::Entity::insert(admission::ActiveModel {
         authorization_id: Set(snapshot.authorization_id.clone()),
         actor_id: Set(policy.actor_id.clone()),
@@ -252,6 +263,27 @@ pub async fn resolve(
     issue: &IssueAccess,
     now: i64,
 ) -> Result<Option<(IssueAdmission, IssueSubscription)>, AssistantStoreError> {
+    Ok(resolve_reference(db, actor, reference, now)
+        .await?
+        .filter(|(snapshot, _)| snapshot.issue == *issue))
+}
+
+async fn resolve_reference(
+    db: &impl ConnectionTrait,
+    actor: &str,
+    reference: &IssueSourceRef,
+    now: i64,
+) -> Result<Option<(IssueAdmission, IssueSubscription)>, AssistantStoreError> {
+    Ok(reference_scope_on(db, actor, reference)
+        .await?
+        .filter(|(snapshot, policy)| snapshot.usable(policy, now)))
+}
+
+pub(crate) async fn reference_scope_on(
+    db: &impl ConnectionTrait,
+    actor: &str,
+    reference: &IssueSourceRef,
+) -> Result<Option<(IssueAdmission, IssueSubscription)>, AssistantStoreError> {
     let Some(row) = admission::Entity::find()
         .filter(admission::Column::ActorId.eq(actor))
         .filter(admission::Column::AuthorizationId.eq(&reference.authorization_id))
@@ -265,18 +297,62 @@ pub async fn resolve(
     }
     let snapshot = decode_admission(&row)?;
     if snapshot.subscription.revision != reference.subscription_revision
-        || snapshot.issue != *issue
-        || reference.tool_ref != issue.tool_ref()
+        || reference.tool_ref != snapshot.issue.tool_ref()
     {
         return Ok(None);
     }
     let Some(policy) = current(db, actor, &snapshot.subscription.subscription_id).await? else {
         return Ok(None);
     };
-    if !snapshot.usable(&policy, now) {
-        return Ok(None);
-    }
     Ok(Some((snapshot, policy)))
+}
+
+/// Match the complete original logical work, in addition to the current rule.
+pub async fn resolve_work_source(
+    db: &impl ConnectionTrait,
+    actor: &str,
+    source: &desk_diagnose_core::issue_authority::IssueWorkSource,
+    issue: &IssueAccess,
+    now: i64,
+) -> Result<Option<(IssueAdmission, IssueSubscription)>, AssistantStoreError> {
+    let Some((admitted, current)) = resolve(db, actor, &source.reference, issue, now).await? else {
+        return Ok(None);
+    };
+    let original = desk_diagnose_core::issue_authority::IssueWorkSource::from_admission(&admitted)
+        .map_err(AssistantStoreError::Invalid)?;
+    Ok((original == *source).then_some((admitted, current)))
+}
+
+/// The stored native role pins the admitted source for both the main
+/// coordinator and its Worker. A device action needs the additional device
+/// scope intersection even if the request can still read the issue.
+pub async fn authorized_session_on(
+    db: &impl ConnectionTrait,
+    session: &desk_diagnose_core::session::PersistedAgentSession,
+    requires_device: bool,
+    now: i64,
+) -> Result<Option<IssueAdmission>, AssistantStoreError> {
+    use desk_diagnose_core::issue_authority::IssueWorkSource;
+    let Some(source) = session.agent_role.issue_source() else {
+        return Ok(None);
+    };
+    let (snapshot, policy) = resolve_reference(db, &session.actor_id, &source.reference, now)
+        .await?
+        .ok_or(AssistantStoreError::Inaccessible)?;
+    let native_root = session
+        .agent_role
+        .binding()
+        .map_or(session.conversation_id.as_str(), |binding| {
+            binding.root_conversation_id.as_str()
+        });
+    if snapshot.execution_root_id != native_root
+        || IssueWorkSource::from_admission(&snapshot).map_err(AssistantStoreError::Invalid)?
+            != *source
+        || (requires_device && !snapshot.can_use_devices(&policy, now))
+    {
+        return Err(AssistantStoreError::Inaccessible);
+    }
+    Ok(Some(snapshot))
 }
 
 pub async fn publication_revision(
@@ -296,8 +372,10 @@ pub async fn publication_revision(
     };
     Ok((snapshot.request_id == origin.request_id
         && snapshot.subscription.conversation_id == origin.root_conversation_id
-        && snapshot.can_publish(&policy, now))
-    .then_some(policy.revision))
+        && snapshot.can_publish(&policy, now)
+        && crate::issue_events::supplements::publication_content_current(db, &snapshot, &policy)
+            .await?)
+        .then_some(policy.revision))
 }
 
 /// The host has already checked this exact native input, version and lease.
@@ -346,8 +424,10 @@ pub async fn publication_revision_for_input(
         && snapshot.subscription.conversation_id == origin.root_conversation_id
         && snapshot.authorization_id == origin.authorization_id
         && snapshot.subscription.revision == origin.authorization_revision
-        && snapshot.can_publish(&policy, now))
-    .then_some(policy.revision))
+        && snapshot.can_publish(&policy, now)
+        && crate::issue_events::supplements::publication_content_current(db, &snapshot, &policy)
+            .await?)
+        .then_some(policy.revision))
 }
 
 pub async fn input_sources_current(
@@ -380,6 +460,7 @@ pub async fn stop_request(
     request: &str,
     now: i64,
 ) -> Result<(), AssistantStoreError> {
+    crate::issue_events::lifecycle::stop_request_on(db, actor, request, now).await?;
     use sea_orm::sea_query::Expr;
     admission::Entity::update_many()
         .filter(admission::Column::ActorId.eq(actor))
@@ -397,6 +478,7 @@ pub async fn stop_conversation(
     conversation: &str,
     now: i64,
 ) -> Result<(), AssistantStoreError> {
+    crate::issue_events::lifecycle::stop_conversation_on(db, actor, conversation, now).await?;
     use sea_orm::sea_query::Expr;
     admission::Entity::update_many()
         .filter(admission::Column::ActorId.eq(actor))
@@ -424,6 +506,7 @@ pub async fn retire_conversation(
     conversation: &str,
     now: i64,
 ) -> Result<(), AssistantStoreError> {
+    crate::issue_events::lifecycle::retire_conversation_on(db, actor, conversation, now).await?;
     use sea_orm::{Condition, sea_query::Expr};
     admission::Entity::update_many()
         .filter(admission::Column::ActorId.eq(actor))
@@ -445,6 +528,7 @@ pub async fn retire_actor(
     actor: &str,
     now: i64,
 ) -> Result<(), AssistantStoreError> {
+    crate::issue_events::lifecycle::retire_actor_on(db, actor, now).await?;
     use sea_orm::sea_query::Expr;
     admission::Entity::update_many()
         .filter(admission::Column::ActorId.eq(actor))
