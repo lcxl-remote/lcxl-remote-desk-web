@@ -317,6 +317,7 @@ async fn run_case_with_live_inner(change: Option<&str>, mode: ResumeMode, live: 
                 interactive_user_home: None,
                 interactive_session_incarnation: "worker".into(),
                 local_ceiling_revision: 1,
+                unattended_command_execution: false,
                 capabilities: vec![ComputerUseCapabilityReadiness {
                     capability: if live {
                         Capability::DocumentLiveInspect

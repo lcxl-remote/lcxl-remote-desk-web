@@ -678,6 +678,7 @@ mod tests {
                 execution_basis: ExecExecutionBasis::Template,
                 template_id: "test".into(),
                 approval_id: ApprovalId("approval-1".into()),
+                authorization: Default::default(),
                 fingerprint: "fp".into(),
                 timeout_ms: 5_000,
                 max_stdout_bytes: 4096,

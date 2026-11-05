@@ -35,7 +35,7 @@ const PROFILE_PRESETS = ["standard", "deepseek", "anthropic_adaptive", "anthropi
 // The execution modes the confirm-execute flow supports. `session_approved` /
 // `automated` are frozen in the protocol but not selectable yet (the backend
 // rejects them), so they are intentionally omitted here.
-const EXECUTION_MODES = ["suggest_only", "read_only", "confirm_each_action"] as const
+const EXECUTION_MODES = ["suggest_only", "read_only", "confirm_each_action", "automated"] as const
 const MAX_STEPS_MIN = 1
 const MAX_STEPS_MAX = 80
 const MAX_STEPS_DEFAULT = 40
@@ -120,6 +120,7 @@ function ExecutionModeItems() {
             <SelectItem value="suggest_only">{t("pages.executionMode.suggestOnly")}</SelectItem>
             <SelectItem value="read_only">{t("pages.executionMode.readOnly")}</SelectItem>
             <SelectItem value="confirm_each_action">{t("pages.executionMode.confirmEachAction")}</SelectItem>
+            <SelectItem value="automated">{t("pages.executionMode.automated")}</SelectItem>
         </>
     )
 }

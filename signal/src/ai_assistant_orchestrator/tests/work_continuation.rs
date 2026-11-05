@@ -128,6 +128,7 @@ async fn finished_command_continues_with_history_and_tools_then_drains_its_trigg
                 interactive_user_home: Some("/Users/fixture".into()),
                 interactive_session_incarnation: "continuation-worker".into(),
                 local_ceiling_revision: 1,
+                unattended_command_execution: false,
                 capabilities: vec![],
                 context_references: vec![],
             },

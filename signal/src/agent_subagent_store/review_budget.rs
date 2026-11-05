@@ -678,16 +678,18 @@ async fn validate_review_subject_on(
             request_id,
             item_id,
         } => {
-            let pending = session.permission_requests.iter().any(|request| {
-                request.request_id == *request_id
-                    && request.input_revision == authority.input_revision
-                    && request.state
-                        == desk_diagnose_core::dynamic_run::PermissionRequestState::Pending
-                    && request.items.iter().any(|item| item.item_id == *item_id)
-            });
-            if !pending {
-                return Err(invalid());
-            }
+            let request = session
+                .permission_requests
+                .iter()
+                .find(|request| {
+                    request.request_id == *request_id
+                        && request.input_revision == authority.input_revision
+                        && request.state
+                            == desk_diagnose_core::dynamic_run::PermissionRequestState::Pending
+                        && request.items.iter().any(|item| item.item_id == *item_id)
+                })
+                .ok_or_else(|| invalid())?;
+            crate::agent_approval_store::check_permission_target_on(txn, session, request).await?;
         }
         ApprovalSource::GoalProposal { request_id } => {
             if session_row

@@ -1438,6 +1438,7 @@ mod tests {
         session.add_permission_request(request.clone()).unwrap();
         session.last_event_seq += 1;
         let event = PermissionRequestedEvent {
+            approval_mode_revision: None,
             event: AgentRunEvent {
                 schema_version: AGENT_RUN_EVENT_SCHEMA_VERSION,
                 event_id: "selected-command-event".into(),
@@ -1458,6 +1459,149 @@ mod tests {
             .unwrap();
         session.finish_turn(TurnState::Idle, input.created_at.clone());
         sessions.save(&mut session).await.unwrap();
+
+        if !managed {
+            use crate::agent_approval_store as approvals;
+            use crate::config::ConfigConnection;
+            use desk_agent_protocol::ai_assistant::approval_mode::{
+                AssistantApprovalMode, UpdateAssistantApprovalMode,
+            };
+            use desk_diagnose_core::approval_delegation::{
+                ApprovalDelegationAuditEvent, ApprovalDelegationAuthority,
+            };
+            let ms = now.timestamp_millis() as u64;
+            approvals::discover_default_review_roots(&db, 0, 64, ms)
+                .await
+                .unwrap();
+            assert!(
+                approvals::load_latest_for_subject(&db, &input.run_id, &input.actor_id, "")
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            db.config_context()
+                .update::<_, sea_orm::DbErr, _>(|file| {
+                    file.approval_gateway.gateway.base_url = Some("http://127.0.0.1:1".into());
+                    file.approval_gateway.gateway.model = Some("reviewer".into());
+                    file.approval_gateway.gateway.api_key = Some("test-key".into());
+                    file.approval_gateway.gateway.wire_protocol = Some(
+                        desk_diagnose_core::model_profile::WireProtocol::OpenAiChatCompletions,
+                    );
+                    Ok(Some(()))
+                })
+                .await
+                .unwrap();
+            for _ in 0..2 {
+                approvals::discover_default_review_roots(&db, 0, 64, ms)
+                    .await
+                    .unwrap();
+            }
+            let delegation =
+                approvals::load_latest_for_subject(&db, &input.run_id, &input.actor_id, "")
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert!(matches!(
+                delegation.issued_by,
+                ApprovalDelegationAuthority::HostDefault { .. }
+            ));
+            let audits = agent_run_event::Entity::find()
+                .filter(agent_run_event::Column::RunId.eq(&input.run_id))
+                .filter(
+                    agent_run_event::Column::Kind
+                        .eq(AgentRunEventKind::ApprovalDelegationOpened.as_str()),
+                )
+                .all(&db)
+                .await
+                .unwrap();
+            assert_eq!(audits.len(), 1);
+            let audit: ApprovalDelegationAuditEvent =
+                serde_json::from_str(&audits[0].payload_json).unwrap();
+            audit.validate_for(&delegation).unwrap();
+            let pending = approvals::pending_permission_reviews(&db, 0, 64, ms)
+                .await
+                .unwrap()
+                .0;
+            let selected = pending
+                .iter()
+                .find(|row| row.request_id == event.request.request_id)
+                .unwrap();
+            assert!(selected.device_id.is_empty());
+            assert_eq!(selected.target_device_id, "device-1");
+            let candidates = approvals::prepare_permission_review_batch(
+                &db,
+                &input.run_id,
+                &input.actor_id,
+                "",
+                &event.request.request_id,
+                desk_diagnose_core::approval_review::PendingRequestKind::Permission,
+                &registry,
+                desk_agent_protocol::capability_provider::ProductSurface::OssPersonalOwner,
+                1,
+                ms,
+            )
+            .await
+            .unwrap();
+            assert_eq!(candidates.len(), 1);
+            assert!(candidates[0].device_id.is_empty());
+            db.config_context()
+                .update::<_, sea_orm::DbErr, _>(|file| {
+                    file.approval_gateway.enabled = false;
+                    Ok(Some(()))
+                })
+                .await
+                .unwrap();
+            assert!(
+                approvals::load_latest_for_subject(&db, &input.run_id, &input.actor_id, "")
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                approvals::pending_permission_reviews(&db, 0, 64, ms)
+                    .await
+                    .unwrap()
+                    .0
+                    .is_empty()
+            );
+            assert!(
+                crate::agent_owner_attention::list_goal_attention(&db, &input.actor_id, ms)
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|item| item.request_id.as_deref() == Some(&event.request.request_id))
+            );
+            db.config_context()
+                .update::<_, sea_orm::DbErr, _>(|file| {
+                    file.approval_gateway.enabled = true;
+                    Ok(Some(()))
+                })
+                .await
+                .unwrap();
+
+            assert!(
+                approvals::save_preference(
+                    &db,
+                    &input.actor_id,
+                    UpdateAssistantApprovalMode {
+                        session: input.run_id.clone(),
+                        expected_revision: 1,
+                        mode: AssistantApprovalMode::Manual,
+                        no_review_confirmation_id: None,
+                    }
+                )
+                .await
+                .unwrap()
+                .is_some()
+            );
+            assert!(
+                approvals::pending_permission_reviews(&db, 0, 64, ms)
+                    .await
+                    .unwrap()
+                    .0
+                    .is_empty()
+            );
+        }
 
         let item = &event.request.items[0];
         let capability = registry.capability_for_tool(&item.tool_name).unwrap();
@@ -2283,6 +2427,7 @@ mod tests {
         session.add_permission_request(request.clone()).unwrap();
         session.last_event_seq += 1;
         let event = PermissionRequestedEvent {
+            approval_mode_revision: None,
             event: AgentRunEvent {
                 schema_version: AGENT_RUN_EVENT_SCHEMA_VERSION,
                 event_id: "web-permission-event".into(),

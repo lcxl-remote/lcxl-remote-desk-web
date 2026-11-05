@@ -438,7 +438,7 @@ fn authorize_review_sources(
     source_ids: BTreeSet<&str>,
 ) -> Result<AuthorizedApprovalReview, ApprovalReviewError> {
     let authorization = ExportDataAuthorization {
-        authorization_id: delegation.owner_authorization_id.clone(),
+        authorization_id: delegation.authorization_id().to_owned(),
         source_envelope_ids: Vec::new(),
         destination: destination.clone(),
         max_sensitivity: Sensitivity::Sensitive,

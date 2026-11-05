@@ -391,6 +391,7 @@ async fn create_request_on(
             now.to_rfc3339(),
         )
         .map_err(|_| invalid())?;
+        child.inherit_direct_approval_origin(held);
         child
             .bind_delegated_owner_requirement(&context.source)
             .map_err(|_| invalid())?;

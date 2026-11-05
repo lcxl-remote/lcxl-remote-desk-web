@@ -350,6 +350,14 @@ impl ExecutionMode {
         }
     }
 
+    /// A device command with an exact approval can run at this ceiling.
+    pub const fn allows_confirmed_execution(self) -> bool {
+        matches!(
+            self,
+            Self::ConfirmEachAction | Self::SessionApproved | Self::Automated
+        )
+    }
+
     /// Clamp this mode so it permits no more execution than `ceiling` does,
     /// returning the stricter (narrower breadth) of the two. Used to make a
     /// locally configured `execution_mode` an upper bound on a manager-issued

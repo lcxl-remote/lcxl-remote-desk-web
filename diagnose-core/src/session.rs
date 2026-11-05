@@ -34,7 +34,7 @@ use crate::context_attachment::{
 use crate::model_context::{ContextNotice, MAX_CONTEXT_NOTICES, ModelContextState};
 use crate::replay::{ReplayDisposition, ReplayUnavailableReason};
 
-pub const CONVERSATION_SCHEMA_VERSION: u16 = 26;
+pub const CONVERSATION_SCHEMA_VERSION: u16 = 27;
 /// Opaque replay is bounded independently from visible transcript text.
 pub const MAX_REPLAY_ENVELOPE_BYTES: usize = 256 * 1024;
 pub const MAX_SESSION_REPLAY_BYTES: usize = 2 * 1024 * 1024;
@@ -636,6 +636,9 @@ pub struct PersistedAgentSession {
     /// carry-over). Gates whether the turn may start new mutations.
     #[serde(default)]
     pub trigger_origin: TriggerOrigin,
+    /// Original owner input for unattended execution. A continuation cannot create this authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    owner_direct_input_revision: Option<u64>,
     /// The automation chain the current turn belongs to: the id of the user turn
     /// that began it. Reset to the claiming turn's id on a `User` claim; preserved
     /// on an `ExecCompletion` claim, so one chain keeps one id. A pending entry
@@ -1479,6 +1482,7 @@ impl PersistedAgentSession {
             turn_start_scope: clone_initial_scope(&scope),
             scope_snapshot: scope,
             trigger_origin: TriggerOrigin::User,
+            owner_direct_input_revision: None,
             chain_id: String::new(),
             automation_turns_used: 0,
             review_denials: Default::default(),
@@ -1579,6 +1583,49 @@ impl PersistedAgentSession {
                 .is_none_or(|binding| binding.source.allows_delegated_review())
     }
 
+    /// The turn's origin may change on resume, but its original source does not.
+    pub fn has_direct_approval_origin(&self) -> bool {
+        use crate::subagent::DelegationSource;
+        let Some(revision) = self.owner_direct_input_revision else {
+            return false;
+        };
+        if revision == 0
+            || self.surface != AgentSessionSurface::AiAssistant
+            || !self.allows_new_mutation()
+            || self.agent_role.issue_source().is_some()
+            || matches!(
+                self.trigger_origin,
+                TriggerOrigin::ScheduledTask | TriggerOrigin::ScheduledContinuation
+            )
+        {
+            return false;
+        }
+        match self.agent_role.binding().map(|binding| &binding.source) {
+            None => revision == self.input_revision,
+            Some(
+                DelegationSource::UserInput { input_revision }
+                | DelegationSource::WorkbenchOwner { input_revision, .. },
+            ) => revision == *input_revision,
+            Some(DelegationSource::Goal { .. }) => true,
+            Some(
+                DelegationSource::IssueWork { .. } | DelegationSource::ScheduledOccurrence { .. },
+            ) => false,
+        }
+    }
+
+    pub fn inherit_direct_approval_origin(&mut self, parent: &Self) {
+        if parent.has_direct_approval_origin()
+            && self
+                .agent_role
+                .binding()
+                .is_some_and(|binding| binding.root_conversation_id == parent.conversation_id)
+            && self.actor_id == parent.actor_id
+            && self.device_id == parent.device_id
+        {
+            self.owner_direct_input_revision = parent.owner_direct_input_revision;
+        }
+    }
+
     /// The child source is authenticated separately from its delegated objective.
     /// This accessor does not treat a model task or resume bridge as owner input.
     pub fn authorization_requirement(&self) -> Option<&ChatMessage> {
@@ -1604,11 +1651,7 @@ impl PersistedAgentSession {
 
     /// The owner switch belongs to the root; requests and grants stay local.
     pub fn approval_delegation_conversation_id(&self) -> &str {
-        self.agent_role
-            .binding()
-            .map_or(self.conversation_id.as_str(), |binding| {
-                binding.root_conversation_id.as_str()
-            })
+        self.device_roster_conversation_id()
     }
 
     /// A work's source selects devices from its coordinator's roster.
@@ -2319,6 +2362,24 @@ impl PersistedAgentSession {
     /// consumes budget, so a turn that dies mid-run cannot be retried without bound.
     pub fn adopt_trigger(&mut self, origin: TriggerOrigin, turn_id: &str) {
         self.trigger_origin = origin;
+        if self.agent_role.is_main() {
+            match origin {
+                TriggerOrigin::User => {
+                    self.owner_direct_input_revision = (self.surface
+                        == AgentSessionSurface::AiAssistant
+                        && self.agent_role.issue_source().is_none()
+                        && self.input_revision > 0)
+                        .then_some(self.input_revision);
+                }
+                TriggerOrigin::IssueSubscription
+                | TriggerOrigin::ScheduledTask
+                | TriggerOrigin::ScheduledContinuation => {
+                    self.owner_direct_input_revision = None;
+                }
+                _ => {}
+            }
+        }
+
         if origin == TriggerOrigin::User {
             self.subagent_result_only = false;
         }
@@ -3640,6 +3701,29 @@ mod tests {
     /// A `User` claim starts a fresh chain (its turn id) and zeroes the budget; a
     /// following `ExecCompletion` claim keeps the chain id and spends one budget per
     /// claim; the next `User` claim resets both again.
+    #[test]
+    fn direct_approval_origin_survives_same_input_resumes_but_not_other_sources() {
+        let mut session = session();
+        session.surface = AgentSessionSurface::AiAssistant;
+        session.input_revision = 1;
+        session.adopt_trigger(TriggerOrigin::User, "direct");
+        assert!(session.has_direct_approval_origin());
+        session.adopt_trigger(TriggerOrigin::PermissionDecision, "decided");
+        assert!(session.has_direct_approval_origin());
+        session.adopt_trigger(TriggerOrigin::WorkContinuation, "completion");
+        assert!(session.has_direct_approval_origin());
+        session.input_revision = 2;
+        assert!(!session.has_direct_approval_origin());
+        session.adopt_trigger(TriggerOrigin::ScheduledTask, "scheduled");
+        session.adopt_trigger(TriggerOrigin::PermissionDecision, "scheduled-decision");
+        assert!(!session.has_direct_approval_origin());
+        session.adopt_trigger(TriggerOrigin::User, "new-direct");
+        assert!(session.has_direct_approval_origin());
+        session.adopt_trigger(TriggerOrigin::IssueSubscription, "subscription");
+        session.adopt_trigger(TriggerOrigin::PermissionDecision, "subscription-decision");
+        assert!(!session.has_direct_approval_origin());
+    }
+
     #[test]
     fn adopt_trigger_tracks_chain_and_spends_budget() {
         let mut s = session();

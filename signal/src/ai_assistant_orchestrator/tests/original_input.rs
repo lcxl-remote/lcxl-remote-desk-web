@@ -1951,14 +1951,24 @@ async fn personal_input_seals_command_but_retires_a_late_receipt_after_supersess
     run_selected_command(SelectedCommandFinish::Retired).await;
 }
 
+#[actix_web::test]
+async fn direct_personal_command_uses_no_review_on_the_selected_device() {
+    run_selected_command(SelectedCommandFinish::NoReview).await;
+}
+
 enum SelectedCommandFinish {
     Foreground,
     Background,
     Retired,
+    NoReview,
 }
 
 async fn run_selected_command(finish: SelectedCommandFinish) {
-    let background = !matches!(finish, SelectedCommandFinish::Foreground);
+    let background = matches!(
+        finish,
+        SelectedCommandFinish::Background | SelectedCommandFinish::Retired
+    );
+    let no_review = matches!(finish, SelectedCommandFinish::NoReview);
     let retired = matches!(finish, SelectedCommandFinish::Retired);
     static DEVICE_FIXTURE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     let _fixture = DEVICE_FIXTURE.lock().await;
@@ -1987,6 +1997,11 @@ async fn run_selected_command(finish: SelectedCommandFinish) {
             base_url: Some(format!("http://{}", listener.local_addr().unwrap())),
             api_key: Some("test-only-key".into()),
             max_context_bytes: Some(131_072),
+            execution_mode: if no_review {
+                desk_agent_protocol::ExecutionMode::Automated
+            } else {
+                desk_agent_protocol::ExecutionMode::ConfirmEachAction
+            },
             ..Default::default()
         },
     )
@@ -2019,6 +2034,7 @@ async fn run_selected_command(finish: SelectedCommandFinish) {
                     interactive_user_home: None,
                     interactive_session_incarnation: "desktop:worker".into(),
                     local_ceiling_revision: 1,
+                    unattended_command_execution: no_review,
                     capabilities: vec![ComputerUseCapabilityReadiness {
                         capability: Capability::ShellExecConfirmed,
                         adapter: ComputerUseAdapterRef {
@@ -2035,6 +2051,14 @@ async fn run_selected_command(finish: SelectedCommandFinish) {
             )
             .unwrap();
     }
+    let intent = "selected-command-conversation";
+    let owner = crate::control_authorizer::SINGLE_ACCOUNT_USER_ID;
+    let actor = owner.to_string();
+    let run =
+        derive_assistant_conversation_key(&actor, AssistantConversationScope::Personal, intent);
+    let model_db = db.clone();
+    let model_run = run.clone();
+    let model_actor = actor.clone();
     let model = actix_web::rt::spawn(async move {
         let reply = |target: &str| {
             memory_sse(
@@ -2062,6 +2086,26 @@ async fn run_selected_command(finish: SelectedCommandFinish) {
             reply("command-outside")
         })
         .await;
+        if no_review {
+            use desk_agent_protocol::ai_assistant::approval_mode::{
+                AssistantApprovalMode, UpdateAssistantApprovalMode,
+            };
+            assert!(
+                crate::agent_approval_store::save_preference(
+                    &model_db,
+                    &model_actor,
+                    UpdateAssistantApprovalMode {
+                        session: model_run,
+                        expected_revision: 1,
+                        mode: AssistantApprovalMode::NoReview,
+                        no_review_confirmation_id: Some("fixture-owner-confirmation".into()),
+                    },
+                )
+                .await
+                .unwrap()
+                .is_some()
+            );
+        }
         capture_one_openai_request_with_reply(&listener, |body| {
             let request: Value = serde_json::from_slice(body).unwrap();
             assert!(
@@ -2133,8 +2177,6 @@ async fn run_selected_command(finish: SelectedCommandFinish) {
             }
         }
     });
-    let intent = "selected-command-conversation";
-    let owner = crate::control_authorizer::SINGLE_ACCOUNT_USER_ID;
     let roster = crate::controller::ai_assistant_session::update_roster(
         &db,
         &crate::controller::ai_assistant_session::AiAssistantDeviceRosterBody {
@@ -2168,9 +2210,6 @@ async fn run_selected_command(finish: SelectedCommandFinish) {
     )
     .await
     .unwrap();
-    let actor = owner.to_string();
-    let run =
-        derive_assistant_conversation_key(&actor, AssistantConversationScope::Personal, intent);
     let snapshot = crate::agent_session_store::SignalAgentSessionStore::new(db.clone())
         .read_snapshot_for_subject(&run, &actor, "")
         .await
@@ -2197,36 +2236,57 @@ async fn run_selected_command(finish: SelectedCommandFinish) {
             .unwrap()
             .is_empty()
     );
-    let item = &permission.items[0];
-    let decision = decide_permission_on(
-        &db,
-        connections.clone(),
-        web::Json(PermissionDecisionBody {
-            connection: None,
-            conversation: None,
-            session: Some(run.clone()),
-            expected_run_request_id: None,
-            request_id: permission.request_id.clone(),
-            carrier_id: None,
-            items: vec![PermissionDecisionItemBody {
-                item_id: item.item_id.clone(),
-                decision: PermissionItemDecisionBody::Approve {
-                    resource_scope: item.resource_scope.clone(),
-                    operation_scope: item.operation_scope.clone(),
-                    export_destinations: vec![],
-                    ttl_seconds: 60,
-                    max_uses: 1,
-                },
-            }],
-        }),
-    )
-    .await
-    .unwrap();
-    let decision = actix_web::body::to_bytes(decision.into_body())
+    if no_review {
+        let (mut due, _) = crate::agent_approval_store::discover_default_review_roots(
+            &db,
+            0,
+            64,
+            chrono::Utc::now().timestamp_millis() as u64,
+        )
         .await
         .unwrap();
-    let decision: Value = serde_json::from_slice(&decision).unwrap();
-    assert_eq!(decision["data"]["state"], "approved", "{decision}");
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].request_id, permission.request_id);
+        assert!(
+            crate::approval_dispatch::process_pending_unattended_command(
+                db.clone(),
+                connections.clone(),
+                due.remove(0),
+            )
+            .await
+        );
+    } else {
+        let item = &permission.items[0];
+        let decision = decide_permission_on(
+            &db,
+            connections.clone(),
+            web::Json(PermissionDecisionBody {
+                connection: None,
+                conversation: None,
+                session: Some(run.clone()),
+                expected_run_request_id: None,
+                request_id: permission.request_id.clone(),
+                carrier_id: None,
+                items: vec![PermissionDecisionItemBody {
+                    item_id: item.item_id.clone(),
+                    decision: PermissionItemDecisionBody::Approve {
+                        resource_scope: item.resource_scope.clone(),
+                        operation_scope: item.operation_scope.clone(),
+                        export_destinations: vec![],
+                        ttl_seconds: 60,
+                        max_uses: 1,
+                    },
+                }],
+            }),
+        )
+        .await
+        .unwrap();
+        let decision = actix_web::body::to_bytes(decision.into_body())
+            .await
+            .unwrap();
+        let decision: Value = serde_json::from_slice(&decision).unwrap();
+        assert_eq!(decision["data"]["state"], "approved", "{decision}");
+    }
     let queued = if background {
         let ask = AiAssistantAsk {
             question: "Check the next request".into(),
@@ -2294,11 +2354,22 @@ async fn run_selected_command(finish: SelectedCommandFinish) {
     } else {
         None
     };
-    tokio::time::timeout(SCENARIO_TIMEOUT, async {
+    let timeout = if no_review {
+        std::time::Duration::from_secs(10)
+    } else {
+        SCENARIO_TIMEOUT
+    };
+    let result = tokio::time::timeout(timeout, async {
         tokio::join!(
             async {
-                respond_to_selected_command(&connections, db.clone(), peers.remove(0), background)
-                    .await;
+                respond_to_selected_command(
+                    &connections,
+                    db.clone(),
+                    peers.remove(0),
+                    background,
+                    no_review,
+                )
+                .await;
                 if let Some((next, request_id)) = &queued {
                     let events = SignalAgentRunEventStore::new(db.clone());
                     if let Some(request_id) = request_id {
@@ -2338,8 +2409,19 @@ async fn run_selected_command(finish: SelectedCommandFinish) {
             },
         );
     })
-    .await
-    .unwrap();
+    .await;
+    if result.is_err() {
+        let snapshot = crate::agent_session_store::SignalAgentSessionStore::new(db.clone())
+            .read_snapshot_for_subject(&run, &actor, "")
+            .await
+            .unwrap()
+            .unwrap();
+        panic!(
+            "command transport timed out: terminal={:?}, tail={:?}",
+            snapshot.terminal_error,
+            snapshot.messages.iter().rev().take(4).collect::<Vec<_>>()
+        );
+    }
     let tasks = crate::entity::agent_exec_task::Entity::find()
         .all(&db)
         .await
@@ -2407,6 +2489,7 @@ async fn respond_to_selected_command(
     db: crate::config::connection::DatabaseConnection,
     peer: actix_web::HttpResponse,
     background: bool,
+    no_review: bool,
 ) {
     use desk_agent_protocol::edge_exec::{
         EdgeExecDisposition, EdgeExecRequestPayload, EdgeExecResultPayload,
@@ -2426,6 +2509,20 @@ async fn respond_to_selected_command(
         panic!("expected exact command")
     };
     assert_eq!(plan.argv.last().map(String::as_str), Some("df -h"));
+    use desk_agent_protocol::{ExecutionMode, exec::ExecAuthorization};
+    if no_review {
+        let ExecAuthorization::OwnerNoReview(proof) = &plan.authorization else {
+            panic!("expected an exact owner no-review proof");
+        };
+        assert_eq!(proof.confirmation_id, "fixture-owner-confirmation");
+        assert_eq!(proof.mode_revision, 2);
+        assert_eq!(
+            payload["authz"]["scope"]["mode"],
+            serde_json::to_value(ExecutionMode::Automated).unwrap()
+        );
+    } else {
+        assert_eq!(plan.authorization, ExecAuthorization::PerAction);
+    }
     if background {
         tokio::time::sleep(std::time::Duration::from_secs(9)).await;
     }
@@ -2523,6 +2620,7 @@ async fn personal_input_reads_selected_devices_and_keeps_their_distinct_results(
                     interactive_user_home: None,
                     interactive_session_incarnation: "selected-read-worker".into(),
                     local_ceiling_revision: 1,
+                    unattended_command_execution: false,
                     capabilities: vec![ComputerUseCapabilityReadiness {
                         capability: Capability::SystemInfo,
                         adapter: ComputerUseAdapterRef {

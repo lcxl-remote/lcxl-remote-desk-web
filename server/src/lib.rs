@@ -281,6 +281,8 @@ pub fn configure_api_surface(
                 if opts.include_signaling {
                     cfg.service(create_token)
                         .service(get_ai_assistant_session)
+                        .service(desk_signal::controller::ai_assistant_session::get_ai_assistant_approval_mode)
+                        .service(desk_signal::controller::ai_assistant_session::update_ai_assistant_approval_mode)
                         .service(desk_signal::controller::ai_assistant_session::get_ai_assistant_device_roster)
                         .service(desk_signal::controller::ai_assistant_session::list_ai_assistant_issue_subscriptions)
                         .service(desk_signal::controller::ai_assistant_session::get_ai_assistant_issue_subscription_accounts)

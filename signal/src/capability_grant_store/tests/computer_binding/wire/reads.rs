@@ -161,6 +161,7 @@ async fn browser_wire_case_inner() {
                 interactive_user_home: None,
                 interactive_session_incarnation: "desktop-1".into(),
                 local_ceiling_revision: 1,
+                unattended_command_execution: false,
                 capabilities: [
                     Capability::BrowserPageObserve,
                     Capability::BrowserPageNavigateConfirmed,

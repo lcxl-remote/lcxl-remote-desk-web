@@ -4643,6 +4643,7 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                                                         }
                                                             })?;
                                                         let event = crate::dynamic_run::PermissionRequestedEvent {
+                                        approval_mode_revision: None,
                                         event: crate::dynamic_run::AgentRunEvent {
                                             schema_version: crate::dynamic_run::AGENT_RUN_EVENT_SCHEMA_VERSION,
                                             event_id: stable_lineage_id(

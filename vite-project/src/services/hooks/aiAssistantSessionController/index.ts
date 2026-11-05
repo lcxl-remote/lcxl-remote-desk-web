@@ -11,6 +11,8 @@ export type { DecideAiAssistantPermissionMutationKey } from "./useDecideAiAssist
 export type { DeleteAiAssistantSessionMutationKey } from "./useDeleteAiAssistantSession.ts";
 export type { DeleteAssistantAttachmentsMutationKey } from "./useDeleteAssistantAttachments.ts";
 export type { DeleteAssistantImageMutationKey } from "./useDeleteAssistantImage.ts";
+export type { GetAiAssistantApprovalModeQueryKey } from "./useGetAiAssistantApprovalMode.ts";
+export type { GetAiAssistantApprovalModeSuspenseQueryKey } from "./useGetAiAssistantApprovalModeSuspense.ts";
 export type { GetAiAssistantDeviceRosterQueryKey } from "./useGetAiAssistantDeviceRoster.ts";
 export type { GetAiAssistantDeviceRosterSuspenseQueryKey } from "./useGetAiAssistantDeviceRosterSuspense.ts";
 export type { GetAiAssistantIssueSubscriptionAccountsQueryKey } from "./useGetAiAssistantIssueSubscriptionAccounts.ts";
@@ -53,6 +55,7 @@ export type { RevokeAiAssistantCapabilityGrantMutationKey } from "./useRevokeAiA
 export type { SaveAiAssistantIssueSubscriptionMutationKey } from "./useSaveAiAssistantIssueSubscription.ts";
 export type { SetAiAssistantIssueSubscriptionEnabledMutationKey } from "./useSetAiAssistantIssueSubscriptionEnabled.ts";
 export type { StopAiAssistantSessionMutationKey } from "./useStopAiAssistantSession.ts";
+export type { UpdateAiAssistantApprovalModeMutationKey } from "./useUpdateAiAssistantApprovalMode.ts";
 export type { UpdateAiAssistantDeviceRosterMutationKey } from "./useUpdateAiAssistantDeviceRoster.ts";
 export { cancelAiAssistantBackgroundTaskMutationKey } from "./useCancelAiAssistantBackgroundTask.ts";
 export { cancelAiAssistantBackgroundTaskMutationOptions } from "./useCancelAiAssistantBackgroundTask.ts";
@@ -93,6 +96,12 @@ export { useDeleteAssistantAttachments } from "./useDeleteAssistantAttachments.t
 export { deleteAssistantImageMutationKey } from "./useDeleteAssistantImage.ts";
 export { deleteAssistantImageMutationOptions } from "./useDeleteAssistantImage.ts";
 export { useDeleteAssistantImage } from "./useDeleteAssistantImage.ts";
+export { getAiAssistantApprovalModeQueryKey } from "./useGetAiAssistantApprovalMode.ts";
+export { getAiAssistantApprovalModeQueryOptions } from "./useGetAiAssistantApprovalMode.ts";
+export { useGetAiAssistantApprovalMode } from "./useGetAiAssistantApprovalMode.ts";
+export { getAiAssistantApprovalModeSuspenseQueryKey } from "./useGetAiAssistantApprovalModeSuspense.ts";
+export { getAiAssistantApprovalModeSuspenseQueryOptions } from "./useGetAiAssistantApprovalModeSuspense.ts";
+export { useGetAiAssistantApprovalModeSuspense } from "./useGetAiAssistantApprovalModeSuspense.ts";
 export { getAiAssistantDeviceRosterQueryKey } from "./useGetAiAssistantDeviceRoster.ts";
 export { getAiAssistantDeviceRosterQueryOptions } from "./useGetAiAssistantDeviceRoster.ts";
 export { useGetAiAssistantDeviceRoster } from "./useGetAiAssistantDeviceRoster.ts";
@@ -219,6 +228,9 @@ export { useSetAiAssistantIssueSubscriptionEnabled } from "./useSetAiAssistantIs
 export { stopAiAssistantSessionMutationKey } from "./useStopAiAssistantSession.ts";
 export { stopAiAssistantSessionMutationOptions } from "./useStopAiAssistantSession.ts";
 export { useStopAiAssistantSession } from "./useStopAiAssistantSession.ts";
+export { updateAiAssistantApprovalModeMutationKey } from "./useUpdateAiAssistantApprovalMode.ts";
+export { updateAiAssistantApprovalModeMutationOptions } from "./useUpdateAiAssistantApprovalMode.ts";
+export { useUpdateAiAssistantApprovalMode } from "./useUpdateAiAssistantApprovalMode.ts";
 export { updateAiAssistantDeviceRosterMutationKey } from "./useUpdateAiAssistantDeviceRoster.ts";
 export { updateAiAssistantDeviceRosterMutationOptions } from "./useUpdateAiAssistantDeviceRoster.ts";
 export { useUpdateAiAssistantDeviceRoster } from "./useUpdateAiAssistantDeviceRoster.ts";

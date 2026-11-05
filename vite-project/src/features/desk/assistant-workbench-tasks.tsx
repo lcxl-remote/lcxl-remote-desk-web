@@ -14,8 +14,9 @@ import { AssistantTranscript } from './assistant-transcript';
 import { projectPersistedSnapshot, type PersistedSnapshot } from './use-ai-assistant-chat';
 import { useAiAssistantSubagents } from './use-ai-assistant-subagents';
 
-export function WorkbenchTasks({ workbench, request, worker, permission, active, onOpen, onClose }: {
+export function WorkbenchTasks({ workbench, request, worker, permission, active, subscriptionMode, onOpen, onClose }: {
     workbench: string;
+    subscriptionMode?: 'manual' | 'ai_review';
     request?: string;
     worker?: string;
     permission?: string;
@@ -67,6 +68,9 @@ export function WorkbenchTasks({ workbench, request, worker, permission, active,
                 {request && <>
                     {task.deliveries.length > 0 && <section className="space-y-2" aria-label={t('pages.aiAssistant.workbench.deliveries')}>
                         <h3 className="text-sm font-medium">{t('pages.aiAssistant.workbench.deliveries')}</h3>
+                        {task.issueNumber != null && subscriptionMode && <p className="text-sm text-muted-foreground">
+                            {t('pages.aiAssistant.approvalMode.subscription', { mode: t(`pages.aiAssistant.approvalMode.${subscriptionMode}`) })}
+                        </p>}
                         {task.deliveries.map(delivery => <WorkbenchDelivery key={delivery.artifactId} delivery={delivery} />)}
                     </section>}
                     <WorkbenchExecution workbench={workbench} task={task} worker={worker} permission={permission} refresh={refresh} active={active} />

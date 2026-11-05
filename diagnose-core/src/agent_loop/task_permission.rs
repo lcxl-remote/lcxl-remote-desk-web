@@ -90,6 +90,7 @@ pub(super) async fn pause<F: FnMut() -> String>(
     )?;
     let event_seq = session.last_event_seq.checked_add(1).ok_or_else(invalid)?;
     let event = crate::dynamic_run::PermissionRequestedEvent {
+        approval_mode_revision: None,
         event: crate::dynamic_run::AgentRunEvent {
             schema_version: crate::dynamic_run::AGENT_RUN_EVENT_SCHEMA_VERSION,
             event_id: stable_lineage_id(

@@ -224,30 +224,42 @@ pub fn validate_permission_resume_claim(
     }
     require_current_policy(params.policy_revision)?;
     require_current_policy(session.policy_revision)?;
-    let selected_worker_command = session.agent_role.binding().is_some()
-        && session.permission_requests.iter().any(|request| {
-            request.request_id == decision.request_id
-                && request.input_revision == decision.request_input_revision
-                && request.state == decision.resulting_state
-                && request.exact_command().is_some()
-                && permits_permission_request(session, request)
-        });
+    use crate::dynamic_run::PermissionDecisionSource;
+    let selected_command = session.permission_requests.iter().any(|request| {
+        request.request_id == decision.request_id
+            && request.input_revision == decision.request_input_revision
+            && request.state == decision.resulting_state
+            && request.exact_command().is_some()
+            && permits_permission_request(session, request)
+    });
+    let authorized_decision = match &decision.decision_source {
+        PermissionDecisionSource::UserDecision => true,
+        PermissionDecisionSource::AutomaticReview { .. }
+        | PermissionDecisionSource::SystemDecision { .. } => {
+            selected_command && session.allows_delegated_review()
+        }
+        PermissionDecisionSource::OwnerNoReview { authorization } => {
+            selected_command
+                && session.has_direct_approval_origin()
+                && authorization.root_conversation_id
+                    == session.approval_delegation_conversation_id()
+        }
+    };
     if session.has_admitted_personal_input()
-        && (session.agent_role.is_main() || selected_worker_command)
+        && (session.agent_role.is_main()
+            || (session.agent_role.binding().is_some() && selected_command))
         && params.trigger_origin == TriggerOrigin::PermissionDecision
         && session.input_revision == decision.request_input_revision
-        && matches!(
-            decision.decision_source,
-            crate::dynamic_run::PermissionDecisionSource::UserDecision
-        )
+        && authorized_decision
         && is_targetless_scope(&params.current_pdp_scope)
     {
         return Ok(());
     }
     Err(AgentError {
         kind: AgentErrorKind::PermissionDenied,
-        message: "Personal assistant resume requires the original owner decision and request scope"
-            .into(),
+        message:
+            "Personal assistant resume requires the original authorized decision and request scope"
+                .into(),
         retryable: false,
         safe_for_model: false,
         error_code: None,

@@ -144,6 +144,8 @@ impl ComputerUseReadinessCache {
     }
 }
 
+// The daemon-stamped command ceiling is refreshed by the heartbeat clock.
+// It is checked again for unattended commands and does not rotate other grants.
 fn same_material_readiness(left: &ComputerUseReadiness, right: &ComputerUseReadiness) -> bool {
     left.schema_version == right.schema_version
         && left.revision == right.revision
@@ -272,6 +274,7 @@ mod tests {
             interactive_user_home: None,
             interactive_session_incarnation: incarnation.to_string(),
             local_ceiling_revision: 1,
+            unattended_command_execution: false,
             capabilities: Vec::new(),
             context_references: Vec::new(),
         }
@@ -327,6 +330,31 @@ mod tests {
                 .interactive_session_incarnation,
             "worker-b"
         );
+    }
+
+    #[test]
+    fn unattended_command_ceiling_uses_the_newest_authenticated_heartbeat() {
+        let cache = ComputerUseReadinessCache::default();
+        let first = readiness(10, "worker-a");
+        assert!(!first.unattended_command_execution);
+        cache.update("connection", first.clone(), now()).unwrap();
+        let mut changed = first.clone();
+        changed.observed_at = "2026-08-23T12:00:05Z".into();
+        changed.unattended_command_execution = true;
+        assert_eq!(
+            cache.update("connection", changed, now() + Duration::seconds(5)),
+            Ok(CacheUpdateOutcome::Stored)
+        );
+        assert_eq!(
+            cache.update("connection", first, now() + Duration::seconds(5)),
+            Ok(CacheUpdateOutcome::StaleRevision)
+        );
+        let current = cache
+            .get_fresh("connection", now() + Duration::seconds(5))
+            .unwrap()
+            .readiness;
+        assert_eq!(current.revision, 10);
+        assert!(current.unattended_command_execution);
     }
 
     #[test]

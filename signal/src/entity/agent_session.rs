@@ -17,6 +17,8 @@ pub struct Model {
     /// Optional presentation metadata, independent of the execution snapshot.
     pub title: Option<String>,
     pub state_json: String,
+    /// Owner approval preference, versioned independently from the turn CAS.
+    pub approval_preference_json: Option<String>,
     pub version: i64,
     pub lease_token: i64,
     pub lease_deadline: Option<DateTimeUtc>,

@@ -32,6 +32,7 @@ struct ReviewDeviceContext {
     registry: ProviderRegistry,
     inventory: Vec<CapabilityAvailability>,
     readiness_revision: u64,
+    device_allows_unattended: bool,
     implicit_fresh_object_refs: Vec<desk_agent_protocol::computer_use::ObjectRef>,
 }
 
@@ -47,6 +48,7 @@ async fn current_device_context(
             registry: ai_assistant_provider_registry(),
             inventory: vec![],
             readiness_revision: 0,
+            device_allows_unattended: false,
             implicit_fresh_object_refs: vec![],
         });
     }
@@ -55,7 +57,7 @@ async fn current_device_context(
         let mut targets = map.values().filter(|target| {
             target.auth_context.auth_kind == AuthKind::TokenAuth
                 && target.auth_context.remote_desk_type == RemoteDeskTypeEnum::Server
-                && target.client_id.as_deref() == Some(subject.device_id.as_str())
+                && target.client_id.as_deref() == Some(subject.target_device_id.as_str())
         });
         let first = targets
             .next()
@@ -111,8 +113,55 @@ async fn current_device_context(
         registry,
         inventory,
         readiness_revision: readiness.readiness.revision,
+        device_allows_unattended: readiness.readiness.unattended_command_execution,
         implicit_fresh_object_refs,
     })
+}
+
+pub(crate) async fn process_pending_unattended_command(
+    db: DatabaseConnection,
+    connections: web::Data<SharedConnectionMap>,
+    subject: PendingPermissionReview,
+) -> bool {
+    if subject.owner_id.parse::<i32>().ok() != Some(SINGLE_ACCOUNT_USER_ID) {
+        return false;
+    }
+    let now = chrono::Utc::now();
+    let Some(device) = current_device_context(&db, connections.as_ref(), &subject, now).await
+    else {
+        return false;
+    };
+    if !device.device_allows_unattended {
+        return false;
+    }
+    let store = SignalAgentSessionStore::new(db.clone());
+    let Ok(outcome) = store
+        .decide_permission_request_without_review(
+            PermissionDecisionSubject {
+                conversation_id: &subject.conversation_id,
+                actor_id: &subject.owner_id,
+                device_id: &subject.device_id,
+            },
+            &subject.request_id,
+            PermissionGrantIssuanceContext {
+                surface: ProductSurface::OssPersonalOwner,
+                registry: &device.registry,
+                inventory: &device.inventory,
+                readiness_revision: device.readiness_revision,
+                now_unix_ms: u64::try_from(now.timestamp_millis()).unwrap_or(0),
+                implicit_fresh_object_refs: &device.implicit_fresh_object_refs,
+            },
+            device.device_allows_unattended,
+            &now.to_rfc3339(),
+        )
+        .await
+    else {
+        return false;
+    };
+    if !outcome.newly_recorded {
+        return true;
+    }
+    resume_permission_decision(db, store, connections, subject, device.connection_id).await
 }
 
 pub async fn process_pending_permission_review(
@@ -211,6 +260,12 @@ pub async fn process_pending_permission_review(
         {
             Ok(claim) => claim,
             Err(crate::agent_approval_store::ReviewStartError::Unavailable(reason)) => {
+                if subject.kind == PendingRequestKind::Permission
+                    && reason
+                        == desk_diagnose_core::approval_observation::ReviewReason::Configuration
+                {
+                    return false;
+                }
                 if subject.kind == PendingRequestKind::Goal {
                     return crate::agent_approval_store::deny_goal_unavailable(
                         &db,
@@ -343,24 +398,36 @@ pub async fn process_pending_permission_review(
     if !outcome.newly_recorded {
         return true;
     }
-    match crate::agent_goal_store::wake_for_permission_decision(
-        &db,
-        &subject.conversation_id,
-        &subject.owner_id,
-        &subject.device_id,
-        &subject.request_id,
-        chrono::Utc::now(),
-    )
-    .await
-    {
-        Ok(desk_diagnose_core::goal::GoalPermissionWake::NoGoal) => {}
-        Ok(
-            desk_diagnose_core::goal::GoalPermissionWake::Queued
-            | desk_diagnose_core::goal::GoalPermissionWake::Held,
-        ) => return true,
-        Err(error) => {
-            log::warn!("[ai-assistant-goal] AI permission decision routing deferred: {error}");
-            return true;
+    resume_permission_decision(db, store, connections, subject, device.connection_id).await
+}
+
+async fn resume_permission_decision(
+    db: DatabaseConnection,
+    store: SignalAgentSessionStore,
+    connections: web::Data<SharedConnectionMap>,
+    subject: PendingPermissionReview,
+    connection_id: String,
+) -> bool {
+    if !subject.device_id.is_empty() {
+        match crate::agent_goal_store::wake_for_permission_decision(
+            &db,
+            &subject.conversation_id,
+            &subject.owner_id,
+            &subject.device_id,
+            &subject.request_id,
+            chrono::Utc::now(),
+        )
+        .await
+        {
+            Ok(desk_diagnose_core::goal::GoalPermissionWake::NoGoal) => {}
+            Ok(
+                desk_diagnose_core::goal::GoalPermissionWake::Queued
+                | desk_diagnose_core::goal::GoalPermissionWake::Held,
+            ) => return true,
+            Err(error) => {
+                log::warn!("[ai-assistant-goal] AI permission decision routing deferred: {error}");
+                return true;
+            }
         }
     }
     let snapshot = store
@@ -409,12 +476,18 @@ pub async fn process_pending_permission_review(
         conversation_id: snapshot.client_conversation_id,
         ..Default::default()
     };
+    // A selected action target does not replace the targetless session subject.
+    let connection_id = if subject.device_id.is_empty() {
+        String::new()
+    } else {
+        connection_id
+    };
     actix_web::rt::spawn(async move {
         crate::ai_assistant_orchestrator::resume_after_permission_decision(
             connections,
             db,
             resume_request_id,
-            device.connection_id,
+            connection_id,
             SINGLE_ACCOUNT_USER_ID,
             subject.device_id,
             subject.conversation_id,

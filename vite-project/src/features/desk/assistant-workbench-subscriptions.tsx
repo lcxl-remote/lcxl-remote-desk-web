@@ -13,8 +13,9 @@ import {
 } from '@/services/clients';
 import { deskErrorCodeEnum, type IssueConnectionChoice, type IssueSubscriptionView, type IssueWorkKind } from '@/services/types';
 
-export function WorkbenchSubscriptions({ workbench, onOpenTask }: {
+export function WorkbenchSubscriptions({ workbench, approvalMode, onOpenTask }: {
     workbench: string;
+    approvalMode?: 'manual' | 'ai_review';
     onOpenTask(request: string): void;
 }) {
     const { t } = useTranslation();
@@ -59,6 +60,9 @@ export function WorkbenchSubscriptions({ workbench, onOpenTask }: {
         {connections.isError && <p role="alert" className="text-destructive">{t('pages.aiAssistant.issueSources.loadFailed')}</p>}
         {connections.data?.length === 0 && <p>{t('pages.aiAssistant.issueSources.empty')}</p>}
         {toggle.isError && <p role="alert" className="text-destructive">{t('pages.aiAssistant.workbench.saveFailed')}</p>}
+        {approvalMode && <p className="text-sm text-muted-foreground">
+            {t('pages.aiAssistant.approvalMode.subscription', { mode: t(`pages.aiAssistant.approvalMode.${approvalMode}`) })}
+        </p>}
         {editing && connections.data && <SubscriptionForm
             key={editing === 'new' ? 'new' : `${editing.subscriptionId}:${editing.revision}`}
             initial={editing === 'new' ? undefined : editing} workbench={workbench} connections={connections.data}

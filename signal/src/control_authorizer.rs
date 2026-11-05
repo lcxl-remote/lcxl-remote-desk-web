@@ -199,9 +199,9 @@ fn build_wrapper_outcome(
         file_recovery_registration: None,
         version: AUTHORIZATION_BLOCK_VERSION,
         exec_admission_policy: match scope.mode {
-            ExecutionMode::ConfirmEachAction | ExecutionMode::SessionApproved => {
-                ExecAdmissionPolicy::OwnerInteractive
-            }
+            ExecutionMode::ConfirmEachAction
+            | ExecutionMode::SessionApproved
+            | ExecutionMode::Automated => ExecAdmissionPolicy::OwnerInteractive,
             _ => ExecAdmissionPolicy::TemplateOnly,
         },
         scope,

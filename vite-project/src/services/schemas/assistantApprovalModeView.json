@@ -1,0 +1,1 @@
+{"type":"object","required":["mode","revision","aiReviewAvailable"],"properties":{"aiReviewAvailable":{"type":"boolean"},"mode":{"type":"string","enum":["ai_review","manual","no_review"],"x-readme-ref-name":"AssistantApprovalMode"},"revision":{"type":"integer","format":"int64","minimum":0}},"x-readme-ref-name":"AssistantApprovalModeView"}

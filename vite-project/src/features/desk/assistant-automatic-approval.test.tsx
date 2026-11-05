@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { useState, type ComponentProps } from 'react';
+import { useState, type ComponentProps, type ReactElement } from 'react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { AssistantAutomaticApproval } from './assistant-automatic-approval';
 import { useAiAssistantChat } from './use-ai-assistant-chat';
 import { deskErrorCodeEnum } from '@/services/types';
@@ -9,16 +10,28 @@ import { SIGNALING_TYPE_CODE_ASK_AI_ASSISTANT, SIGNALING_TYPE_CODE_AI_ASSISTANT_
     SIGNALING_TYPE_CODE_AI_ASSISTANT_SESSION_SELECTED, SIGNALING_TYPE_CODE_UPDATE_AI_ASSISTANT_CONTEXT } from './constants';
 
 vi.mock('react-i18next', () => import('@/test-utils/i18n-mock').then(m => m.reactI18nextMock()));
+const approvalApi = vi.hoisted(() => ({ get: vi.fn(), update: vi.fn() }));
+vi.mock('@/services/clients', async importOriginal => ({
+    ...await importOriginal<typeof import('@/services/clients')>(),
+    getAiAssistantApprovalMode: approvalApi.get,
+    updateAiAssistantApprovalMode: approvalApi.update,
+}));
 type Chat = ComponentProps<typeof AssistantAutomaticApproval>['chat'];
-const empty = (): Chat => ({ conversationId: null, sessionId: undefined, hydrating: false, contextUpdating: false,
-    approvalUpdating: false, approvalDelegation: null, approvalModelReadiness: null, turnRunning: false,
-    approvalInitializing: false, approvalInitializationFailed: false,
-    error: null, initializeApprovalConversation: vi.fn().mockResolvedValue(true), setAutomaticApproval: vi.fn().mockResolvedValue(true) });
+const empty = (): Chat => ({ sessionId: undefined, hydrating: false, contextUpdating: false,
+    approvalDelegation: null, approvalInitializing: false, approvalInitializationFailed: false,
+    error: null, initializeApprovalConversation: vi.fn().mockResolvedValue(true) });
+const renderWithMode = (ui: ReactElement) => render(<QueryClientProvider client={new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+})}>{ui}</QueryClientProvider>);
 const persisted = () => ({ sessionId: 'stored-session', seq: 1, inputRevision: 0, controlRevision: 1,
     mainStopped: false, active: false, messages: [],
     subagents: { active_tasks: [], attention_tasks: [], attention_count: 0, task: null, parent_session_id: null },
     approvalModelReadiness: { available: true }, approvalDelegation: null });
-beforeEach(() => localStorage.clear());
+beforeEach(() => {
+    localStorage.clear();
+    vi.clearAllMocks();
+    approvalApi.get.mockResolvedValue({ success: true, data: { mode: 'ai_review', revision: 1, aiReviewAvailable: true } });
+});
 afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); });
 
 describe('automatic approval in a blank conversation', () => {
@@ -26,25 +39,15 @@ describe('automatic approval in a blank conversation', () => {
         { initialConversationId: undefined, storedConversationId: undefined },
         { initialConversationId: 'reserved-empty-conversation', storedConversationId: undefined },
         { initialConversationId: undefined, storedConversationId: 'stored-empty-conversation' },
-    ])('initializes and enables approval with client selection %j and preserves it for the first message', async ({ initialConversationId, storedConversationId }) => {
+    ])('initializes and shows the default approval with client selection %j and preserves it for the first message', async ({ initialConversationId, storedConversationId }) => {
         if (storedConversationId) localStorage.setItem('ai-assistant-conversation:stable-device', storedConversationId);
         let subscriber: SignalingSubscriber | undefined;
         const sendMessage = vi.fn((_type: number, _data: unknown, _to?: string, id?: string) => id ?? 'initialize-request');
         let chat: ReturnType<typeof useAiAssistantChat>;
         let initialized = false;
-        let opened = false;
-        const delegation = { delegationId: 'delegation', status: 'active', reviewsUsed: 0, tokensUsed: 0,
-            createdAtUnixMs: 1 };
-        const fetchMock = vi.fn(async (url: string, _options?: RequestInit) => {
-            if (url.endsWith('/approval-delegation/open')) {
-                opened = true;
-                return { ok: true, json: async () => ({ success: true, data: delegation }) };
-            }
+        const fetchMock = vi.fn(async () => {
             return { ok: true, json: async () => ({ success: true, data: initialized ? {
-                sessionId: 'empty-session', seq: opened ? 2 : 1, inputRevision: 0, controlRevision: 1,
-                mainStopped: false, active: false, messages: [],
-                subagents: { active_tasks: [], attention_tasks: [], attention_count: 0, task: null, parent_session_id: null },
-                approvalModelReadiness: { available: true }, approvalDelegation: opened ? delegation : null,
+                ...persisted(), sessionId: 'empty-session',
             } : null, ...(initialized ? {} : { success: false, code: deskErrorCodeEnum.PERMISSION_ERROR }) }) };
         });
         vi.stubGlobal('fetch', fetchMock);
@@ -55,7 +58,7 @@ describe('automatic approval in a blank conversation', () => {
             return <><button onClick={() => setOpen(true)}>Approval settings</button>
                 {open && <AssistantAutomaticApproval chat={chat} enabled connected />}</>;
         }
-        render(<Workspace />);
+        renderWithMode(<Workspace />);
         await waitFor(() => expect(chat!.hydrating).toBe(false));
         await act(async () => subscriber?.({ request_id: 'initialize-request',
             signaling_type: SIGNALING_TYPE_CODE_AI_ASSISTANT_SESSION_SELECTED,
@@ -63,7 +66,7 @@ describe('automatic approval in a blank conversation', () => {
         sendMessage.mockClear();
         fireEvent.click(screen.getByRole('button', { name: 'Approval settings' }));
         await waitFor(() => expect(sendMessage).toHaveBeenCalledOnce());
-        expect(screen.getByRole('switch', { name: 'AI approval' })).toBeDisabled();
+        expect(screen.queryByRole('combobox')).not.toBeInTheDocument();
         expect(screen.getByRole('status')).toBeInTheDocument();
         const payload = sendMessage.mock.calls[0][1] as { conversation_id: string; client_request_id: string };
         if (initialConversationId || storedConversationId) expect(payload.conversation_id).toBe(initialConversationId ?? storedConversationId);
@@ -73,14 +76,9 @@ describe('automatic approval in a blank conversation', () => {
         await act(async () => subscriber?.({ request_id: 'initialize-request',
             signaling_type: SIGNALING_TYPE_CODE_AI_ASSISTANT_CONTEXT_UPDATED,
             signaling_data: { changed: false, conversation_id: payload.conversation_id, client_request_id: payload.client_request_id } }));
-        await waitFor(() => expect(screen.getByRole('switch', { name: 'AI approval' })).toBeEnabled());
-        expect(chat!.messages).toEqual([]);
-        fireEvent.click(screen.getByRole('switch', { name: 'AI approval' }));
-        await waitFor(() => expect(screen.getByRole('switch', { name: 'AI approval' })).toBeEnabled());
-        expect(screen.getByRole('switch', { name: 'AI approval' })).toBeChecked();
-        const call = fetchMock.mock.calls.find(([url]) => url.endsWith('/approval-delegation/open'));
-        expect(JSON.parse(call?.[1]?.body as string)).toMatchObject({ conversation: payload.conversation_id,
-            session: 'empty-session', expectedInputRevision: 0 });
+        expect(await screen.findByRole('combobox', { name: 'Approval mode' })).toHaveTextContent('AI review');
+        expect(approvalApi.get).toHaveBeenCalledWith({ session: 'empty-session' }, expect.anything());
+        expect(approvalApi.update).not.toHaveBeenCalled();
         expect(chat!.messages).toEqual([]);
         expect(sendMessage.mock.calls.some(([type]) => type === SIGNALING_TYPE_CODE_ASK_AI_ASSISTANT)).toBe(false);
         act(() => { expect(chat!.start('My first real message')).toBe(true); });
@@ -89,15 +87,17 @@ describe('automatic approval in a blank conversation', () => {
             'device', expect.any(String));
     });
 
-    it.each(['network', 'malformed', 'missing-approval-state'])('shows a bounded %s failure and retries without clearing existing history', async failure => {
+    it.each(['network', 'malformed'])('shows a bounded %s failure and retries without clearing existing history', async failure => {
         let retry = false;
         let chat: ReturnType<typeof useAiAssistantChat>;
         const sendMessage = vi.fn().mockReturnValue('context-request');
-        vi.stubGlobal('fetch', vi.fn(async () => ({ ok: retry || failure !== 'network', json: async () => ({
-            success: true, code: deskErrorCodeEnum.SUCCESS,
-            data: retry ? { ...persisted(), messages: [{ id: 'answer', role: 'assistant', text: 'Existing answer' }] }
-                : { ...persisted(), ...(failure === 'malformed' ? { controlRevision: -1 } : { approvalModelReadiness: null }) },
-        }) })));
+        vi.stubGlobal('fetch', vi.fn(async () => ({
+            ok: retry || failure !== 'network', json: async () => ({
+                success: true, code: deskErrorCodeEnum.SUCCESS,
+                data: retry ? { ...persisted(), messages: [{ id: 'answer', role: 'assistant', text: 'Existing answer' }] }
+                    : { ...persisted(), controlRevision: -1 },
+            }),
+        })));
         function Workspace() {
             const [open, setOpen] = useState(false);
             chat = useAiAssistantChat({ deskId: 'device', initialConversationId: 'existing-client',
@@ -105,16 +105,16 @@ describe('automatic approval in a blank conversation', () => {
             return <><button onClick={() => setOpen(true)}>Approval settings</button>
                 {open && <AssistantAutomaticApproval chat={chat} enabled connected />}</>;
         }
-        render(<Workspace />);
+        renderWithMode(<Workspace />);
         await waitFor(() => expect(chat!.hydrating).toBe(false));
         fireEvent.click(screen.getByRole('button', { name: 'Approval settings' }));
         await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(
-            failure === 'missing-approval-state' ? 'Could not load approval settings' : 'Could not restore conversation'));
+            'Could not restore conversation'));
         expect(screen.queryByRole('status')).not.toBeInTheDocument();
         expect(sendMessage).not.toHaveBeenCalled();
         retry = true;
         fireEvent.click(screen.getByRole('button', { name: 'Retry', exact: true }));
-        await waitFor(() => expect(screen.getByRole('switch', { name: 'AI approval' })).toBeEnabled());
+        expect(await screen.findByRole('combobox', { name: 'Approval mode' })).toBeEnabled();
         expect(chat!.messages).toEqual([expect.objectContaining({ text: 'Existing answer' })]);
         expect(screen.queryByRole('alert')).not.toBeInTheDocument();
         expect(sendMessage).not.toHaveBeenCalled();
@@ -132,7 +132,7 @@ describe('automatic approval in a blank conversation', () => {
             return <><button onClick={() => setOpen(true)}>Approval settings</button>
                 {open && <AssistantAutomaticApproval chat={chat} enabled connected />}</>;
         }
-        render(<Workspace />);
+        renderWithMode(<Workspace />);
         fireEvent.click(screen.getByRole('button', { name: 'Approval settings' }));
         await waitFor(() => expect(sendMessage).toHaveBeenCalledOnce());
         await act(async () => subscriber?.({ request_id: 'context-request',
@@ -155,7 +155,7 @@ describe('automatic approval in a blank conversation', () => {
             return <><button onClick={() => setOpen(true)}>Approval settings</button>
                 {open && <AssistantAutomaticApproval chat={chat} enabled connected />}</>;
         }
-        render(<Workspace />);
+        renderWithMode(<Workspace />);
         await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Approval settings' })));
         expect(sendMessage).toHaveBeenCalledOnce();
         expect(screen.getByRole('status')).toBeInTheDocument();
@@ -166,53 +166,25 @@ describe('automatic approval in a blank conversation', () => {
         expect(sendMessage).toHaveBeenCalledOnce();
     });
 
-    it('keeps an existing conversation and its selected context unchanged', () => {
-        const chat = { ...empty(), conversationId: 'existing', sessionId: 'stored-existing', approvalModelReadiness: { available: true } };
-        render(<AssistantAutomaticApproval chat={chat} enabled connected />);
+    it('keeps an existing conversation and its selected context unchanged', async () => {
+        const chat = { ...empty(), sessionId: 'stored-existing' };
+        renderWithMode(<AssistantAutomaticApproval chat={chat} enabled connected />);
+        expect(await screen.findByRole('combobox', { name: 'Approval mode' })).toHaveTextContent('AI review');
         expect(chat.initializeApprovalConversation).not.toHaveBeenCalled();
-        fireEvent.click(screen.getByRole('switch', { name: 'AI approval' }));
-        expect(chat.setAutomaticApproval).toHaveBeenCalledWith(true);
-        expect(screen.getByRole('switch', { name: 'AI approval' })).not.toBeChecked();
     });
 
     it.each([{ enabled: false, connected: true }, { enabled: true, connected: false }])(
         'does not initialize while the assistant or signaling is unavailable: %j', props => {
             const chat = empty();
-            render(<AssistantAutomaticApproval chat={chat} {...props} />);
+            renderWithMode(<AssistantAutomaticApproval chat={chat} {...props} />);
             expect(chat.initializeApprovalConversation).not.toHaveBeenCalled();
-            expect(screen.getByRole('switch', { name: 'AI approval' })).toBeDisabled();
+            expect(screen.queryByRole('combobox')).not.toBeInTheDocument();
         });
 
-    it('shows initialization failures in the approval panel and prevents duplicate initialization', () => {
-        const chat = { ...empty(), conversationId: 'empty', error: 'Could not initialize this conversation' };
-        render(<AssistantAutomaticApproval chat={chat} enabled connected />);
-        expect(screen.getByRole('alert')).toHaveTextContent(chat.error);
-        expect(screen.getByRole('switch', { name: 'AI approval' })).toBeDisabled();
-        expect(chat.initializeApprovalConversation).not.toHaveBeenCalled();
-    });
-
-    it.each([false, true])('keeps server state and disables duplicate changes while saving (active=%s)', active => {
-        const chat = { ...empty(), conversationId: 'existing', sessionId: 'stored-existing', approvalUpdating: true,
-            approvalModelReadiness: { available: true }, approvalDelegation: active ? {
-                delegationId: 'delegation', status: 'active' as const, reviewsUsed: 0, tokensUsed: 0, createdAtUnixMs: 1,
-            } : null };
-        render(<AssistantAutomaticApproval chat={chat} enabled connected />);
-        const toggle = screen.getByRole('switch', { name: 'AI approval' });
-        expect(toggle).toHaveAttribute('aria-checked', String(active));
-        expect(toggle).toBeDisabled();
-        expect(screen.getByRole('status')).toBeInTheDocument();
-        fireEvent.click(toggle);
-        expect(chat.setAutomaticApproval).not.toHaveBeenCalled();
-    });
-
-    it('still lets the owner close an existing approval while signaling is disconnected', () => {
-        const chat = { ...empty(), conversationId: 'existing', sessionId: 'stored-existing', approvalDelegation: {
-            delegationId: 'delegation', status: 'active' as const, reviewsUsed: 0, tokensUsed: 0, createdAtUnixMs: 1,
-        } };
-        render(<AssistantAutomaticApproval chat={chat} enabled connected={false} />);
-        fireEvent.click(screen.getByRole('switch', { name: 'AI approval' }));
-        expect(chat.setAutomaticApproval).toHaveBeenCalledWith(false);
-        expect(screen.getByRole('switch', { name: 'AI approval' })).toBeChecked();
+    it('keeps an existing approval mode accessible after signaling disconnects', async () => {
+        const chat = { ...empty(), sessionId: 'stored-existing' };
+        renderWithMode(<AssistantAutomaticApproval chat={chat} enabled connected={false} />);
+        expect(await screen.findByRole('combobox', { name: 'Approval mode' })).toBeEnabled();
         expect(chat.initializeApprovalConversation).not.toHaveBeenCalled();
     });
 });

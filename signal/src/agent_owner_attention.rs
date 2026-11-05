@@ -31,14 +31,29 @@ pub async fn list_goal_attention(
 
     let now = i64::try_from(now_unix_ms)
         .map_err(|_| DbErr::Custom("invalid owner attention clock".into()))?;
-    let delegated: HashSet<String> = agent_approval_delegation::Entity::find()
+    let delegation_rows = agent_approval_delegation::Entity::find()
         .filter(agent_approval_delegation::Column::ActorId.eq(actor_id))
         .filter(agent_approval_delegation::Column::Status.eq("active"))
         .all(db)
-        .await?
-        .into_iter()
-        .map(|row| row.conversation_id)
-        .collect();
+        .await?;
+    let mut delegated = HashSet::new();
+    let mut default_available = None;
+    for row in delegation_rows {
+        let Ok(delegation) = crate::agent_approval_store::decode(&row) else {
+            continue;
+        };
+        if delegation.is_system_default() {
+            let available = match default_available {
+                Some(value) => value,
+                None => *default_available
+                    .insert(crate::agent_approval_store::default_reviewer_available(db).await?),
+            };
+            if !available {
+                continue;
+            }
+        }
+        delegated.insert(row.conversation_id);
+    }
     let open_rows = agent_goal_open_request::Entity::find()
         .filter(agent_goal_open_request::Column::ActorId.eq(actor_id))
         .filter(agent_goal_open_request::Column::Status.eq("pending"))
@@ -79,20 +94,19 @@ pub async fn list_goal_attention(
         if session.surface != AgentSessionSurface::AiAssistant || session.turn_state.is_active() {
             continue;
         }
-        if delegated.contains(session.approval_delegation_conversation_id())
+        let automatic = delegated.contains(session.approval_delegation_conversation_id())
             && session.allows_delegated_review()
             && crate::agent_subagent_store::shared_approval_current_on(
                 db,
                 &session,
                 chrono::Utc::now().timestamp_millis(),
             )
-            .await?
-        {
-            continue;
-        }
+            .await?;
         for request in &session.permission_requests {
             if request.state == PermissionRequestState::Pending
                 && request.input_revision == session.input_revision
+                && (!automatic
+                    || desk_diagnose_core::approval_review::requires_owner_decision(request))
             {
                 items.push(AiAssistantAttentionItemDto::from_permission(
                     &row.conversation_id,

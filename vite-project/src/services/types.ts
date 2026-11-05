@@ -1865,6 +1865,7 @@ export type SnapshotMessageDto = {
 
 export const permissionDecisionSourceDtoEnum = {
     owner: "owner",
+    owner_no_review: "owner_no_review",
     ai_approval: "ai_approval",
     system: "system",
     mixed_review: "mixed_review"
@@ -4464,6 +4465,32 @@ export type ApprovalTraceSettings = {
      * @type string
     */
     storage_budget_bytes: string;
+};
+
+export const assistantApprovalModeEnum = {
+    ai_review: "ai_review",
+    manual: "manual",
+    no_review: "no_review"
+} as const;
+
+export type AssistantApprovalModeEnumKey = (typeof assistantApprovalModeEnum)[keyof typeof assistantApprovalModeEnum];
+
+export type AssistantApprovalMode = AssistantApprovalModeEnumKey;
+
+export type AssistantApprovalModeView = {
+    /**
+     * @type boolean
+    */
+    aiReviewAvailable: boolean;
+    /**
+     * @type string
+    */
+    mode: AssistantApprovalMode;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    revision: number;
 };
 
 /**
@@ -12600,6 +12627,39 @@ export type RestResponseApprovalTraceSettings = {
     success: boolean;
 };
 
+export type RestResponseAssistantApprovalModeView = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @type boolean
+        */
+        aiReviewAvailable: boolean;
+        /**
+         * @type string
+        */
+        mode: AssistantApprovalMode;
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        revision: number;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
 export type RestResponseAssistantDataControlReceipt = {
     /**
      * @type integer, int32
@@ -19271,6 +19331,26 @@ export type UpdateAccessCodeProtectionSettings = {
     policy: AccessCodeProtectionPolicy;
 };
 
+export type UpdateAssistantApprovalMode = {
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    expectedRevision: number;
+    /**
+     * @type string
+    */
+    mode: AssistantApprovalMode;
+    /**
+     * @type string,null
+    */
+    noReviewConfirmationId?: string | null;
+    /**
+     * @type string
+    */
+    session: string;
+};
+
 export type UpdateContextManagementRequest = {
     /**
      * @minLength 1
@@ -21999,6 +22079,35 @@ export type OpenAiAssistantApprovalDelegationMutationResponse = OpenAiAssistantA
 export type OpenAiAssistantApprovalDelegationMutation = {
     Response: OpenAiAssistantApprovalDelegation200;
     Request: OpenAiAssistantApprovalDelegationMutationRequest;
+    Errors: any;
+};
+
+export type GetAiAssistantApprovalModeQueryParams = {
+    /**
+     * @type string
+    */
+    session: string;
+};
+
+export type GetAiAssistantApprovalMode200 = RestResponseAssistantApprovalModeView;
+
+export type GetAiAssistantApprovalModeQueryResponse = GetAiAssistantApprovalMode200;
+
+export type GetAiAssistantApprovalModeQuery = {
+    Response: GetAiAssistantApprovalMode200;
+    QueryParams: GetAiAssistantApprovalModeQueryParams;
+    Errors: any;
+};
+
+export type UpdateAiAssistantApprovalMode200 = RestResponseAssistantApprovalModeView;
+
+export type UpdateAiAssistantApprovalModeMutationRequest = UpdateAssistantApprovalMode;
+
+export type UpdateAiAssistantApprovalModeMutationResponse = UpdateAiAssistantApprovalMode200;
+
+export type UpdateAiAssistantApprovalModeMutation = {
+    Response: UpdateAiAssistantApprovalMode200;
+    Request: UpdateAiAssistantApprovalModeMutationRequest;
     Errors: any;
 };
 

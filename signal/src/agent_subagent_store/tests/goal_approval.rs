@@ -573,6 +573,7 @@ async fn goal_approval_funding_failure_is_terminal_instead_of_a_storage_retry() 
                     conversation_id: session.conversation_id.clone(),
                     owner_id: session.actor_id.clone(),
                     device_id: session.device_id.clone(),
+                    target_device_id: session.device_id.clone(),
                     request_id: request.request_id.clone(),
                     kind: PendingRequestKind::Goal,
                 },

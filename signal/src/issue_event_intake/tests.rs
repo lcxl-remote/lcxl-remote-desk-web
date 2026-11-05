@@ -485,6 +485,7 @@ async fn frozen_comment_uses_native_queue_and_cannot_claim_as_owner() {
     held.last_event_seq += 1;
     held.add_permission_request(request.clone()).unwrap();
     let requested = PermissionRequestedEvent {
+        approval_mode_revision: None,
         event: AgentRunEvent {
             schema_version: AGENT_RUN_EVENT_SCHEMA_VERSION,
             event_id: "issue-permission-requested".into(),

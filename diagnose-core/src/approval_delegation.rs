@@ -4,7 +4,9 @@
 use crate::dynamic_run::{AgentRunEvent, AgentRunEventKind};
 use serde::{Deserialize, Serialize};
 
-pub const APPROVAL_DELEGATION_SCHEMA_VERSION: u16 = 1;
+pub const APPROVAL_DELEGATION_SCHEMA_VERSION: u16 = 2;
+pub const APPROVAL_DELEGATION_AUDIT_SCHEMA_VERSION: u16 = 2;
+pub const DEFAULT_APPROVAL_POLICY_REVISION: u16 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -51,6 +53,34 @@ impl Default for ApprovalDelegationUsage {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ApprovalDelegationAuthority {
+    OwnerDecision { decision_id: String },
+    HostDefault { policy_revision: u16 },
+}
+
+impl ApprovalDelegationAuthority {
+    fn validate(&self) -> Result<(), ApprovalDelegationError> {
+        match self {
+            Self::OwnerDecision { decision_id } => valid_id(decision_id),
+            Self::HostDefault { policy_revision }
+                if *policy_revision == DEFAULT_APPROVAL_POLICY_REVISION =>
+            {
+                Ok(())
+            }
+            Self::HostDefault { .. } => Err(ApprovalDelegationError::InvalidIdentity),
+        }
+    }
+
+    pub fn operation_id<'a>(&'a self, delegation_id: &'a str) -> &'a str {
+        match self {
+            Self::OwnerDecision { decision_id } => decision_id,
+            Self::HostDefault { .. } => delegation_id,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ApprovalDelegation {
     pub schema_version: u16,
@@ -65,8 +95,7 @@ pub struct ApprovalDelegation {
     pub ledger_version: u64,
     pub status: ApprovalDelegationStatus,
     pub usage: ApprovalDelegationUsage,
-    /// Stable owner-issued operation id; the store writes the matching audit event.
-    pub owner_authorization_id: String,
+    pub issued_by: ApprovalDelegationAuthority,
     pub created_at_unix_ms: u64,
 }
 
@@ -84,9 +113,10 @@ pub enum ApprovalDelegationError {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ApprovalDelegationAuditEvent {
+    pub schema_version: u16,
     pub event: AgentRunEvent,
     pub delegation_id: String,
-    pub owner_decision_id: String,
+    pub operation_authority: ApprovalDelegationAuthority,
     pub delegation_revision: u64,
     pub status: ApprovalDelegationStatus,
 }
@@ -96,24 +126,36 @@ impl ApprovalDelegationAuditEvent {
         &self,
         delegation: &ApprovalDelegation,
     ) -> Result<(), ApprovalDelegationError> {
+        delegation.validate()?;
         self.event
             .validate()
             .map_err(|_| ApprovalDelegationError::InvalidState)?;
-        if !matches!(
-            (self.event.kind, self.status),
-            (
-                AgentRunEventKind::ApprovalDelegationOpened,
-                ApprovalDelegationStatus::Active
-            ) | (
-                AgentRunEventKind::ApprovalDelegationClosed,
-                ApprovalDelegationStatus::Closed
+        let authority_matches = match self.event.kind {
+            AgentRunEventKind::ApprovalDelegationOpened => {
+                self.operation_authority == delegation.issued_by
+            }
+            AgentRunEventKind::ApprovalDelegationClosed => matches!(
+                self.operation_authority,
+                ApprovalDelegationAuthority::OwnerDecision { .. }
+            ),
+            _ => false,
+        };
+        if self.schema_version != APPROVAL_DELEGATION_AUDIT_SCHEMA_VERSION
+            || !authority_matches
+            || self.operation_authority.validate().is_err()
+            || !matches!(
+                (self.event.kind, self.status),
+                (
+                    AgentRunEventKind::ApprovalDelegationOpened,
+                    ApprovalDelegationStatus::Active
+                ) | (
+                    AgentRunEventKind::ApprovalDelegationClosed,
+                    ApprovalDelegationStatus::Closed
+                )
             )
-        ) || self.event.run_id != delegation.conversation_id
+            || self.event.run_id != delegation.conversation_id
             || self.event.correlation_id.as_deref() != Some(delegation.delegation_id.as_str())
             || self.delegation_id != delegation.delegation_id
-            || valid_id(&self.owner_decision_id).is_err()
-            || (self.status == ApprovalDelegationStatus::Active
-                && self.owner_decision_id != delegation.owner_authorization_id)
             || self.delegation_revision != delegation.revision
             || self.status != delegation.status
         {
@@ -262,6 +304,62 @@ impl ApprovalDelegation {
         owner_authorization_id: String,
         created_at_unix_ms: u64,
     ) -> Result<Self, ApprovalDelegationError> {
+        Self::new_with_authority(
+            delegation_id,
+            conversation_id,
+            owner_id,
+            device_id,
+            ApprovalDelegationAuthority::OwnerDecision {
+                decision_id: owner_authorization_id,
+            },
+            created_at_unix_ms,
+        )
+    }
+
+    pub fn new_default(
+        delegation_id: String,
+        conversation_id: String,
+        owner_id: String,
+        device_id: String,
+        created_at_unix_ms: u64,
+        usage_only: bool,
+    ) -> Result<Self, ApprovalDelegationError> {
+        let mut delegation = Self::new_with_authority(
+            delegation_id,
+            conversation_id,
+            owner_id,
+            device_id,
+            ApprovalDelegationAuthority::HostDefault {
+                policy_revision: DEFAULT_APPROVAL_POLICY_REVISION,
+            },
+            created_at_unix_ms,
+        )?;
+        if usage_only {
+            delegation.usage.cost_used_micros = None;
+            delegation.usage.cost_reserved_micros = None;
+        }
+        Ok(delegation)
+    }
+
+    pub fn is_system_default(&self) -> bool {
+        matches!(
+            self.issued_by,
+            ApprovalDelegationAuthority::HostDefault { .. }
+        )
+    }
+
+    pub fn authorization_id(&self) -> &str {
+        self.issued_by.operation_id(&self.delegation_id)
+    }
+
+    fn new_with_authority(
+        delegation_id: String,
+        conversation_id: String,
+        owner_id: String,
+        device_id: String,
+        issued_by: ApprovalDelegationAuthority,
+        created_at_unix_ms: u64,
+    ) -> Result<Self, ApprovalDelegationError> {
         let delegation = Self {
             schema_version: APPROVAL_DELEGATION_SCHEMA_VERSION,
             delegation_id,
@@ -272,7 +370,7 @@ impl ApprovalDelegation {
             ledger_version: 1,
             status: ApprovalDelegationStatus::Active,
             usage: ApprovalDelegationUsage::default(),
-            owner_authorization_id,
+            issued_by,
             created_at_unix_ms,
         };
         delegation.validate()?;
@@ -286,15 +384,13 @@ impl ApprovalDelegation {
         if self.usage.cost_used_micros.is_some() != self.usage.cost_reserved_micros.is_some() {
             return Err(ApprovalDelegationError::InvalidState);
         }
-        for identity in [
-            &self.delegation_id,
-            &self.conversation_id,
-            &self.owner_id,
-            &self.device_id,
-            &self.owner_authorization_id,
-        ] {
+        for identity in [&self.delegation_id, &self.conversation_id, &self.owner_id] {
             valid_id(identity)?;
         }
+        if !self.device_id.is_empty() {
+            valid_id(&self.device_id)?;
+        }
+        self.issued_by.validate()?;
         if self.revision == 0 || self.ledger_version < self.revision || self.created_at_unix_ms == 0
         {
             return Err(ApprovalDelegationError::InvalidIdentity);
@@ -576,6 +672,56 @@ mod tests {
             1000,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn default_issuance_and_owner_close_have_separate_audit_authority() {
+        let mut delegation = ApprovalDelegation::new_default(
+            "default-delegation".into(),
+            "conversation".into(),
+            "owner".into(),
+            String::new(),
+            1000,
+            true,
+        )
+        .unwrap();
+        let owner = ApprovalDelegationAuthority::OwnerDecision {
+            decision_id: "owner-close".into(),
+        };
+        let mut audit = ApprovalDelegationAuditEvent {
+            schema_version: APPROVAL_DELEGATION_AUDIT_SCHEMA_VERSION,
+            event: AgentRunEvent {
+                schema_version: crate::dynamic_run::AGENT_RUN_EVENT_SCHEMA_VERSION,
+                event_id: "open-event".into(),
+                run_id: "conversation".into(),
+                event_seq: 1,
+                input_revision: 0,
+                kind: AgentRunEventKind::ApprovalDelegationOpened,
+                correlation_id: Some("default-delegation".into()),
+                source_envelope_ids: vec![],
+                result_envelope_ids: vec![],
+                created_at: "2026-11-05T00:00:00Z".into(),
+            },
+            delegation_id: delegation.delegation_id.clone(),
+            operation_authority: delegation.issued_by.clone(),
+            delegation_revision: delegation.revision,
+            status: delegation.status,
+        };
+        assert_eq!(delegation.authorization_id(), "default-delegation");
+        assert!(audit.validate_for(&delegation).is_ok());
+        audit.operation_authority = owner.clone();
+        assert!(audit.validate_for(&delegation).is_err());
+
+        delegation.close(ApprovalDelegationStatus::Closed).unwrap();
+        audit.event.kind = AgentRunEventKind::ApprovalDelegationClosed;
+        audit.event.event_id = "close-event".into();
+        audit.event.event_seq = 2;
+        audit.status = delegation.status;
+        audit.delegation_revision = delegation.revision;
+        assert!(audit.validate_for(&delegation).is_ok());
+        audit.operation_authority = delegation.issued_by.clone();
+        assert!(audit.validate_for(&delegation).is_err());
+        assert_eq!(delegation.authorization_id(), "default-delegation");
     }
 
     #[test]

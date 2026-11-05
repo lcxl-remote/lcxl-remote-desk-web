@@ -36,6 +36,7 @@ pub(super) fn request(session: &mut PersistedAgentSession) -> PermissionRequeste
     session.add_permission_request(request.clone()).unwrap();
     session.last_event_seq += 1;
     PermissionRequestedEvent {
+        approval_mode_revision: None,
         event: AgentRunEvent {
             schema_version: AGENT_RUN_EVENT_SCHEMA_VERSION,
             event_id: "paused-child-request-event".into(),

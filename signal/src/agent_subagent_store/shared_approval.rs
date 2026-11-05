@@ -8,6 +8,9 @@ pub(crate) async fn shared_approval_current_on<
     session: &PersistedAgentSession,
     now_ms: i64,
 ) -> Result<bool, DbErr> {
+    if !crate::agent_approval_store::review_mode_current_on(db, session).await? {
+        return Ok(false);
+    }
     let Some(binding) = session.agent_role.binding() else {
         return Ok(true);
     };

@@ -46,6 +46,7 @@ async fn seed(db: DatabaseConnection) -> (SignalAgentSessionStore, Vec<Permissio
     session.add_permission_request(request.clone()).unwrap();
     session.last_event_seq += 1;
     let event = PermissionRequestedEvent {
+        approval_mode_revision: None,
         event: AgentRunEvent {
             schema_version: AGENT_RUN_EVENT_SCHEMA_VERSION,
             event_id: "requested-1".into(),

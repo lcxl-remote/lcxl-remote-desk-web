@@ -323,6 +323,7 @@ async fn run_desktop_history_case(
                 interactive_user_home: None,
                 interactive_session_incarnation: "worker".into(),
                 local_ceiling_revision: 1,
+                unattended_command_execution: false,
                 capabilities: if concrete {
                     vec![
                         capability.required_capability,
@@ -973,17 +974,15 @@ async fn approve_with_independent_model(
         .await
         .unwrap();
     let now_ms = || Utc::now().timestamp_millis() as u64;
-    crate::agent_approval_store::open_for_subject(
-        db,
-        run_id,
-        "1",
-        "device",
-        session.input_revision,
-        "test-owner-authorization".into(),
-        now_ms(),
-    )
-    .await
-    .unwrap();
+    crate::agent_approval_store::discover_default_review_roots(db, 0, 64, now_ms())
+        .await
+        .unwrap();
+    let delegation =
+        crate::agent_approval_store::load_latest_for_subject(db, run_id, "1", "device")
+            .await
+            .unwrap()
+            .expect("default reviewer from original pending permission");
+    assert!(delegation.is_system_default());
     let candidates = crate::agent_approval_store::prepare_permission_review_batch(
         db,
         run_id,

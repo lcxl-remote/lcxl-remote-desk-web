@@ -2427,23 +2427,25 @@ impl SignalAiAssistantTools {
                 true,
             )
         });
-        let result = if let Err(error) = checked {
-            Err(error)
-        } else {
-            desk_diagnose_core::future::boxed(|| async {
-                self.exec_tools
-                    .execute_preapproved(
-                        validation_input,
-                        &confirmation,
-                        &canonical_input_json,
-                        ctx,
-                        ExecRequestId(server_call_id.clone()),
-                        dispatch_id.clone(),
-                        ApprovalId(grant_id),
-                    )
-                    .await
-            })
-            .await
+        let result = match checked {
+            Err(error) => Err(error),
+            Ok(grant) => {
+                desk_diagnose_core::future::boxed(|| async {
+                    self.exec_tools
+                        .execute_preapproved(
+                            validation_input,
+                            &confirmation,
+                            &canonical_input_json,
+                            ctx,
+                            ExecRequestId(server_call_id.clone()),
+                            dispatch_id.clone(),
+                            ApprovalId(grant_id),
+                            grant.issued_by.into(),
+                        )
+                        .await
+                })
+                .await
+            }
         };
         match result {
             Ok(ExecOutcome::Executed {

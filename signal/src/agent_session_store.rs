@@ -56,6 +56,9 @@ const CLAIM_ATTEMPTS: usize = 5;
 
 enum PermissionDecisionAuthority<'a> {
     Owner,
+    NoReview {
+        device_allows_unattended: bool,
+    },
     Ai {
         candidates: &'a [desk_diagnose_core::approval_review::ApprovalReviewCandidate],
         hmac_key: [u8; 32],
@@ -337,6 +340,28 @@ impl SignalAgentSessionStore {
         .await
     }
 
+    pub(crate) async fn decide_permission_request_without_review(
+        &self,
+        subject: PermissionDecisionSubject<'_>,
+        request_id: &str,
+        context: PermissionGrantIssuanceContext<'_>,
+        device_allows_unattended: bool,
+        now: &str,
+    ) -> Result<PermissionDecisionOutcome, AgentError> {
+        self.decide_permission_request_with_authority(
+            subject,
+            request_id,
+            Vec::new(),
+            context,
+            now,
+            None,
+            PermissionDecisionAuthority::NoReview {
+                device_allows_unattended,
+            },
+        )
+        .await
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn decide_permission_request_with_authority(
         &self,
@@ -354,8 +379,7 @@ impl SignalAgentSessionStore {
             device_id,
         } = subject;
         if device_id.is_empty()
-            && (actor_id != crate::control_authorizer::SINGLE_ACCOUNT_USER_ID.to_string()
-                || !matches!(&authority, PermissionDecisionAuthority::Owner))
+            && actor_id != crate::control_authorizer::SINGLE_ACCOUNT_USER_ID.to_string()
         {
             return Err(internal(
                 "targetless permission requires the personal owner",
@@ -435,11 +459,8 @@ impl SignalAgentSessionStore {
                     "permission request is outside the conversation authority",
                 ));
             }
-            if permission_receipt::requested_on(&txn, &session, request_id)
-                .await?
-                .request
-                != requested
-            {
+            let proposal = permission_receipt::requested_on(&txn, &session, request_id).await?;
+            if proposal.request != requested {
                 return Err(internal(
                     "permission request differs from its original event",
                 ));
@@ -452,7 +473,8 @@ impl SignalAgentSessionStore {
             }
 
             let reviewed = match &authority {
-                PermissionDecisionAuthority::Owner => None,
+                PermissionDecisionAuthority::Owner
+                | PermissionDecisionAuthority::NoReview { .. } => None,
                 PermissionDecisionAuthority::Ai {
                     candidates,
                     hmac_key,
@@ -474,11 +496,49 @@ impl SignalAgentSessionStore {
                     .map_err(|_| internal("AI permission reviews are no longer current"))?,
                 ),
             };
+            let no_review_preference =
+                if matches!(&authority, PermissionDecisionAuthority::NoReview { .. }) {
+                    crate::agent_approval_store::preference_for_session_on(&txn, &session)
+                        .await
+                        .map_err(|_| internal("unattended command mode is unavailable"))?
+                } else {
+                    None
+                };
+            let event_seq = session
+                .last_event_seq
+                .checked_add(1)
+                .ok_or_else(|| internal("permission decision event sequence exhausted"))?;
+            let decision_event_id = stable_event_id(
+                "permission-decision",
+                &format!("{}:{}:{}", session.conversation_id, event_seq, request_id),
+            );
             let (mut decision_items, mut decision_source) = match &authority {
                 PermissionDecisionAuthority::Owner => (
                     decisions.clone(),
                     desk_diagnose_core::dynamic_run::PermissionDecisionSource::UserDecision,
                 ),
+                PermissionDecisionAuthority::NoReview {
+                    device_allows_unattended,
+                } => {
+                    let mode = crate::model_provider::load(&txn)
+                        .await
+                        .map_err(|_| internal("unattended command host ceiling is unavailable"))?
+                        .execution_mode;
+                    let device = permission_device_id(&session, &requested);
+                    no_review_preference
+                        .as_ref()
+                        .and_then(|preference| {
+                            preference.unattended_decision(
+                                &session,
+                                &proposal,
+                                device,
+                                mode,
+                                *device_allows_unattended,
+                                decision_event_id.clone(),
+                            )
+                        })
+                        .ok_or_else(|| internal("unattended command mode is no longer current"))?
+                }
                 PermissionDecisionAuthority::Ai { .. } => {
                     let batch = reviewed
                         .as_ref()
@@ -530,21 +590,12 @@ impl SignalAgentSessionStore {
             let resulting_state = session.permission_requests[request_index]
                 .apply_user_decision(&decision_items)
                 .map_err(|error| internal(format!("invalid permission decision: {error}")))?;
-            session.last_event_seq = session
-                .last_event_seq
-                .checked_add(1)
-                .ok_or_else(|| internal("permission decision event sequence exhausted"))?;
+            session.last_event_seq = event_seq;
             session.updated_at = now.to_string();
             let event = desk_diagnose_core::dynamic_run::PermissionDecidedEvent {
                 event: desk_diagnose_core::dynamic_run::AgentRunEvent {
                     schema_version: AGENT_RUN_EVENT_SCHEMA_VERSION,
-                    event_id: stable_event_id(
-                        "permission-decision",
-                        &format!(
-                            "{}:{}:{}",
-                            session.conversation_id, session.last_event_seq, request_id
-                        ),
-                    ),
+                    event_id: decision_event_id,
                     run_id: session.conversation_id.clone(),
                     event_seq: session.last_event_seq,
                     input_revision: request_input_revision,
@@ -584,6 +635,15 @@ impl SignalAgentSessionStore {
                         .as_ref()
                         .map(|(id, revision)| (id.as_str(), *revision)),
                     grant_context.now_unix_ms,
+                    &mut grants,
+                )?;
+            }
+
+            if let Some(preference) = &no_review_preference {
+                desk_diagnose_core::permission_grant::bind_no_review_command_grant(
+                    &session,
+                    preference,
+                    &event,
                     &mut grants,
                 )?;
             }
@@ -2678,6 +2738,18 @@ impl SessionSeam for SignalAgentSessionStore {
         crate::schedule_store::validate_task_permission_on(&txn, session, &update.request)
             .await
             .map_err(|_| internal("permission request exceeds current task authority"))?;
+        let mut proposal = update.clone();
+        proposal.approval_mode_revision =
+            if session.has_direct_approval_origin() && update.request.exact_command().is_some() {
+                crate::agent_approval_store::preference_for_session_on(&txn, session)
+                    .await
+                    .map_err(|_| internal("unattended command mode is unavailable"))?
+                    .and_then(|preference| {
+                        preference.unattended_proposal_revision(session, &update.request)
+                    })
+            } else {
+                None
+            };
         let now = Utc::now();
         let old_version = session.version;
         let new_version = old_version + 1;
@@ -2731,7 +2803,7 @@ impl SessionSeam for SignalAgentSessionStore {
                 .map_err(|error| {
                     internal(format!("encode permission result envelopes: {error}"))
                 })?),
-            payload_json: Set(serde_json::to_string(update)
+            payload_json: Set(serde_json::to_string(&proposal)
                 .map_err(|error| internal(format!("encode permission event: {error}")))?),
             payload_schema_version: Set(i32::from(AGENT_RUN_EVENT_SCHEMA_VERSION)),
             created_at: Set(now_from(&update.event.created_at)),
@@ -4280,6 +4352,7 @@ mod tests {
         session.add_permission_request(request.clone()).unwrap();
         session.last_event_seq = 2;
         let update = PermissionRequestedEvent {
+            approval_mode_revision: None,
             event: AgentRunEvent {
                 schema_version: AGENT_RUN_EVENT_SCHEMA_VERSION,
                 event_id: "permission-event-1".into(),
@@ -4369,6 +4442,7 @@ mod tests {
             .save_permission_request(
                 &mut session,
                 &PermissionRequestedEvent {
+                    approval_mode_revision: None,
                     event: AgentRunEvent {
                         schema_version: AGENT_RUN_EVENT_SCHEMA_VERSION,
                         event_id: "permission-event-1".into(),

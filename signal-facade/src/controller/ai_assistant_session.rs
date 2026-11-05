@@ -1183,7 +1183,7 @@ impl From<desk_diagnose_core::file_scope::SessionFileScope> for FileScopeDto {
                     decision_actor: record.decision.as_ref().map(|decision| match decision.source {
                         desk_diagnose_core::dynamic_run::PermissionDecisionSource::UserDecision => "owner",
                         desk_diagnose_core::dynamic_run::PermissionDecisionSource::AutomaticReview { .. } => "ai_approval",
-                        desk_diagnose_core::dynamic_run::PermissionDecisionSource::SystemDecision { .. } => "system",
+                        desk_diagnose_core::dynamic_run::PermissionDecisionSource::SystemDecision { .. } | desk_diagnose_core::dynamic_run::PermissionDecisionSource::OwnerNoReview { .. } => "system",
                     }.into()),
                     decision_reason: record.decision.as_ref().map(|decision| decision.reason.clone()),
                     review_id: record.decision.as_ref().and_then(|decision| decision.candidate_id.clone()),
@@ -1749,6 +1749,9 @@ impl PermissionRequestDto {
                     desk_diagnose_core::dynamic_run::PermissionDecisionActor::Owner => {
                         PermissionDecisionSourceDto::Owner
                     }
+                    desk_diagnose_core::dynamic_run::PermissionDecisionActor::OwnerNoReview => {
+                        PermissionDecisionSourceDto::OwnerNoReview
+                    }
                     desk_diagnose_core::dynamic_run::PermissionDecisionActor::AiApproval => {
                         PermissionDecisionSourceDto::AiApproval
                     }
@@ -1760,7 +1763,8 @@ impl PermissionRequestDto {
                     }
                 };
                 let (reviews, failures, system_reason) = match &event.decision_source {
-                    PermissionDecisionSource::UserDecision => (None, None, None),
+                    PermissionDecisionSource::UserDecision
+                    | PermissionDecisionSource::OwnerNoReview { .. } => (None, None, None),
                     PermissionDecisionSource::AutomaticReview {
                         reviews, failures, ..
                     } => (Some(reviews.as_slice()), Some(failures.as_slice()), None),
@@ -1793,6 +1797,11 @@ impl PermissionRequestDto {
                                     PermissionDecisionSourceDto::System
                                 } else if review.is_some() {
                                     PermissionDecisionSourceDto::AiApproval
+                                } else if matches!(
+                                    source,
+                                    PermissionDecisionSourceDto::OwnerNoReview
+                                ) {
+                                    PermissionDecisionSourceDto::OwnerNoReview
                                 } else {
                                     PermissionDecisionSourceDto::Owner
                                 },
@@ -1994,10 +2003,11 @@ pub struct PermissionDecisionSummaryDto {
     pub items: Vec<PermissionItemDecisionSummaryDto>,
 }
 
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Debug, Clone, Copy, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PermissionDecisionSourceDto {
     Owner,
+    OwnerNoReview,
     AiApproval,
     System,
     MixedReview,

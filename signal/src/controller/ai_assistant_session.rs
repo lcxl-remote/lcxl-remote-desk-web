@@ -28,6 +28,8 @@ use crate::control_authorizer::SINGLE_ACCOUNT_USER_ID;
 use crate::error::DeskSignalError;
 
 pub const TAG: &str = "AiAssistantSession";
+mod approval_mode;
+pub use approval_mode::{get_ai_assistant_approval_mode, update_ai_assistant_approval_mode};
 mod command_tasks;
 pub use command_tasks::cancel_ai_assistant_command;
 mod device_roster;

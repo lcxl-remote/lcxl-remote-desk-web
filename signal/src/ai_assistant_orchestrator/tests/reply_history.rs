@@ -151,6 +151,7 @@ async fn scenario(stack_bytes: Option<usize>) {
                 interactive_user_home: Some("/Users/fixture".into()),
                 interactive_session_incarnation: "reply-worker".into(),
                 local_ceiling_revision: 1,
+                unattended_command_execution: false,
                 capabilities: vec![],
                 context_references: vec![],
             },

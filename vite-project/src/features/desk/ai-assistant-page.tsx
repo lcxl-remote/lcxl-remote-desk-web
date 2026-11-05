@@ -22,6 +22,7 @@ import { AssistantRequestDevices, type AssistantRequestDevice } from './assistan
 import { AssistantIssueSources } from './assistant-issue-sources';
 import type { IssueSelection } from '@/services/types';
 import { AssistantAutomaticApproval } from './assistant-automatic-approval';
+import { useAssistantApprovalMode } from './assistant-approval-mode';
 import { useAiAssistantSubagents } from './use-ai-assistant-subagents';
 import { ScheduleProposalCards } from '@/features/schedules/proposal-card';
 import { AssistantContextMeter } from './assistant-context-meter';
@@ -354,7 +355,10 @@ export function AiAssistantWorkspace({
     const selectedChildTask = subagents.detail?.result.task ?? subagents.selected;
     const selectedChildDraft = selectedChildTask && childDrafts[selectedChildTask.task_id];
     const { scrollRef, contentRef, onScroll, showJumpToLatest, jumpToLatest } = useFollowLatest(!subagents.selected, permissionHistoryKey);
-    const automaticApproval = chat.approvalDelegation?.status === 'active';
+    const approvalSettingsAvailable = !rehearsal && target?.orgId == null && !!(hasDevice || personalScope) && featureProfile.approval_delegation;
+    const approvalMode = useAssistantApprovalMode(chat.sessionId, approvalSettingsAvailable);
+    const noReview = approvalMode.data?.mode === 'no_review';
+    const automaticApproval = approvalMode.data?.mode !== 'manual' && chat.approvalDelegation?.status === 'active';
     const pendingDirectories = chat.fileScope.directories.filter(directory => directory.state === 'pending'
         && !(automaticApproval && directory.source === 'model_proposal'));
     const pendingPermissionCount = chat.permissionRequests.filter(request => ['pending', 'needs_revalidation'].includes(request.state)
@@ -641,7 +645,7 @@ export function AiAssistantWorkspace({
                 icon: ListTodo, onSelect: () => setTaskPanelSession(permissionHistoryKey) },
             { label: t('pages.aiAssistant.permissionHistory'), icon: ShieldCheck,
                 onSelect: () => setPermissionHistorySession(permissionHistoryKey) },
-            ...(hasDevice && featureProfile.approval_delegation ? [{ label: t('pages.aiAssistant.autoApprovalTitle'), icon: Bot,
+            ...(approvalSettingsAvailable ? [{ label: t('pages.aiAssistant.approvalMode.title'), icon: Bot,
                 onSelect: () => setApprovalSettingsOpen(true) }] : []),
             { label: t('pages.aiAssistant.personalization.title'), icon: SlidersHorizontal,
                 onSelect: () => navigate('/ai-assistant/personalization') },
@@ -1122,8 +1126,9 @@ export function AiAssistantWorkspace({
                             {!hasDevice && selectedIssues.length > 0 && <Button type="button" variant="ghost" size="sm" onClick={() => setPanel('context')}>
                                 {t('pages.aiAssistant.issueSources.selected', { count: selectedIssues.length })}
                             </Button>}
-                            {hasDevice && <AssistantComposerStatus automaticApproval={automaticApproval} onApprovalSettings={() => setApprovalSettingsOpen(true)}
-                                contextCount={selectedContextCount} onContext={() => setPanel('context')} startGoal={startGoal}
+                            {(hasDevice || noReview || automaticApproval) && <AssistantComposerStatus automaticApproval={automaticApproval} noReview={noReview}
+                                onApprovalSettings={() => setApprovalSettingsOpen(true)}
+                                contextCount={hasDevice ? selectedContextCount : 0} onContext={() => setPanel('context')} startGoal={startGoal}
                                 onClearGoal={() => { setStartGoal(false); setPreviousCompletedGoalId(null); }} />}
                             <div className="ml-auto flex shrink-0 items-center gap-1">
                                 <AssistantContextMeter usage={chat.contextUsage} draft={question} />
@@ -1236,9 +1241,9 @@ export function AiAssistantWorkspace({
                     </Sheet>
                     <Sheet open={approvalSettingsOpen} onOpenChange={setApprovalSettingsOpen}>
                         <SheetContent className="w-full overflow-y-auto sm:max-w-xl">
-                            <SheetHeader><SheetTitle>{t('pages.aiAssistant.autoApprovalTitle')}</SheetTitle></SheetHeader>
-                            {approvalSettingsOpen && !rehearsal && featureProfile.approval_delegation && (
-                                <><AssistantAutomaticApproval chat={chat} enabled={assistantEnabled} connected={isConnected} />
+                            <SheetHeader><SheetTitle>{t('pages.aiAssistant.approvalMode.title')}</SheetTitle></SheetHeader>
+                            {approvalSettingsOpen && approvalSettingsAvailable && (
+                                <><AssistantAutomaticApproval chat={chat} enabled={assistantEnabled} connected={isConnected} initializeEmpty={!personalScope} />
                                 {approvalAccess.allowed && <Button type="button" variant="outline" className="mt-3" onClick={() => { setApprovalSettingsOpen(false); if (subagents.selected) setSelectedChildPanel('permissions'); else setPermissionHistorySession(permissionHistoryKey); }}><ListTree className="mr-2 size-4"/>{t('approval.records')}</Button>}</>
                             )}
                         </SheetContent>

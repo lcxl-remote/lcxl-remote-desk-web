@@ -218,5 +218,52 @@ mod tests {
             .unwrap();
         assert_eq!(roster.revision, 1);
         assert!(roster.members.is_empty());
+        use crate::agent_approval_store::{load_preference, save_preference};
+        use desk_agent_protocol::ai_assistant::approval_mode::{
+            AssistantApprovalMode, UpdateAssistantApprovalMode,
+        };
+        let initial = load_preference(&db, &actor, &created.workbench_id)
+            .await
+            .unwrap();
+        assert_eq!(initial.mode, AssistantApprovalMode::AiReview);
+        assert!(
+            load_preference(&db, "foreign", &created.workbench_id)
+                .await
+                .is_err()
+        );
+        let update = || UpdateAssistantApprovalMode {
+            session: created.workbench_id.clone(),
+            expected_revision: initial.revision,
+            mode: AssistantApprovalMode::Manual,
+            no_review_confirmation_id: None,
+        };
+        assert!(
+            save_preference(&db, &actor, update())
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            save_preference(&db, &actor, update())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            load_preference(&db, &actor, &created.workbench_id)
+                .await
+                .unwrap()
+                .mode,
+            AssistantApprovalMode::Manual
+        );
+        let saved = agent_session::Entity::find()
+            .filter(agent_session::Column::Id.eq(row.id))
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.state_json, saved.state_json);
+        assert_eq!(row.version, saved.version);
+        assert_eq!(row.lease_token, saved.lease_token);
     }
 }

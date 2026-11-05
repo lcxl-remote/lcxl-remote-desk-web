@@ -274,13 +274,7 @@ pub(super) async fn handle_confirm_exec_inbound(
         (ExecDecision::ConfirmRequired, Some(ExecEffect::Mutating), ExecutionMode::ReadOnly) => {
             Some("read-only mode does not permit state-changing commands".to_string())
         }
-        // SessionApproved executes like ConfirmEachAction, except the first
-        // confirmation of a given template grants it for the rest of the
-        // session (handled below). Automated (run without any confirmation)
-        // is not implemented.
-        (ExecDecision::ConfirmRequired, _, ExecutionMode::Automated) => {
-            Some("execution mode not available".to_string())
-        }
+        // This browser path still requires an approval at the automated ceiling.
         (ExecDecision::ConfirmRequired, _, _) => None, // executable
     };
 
@@ -640,7 +634,6 @@ pub(super) async fn handle_resolve_exec_inbound(
                     Some(ExecEffect::Mutating),
                     ExecutionMode::ReadOnly,
                 ) => false,
-                (ExecDecision::ConfirmRequired, _, ExecutionMode::Automated) => false,
                 (ExecDecision::ConfirmRequired, _, _) => true,
                 _ => false,
             };

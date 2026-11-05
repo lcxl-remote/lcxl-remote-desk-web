@@ -486,6 +486,22 @@ pub(super) async fn owner_interactive_off_template_command_gets_critical_preview
 }
 
 #[tokio::test]
+pub(super) async fn automated_ceiling_still_requests_explicit_browser_confirmation() {
+    let (mut ctx, mut rx) = exec_enabled_ctx(ExecutionMode::Automated).await;
+    ctx.inbound_authz = Some(owner_authz_block(ExecutionMode::Automated));
+    handle_confirm_exec_inbound(
+        &ctx,
+        &confirm_exec_model("automated-preview", "Get-ChildItem C:\\"),
+    )
+    .await
+    .unwrap();
+    let preview = read_preview(&mut rx);
+    assert!(preview.executable);
+    assert!(preview.requires_confirmation);
+    assert!(preview.exec_request_id.is_some());
+}
+
+#[tokio::test]
 pub(super) async fn template_only_policy_still_rejects_off_template_command() {
     let (mut ctx, mut rx) = exec_enabled_ctx(ExecutionMode::ConfirmEachAction).await;
     ctx.inbound_authz = Some(authz_block(

@@ -24,7 +24,7 @@ import { FileRecoverySettings } from './file-recovery-settings';
 import { ComputerUseApplicationPolicySettings } from './computer-use-application-policy';
 import { ComputerUseCommunicationPolicySettings } from './computer-use-communication-policy';
 
-const EXECUTION_MODES = ["suggest_only", "read_only", "confirm_each_action"] as const
+const EXECUTION_MODES = ["suggest_only", "read_only", "confirm_each_action", "automated"] as const
 const MIN_CONCURRENT_EXECUTIONS = 1
 const MAX_CONCURRENT_EXECUTIONS = 64
 const MIN_COMMAND_RUNTIME_SECONDS = 10
@@ -68,6 +68,7 @@ function ExecutionModeItems() {
             <SelectItem value="suggest_only">{t("pages.executionMode.suggestOnly")}</SelectItem>
             <SelectItem value="read_only">{t("pages.executionMode.readOnly")}</SelectItem>
             <SelectItem value="confirm_each_action">{t("pages.executionMode.confirmEachAction")}</SelectItem>
+            <SelectItem value="automated">{t("pages.executionMode.automated")}</SelectItem>
         </>
     )
 }

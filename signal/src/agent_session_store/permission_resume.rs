@@ -143,7 +143,7 @@ fn current_decision<'a>(
         .ok_or_else(invalid)
 }
 
-pub(super) async fn validate_permission_device_on(
+pub(crate) async fn validate_permission_device_on(
     txn: &DatabaseTransaction,
     session: &PersistedAgentSession,
     request: &PermissionRequest,
@@ -154,7 +154,7 @@ pub(super) async fn validate_permission_device_on(
     validate_permission_target_on(txn, session, request).await
 }
 
-pub(super) async fn permission_work_current(
+pub(crate) async fn permission_work_current(
     txn: &DatabaseTransaction,
     session: &PersistedAgentSession,
     request: &PermissionRequest,

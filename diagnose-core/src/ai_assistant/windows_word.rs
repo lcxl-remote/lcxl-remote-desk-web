@@ -103,6 +103,7 @@ mod tests {
             interactive_user_home: None,
             interactive_session_incarnation: "1:worker".into(),
             local_ceiling_revision: 3,
+            unattended_command_execution: false,
             context_references: vec![],
             capabilities: vec![ComputerUseCapabilityReadiness {
                 capability: Capability::DocumentLiveInspect,

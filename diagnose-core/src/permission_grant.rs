@@ -141,7 +141,7 @@ pub fn bind_ai_permission_grants(
             || !matches!(grant.issued_by, CapabilityGrantIssuer::UserDecision)
             || grant.actor_id != session.actor_id
             || grant.run_id != session.conversation_id
-            || grant.target_device_id != session.device_id
+            || grant.target_device_id != permission_device_id(session, request)
             || grant.input_revision != request.input_revision
             || grant.policy_revision != session.policy_revision
             || grant.provider_id != item.provider_id
@@ -191,6 +191,29 @@ pub fn requires_original_read_context(
                     )
             })
     })
+}
+
+pub fn bind_no_review_command_grant(
+    session: &PersistedAgentSession,
+    preference: &crate::assistant_approval_mode::AssistantApprovalPreference,
+    decided: &crate::dynamic_run::PermissionDecidedEvent,
+    grants: &mut [CapabilityGrant],
+) -> Result<(), AgentError> {
+    let crate::dynamic_run::PermissionDecisionSource::OwnerNoReview { authorization } =
+        &decided.decision_source
+    else {
+        return Ok(());
+    };
+    let [grant] = grants else {
+        return Err(internal("unattended command requires one exact grant"));
+    };
+    grant.issued_by = CapabilityGrantIssuer::OwnerNoReview(authorization.clone());
+    if grant.validate().is_err() || !preference.matches_unattended_grant(session, decided, grant) {
+        return Err(internal(
+            "unattended command grant no longer matches its proposal",
+        ));
+    }
+    Ok(())
 }
 
 pub struct PermissionGrantIssuanceContext<'a> {

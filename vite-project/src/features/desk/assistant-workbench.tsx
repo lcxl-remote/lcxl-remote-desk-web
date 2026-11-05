@@ -14,6 +14,7 @@ import { createAiAssistantWorkbench, getAiAssistantDeviceRoster, listAiAssistant
 import type { AiAssistantWorkbenchView } from '@/services/types';
 import { AiAssistantHubLayout } from './ai-assistant-hub-layout';
 import { AssistantRequestDevices, type AssistantRequestDevice } from './assistant-request-devices';
+import { AssistantApprovalModePicker, subscriptionApprovalMode, useAssistantApprovalMode } from './assistant-approval-mode';
 import { WorkbenchSubscriptions } from './assistant-workbench-subscriptions';
 import { WorkbenchTasks } from './assistant-workbench-tasks';
 import { useAiAssistantChat } from './use-ai-assistant-chat';
@@ -102,6 +103,8 @@ function WorkbenchTabs({ workbench }: { workbench: AiAssistantWorkbenchView }) {
     const [params, setParams] = useSearchParams();
     const selectedTab = params.get('tab');
     const tab = selectedTab === 'settings' || selectedTab === 'subscriptions' ? selectedTab : 'tasks';
+    const approvalMode = useAssistantApprovalMode(workbench.workbenchId);
+    const subscriptionMode = approvalMode.data ? subscriptionApprovalMode(approvalMode.data) : undefined;
     const request = params.get('task') ?? undefined;
     const changeView = (tab: string, task?: string) => setParams(previous => {
         const next = new URLSearchParams(previous);
@@ -141,6 +144,8 @@ function WorkbenchTabs({ workbench }: { workbench: AiAssistantWorkbenchView }) {
         },
     });
     return <Tabs value={tab} onValueChange={value => changeView(value)}>
+        {approvalMode.data?.mode === 'no_review' && <Button type="button" size="sm" variant="destructive"
+            className="mb-2 mr-2" onClick={() => changeView('settings')}>{t('pages.aiAssistant.approvalMode.no_review')}</Button>}
         <TabsList>
             <TabsTrigger value="tasks">{t('pages.aiAssistant.workbench.tasks')}</TabsTrigger>
             <TabsTrigger value="subscriptions">{t('pages.aiAssistant.workbench.subscriptions')}</TabsTrigger>
@@ -149,13 +154,14 @@ function WorkbenchTabs({ workbench }: { workbench: AiAssistantWorkbenchView }) {
         <TabsContent value="tasks" forceMount className="space-y-3 data-[state=inactive]:hidden">
             <WorkbenchComposer workbench={workbench} targetRefs={roster.data?.targetRefs} />
             <WorkbenchTasks key={request ?? 'list'} workbench={workbench.workbenchId} request={request}
-                worker={params.get('worker') ?? undefined} permission={params.get('permission') ?? undefined} active={tab === 'tasks'}
+                worker={params.get('worker') ?? undefined} permission={params.get('permission') ?? undefined} active={tab === 'tasks'} subscriptionMode={subscriptionMode}
                 onOpen={id => changeView('tasks', id)} onClose={() => changeView('tasks')} />
         </TabsContent>
         <TabsContent value="subscriptions">
-            <WorkbenchSubscriptions workbench={workbench.workbenchId} onOpenTask={id => changeView('tasks', id)} />
+            <WorkbenchSubscriptions workbench={workbench.workbenchId} approvalMode={subscriptionMode} onOpenTask={id => changeView('tasks', id)} />
         </TabsContent>
         <TabsContent value="settings" className="space-y-3">
+            <AssistantApprovalModePicker session={workbench.workbenchId} />
             {roster.isPending && <p role="status">{t('common.loading')}</p>}
             {roster.isError && <p role="alert" className="text-destructive">{t('pages.aiAssistant.conversations.loadFailed')}</p>}
             {roster.data && <div className="flex flex-wrap items-center gap-3">

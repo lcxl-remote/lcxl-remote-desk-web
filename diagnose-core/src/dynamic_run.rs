@@ -839,6 +839,9 @@ impl PermissionRequest {
 pub struct PermissionRequestedEvent {
     pub event: AgentRunEvent,
     pub request: PermissionRequest,
+    /// Captured by the host at proposal commit, under the approval mode fence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_mode_revision: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -888,6 +891,9 @@ pub struct SystemPermissionDecisionEvidence {
 #[serde(tag = "source", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PermissionDecisionSource {
     UserDecision,
+    OwnerNoReview {
+        authorization: desk_agent_protocol::capability_grant::NoReviewGrantProvenance,
+    },
     AutomaticReview {
         delegation_id: String,
         delegation_revision: u64,
@@ -920,13 +926,14 @@ impl PermissionDecisionSource {
                 .iter()
                 .find(|failure| failure.item_id == item_id)
                 .map(|failure| failure.reason_code.as_str()),
-            Self::UserDecision => None,
+            Self::UserDecision | Self::OwnerNoReview { .. } => None,
         }
     }
 
     pub fn item_actor(&self, item_id: &str) -> PermissionDecisionActor {
         match self {
             Self::UserDecision => PermissionDecisionActor::Owner,
+            Self::OwnerNoReview { .. } => PermissionDecisionActor::OwnerNoReview,
             Self::AutomaticReview { reviews, .. }
                 if reviews.iter().any(|review| review.item_id == item_id) =>
             {
@@ -939,6 +946,7 @@ impl PermissionDecisionSource {
     pub fn actor(&self) -> PermissionDecisionActor {
         match self {
             Self::UserDecision => PermissionDecisionActor::Owner,
+            Self::OwnerNoReview { .. } => PermissionDecisionActor::OwnerNoReview,
             Self::SystemDecision { .. } => PermissionDecisionActor::System,
             Self::AutomaticReview { reviews, .. } if reviews.is_empty() => {
                 PermissionDecisionActor::System
@@ -960,6 +968,7 @@ pub enum PermissionDecisionActor {
     AiApproval,
     System,
     Mixed,
+    OwnerNoReview,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1033,10 +1042,20 @@ impl PermissionDecisionProjection {
                     .items
                     .iter()
                     .any(|item| item.actor == PermissionDecisionActor::System)
-                || self
-                    .items
-                    .iter()
-                    .any(|item| item.actor == PermissionDecisionActor::Owner))
+                || self.items.iter().any(|item| {
+                    !matches!(
+                        item.actor,
+                        PermissionDecisionActor::AiApproval | PermissionDecisionActor::System
+                    )
+                }))
+        {
+            return Err(DynamicRunContractError::PermissionEventMismatch);
+        }
+        if self.actor == PermissionDecisionActor::OwnerNoReview
+            && (request
+                .exact_command()
+                .is_none_or(|command| command.is_interactive())
+                || request.state != PermissionRequestState::Approved)
         {
             return Err(DynamicRunContractError::PermissionEventMismatch);
         }
@@ -1118,6 +1137,17 @@ impl PermissionDecidedEvent {
             PermissionRequestState::PartiallyApproved
         };
         if self.resulting_state != expected_state {
+            return Err(DynamicRunContractError::PermissionEventMismatch);
+        }
+        if let PermissionDecisionSource::OwnerNoReview { authorization } = &self.decision_source
+            && (authorization.validate().is_err()
+                || authorization.decision_event_id != self.event.event_id
+                || approved != 1
+                || self.items.len() != 1
+                || !matches!(&self.items[0].decision,
+                    PermissionItemDecision::Approve { max_uses: 1, export_destinations, .. }
+                    if export_destinations.is_empty()))
+        {
             return Err(DynamicRunContractError::PermissionEventMismatch);
         }
         if let PermissionDecisionSource::SystemDecision {
@@ -1260,6 +1290,13 @@ impl PermissionRequestedEvent {
         }
         if self.event.input_revision != self.request.input_revision
             || self.event.correlation_id.as_deref() != Some(self.request.request_id.as_str())
+            || self.approval_mode_revision.is_some_and(|revision| {
+                revision <= 1
+                    || self
+                        .request
+                        .exact_command()
+                        .is_none_or(|command| command.is_interactive())
+            })
         {
             return Err(DynamicRunContractError::PermissionEventMismatch);
         }
@@ -1513,6 +1550,7 @@ mod tests {
     fn permission_event_binds_request_to_input_revision() {
         let request = permission_request();
         let update = PermissionRequestedEvent {
+            approval_mode_revision: None,
             event: AgentRunEvent {
                 schema_version: AGENT_RUN_EVENT_SCHEMA_VERSION,
                 event_id: "permission-event-1".into(),

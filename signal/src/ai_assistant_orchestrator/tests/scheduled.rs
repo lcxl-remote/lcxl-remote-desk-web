@@ -377,6 +377,7 @@ async fn exercise_with_restart(
                     interactive_user_home: None,
                     interactive_session_incarnation: "worker".into(),
                     local_ceiling_revision: 1,
+                    unattended_command_execution: false,
                     capabilities: vec![],
                     context_references: vec![],
                 },
@@ -753,6 +754,7 @@ async fn exercise_with_restart(
         session.add_permission_request(request.clone()).unwrap();
         session.last_event_seq += 1;
         let event = PermissionRequestedEvent {
+            approval_mode_revision: None,
             event: AgentRunEvent {
                 schema_version: AGENT_RUN_EVENT_SCHEMA_VERSION,
                 event_id: "next-permission-requested".into(),
@@ -948,6 +950,7 @@ async fn owner_decision(
         .unwrap();
     claimed.session.last_event_seq += 1;
     let event = PermissionRequestedEvent {
+        approval_mode_revision: None,
         event: AgentRunEvent {
             schema_version: AGENT_RUN_EVENT_SCHEMA_VERSION,
             event_id: "scheduled-permission-requested".into(),

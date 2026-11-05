@@ -1006,6 +1006,63 @@ pub(super) async fn agentic_owner_freeform_is_rejected_when_local_mode_tightens(
 }
 
 #[tokio::test]
+pub(super) async fn unattended_command_requires_both_live_ceilings_before_worker_dispatch() {
+    use desk_agent_protocol::{capability_grant::NoReviewGrantProvenance, exec::ExecAuthorization};
+
+    for (central, local, dispatched) in [
+        (
+            ExecutionMode::ConfirmEachAction,
+            ExecutionMode::Automated,
+            false,
+        ),
+        (
+            ExecutionMode::Automated,
+            ExecutionMode::ConfirmEachAction,
+            false,
+        ),
+        (ExecutionMode::Automated, ExecutionMode::Automated, true),
+    ] {
+        let (mut ctx, mut rx, mut ipc_rx) = make_ctx_with_attached_supervisor().await;
+        ctx.exec_supported = true;
+        ctx.settings.write().await.ai_policy.execution_mode = local;
+        let mut authz = authz_block(
+            vec![Capability::ShellExecConfirmed],
+            vec!["shell.plan"],
+            central,
+            desk_agent_protocol::RiskLevel::Critical,
+        );
+        authz.exec_admission_policy =
+            desk_agent_protocol::authz::ExecAdmissionPolicy::OwnerInteractive;
+        ctx.inbound_authz = Some(authz);
+        let input = agentic_input("Get-Service -Name Spooler", None, 5_000);
+        let mut plan = owner_agentic_plan_from_input(&input, "unattended-command");
+        plan.authorization = ExecAuthorization::OwnerNoReview(NoReviewGrantProvenance {
+            root_conversation_id: "owner-session".into(),
+            mode_revision: 2,
+            confirmation_id: "owner-confirmation".into(),
+            decision_event_id: "unattended-decision".into(),
+        });
+        handle_edge_exec_request_inbound(
+            &ctx,
+            &agentic_exec_model("unattended-command", &plan, &input),
+        )
+        .await
+        .unwrap();
+        if dispatched {
+            assert!(
+                matches!(ipc_rx.try_recv().unwrap(), ServiceToWorker::ExecPlan(payload)
+                if payload.plan.authorization == plan.authorization)
+            );
+        } else {
+            assert!(ipc_rx.try_recv().is_err());
+            assert!(matches!(read_fleet_result(&mut rx).disposition,
+                EdgeExecDisposition::RejectedBeforeDispatch { error }
+                if error.message == "pep_rejected:unattended_command_not_authorized"));
+        }
+    }
+}
+
+#[tokio::test]
 pub(super) async fn agentic_plan_is_rejected_when_local_runtime_ceiling_tightens() {
     let (mut ctx, mut rx) = make_ctx_with_rx().await;
     ctx.exec_supported = true;

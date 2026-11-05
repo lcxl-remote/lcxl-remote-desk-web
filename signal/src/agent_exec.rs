@@ -758,6 +758,7 @@ impl SignalAgentTools {
         exec_request_id: ExecRequestId,
         execution_generation: String,
         approval_id: ApprovalId,
+        authorization: desk_agent_protocol::exec::ExecAuthorization,
     ) -> Result<ExecOutcome, AgentError> {
         desk_diagnose_core::exec_tools::apply_exec_runtime_ceiling(
             &mut validation_input,
@@ -819,7 +820,18 @@ impl SignalAgentTools {
             })?
             .execution_mode;
         let effective_mode = ctx.scope.mode.restrict_to(current_mode);
-        if effective_mode != desk_agent_protocol::ExecutionMode::ConfirmEachAction {
+        let unattended = matches!(
+            authorization,
+            desk_agent_protocol::exec::ExecAuthorization::OwnerNoReview(_)
+        );
+        if !effective_mode.allows_confirmed_execution()
+            || (unattended
+                && (current_mode != desk_agent_protocol::ExecutionMode::Automated
+                    || draft.io_mode.is_pty()
+                    || !crate::computer_use_readiness::global_computer_use_readiness_cache()
+                        .get_fresh(&self.target_connection_id, chrono::Utc::now())
+                        .is_some_and(|ready| ready.readiness.unattended_command_execution)))
+        {
             self.observation
                 .get_by_call_id(&ctx.tool_call_id)
                 .permission(desk_diagnose_core::model_observability::PermissionOutcome::Revoked);
@@ -870,7 +882,9 @@ impl SignalAgentTools {
         } else {
             None
         };
-        let plan = ExecPlan::from_draft(exec_request_id, execution_generation, approval_id, draft);
+        let mut plan =
+            ExecPlan::from_draft(exec_request_id, execution_generation, approval_id, draft);
+        plan.authorization = authorization;
         let actor_user_id = ctx.actor_id.parse::<i32>().map_err(|_| {
             safe(
                 AgentErrorKind::PermissionDenied,
@@ -878,7 +892,11 @@ impl SignalAgentTools {
             )
         })?;
         let mut refreshed_scope = ctx.scope.clone();
-        refreshed_scope.mode = effective_mode;
+        refreshed_scope.mode = if unattended {
+            desk_agent_protocol::ExecutionMode::Automated
+        } else {
+            effective_mode
+        };
         match self
             .dispatch(
                 actor_user_id,
@@ -1157,11 +1175,7 @@ impl ToolSeam for SignalAgentTools {
             })?
             .execution_mode;
         let effective_mode = ctx.scope.mode.restrict_to(current_mode);
-        if !matches!(
-            effective_mode,
-            desk_agent_protocol::ExecutionMode::ConfirmEachAction
-                | desk_agent_protocol::ExecutionMode::SessionApproved
-        ) {
+        if !effective_mode.allows_confirmed_execution() {
             self.observed(call)
                 .permission(desk_diagnose_core::model_observability::PermissionOutcome::Revoked);
             return Ok(ExecOutcome::Rejected {

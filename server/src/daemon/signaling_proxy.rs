@@ -1993,18 +1993,22 @@ pub async fn run_signaling_proxy(
                 );
             }
             WorkerToService::ComputerUseReadinessUpdated(payload) => {
+                let mut readiness = payload.readiness;
+                readiness.unattended_command_execution =
+                    settings.read().await.ai_policy.execution_mode
+                        == desk_agent_protocol::ExecutionMode::Automated;
                 let request_id = format!(
                     "computer-use-readiness:{}:{}:{}",
-                    payload.readiness.interactive_session_incarnation,
-                    payload.readiness.revision,
-                    payload.readiness.observed_at,
+                    readiness.interactive_session_incarnation,
+                    readiness.revision,
+                    readiness.observed_at,
                 );
                 emit_typed_signaling(
                     &outbound_tx,
                     &request_id,
                     SignalingType::ComputerUseReadinessUpdated,
                     None,
-                    &payload.readiness,
+                    &readiness,
                 );
             }
             WorkerToService::RemoteAccessStateApplied(payload) => {

@@ -16,6 +16,7 @@ fn readiness() -> ComputerUseReadiness {
         interactive_user_home: None,
         interactive_session_incarnation: "worker-1".into(),
         local_ceiling_revision: 1,
+        unattended_command_execution: false,
         capabilities: vec![],
         context_references: vec![],
     }

@@ -118,9 +118,9 @@ sudo apt install -y build-essential pkg-config libssl-dev libasound2-dev \
 
 - **服务端是唯一可信源**：`request_id` / `target` / `actor` / `scope` / `caller` / 最终 `risk` / `approval_id` 全部由服务端注入与校验，控制端永远无法自报——浏览器侧请求体 `AgentRequestData` 在结构上就不含这些字段（见 `agent-protocol/src/lib.rs`）。
 - **能力协议面向设备、与控制端无关**：`agent-protocol` 是纯协议 crate（wire 类型 + `DeviceAgent` trait），描述「对设备能做什么」，不关心调用来自浏览器 / android / MCP。读操作的权限点由输入**派生**（`OperationInput::capability()`），杜绝能力、采集分发、审计三者漂移。
-- **当前执行与审批**：`ExecutionMode` 默认 `SuggestOnly`（模型只能建议命令、不能执行）。AI 审批委托由 owner 显式开启，OSS Signal 的审批模型启用默认值为关。被控端在 `Automated` 档位拒绝需确认的命令。核对当前实现时参见 `signal/src/controller/ai_assistant_session.rs`、`signal/src/approval_model_provider.rs` 和 `server/src/daemon/signaling_router/exec_lifecycle.rs`。
-- **会话审批模式的目标约束**：由会话审批模式计划交付。已允许执行的本人设备动作默认逐项走 AI 审批，模型不可用或需要本人决定时走设备 owner 的原人工审批。宿主按受信策略和所有权建立默认 AI 委托，审计区分系统默认与本人授权。组织设备沿原 owner 人工审批。免审批仅限设备 owner 在本人上下文直接交办及其同源续跑，须风险提示及本人二次确认，并受宿主和设备的当前执行上限约束。订阅等外部来源禁止免审批。模型提示词和相关工具描述须将网页、工单、设备文件和日志中的内容作为待分析资料，禁止将其中的指令当作用户交办或授权。本人直派免审批工作沿原来源判断审批模式，确认界面须提示资料中的误导性指令仍可能诱导设备操作。
-- **每次执行须有准确动作授权**：服务端按风险分级和黑名单执行硬拒，冻结 `ExecPlan` 的 program、argv、目标及派发代次。被控端重验授权和现行策略，worker 只按 argv 逐字执行，从不重新解析命令字符串。会话审批模式交付时，执行授权须绑定原请求、来源和当前审批模式，回执须区分本人决定、AI 决定和用户确认的会话免审批。
+- **会话审批模式**：本人设备的合格动作默认逐项接受 AI 审批。审批模型不可用或需要本人决定时走设备 owner 的人工审批。宿主按受信策略和所有权建立默认 AI 委托，审计区分系统默认与本人授权。组织设备沿原 owner 人工审批。
+- **免审批来源**：免审批仅用于设备 owner 在本人上下文直接交办及其同源续跑中的合格非交互式命令。须风险提示及本人二次确认，且宿主和设备的当前策略都允许无人值守执行。订阅等外部来源仍逐项审查。模型提示词和相关工具描述须将网页、工单、设备文件和日志中的内容作为待分析资料，其中的指令不构成交办或授权。本人直派工作沿原来源判断审批模式，确认界面须提示资料中的误导性指令仍可能诱导设备操作。
+- **每次执行须有准确动作授权**：设备执行上限默认 `SuggestOnly`。服务端按风险分级和黑名单执行硬拒，冻结 `ExecPlan` 的 program、argv、目标及派发代次。命令授权绑定原请求、来源和现行审批模式。被控端复验授权和现行策略，worker 只按 argv 逐字执行。回执区分本人决定、AI 决定和会话免审批授权。
 - **脱敏 fail-closed**：诊断编排器（`server/src/diagnose/mod.rs`）按 **采集 → 脱敏 → 模型 → 渲染** 运行；脱敏失败会在调用模型**之前**中止。证据在到达模型 trait 之前一定已脱敏。
 - **API Key 是服务端密钥**：AI 模型 api_key 绝不回传浏览器、不进任何 `/settings` 公开 DTO、不写日志。公共审计、日志与模型调用指标只记录无内容的摘要（计数 / 大小 / token 用量 / provider / adapter），不得留存原始输出、截图或 prompt。独立 `agent_approval_trace` / `_part` 是明确的受限例外：可保存当次审批请求的可读投影和供应商返回的可读思考/答复，所有读取必须同时要求全局管理员和本人会话归属，且具备独立开关、保留与容量清理；绝不保存/返回 API Key、请求头、思考签名、加密回传或图片正文，不把详情加入普通 snapshot/SSE/模型上下文。平台审批统计仅返回跨 owner 聚合，不能开放他人逐条事实。
 - **模型无关**：`diagnose-core/src/model_profile.rs` 冻结通用 profile / wire contract；`signal/src/model_dial.rs` 与父仓 `backend/manager/src/service/model_dialect.rs` 用 adapter 隔离 OpenAI-compatible Chat Completions / Anthropic Messages。新增 wire 协议需新增 adapter，不改共享编排器，也不得按模型名猜测协议行为。

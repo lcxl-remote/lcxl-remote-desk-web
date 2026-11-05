@@ -33,7 +33,9 @@ impl ObservedCapabilityAuthority {
         let approval_source = match issuer {
             CapabilityGrantIssuer::PolicyAuto => RehearsalApprovalSource::PolicyAuto,
             CapabilityGrantIssuer::UserDecision => RehearsalApprovalSource::UserDecision,
-            CapabilityGrantIssuer::TaskAuthorization(_) | CapabilityGrantIssuer::AiApproval(_) => {
+            CapabilityGrantIssuer::TaskAuthorization(_)
+            | CapabilityGrantIssuer::AiApproval(_)
+            | CapabilityGrantIssuer::OwnerNoReview(_) => {
                 return None;
             }
         };

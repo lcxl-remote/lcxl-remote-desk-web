@@ -184,12 +184,33 @@ pub(super) async fn handle_edge_exec_request_inbound(
     // dispatch down before worker handoff.
     let local_policy = ctx.settings.read().await.ai_policy.clone();
     let effective_mode = { authz.scope.mode.restrict_to(local_policy.execution_mode) };
+    if let desk_agent_protocol::exec::ExecAuthorization::OwnerNoReview(proof) =
+        &payload.plan().authorization
+        && (proof.validate().is_err()
+            || !matches!(&payload, EdgeExecRequestPayload::Agentic { .. })
+            || payload.plan().io_mode.is_pty()
+            || authz.exec_admission_policy
+                != desk_agent_protocol::authz::ExecAdmissionPolicy::OwnerInteractive
+            || authz.actor.user_id.is_none()
+            || effective_mode != desk_agent_protocol::ExecutionMode::Automated)
+    {
+        send_edge_execution_completed(
+            &ctx.outbound_tx,
+            &request_id,
+            EdgeExecDisposition::RejectedBeforeDispatch {
+                error: agent_error(
+                    AgentErrorKind::PermissionDenied,
+                    "pep_rejected:unattended_command_not_authorized",
+                    false,
+                    true,
+                ),
+            },
+        );
+        return Ok(());
+    }
     if payload.plan().execution_basis
         == desk_agent_protocol::exec::ExecExecutionBasis::OwnerBlocklistOnly
-        && !matches!(
-            effective_mode,
-            ExecutionMode::ConfirmEachAction | ExecutionMode::SessionApproved
-        )
+        && !effective_mode.allows_confirmed_execution()
     {
         send_edge_execution_completed(
             &ctx.outbound_tx,

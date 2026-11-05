@@ -200,6 +200,7 @@ async fn approved_child_with_source_on(
     child.add_permission_request(request.clone()).unwrap();
     child.last_event_seq += 1;
     let event = PermissionRequestedEvent {
+        approval_mode_revision: None,
         event: AgentRunEvent {
             schema_version: AGENT_RUN_EVENT_SCHEMA_VERSION,
             event_id: "child-command-permission".into(),

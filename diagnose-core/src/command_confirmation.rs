@@ -248,10 +248,7 @@ impl CommandPolicyContext {
             || self.policy_version.is_empty()
             || self.policy_revision < 1
             || input_revision == 0
-            || !matches!(
-                self.execution_mode,
-                ExecutionMode::ConfirmEachAction | ExecutionMode::SessionApproved
-            )
+            || !self.execution_mode.allows_confirmed_execution()
         {
             return Err(denied(
                 "confirmed command execution is unavailable under current policy",

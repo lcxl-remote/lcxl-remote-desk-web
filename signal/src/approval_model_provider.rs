@@ -38,7 +38,7 @@ impl Default for ApprovalModelConfig {
             ..Default::default()
         };
         Self {
-            enabled: false,
+            enabled: true,
             configuration_revision: 1,
             gateway,
             probe_observation: None,

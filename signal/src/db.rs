@@ -237,7 +237,7 @@ pub async fn init_db(
         .await
 }
 
-const SIGNAL_SCHEMA_VERSION: i32 = 50;
+const SIGNAL_SCHEMA_VERSION: i32 = 51;
 const SCHEMA_LOCK_TABLE: &str = "signal_schema_init_lock";
 
 #[derive(Debug, FromQueryResult)]
@@ -436,6 +436,10 @@ async fn create_latest_schema<C: ConnectionTrait + crate::config::ConfigConnecti
     create_entity(db, &schema, agent_capability_dispatch_outbox::Entity).await?;
     create_entity(db, &schema, model_egress_receipt::Entity).await?;
     create_entity(db, &schema, agent_run_event::Entity).await?;
+    db.execute_unprepared(
+        "CREATE INDEX IF NOT EXISTS idx_agent_run_event_permission_proposal ON agent_run_event (actor_id, id) WHERE kind = 'permission_requested'",
+    ).await?;
+
     create_entity(db, &schema, crate::entity::agent_permission_resume::Entity).await?;
     // Cross-table assistant indexes require the native receipt table above.
     create_assistant_data_indexes(db).await?;

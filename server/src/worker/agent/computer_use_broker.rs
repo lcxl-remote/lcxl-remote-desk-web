@@ -1710,6 +1710,7 @@ impl ComputerUseBroker {
             interactive_user_home: user_home::current(),
             interactive_session_incarnation,
             local_ceiling_revision: ceiling.revision,
+            unattended_command_execution: false,
             capabilities: vec![
                 ComputerUseCapabilityReadiness {
                     capability: Capability::SystemInfo,

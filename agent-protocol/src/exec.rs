@@ -687,6 +687,33 @@ impl ExecPlanDraft {
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
 )]
+#[serde(rename_all = "snake_case")]
+pub enum ExecAuthorization {
+    PerAction,
+    AiReviewed,
+    OwnerNoReview(crate::capability_grant::NoReviewGrantProvenance),
+}
+
+impl Default for ExecAuthorization {
+    fn default() -> Self {
+        Self::PerAction
+    }
+}
+
+impl From<crate::capability_grant::CapabilityGrantIssuer> for ExecAuthorization {
+    fn from(issuer: crate::capability_grant::CapabilityGrantIssuer) -> Self {
+        use crate::capability_grant::CapabilityGrantIssuer;
+        match issuer {
+            CapabilityGrantIssuer::AiApproval(_) => Self::AiReviewed,
+            CapabilityGrantIssuer::OwnerNoReview(authority) => Self::OwnerNoReview(authority),
+            _ => Self::PerAction,
+        }
+    }
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
+)]
 pub struct ExecPlan {
     /// The task axis: stable across retries, and what a control end correlates a
     /// result to for display.
@@ -705,8 +732,10 @@ pub struct ExecPlan {
     #[serde(default)]
     pub execution_basis: ExecExecutionBasis,
     pub template_id: String,
-    /// Minted at approval time; proves the execution was user-approved.
+    /// Durable one-shot approval or authorization ID.
     pub approval_id: ApprovalId,
+    #[serde(default)]
+    pub authorization: ExecAuthorization,
     pub fingerprint: String,
     pub timeout_ms: u32,
     pub max_stdout_bytes: u32,
@@ -755,6 +784,7 @@ impl ExecPlan {
             execution_basis: draft.execution_basis,
             template_id: draft.template_id,
             approval_id,
+            authorization: ExecAuthorization::PerAction,
             fingerprint: draft.fingerprint,
             timeout_ms: draft.timeout_ms,
             max_stdout_bytes: draft.max_stdout_bytes,

@@ -524,9 +524,39 @@ impl SignalScheduleExecutor {
     }
 
     async fn run_approval_reviews(self) {
+        let mut default_cursor = 0;
         loop {
             if self.gate.is_enabled() {
                 let now_unix_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0);
+                match crate::agent_approval_store::discover_default_review_roots(
+                    &self.db,
+                    default_cursor,
+                    BATCH_SIZE,
+                    now_unix_ms,
+                )
+                .await
+                {
+                    Ok((unattended, next)) => {
+                        default_cursor = next.unwrap_or(0);
+                        let mut tasks = stream::iter(unattended.into_iter().map(|subject| {
+                            Box::pin(
+                                crate::approval_dispatch::process_pending_unattended_command(
+                                    self.db.clone(),
+                                    self.connections.clone(),
+                                    subject,
+                                ),
+                            )
+                        }))
+                        .buffer_unordered(LOCAL_CONCURRENCY);
+                        while tasks.next().await.is_some() {}
+                    }
+                    Err(error) => {
+                        default_cursor = 0;
+                        log::warn!(
+                            "[approval-executor] default approval discovery unavailable: {error}"
+                        );
+                    }
+                }
                 match crate::agent_approval_store::pending_permission_reviews(
                     &self.db,
                     self.approval_cursor.load(Ordering::Relaxed),

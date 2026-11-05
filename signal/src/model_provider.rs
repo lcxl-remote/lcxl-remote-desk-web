@@ -64,14 +64,15 @@ pub fn step_budget_covers_same_tool_limit(max_steps: u32, same_tool_limit: u32) 
     max_steps >= same_tool_limit
 }
 
-/// Whether an [`ExecutionMode`] is one the confirm-execute flow supports.
-/// `SessionApproved` / `Automated` are frozen in the protocol enum but not
-/// selectable yet; persisting them is rejected so the stored grant stays in the
-/// usable set. Mirrors the edge `ai_model` guard.
+/// Execution ceilings available to this settings surface. The confirmation flow
+/// still requires a valid action approval at every ceiling.
 fn is_selectable(mode: ExecutionMode) -> bool {
     matches!(
         mode,
-        ExecutionMode::SuggestOnly | ExecutionMode::ReadOnly | ExecutionMode::ConfirmEachAction
+        ExecutionMode::SuggestOnly
+            | ExecutionMode::ReadOnly
+            | ExecutionMode::ConfirmEachAction
+            | ExecutionMode::Automated
     )
 }
 
@@ -818,6 +819,7 @@ mod tests {
         let mut s = configured();
         for mode in [
             ExecutionMode::ReadOnly,
+            ExecutionMode::Automated,
             ExecutionMode::ConfirmEachAction,
             ExecutionMode::SuggestOnly,
         ] {
@@ -831,17 +833,15 @@ mod tests {
             execution_mode: Some(ExecutionMode::ConfirmEachAction),
             ..Default::default()
         });
-        for mode in [ExecutionMode::SessionApproved, ExecutionMode::Automated] {
-            s.apply_update(ModelProviderUpdate {
-                execution_mode: Some(mode),
-                ..Default::default()
-            });
-            assert_eq!(
-                s.execution_mode,
-                ExecutionMode::ConfirmEachAction,
-                "not-selectable mode {mode:?} must not be persisted"
-            );
-        }
+        s.apply_update(ModelProviderUpdate {
+            execution_mode: Some(ExecutionMode::SessionApproved),
+            ..Default::default()
+        });
+        assert_eq!(
+            s.execution_mode,
+            ExecutionMode::ConfirmEachAction,
+            "session approval must not be persisted"
+        );
     }
 
     #[test]

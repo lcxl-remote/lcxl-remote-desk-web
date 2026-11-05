@@ -19,9 +19,12 @@ pub fn state_outcome(
         PermissionRequestState::Denied => match actor {
             Some(PermissionDecisionActor::Owner) => PermissionOutcome::Denied,
             Some(PermissionDecisionActor::AiApproval) => PermissionOutcome::PolicyRejected,
-            Some(PermissionDecisionActor::System | PermissionDecisionActor::Mixed) | None => {
-                PermissionOutcome::Unavailable
-            }
+            Some(
+                PermissionDecisionActor::System
+                | PermissionDecisionActor::Mixed
+                | PermissionDecisionActor::OwnerNoReview,
+            )
+            | None => PermissionOutcome::Unavailable,
         },
         PermissionRequestState::Replaced => PermissionOutcome::Revoked,
         PermissionRequestState::Withdrawn => PermissionOutcome::Cancelled,

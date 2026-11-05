@@ -3,8 +3,9 @@ import { Bot, Layers, ToggleRight, X } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 
-export function AssistantComposerStatus({ automaticApproval, onApprovalSettings, contextCount = 0, onContext, startGoal = false, onClearGoal }: {
+export function AssistantComposerStatus({ automaticApproval, noReview = false, onApprovalSettings, contextCount = 0, onContext, startGoal = false, onClearGoal }: {
     automaticApproval: boolean;
+    noReview?: boolean;
     onApprovalSettings?: () => void;
     contextCount?: number;
     onContext?: () => void;
@@ -12,7 +13,7 @@ export function AssistantComposerStatus({ automaticApproval, onApprovalSettings,
     onClearGoal?: () => void;
 }) {
     const { t } = useTranslation();
-    const label = t('pages.aiAssistant.workspace.autoApprovalActive');
+    const label = t(noReview ? 'pages.aiAssistant.approvalMode.no_review' : 'pages.aiAssistant.workspace.autoApprovalActive');
     const contextLabel = t('pages.aiAssistant.workspace.contextCount', { count: contextCount });
     const goalLabel = t('pages.aiAssistant.goalStart');
     const approval = <><Bot className="h-4 w-4 shrink-0" aria-hidden="true" /><span className="assistant-action-label truncate">{label}</span></>;
@@ -26,8 +27,8 @@ export function AssistantComposerStatus({ automaticApproval, onApprovalSettings,
             <ToggleRight className="h-4 w-4 shrink-0" aria-hidden="true" /><span className="assistant-action-label truncate">{goalLabel}</span>
             <X className="assistant-action-label h-3.5 w-3.5 shrink-0" aria-hidden="true" />
         </Button>}
-        {automaticApproval && (onApprovalSettings
-            ? <Button type="button" size="sm" variant="secondary" className="assistant-status-action min-w-0 max-w-full gap-1"
+        {(automaticApproval || noReview) && (onApprovalSettings
+            ? <Button type="button" size="sm" variant={noReview ? "destructive" : "secondary"} className="assistant-status-action min-w-0 max-w-full gap-1"
                 title={label} aria-label={label} aria-haspopup="dialog" onClick={onApprovalSettings}>{approval}</Button>
             : <Badge variant="secondary" className="assistant-status-action min-w-0 max-w-full gap-1" role="status" title={label} aria-label={label}>{approval}</Badge>)}
     </div>;

@@ -4198,7 +4198,10 @@ mod tests {
             recovery_epoch: 4,
         });
         let row = store.issue(&task).await.unwrap();
-        assert_eq!(row.payload_schema_version, 3);
+        assert_eq!(
+            row.payload_schema_version,
+            i32::from(CAPABILITY_GRANT_SCHEMA_VERSION)
+        );
         assert_eq!(
             store
                 .list_for_subject("run-1", "actor-1", "device-1")

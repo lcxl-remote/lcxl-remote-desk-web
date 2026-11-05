@@ -14,7 +14,7 @@ use crate::{
     data_lineage::DestinationIdentity,
 };
 
-pub const CAPABILITY_GRANT_SCHEMA_VERSION: u16 = 3;
+pub const CAPABILITY_GRANT_SCHEMA_VERSION: u16 = 4;
 pub const MAX_GRANT_SCOPE_VALUES: usize = 128;
 pub const MAX_GRANT_USES: u32 = 10_000;
 
@@ -49,6 +49,30 @@ pub enum CapabilityGrantIssuer {
     UserDecision,
     TaskAuthorization(TaskGrantProvenance),
     AiApproval(AiApprovalGrantProvenance),
+    OwnerNoReview(NoReviewGrantProvenance),
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
+)]
+#[serde(deny_unknown_fields)]
+pub struct NoReviewGrantProvenance {
+    pub root_conversation_id: String,
+    pub mode_revision: u64,
+    pub confirmation_id: String,
+    pub decision_event_id: String,
+}
+
+impl NoReviewGrantProvenance {
+    pub fn validate(&self) -> Result<(), CapabilityGrantError> {
+        validate_id("root_conversation_id", &self.root_conversation_id)?;
+        validate_id("confirmation_id", &self.confirmation_id)?;
+        validate_id("decision_event_id", &self.decision_event_id)?;
+        if self.mode_revision <= 1 {
+            return Err(CapabilityGrantError::InvalidLimitOrRevision);
+        }
+        Ok(())
+    }
 }
 
 /// Immutable review binding. The current delegation and decision must still
@@ -207,6 +231,16 @@ impl CapabilityGrant {
         match &self.issued_by {
             CapabilityGrantIssuer::TaskAuthorization(parent) => parent.validate()?,
             CapabilityGrantIssuer::AiApproval(parent) => parent.validate()?,
+            CapabilityGrantIssuer::OwnerNoReview(parent) => {
+                parent.validate()?;
+                if self.tool_name != "exec_command"
+                    || self.effect != CapabilityEffect::ExecuteCommand
+                    || self.use_policy != CapabilityGrantUsePolicy::OneShotExact
+                    || !self.export_destinations.is_empty()
+                {
+                    return Err(CapabilityGrantError::InvalidLimitOrRevision);
+                }
+            }
             CapabilityGrantIssuer::PolicyAuto | CapabilityGrantIssuer::UserDecision => {}
         }
         for (field, value) in [

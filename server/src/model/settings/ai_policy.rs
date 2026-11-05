@@ -14,14 +14,15 @@ use desk_agent_protocol::ExecutionMode;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-/// Whether an [`ExecutionMode`] is one of the three the confirm-execute flow
-/// supports. `SessionApproved` / `Automated` are frozen in the protocol enum but
-/// not selectable yet (they need a future policy engine); persisting them is
-/// rejected so the stored mode stays in the usable set.
+/// Execution ceilings available to this settings surface. The confirmation flow
+/// still requires a valid action approval at every ceiling.
 fn is_m2_selectable(mode: ExecutionMode) -> bool {
     matches!(
         mode,
-        ExecutionMode::SuggestOnly | ExecutionMode::ReadOnly | ExecutionMode::ConfirmEachAction
+        ExecutionMode::SuggestOnly
+            | ExecutionMode::ReadOnly
+            | ExecutionMode::ConfirmEachAction
+            | ExecutionMode::Automated
     )
 }
 
@@ -326,6 +327,7 @@ mod tests {
 
         for mode in [
             ExecutionMode::ReadOnly,
+            ExecutionMode::Automated,
             ExecutionMode::ConfirmEachAction,
             ExecutionMode::SuggestOnly,
         ] {
@@ -344,19 +346,17 @@ mod tests {
             max_command_runtime_seconds: None,
             ..Default::default()
         });
-        for mode in [ExecutionMode::SessionApproved, ExecutionMode::Automated] {
-            s.apply_update(AiExecutionPolicyUpdate {
-                execution_mode: Some(mode),
-                max_concurrent_executions: None,
-                max_command_runtime_seconds: None,
-                ..Default::default()
-            });
-            assert_eq!(
-                s.execution_mode,
-                ExecutionMode::ConfirmEachAction,
-                "not-selectable mode {mode:?} must not be persisted"
-            );
-        }
+        s.apply_update(AiExecutionPolicyUpdate {
+            execution_mode: Some(ExecutionMode::SessionApproved),
+            max_concurrent_executions: None,
+            max_command_runtime_seconds: None,
+            ..Default::default()
+        });
+        assert_eq!(
+            s.execution_mode,
+            ExecutionMode::ConfirmEachAction,
+            "session approval must not be persisted"
+        );
 
         // None leaves the stored mode unchanged.
         s.apply_update(AiExecutionPolicyUpdate::default());

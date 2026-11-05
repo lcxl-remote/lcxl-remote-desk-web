@@ -950,6 +950,7 @@ mod platform {
                 execution_basis: ExecExecutionBasis::Template,
                 template_id: "pty-test".into(),
                 approval_id: ApprovalId("pty-test-approval".into()),
+                authorization: Default::default(),
                 fingerprint: "pty-test-fingerprint".into(),
                 timeout_ms: 5_000,
                 max_stdout_bytes: 4096,

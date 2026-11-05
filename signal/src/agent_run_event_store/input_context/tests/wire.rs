@@ -184,6 +184,7 @@ auth_context: AuthContext::token_auth(7, 1, RemoteDeskTypeEnum::Server),
                     interactive_user_home: None,
                     interactive_session_incarnation: "worker".into(),
                     local_ceiling_revision: 1,
+                    unattended_command_execution: false,
                     capabilities: vec![ComputerUseCapabilityReadiness {
                         capability: Capability::FileMetadataRead,
                         adapter: desk_agent_protocol::computer_use::ComputerUseAdapterRef { kind: desk_agent_protocol::computer_use::ComputerUseAdapterKind::FileSystem, version: "1".into() },

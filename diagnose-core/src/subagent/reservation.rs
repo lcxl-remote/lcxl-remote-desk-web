@@ -267,18 +267,24 @@ pub struct ReviewCallAuthority {
 impl ReviewCallAuthority {
     pub fn validate(&self) -> Result<(), &'static str> {
         self.attempt.validate()?;
+        let valid_device_audience = valid_id(&self.device_id)
+            || (self.device_id.is_empty()
+                && matches!(
+                    self.source,
+                    crate::approval_review::ApprovalSource::PermissionItem { .. }
+                ));
         if [
             &self.candidate_id,
             &self.lease_owner,
             &self.root_conversation_id,
             &self.conversation_id,
             &self.actor_id,
-            &self.device_id,
             &self.delegation_id,
             &self.source_record_id,
         ]
         .iter()
         .any(|id| !valid_id(id))
+            || !valid_device_audience
             || self.group_id.as_ref().is_some_and(|id| !valid_id(id))
             || self.task_id.as_ref().is_some_and(|id| !valid_id(id))
             || [

@@ -807,6 +807,7 @@ mod tests {
             execution_basis: desk_agent_protocol::exec::ExecExecutionBasis::Template,
             template_id: "test".into(),
             approval_id: desk_agent_protocol::exec::ApprovalId("appr_t".into()),
+            authorization: Default::default(),
             fingerprint: "fp".into(),
             timeout_ms,
             max_stdout_bytes: max_out,

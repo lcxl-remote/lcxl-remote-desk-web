@@ -2489,6 +2489,7 @@ fn sample_computer_use_readiness() -> desk_agent_protocol::computer_use::Compute
         interactive_user_home: None,
         interactive_session_incarnation: "session-1".to_string(),
         local_ceiling_revision: 1,
+        unattended_command_execution: false,
         capabilities: vec![ComputerUseCapabilityReadiness {
             capability: desk_agent_protocol::Capability::DesktopUiInspect,
             adapter: ComputerUseAdapterRef {
@@ -2520,6 +2521,7 @@ fn sample_exec_plan() -> desk_agent_protocol::exec::ExecPlan {
         execution_basis: ExecExecutionBasis::Template,
         template_id: "docker_restart".to_string(),
         approval_id: ApprovalId("appr-1".to_string()),
+        authorization: Default::default(),
         fingerprint: "fp".to_string(),
         timeout_ms: 30_000,
         max_stdout_bytes: 65_536,

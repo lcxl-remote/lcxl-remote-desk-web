@@ -2536,6 +2536,9 @@ pub struct ComputerUseReadiness {
     pub interactive_user_home: Option<String>,
     pub interactive_session_incarnation: String,
     pub local_ceiling_revision: u64,
+    /// Stamped by the host daemon from its current command ceiling.
+    #[serde(default)]
+    pub unattended_command_execution: bool,
     pub capabilities: Vec<ComputerUseCapabilityReadiness>,
     #[serde(default)]
     pub context_references: Vec<ComputerUseContextReference>,
@@ -3282,6 +3285,7 @@ mod tests {
             interactive_user_home: None,
             interactive_session_incarnation: "session-1".to_string(),
             local_ceiling_revision: 1,
+            unattended_command_execution: false,
             capabilities: vec![ComputerUseCapabilityReadiness {
                 capability: Capability::DesktopUiInspect,
                 adapter: ComputerUseAdapterRef {
@@ -3311,6 +3315,7 @@ mod tests {
             interactive_user_home: None,
             interactive_session_incarnation: "session-1".into(),
             local_ceiling_revision: 1,
+            unattended_command_execution: false,
             capabilities: vec![ComputerUseCapabilityReadiness {
                 capability: Capability::OfficeDocumentInspect,
                 adapter: ComputerUseAdapterRef {

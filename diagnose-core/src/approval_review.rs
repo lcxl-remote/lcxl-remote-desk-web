@@ -488,7 +488,15 @@ pub fn project_permission_authority(
 ) -> Result<Vec<ApprovalAuthorityFact>, ApprovalReviewError> {
     valid_id(run_id)?;
     valid_id(owner_id)?;
-    valid_id(device_id)?;
+    if !device_id.is_empty() {
+        valid_id(device_id)?;
+    }
+    if request
+        .exact_command()
+        .is_some_and(|command| command.target_device_id != device_id)
+    {
+        return Err(ApprovalReviewError::InvalidContext);
+    }
     request
         .validate()
         .map_err(|_| ApprovalReviewError::InvalidContext)?;
@@ -643,6 +651,10 @@ fn grant_matches_permission_decision_source(
 ) -> bool {
     match (&decision.decision_source, &grant.issued_by) {
         (PermissionDecisionSource::UserDecision, CapabilityGrantIssuer::UserDecision) => true,
+        (
+            PermissionDecisionSource::OwnerNoReview { authorization },
+            CapabilityGrantIssuer::OwnerNoReview(parent),
+        ) => authorization == parent && parent.decision_event_id == decision.event.event_id,
         (
             PermissionDecisionSource::AutomaticReview {
                 delegation_id,
@@ -881,7 +893,6 @@ impl ApprovalReviewCandidate {
         for id in [
             &self.candidate_id,
             &self.owner_id,
-            &self.device_id,
             &self.conversation_id,
             &self.delegation_id,
             &self.tool_name,
@@ -934,6 +945,22 @@ impl ApprovalReviewCandidate {
             .map_err(|_| ApprovalReviewError::InvalidCandidate)?;
         if action.is_null() {
             return Err(ApprovalReviewError::InvalidCandidate);
+        }
+        if self.device_id.is_empty() {
+            let target = action
+                .get("command_confirmation")
+                .and_then(|confirmation| confirmation.get("target_device_id"))
+                .and_then(serde_json::Value::as_str)
+                .ok_or(ApprovalReviewError::InvalidCandidate)?;
+            valid_id(target)?;
+            if !matches!(self.source, ApprovalSource::PermissionItem { .. })
+                || self.input_kind != ApprovalInputKind::ExactCall
+                || self.tool_name != crate::command_confirmation::COMMAND_TOOL
+            {
+                return Err(ApprovalReviewError::InvalidCandidate);
+            }
+        } else {
+            valid_id(&self.device_id)?;
         }
         if descriptor
             .get("tool_name")
@@ -1126,7 +1153,7 @@ const MAX_REVIEW_RECENT_MESSAGES: usize = 24;
 /// Review candidates have a finite, deterministic lifetime independent of
 /// the grant TTL. A delayed reviewer must never make a pending request
 /// unreviewable after only a few minutes of device downtime.
-const PERMISSION_REVIEW_MAX_AGE_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
+pub const PERMISSION_REVIEW_MAX_AGE_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
 
 pub(crate) fn review_evidence_message<'a>(
     session: &'a PersistedAgentSession,
@@ -1262,6 +1289,34 @@ pub struct PermissionReviewInput<'a> {
 /// Whether only the owner may decide this request. An interactive (PTY)
 /// command is approved together with the owner's live terminal carrier, which
 /// an AI reviewer cannot provide.
+/// Discover a current device permission from a durable request hint.
+pub fn pending_default_device_review<'a>(
+    session: &'a PersistedAgentSession,
+    request_id: &str,
+    now_ms: u64,
+) -> Option<&'a PermissionRequest> {
+    if session.surface != crate::session::AgentSessionSurface::AiAssistant
+        || session.main_stopped
+        || session.turn_state.is_active()
+        || !session.allows_delegated_review()
+    {
+        return None;
+    }
+    session.permission_requests.iter().find(|request| {
+        request.request_id == request_id
+            && request.input_revision == session.input_revision
+            && request.state == PermissionRequestState::Pending
+            && !requires_owner_decision(request)
+            && !crate::permission_grant::permission_device_id(session, request).is_empty()
+            && chrono::DateTime::parse_from_rfc3339(&request.created_at)
+                .ok()
+                .and_then(|date| u64::try_from(date.timestamp_millis()).ok())
+                .is_some_and(|created| {
+                    now_ms < created.saturating_add(PERMISSION_REVIEW_MAX_AGE_MS)
+                })
+    })
+}
+
 pub fn requires_owner_decision(request: &crate::dynamic_run::PermissionRequest) -> bool {
     request.items.iter().any(|item| {
         item.command_confirmation
@@ -1941,7 +1996,9 @@ pub fn ai_review_denial_notice(
         .map_err(|_| ApprovalReviewError::InvalidDecision)?
         .saturating_add(5 * 60 * 1000);
     let (reviews, failures, system) = match &event.decision_source {
-        PermissionDecisionSource::UserDecision => return Ok(None),
+        PermissionDecisionSource::UserDecision | PermissionDecisionSource::OwnerNoReview { .. } => {
+            return Ok(None);
+        }
         PermissionDecisionSource::AutomaticReview {
             reviews, failures, ..
         } => (Some(reviews), Some(failures), None),

@@ -37,6 +37,7 @@ pub mod approval_delegation;
 pub mod approval_egress;
 pub mod approval_review;
 pub mod approval_usage;
+pub mod assistant_approval_mode;
 mod assistant_data_model;
 pub mod assistant_policy;
 pub mod background_input;

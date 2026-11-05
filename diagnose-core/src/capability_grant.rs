@@ -6,7 +6,7 @@
 use desk_agent_protocol::{
     capability_grant::{
         AiApprovalGrantProvenance, CapabilityGrant, CapabilityGrantIssuer,
-        CapabilityGrantUsePolicy, CapabilityRiskTier, TaskGrantProvenance,
+        CapabilityGrantUsePolicy, CapabilityRiskTier, NoReviewGrantProvenance, TaskGrantProvenance,
     },
     capability_provider::{AuthorizationResourceKind, CapabilityEffect, ProductSurface},
     data_lineage::DestinationIdentity,
@@ -176,6 +176,7 @@ pub enum GrantMismatch {
     InvalidGrant,
     TaskAuthorization,
     ApprovalDelegation,
+    NoReviewAuthorization,
     Revoked,
     NotYetValid,
     Expired,
@@ -201,7 +202,7 @@ pub fn match_capability_grant(
     grant: &CapabilityGrant,
     call: &CapabilityGrantCall<'_>,
 ) -> Result<(), GrantMismatch> {
-    match_capability_grant_inner(grant, call, true, None, None)
+    match_capability_grant_inner(grant, call, true, None, None, None)
 }
 
 /// Explain a rejected selection without granting authority or exposing inputs.
@@ -236,12 +237,15 @@ pub fn is_capability_grant_candidate(
     grant: &CapabilityGrant,
     call: &CapabilityGrantCall<'_>,
 ) -> bool {
-    let (task, approval) = match &grant.issued_by {
-        CapabilityGrantIssuer::TaskAuthorization(parent) => (Some(parent), None),
-        CapabilityGrantIssuer::AiApproval(parent) => (None, Some(parent)),
-        CapabilityGrantIssuer::PolicyAuto | CapabilityGrantIssuer::UserDecision => (None, None),
+    let (task, approval, no_review) = match &grant.issued_by {
+        CapabilityGrantIssuer::TaskAuthorization(parent) => (Some(parent), None, None),
+        CapabilityGrantIssuer::AiApproval(parent) => (None, Some(parent), None),
+        CapabilityGrantIssuer::OwnerNoReview(parent) => (None, None, Some(parent)),
+        CapabilityGrantIssuer::PolicyAuto | CapabilityGrantIssuer::UserDecision => {
+            (None, None, None)
+        }
     };
-    match_capability_grant_inner(grant, call, true, task, approval).is_ok()
+    match_capability_grant_inner(grant, call, true, task, approval, no_review).is_ok()
 }
 
 /// Revalidate a call that already owns a durable reservation. The reservation
@@ -251,7 +255,7 @@ pub fn match_reserved_capability_grant(
     grant: &CapabilityGrant,
     call: &CapabilityGrantCall<'_>,
 ) -> Result<(), GrantMismatch> {
-    match_capability_grant_inner(grant, call, false, None, None)
+    match_capability_grant_inner(grant, call, false, None, None, None)
 }
 
 /// The expected binding must come from current authoritative task/authorization rows
@@ -262,7 +266,7 @@ pub fn match_task_capability_grant(
     call: &CapabilityGrantCall<'_>,
     current: &TaskGrantProvenance,
 ) -> Result<(), GrantMismatch> {
-    match_capability_grant_inner(grant, call, true, Some(current), None)
+    match_capability_grant_inner(grant, call, true, Some(current), None, None)
 }
 
 pub fn match_reserved_task_capability_grant(
@@ -270,7 +274,7 @@ pub fn match_reserved_task_capability_grant(
     call: &CapabilityGrantCall<'_>,
     current: &TaskGrantProvenance,
 ) -> Result<(), GrantMismatch> {
-    match_capability_grant_inner(grant, call, false, Some(current), None)
+    match_capability_grant_inner(grant, call, false, Some(current), None, None)
 }
 
 /// The caller must derive this binding from the current delegation and review
@@ -280,7 +284,7 @@ pub fn match_ai_capability_grant(
     call: &CapabilityGrantCall<'_>,
     current: &AiApprovalGrantProvenance,
 ) -> Result<(), GrantMismatch> {
-    match_capability_grant_inner(grant, call, true, None, Some(current))
+    match_capability_grant_inner(grant, call, true, None, Some(current), None)
 }
 
 pub fn match_reserved_ai_capability_grant(
@@ -288,7 +292,16 @@ pub fn match_reserved_ai_capability_grant(
     call: &CapabilityGrantCall<'_>,
     current: &AiApprovalGrantProvenance,
 ) -> Result<(), GrantMismatch> {
-    match_capability_grant_inner(grant, call, false, None, Some(current))
+    match_capability_grant_inner(grant, call, false, None, Some(current), None)
+}
+
+pub fn match_no_review_command_grant(
+    grant: &CapabilityGrant,
+    call: &CapabilityGrantCall<'_>,
+    current: &NoReviewGrantProvenance,
+    reserved: bool,
+) -> Result<(), GrantMismatch> {
+    match_capability_grant_inner(grant, call, !reserved, None, None, Some(current))
 }
 
 fn match_capability_grant_inner(
@@ -297,9 +310,19 @@ fn match_capability_grant_inner(
     require_available_use: bool,
     current_task: Option<&TaskGrantProvenance>,
     current_approval: Option<&AiApprovalGrantProvenance>,
+    current_no_review: Option<&NoReviewGrantProvenance>,
 ) -> Result<(), GrantMismatch> {
     grant.validate().map_err(|_| GrantMismatch::InvalidGrant)?;
+    if let CapabilityGrantIssuer::OwnerNoReview(parent) = &grant.issued_by {
+        if current_no_review != Some(parent) || current_task.is_some() || current_approval.is_some()
+        {
+            return Err(GrantMismatch::NoReviewAuthorization);
+        }
+    } else if current_no_review.is_some() {
+        return Err(GrantMismatch::NoReviewAuthorization);
+    }
     match &grant.issued_by {
+        CapabilityGrantIssuer::OwnerNoReview(_) => {}
         CapabilityGrantIssuer::TaskAuthorization(parent) => {
             if current_task != Some(parent) || current_approval.is_some() {
                 return Err(GrantMismatch::TaskAuthorization);

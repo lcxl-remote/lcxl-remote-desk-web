@@ -99,6 +99,7 @@ async fn select_live_document(store: &SignalAgentRunEventStore) {
         interactive_user_home: None,
         interactive_session_incarnation: "worker-1".into(),
         local_ceiling_revision: 1,
+        unattended_command_execution: false,
         capabilities: vec![ComputerUseCapabilityReadiness {
             capability: Capability::DocumentLiveInspect,
             adapter: ComputerUseAdapterRef {

@@ -203,6 +203,9 @@ pub fn reviewed_decision_result(
         crate::dynamic_run::PermissionDecisionSource::UserDecision => "owner",
         crate::dynamic_run::PermissionDecisionSource::AutomaticReview { .. } => "ai_approval",
         crate::dynamic_run::PermissionDecisionSource::SystemDecision { .. } => "system",
+        crate::dynamic_run::PermissionDecisionSource::OwnerNoReview { .. } => {
+            return decision_result(request_id, false);
+        }
     };
     json!({"directory_request_id":request_id,"state":if approved {"approved"} else {"rejected"},
     "authority":authority,"reason":decision.reason,"file_operation_authorized":false,
