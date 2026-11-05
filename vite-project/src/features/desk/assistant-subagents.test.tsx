@@ -30,7 +30,7 @@ vi.mock('./assistant-images', async () => {
 });
 
 function agentsFor(childId: string): ReturnType<typeof useAiAssistantSubagents> {
-    const task: AiAssistantSubAgentSummary = { task_id: `task-${childId}`, child_session_id: childId,
+    const task: AiAssistantSubAgentSummary = { task_id: `task-${childId}`, worker_id: "worker-1", child_session_id: childId,
         group_id: 'original-group', name: `Research ${childId}`, state: 'running', input_revision: 1,
         control_revision: 1, state_revision: 2, source_goal_id: null,
         source: { kind: 'user_input', input_revision: 1 }, wait_reason: null,
@@ -44,10 +44,12 @@ function agentsFor(childId: string): ReturnType<typeof useAiAssistantSubagents> 
     return {
         tasks: [task], total: 1, attentionCount: 0, unfinished: 1, hasMore: false, loading: false,
         loadMore: vi.fn(), selected: task, detail: { result: { task, objective: 'Read original evidence',
-            acceptance_criteria: ['Cite the source'], report: null, failure_reason: null }, session },
+            acceptance_criteria: ['Cite the source'], report: null, failure_reason: null,
+            reports: { items: [], next_before_seq: null }, open_question: null }, session },
         detailLoading: false, openDetail: vi.fn(), closeDetail: vi.fn(), updating: false, error: null,
         control: vi.fn(), decidePermission: vi.fn(), updateDirectory: vi.fn(), revokeGrant: vi.fn(),
         cancelProviderTask: vi.fn(), cancelCommandTask: vi.fn(), historyLoading: false, hasMoreMessages: false,
+        reports: undefined, viewingOlderReports: false, reportsLoading: false, loadOlderReports: vi.fn(), showLatestReports: vi.fn(),
         loadOlderMessages: vi.fn(), childTools: [], childMessages: [{ id: `receipt-${childId}`,
             role: 'tool_result', text: `Original output ${childId}` }],
     };
@@ -107,6 +109,20 @@ it('submits a child adjustment with Enter and keeps the draft when the server re
     await waitFor(() => expect(agents.control).toHaveBeenCalledExactlyOnceWith(agents.selected,
         { kind: 'adjust', message: 'Check the logs first' }));
     expect(input).toHaveValue('Check the logs first');
+});
+it('answers the exact Worker question and keeps the adjustment draft separate', async () => {
+    const agents = agentsFor('child-1');
+    agents.detail!.result.open_question = { question_id: 'original-question', text: 'Which environment should I verify?' };
+    vi.mocked(agents.control).mockResolvedValue(true);
+    render(<AssistantSubagents agents={agents} connected canDecide mainStopped={false} adjustment="Existing adjustment" />);
+    expect(screen.getByText('Which environment should I verify?')).toBeVisible();
+    const input = screen.getByRole('textbox', { name: 'Answer the Worker' });
+    expect(input).toHaveValue('');
+    fireEvent.change(input, { target: { value: 'Use staging.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send reply' }));
+    await waitFor(() => expect(agents.control).toHaveBeenCalledExactlyOnceWith(agents.selected,
+        { kind: 'reply', question_id: 'original-question', message: 'Use staging.' }));
+    await waitFor(() => expect(input).toHaveValue(''));
 });
 describe('subagent approval notice', () => {
     it('shows pending approvals outside the collapsed task list and opens the original child', () => {
@@ -287,6 +303,18 @@ describe('conversation tabs', () => {
         expect(screen.getByRole('tab', { name: /Research running/ })).toHaveAttribute('aria-selected', 'true');
         expect(agents.openDetail).not.toHaveBeenCalled();
         expect(agents.control).not.toHaveBeenCalled();
+    });
+
+    it('shows a worker waiting for the main agent before finished requests', () => {
+        const agents = agentsFor('child-1');
+        const waiting: AiAssistantSubAgentSummary = { ...agents.tasks[0], state: 'waiting_input', wait_reason: 'main_agent_reply' };
+        agents.tasks = [{ ...agentsFor('finished').tasks[0], state: 'completed' }, waiting];
+        agents.selected = waiting;
+        agents.detail = null;
+        render(<AssistantConversationTabs agents={agents} />);
+        const tab = screen.getAllByRole('tab')[1];
+        expect(tab).toHaveTextContent('Waiting for the main agent');
+        expect(tab).toHaveAttribute('aria-selected', 'true');
     });
 
     it('promotes a running child with matching pending revalidation above another unfinished child', () => {

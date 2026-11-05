@@ -29,6 +29,8 @@ pub struct DelegationGroup {
     pub parent_input_revision: u64,
     pub parent_control_revision: u64,
     pub parent_active: bool,
+    /// Duration setting frozen when the source group was created.
+    pub max_task_duration_minutes: u32,
     pub limits: DelegationLimits,
     pub budget: BudgetLedger,
     pub tasks_created: u32,
@@ -44,10 +46,11 @@ impl DelegationGroup {
         if !valid_id(&self.group_id)
             || !valid_id(&self.root_conversation_id)
             || self.actor_id.is_empty()
-            || self.device_id.is_empty()
+            || (self.device_id.is_empty() && self.source.owner_input_revision().is_none())
             || self.source_epoch == 0
             || self.parent_input_revision == 0
             || self.parent_control_revision == 0
+            || self.max_task_duration_minutes == 0
             || self.version == 0
             || self.required_task_ids.len() > self.tasks_created as usize
             || ids.len() != self.required_task_ids.len()

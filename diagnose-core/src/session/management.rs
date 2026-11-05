@@ -26,6 +26,7 @@ pub struct SessionManagementMetadata {
 enum ManagementRole {
     #[default]
     Main,
+    Coordinator,
     SubAgent,
 }
 
@@ -49,7 +50,10 @@ impl SessionManagementMetadata {
     }
 
     pub fn is_main(&self) -> bool {
-        matches!(self.role, ManagementRole::Main)
+        matches!(
+            self.role,
+            ManagementRole::Main | ManagementRole::Coordinator
+        )
     }
 
     pub fn first_question(&self) -> Option<String> {

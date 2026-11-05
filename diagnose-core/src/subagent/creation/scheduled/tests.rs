@@ -122,15 +122,15 @@ fn published_source_freezes_contract_caps_and_original_deadline() {
             .source_provider_id,
         crate::schedule::published_input::PUBLISHED_INPUT_PROVIDER
     );
-    let original = creation.new_group(now, None).unwrap();
+    let original = creation.new_group(now, None, 1).unwrap();
     assert_eq!(original.limits.total.tool_calls, 9);
     assert_eq!(original.limits.total.tokens, Some(500));
     assert_eq!(original.limits.child_ceiling().tokens, Some(400));
     assert_eq!(original.limits.deadline_ms, now + 30_000);
-    let later = creation.new_group(now + 20_000, None).unwrap();
+    let later = creation.new_group(now + 20_000, None, 1).unwrap();
     assert_eq!(later.group_id, original.group_id);
     assert_eq!(later.limits.deadline_ms, original.limits.deadline_ms);
-    assert!(creation.new_group(now + 30_000, None).is_err());
+    assert!(creation.new_group(now + 30_000, None, 1).is_err());
     let stored = serde_json::to_string(&creation).unwrap();
     let restored: CreationEnvelope = serde_json::from_str(&stored).unwrap();
     assert_eq!(restored, creation);
@@ -192,7 +192,8 @@ fn scheduled_evidence_cannot_be_attached_to_a_user_or_another_occurrence() {
             &session,
             original.source.clone(),
             original.owner_requirement,
-            None
+            None,
+            Default::default(),
         )
         .is_err()
     );
@@ -218,6 +219,7 @@ fn initial_capture_does_not_replace_an_existing_label_or_claim() {
             6 => {
                 changed.agent_role = crate::subagent::AgentRole::SubAgent {
                     binding: Box::new(crate::subagent::DelegatedTaskBinding {
+                        targets: Vec::new(),
                         root_conversation_id: "parent".into(),
                         group_id: "group".into(),
                         task_id: "child".into(),
@@ -345,7 +347,7 @@ fn invalid_canonical_contract_and_deadline_are_rejected_before_allocation() {
 fn scheduled_source_keeps_large_frozen_contract_tokens() {
     let (source, session, now) = fixture_with_tokens(2_000_000);
     let creation = CreationEnvelope::capture_scheduled(&session, source, destination()).unwrap();
-    let group = creation.new_group(now, None).unwrap();
+    let group = creation.new_group(now, None, 1).unwrap();
     assert_eq!(group.limits.total.tokens, Some(2_000_000));
     assert_eq!(group.limits.child_ceiling().tokens, Some(1_600_000));
 }

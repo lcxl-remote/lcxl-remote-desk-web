@@ -1,1 +1,1 @@
-{"type":"string","enum":["owner_approval","background_work","model_capacity","writer_capacity","source_paused","device_unavailable"],"x-readme-ref-name":"SubAgentWaitReason"}
+{"type":"string","enum":["owner_approval","background_work","model_capacity","writer_capacity","source_paused","device_unavailable","main_agent_reply"],"x-readme-ref-name":"SubAgentWaitReason"}

@@ -6,18 +6,34 @@ use desk_diagnose_core::{
     session::TurnState,
     subagent::{
         creation::TaskCreationEnvelope,
+        report::ReportSubmission,
         seam::ChildAdmission,
         state::{CompletionDisposition, PlanningFence},
     },
 };
-
-use sha2::Digest;
 
 pub(crate) async fn child_records_on(
     txn: &DatabaseTransaction,
     held: &PersistedAgentSession,
     now_ms: i64,
 ) -> Result<(run_row::Model, SubAgentRun, DelegationGroup), DbErr> {
+    let (row, run, group, _) = child_records_with_session_on(txn, held, now_ms).await?;
+    Ok((row, run, group))
+}
+
+async fn child_records_with_session_on(
+    txn: &DatabaseTransaction,
+    held: &PersistedAgentSession,
+    now_ms: i64,
+) -> Result<
+    (
+        run_row::Model,
+        SubAgentRun,
+        DelegationGroup,
+        Box<PersistedAgentSession>,
+    ),
+    DbErr,
+> {
     let binding = held.agent_role.binding().ok_or_else(|| invalid())?;
     let row = run_row::Entity::find()
         .filter(run_row::Column::TaskId.eq(&binding.task_id))
@@ -55,7 +71,8 @@ pub(crate) async fn child_records_on(
         .one(txn)
         .await?
         .ok_or_else(|| invalid())?;
-    let current = PersistedAgentSession::decode_json(&stored.state_json).map_err(|_| invalid())?;
+    let current =
+        PersistedAgentSession::decode_boxed_json(&stored.state_json).map_err(|_| invalid())?;
     if run.binding != *binding
         || run.child_conversation_id != held.conversation_id
         || current.agent_role != held.agent_role
@@ -83,7 +100,7 @@ pub(crate) async fn child_records_on(
     {
         return Err(invalid());
     }
-    Ok((row, run, *group))
+    Ok((row, run, *group, current))
 }
 
 async fn begin_child_control(
@@ -103,7 +120,382 @@ async fn begin_child_control(
     Ok(txn)
 }
 
+async fn previous_worker_report_on(
+    txn: &DatabaseTransaction,
+    row: &run_row::Model,
+    run: &SubAgentRun,
+    held: &PersistedAgentSession,
+    destination: &desk_agent_protocol::data_lineage::DestinationIdentity,
+    now_ms: i64,
+) -> Result<Option<desk_diagnose_core::subagent::report::StoredReport>, DbErr> {
+    use crate::entity::agent_file_recovery_cleanup as tombstone;
+    use desk_assistant_data_store::{device_roster, worker_report, worker_request};
+    use sea_orm::QueryTrait;
+
+    let retained = || {
+        let deleted = tombstone::Entity::find()
+            .select_only()
+            .column(tombstone::Column::ConversationId)
+            .into_query();
+        session_row::Entity::find()
+            .filter(session_row::Column::ConversationId.not_in_subquery(deleted))
+            .filter(session_row::Column::ActorId.eq(&row.actor_id))
+            .filter(session_row::Column::DeviceId.eq(&row.device_id))
+            .select_only()
+            .column(session_row::Column::ConversationId)
+            .into_query()
+    };
+    let candidates = worker_request::previous_requests(row)
+        .filter(run_row::Column::RootConversationId.in_subquery(retained()))
+        .filter(run_row::Column::ChildConversationId.in_subquery(retained()))
+        .all(txn)
+        .await?;
+    for candidate in candidates {
+        let previous = decode_run(&candidate)?;
+        if !worker_request::shares_history_scope(&previous.binding, &run.binding) {
+            continue;
+        }
+        let Some(report) =
+            worker_report::retained_terminal_report_on(txn, &previous, destination, now_ms).await?
+        else {
+            continue;
+        };
+        if !previous.binding.targets.is_empty() {
+            let live = device_roster::current_request_devices(txn, held)
+                .await
+                .map_err(|_| invalid())?;
+            let devices: Vec<_> = previous
+                .binding
+                .targets
+                .into_iter()
+                .map(|target| target.device_id)
+                .collect();
+            if !devices.iter().all(|device| live.contains(device))
+                || !super::notification::retained_devices_are_eligible_on(txn, &devices).await?
+            {
+                continue;
+            }
+        }
+        return Ok(Some(report));
+    }
+    Ok(None)
+}
+
 impl SubAgentStore {
+    pub async fn wait_for_device_for_turn(
+        &self,
+        held: &mut PersistedAgentSession,
+        call: &desk_diagnose_core::chat::ToolCall,
+        target_ref: String,
+        result_message_id: &str,
+    ) -> Result<desk_diagnose_core::subagent::seam::ToolReceipt, DbErr> {
+        use desk_diagnose_core::subagent::{
+            device_wait::{self, DeviceWaitStatus},
+            seam::ToolReceipt,
+            state::TaskDependency,
+            tools,
+        };
+        if tools::parse(held, call).map_err(|_| invalid())?
+            != (tools::Operation::WaitDevice {
+                target_ref: target_ref.clone(),
+            })
+        {
+            return Err(invalid());
+        }
+        let txn = begin_child_control(&self.db, held).await?;
+        let now = chrono::Utc::now();
+        let (row, mut run, group, current) =
+            child_records_with_session_on(&txn, held, now.timestamp_millis()).await?;
+        if now.timestamp_millis() >= run.binding.deadline_ms
+            || now.timestamp_millis() >= group.limits.deadline_ms
+        {
+            return Err(invalid());
+        }
+        let target = run
+            .binding
+            .targets
+            .iter()
+            .find(|target| target.reference == target_ref)
+            .ok_or_else(invalid)?;
+        let waits = super::resources::device_wait_authorized_on(&txn, &current, target).await?;
+        if waits {
+            let facts =
+                super::facts::runtime_facts_on(&txn, &current, now.timestamp_millis()).await?;
+            if !facts.dependencies.is_empty()
+                || !facts.completion.incomplete_action_ids.is_empty()
+                || !current.execution_state.states().is_empty()
+                || !current.pending_auto_triggers.is_empty()
+                || current
+                    .permission_requests
+                    .iter()
+                    .any(|request| !request.state.is_terminal())
+            {
+                return Err(DbErr::Custom(device_wait::NATIVE_WORK_PENDING.into()));
+            }
+        }
+        let status = if waits {
+            DeviceWaitStatus::Waiting
+        } else {
+            DeviceWaitStatus::Unavailable
+        };
+        let message = device_wait::receipt(&current, call, result_message_id, &target_ref, status)
+            .map_err(|_| invalid())?;
+        let payload = serde_json::from_str(&message.text).map_err(|_| invalid())?;
+        let mut next = held.clone_boxed();
+        next.conversation.push(message);
+        if waits {
+            run.set_dependencies(
+                vec![TaskDependency::Device {
+                    target_ref,
+                    result_message_id: result_message_id.into(),
+                }],
+                &now.to_rfc3339(),
+            )
+            .map_err(|_| invalid())?;
+            replace_run_on(&txn, &row, &run, now.timestamp_millis()).await?;
+            next.handled_input_seq = next.latest_input_seq;
+            next.finish_turn(TurnState::Idle, now.to_rfc3339());
+            append_state_event_on(&txn, &group, &run, now.timestamp_millis()).await?;
+        }
+        next.version = write_child_session_on(&txn, &next, now).await?;
+        let history = crate::assistant_data_store::native_scope_on(
+            &txn,
+            &held.actor_id,
+            &held.device_id,
+            &run.binding.root_conversation_id,
+        )
+        .await?;
+        if let Some(history) = history {
+            history.capture_on(&txn).await?;
+        }
+        txn.commit().await?;
+        *held = *next;
+        Ok(ToolReceipt {
+            payload,
+            result_message_id: result_message_id.into(),
+        })
+    }
+
+    pub async fn report_for_turn(
+        &self,
+        held: &mut PersistedAgentSession,
+        call: &desk_diagnose_core::chat::ToolCall,
+        content: desk_diagnose_core::subagent::report::ReportContent,
+        result_message_id: &str,
+    ) -> Result<desk_diagnose_core::subagent::seam::ToolReceipt, DbErr> {
+        use desk_diagnose_core::{
+            chat::ChatMessage,
+            subagent::{
+                report::{ReportKind, TERMINAL_REPORT_BLOCKED, from_terminal_submission},
+                seam::ToolReceipt,
+                tools,
+            },
+        };
+
+        if tools::parse(held, call).map_err(|_| invalid())?
+            != tools::Operation::Report(content.clone())
+            || !desk_diagnose_core::subagent::valid_id(result_message_id)
+        {
+            return Err(invalid());
+        }
+        let txn = begin_child_control(&self.db, held).await?;
+        let now = chrono::Utc::now();
+        let (row, mut run, group, current) =
+            child_records_with_session_on(&txn, held, now.timestamp_millis()).await?;
+        if now.timestamp_millis() >= run.binding.deadline_ms
+            || now.timestamp_millis() >= group.limits.deadline_ms
+        {
+            return Err(invalid());
+        }
+        let caller = current
+            .conversation
+            .iter()
+            .find(|message| {
+                message.role == ChatRole::Assistant
+                    && message.turn_id == current.current_turn_id
+                    && message.tool_calls.iter().any(|reference| {
+                        reference.id == call.id
+                            && reference.name == call.name
+                            && tools::same_arguments(
+                                &call.name,
+                                &reference.arguments_json,
+                                &call.arguments_json,
+                            )
+                    })
+            })
+            .ok_or_else(|| invalid())?;
+        if let Some(receipt) = current.conversation.iter().find(|message| {
+            message.role == ChatRole::Tool
+                && message.tool_call_id.as_deref() == Some(call.id.as_str())
+        }) {
+            if receipt
+                .data_envelope
+                .as_ref()
+                .is_none_or(|label| label.provenance.source_tool_name != call.name)
+            {
+                return Err(invalid());
+            }
+            let receipt = ToolReceipt {
+                payload: serde_json::from_str(&receipt.text).map_err(|_| invalid())?,
+                result_message_id: receipt.message_id.clone(),
+            };
+            txn.commit().await?;
+            return Ok(receipt);
+        }
+        let creation: TaskCreationEnvelope =
+            serde_json::from_str(&row.creation_envelope_json).map_err(|_| invalid())?;
+        let mut sources = creation.input_envelopes;
+        sources.push(caller.data_envelope.clone().ok_or_else(|| invalid())?);
+        let yields = content.kind != ReportKind::Progress;
+        let facts = if yields || !content.evidence_refs.is_empty() {
+            Some(super::facts::runtime_facts_on(&txn, &current, now.timestamp_millis()).await?)
+        } else {
+            None
+        };
+        if let Some(facts) = &facts {
+            for reference in &content.evidence_refs {
+                if !facts.completion.available_evidence_ids.contains(reference) {
+                    return Err(invalid());
+                }
+                let label = facts
+                    .result_envelopes
+                    .iter()
+                    .chain(
+                        current
+                            .conversation
+                            .iter()
+                            .filter_map(|message| message.data_envelope.as_ref()),
+                    )
+                    .find(|label| &label.envelope_id == reference)
+                    .ok_or_else(|| invalid())?;
+                sources.push(label.clone());
+            }
+        }
+        if yields
+            && (caller.tool_calls.len() != 1
+                || current.unclosed_tool_call_ids().as_slice() != [call.id.as_str()])
+        {
+            return Err(invalid());
+        }
+        if content.kind == ReportKind::NeedsInput {
+            let facts = facts.as_ref().ok_or_else(invalid)?;
+            run.synchronize_dependencies(facts.dependencies.clone(), true, &now.to_rfc3339())
+                .map_err(|_| invalid())?;
+        }
+        let terminal_report = if let Some(facts) = &facts
+            && content.kind.is_terminal()
+        {
+            let unsettled = || DbErr::Custom(TERMINAL_REPORT_BLOCKED.into());
+            if !facts.dependencies.is_empty() || !current.execution_state.states().is_empty() {
+                return Err(unsettled());
+            }
+            let terminal =
+                from_terminal_submission(&content, &facts.completion).map_err(|error| {
+                    if error.message == TERMINAL_REPORT_BLOCKED {
+                        unsettled()
+                    } else {
+                        invalid()
+                    }
+                })?;
+            run.synchronize_dependencies(Vec::new(), true, &now.to_rfc3339())
+                .map_err(|_| invalid())?;
+            run.settle_report(
+                run.fence(),
+                terminal.clone(),
+                &facts.completion,
+                &now.to_rfc3339(),
+            )
+            .map_err(|_| unsettled())?;
+            sources.extend(facts.result_envelopes.iter().cloned());
+            let text = serde_json::to_string(&terminal).map_err(|_| invalid())?;
+            if text.len() as u64 > group.limits.max_result_bytes {
+                return Err(invalid());
+            }
+            replace_run_on(&txn, &row, &run, now.timestamp_millis()).await?;
+            Some(terminal)
+        } else {
+            None
+        };
+        let report = desk_assistant_data_store::worker_report::append_report_on(
+            &txn,
+            &group,
+            &run,
+            ReportSubmission {
+                generation: held.lease_token,
+                origin: ("tool", &call.id),
+                model_destination: &creation.source.model_destination,
+                content,
+                receipt_refs: terminal_report
+                    .as_ref()
+                    .map(|report| report.receipt_refs.clone())
+                    .unwrap_or_default(),
+            },
+            &sources,
+            now.timestamp_millis(),
+        )
+        .await?;
+        let mut payload = serde_json::json!({"report_id": report.report_id, "seq": report.seq});
+        if let Some(question_id) = report.question_id {
+            payload["question_id"] = serde_json::json!(question_id);
+            run.ask_question(question_id, &now.to_rfc3339())
+                .map_err(|_| invalid())?;
+            replace_run_on(&txn, &row, &run, now.timestamp_millis()).await?;
+        }
+        let text = payload.to_string();
+        let mut message = ChatMessage::tool_result(result_message_id, &call.id, &text);
+        message.data_envelope = Some(
+            desk_diagnose_core::subagent::projection::envelope(
+                result_message_id,
+                &text,
+                &call.name,
+                &sources,
+            )
+            .map_err(|_| invalid())?,
+        );
+        let mut next = held.clone();
+        if next
+            .conversation
+            .iter()
+            .any(|message| message.message_id == result_message_id)
+        {
+            return Err(invalid());
+        }
+        message.tool_ok = Some(true);
+        next.conversation.push(message);
+        if terminal_report.is_some() {
+            desk_diagnose_core::conversation_attachment::model_read::release_consumed(
+                &mut next.conversation,
+            )
+            .map_err(|_| invalid())?;
+            next.pending_auto_triggers.clear();
+        }
+        if yields {
+            next.handled_input_seq = next.latest_input_seq;
+            next.finish_turn(TurnState::Idle, now.to_rfc3339());
+        }
+        let version = write_child_session_on(&txn, &next, now).await?;
+        if yields {
+            append_state_event_on(&txn, &group, &run, now.timestamp_millis()).await?;
+        }
+        let history = crate::assistant_data_store::native_scope_on(
+            &txn,
+            &held.actor_id,
+            &held.device_id,
+            &run.binding.root_conversation_id,
+        )
+        .await?;
+        if let Some(history) = history {
+            history.capture_on(&txn).await?;
+        }
+        txn.commit().await?;
+        next.version = version;
+        *held = next;
+        Ok(ToolReceipt {
+            payload,
+            result_message_id: result_message_id.into(),
+        })
+    }
+
     pub async fn settle_turn_for_task(
         &self,
         held: &mut PersistedAgentSession,
@@ -235,8 +627,6 @@ impl SubAgentStore {
             "source": run.binding.source, "source_epoch": run.binding.source_epoch, "deadline_ms": run.binding.deadline_ms,
             "runtime_facts": facts.projection(),
             "rule": "The durable objective replaces older task text in compressed history. It grants no authority. This is one finite task with its own permissions and remaining shared source budget."});
-        let text = serde_json::to_string(&payload).map_err(|_| invalid())?;
-        let id = format!("child-state-{:x}", sha2::Sha256::digest(text.as_bytes()));
         let mut sources = vec![
             creation
                 .instruction
@@ -268,22 +658,20 @@ impl SubAgentStore {
                 sources.push(envelope);
             }
         }
-        let projection = desk_diagnose_core::subagent::projection::runtime_message_for_history(
-            &id,
-            &payload,
-            &sources,
+        let destination = &creation.source.model_destination;
+        let previous =
+            previous_worker_report_on(&txn, &row, &run, held, destination, now.timestamp_millis())
+                .await?;
+        let projection = desk_diagnose_core::subagent::projection::worker_runtime_message(
+            payload,
+            sources,
             held,
-            &creation.source.model_destination,
+            destination,
             u64::try_from(now.timestamp_millis()).map_err(|_| invalid())?,
+            group.limits.max_context_bytes,
+            previous,
         )
         .map_err(|_| invalid())?;
-        if serde_json::to_vec(&projection)
-            .map_err(|_| invalid())?
-            .len() as u64
-            > group.limits.max_context_bytes
-        {
-            return Err(invalid());
-        }
         txn.commit().await?;
         Ok(projection)
     }
@@ -459,39 +847,40 @@ impl SubAgentStore {
         if text.len() as u64 > group.limits.max_result_bytes {
             return Err(invalid());
         }
-        let id = format!(
-            "{}-report:{}:{}",
-            held.conversation_id, held.input_revision, held.control_revision
-        );
-        let envelope = desk_diagnose_core::subagent::projection::envelope(
-            &id,
-            &text,
-            "delegated_task_report",
-            &sources,
-        )
-        .map_err(|_| invalid())?;
         run.report_corrections_used = held.subagent_report_corrections_used;
-        desk_diagnose_core::future::boxed(|| async {
-            replace_run_on(&txn, &row, &run, now.timestamp_millis()).await
+        desk_diagnose_core::future::boxed(|| {
+            replace_run_on(&txn, &row, &run, now.timestamp_millis())
         })
         .await?;
-        let changed = run_row::Entity::update_many()
-            .set(run_row::ActiveModel {
-                result_envelope_json: Set(Some(
-                    serde_json::to_string(&envelope).map_err(|_| invalid())?,
-                )),
-                ..Default::default()
-            })
-            .filter(run_row::Column::Id.eq(row.id))
-            .filter(
-                run_row::Column::StateRevision
-                    .eq(i64::try_from(run.state_revision).map_err(|_| invalid())?),
+        desk_diagnose_core::future::boxed(|| async {
+            use desk_diagnose_core::subagent::report::{ReportContent, ReportKind};
+            let kind = match disposition {
+                CompletionDisposition::Complete => ReportKind::Completed,
+                CompletionDisposition::Unable => ReportKind::Failed,
+                CompletionDisposition::Waiting => ReportKind::Progress,
+            };
+            desk_assistant_data_store::worker_report::append_report_on(
+                &txn,
+                &group,
+                &run,
+                ReportSubmission {
+                    generation: held.lease_token,
+                    origin: ("answer", &answer.message_id),
+                    model_destination: &creation.source.model_destination,
+                    content: ReportContent {
+                        kind,
+                        summary: report.summary,
+                        question: None,
+                        evidence_refs: report.evidence_refs,
+                    },
+                    receipt_refs: report.receipt_refs,
+                },
+                &sources,
+                now.timestamp_millis(),
             )
-            .exec(&txn)
-            .await?;
-        if changed.rows_affected != 1 {
-            return Err(invalid());
-        }
+            .await
+        })
+        .await?;
         let mut next = held.clone();
         if run.state.is_terminal() {
             next.pending_auto_triggers.clear();

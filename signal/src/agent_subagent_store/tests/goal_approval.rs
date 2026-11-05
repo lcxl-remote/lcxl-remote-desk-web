@@ -95,6 +95,7 @@ async fn fixture() -> (
         None,
         None,
         now.timestamp_millis(),
+        Default::default(),
     )
     .await
     .unwrap();

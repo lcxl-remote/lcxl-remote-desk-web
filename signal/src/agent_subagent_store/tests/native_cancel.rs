@@ -2,7 +2,7 @@ use super::*;
 use crate::entity::agent_exec_task as command;
 use desk_agent_protocol::ai_assistant::subagent::{AiAssistantStopControl, SubAgentStopChoice};
 
-pub(super) async fn seed_native(
+pub(crate) async fn seed_native(
     db: &DatabaseConnection,
     conversation: &str,
     generation: &str,
@@ -39,13 +39,81 @@ async fn native<C: ConnectionTrait + crate::config::ConfigConnection>(
         .unwrap()
 }
 
-fn assert_stop_only(before: &command::Model, after: &command::Model) {
+pub(crate) fn assert_stop_only(before: &command::Model, after: &command::Model) {
     assert!(after.cancel_requested_at.is_some());
     assert_eq!(after.cancel_requested_by.as_deref(), Some("1"));
     let mut facts = after.clone();
     facts.cancel_requested_at = before.cancel_requested_at;
     facts.cancel_requested_by = before.cancel_requested_by.clone();
     assert_eq!(&facts, before);
+}
+
+#[tokio::test]
+async fn personal_stop_targets_original_actions_on_their_native_devices() {
+    use crate::entity::agent_action_item as action;
+    let db = database().await;
+    let mut rows = Vec::new();
+    let now = chrono::Utc::now();
+    for (id, conversation, device) in [
+        ("a", "personal-work", "mac"),
+        ("b", "personal-work", "linux"),
+        ("c", "other-work", "mac"),
+    ] {
+        rows.push(
+            action::ActiveModel {
+                action_request_id: Set(format!("action-{id}")),
+                kind: Set("agent_capability".into()),
+                conversation_id: Set(conversation.into()),
+                turn_id: Set("original-turn".into()),
+                tool_call_id: Set(format!("call-{id}")),
+                actor_id: Set("1".into()),
+                target_device_id: Set(device.into()),
+                status: Set("dispatched".into()),
+                attempt: Set(1),
+                execution_id: Set(Some(format!("generation-{id}"))),
+                draft_hash: Set("original-draft".into()),
+                policy_revision: Set(1),
+                is_side_effecting: Set(true),
+                payload_json: Set("{}".into()),
+                payload_schema_version: Set(1),
+                completion_event_id: Set(format!("completion-{id}")),
+                completion_delivery_state: Set("pending".into()),
+                created_at: Set(now),
+                updated_at: Set(now),
+                ..Default::default()
+            }
+            .insert(&db)
+            .await
+            .unwrap(),
+        );
+    }
+    let txn = crate::db::begin_write(&db, session_row::Entity)
+        .await
+        .unwrap();
+    super::super::native_cancel::cancel_native_actions_for_subject_on(
+        &txn,
+        "personal-work",
+        "1",
+        "",
+        "personal-stop",
+        now.timestamp_millis(),
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+    for original in rows {
+        let mut actual = action::Entity::find_by_id(original.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        if original.conversation_id == "personal-work" {
+            assert!(actual.cancel_requested_at.take().is_some());
+            assert_eq!(actual.cancel_requested_by.take().as_deref(), Some("1"));
+            assert_eq!(actual.cancel_generation.take(), original.execution_id);
+        }
+        assert_eq!(actual, original);
+    }
 }
 
 #[tokio::test]

@@ -324,6 +324,8 @@ pub enum LoopOutcome {
     },
     /// A durable main dependency wait releases this turn's lease and model slot.
     SubAgentsWaiting { wait_id: String },
+    /// The worker committed a report or wait and released the execution lease.
+    SubAgentYielded,
     /// The child's source group closed admission while its original task persists.
     DelegationSourcePaused,
 }
@@ -703,7 +705,7 @@ pub async fn run_preclaimed_child_completion(
     drive_claimed(deps, session, turn_id, None, sink).await
 }
 
-/// Resume an explicit dependency wait under its original owner task and budget.
+/// Resume a dependency or report under its original owner task and budget.
 /// The coordinator binds the claim to the original input and control revisions.
 pub async fn run_preclaimed_subagent_completion(
     deps: &LoopDeps<'_>,
@@ -714,7 +716,7 @@ pub async fn run_preclaimed_subagent_completion(
         || session.trigger_origin != TriggerOrigin::SubAgentCompletion
         || session.surface != AgentSessionSurface::AiAssistant
         || !session.turn_state.is_active()
-        || session.ready_subagent_wait.is_none()
+        || !session.has_ready_subagent_completion()
         || session.subagent_wait.is_some()
         || session.lease_token == 0
         || deps.heartbeat.is_none()
@@ -870,6 +872,9 @@ async fn drive_claimed_inner(
     } else {
         run_inner(deps, &mut session, &turn_id, sink).await
     };
+    if matches!(&result, Ok(LoopOutcome::SubAgentYielded)) {
+        return result;
+    }
     if matches!(&result, Ok(LoopOutcome::DelegationSourcePaused)) {
         // The source-control transaction already released and fenced this child
         // claim. Its old history must not overwrite that committed pause.
@@ -3103,6 +3108,7 @@ fn validate_browser_permission_references(
 /// so merely naming one of these tools never expands the candidate set. Runtime
 /// readiness and the compiled Provider registry are still checked normally.
 fn validate_permission_request_availability(
+    role: &crate::subagent::AgentRole,
     conversation: &[ChatMessage],
     request: &crate::dynamic_run::PermissionRequest,
     providers: &crate::provider_registry::ProviderRegistry,
@@ -3137,6 +3143,7 @@ fn validate_permission_request_availability(
             effective_callable_tools.push(capability.registered_tool());
         }
     }
+    effective_callable_tools.retain(|tool| role.allows_effect(tool.effect));
     crate::permission_tools::validate_request_availability(
         request,
         inventory,

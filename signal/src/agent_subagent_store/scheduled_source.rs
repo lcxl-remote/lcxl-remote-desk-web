@@ -44,7 +44,7 @@ pub(crate) async fn current_scheduled_source_on(
         .ok_or_else(|| invalid())?;
     if group.source_admission != SourceAdmission::Open
         || creation
-            .new_group(row.created_at, None)
+            .new_group(row.created_at, None, group.max_task_duration_minutes)
             .map_err(|_| invalid())?
             .limits
             != group.limits

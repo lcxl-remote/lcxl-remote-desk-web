@@ -343,7 +343,20 @@ pub(crate) fn reclaim_condition(cutoff_ms: i64) -> sea_orm::Condition {
         .column(run_row::Column::RootConversationId)
         .filter(run_row::Column::ChildConversationId.in_subquery(commands))
         .into_query();
+    // The workbench shell owns its native work queue. Reclaim it only after
+    // those sessions have passed their own lifetime and reconciliation checks.
+    let native_sessions = session_row::Entity::find()
+        .select_only()
+        .column(session_row::Column::ConversationId)
+        .into_query();
+    let live_workbenches = group_row::Entity::find()
+        .select_only()
+        .column(group_row::Column::SourceWorkbenchId)
+        .filter(group_row::Column::SourceWorkbenchId.is_not_null())
+        .filter(group_row::Column::RootConversationId.in_subquery(native_sessions))
+        .into_query();
     sea_orm::Condition::all()
+        .add(session_row::Column::ConversationId.not_in_subquery(live_workbenches))
         .add(session_row::Column::ConversationId.not_in_subquery(native_roots))
         .add(session_row::Column::ConversationId.not_in_subquery(command_roots))
         .add(session_row::Column::ConversationId.not_in_subquery(live()))
@@ -730,7 +743,6 @@ pub(crate) async fn redact_deleted_content(
                     state_json: Set(serde_json::to_string(&run).map_err(|_| invalid())?),
                     state_revision: Set(i64::try_from(run.state_revision).map_err(|_| invalid())?),
                     creation_envelope_json: Set(String::new()),
-                    result_envelope_json: Set(None),
                     ..Default::default()
                 })
                 .filter(run_row::Column::Id.eq(task.id))

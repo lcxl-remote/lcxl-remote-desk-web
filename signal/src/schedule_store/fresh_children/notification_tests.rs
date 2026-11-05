@@ -368,10 +368,10 @@ async fn assert_result_only_authority(
             tools::SPAWN,
             serde_json::json!({"name":"forbidden", "task":"Start new work", "acceptance_criteria":["Return evidence"], "required_for_completion":false}),
         ),
-        (tools::CANCEL, serde_json::json!({"task_id":task_id})),
+        (tools::CANCEL, serde_json::json!({"request_id":task_id})),
         (
-            tools::MESSAGE,
-            serde_json::json!({"task_id":task_id,"message":"Change the task"}),
+            tools::ADJUST,
+            serde_json::json!({"request_id":task_id,"message":"Change the task"}),
         ),
     ] {
         let call = ToolCall {

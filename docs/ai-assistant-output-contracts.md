@@ -2,19 +2,23 @@
 
 Generated from `diagnose-core/src/output_contracts.rs`. Catalog version describes this mapping, not a payload schema field. All errors may instead be returned as safe text; an externalized attachment must be read before interpreting its business payload.
 
-`read_subagent_result` returns `SubAgentModelResult`: the full answer, frozen acceptance criteria, task identity, and nonempty runtime facts or references. It omits UI metadata and empty optional fields. `include_task=true` adds the original task instructions; owner views keep the full stored result.
+The `read_subagent_reports` tool returns a `WorkerReportPage` with reports in sequence order, acceptance criteria when reports are present, a next cursor, and an indication of further pages. Report text and available evidence and receipt references stay with the individual report.
 
 Model results retain business text, outcomes, times, coverage and usable references. Internal source locators, verification hashes, idempotency keys and control generations stay in the original stored result. History uses conversation aliases such as `cv1`; source IDs remain readable, and memory update/forget keeps the memory revision. Live document references and JSON attachment pages use the same view as inline results. A successful tool return does not by itself prove that an action completed or was verified.
 
 | Tool | Business output type | Catalog version | Possible delivery |
 |---|---|---:|---|
-| `spawn_subagent` | `SubAgentSpawnReceipt` | 1 | inline |
+| `send_subagent_request` | `SubAgentSpawnReceipt` | 1 | inline |
 | `list_subagents` | `AiAssistantSubAgentPage` | 1 | inline |
 | `get_subagent_status` | `AiAssistantSubAgentSummary` | 1 | inline |
-| `read_subagent_result` | `SubAgentModelResult` | 1 | inline |
-| `wait_subagents` | `SubAgentWaitReceipt` | 1 | inline |
-| `cancel_subagent` | `SubAgentControlReceipt` | 1 | inline |
-| `send_subagent_message` | `SubAgentControlReceipt` | 1 | inline |
+| `read_subagent_reports` | `WorkerReportPage` | 1 | inline |
+| `acknowledge_subagent_reports` | `WorkerReportAcknowledgement` | 1 | inline |
+| `report_subagent_status` | `WorkerReportReceipt` | 1 | inline |
+| `wait_for_subagent_device` | `WorkerDeviceWaitReceipt` | 1 | inline |
+| `reply_subagent_request` | `AiAssistantSubAgentSummary` | 1 | inline |
+| `wait_subagent_reports` | `SubAgentWaitReceipt` | 1 | inline |
+| `cancel_subagent_request` | `SubAgentControlReceipt` | 1 | inline |
+| `adjust_subagent_request` | `SubAgentControlReceipt` | 1 | inline |
 | `update_task_status` | `TaskStatusUpdateReceipt` | 1 | inline |
 | `control_goal` | `GoalControlReceipt` | 1 | inline |
 | `request_goal` | `GoalRequestReceipt` | 1 | inline |

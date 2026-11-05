@@ -77,7 +77,7 @@ pub fn validate_origin(
         .ok_or("action has no delegation origin")?;
     if fence.conversation_id != session.conversation_id
         || fence.actor_id != session.actor_id
-        || fence.device_id != session.device_id
+        || !session.admits_assistant_device(&fence.device_id)
         || fence.input_revision > binding.input_revision
         || fence.control_revision > binding.control_revision
         || delegation.source_epoch > binding.source_epoch

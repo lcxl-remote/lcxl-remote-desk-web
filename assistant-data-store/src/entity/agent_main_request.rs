@@ -23,6 +23,8 @@ pub struct Model {
     /// The authenticated connection that submitted this input, for live output.
     pub reply_connection_id: Option<String>,
     pub coordinated: bool,
+    pub first_dispatch_json: Option<String>,
+    pub first_worker_request_id: Option<String>,
     pub coordination_attempts: i32,
     pub retry_at_ms: Option<i64>,
     pub input_revision: Option<i64>,

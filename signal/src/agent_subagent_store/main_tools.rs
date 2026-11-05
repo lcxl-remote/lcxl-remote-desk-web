@@ -17,6 +17,15 @@ use desk_diagnose_core::{
 
 use sha2::{Digest, Sha256};
 
+fn worker_scope(parent: &PersistedAgentSession) -> sea_orm::Select<run_row::Entity> {
+    desk_assistant_data_store::worker_request::in_scope(
+        &parent.actor_id,
+        &parent.device_id,
+        &parent.conversation_id,
+        parent.agent_role.workbench_id(),
+    )
+}
+
 fn task_query(parent: &PersistedAgentSession) -> sea_orm::Select<run_row::Entity> {
     run_row::Entity::find()
         .filter(run_row::Column::RootConversationId.eq(&parent.conversation_id))
@@ -68,6 +77,14 @@ pub(crate) async fn current_group_on(
     txn: &DatabaseTransaction,
     parent: &PersistedAgentSession,
 ) -> Result<DelegationGroup, DbErr> {
+    let (group, _) = current_group_record_on(txn, parent).await?;
+    Ok(group)
+}
+
+async fn current_group_record_on(
+    txn: &DatabaseTransaction,
+    parent: &PersistedAgentSession,
+) -> Result<(DelegationGroup, String), DbErr> {
     let row = group_row::Entity::find()
         .filter(
             group_row::Column::GroupId.eq(parent
@@ -82,11 +99,13 @@ pub(crate) async fn current_group_on(
         .await?
         .ok_or_else(|| invalid())?;
     let group = decode_group(&row)?;
-    if !group.can_interpret(parent.input_revision, parent.control_revision) {
+    if !group.can_interpret(parent.input_revision, parent.control_revision)
+        || group.source.workbench_id() != parent.agent_role.workbench_id()
+    {
         return Err(invalid());
     }
     super::scheduled_source::current_scheduled_source_on(txn, &row).await?;
-    Ok(group)
+    Ok((group, row.model_binding_json))
 }
 
 async fn begin_main_tool(
@@ -122,7 +141,12 @@ async fn begin_main_tool(
                 &key,
             ))
         }
-        Operation::Cancel { task_id, .. } | Operation::Message { task_id, .. } => Some(
+        Operation::Cancel { task_id, .. }
+        | Operation::Adjust { task_id, .. }
+        | Operation::Reply {
+            request_id: task_id,
+            ..
+        } => Some(
             task_for_parent_observed_on(&txn, held, task_id, input_observation)
                 .await?
                 .child_conversation_id,
@@ -218,9 +242,8 @@ impl SubAgentStore {
         })
         .await?
         .ok_or_else(|| invalid())?;
-        let mut labels = decode_creation(&source)?
-            .input_envelopes()
-            .map_err(|_| invalid())?;
+        let creation = decode_creation(&source)?;
+        let mut labels = creation.input_envelopes().map_err(|_| invalid())?;
         let query = task_query(&parent);
         let total =
             desk_diagnose_core::future::boxed(|| async { query.clone().count(&txn).await }).await?;
@@ -270,14 +293,45 @@ impl SubAgentStore {
                     "details_require_explicit_read": true}));
             }
         }
-        let payload = serde_json::json!({"group_id": group.group_id, "source_epoch": group.source_epoch,
+        let mut payload = serde_json::json!({"group_id": group.group_id, "source_epoch": group.source_epoch,
             "deadline_ms": group.limits.deadline_ms, "total": total, "unfinished": unfinished,
             "creation_limits": policy.limits, "policy_revision": policy.revision,
             "created_in_group": group.tasks_created,
             "creation_capacity_rule": "Only unfinished children count toward the configured limit, including queued, approval, background work and cancelling tasks. Reject new creation at the limit; terminal tasks release slots. There is no cumulative creation limit.",
             "remaining_unfinished_slots": (policy.limits.max_unfinished_per_root as u64).saturating_sub(unfinished),
             "tasks": tasks, "omitted": total.saturating_sub(tasks.len() as u64),
-            "rule": "Current task state is durable across compression. Use list/status/result tools for omitted details. Task completion is not main task completion; verify reports against receipts. Approval attention does not finish a wait."});
+            "pending_reports": [],
+            "rule": "Current task state is durable across compression. Use list, status and report tools for omitted details. Pending reports are independent; acknowledge only the ones you have handled. Verify reports against receipts. Approval attention does not finish a wait."});
+        if let Some(workbench) = group.source.workbench_id() {
+            let workers = desk_diagnose_core::future::boxed(|| {
+                desk_assistant_data_store::worker_request::recent_workbench_workers_on(
+                    &txn,
+                    &parent.actor_id,
+                    workbench,
+                )
+            })
+            .await?;
+            payload["recent_workbench_worker_ids"] = serde_json::json!(workers);
+            let payload = payload.as_object_mut().ok_or_else(invalid)?;
+            payload.remove("remaining_unfinished_slots");
+            payload.insert("creation_capacity_rule".into(), serde_json::json!(
+                "A dispatched request can queue when Worker slots are occupied. The configured Worker limit applies to requests that have started and are still unfinished, including waits."
+            ));
+        }
+        let max_bytes = usize::try_from(group.limits.max_context_bytes).map_err(|_| invalid())?;
+        let base_bytes = desk_diagnose_core::subagent::projection::runtime_text(&payload).len();
+        let reports = desk_diagnose_core::future::boxed(|| {
+            desk_assistant_data_store::worker_report::project_pending_on(
+                &txn,
+                &group,
+                &creation.model_destination,
+                chrono::Utc::now().timestamp_millis(),
+                max_bytes.saturating_sub(base_bytes),
+                &mut labels,
+            )
+        })
+        .await?;
+        payload["pending_reports"] = serde_json::json!(reports);
         let id = format!(
             "main-delegation-{:x}",
             Sha256::digest(payload.to_string().as_bytes())
@@ -389,9 +443,10 @@ impl SubAgentStore {
             desk_diagnose_core::future::boxed(|| async { txn.commit().await }).await?;
             return Ok(receipt);
         }
-        let group =
-            desk_diagnose_core::future::boxed(|| async { current_group_on(&txn, &parent).await })
-                .await?;
+        let (group, model_binding) = desk_diagnose_core::future::boxed(|| async {
+            current_group_record_on(&txn, &parent).await
+        })
+        .await?;
         let mut labels = vec![caller];
         let mut next = held.clone();
         let mut observation = None;
@@ -411,7 +466,7 @@ impl SubAgentStore {
                 )?);
                 serde_json::to_value(summary).map_err(|_| invalid())?
             }
-            Operation::Cancel { .. } | Operation::Message { .. } => {
+            Operation::Cancel { .. } | Operation::Adjust { .. } => {
                 let controlled = desk_diagnose_core::future::boxed(|| async {
                     super::task_control::apply_task_control_from_turn_on(
                         &txn,
@@ -433,62 +488,43 @@ impl SubAgentStore {
                 serde_json::to_value(controlled.outcome.task).map_err(|_| invalid())?
             }
             Operation::List { cursor, limit } => {
-                let before = cursor
-                    .as_deref()
-                    .map(str::parse::<i64>)
-                    .transpose()
-                    .map_err(|_| {
-                        input_observation.reject(Stage::Reference, InputIssue::UnknownReference);
-                        invalid()
-                    })?
-                    .unwrap_or(i64::MAX);
-                if before <= 0 {
-                    input_observation.reject(Stage::Reference, InputIssue::UnknownReference);
-                    return Err(invalid());
+                if cursor.is_some() {
+                    input_observation.stage(Stage::Reference, StageOutcome::Attempted);
                 }
+                let page = desk_diagnose_core::future::boxed(|| {
+                    desk_assistant_data_store::worker_request::worker_page_on(
+                        &txn,
+                        worker_scope(&parent),
+                        cursor.as_deref(),
+                        limit,
+                    )
+                })
+                .await?
+                .ok_or_else(|| {
+                    input_observation.reject(Stage::Reference, InputIssue::UnknownReference);
+                    invalid()
+                })?;
                 if cursor.is_some() {
                     input_observation.stage(Stage::Reference, StageOutcome::Passed);
                 }
-                let query = task_query(&parent);
-                let total =
-                    desk_diagnose_core::future::boxed(|| async { query.clone().count(&txn).await })
-                        .await?;
-                let unfinished = desk_diagnose_core::future::boxed(|| async {
-                    query
-                        .clone()
-                        .filter(run_row::Column::State.is_not_in([
-                            "completed",
-                            "failed",
-                            "cancelled",
-                        ]))
-                        .count(&txn)
-                        .await
+                serde_json::to_value(page).map_err(|_| invalid())?
+            }
+            Operation::WorkerStatus { worker_id } => {
+                input_observation.stage(Stage::Reference, StageOutcome::Attempted);
+                let status = desk_diagnose_core::future::boxed(|| {
+                    desk_assistant_data_store::worker_request::worker_status_on(
+                        &txn,
+                        worker_scope(&parent),
+                        &worker_id,
+                    )
                 })
-                .await?;
-                let rows = desk_diagnose_core::future::boxed(|| async {
-                    query
-                        .filter(run_row::Column::Id.lt(before))
-                        .order_by_desc(run_row::Column::Id)
-                        .limit(u64::from(limit) + 1)
-                        .all(&txn)
-                        .await
-                })
-                .await?;
-                let mut items = Vec::new();
-                for row in rows.iter().take(limit as usize) {
-                    labels.extend(task_labels(row)?);
-                    items.push(decode_run(row)?.summary());
-                }
-                let has_more = rows.len() > limit as usize;
-                let next_cursor = has_more.then(|| rows[limit as usize - 1].id.to_string());
-                serde_json::to_value(AiAssistantSubAgentPage {
-                    items,
-                    total,
-                    unfinished,
-                    has_more,
-                    next_cursor,
-                })
-                .map_err(|_| invalid())?
+                .await?
+                .ok_or_else(|| {
+                    input_observation.reject(Stage::Reference, InputIssue::UnknownReference);
+                    invalid()
+                })?;
+                input_observation.stage(Stage::Reference, StageOutcome::Passed);
+                serde_json::to_value(status).map_err(|_| invalid())?
             }
             Operation::Status { task_id } => {
                 let row = desk_diagnose_core::future::boxed(|| async {
@@ -498,28 +534,108 @@ impl SubAgentStore {
                 labels.extend(task_labels(&row)?);
                 serde_json::to_value(decode_run(&row)?.summary()).map_err(|_| invalid())?
             }
-            Operation::ReadResult {
-                task_id,
-                include_task,
+            Operation::Reply {
+                request_id,
+                question_id,
+                message,
             } => {
-                let row = desk_diagnose_core::future::boxed(|| async {
-                    task_for_parent_observed_on(&txn, &parent, &task_id, input_observation).await
+                let row = desk_diagnose_core::future::boxed(|| {
+                    task_for_parent_observed_on(&txn, &parent, &request_id, input_observation)
+                })
+                .await?;
+                let after_seq = if parent.trigger_origin
+                    == desk_diagnose_core::session::TriggerOrigin::SubAgentCompletion
+                {
+                    if parent.has_workbench_report_notification() {
+                        Some(
+                            tools::report_question_sequence(&parent, &request_id, &question_id)
+                                .and_then(|seq| seq.checked_sub(1))
+                                .ok_or_else(invalid)?,
+                        )
+                    } else {
+                        let wait = parent.ready_subagent_wait.as_ref().ok_or_else(invalid)?;
+                        if !wait.tasks.iter().any(|task| {
+                            task.task_id == request_id
+                                && i64::try_from(task.input_revision).ok()
+                                    == Some(row.input_revision)
+                                && i64::try_from(task.control_revision).ok()
+                                    == Some(row.control_revision)
+                        }) {
+                            return Err(invalid());
+                        }
+                        Some(
+                            wait.report_wait
+                                .reply_cursor(&request_id)
+                                .ok_or_else(invalid)?,
+                        )
+                    }
+                } else {
+                    None
+                };
+                let reply = desk_diagnose_core::future::boxed(|| {
+                    super::task_control::reply_to_question_on(
+                        &txn,
+                        &row,
+                        &question_id,
+                        &message,
+                        Some(&labels[0]),
+                        after_seq,
+                        now,
+                    )
+                })
+                .await?;
+                labels.extend(task_labels(&row)?);
+                serde_json::to_value(reply).map_err(|_| invalid())?
+            }
+            Operation::Report(_) | Operation::WaitDevice { .. } => return Err(invalid()),
+            Operation::AcknowledgeReports(report_ids) => {
+                let turn_id = parent.current_turn_id.as_deref().ok_or_else(invalid)?;
+                let payload = serde_json::json!({"acknowledged_report_ids": report_ids});
+                desk_diagnose_core::future::boxed(|| {
+                    desk_assistant_data_store::worker_report::settle_projected_on(
+                        &txn,
+                        &group,
+                        report_ids,
+                        turn_id,
+                        now.timestamp_millis(),
+                    )
+                })
+                .await?;
+                payload
+            }
+            Operation::ReadReports {
+                request_id,
+                after_seq,
+                limit,
+            } => {
+                let row = desk_diagnose_core::future::boxed(|| {
+                    task_for_parent_observed_on(&txn, &parent, &request_id, input_observation)
                 })
                 .await?;
                 let run = decode_run(&row)?;
-                let result = run.result();
-                labels.extend(task_labels(&row)?);
-                if result.report.is_some() {
-                    let label: DataEnvelope = serde_json::from_str(
-                        row.result_envelope_json
-                            .as_deref()
-                            .ok_or_else(|| invalid())?,
+                let destination = serde_json::from_str(&model_binding).map_err(|_| invalid())?;
+                let (page, terminal) = desk_diagnose_core::future::boxed(|| {
+                    desk_assistant_data_store::worker_report::read_report_page_on(
+                        &txn,
+                        &run,
+                        desk_assistant_data_store::worker_report::ReportPageRead {
+                            after_seq,
+                            limit,
+                            byte_limit: group.limits.max_context_bytes.min(64 * 1024),
+                            destination: &destination,
+                            now_ms: now.timestamp_millis(),
+                        },
+                        &mut labels,
                     )
-                    .map_err(|_| invalid())?;
-                    label.validate().map_err(|_| invalid())?;
-                    labels.push(label);
+                })
+                .await?;
+                if !page.acceptance_criteria.is_empty() {
+                    labels.extend(task_labels(&row)?);
+                }
+                if let Some(report_id) = terminal {
                     observation = Some(ObservedResult {
-                        task_id,
+                        task_id: request_id,
+                        report_id,
                         state_revision: run.state_revision,
                         tool_call_id: call.id.clone(),
                         result_message_id: result_message_id.into(),
@@ -527,15 +643,9 @@ impl SubAgentStore {
                         parent_control_revision: parent.control_revision,
                     });
                 }
-                serde_json::to_value(
-                    desk_diagnose_core::subagent::result::SubAgentModelResult::from_result(
-                        &result,
-                        include_task,
-                    ),
-                )
-                .map_err(|_| invalid())?
+                serde_json::to_value(page).map_err(|_| invalid())?
             }
-            Operation::Wait { task_ids, mode } => {
+            Operation::WaitReports(report_wait) => {
                 if now.timestamp_millis() >= group.limits.deadline_ms {
                     input_observation.permission(PermissionOutcome::PolicyRejected);
                 }
@@ -550,20 +660,40 @@ impl SubAgentStore {
                     }
                     return Err(invalid());
                 }
+                let destination = serde_json::from_str(&model_binding).map_err(|_| invalid())?;
                 let mut current = Vec::new();
                 let mut summaries = Vec::new();
-                for task_id in task_ids {
-                    let row = desk_diagnose_core::future::boxed(|| async {
-                        task_for_parent_observed_on(&txn, &parent, &task_id, input_observation)
-                            .await
+                let mut reports = Vec::new();
+                for cursor in &report_wait.requests {
+                    let row = desk_diagnose_core::future::boxed(|| {
+                        task_for_parent_observed_on(
+                            &txn,
+                            &parent,
+                            &cursor.request_id,
+                            input_observation,
+                        )
                     })
                     .await?;
                     let run = decode_run(&row)?;
                     labels.extend(task_labels(&row)?);
+                    if let Some(report) = desk_diagnose_core::future::boxed(|| {
+                        desk_assistant_data_store::worker_report::first_matching_report_on(
+                            &txn,
+                            &run,
+                            cursor.after_seq,
+                            &report_wait.kinds,
+                            &destination,
+                            now.timestamp_millis(),
+                        )
+                    })
+                    .await?
+                    {
+                        reports.push(report);
+                    }
                     summaries.push(run.summary());
                     current.push((
                         TaskFence {
-                            task_id,
+                            task_id: cursor.request_id.clone(),
                             input_revision: run.binding.input_revision,
                             control_revision: run.binding.control_revision,
                         },
@@ -592,14 +722,30 @@ impl SubAgentStore {
                     retry_after_ms: None,
                     parent_input_revision: parent.input_revision,
                     parent_control_revision: parent.control_revision,
-                    mode,
                     tasks: current.iter().map(|(fence, _)| fence.clone()).collect(),
+                    report_wait,
                 };
                 wait.validate().map_err(|_| invalid())?;
-                let ready = wait.evaluate(parent.input_revision, parent.control_revision, &current)
-                    == WaitEvaluation::Ready;
+                let ready = wait.evaluate_reports(
+                    parent.input_revision,
+                    parent.control_revision,
+                    &current,
+                    !reports.is_empty(),
+                ) == WaitEvaluation::Ready;
+                let references = if ready {
+                    reports
+                        .into_iter()
+                        .map(|stored| {
+                            labels.push(stored.envelope);
+                            stored.report.wake_reference()
+                        })
+                        .collect::<Vec<_>>()
+                } else {
+                    Vec::new()
+                };
                 let payload = serde_json::json!({"wait_id": wait.wait_id, "status": if ready {"ready"} else {"waiting"},
-                    "tasks": summaries, "rule": "Waiting releases model capacity; completion does not grant new device authority."});
+                    "tasks": summaries, "reports": references,
+                    "rule": "Waiting releases model capacity; completion does not grant new device authority."});
                 next.ready_subagent_wait = None;
                 next.ready_subagent_notification = None;
                 if !ready {
@@ -610,7 +756,7 @@ impl SubAgentStore {
         };
         if matches!(
             call.name.as_str(),
-            tools::STATUS | tools::RESULT | tools::WAIT
+            tools::STATUS | tools::REPORTS | tools::REPLY | tools::WAIT_REPORTS
         ) {
             input_observation.stage(Stage::Reference, StageOutcome::Passed);
         }

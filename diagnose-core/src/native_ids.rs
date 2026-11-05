@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 pub enum Kind {
     Task,
     ChildConversation,
+    Worker,
     BackgroundAction,
     ExecRequest,
     InteractiveExecRequest,
@@ -33,6 +34,7 @@ pub enum Kind {
     AssistantRetrievalQuery,
     AssistantPageCursor,
     AssistantMainRequest,
+    WorkbenchWorkConversation,
 }
 
 impl Kind {
@@ -40,6 +42,7 @@ impl Kind {
         match self {
             Self::Task => "t",
             Self::ChildConversation => "sa",
+            Self::Worker => "worker",
             Self::BackgroundAction => "j",
             Self::ExecRequest => "ex",
             Self::InteractiveExecRequest => "xp",
@@ -65,6 +68,7 @@ impl Kind {
             Self::AssistantRetrievalQuery => "query",
             Self::AssistantPageCursor => "page",
             Self::AssistantMainRequest => "request",
+            Self::WorkbenchWorkConversation => "work",
         }
     }
 }
@@ -99,6 +103,13 @@ pub fn is(kind: Kind, id: &str) -> bool {
 
 pub fn background_action(conversation: &str, turn: &str, call: &str) -> String {
     stable(Kind::BackgroundAction, &(conversation, turn, call))
+}
+
+pub fn workbench_work_conversation(actor: &str, workbench: &str, request: &str) -> String {
+    stable(
+        Kind::WorkbenchWorkConversation,
+        &(actor, workbench, request),
+    )
 }
 
 pub fn capability_completion(call: &str) -> String {

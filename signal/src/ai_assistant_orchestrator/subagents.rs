@@ -9,6 +9,7 @@ pub async fn resume_subagent_turn(
     gate: &crate::ai_assistant_gate::AiAssistantGate,
     runtime: RuntimeTurn,
 ) -> Result<LoopOutcome, AgentError> {
+    runtime.validate()?;
     let session = runtime.session();
     if !gate.is_enabled()
         || session.actor_id.parse::<i32>().ok()
@@ -34,7 +35,9 @@ pub async fn resume_subagent_turn(
             first
         }
     };
-    let target = if matches!(&runtime, RuntimeTurn::ParentCompletion { .. }) {
+    let target = if session.device_id.is_empty()
+        || matches!(&runtime, RuntimeTurn::ParentCompletion { .. })
+    {
         target.unwrap_or_default()
     } else {
         target.ok_or_else(|| transport_error("delegated device is unavailable or ambiguous"))?

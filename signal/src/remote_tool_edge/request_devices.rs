@@ -249,52 +249,59 @@ impl SignalAiAssistantTools {
             desk_assistant_data_store::device_roster::current_request_devices(&self.db, session)
                 .await
                 .map_err(|error| error.into_agent_error())?;
-        let eligible =
-            crate::agent_run_event_store::eligible_request_device_ids(&self.db, &selected).await?;
-        let connections = self.connections.read().await;
-        let now = chrono::Utc::now();
-        let readiness = crate::computer_use_readiness::global_computer_use_readiness_cache();
-        Ok(selected
-            .iter()
-            .filter(|id| eligible.contains(*id))
-            .filter_map(|id| {
-                let connection = connections
-                    .current_oss_server(id)
-                    .filter(|state| !state.lifecycle.is_retired());
-                if connection.is_some_and(|state| {
-                    !state
-                        .model
-                        .ai_assistant_settings
-                        .as_ref()
-                        .is_some_and(|settings| settings.enabled)
-                }) {
-                    return None;
-                }
-                let ready_capabilities = connection
-                    .and_then(|state| readiness.get_fresh(&state.model.connection_id, now))
-                    .into_iter()
-                    .flat_map(|current| current.readiness.capabilities)
-                    .filter(|item| item.supported && item.ready)
-                    .map(|item| item.capability)
-                    .collect();
-                Some(RequestDevice {
-                    target_ref: id.clone(),
-                    name: connection.and_then(|state| state.model.peer.display_name.clone()),
-                    platform: connection.and_then(|state| {
-                        use desk_signal_facade::model::os::OperationSystemEnum::*;
-                        match state.model.peer.operation_system {
-                            Windows => Some("Windows"),
-                            Linux => Some("Linux"),
-                            Mac => Some("macOS"),
-                            Android => Some("Android"),
-                            Ios => Some("iOS"),
-                            _ => None,
-                        }
-                    }),
-                    online: connection.is_some(),
-                    ready_capabilities,
-                })
-            })
-            .collect())
+        request_device_catalogue(&self.db, &self.connections, &selected).await
     }
+}
+
+pub(crate) async fn request_device_catalogue(
+    db: &DatabaseConnection,
+    connections: &SharedConnectionMap,
+    selected: &[String],
+) -> Result<Vec<RequestDevice>, AgentError> {
+    let eligible = crate::agent_run_event_store::eligible_request_device_ids(db, selected).await?;
+    let connections = connections.read().await;
+    let now = chrono::Utc::now();
+    let readiness = crate::computer_use_readiness::global_computer_use_readiness_cache();
+    Ok(selected
+        .iter()
+        .filter(|id| eligible.contains(*id))
+        .filter_map(|id| {
+            let connection = connections
+                .current_oss_server(id)
+                .filter(|state| !state.lifecycle.is_retired());
+            if connection.is_some_and(|state| {
+                !state
+                    .model
+                    .ai_assistant_settings
+                    .as_ref()
+                    .is_some_and(|settings| settings.enabled)
+            }) {
+                return None;
+            }
+            let ready_capabilities = connection
+                .and_then(|state| readiness.get_fresh(&state.model.connection_id, now))
+                .into_iter()
+                .flat_map(|current| current.readiness.capabilities)
+                .filter(|item| item.supported && item.ready)
+                .map(|item| item.capability)
+                .collect();
+            Some(RequestDevice {
+                target_ref: id.clone(),
+                name: connection.and_then(|state| state.model.peer.display_name.clone()),
+                platform: connection.and_then(|state| {
+                    use desk_signal_facade::model::os::OperationSystemEnum::*;
+                    match state.model.peer.operation_system {
+                        Windows => Some("Windows"),
+                        Linux => Some("Linux"),
+                        Mac => Some("macOS"),
+                        Android => Some("Android"),
+                        Ios => Some("iOS"),
+                        _ => None,
+                    }
+                }),
+                online: connection.is_some(),
+                ready_capabilities,
+            })
+        })
+        .collect())
 }

@@ -209,7 +209,7 @@ OSS saves AI gateways, search and global policies in the same `config.toml` as h
 | `[approval_gateway]` | `enabled`; its independent model settings are in `[approval_gateway.gateway]`, with the same fields as the main gateway. OSS has no price, currency or accounting settings |
 | `[web_search]` | `schema_version`, `provider` (`duck_duck_go`, `brave`, `tavily`), optional `api_key` |
 | `[context_management]` | `schema_version`, `strategy` (`window`, `checkpoint_summary`) |
-| `[subagent_policy.limits]` | `maxUnfinishedPerRoot`: maximum unfinished subagents for each root conversation |
+| `[subagent_policy.limits]` | `maxUnfinishedPerRoot` limits unfinished tasks per main conversation. `maxTaskDurationMinutes` sets the maximum duration for new tasks and accepts positive whole minutes, default 120 |
 | `[goal_budget_policy]` | `schemaVersion`, `deviceUnavailableMaxMs` (milliseconds, cannot be disabled); `[goal_budget_policy.limits]` contains `activeTimeMs`, `deadlineMs` (milliseconds), `modelTokens`, `modelCalls`, `toolCalls`, `slices`, `stalledSlices` |
 | `[schedule_budget_policy.maximum]` | `max_runs_per_utc_day`, `max_calls_per_run`, `max_model_tokens_per_run`, `max_runtime_seconds` (seconds) |
 | `[usage_retention]` | `turn_days`, `agent_session_days` (days) |

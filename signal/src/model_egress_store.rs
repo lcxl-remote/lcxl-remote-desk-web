@@ -52,10 +52,8 @@ impl SignalModelEgressStore {
             return Err(invalid());
         };
         let inputs = completed_inputs_on(db, row, output).await?;
-        caller
-            .model_controls
-            .as_ref()
-            .ok_or_else(invalid)?
+        desk_diagnose_core::model_controls::current_binding(session, caller)
+            .map_err(|_| invalid())?
             .validate_audit(call, &inputs)
             .map_err(|_| invalid())
     }

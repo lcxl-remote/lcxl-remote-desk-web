@@ -73,9 +73,12 @@ impl SignalMainRequestExecutor {
 
     async fn process(&self, row: agent_main_request::Model) -> Result<(), AgentError> {
         let owner = crate::control_authorizer::SINGLE_ACCOUNT_USER_ID;
-        if row.actor_id != owner.to_string() || !self.ready(&row).await? {
+        if row.actor_id != owner.to_string() {
             return Ok(());
         }
+        let Some(execution_conversation_id) = self.ready(&row).await? else {
+            return Ok(());
+        };
         let frozen = FrozenOwnerInput::decode(&row).map_err(|error| error.into_agent_error())?;
         let now_ms = chrono::Utc::now().timestamp_millis();
         let failure = if main_request::coordination::exhausted(&row) {
@@ -93,7 +96,14 @@ impl SignalMainRequestExecutor {
                     .await
                     .map_err(|error| error.into_agent_error())?;
             } else {
-                coordination::close_unclaimed(&self.db, &row, &frozen.device_id, reason).await?;
+                coordination::close_unclaimed(
+                    &self.db,
+                    &row,
+                    &execution_conversation_id,
+                    &frozen.device_id,
+                    reason,
+                )
+                .await?;
             }
             return Ok(());
         }
@@ -113,7 +123,7 @@ impl SignalMainRequestExecutor {
             target.model.connection_id.clone()
         };
         if row.input_revision.is_none()
-            && !row.coordinated
+            && !main_request::coordination::has_route(&row)
             && self.coordinate(&row, &frozen.device_id, owner).await?
         {
             return Ok(());
@@ -132,6 +142,7 @@ impl SignalMainRequestExecutor {
         let queue = Box::new(OwnerQueueTurn::Activate {
             request_id: request_id.clone(),
             conversation_id: row.conversation_id,
+            execution_conversation_id,
             destination: frozen.destination,
         });
         compose_turn_with_queue(
@@ -183,19 +194,57 @@ impl SignalMainRequestExecutor {
             .map_err(|error| error.into_agent_error())
     }
 
-    async fn ready(&self, row: &agent_main_request::Model) -> Result<bool, AgentError> {
+    async fn ready(&self, row: &agent_main_request::Model) -> Result<Option<String>, AgentError> {
         let snapshot = agent_session::Entity::find()
             .filter(agent_session::Column::ConversationId.eq(&row.conversation_id))
             .filter(agent_session::Column::ActorId.eq(&row.actor_id))
             .one(&self.db)
             .await
             .map_err(|_| transport_error("queued conversation unavailable"))?;
-        let Some(snapshot) = snapshot else {
-            return Ok(row.input_revision.is_none());
+        let Some(mut snapshot) = snapshot else {
+            return Ok(row
+                .input_revision
+                .is_none()
+                .then(|| row.conversation_id.clone()));
         };
-        let session = PersistedAgentSession::decode_boxed_json(&snapshot.state_json)
+        let mut session = PersistedAgentSession::decode_boxed_json(&snapshot.state_json)
             .map_err(|_| transport_error("queued conversation state unavailable"))?;
         let now = chrono::Utc::now();
+        let execution = main_request::workbench_execution(&session, row)
+            .map_err(|error| error.into_agent_error())?;
+        if let Some(execution) = &execution {
+            if session.main_stopped || session.has_live_main_coordination(now.timestamp_millis()) {
+                return Ok(None);
+            }
+            if let Some(active) =
+                agent_run_event_store::main_requests::active_work_on(&self.db, &session).await?
+            {
+                if active.lease_deadline.is_none_or(|deadline| deadline < now) {
+                    SignalAgentSessionStore::new(self.db.clone())
+                        .settle_lapsed_session(&active, now)
+                        .await?;
+                }
+                return Ok(None);
+            }
+            if row.input_revision.is_none() {
+                return Ok(Some(execution.clone()));
+            }
+            snapshot = agent_session::Entity::find()
+                .filter(agent_session::Column::ConversationId.eq(execution))
+                .filter(agent_session::Column::ActorId.eq(&row.actor_id))
+                .one(&self.db)
+                .await
+                .map_err(|_| transport_error("queued conversation unavailable"))?
+                .ok_or_else(|| transport_error("queued conversation state unavailable"))?;
+            session = PersistedAgentSession::decode_boxed_json(&snapshot.state_json)
+                .map_err(|_| transport_error("queued conversation state unavailable"))?;
+            if session.agent_role.workbench_id() != Some(row.conversation_id.as_str())
+                || session.agent_role.workbench_request_id() != Some(row.request_id.as_str())
+            {
+                return Err(transport_error("queued conversation state unavailable"));
+            }
+        }
+        let execution = execution.unwrap_or_else(|| row.conversation_id.clone());
         if row
             .input_revision
             .is_some_and(|revision| revision < session.input_revision as i64)
@@ -203,10 +252,10 @@ impl SignalMainRequestExecutor {
             main_request::retire_superseded(&self.db, row, now.timestamp_millis())
                 .await
                 .map_err(|error| error.into_agent_error())?;
-            return Ok(false);
+            return Ok(None);
         }
         if session.main_stopped || session.has_live_main_coordination(now.timestamp_millis()) {
-            return Ok(false);
+            return Ok(None);
         }
         if session.turn_state.is_active() {
             if snapshot
@@ -217,16 +266,19 @@ impl SignalMainRequestExecutor {
                     .settle_lapsed_session(&snapshot, now)
                     .await?;
             }
-            return Ok(false);
+            return Ok(None);
         }
         if let Some(revision) = row.input_revision {
-            return Ok(revision == session.input_revision as i64);
+            return Ok((revision == session.input_revision as i64).then_some(execution));
         }
         let txn = self
             .db
             .begin()
             .await
             .map_err(|_| transport_error("queued conversation unavailable"))?;
-        Ok(!agent_run_event_store::main_requests::slot_held(&txn, &session).await?)
+        Ok(
+            (!agent_run_event_store::main_requests::slot_held(&txn, &session).await?)
+                .then_some(execution),
+        )
     }
 }

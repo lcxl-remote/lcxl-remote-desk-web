@@ -18,6 +18,8 @@ pub(super) fn destination() -> DestinationIdentity {
 
 pub(super) fn spawn_request() -> SpawnRequest {
     SpawnRequest {
+        target_refs: Vec::new(),
+        worker_id: None,
         name: "Independent investigation".into(),
         task: "Investigate one symptom".into(),
         acceptance_criteria: vec!["Cite original evidence".into()],
@@ -96,9 +98,17 @@ pub(super) async fn runnable_parent_with_source(
     caller.data_envelope.as_mut().unwrap().sensitivity = sensitivity;
     parent.conversation.push(caller);
     let txn = db.begin().await.unwrap();
-    initialize_input_group_on(&txn, &mut parent, owner, None, None, now.timestamp_millis())
-        .await
-        .unwrap();
+    initialize_input_group_on(
+        &txn,
+        &mut parent,
+        owner,
+        None,
+        None,
+        now.timestamp_millis(),
+        Default::default(),
+    )
+    .await
+    .unwrap();
     parent.version = row.version + 1;
     session_row::Entity::update_many()
         .set(session_row::ActiveModel {
@@ -230,6 +240,382 @@ async fn spawn_replays_one_independent_child_and_capacity_is_root_scoped() {
 }
 
 #[tokio::test]
+async fn reused_worker_projects_only_retained_history_for_the_current_model() {
+    use crate::entity::agent_subagent_inbox as inbox;
+    use desk_diagnose_core::{session::TurnState, subagent::report::StoredReport};
+
+    let db = database().await;
+    let (mut parent, mut calls) =
+        runnable_parent_with_source(&db, destination(), Sensitivity::UserContent).await;
+    let store = SubAgentStore::new(db.clone());
+    let first = store
+        .spawn_for_turn(&parent, &calls[0], &spawn_request())
+        .await
+        .unwrap();
+    let original = load(&db, &first.task_id).await;
+
+    let mut next = spawn_request();
+    next.worker_id = Some(first.worker_id.clone());
+    next.task = "Check a distinct issue".into();
+    calls[1].arguments_json = serde_json::to_string(&next).unwrap();
+    parent.conversation.last_mut().unwrap().tool_calls[1].arguments_json =
+        calls[1].arguments_json.clone();
+    session_row::Entity::update_many()
+        .set(session_row::ActiveModel {
+            state_json: Set(parent.encode_json_for_storage().unwrap()),
+            ..Default::default()
+        })
+        .filter(session_row::Column::ConversationId.eq(&parent.conversation_id))
+        .exec(&db)
+        .await
+        .unwrap();
+    let second = store
+        .spawn_for_turn(&parent, &calls[1], &next)
+        .await
+        .unwrap();
+    let SubAgentClaimOutcome::Claimed(claimed) = store
+        .claim_child(
+            &claim_params(&original),
+            &first.task_id,
+            original.fence(),
+            &destination(),
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("original worker request");
+    };
+    let mut session = claimed.session;
+    let answer = super::lifecycle::report();
+    super::lifecycle::append_report(&db, &mut session, &answer).await;
+    session.finish_turn(TurnState::Idle, chrono::Utc::now().to_rfc3339());
+    store
+        .settle_answer_for_turn(&mut session, original.fence(), answer.summary.clone())
+        .await
+        .unwrap()
+        .unwrap();
+
+    let next_run = load(&db, &second.task_id).await;
+    let SubAgentClaimOutcome::Claimed(next_claim) = store
+        .claim_child(
+            &claim_params(&next_run),
+            &second.task_id,
+            next_run.fence(),
+            &destination(),
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("follow-up worker request");
+    };
+    let prior = inbox::Entity::find()
+        .filter(inbox::Column::TaskId.eq(&first.task_id))
+        .filter(inbox::Column::EventKind.eq("report_completed"))
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    let saved: StoredReport = serde_json::from_str(&prior.event_json).unwrap();
+    let projection = store
+        .child_projection_for_turn(&next_claim.session)
+        .await
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_str(&projection.text).unwrap();
+    let runtime = &value["runtime_delegation_state"];
+    assert_eq!(runtime["objective"], next.task);
+    assert_eq!(runtime["previous_worker_report"]["summary"], answer.summary);
+    assert_eq!(
+        runtime["previous_worker_report"]["request_id"],
+        first.task_id
+    );
+    assert!(
+        runtime["previous_worker_report"]
+            .get("receipt_refs")
+            .is_none()
+    );
+    assert!(
+        projection
+            .data_envelope
+            .unwrap()
+            .provenance
+            .source_envelope_ids
+            .contains(&saved.envelope.envelope_id)
+    );
+    assert!(
+        !next_claim
+            .session
+            .conversation
+            .iter()
+            .any(|message| message.text.contains(&answer.summary))
+    );
+
+    let different = store
+        .spawn_for_turn(&parent, &calls[2], &spawn_request())
+        .await
+        .unwrap();
+
+    let separate = load(&db, &different.task_id).await;
+    let SubAgentClaimOutcome::Claimed(unrelated) = store
+        .claim_child(
+            &claim_params(&separate),
+            &different.task_id,
+            separate.fence(),
+            &destination(),
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("independent worker");
+    };
+    assert!(
+        !store
+            .child_projection_for_turn(&unrelated.session)
+            .await
+            .unwrap()
+            .text
+            .contains(&answer.summary)
+    );
+
+    let mut other_destination = destination();
+    if let DestinationIdentity::Model {
+        profile_revision, ..
+    } = &mut other_destination
+    {
+        *profile_revision += 1;
+    }
+    assert!(
+        desk_assistant_data_store::worker_report::retained_terminal_report_on(
+            &db,
+            &load(&db, &first.task_id).await,
+            &other_destination,
+            chrono::Utc::now().timestamp_millis(),
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+    let expiry = chrono::Utc::now().timestamp_millis() - 1;
+    let mut expired = saved.clone();
+    expired.envelope.retention.expires_at_unix_ms = Some(expiry as u64);
+    let mut update: inbox::ActiveModel = prior.clone().into();
+    update.event_json = Set(serde_json::to_string(&expired).unwrap());
+    update.report_expires_at_ms = Set(Some(expiry));
+    update.update(&db).await.unwrap();
+    let projection = store
+        .child_projection_for_turn(&next_claim.session)
+        .await
+        .unwrap();
+    assert!(!projection.text.contains("previous_worker_report"));
+    assert!(projection.text.contains(&next.task));
+
+    let mut restore: inbox::ActiveModel = prior.into();
+    restore.event_json = Set(serde_json::to_string(&saved).unwrap());
+    restore.report_expires_at_ms = Set(None);
+    restore.update(&db).await.unwrap();
+    super::super::tombstone_on(
+        &db,
+        &first.child_session_id,
+        &parent.actor_id,
+        &parent.device_id,
+        chrono::Utc::now().timestamp_millis(),
+    )
+    .await
+    .unwrap();
+    let projection = store
+        .child_projection_for_turn(&next_claim.session)
+        .await
+        .unwrap();
+    assert!(!projection.text.contains("previous_worker_report"));
+}
+
+#[tokio::test]
+async fn a_worker_claims_requests_in_order_and_keeps_execution_bindings_separate() {
+    use desk_agent_protocol::ai_assistant::subagent::{
+        AiAssistantSubAgentControl, SubAgentControlAction,
+    };
+
+    let db = database().await;
+    let (mut parent, mut calls) = runnable_parent(&db).await;
+    let store = SubAgentStore::new(db.clone());
+    let first = store
+        .spawn_for_turn(&parent, &calls[0], &spawn_request())
+        .await
+        .unwrap();
+    let first_run = load(&db, &first.task_id).await;
+
+    let mut follow_up = spawn_request();
+    follow_up.worker_id = Some(first.worker_id.clone());
+    follow_up.task = "Verify a separate symptom".into();
+    calls[1].arguments_json = serde_json::to_string(&follow_up).unwrap();
+    let caller = parent.conversation.last_mut().unwrap();
+    caller.tool_calls[1].arguments_json = calls[1].arguments_json.clone();
+    session_row::Entity::update_many()
+        .set(session_row::ActiveModel {
+            state_json: Set(parent.encode_json_for_storage().unwrap()),
+            ..Default::default()
+        })
+        .filter(session_row::Column::ConversationId.eq(&parent.conversation_id))
+        .exec(&db)
+        .await
+        .unwrap();
+
+    let second = store
+        .spawn_for_turn(&parent, &calls[1], &follow_up)
+        .await
+        .unwrap();
+    assert_eq!(second.worker_id, first.worker_id);
+    assert_ne!(second.task_id, first.task_id);
+    assert_ne!(second.child_session_id, first.child_session_id);
+    assert_eq!(
+        store
+            .spawn_for_turn(&parent, &calls[1], &follow_up)
+            .await
+            .unwrap(),
+        second
+    );
+    use desk_assistant_data_store::worker_request::{in_scope, worker_page_on, worker_status_on};
+    let scope = || {
+        in_scope(
+            &parent.actor_id,
+            &parent.device_id,
+            &parent.conversation_id,
+            None,
+        )
+    };
+    let query_worker = || worker_status_on(&db, scope(), &first.worker_id);
+    let page = worker_page_on(&db, scope(), None, 1)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(page.items, vec![first.worker_id.clone()]);
+    assert_eq!(page.total, 1);
+    assert!(!page.has_more);
+    let queued = query_worker().await.unwrap().unwrap();
+    assert_eq!(queued.current_request.unwrap().request_id, first.task_id);
+    assert_eq!(queued.queued_requests.len(), 1);
+    assert_eq!(queued.queued_requests[0].request_id, second.task_id);
+    assert!(queued.latest_finished_request.is_none());
+    assert!(
+        worker_status_on(
+            &db,
+            in_scope(&parent.actor_id, &parent.device_id, "other-root", None),
+            &first.worker_id
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+    let second_run = load(&db, &second.task_id).await;
+    let params = claim_params(&second_run);
+    assert!(
+        store
+            .child_runtime_candidate(&second.task_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(matches!(
+        store
+            .claim_child(&params, &second.task_id, second_run.fence(), &destination())
+            .await
+            .unwrap(),
+        SubAgentClaimOutcome::Blocked(SubAgentClaimBlock::NotReady)
+    ));
+    assert!(matches!(
+        store
+            .claim_child(
+                &claim_params(&first_run),
+                &first.task_id,
+                first_run.fence(),
+                &destination()
+            )
+            .await
+            .unwrap(),
+        SubAgentClaimOutcome::Claimed(_)
+    ));
+
+    let running = query_worker().await.unwrap().unwrap();
+    assert_eq!(
+        running.current_request.unwrap().state,
+        SubAgentState::Running
+    );
+    assert_eq!(running.queued_requests[0].state, SubAgentState::Queued);
+    let txn = crate::db::begin_write(&db, session_row::Entity)
+        .await
+        .unwrap();
+    super::super::task_control::apply_task_control_on(
+        &txn,
+        &parent,
+        &AiAssistantSubAgentControl {
+            client_request_id: "cancel-first".into(),
+            task_id: first.task_id.clone(),
+            expected_input_revision: first.input_revision,
+            expected_control_revision: first.control_revision,
+            action: SubAgentControlAction::Cancel,
+        },
+        chrono::Utc::now().timestamp_millis(),
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+
+    assert_eq!(
+        load(&db, &first.task_id).await.state,
+        SubAgentState::Cancelled
+    );
+    let promoted = query_worker().await.unwrap().unwrap();
+    assert_eq!(promoted.current_request.unwrap().request_id, second.task_id);
+    assert!(promoted.queued_requests.is_empty());
+    let finished = promoted.latest_finished_request.unwrap();
+    assert_eq!(finished.request_id, first.task_id);
+    assert_eq!(finished.state, SubAgentState::Cancelled);
+
+    let other = store
+        .spawn_for_turn(&parent, &calls[2], &spawn_request())
+        .await
+        .unwrap();
+    let first_page = worker_page_on(&db, scope(), None, 1)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(first_page.has_more);
+    let second_page = worker_page_on(&db, scope(), first_page.next_cursor.as_deref(), 1)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!second_page.has_more);
+    assert_eq!(second_page.total, 2);
+    let mut workers = vec![first.worker_id.clone(), other.worker_id];
+    workers.sort();
+    assert_eq!([first_page.items, second_page.items].concat(), workers);
+
+    assert!(
+        store
+            .child_runtime_candidate(&second.task_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let SubAgentClaimOutcome::Claimed(claimed) = store
+        .claim_child(&params, &second.task_id, second_run.fence(), &destination())
+        .await
+        .unwrap()
+    else {
+        panic!("the next request can claim its own execution session");
+    };
+    assert_eq!(
+        claimed.session.agent_role.binding(),
+        Some(&second_run.binding)
+    );
+    assert!(claimed.session.permission_requests.is_empty());
+    assert!(claimed.session.execution_state.states().is_empty());
+    assert_eq!(
+        load(&db, &second.task_id).await.state,
+        SubAgentState::Running
+    );
+}
+
+#[tokio::test]
 async fn new_main_input_does_not_invalidate_an_existing_child_claim() {
     let db = database().await;
     let (mut parent, calls) = runnable_parent(&db).await;
@@ -355,6 +741,7 @@ async fn group_creation_and_parent_binding_roll_back_together() {
         None,
         None,
         chrono::Utc::now().timestamp_millis(),
+        Default::default(),
     )
     .await
     .unwrap();

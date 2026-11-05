@@ -419,7 +419,7 @@ mod tests {
             "",
             vec![ToolCallRef {
                 id: "tool".into(),
-                name: "read_subagent_result".into(),
+                name: "read_subagent_reports".into(),
                 arguments_json: "{}".into(),
             }],
         );

@@ -1,5 +1,6 @@
 //! Child planning and root result delivery release independent session leases.
 use super::*;
+use desk_diagnose_core::subagent::device_wait::DeviceWaitStatus;
 use std::time::Instant;
 
 impl SignalScheduleExecutor {
@@ -85,10 +86,25 @@ impl SignalScheduleExecutor {
                                     return;
                                 }
                                 if row.state == "waiting_resource" {
-                                    let available =
-                                        executor.delegated_device_available(&row.device_id).await;
+                                    let Ok(run) = crate::agent_subagent_store::decode_run(&row)
+                                    else {
+                                        return;
+                                    };
+                                    let device = run.resource_device_id();
+                                    let availability =
+                                        if let Some((target, _)) = run.waiting_target() {
+                                            executor
+                                                .selected_wait_device_status(&target.device_id)
+                                                .await
+                                        } else if let Some(device) = device
+                                            && executor.delegated_device_available(device).await
+                                        {
+                                            DeviceWaitStatus::Ready
+                                        } else {
+                                            DeviceWaitStatus::Waiting
+                                        };
                                     if !store
-                                        .retry_resource_task(&row.task_id, available)
+                                        .retry_resource_task(&row.task_id, device, availability)
                                         .await
                                         .unwrap_or(false)
                                     {
@@ -206,6 +222,30 @@ impl SignalScheduleExecutor {
         }
     }
 
+    async fn selected_wait_device_status(&self, device: &str) -> DeviceWaitStatus {
+        let connections = self.connections.read().await;
+        let Some(connection) = connections
+            .current_oss_server(device)
+            .filter(|connection| !connection.lifecycle.is_retired())
+        else {
+            return DeviceWaitStatus::Waiting;
+        };
+        let Some(settings) = connection.model.ai_assistant_settings.as_ref() else {
+            return DeviceWaitStatus::Waiting;
+        };
+        if !settings.enabled {
+            return DeviceWaitStatus::Unavailable;
+        }
+        let ready = crate::computer_use_readiness::global_computer_use_readiness_cache()
+            .get_fresh(&connection.model.connection_id, chrono::Utc::now())
+            .is_some();
+        if ready {
+            DeviceWaitStatus::Ready
+        } else {
+            DeviceWaitStatus::Waiting
+        }
+    }
+
     async fn delegated_device_available(&self, device: &str) -> bool {
         let connections = self.connections.read().await;
         let mut targets = connections.values().filter(|target| {
@@ -234,9 +274,10 @@ impl SignalScheduleExecutor {
         if matches!(
             &runtime,
             desk_diagnose_core::subagent::runtime::RuntimeTurn::Child { .. }
-        ) && !self
-            .delegated_device_available(&runtime.session().device_id)
-            .await
+        ) && !runtime.session().device_id.is_empty()
+            && !self
+                .delegated_device_available(&runtime.session().device_id)
+                .await
         {
             let _ = store
                 .defer_child_candidate(

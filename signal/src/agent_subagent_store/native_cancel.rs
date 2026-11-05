@@ -38,8 +38,13 @@ pub(crate) async fn cancel_native_actions_for_subject_on<
     let now = chrono::DateTime::from_timestamp_millis(now_ms).ok_or_else(|| invalid())?;
     let rows = work::Entity::find()
         .filter(work::Column::ConversationId.eq(conversation))
-        .filter(work::Column::ActorId.eq(actor))
-        .filter(work::Column::TargetDeviceId.eq(device))
+        .filter(work::Column::ActorId.eq(actor));
+    let rows = if device.is_empty() {
+        rows
+    } else {
+        rows.filter(work::Column::TargetDeviceId.eq(device))
+    };
+    let rows = rows
         .filter(
             sea_orm::Condition::any()
                 .add(work::Column::ResultJson.is_null())
@@ -72,7 +77,7 @@ pub(crate) async fn cancel_native_actions_for_subject_on<
             if original.computer_binding_json.is_some() {
                 let key = format!("owner-stop:{operation}:{}", row.id);
                 crate::capability_grant_store::SignalCapabilityGrantStore::request_computer_execution_cancel_on(
-                    txn, &row.action_request_id, conversation, actor, device,
+                    txn, &row.action_request_id, conversation, actor, &row.target_device_id,
                     &key, "Owner stopped this task").await?;
                 continue;
             }

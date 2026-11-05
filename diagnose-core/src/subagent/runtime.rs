@@ -1,6 +1,5 @@
 //! Read candidates prepare the ordinary runtime; only a host transaction claims it.
 use super::{
-    DelegationSource,
     creation::{CreationEnvelope, TaskCreationEnvelope},
     state::SubAgentRun,
 };
@@ -44,10 +43,14 @@ impl RuntimeTurn {
         }
     }
     pub fn read_context(&self) -> Option<ReadContextSelection> {
-        if matches!(self, Self::ParentCompletion { .. }) {
-            return None;
+        match self {
+            Self::Child { .. } => self.source().child_read_context(),
+            Self::ParentCompletion { source, session } if session.device_id.is_empty() => source
+                .original_read_context
+                .clone()
+                .or_else(|| source.child_read_context()),
+            Self::ParentCompletion { .. } => None,
         }
-        self.source().child_read_context()
     }
     /// Bind only the child's own revision and narrowed immutable read selection.
     pub fn read_context_binding(&self) -> Option<(u64, ReadContextSelection)> {
@@ -79,9 +82,10 @@ impl RuntimeTurn {
                     || session.conversation_id != source.root_conversation_id
                     || session.input_revision != source.parent_input_revision
                     || session.control_revision != source.parent_control_revision
-                    || session.ready_subagent_wait.is_none()
+                    || !session.has_ready_subagent_completion()
                     || session.subagent_wait.is_some()
-                    || !matches!(source.source, DelegationSource::UserInput { .. })
+                    || source.source.owner_input_revision().is_none()
+                    || source.source.workbench_id() != session.agent_role.workbench_id()
                 {
                     return Err(super::invalid("root interpretation source changed"));
                 }

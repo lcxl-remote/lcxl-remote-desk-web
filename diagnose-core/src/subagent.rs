@@ -7,6 +7,7 @@
 pub mod budget;
 pub mod control;
 pub mod creation;
+pub mod device_wait;
 pub mod facts;
 pub mod group;
 pub(crate) mod model_ids;
@@ -15,7 +16,6 @@ pub mod policy;
 pub mod projection;
 pub mod report;
 pub mod reservation;
-pub mod result;
 pub mod role;
 pub mod runtime;
 pub mod seam;

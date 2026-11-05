@@ -40,13 +40,29 @@ macro_rules! catalog {
 }
 
 catalog!(
-    ("spawn_subagent", "SubAgentSpawnReceipt", Inline),
+    ("send_subagent_request", "SubAgentSpawnReceipt", Inline),
     ("list_subagents", "AiAssistantSubAgentPage", Inline),
     ("get_subagent_status", "AiAssistantSubAgentSummary", Inline),
-    ("read_subagent_result", "SubAgentModelResult", Inline),
-    ("wait_subagents", "SubAgentWaitReceipt", Inline),
-    ("cancel_subagent", "SubAgentControlReceipt", Inline),
-    ("send_subagent_message", "SubAgentControlReceipt", Inline),
+    ("read_subagent_reports", "WorkerReportPage", Inline),
+    (
+        "acknowledge_subagent_reports",
+        "WorkerReportAcknowledgement",
+        Inline
+    ),
+    ("report_subagent_status", "WorkerReportReceipt", Inline),
+    (
+        "wait_for_subagent_device",
+        "WorkerDeviceWaitReceipt",
+        Inline
+    ),
+    (
+        "reply_subagent_request",
+        "AiAssistantSubAgentSummary",
+        Inline
+    ),
+    ("wait_subagent_reports", "SubAgentWaitReceipt", Inline),
+    ("cancel_subagent_request", "SubAgentControlReceipt", Inline),
+    ("adjust_subagent_request", "SubAgentControlReceipt", Inline),
     ("update_task_status", "TaskStatusUpdateReceipt", Inline),
     ("control_goal", "GoalControlReceipt", Inline),
     ("request_goal", "GoalRequestReceipt", Inline),
@@ -392,7 +408,7 @@ pub fn for_tool(name: &str) -> Option<&'static OutputContract> {
 
 pub fn markdown() -> String {
     let mut document = String::from(
-        "# AI Assistant output contracts\n\nGenerated from `diagnose-core/src/output_contracts.rs`. Catalog version describes this mapping, not a payload schema field. All errors may instead be returned as safe text; an externalized attachment must be read before interpreting its business payload.\n\n`read_subagent_result` returns `SubAgentModelResult`: the full answer, frozen acceptance criteria, task identity, and nonempty runtime facts or references. It omits UI metadata and empty optional fields. `include_task=true` adds the original task instructions; owner views keep the full stored result.\n\nModel results retain business text, outcomes, times, coverage and usable references. Internal source locators, verification hashes, idempotency keys and control generations stay in the original stored result. History uses conversation aliases such as `cv1`; source IDs remain readable, and memory update/forget keeps the memory revision. Live document references and JSON attachment pages use the same view as inline results. A successful tool return does not by itself prove that an action completed or was verified.\n\n| Tool | Business output type | Catalog version | Possible delivery |\n|---|---|---:|---|\n",
+        "# AI Assistant output contracts\n\nGenerated from `diagnose-core/src/output_contracts.rs`. Catalog version describes this mapping, not a payload schema field. All errors may instead be returned as safe text; an externalized attachment must be read before interpreting its business payload.\n\nThe `read_subagent_reports` tool returns a `WorkerReportPage` with reports in sequence order, acceptance criteria when reports are present, a next cursor, and an indication of further pages. Report text and available evidence and receipt references stay with the individual report.\n\nModel results retain business text, outcomes, times, coverage and usable references. Internal source locators, verification hashes, idempotency keys and control generations stay in the original stored result. History uses conversation aliases such as `cv1`; source IDs remain readable, and memory update/forget keeps the memory revision. Live document references and JSON attachment pages use the same view as inline results. A successful tool return does not by itself prove that an action completed or was verified.\n\n| Tool | Business output type | Catalog version | Possible delivery |\n|---|---|---:|---|\n",
     );
     for contract in ALL {
         document.push_str(&format!(
@@ -409,7 +425,7 @@ pub fn markdown() -> String {
 #[cfg(test)]
 pub fn markdown_zh() -> String {
     let mut document = String::from(
-        "# AI 助手出参契约目录\n\n由 `diagnose-core/src/output_contracts.rs` 生成。目录版本是映射版本，并不表示每个业务对象都有 `schema_version` 字段。错误可能以安全文本返回；结果外置时须先读取附件，再判断业务内容。\n\n`read_subagent_result` 返回 `SubAgentModelResult`：完整答复、冻结完成标准、任务身份，以及非空运行事实或引用；省略 UI 元数据和空可选字段。`include_task=true` 补回冻结的原任务说明；用户界面仍保留完整存储结果。\n\n模型结果保留业务正文、结果、时间、覆盖范围和可用引用。内部来源定位、校验摘要、幂等键和控制代次保存在原始结果中。历史会话使用 `cv1` 等别名；来源 ID 可继续读取，更新和遗忘记忆仍保留记忆版本。实时文档引用、JSON 附件分页与内联结果使用相同视图。工具正常返回本身不代表动作已完成或验证成功。\n\n| 工具 | 业务出参类型 | 目录版本 | 可能的投递形态 |\n|---|---|---:|---|\n",
+        "# AI 助手出参契约目录\n\n由 `diagnose-core/src/output_contracts.rs` 生成。目录版本是映射版本，并不表示每个业务对象都有 `schema_version` 字段。错误可能以安全文本返回；结果外置时须先读取附件，再判断业务内容。\n\n`read_subagent_reports` 返回 `WorkerReportPage`。报告按序号排列，有报告时附验收标准，并给出下一页游标及是否还有后续页。正文和可用的证据、回执引用随每条报告返回。\n\n模型结果保留业务正文、结果、时间、覆盖范围和可用引用。内部来源定位、校验摘要、幂等键和控制代次保存在原始结果中。历史会话使用 `cv1` 等别名；来源 ID 可继续读取，更新和遗忘记忆仍保留记忆版本。实时文档引用、JSON 附件分页与内联结果使用相同视图。工具正常返回本身不代表动作已完成或验证成功。\n\n| 工具 | 业务出参类型 | 目录版本 | 可能的投递形态 |\n|---|---|---:|---|\n",
     );
     for contract in ALL {
         document.push_str(&format!(
@@ -444,6 +460,9 @@ mod tests {
                 tool.spec.name
             );
         }
+        for tool in crate::subagent::tools::registry() {
+            assert!(for_tool(tool.name()).is_some(), "missing {}", tool.name());
+        }
         for builtin in [
             "update_task_status",
             "control_goal",
@@ -466,7 +485,7 @@ mod tests {
         ] {
             assert!(for_tool(builtin).is_some());
         }
-        assert_eq!(ALL.len(), 88);
+        assert_eq!(ALL.len(), 92);
     }
 
     #[test]

@@ -13,6 +13,7 @@ async fn configure(db: &DatabaseConnection, unfinished: u32) {
             expected_revision: current.revision,
             limits: SubAgentLimits {
                 max_unfinished_per_root: unfinished,
+                ..current.limits
             },
         },
     )
@@ -52,6 +53,62 @@ async fn parent_with_calls(
         .await
         .unwrap();
     (parent, calls)
+}
+
+#[tokio::test]
+async fn task_duration_is_frozen_per_request_and_limited_by_the_source_group() {
+    let db = database().await;
+    let (parent, calls) = parent_with_calls(&db, 3).await;
+    let group_row = group_row::Entity::find().one(&db).await.unwrap().unwrap();
+    let original_group = decode_group(&group_row).unwrap();
+    assert_eq!(original_group.max_task_duration_minutes, 120);
+    assert_eq!(
+        original_group.limits.deadline_ms,
+        group_row.created_at + 120 * 60_000
+    );
+    let store = SubAgentStore::new(db.clone());
+    let first = store
+        .spawn_for_turn(&parent, &calls[0], &super::creation::spawn_request())
+        .await
+        .unwrap();
+    let first_deadline = load(&db, &first.task_id).await.binding.deadline_ms;
+    assert_eq!(first_deadline, original_group.limits.deadline_ms);
+
+    let current = crate::subagent_policy::read(&db).await.unwrap();
+    crate::subagent_policy::update(
+        &db,
+        &UpdateSubAgentPolicy {
+            expected_revision: current.revision,
+            limits: SubAgentLimits {
+                max_task_duration_minutes: 5,
+                ..current.limits
+            },
+        },
+    )
+    .await
+    .unwrap();
+    let second = store
+        .spawn_for_turn(&parent, &calls[1], &super::creation::spawn_request())
+        .await
+        .unwrap();
+    let persisted = run_row::Entity::find()
+        .filter(run_row::Column::TaskId.eq(&second.task_id))
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(persisted.deadline_ms, persisted.created_at + 5 * 60_000);
+    assert_eq!(
+        load(&db, &first.task_id).await.binding.deadline_ms,
+        first_deadline
+    );
+    assert_eq!(
+        decode_group(&group_row::Entity::find().one(&db).await.unwrap().unwrap())
+            .unwrap()
+            .limits
+            .deadline_ms,
+        original_group.limits.deadline_ms
+    );
 }
 
 #[tokio::test]

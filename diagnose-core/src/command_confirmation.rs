@@ -462,6 +462,14 @@ impl CommandConfirmation {
         canonical: &str,
     ) -> Result<(&'a str, &'a Self), AgentError> {
         use crate::dynamic_run::PermissionRequestState;
+        if !session
+            .agent_role
+            .allows_effect(crate::registry::ToolEffect::Mutating)
+        {
+            return Err(denied(
+                "the coordination session cannot execute device commands",
+            ));
+        }
         if !session.admits_assistant_device(target_device_id) {
             return Err(denied("command target is outside the admitted request"));
         }

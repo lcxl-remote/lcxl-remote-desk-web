@@ -520,6 +520,37 @@ pub struct AssistantInputTarget {
     pub member_generation: Option<u64>,
 }
 
+impl AssistantInputTarget {
+    pub(crate) fn validate_all(targets: &[Self]) -> Result<(), &'static str> {
+        use desk_agent_protocol::ai_assistant::validate_target_refs;
+        validate_target_refs(targets.iter().map(|target| target.reference.as_str()))?;
+        validate_target_refs(targets.iter().map(|target| target.device_id.as_str()))?;
+        let versioned = targets
+            .first()
+            .is_some_and(|target| target.member_generation.is_some());
+        if targets.iter().any(|target| match target.member_generation {
+            Some(generation) => !versioned || generation == 0 || generation > i64::MAX as u64,
+            None => versioned,
+        }) {
+            return Err("invalid assistant target membership revision");
+        }
+        Ok(())
+    }
+
+    pub(crate) fn matches_request(
+        targets: &[Self],
+        session: &crate::session::PersistedAgentSession,
+    ) -> bool {
+        session
+            .assistant_request_devices()
+            .is_some_and(|devices| targets.iter().map(|target| &target.device_id).eq(devices))
+            && targets.iter().all(|target| {
+                target.member_generation
+                    == session.assistant_request_device_generation(&target.device_id)
+            })
+    }
+}
+
 /// Append-only evidence for a model-maintained task-status projection update.
 /// The projection remains advisory UX state and carries no grant or execution
 /// authority.
@@ -569,16 +600,7 @@ impl UserFollowupEvent {
             && self.event.run_id == session.conversation_id
             && self.actor_id == session.actor_id
             && self.event.input_revision == session.input_revision
-            && session.assistant_request_devices().is_some_and(|devices| {
-                self.targets
-                    .iter()
-                    .map(|target| &target.device_id)
-                    .eq(devices)
-            })
-            && self.targets.iter().all(|target| {
-                target.member_generation
-                    == session.assistant_request_device_generation(&target.device_id)
-            })
+            && AssistantInputTarget::matches_request(&self.targets, session)
     }
 
     pub fn validate(&self) -> Result<(), DynamicRunContractError> {
@@ -596,27 +618,8 @@ impl UserFollowupEvent {
         }
         validate_id("actor_id", &self.actor_id)?;
         validate_id("message_id", &self.message_id)?;
-        use desk_agent_protocol::ai_assistant::validate_target_refs;
-        validate_target_refs(self.targets.iter().map(|target| target.reference.as_str()))
-            .and_then(|_| {
-                validate_target_refs(self.targets.iter().map(|target| target.device_id.as_str()))
-            })
+        AssistantInputTarget::validate_all(&self.targets)
             .map_err(|message| DynamicRunContractError::InvalidEnvelope(message.into()))?;
-        if self.targets.iter().any(|target| {
-            target
-                .member_generation
-                .is_some_and(|generation| generation == 0 || generation > i64::MAX as u64)
-        }) || (self
-            .targets
-            .iter()
-            .any(|target| target.member_generation.is_some())
-            && self
-                .targets
-                .iter()
-                .any(|target| target.member_generation.is_none()))
-        {
-            return Err(DynamicRunContractError::InvalidRevision);
-        }
         self.message_envelope
             .validate()
             .map_err(|error| DynamicRunContractError::InvalidEnvelope(error.to_string()))?;

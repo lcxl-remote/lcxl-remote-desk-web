@@ -94,12 +94,14 @@ struct ChildSessions {
     budget: super::delegation_budget::BudgetSessions,
     run: RefCell<SubAgentRun>,
     paused: Cell<bool>,
+    finalizations: Cell<usize>,
 }
 
 impl ChildSessions {
     fn prepared() -> (Self, PersistedAgentSession) {
         let now = "2026-06-20T00:00:00Z";
         let binding = DelegatedTaskBinding {
+            targets: Vec::new(),
             root_conversation_id: "root".into(),
             group_id: "group".into(),
             task_id: "task".into(),
@@ -131,8 +133,14 @@ impl ChildSessions {
         parent.surface = crate::session::AgentSessionSurface::AiAssistant;
         parent.input_revision = 1;
         parent.control_revision = 1;
-        let source =
-            CreationEnvelope::capture(&parent, binding.source.clone(), owner, None).unwrap();
+        let source = CreationEnvelope::capture(
+            &parent,
+            binding.source.clone(),
+            owner,
+            None,
+            Default::default(),
+        )
+        .unwrap();
         child.bind_delegated_owner_requirement(&source).unwrap();
         child
             .conversation
@@ -142,6 +150,7 @@ impl ChildSessions {
             .unwrap();
         child.adopt_trigger(TriggerOrigin::DelegatedTask, "child-turn");
         let mut run = SubAgentRun {
+            worker_id: "worker-test".into(),
             child_conversation_id: "child".into(),
             actor_id: "actor".into(),
             device_id: "device".into(),
@@ -151,6 +160,7 @@ impl ChildSessions {
             state_revision: 1,
             source_paused: false,
             dependencies: Vec::new(),
+            pending_question_id: None,
             partial_report: None,
             terminal_report: None,
             failure_reason: None,
@@ -166,6 +176,7 @@ impl ChildSessions {
                 budget,
                 run: RefCell::new(run),
                 paused: Cell::new(false),
+                finalizations: Cell::new(0),
             },
             child,
         )
@@ -230,13 +241,41 @@ impl SubAgentSeam for ChildSessions {
     }
     async fn execute(
         &self,
-        _: &mut PersistedAgentSession,
-        _: &ToolCall,
-        _: Operation,
-        _: &str,
+        session: &mut PersistedAgentSession,
+        call: &ToolCall,
+        operation: Operation,
+        result_message_id: &str,
         _: &crate::model_observability::tool::ToolObservation,
     ) -> Result<ToolReceipt, AgentError> {
-        panic!("a child cannot reach delegation tools");
+        let Operation::Report(content) = operation else {
+            panic!("a child cannot reach main delegation tools");
+        };
+        assert!(content.kind.is_terminal());
+        let facts = CompletionFacts::default();
+        let report = crate::subagent::report::from_terminal_submission(&content, &facts)?;
+        {
+            let mut run = self.run.borrow_mut();
+            let fence = run.fence();
+            run.settle_report(fence, report, &facts, "2026-06-20T00:00:01Z")
+                .map_err(crate::subagent::invalid)?;
+        }
+        let payload = serde_json::json!({"report_id":"terminal", "seq":1});
+        let text = payload.to_string();
+        let mut receipt = ChatMessage::tool_result(result_message_id, &call.id, &text);
+        receipt.data_envelope = crate::model_message_labels::internal_tool_result_envelope(
+            session.conversation[0].data_envelope.as_ref(),
+            &call.id,
+            &text,
+            &call.name,
+        )?;
+        receipt.tool_ok = Some(true);
+        session.conversation.push(receipt);
+        session.finish_turn(TurnState::Idle, "2026-06-20T00:00:01Z");
+        self.save(session).await?;
+        Ok(ToolReceipt {
+            payload,
+            result_message_id: result_message_id.into(),
+        })
     }
     async fn required_children_complete(
         &self,
@@ -273,6 +312,7 @@ impl SubAgentSeam for ChildSessions {
         expected: PlanningFence,
         answer: String,
     ) -> Result<CompletionDisposition, AgentError> {
+        self.finalizations.set(self.finalizations.get() + 1);
         let report = crate::subagent::report::from_answer(
             &answer,
             !self.run.borrow().dependencies.is_empty(),
@@ -297,6 +337,7 @@ impl SubAgentSeam for ChildSessions {
         failure: Option<&str>,
         _: bool,
     ) -> Result<(), AgentError> {
+        self.finalizations.set(self.finalizations.get() + 1);
         if let Some(reason) = failure {
             self.run
                 .borrow_mut()
@@ -596,4 +637,48 @@ async fn child_cannot_reach_delegation_goal_or_schedule_creation_even_when_model
         );
         assert!(saved.as_ref().unwrap().agent_role.binding().is_some());
     }
+}
+
+#[tokio::test]
+async fn committed_terminal_report_exits_without_another_model_call_or_save() {
+    let (sessions, child) = ChildSessions::prepared();
+    let script = ScriptModel {
+        turns: RefCell::new(
+            [tool_use_args(
+                "worker-final",
+                crate::subagent::tools::REPORT,
+                r#"{"kind":"completed","summary":"The investigation is complete."}"#,
+            )]
+            .into(),
+        ),
+        requests: Rc::new(RefCell::new(Vec::new())),
+    };
+    let model = AuditedChildModel(&script);
+    let tools = RecordingTools {
+        calls: Rc::new(RefCell::new(Vec::new())),
+        reply: "unused".into(),
+    };
+    let clock = || "2026-06-20T00:00:01Z".into();
+    let heartbeat = HealthyChildLease;
+    let registry = crate::subagent::tools::registry();
+    let mut runtime = deps(&sessions.budget.sessions, &model, &tools, &registry, &clock);
+    runtime.session_seam = &sessions;
+    runtime.heartbeat = Some(&heartbeat);
+    let outcome = run_preclaimed_subagent_turn(&runtime, child, &mut NullTurnSink)
+        .await
+        .unwrap();
+    assert_eq!(outcome, LoopOutcome::SubAgentYielded);
+    assert_eq!(sessions.finalizations.get(), 0);
+    assert_eq!(script.requests.borrow().len(), 1);
+    assert_eq!(
+        sessions.run.borrow().state,
+        crate::subagent::SubAgentState::Completed
+    );
+    let stored = sessions.budget.sessions.inner.borrow();
+    let stored = stored.as_ref().unwrap();
+    assert_eq!(stored.turn_state, TurnState::Idle);
+    assert!(stored.unclosed_tool_call_ids().is_empty());
+    assert!(stored.conversation.iter().any(|message| {
+        message.tool_call_id.as_deref() == Some("worker-final") && message.tool_ok == Some(true)
+    }));
 }

@@ -33,8 +33,11 @@ fn native_tasks_do_not_allocate_or_resolve_aliases() {
     );
     for (tool, args) in [
         (tools::STATUS, json!({"task_id":id})),
-        (tools::RESULT, json!({"task_id":id})),
-        (tools::WAIT, json!({"task_ids":[id],"mode":"all"})),
+        (tools::REPORTS, json!({"request_id":id})),
+        (
+            tools::WAIT_REPORTS,
+            json!({"requests":[{"request_id":id,"after_seq":0}],"kinds":["completed"]}),
+        ),
     ] {
         let call = ToolCall {
             id: "read".into(),
@@ -53,9 +56,10 @@ fn native_tasks_do_not_allocate_or_resolve_aliases() {
 #[test]
 fn internal_metadata_is_omitted_without_touching_deliverables() {
     let id = native_ids::stable(Kind::Task, &"creation");
+    let worker_id = native_ids::stable(Kind::Worker, &"creation");
     let mut value = json!({
         "wait_id":"internal-wait", "tasks":[{
-            "task_id":id,"state":"completed","child_session_id":"child","group_id":"group",
+            "task_id":id,"worker_id":worker_id,"state":"completed","child_session_id":"child","group_id":"group",
             "answer":"Keep child and group verbatim", "note":{"task_id":"business-id"},
             "receipt_refs":["original-proof"]
         }]
@@ -65,6 +69,7 @@ fn internal_metadata_is_omitted_without_touching_deliverables() {
     assert!(value["tasks"][0].get("child_session_id").is_none());
     assert!(value["tasks"][0].get("group_id").is_none());
     assert_eq!(value["tasks"][0]["task_id"], id);
+    assert_eq!(value["tasks"][0]["worker_id"], worker_id);
     assert_eq!(value["tasks"][0]["note"]["task_id"], "business-id");
     assert_eq!(value["tasks"][0]["answer"], "Keep child and group verbatim");
     assert_eq!(value["tasks"][0]["receipt_refs"], json!(["original-proof"]));
@@ -73,19 +78,19 @@ fn internal_metadata_is_omitted_without_touching_deliverables() {
 #[test]
 fn native_caller_comparison_keeps_control_inputs_exact() {
     let id = native_ids::stable(Kind::Task, &"creation");
-    let original = json!({"task_id":id}).to_string();
+    let original = json!({"request_id":id}).to_string();
     assert!(tools::same_arguments(
-        tools::RESULT,
+        tools::REPORTS,
         &original,
-        &json!({"task_id":id,"include_task":false}).to_string()
+        &json!({"request_id":id,"after_seq":0}).to_string()
     ));
     for changed in [
-        json!({"task_id":"other","include_task":false}),
-        json!({"task_id":id,"include_task":true}),
-        json!({"task_id":id,"include_task":false,"unknown":1}),
+        json!({"request_id":"other","after_seq":0}),
+        json!({"request_id":id,"after_seq":1}),
+        json!({"request_id":id,"after_seq":0,"unknown":1}),
     ] {
         assert!(!tools::same_arguments(
-            tools::RESULT,
+            tools::REPORTS,
             &original,
             &changed.to_string()
         ));

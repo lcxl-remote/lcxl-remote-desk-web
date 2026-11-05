@@ -177,10 +177,7 @@ pub(crate) async fn awaiting_children_fixture() -> (
     PersistedAgentSession,
     String,
 ) {
-    use desk_diagnose_core::subagent::{
-        tools::{self, Operation},
-        wait::WaitMode,
-    };
+    use desk_diagnose_core::subagent::tools::{self, Operation};
     let (db, schedule, store, mut parent, _) = published_parent().await;
     let request = super::creation::spawn_request();
     let call = super::main_tools::committed_call(
@@ -206,20 +203,13 @@ pub(crate) async fn awaiting_children_fixture() -> (
         &db,
         &mut parent,
         "scheduled-wait",
-        tools::WAIT,
-        serde_json::json!({"task_ids": [&task_id], "mode": "all_terminal"}),
+        tools::WAIT_REPORTS,
+        serde_json::json!({"requests":[{"request_id":&task_id,"after_seq":0}],"kinds":["completed","failed"],"mode":"all_terminal"}),
     )
     .await;
+    let operation = tools::parse(&parent, &call).unwrap();
     store
-        .execute_main_tool(
-            &mut parent,
-            &call,
-            Operation::Wait {
-                task_ids: vec![task_id.clone()],
-                mode: WaitMode::AllTerminal,
-            },
-            "scheduled-wait-result",
-        )
+        .execute_main_tool(&mut parent, &call, operation, "scheduled-wait-result")
         .await
         .unwrap();
     let wait_id = parent.subagent_wait.as_ref().unwrap().wait_id.clone();
@@ -494,6 +484,32 @@ async fn source_initialization_is_fenced_and_keeps_one_original_group() {
     assert_eq!(*same, parent);
     assert_eq!(creation, source);
     assert_eq!(group_row::Entity::find().count(&db).await.unwrap(), 1);
+
+    let row = group_row::Entity::find().one(&db).await.unwrap().unwrap();
+    let original_group = decode_group(&row).unwrap();
+    let policy = crate::subagent_policy::read(&db).await.unwrap();
+    let mut limits = policy.limits;
+    limits.max_task_duration_minutes = 1;
+    crate::subagent_policy::update(
+        &db,
+        &desk_agent_protocol::ai_assistant::subagent_policy::UpdateSubAgentPolicy {
+            expected_revision: policy.revision,
+            limits,
+        },
+    )
+    .await
+    .unwrap();
+    let txn = db.begin().await.unwrap();
+    assert!(
+        super::super::scheduled_source::current_scheduled_source_on(&txn, &row)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    txn.commit().await.unwrap();
+    let row_after = group_row::Entity::find().one(&db).await.unwrap().unwrap();
+    assert_eq!(decode_group(&row_after).unwrap(), original_group);
+
     let mut changed = super::creation::destination();
     if let desk_agent_protocol::data_lineage::DestinationIdentity::Model { model_id, .. } =
         &mut changed

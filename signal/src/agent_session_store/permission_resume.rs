@@ -482,6 +482,23 @@ impl SignalAgentSessionStore {
         .map_err(ClaimError::Backend)?;
         self.reconcile_context_selection(&mut session)
             .map_err(ClaimError::Backend)?;
+        if let (Some(root), Some(request)) = (
+            session.agent_role.workbench_id(),
+            session.agent_role.workbench_request_id(),
+        ) && !desk_diagnose_core::future::boxed(|| {
+            crate::agent_run_event_store::main_requests::claim_workbench_on(
+                &txn,
+                &session.actor_id,
+                root,
+                request,
+                now.timestamp_millis(),
+            )
+        })
+        .await
+        .map_err(ClaimError::Backend)?
+        {
+            return Err(ClaimError::Busy);
+        }
         session
             .begin_turn(
                 params.turn_id.clone(),

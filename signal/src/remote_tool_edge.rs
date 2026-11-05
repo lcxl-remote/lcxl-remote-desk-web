@@ -10,6 +10,7 @@ pub(crate) mod directory;
 pub(crate) mod document_preview;
 mod object_read;
 mod request_devices;
+pub(crate) use request_devices::request_device_catalogue;
 
 use std::collections::HashMap;
 use std::pin::Pin;

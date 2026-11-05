@@ -160,6 +160,7 @@ async fn file_updates_and_host_updates_preserve_the_complete_profile_across_data
             config.context_management.strategy =
                 desk_diagnose_core::model_context::ContextManagementStrategy::Window;
             config.subagent_policy.limits.max_unfinished_per_root = 8;
+            config.subagent_policy.limits.max_task_duration_minutes = 45;
             config.goal_budget_policy.limits.model_tokens = None;
             config.schedule_budget_policy.maximum.max_calls_per_run = 12;
             config.usage_retention.turn_days = 7;
@@ -204,6 +205,7 @@ async fn file_updates_and_host_updates_preserve_the_complete_profile_across_data
         desk_diagnose_core::model_context::ContextManagementStrategy::Window
     );
     assert_eq!(global.subagent_policy.limits.max_unfinished_per_root, 8);
+    assert_eq!(global.subagent_policy.limits.max_task_duration_minutes, 45);
     assert!(global.goal_budget_policy.limits.model_tokens.is_none());
     assert_eq!(global.schedule_budget_policy.maximum.max_calls_per_run, 12);
     assert_eq!(global.usage_retention.turn_days, 7);

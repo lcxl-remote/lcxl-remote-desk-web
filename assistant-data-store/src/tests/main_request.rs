@@ -26,7 +26,9 @@ fn input(message_id: &str, text: &str) -> FrozenOwnerInput {
 
 #[test]
 fn native_subagent_wait_and_ready_resume_retain_the_original_slot() {
-    use desk_diagnose_core::subagent::wait::{ParentWait, TaskFence, WaitMode};
+    use desk_diagnose_core::subagent::wait::{
+        ParentWait, ReportCursor, ReportWait, TaskFence, WaitMode,
+    };
     let mut session = desk_diagnose_core::session::PersistedAgentSession::new(
         "root",
         "owner",
@@ -51,7 +53,14 @@ fn native_subagent_wait_and_ready_resume_retain_the_original_slot() {
         retry_after_ms: None,
         parent_input_revision: 1,
         parent_control_revision: session.control_revision,
-        mode: WaitMode::AllTerminal,
+        report_wait: ReportWait {
+            requests: vec![ReportCursor {
+                request_id: "child".into(),
+                after_seq: 0,
+            }],
+            kinds: vec![desk_diagnose_core::subagent::report::ReportKind::Completed],
+            mode: WaitMode::AllTerminal,
+        },
         tasks: vec![TaskFence {
             task_id: "child".into(),
             input_revision: 1,
@@ -111,7 +120,7 @@ async fn coordination_preserves_native_fences_and_defers_omissions_independently
     let d = queue::enqueue(&txn, "owner", "root", &other, None, 4, now)
         .await
         .unwrap();
-    let (batch, projection) = queue::coordination::reserve(&txn, &mut session, &b, now)
+    let (batch, projection) = queue::coordination::reserve(&txn, &mut session, &b, now, Vec::new())
         .await
         .unwrap()
         .unwrap();
@@ -139,7 +148,7 @@ async fn coordination_preserves_native_fences_and_defers_omissions_independently
         .unwrap();
     assert!(!batch.is_current(&rival, now + 61_000));
     assert!(
-        queue::coordination::reserve(&txn, &mut session, &b, now + 1)
+        queue::coordination::reserve(&txn, &mut session, &b, now + 1, Vec::new())
             .await
             .unwrap()
             .is_none()
@@ -157,7 +166,7 @@ async fn coordination_preserves_native_fences_and_defers_omissions_independently
         usage: Default::default(),
         provider_meta: Default::default(),
     };
-    queue::coordination::settle(&txn, &batch, Some(&turn), now + 1)
+    queue::coordination::settle(&txn, &batch, Some(&turn), now + 1, &Default::default())
         .await
         .unwrap();
     let b = queue::load(&txn, "owner", "root", &b.request_id)
@@ -280,7 +289,7 @@ async fn coordination_attempts_survive_a_lost_lease() {
     for attempt in 1..=3 {
         let txn = db.begin().await.unwrap();
         let time = now + i64::from(attempt) * 61_000;
-        queue::coordination::reserve(&txn, &mut session, &head, time)
+        queue::coordination::reserve(&txn, &mut session, &head, time, Vec::new())
             .await
             .unwrap()
             .unwrap();
@@ -294,7 +303,7 @@ async fn coordination_attempts_survive_a_lost_lease() {
     assert!(queue::coordination::exhausted(&head));
     let txn = db.begin().await.unwrap();
     assert!(
-        queue::coordination::reserve(&txn, &mut session, &head, now + 244_000)
+        queue::coordination::reserve(&txn, &mut session, &head, now + 244_000, Vec::new())
             .await
             .unwrap()
             .is_none()
@@ -489,5 +498,148 @@ async fn duplicate_intake_keeps_the_first_frozen_input_and_fifo_order() {
             .await
             .unwrap()
             .is_none()
+    );
+}
+
+#[tokio::test]
+async fn workbench_dispatch_proposals_are_scoped_and_activation_is_atomic() {
+    use desk_diagnose_core::{
+        chat::{ModelTurn, StopReason},
+        model_egress::ModelEgressPolicy,
+        native_ids::{self, Kind},
+        session::{AgentSessionSurface, PersistedAgentSession},
+    };
+    let TestStore { db } = setup().await;
+    let now = chrono::Utc::now();
+    let ms = now.timestamp_millis();
+    let mut root = PersistedAgentSession::new_workbench_coordinator(
+        "owner",
+        "root",
+        None,
+        1,
+        desk_agent_protocol::AgentScope {
+            granted: vec![],
+            mode: desk_agent_protocol::ExecutionMode::ReadOnly,
+            expires_at: None,
+            policy_name: None,
+        },
+        &now.to_rfc3339(),
+    )
+    .unwrap();
+    root.surface = AgentSessionSurface::AiAssistant;
+    let txn = db.begin().await.unwrap();
+    let mut original = input("b", "Work B");
+    original.ask.target_refs.push("selected-device".into());
+    original
+        .targets
+        .push(desk_diagnose_core::dynamic_run::AssistantInputTarget {
+            reference: "selected-device".into(),
+            device_id: "9".into(),
+            member_generation: Some(1),
+        });
+    let b = queue::enqueue(&txn, "owner", "root", &original, None, 4, ms)
+        .await
+        .unwrap();
+    let c = queue::enqueue(&txn, "owner", "root", &input("c", "Work C"), None, 4, ms)
+        .await
+        .unwrap();
+    let (batch, request) = queue::coordination::reserve(&txn, &mut root, &b, ms, Vec::new())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!request.messages[0].text.contains("selected-device"));
+    let scope = request
+        .messages
+        .iter()
+        .find(|message| message.text.contains("selected-device"))
+        .unwrap();
+    assert_eq!(
+        scope
+            .data_envelope
+            .as_ref()
+            .unwrap()
+            .provenance
+            .source_envelope_ids,
+        ["user-message-b"]
+    );
+    let policy = ModelEgressPolicy {
+        destination: batch.destination.clone(),
+        selected_source_tools: Default::default(),
+        export_authorization_id: "test-dispatch-output".into(),
+        now_unix_ms: ms as u64,
+        byte_cap: desk_diagnose_core::sink_authorizer::MAX_SINK_BYTES,
+        permission_resume: false,
+    };
+    let accepted = policy.authorize_request(request).unwrap();
+    let mut turn = ModelTurn {
+        text: serde_json::json!({"decisions":[
+            {"request_id":b.request_id,"route":"worker","dispatch":{}},
+            {"request_id":c.request_id,"route":"worker","dispatch":{"target_refs":["other-device"]}},
+        ]}).to_string(),
+        stop_reason: StopReason::EndTurn,
+        ..Default::default()
+    };
+    turn.provider_meta.data_envelope = Some(
+        policy
+            .derive_model_output_envelope(&turn, &accepted.input_envelopes)
+            .unwrap(),
+    );
+    queue::coordination::settle(&txn, &batch, Some(&turn), ms + 1, &Default::default())
+        .await
+        .unwrap();
+    txn.commit().await.unwrap();
+
+    let b = queue::load(&db, "owner", "root", &b.request_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let c = queue::load(&db, "owner", "root", &c.request_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(queue::coordination::has_route(&b));
+    assert!(!b.coordinated && b.first_worker_request_id.is_none());
+    assert!(!queue::coordination::has_route(&c));
+    assert!(c.retry_at_ms.is_some());
+
+    let worker = native_ids::stable(Kind::Task, &b.request_id);
+    let txn = db.begin().await.unwrap();
+    assert!(
+        queue::activate_with_dispatch(&txn, &b, 1, ms + 2, Some(&worker))
+            .await
+            .unwrap()
+    );
+    txn.rollback().await.unwrap();
+    assert_eq!(
+        queue::load(&db, "owner", "root", &b.request_id)
+            .await
+            .unwrap(),
+        Some(b.clone())
+    );
+
+    let txn = db.begin().await.unwrap();
+    assert!(
+        queue::activate_with_dispatch(&txn, &b, 1, ms + 3, Some(&worker))
+            .await
+            .unwrap()
+    );
+    assert!(
+        !queue::activate_with_dispatch(&txn, &b, 1, ms + 4, Some(&worker))
+            .await
+            .unwrap()
+    );
+    txn.commit().await.unwrap();
+    let saved = queue::load(&db, "owner", "root", &b.request_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        saved.first_worker_request_id.as_deref(),
+        Some(worker.as_str())
+    );
+    assert!(
+        saved.coordinated
+            && saved.pending_input_json.is_none()
+            && saved.first_dispatch_json.is_none()
     );
 }

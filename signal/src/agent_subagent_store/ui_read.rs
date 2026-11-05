@@ -38,6 +38,7 @@ impl SubAgentStore {
             .filter(inbox::Column::ActorId.eq(actor))
             .filter(inbox::Column::DeviceId.eq(device))
             .filter(inbox::Column::StateRevision.lte(through))
+            .filter(inbox::Column::ReportSeq.is_null())
             .filter(inbox::Column::UiReadAtMs.is_null())
             .exec(&txn)
             .await?;

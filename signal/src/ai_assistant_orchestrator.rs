@@ -1188,15 +1188,16 @@ async fn prepare_composed_turn(
                 resume.permission_request_id.is_none() && resume.work_event.is_none()
             })
             || scheduled.is_some()
-            || goal_resume.is_some()
-            || delegated.is_some())
+            || goal_resume.is_some())
     {
         return Err(transport_error(
             "targetless assistant input cannot carry device context",
         ));
     }
-    desk_diagnose_core::assistant_policy::validate_assistant_ask_scope(&ask, !targetless)
-        .map_err(transport_error)?;
+    if delegated.is_none() {
+        desk_diagnose_core::assistant_policy::validate_assistant_ask_scope(&ask, !targetless)
+            .map_err(transport_error)?;
+    }
     if let Some(runtime) = &delegated
         && (resume_conversation_id.is_some()
             || scheduled.is_some()
@@ -1312,7 +1313,9 @@ async fn prepare_composed_turn(
         .map(str::trim)
         .filter(|id| is_valid_client_conversation_id(id))
         .map(str::to_string);
-    let conversation_id = if targetless {
+    let conversation_id = if let Some(runtime) = delegated.as_ref() {
+        runtime.session().conversation_id.clone()
+    } else if targetless {
         let personal = derive_assistant_conversation_key(
             &actor_id,
             AssistantConversationScope::Personal,
@@ -1320,24 +1323,27 @@ async fn prepare_composed_turn(
                 transport_error("targetless input requires a valid continuation id")
             })?,
         );
-        if resume_conversation_id
-            .as_ref()
-            .is_some_and(|resume| resume.conversation_id != personal)
+        if let Some(resume) = resume_conversation_id.as_ref()
+            && resume.conversation_id != personal
         {
-            return Err(transport_error(
-                "permission resume does not match its personal conversation",
-            ));
+            if resume.permission_request_id.is_none()
+                || !desk_diagnose_core::native_ids::is(
+                    desk_diagnose_core::native_ids::Kind::WorkbenchWorkConversation,
+                    &resume.conversation_id,
+                )
+            {
+                return Err(transport_error(
+                    "permission resume does not match its personal conversation",
+                ));
+            }
+            resume.conversation_id.clone()
+        } else {
+            personal
         }
-        personal
     } else {
-        delegated
+        scheduled
             .as_ref()
-            .map(|runtime| runtime.session().conversation_id.clone())
-            .or_else(|| {
-                scheduled
-                    .as_ref()
-                    .map(|resume| resume.claimed.session.conversation_id.clone())
-            })
+            .map(|resume| resume.claimed.session.conversation_id.clone())
             .or_else(|| {
                 resume_conversation_id
                     .as_ref()
@@ -1359,21 +1365,28 @@ async fn prepare_composed_turn(
     };
     let now_unix_ms = u64::try_from(chrono::Utc::now().timestamp_millis())
         .expect("current time is after the Unix epoch");
+    let conversation_id = match owner_queue
+        .as_deref()
+        .map(|queue| queue.execution_conversation(&actor_id, &conversation_id))
+        .transpose()
+        .map_err(|error| error.into_agent_error())?
+    {
+        Some(Some(execution)) => execution.to_owned(),
+        _ => conversation_id,
+    };
     if let Some(OwnerQueueTurn::Activate {
         request_id,
-        conversation_id: expected,
+        conversation_id: queue,
         destination: original,
+        ..
     }) = owner_queue.as_deref()
+        && original != &destination
     {
-        if expected != &conversation_id {
-            return Err(model_rejected("queued input changed its conversation"));
-        }
-        if original != &destination {
-            main_requests::fail_destination(&db, &actor_id, expected, request_id).await?;
-            return Err(main_request::failure_error(
-                desk_agent_protocol::ai_assistant::MainRequestFailure::DestinationChanged,
-            ));
-        }
+        main_requests::fail_destination(&db, &actor_id, queue, &conversation_id, request_id)
+            .await?;
+        return Err(main_request::failure_error(
+            desk_agent_protocol::ai_assistant::MainRequestFailure::DestinationChanged,
+        ));
     }
     let session_reader = crate::agent_session_store::SignalAgentSessionStore::new(db.clone())
         .with_client_metadata(
@@ -3122,6 +3135,13 @@ async fn prepare_composed_turn(
                     request_id: row.request_id,
                     session_id: row.conversation_id,
                 }));
+            }
+            Ok(OwnerAdmissionResult::Dispatched) => {
+                desk_diagnose_core::future::boxed(|| async { stream_event(
+                    connections.as_ref(), &browser_connection_id,
+                    &AgentEvent::status(&request_id, 1, "accepted"),
+                ).await }).await;
+                return Ok(Some(LoopOutcome::SubAgentYielded));
             }
             Ok(OwnerAdmissionResult::Waiting) => return Ok(Some(LoopOutcome::TurnBusy)),
             Err(error) => {

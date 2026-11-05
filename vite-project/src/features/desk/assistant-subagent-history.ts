@@ -9,10 +9,13 @@ export type SubagentHistory = {
     hasMore: boolean;
 };
 
-export function sameSubagentHistoryScope(a: AiAssistantSubAgentSummary, b: AiAssistantSubAgentSummary) {
+export function sameSubagentRequest(a: AiAssistantSubAgentSummary, b: AiAssistantSubAgentSummary) {
     return a.task_id === b.task_id && a.child_session_id === b.child_session_id && a.group_id === b.group_id
-        && a.input_revision === b.input_revision && a.control_revision === b.control_revision
-        && a.state_revision === b.state_revision && a.state === b.state;
+        && a.input_revision === b.input_revision && a.control_revision === b.control_revision;
+}
+
+export function sameSubagentHistoryScope(a: AiAssistantSubAgentSummary, b: AiAssistantSubAgentSummary) {
+    return sameSubagentRequest(a, b) && a.state_revision === b.state_revision && a.state === b.state;
 }
 
 /** Latest polling updates content without resetting an older or exhausted cursor. */

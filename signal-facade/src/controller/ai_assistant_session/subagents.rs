@@ -23,6 +23,7 @@ pub struct AiAssistantSubAgentQuery {
     pub conversation: Option<String>,
     pub session: Option<String>,
     pub task_id: String,
+    pub before_report_seq: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]

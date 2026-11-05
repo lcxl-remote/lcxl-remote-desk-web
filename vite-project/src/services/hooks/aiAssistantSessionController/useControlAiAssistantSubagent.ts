@@ -26,7 +26,7 @@ export function controlAiAssistantSubagentMutationOptions<TContext = unknown>(co
 }
 
 /**
- * @summary Explicitly cancel or adjust one nonterminal subagent
+ * @summary Cancel or adjust a Worker request or answer its open question
  * {@link /api/my/ai-assistant-session/subagents/control}
  */
 export function useControlAiAssistantSubagent<TContext>(options: 

@@ -83,14 +83,18 @@ export function AssistantSubagents({ agents, connected, canDecide, interactive, 
     const { t } = useTranslation();
     const [localAdjustment, setLocalAdjustment] = useState('');
     const adjustment = externalAdjustment ?? localAdjustment;
-    const validAdjustment = adjustment.trim().length > 0;
-    const sendDisabled = !validAdjustment || !canDecide || !connected || agents.updating;
+    const question = agents.detail?.result.open_question;
+    const [replyDraft, setReplyDraft] = useState<{ questionId: string; text: string }>();
+    const replyText = question && replyDraft?.questionId === question.question_id ? replyDraft.text : '';
+    const draft = question ? replyText : adjustment;
+    const draftValid = !!draft.trim() && (!question || new TextEncoder().encode(draft.trim()).length <= 4096);
+    const sendDisabled = !draftValid || !canDecide || !connected || agents.updating;
     const setAdjustment = onAdjustmentChange ?? setLocalAdjustment;
     const [localPanel, setLocalPanel] = useState<AssistantSubagentPanel | null>(null);
     const panel = externalPanel === undefined ? localPanel : externalPanel;
     const setPanel = onPanelChange ?? setLocalPanel;
     const task = agents.detail?.result.task ?? agents.selected;
-    useEffect(() => { setLocalAdjustment(''); setLocalPanel(null); }, [task?.task_id]);
+    useEffect(() => { setLocalAdjustment(''); setLocalPanel(null); setReplyDraft(undefined); }, [task?.task_id]);
     const child = agents.detail?.session;
     const report = agents.detail?.result.report;
     const { scrollRef, contentRef, onScroll, showJumpToLatest, jumpToLatest } = useFollowLatest(true, child?.sessionId ?? task?.child_session_id ?? '');
@@ -139,6 +143,24 @@ export function AssistantSubagents({ agents, connected, canDecide, interactive, 
                             <p className="mt-2 break-all text-xs text-muted-foreground">{[...report.receipt_refs, ...report.evidence_refs].join(' · ')}</p>
                         </Disclosure>}
                     </section>}
+                    {agents.reports && (agents.reports.items.length > 0 || agents.viewingOlderReports) &&
+                        <Disclosure title={t('pages.aiAssistant.subagents.reports')} defaultOpen summaryClassName="text-sm font-medium">
+                            <ol className="mt-2 space-y-3">
+                                {agents.reports.items.map(item => <li key={item.report_id} className="space-y-1 border-l pl-3">
+                                    <p className="text-xs text-muted-foreground">{item.seq} · {t(`pages.aiAssistant.subagents.reportKinds.${item.kind}`)}</p>
+                                    <MarkdownContent disableLinks>{item.summary}</MarkdownContent>
+                                    {item.question && <p className="whitespace-pre-wrap text-sm">{item.question}</p>}
+                                </li>)}
+                            </ol>
+                            <div className="mt-2 flex flex-wrap gap-2">
+                                {agents.reports.next_before_seq != null && <Button type="button" size="sm" variant="outline"
+                                    disabled={agents.reportsLoading} onClick={() => void agents.loadOlderReports()}>
+                                    {t('pages.aiAssistant.subagents.earlierReports')}
+                                </Button>}
+                                {agents.viewingOlderReports && <Button type="button" size="sm" variant="ghost"
+                                    onClick={agents.showLatestReports}>{t('pages.aiAssistant.subagents.latestReports')}</Button>}
+                            </div>
+                        </Disclosure>}
                     {agents.detail?.result.failure_reason && <p className="whitespace-pre-wrap text-sm text-destructive">{agents.detail.result.failure_reason}</p>}
                         {!!child?.taskStatusProjection?.items.length && <Disclosure title={t('pages.aiAssistant.subagents.progress')} summaryClassName="text-sm">
                             <ul className="mt-2 list-disc space-y-2 pl-5 text-sm">
@@ -202,27 +224,40 @@ export function AssistantSubagents({ agents, connected, canDecide, interactive, 
         </div>
         <form className="assistant-composer mx-auto w-full max-w-[840px] shrink-0 space-y-2 rounded-xl border bg-background p-3 shadow-sm" onSubmit={event => {
             event.preventDefault();
-            if (!subagentIsTerminal(task) && !sendDisabled) void agents.control(task, { kind: 'adjust', message: adjustment.trim() }).then(ok => {
-                if (ok) setAdjustment('');
-            });
+            if (subagentIsTerminal(task) || sendDisabled) return;
+            if (question) {
+                void agents.control(task, { kind: 'reply', question_id: question.question_id, message: replyText.trim() }).then(ok => {
+                    if (ok) setReplyDraft(current => current?.questionId === question.question_id ? undefined : current);
+                });
+            } else {
+                void agents.control(task, { kind: 'adjust', message: adjustment.trim() }).then(ok => {
+                    if (ok) setAdjustment('');
+                });
+            }
         }}>
             <AssistantSubagentApprovalNotice agents={agents} />
+            {question && <p className="whitespace-pre-wrap text-sm">{question.text}</p>}
             {!subagentIsTerminal(task) && <AssistantComposerInput sendDisabled={sendDisabled}
-                aria-label={t('pages.aiAssistant.subagents.adjustMessage')} placeholder={t('pages.aiAssistant.subagents.adjustMessage')}
-                value={adjustment} disabled={!canDecide || !connected || agents.updating}
-                onChange={event => setAdjustment(event.target.value)} className="min-h-16 max-h-40 resize-y" />}
+                aria-label={t(question ? 'pages.aiAssistant.subagents.replyMessage' : 'pages.aiAssistant.subagents.adjustMessage')}
+                placeholder={t(question ? 'pages.aiAssistant.subagents.replyMessage' : 'pages.aiAssistant.subagents.adjustMessage')}
+                value={draft} disabled={!canDecide || !connected || agents.updating}
+                onChange={event => question
+                    ? setReplyDraft({ questionId: question.question_id, text: event.target.value })
+                    : setAdjustment(event.target.value)} className="min-h-16 max-h-40 resize-y" />}
             <div className="flex flex-wrap items-center justify-between gap-2">
                 <div className="flex min-w-0 flex-wrap items-center gap-1">
                     <AssistantSubagentMenu onSelect={setPanel} onDeviceSettings={onDeviceSettings} onApprovalSettings={onApprovalSettings} />
                     {automaticApproval && <AssistantComposerStatus automaticApproval onApprovalSettings={onApprovalSettings} />}
-                    <AssistantComposerTools meter={<AssistantContextMeter usage={child?.contextUsage ?? null} draft={adjustment} />}
+                    <AssistantComposerTools meter={<AssistantContextMeter usage={child?.contextUsage ?? null} draft={draft} />}
                         onDetails={() => setPanel('details')} onPermissionHistory={() => setPanel('permissions')}
                         onDirectories={() => setPanel('directories')} onTasks={() => setPanel('tasks')} runningTaskCount={runningTaskCount} />
                 </div>
                 {!subagentIsTerminal(task) && <div className="flex items-center gap-2">
                     <Button type="button" variant="outline" disabled={!canDecide || !connected || agents.updating}
                         onClick={() => void agents.control(task, { kind: 'cancel' })}>{t('pages.aiAssistant.subagents.cancel')}</Button>
-                    <Button type="submit" disabled={sendDisabled}>{t('pages.aiAssistant.subagents.applyAdjustment')}</Button>
+                    <Button type="submit" disabled={sendDisabled}>
+                        {t(question ? 'pages.aiAssistant.subagents.sendReply' : 'pages.aiAssistant.subagents.applyAdjustment')}
+                    </Button>
                 </div>}
             </div>
         </form>

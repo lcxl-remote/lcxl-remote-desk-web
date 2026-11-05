@@ -20,10 +20,15 @@ pub(crate) async fn runtime_facts_on(
 ) -> Result<RuntimeFacts, DbErr> {
     let mut facts = RuntimeFacts::default();
     let rows = desk_diagnose_core::future::boxed(|| async {
-        work::Entity::find()
+        let query = work::Entity::find()
             .filter(work::Column::ConversationId.eq(&session.conversation_id))
-            .filter(work::Column::ActorId.eq(&session.actor_id))
-            .filter(work::Column::TargetDeviceId.eq(&session.device_id))
+            .filter(work::Column::ActorId.eq(&session.actor_id));
+        let query = if session.device_id.is_empty() {
+            query
+        } else {
+            query.filter(work::Column::TargetDeviceId.eq(&session.device_id))
+        };
+        query
             .order_by_asc(work::Column::Id)
             .limit(MAX_ACTION_FACTS as u64 + 1)
             .all(txn)
@@ -35,6 +40,11 @@ pub(crate) async fn runtime_facts_on(
     }
     let mut tracked_generations = Vec::new();
     for row in rows {
+        if row.target_device_id != session.device_id
+            && !session.admits_assistant_device(&row.target_device_id)
+        {
+            return Err(invalid());
+        }
         let id = format!("work:{}", row.id);
         use crate::capability_grant_store::*;
         if row.dispatch_intent_at.is_none() {
@@ -68,6 +78,8 @@ pub(crate) async fn runtime_facts_on(
         let payload: CapabilityDispatchPayload =
             serde_json::from_str(&dispatch.payload_json).map_err(|_| invalid())?;
         if payload.work_id != row.id
+            || (row.target_device_id.is_empty()
+                && !desk_diagnose_core::web_research::is_web_tool(&payload.tool_name))
             || payload.dispatch_id != dispatch.dispatch_id
             || payload.call_id != row.tool_call_id
             || payload.call_id != row.action_request_id

@@ -104,7 +104,12 @@ async fn host(connections: &SharedConnectionMap) {
 
 #[actix_web::test]
 async fn formatted_delegation_calls_create_children_without_rewriting_model_history() {
-    desk_diagnose_core::future::boxed(formatted_delegation_scenario).await;
+    desk_diagnose_core::future::boxed(|| formatted_delegation_scenario(false)).await;
+}
+
+#[actix_web::test]
+async fn personal_worker_dials_without_a_bound_device_and_sees_its_targets() {
+    desk_diagnose_core::future::boxed(|| formatted_delegation_scenario(true)).await;
 }
 
 #[test]
@@ -113,28 +118,32 @@ fn ordinary_delegation_fits_production_thread_stack() {
         .name("ordinary-delegation-stack".into())
         .stack_size(2 * 1024 * 1024)
         .spawn(|| {
-            actix_web::rt::System::new().block_on(desk_diagnose_core::future::boxed(
-                formatted_delegation_scenario,
-            ));
+            actix_web::rt::System::new().block_on(desk_diagnose_core::future::boxed(|| {
+                formatted_delegation_scenario(false)
+            }));
         })
         .unwrap()
         .join()
         .unwrap();
 }
 
-async fn formatted_delegation_scenario() {
+async fn formatted_delegation_scenario(personal: bool) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
+    let target_refs = ["worker-mac", "worker-linux"];
     let originals = ["first", "second"].map(|name| {
-        serde_json::to_string_pretty(&json!({
+        let mut args = json!({
             "task":format!("Analyze {name} supplied value"), "required_for_completion":false,
             "name":name,"acceptance_criteria":["Report only the supplied value"]
-        }))
-        .unwrap()
+        });
+        if personal && name == "first" {
+            args["target_refs"] = json!(target_refs);
+        }
+        serde_json::to_string_pretty(&args).unwrap()
     });
     let delta = json!({"choices":[{"delta":{"role":"assistant","tool_calls": originals.iter().enumerate().map(|(index, args)| json!({
         "index":index,"id":format!("spawn-{index}"),"type":"function",
-        "function":{"name":"spawn_subagent","arguments":args}
+        "function":{"name":"send_subagent_request","arguments":args}
     })).collect::<Vec<_>>()}}]});
     let reply = format!(
         "data: {delta}\n\ndata: {{\"choices\":[{{\"delta\":{{}},\"finish_reason\":\"tool_calls\"}}],\"usage\":{{\"prompt_tokens\":4,\"completion_tokens\":3}}}}\n\ndata: [DONE]\n\n"
@@ -142,11 +151,28 @@ async fn formatted_delegation_scenario() {
     let capture = actix_web::rt::spawn(async move {
         capture_one_openai_request_with_sse(&listener, &reply).await;
         let ending = json!({"choices":[{"delta":{"content":"children-created"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":2}});
-        capture_one_openai_request_with_sse(
-            &listener,
-            &format!("data: {ending}\n\ndata: [DONE]\n\n"),
-        )
-        .await;
+        let answer = format!("data: {ending}\n\ndata: [DONE]\n\n");
+        if personal {
+            capture_openai_answer_with_title(&listener, &answer).await;
+            let ending = json!({"choices":[{"delta":{"content":"worker-complete"},"finish_reason":"stop"}],"usage":{"prompt_tokens":6,"completion_tokens":2}});
+            let worker = capture_one_openai_request_with_sse(
+                &listener,
+                &format!("data: {ending}\n\ndata: [DONE]\n\n"),
+            )
+            .await;
+            let worker: Value = serde_json::from_slice(&worker).unwrap();
+            let messages = worker["messages"].to_string();
+            for target in target_refs {
+                assert!(messages.contains(target), "{messages}");
+            }
+            assert!(
+                worker["tools"]
+                    .to_string()
+                    .contains("report_subagent_status")
+            );
+        } else {
+            capture_one_openai_request_with_sse(&listener, &answer).await;
+        }
     });
     let db = crate::config::test_support::Database::connect("sqlite::memory:")
         .await
@@ -168,15 +194,28 @@ async fn formatted_delegation_scenario() {
     )
     .await
     .unwrap();
+    if personal {
+        for device in target_refs {
+            crate::device_code_store::get_or_create(&db, device)
+                .await
+                .unwrap();
+        }
+    }
+    let connections = web::Data::new(SharedConnectionMap::new());
     run_turn_inner(
-        web::Data::new(SharedConnectionMap::new()),
+        connections.clone(),
         db.clone(),
         "format-turn".into(),
         "controller".into(),
-        "offline".into(),
+        if personal { "" } else { "offline" }.into(),
         1,
-        "device".into(),
+        if personal { "" } else { "device" }.into(),
         AiAssistantAsk {
+            target_refs: if personal {
+                target_refs.into_iter().map(str::to_owned).collect()
+            } else {
+                Vec::new()
+            },
             client_timezone: "UTC".into(),
             temporary_conversation: None,
             question: "Delegate two optional independent analyses".into(),
@@ -187,17 +226,59 @@ async fn formatted_delegation_scenario() {
         None,
     )
     .await;
-    tokio::time::timeout(MODEL_IO_TIMEOUT, capture)
-        .await
-        .unwrap()
-        .unwrap();
     let children = crate::entity::agent_subagent_run::Entity::find()
         .all(&db)
         .await
         .unwrap();
     assert_eq!(children.len(), 2);
     assert!(children.iter().all(|child| child.state == "queued"));
-    let root = derive_conversation_key("1", "device", Some("formatted-delegation"), "unused");
+    let root = if personal {
+        derive_assistant_conversation_key(
+            "1",
+            AssistantConversationScope::Personal,
+            "formatted-delegation",
+        )
+    } else {
+        derive_conversation_key("1", "device", Some("formatted-delegation"), "unused")
+    };
+    if personal {
+        let store = crate::agent_subagent_store::SubAgentStore::new(db.clone());
+        let task = children
+            .iter()
+            .find(|row| {
+                row.creation_envelope_json.contains("worker-mac")
+                    && serde_json::from_str::<desk_diagnose_core::subagent::state::SubAgentRun>(
+                        &row.state_json,
+                    )
+                    .is_ok_and(|run| !run.binding.targets.is_empty())
+            })
+            .unwrap();
+        let runtime = store
+            .child_runtime_candidate(&task.task_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let outcome = tokio::time::timeout(
+            MODEL_IO_TIMEOUT,
+            resume_subagent_turn(
+                connections,
+                db.clone(),
+                &crate::ai_assistant_gate::global_ai_assistant_gate(),
+                runtime,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(
+            matches!(outcome, LoopOutcome::Answered(ref answer) if answer == "worker-complete"),
+            "{outcome:?}"
+        );
+    }
+    tokio::time::timeout(MODEL_IO_TIMEOUT, capture)
+        .await
+        .unwrap()
+        .unwrap();
     let snapshot = crate::agent_session_store::SignalAgentSessionStore::new(db.clone())
         .read_snapshot(&root)
         .await
@@ -680,9 +761,9 @@ async fn sample(
         .len();
     let requested_reads = parent_calls
         .iter()
-        .filter(|call| call.name == desk_diagnose_core::subagent::tools::RESULT)
+        .filter(|call| call.name == desk_diagnose_core::subagent::tools::REPORTS)
         .filter_map(|call| serde_json::from_str::<Value>(&call.arguments_json).ok())
-        .filter_map(|input| input["task_id"].as_str().map(str::to_owned))
+        .filter_map(|input| input["request_id"].as_str().map(str::to_owned))
         .collect::<std::collections::BTreeSet<_>>();
     let parent_row = crate::entity::agent_session::Entity::find()
         .filter(crate::entity::agent_session::Column::ConversationId.eq(&root))

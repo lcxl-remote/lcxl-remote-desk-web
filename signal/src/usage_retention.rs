@@ -1028,6 +1028,8 @@ mod tests {
                 client_message_id: Set("message".into()),
                 submission_sha256: Set("0".repeat(64)),
                 state: Set(state.into()),
+                coordinated: Set(false),
+                coordination_attempts: Set(0),
                 pending_input_json: Set(None),
                 input_revision: Set(None),
                 accepted_at_ms: Set(days_ago(40).timestamp_millis()),

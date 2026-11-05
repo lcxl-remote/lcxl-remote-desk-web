@@ -7,7 +7,7 @@ use crate::{
 use desk_agent_protocol::{AgentScope, ExecutionMode};
 use group::{DelegationGroup, SourceAdmission};
 use state::{CompletionDisposition, CompletionFacts, RequiredReceipt, SubAgentRun, TaskDependency};
-use wait::{ParentWait, TaskFence, WaitEvaluation, WaitMode};
+use wait::{ParentWait, ReportCursor, ReportWait, TaskFence, WaitEvaluation, WaitMode};
 
 #[test]
 fn source_controls_fence_old_planning_and_keep_task_and_automation_usage() {
@@ -76,6 +76,7 @@ fn scope() -> AgentScope {
 
 fn binding() -> DelegatedTaskBinding {
     DelegatedTaskBinding {
+        targets: Vec::new(),
         root_conversation_id: "root".into(),
         group_id: "group".into(),
         task_id: "child-task".into(),
@@ -89,6 +90,103 @@ fn binding() -> DelegatedTaskBinding {
         source_epoch: 1,
         deadline_ms: 10_000,
     }
+}
+
+#[test]
+fn personal_worker_targets_are_a_frozen_subset_across_adjustment() {
+    use crate::dynamic_run::AssistantInputTarget;
+    use desk_agent_protocol::data_lineage::DestinationIdentity;
+
+    let devices = [
+        ("mac-a", "device-1", 1),
+        ("mac-b", "device-2", 2),
+        ("linux", "device-3", 3),
+    ]
+    .map(|(reference, device_id, generation)| AssistantInputTarget {
+        reference: reference.into(),
+        device_id: device_id.into(),
+        member_generation: Some(generation),
+    });
+    let mut run = run();
+    run.device_id.clear();
+    run.binding.source = DelegationSource::UserInput { input_revision: 1 };
+    let now = "2026-09-30T00:00:00Z";
+    let mut parent = PersistedAgentSession::new("root", "owner", "", 1, scope(), now);
+    parent.surface = AgentSessionSurface::AiAssistant;
+    parent.input_revision = 1;
+    parent
+        .bind_personal_assistant_request_targets(&devices)
+        .unwrap();
+    let owner = crate::model_message_labels::model_bound_user_message(
+        "personal-input".into(),
+        "Reproduce on macOS and compare Linux".into(),
+        DestinationIdentity::Model {
+            connection_id: "gateway".into(),
+            connection_revision: 1,
+            model_id: "model".into(),
+            profile_revision: 1,
+        },
+    )
+    .unwrap();
+    let source = creation::CreationEnvelope::capture(
+        &parent,
+        run.binding.source.clone(),
+        owner,
+        None,
+        creation::AcceptedOwnerSource {
+            targets: &devices,
+            main_request_id: None,
+        },
+    )
+    .unwrap();
+    assert!(source.select_targets(&["another-device".into()]).is_err());
+    assert!(source.select_targets(&[]).unwrap().is_empty());
+    run.binding.targets = source
+        .select_targets(&["mac-b".into(), "linux".into()])
+        .unwrap();
+    let mut worker = PersistedAgentSession::new_subagent(
+        &run.child_conversation_id,
+        &run.actor_id,
+        "",
+        1,
+        scope(),
+        run.binding.clone(),
+        now,
+    )
+    .unwrap();
+    assert_eq!(
+        worker.assistant_request_devices().unwrap(),
+        ["device-2", "device-3"]
+    );
+    assert_eq!(
+        worker.assistant_request_device_generation("device-2"),
+        Some(2)
+    );
+    assert!(!worker.admits_assistant_device("device-1"));
+    run.adjust(
+        run.fence(),
+        "Verify the two environments".into(),
+        vec!["Cite each result".into()],
+        now,
+    )
+    .unwrap();
+    control::synchronize_session(&mut worker, &run, now).unwrap();
+    assert_eq!(
+        worker.assistant_request_devices().unwrap(),
+        ["device-2", "device-3"]
+    );
+    assert_eq!(
+        worker.assistant_request_device_generation("device-2"),
+        Some(2)
+    );
+    let raw = worker.encode_json_for_storage().unwrap();
+    assert_eq!(
+        PersistedAgentSession::decode_json(&raw)
+            .unwrap()
+            .agent_role
+            .binding(),
+        Some(&run.binding)
+    );
 }
 
 fn child() -> PersistedAgentSession {
@@ -106,6 +204,7 @@ fn child() -> PersistedAgentSession {
 
 fn run() -> SubAgentRun {
     SubAgentRun {
+        worker_id: "worker-test".into(),
         child_conversation_id: "child-session".into(),
         actor_id: "owner".into(),
         device_id: "device".into(),
@@ -115,6 +214,7 @@ fn run() -> SubAgentRun {
         state_revision: 1,
         source_paused: false,
         dependencies: Vec::new(),
+        pending_question_id: None,
         partial_report: None,
         terminal_report: None,
         failure_reason: None,
@@ -162,6 +262,7 @@ fn group() -> DelegationGroup {
         parent_input_revision: 1,
         parent_control_revision: 1,
         parent_active: true,
+        max_task_duration_minutes: super::policy::DEFAULT_TASK_DURATION_MINUTES,
         limits: budget::DelegationLimits {
             total: budget::Allowance {
                 model_calls: 10,
@@ -475,8 +576,15 @@ fn wait_handles_completion_before_registration_and_control_changes() {
         retry_after_ms: None,
         parent_input_revision: 1,
         parent_control_revision: 1,
-        mode: WaitMode::AllTerminal,
         tasks: vec![fence.clone()],
+        report_wait: ReportWait {
+            requests: vec![ReportCursor {
+                request_id: fence.task_id.clone(),
+                after_seq: 0,
+            }],
+            kinds: vec![report::ReportKind::Completed],
+            mode: WaitMode::AllTerminal,
+        },
     };
     wait.validate().unwrap();
     assert_eq!(
@@ -775,6 +883,8 @@ fn adjusted_task_projection_retains_source_labels_locale_and_current_objective()
     .unwrap();
     owner.data_envelope.as_mut().unwrap().sensitivity = Sensitivity::Secret;
     let source = creation::CreationEnvelope {
+        main_request_id: None,
+        targets: Vec::new(),
         root_conversation_id: "root".into(),
         actor_id: "owner".into(),
         device_id: "device".into(),
@@ -892,6 +1002,8 @@ fn completion_context() -> creation::TaskCreationEnvelope {
     .unwrap();
     creation::TaskCreationEnvelope {
         source: creation::CreationEnvelope {
+            main_request_id: None,
+            targets: Vec::new(),
             root_conversation_id: "root".into(),
             actor_id: "owner".into(),
             device_id: "device".into(),
@@ -930,7 +1042,7 @@ fn goal_delegation_uses_the_goal_token_ceiling_and_honors_a_lower_configured_lim
     assert!(goal.limits.model_tokens > 1_000_000);
     assert_eq!(
         source
-            .new_group(1_000, Some(&goal))
+            .new_group(1_000, Some(&goal), 120)
             .unwrap()
             .limits
             .total
@@ -940,7 +1052,7 @@ fn goal_delegation_uses_the_goal_token_ceiling_and_honors_a_lower_configured_lim
     goal.limits.model_tokens = 50_000;
     assert_eq!(
         source
-            .new_group(1_000, Some(&goal))
+            .new_group(1_000, Some(&goal), 120)
             .unwrap()
             .limits
             .total
@@ -950,7 +1062,7 @@ fn goal_delegation_uses_the_goal_token_ceiling_and_honors_a_lower_configured_lim
     goal.limits.model_tokens = 20_000_000;
     assert_eq!(
         source
-            .new_group(1_000, Some(&goal))
+            .new_group(1_000, Some(&goal), 120)
             .unwrap()
             .limits
             .total
@@ -962,7 +1074,7 @@ fn goal_delegation_uses_the_goal_token_ceiling_and_honors_a_lower_configured_lim
     goal.apply_budget_policy(&policy).unwrap();
     assert_eq!(
         source
-            .new_group(1_000, Some(&goal))
+            .new_group(1_000, Some(&goal), 120)
             .unwrap()
             .limits
             .total
@@ -972,7 +1084,12 @@ fn goal_delegation_uses_the_goal_token_ceiling_and_honors_a_lower_configured_lim
     let mut ordinary = source;
     ordinary.source = DelegationSource::UserInput { input_revision: 1 };
     assert_eq!(
-        ordinary.new_group(1_000, None).unwrap().limits.total.tokens,
+        ordinary
+            .new_group(1_000, None, 120)
+            .unwrap()
+            .limits
+            .total
+            .tokens,
         None
     );
 }
@@ -1329,11 +1446,12 @@ fn published_result_authority_survives_notice_consumption_and_dependency_waits()
     assert!(!parent.allows_delegated_review());
     assert!(parent.ready_subagent_notification.is_none());
     let exposed = exposed_for_session(&catalog, &parent);
-    assert_eq!(exposed.len(), 6);
+    assert_eq!(exposed.len(), 7);
     for name in [
         tools::SPAWN,
         tools::CANCEL,
-        tools::MESSAGE,
+        tools::ADJUST,
+        tools::REPORT,
         "device_read",
         "device_write",
         "permissions",
@@ -1347,8 +1465,9 @@ fn published_result_authority_survives_notice_consumption_and_dependency_waits()
     for name in [
         tools::LIST,
         tools::STATUS,
-        tools::RESULT,
-        tools::WAIT,
+        tools::REPORTS,
+        tools::ACK_REPORTS,
+        tools::WAIT_REPORTS,
         "history",
         "projection",
     ] {
@@ -1398,8 +1517,18 @@ fn all_and_any_waits_distinguish_partial_completion_without_ignoring_changed_dep
             retry_after_ms: None,
             parent_input_revision: 1,
             parent_control_revision: 1,
-            mode,
             tasks: vec![first.clone(), second.clone()],
+            report_wait: ReportWait {
+                requests: [&first, &second]
+                    .iter()
+                    .map(|fence| ReportCursor {
+                        request_id: fence.task_id.clone(),
+                        after_seq: 0,
+                    })
+                    .collect(),
+                kinds: vec![report::ReportKind::Completed],
+                mode,
+            },
         };
         wait.validate().unwrap();
         assert_eq!(
@@ -1491,6 +1620,7 @@ fn unfinished_limit_does_not_cap_cumulative_group_creation() {
     assert_eq!(group.tasks_created, 257);
     let lowered = desk_agent_protocol::ai_assistant::subagent_policy::SubAgentLimits {
         max_unfinished_per_root: 1,
+        ..limits
     };
     assert!(group.admit_child("lowered", true, 1, 1, lowered).is_err());
     assert!(group.validate().is_ok());
@@ -1627,7 +1757,7 @@ fn goal_source_outlives_group_creation_and_children_keep_fixed_deadlines() {
         GoalLimits::default(),
     )
     .unwrap();
-    let mut group = source.new_group(1_000, Some(&goal)).unwrap();
+    let mut group = source.new_group(1_000, Some(&goal), 120).unwrap();
     assert_eq!(group.limits.deadline_ms, i64::MAX);
     let later = 1_000 + 8 * 86_400_000;
     group
@@ -1642,15 +1772,15 @@ fn goal_source_outlives_group_creation_and_children_keep_fixed_deadlines() {
             later,
         )
         .unwrap();
-    let child_deadline = creation::child_deadline_ms(group.limits.deadline_ms, later).unwrap();
-    assert_eq!(child_deadline, later + creation::DEFAULT_GROUP_LIFETIME_MS);
+    let child_deadline = creation::child_deadline_ms(group.limits.deadline_ms, later, 120).unwrap();
+    assert_eq!(child_deadline, later + 120 * 60_000);
     goal.deadline_unix_ms = (later + 60_000) as u64;
-    let limited = source.new_group(later, Some(&goal)).unwrap();
+    let limited = source.new_group(later, Some(&goal), 120).unwrap();
     assert_eq!(limited.limits.deadline_ms, later + 60_000);
     assert_eq!(
-        creation::child_deadline_ms(limited.limits.deadline_ms, later).unwrap(),
+        creation::child_deadline_ms(limited.limits.deadline_ms, later, 120).unwrap(),
         later + 60_000
     );
-    assert!(creation::child_deadline_ms(later, later).is_err());
-    assert!(creation::child_deadline_ms(i64::MAX, i64::MAX - 1).is_err());
+    assert!(creation::child_deadline_ms(later, later, 120).is_err());
+    assert!(creation::child_deadline_ms(i64::MAX, i64::MAX - 1, 120).is_err());
 }

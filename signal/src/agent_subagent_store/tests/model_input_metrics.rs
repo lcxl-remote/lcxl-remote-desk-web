@@ -6,6 +6,7 @@ async fn configure_limit(db: &crate::config::connection::DatabaseConnection, unf
             expected_revision: current.revision,
             limits: desk_agent_protocol::ai_assistant::subagent_policy::SubAgentLimits {
                 max_unfinished_per_root: unfinished,
+                ..current.limits
             },
         },
     )

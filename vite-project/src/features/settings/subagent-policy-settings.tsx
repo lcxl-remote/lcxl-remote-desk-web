@@ -8,6 +8,7 @@ import type { SubAgentLimits, SubAgentPolicy } from '@/services/types';
 const path = '/api/admin/system/subagent-policy';
 const fields = [
     { key: 'maxUnfinishedPerRoot', label: 'subagentPolicyUnfinished', maximum: 32 },
+    { key: 'maxTaskDurationMinutes', label: 'subagentPolicyTaskDuration', maximum: 0xffff_ffff },
 ] as const;
 
 function validLimits(limits: SubAgentLimits | undefined): boolean {
@@ -16,7 +17,7 @@ function validLimits(limits: SubAgentLimits | undefined): boolean {
 }
 
 function validPolicy(value: SubAgentPolicy | undefined): value is SubAgentPolicy {
-    return !!value && value.schemaVersion === 1 && Number.isSafeInteger(value.revision)
+    return !!value && value.schemaVersion === 2 && Number.isSafeInteger(value.revision)
         && value.revision >= 0 && validLimits(value.limits);
 }
 
@@ -29,7 +30,10 @@ export default function SubAgentPolicySettings() {
     const [saved, setSaved] = useState(false);
     const adopt = (policy: SubAgentPolicy) => {
         setCurrent(policy);
-        setInput({ maxUnfinishedPerRoot: String(policy.limits.maxUnfinishedPerRoot) });
+        setInput({
+            maxUnfinishedPerRoot: String(policy.limits.maxUnfinishedPerRoot),
+            maxTaskDurationMinutes: String(policy.limits.maxTaskDurationMinutes),
+        });
     };
     const reload = async () => {
         setBusy(true); setError(''); setSaved(false);
@@ -46,6 +50,7 @@ export default function SubAgentPolicySettings() {
     useEffect(() => { void reload(); }, []);
     const next: SubAgentLimits | undefined = input ? {
         maxUnfinishedPerRoot: Number(input.maxUnfinishedPerRoot),
+        maxTaskDurationMinutes: Number(input.maxTaskDurationMinutes),
     } : undefined;
     const valid = validLimits(next);
     const dirty = !!current && !!next && fields.some(({ key }) => current.limits[key] !== next[key]);

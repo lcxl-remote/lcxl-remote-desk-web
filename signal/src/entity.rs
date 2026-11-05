@@ -35,9 +35,9 @@ pub mod agent_attachment;
 
 pub mod agent_delegation_group;
 
-pub mod agent_subagent_run;
+pub use desk_assistant_data_store::entity::agent_subagent_run;
 
-pub mod agent_subagent_inbox;
+pub use desk_assistant_data_store::entity::agent_subagent_inbox;
 
 pub mod agent_delegation_reservation;
 

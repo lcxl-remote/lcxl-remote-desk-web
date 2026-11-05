@@ -6,7 +6,7 @@ import type { AiAssistantDelegationSnapshot, AiAssistantSubAgentControl, AiAssis
     AiAssistantSubAgentResult, AiAssistantSubAgentSummary, PermissionDecisionBody, PermissionRequestDto } from '@/services/types';
 import { projectPersistedSnapshot, type PersistedSnapshot } from './use-ai-assistant-chat';
 import type { AssistantDirectoryOperation } from './assistant-file-scope';
-import { prependSubagentHistory, refreshSubagentHistory, sameSubagentHistoryScope, type SubagentHistory } from './assistant-subagent-history';
+import { prependSubagentHistory, refreshSubagentHistory, sameSubagentHistoryScope, sameSubagentRequest, type SubagentHistory } from './assistant-subagent-history';
 
 export const subagentIsTerminal = (task: AiAssistantSubAgentSummary) =>
     ['completed', 'failed', 'cancelled'].includes(task.state);
@@ -57,6 +57,9 @@ export function useAiAssistantSubagents({ connection, conversation, session, sna
     const historyOperation = useRef<object | null>(null);
     const selectionEpoch = useRef(0);
     const [historyLoading, setHistoryLoading] = useState(false);
+    const [olderReports, setOlderReports] = useState<Pick<AiAssistantSubAgentResult, 'task' | 'reports'> | null>(null);
+    const [reportsLoading, setReportsLoading] = useState(false);
+    const reportsOperation = useRef<object | null>(null);
     const selectedId = useRef<string | null>(null);
     selectedId.current = selected?.task_id ?? null;
     const [loading, setLoading] = useState(false);
@@ -74,6 +77,12 @@ export function useAiAssistantSubagents({ connection, conversation, session, sna
         return `/api/my/ai-assistant-session/subagents${path}?${query}`;
     }, [connection, session, conversation]);
 
+    const showLatestReports = useCallback(() => {
+        reportsOperation.current = null;
+        setReportsLoading(false);
+        setOlderReports(null);
+    }, []);
+
     useEffect(() => {
         currentScope.current = scope; setDataScope(scope);
         setPage(null); setOlderTasks([]); setSelected(null); setDetail(null); setError(null);
@@ -83,8 +92,9 @@ export function useAiAssistantSubagents({ connection, conversation, session, sna
         uiRead.current.clear();
         selectionEpoch.current += 1; detailRef.current = null;
         historyRef.current = null; historyOperation.current = null; setHistory(null); setHistoryLoading(false);
+        showLatestReports();
         return () => { currentScope.current = ''; };
-    }, [scope]);
+    }, [scope, showLatestReports]);
 
     const tasks = useMemo(() => mergeTasks(olderTasks, page?.items ?? [], snapshot.tasks?.items ?? [],
         snapshot.active_tasks, snapshot.attention_tasks, detail ? [detail.result.task] : []), [olderTasks, page, snapshot, detail]);
@@ -151,16 +161,47 @@ export function useAiAssistantSubagents({ connection, conversation, session, sna
         if (currentScope.current !== scope || dataScope !== scope) return;
         selectionEpoch.current += 1; detailRef.current = null;
         historyRef.current = null; historyOperation.current = null; setHistory(null); setHistoryLoading(false);
+        showLatestReports();
         selectedId.current = task.task_id;
         setSelected(task); setDetail(null); setError(null);
         void loadDetail(task, true);
-    }, [scope, dataScope, loadDetail]);
+    }, [scope, dataScope, loadDetail, showLatestReports]);
     const closeDetail = useCallback(() => {
         if (currentScope.current !== scope) return;
         selectionEpoch.current += 1; detailRef.current = null;
         historyRef.current = null; historyOperation.current = null; setHistory(null); setHistoryLoading(false);
+        showLatestReports();
         selectedId.current = null; setSelected(null); setDetail(null); setError(null);
-    }, [scope]);
+    }, [scope, showLatestReports]);
+
+    const activeOlderReports = olderReports && detail && sameSubagentRequest(olderReports.task, detail.result.task)
+        ? olderReports.reports : null;
+    const reports = activeOlderReports ?? detail?.result.reports;
+    const loadOlderReports = useCallback(async () => {
+        const current = detailRef.current;
+        const before = reports?.next_before_seq;
+        if (!session || currentScope.current !== scope || dataScope !== scope
+            || !current || !before || reportsOperation.current) return;
+        const task = current.result.task;
+        const epoch = selectionEpoch.current;
+        const token = {}; reportsOperation.current = token; setReportsLoading(true);
+        const isCurrent = () => currentScope.current === scope && selectionEpoch.current === epoch
+            && reportsOperation.current === token && selectedId.current === task.task_id;
+        try {
+            const page = await request<AiAssistantSubAgentResult>(listUrl('/result', {
+                task_id: task.task_id, before_report_seq: String(before),
+            }));
+            const latest = detailRef.current;
+            if (!isCurrent() || !latest || !sameSubagentRequest(page.task, latest.result.task)
+                || !sameSubagentRequest(task, page.task)
+                || !page.reports.items.every(report => report.seq < before)) return;
+            setOlderReports({ task: page.task, reports: page.reports });
+        } catch (reason) {
+            if (isCurrent()) setError(reason instanceof Error ? reason.message : t('pages.aiAssistant.subagents.readFailed'));
+        } finally {
+            if (isCurrent()) { reportsOperation.current = null; setReportsLoading(false); }
+        }
+    }, [reports, session, scope, dataScope, listUrl, t]);
 
     const loadOlderMessages = useCallback(async () => {
         const current = detailRef.current;
@@ -227,8 +268,11 @@ export function useAiAssistantSubagents({ connection, conversation, session, sna
         return () => { cancelled = true; };
     }, [snapshot, session, page, olderTasks, listUrl, scope]);
 
-    const control = useCallback(async (task: AiAssistantSubAgentSummary, action: { kind: 'cancel' } | { kind: 'adjust'; message: string }) => {
+    const control = useCallback(async (task: AiAssistantSubAgentSummary, action: { kind: 'cancel' } | { kind: 'adjust'; message: string }
+        | { kind: 'reply'; question_id: string; message: string }) => {
         if (!session || currentScope.current !== scope || dataScope !== scope || operation.current || subagentIsTerminal(task)) return false;
+        if (action.kind === 'reply' && (selectedId.current !== task.task_id
+            || detailRef.current?.result.open_question?.question_id !== action.question_id)) return false;
         const epoch = selectionEpoch.current;
         const token = {}; operation.current = token; setUpdating(true); setError(null);
         const isCurrent = () => currentScope.current === scope && operation.current === token && selectionEpoch.current === epoch;
@@ -346,6 +390,8 @@ export function useAiAssistantSubagents({ connection, conversation, session, sna
         selected: visible ? selected : null, detail: visible ? detail : null, detailLoading, openDetail, closeDetail, updating, error: visible ? error : null, control, decidePermission,
         updateDirectory, revokeGrant, cancelProviderTask, cancelCommandTask,
         historyLoading, hasMoreMessages: visible && (history?.hasMore ?? false), loadOlderMessages,
+        reports: visible ? reports : undefined, viewingOlderReports: visible && !!activeOlderReports,
+        reportsLoading, loadOlderReports, showLatestReports,
         childMessages: visible && detail ? projectPersistedSnapshot({ ...detail.session, messages: history?.messages ?? detail.session.messages }).messages : [],
         childTools: visible && detail ? projectPersistedSnapshot({ ...detail.session, messages: history?.messages ?? detail.session.messages }).tools : [] };
 }

@@ -3,7 +3,12 @@ use super::*;
 #[tokio::test]
 async fn runtime_schema_defaults_preserve_result_and_list_call_authority() {
     let db = database().await;
-    let (mut parent, calls) = super::creation::runnable_parent(&db).await;
+    let (mut parent, calls) = super::creation::runnable_parent_with_source(
+        &db,
+        super::creation::destination(),
+        desk_agent_protocol::data_lineage::Sensitivity::UserContent,
+    )
+    .await;
     let store = SubAgentStore::new(db.clone());
     let task = store
         .spawn_for_turn(&parent, &calls[0], &super::creation::spawn_request())
@@ -11,6 +16,11 @@ async fn runtime_schema_defaults_preserve_result_and_list_call_authority() {
         .unwrap();
     complete_child(&db, &task.task_id).await;
     let projection = store.main_projection_for_turn(&parent).await.unwrap();
+    let runtime: serde_json::Value = serde_json::from_str(&projection.text).unwrap();
+    assert_eq!(
+        runtime["runtime_delegation_state"]["pending_reports"][0]["request_id"],
+        task.task_id
+    );
     parent
         .ui_references
         .observe(std::slice::from_ref(&projection))
@@ -21,10 +31,10 @@ async fn runtime_schema_defaults_preserve_result_and_list_call_authority() {
     for (id, name, arguments, field, default) in [
         (
             "read-default",
-            tools::RESULT,
-            serde_json::json!({"task_id": &task.task_id}),
-            "include_task",
-            serde_json::json!(false),
+            tools::REPORTS,
+            serde_json::json!({"request_id": &task.task_id}),
+            "after_seq",
+            serde_json::json!(0),
         ),
         (
             "list-default",
@@ -49,9 +59,9 @@ async fn runtime_schema_defaults_preserve_result_and_list_call_authority() {
             .execute_main_tool(&mut parent, &resolved, operation, &format!("{id}-result"))
             .await
             .unwrap();
-        if name == tools::RESULT {
+        if name == tools::REPORTS {
             assert!(
-                receipt.payload["answer"]
+                receipt.payload["reports"][0]["content"]["summary"]
                     .as_str()
                     .is_some_and(|answer| !answer.is_empty())
             );
@@ -59,6 +69,10 @@ async fn runtime_schema_defaults_preserve_result_and_list_call_authority() {
             assert_eq!(parent.observed_subagent_results.len(), 1);
         } else {
             assert_eq!(receipt.payload["total"], 1);
+            assert_eq!(
+                receipt.payload["items"],
+                serde_json::json!([&task.worker_id])
+            );
         }
         let committed = parent
             .conversation
@@ -67,8 +81,8 @@ async fn runtime_schema_defaults_preserve_result_and_list_call_authority() {
             .find(|call| call.id == original.id)
             .unwrap();
         assert_eq!(committed.arguments_json, original.arguments_json);
-        input[field] = if name == tools::RESULT {
-            serde_json::json!(true)
+        input[field] = if name == tools::REPORTS {
+            serde_json::json!(1)
         } else {
             serde_json::json!(11)
         };
@@ -86,6 +100,31 @@ async fn runtime_schema_defaults_preserve_result_and_list_call_authority() {
         );
         assert_eq!(parent, unchanged);
     }
+
+    let call = committed_call(
+        &db,
+        &mut parent,
+        "worker-status",
+        tools::STATUS,
+        serde_json::json!({"worker_id": &task.worker_id}),
+    )
+    .await;
+    let operation = tools::parse(&parent, &call).unwrap();
+    let receipt = store
+        .execute_main_tool(&mut parent, &call, operation, "worker-status-result")
+        .await
+        .unwrap();
+    assert_eq!(receipt.payload["worker_id"], task.worker_id);
+    assert!(receipt.payload["current_request"].is_null());
+    assert_eq!(
+        receipt.payload["latest_finished_request"]["request_id"],
+        task.task_id
+    );
+    assert_eq!(
+        receipt.payload["latest_finished_request"]["state"],
+        "completed"
+    );
+    assert_eq!(parent.observed_subagent_results.len(), 1);
 }
 
 #[tokio::test]
@@ -171,10 +210,7 @@ async fn normalized_json_matches_original_lineage_but_changed_task_is_rejected()
 use desk_diagnose_core::{
     chat::{ChatMessage, ToolCall, ToolCallRef},
     session::TurnState,
-    subagent::{
-        tools::{self, Operation},
-        wait::WaitMode,
-    },
+    subagent::tools::{self, Operation},
 };
 
 pub(super) async fn committed_call(
@@ -221,7 +257,7 @@ pub(super) async fn committed_call(
         let policy = desk_diagnose_core::model_egress::ModelEgressPolicy {
             destination: super::creation::destination(),
             selected_source_tools: Default::default(),
-            export_authorization_id: "control-test-export".into(),
+            export_authorization_id: format!("control-test-export-{id}"),
             now_unix_ms: chrono::Utc::now().timestamp_millis() as u64,
             byte_cap: 1024 * 1024,
             permission_resume: false,
@@ -244,6 +280,7 @@ pub(super) async fn committed_call(
         let mut binding =
             desk_diagnose_core::model_controls::FrozenModelControls::capture(parent, &[projection]);
         binding.retain_exported(Some(&output), Some(&policy.export_authorization_id));
+        binding.retain_called_targets(&turn.tool_calls);
         message.model_controls = Some(Box::new(binding));
         message.data_envelope = Some(output.clone());
         super::observation::record_accepted_provider(
@@ -380,20 +417,13 @@ async fn wait_registration_persists_result_and_fences_without_consuming_attentio
         &db,
         &mut parent,
         "wait-1",
-        tools::WAIT,
-        serde_json::json!({"task_ids": [&task.task_id], "mode": "all_terminal"}),
+        tools::WAIT_REPORTS,
+        serde_json::json!({"requests":[{"request_id":&task.task_id,"after_seq":0}],"kinds":["completed","failed"],"mode":"all_terminal"}),
     )
     .await;
+    let operation = tools::parse(&parent, &call).unwrap();
     let receipt = store
-        .execute_main_tool(
-            &mut parent,
-            &call,
-            Operation::Wait {
-                task_ids: vec![task.task_id.clone()],
-                mode: WaitMode::AllTerminal,
-            },
-            "wait-result",
-        )
+        .execute_main_tool(&mut parent, &call, operation, "wait-result")
         .await
         .unwrap();
     assert_eq!(receipt.payload["status"], "waiting");
@@ -438,6 +468,67 @@ async fn wait_registration_persists_result_and_fences_without_consuming_attentio
 }
 
 #[tokio::test]
+async fn all_terminal_report_wait_keeps_native_terminal_fallback_for_protected_reports() {
+    let db = database().await;
+    let (mut parent, calls) = super::creation::runnable_parent(&db).await;
+    let store = SubAgentStore::new(db.clone());
+    let mut ids = Vec::new();
+    for call in &calls[..2] {
+        let child = store
+            .spawn_for_turn(&parent, call, &super::creation::spawn_request())
+            .await
+            .unwrap();
+        ids.push(child.task_id);
+    }
+    complete_child(&db, &ids[0]).await;
+    let requests = ids
+        .iter()
+        .map(|id| serde_json::json!({"request_id":id,"after_seq":0}))
+        .collect::<Vec<_>>();
+    let call = committed_call(
+        &db, &mut parent, "wait-for-two", tools::WAIT_REPORTS,
+        serde_json::json!({"requests":requests,"kinds":["completed","failed"],"mode":"all_terminal"}),
+    ).await;
+    let operation = tools::parse(&parent, &call).unwrap();
+    let waiting = store
+        .execute_main_tool(&mut parent, &call, operation, "wait-for-two-receipt")
+        .await
+        .unwrap();
+    assert_eq!(waiting.payload["status"], "waiting");
+    assert_eq!(waiting.payload["reports"], serde_json::json!([]));
+    parent.finish_turn(TurnState::Idle, chrono::Utc::now().to_rfc3339());
+    save_main_delegation_session(&db, &mut parent)
+        .await
+        .unwrap();
+    assert_eq!(
+        store.resolve_parent_wait("root", "1", "1").await.unwrap(),
+        ParentWaitResolution::Pending
+    );
+
+    complete_child(&db, &ids[1]).await;
+    let ready = store.resolve_parent_wait("root", "1", "1").await.unwrap();
+    assert!(matches!(ready, ParentWaitResolution::Ready(_)));
+    let row = session_row::Entity::find()
+        .filter(session_row::Column::ConversationId.eq("root"))
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    let resumed = PersistedAgentSession::decode_json(&row.state_json).unwrap();
+    let receipt = resumed
+        .conversation
+        .iter()
+        .find(|message| message.message_id == "wait-for-two-receipt")
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_str(&receipt.text).unwrap();
+    assert_eq!(payload["status"], "ready");
+    assert_eq!(payload["reports"], serde_json::json!([]));
+    let tasks = payload["tasks"].as_array().unwrap();
+    assert_eq!(tasks.len(), 2);
+    assert!(tasks.iter().all(|task| task["state"] == "completed"));
+}
+
+#[tokio::test]
 async fn already_completed_dependency_returns_immediately_instead_of_registering_a_wait() {
     let db = database().await;
     let (mut parent, calls) = super::creation::runnable_parent(&db).await;
@@ -451,20 +542,13 @@ async fn already_completed_dependency_returns_immediately_instead_of_registering
         &db,
         &mut parent,
         "wait-ended",
-        tools::WAIT,
-        serde_json::json!({"task_ids": [&task.task_id], "mode": "any_terminal"}),
+        tools::WAIT_REPORTS,
+        serde_json::json!({"requests":[{"request_id":&task.task_id,"after_seq":0}],"kinds":["completed","failed"],"mode":"any_terminal"}),
     )
     .await;
+    let operation = tools::parse(&parent, &call).unwrap();
     let receipt = store
-        .execute_main_tool(
-            &mut parent,
-            &call,
-            Operation::Wait {
-                task_ids: vec![task.task_id],
-                mode: WaitMode::AnyTerminal,
-            },
-            "wait-ended-result",
-        )
+        .execute_main_tool(&mut parent, &call, operation, "wait-ended-result")
         .await
         .unwrap();
     assert_eq!(receipt.payload["status"], "ready");
@@ -472,7 +556,7 @@ async fn already_completed_dependency_returns_immediately_instead_of_registering
 }
 
 #[tokio::test]
-async fn explicit_result_reads_preserve_labels_and_stage_only_exact_report_revisions() {
+async fn protected_terminal_report_is_not_returned_or_staged_for_observation() {
     let db = database().await;
     let (mut parent, calls) = super::creation::runnable_parent(&db).await;
     let store = SubAgentStore::new(db.clone());
@@ -484,95 +568,31 @@ async fn explicit_result_reads_preserve_labels_and_stage_only_exact_report_revis
     let call = committed_call(
         &db,
         &mut parent,
-        "read-1",
-        tools::RESULT,
-        serde_json::json!({"task_id": &task.task_id}),
+        "read-protected-report",
+        tools::REPORTS,
+        serde_json::json!({"request_id": &task.task_id}),
     )
     .await;
+    let operation = tools::parse(&parent, &call).unwrap();
     let receipt = store
-        .execute_main_tool(
-            &mut parent,
-            &call,
-            Operation::ReadResult {
-                task_id: task.task_id.clone(),
-                include_task: false,
-            },
-            "read-result",
-        )
+        .execute_main_tool(&mut parent, &call, operation, "read-protected-receipt")
         .await
         .unwrap();
-    assert!(receipt.payload.get("task").is_none());
-    assert!(receipt.payload.get("objective").is_none());
-    let result: desk_diagnose_core::subagent::result::SubAgentModelResult =
+    let page: desk_diagnose_core::subagent::report::WorkerReportPage =
         serde_json::from_value(receipt.payload).unwrap();
-    assert_eq!(result.state, SubAgentState::Completed);
-    assert_eq!(parent.observed_subagent_results.len(), 1);
-    assert_eq!(
-        parent.observed_subagent_results[0].state_revision,
-        result.state_revision
-    );
-    assert_eq!(
-        parent.observed_subagent_results[0].result_message_id,
-        "read-result"
-    );
+    assert_eq!(page.request_id, task.task_id);
+    assert!(page.reports.is_empty());
+    assert!(page.acceptance_criteria.is_empty());
+    assert_eq!(page.next_after_seq, 0);
+    assert!(!page.has_more);
+    assert!(parent.observed_subagent_results.is_empty());
     assert!(parent.accepted_subagent_observations.is_empty());
-    let label = parent
-        .conversation
-        .iter()
-        .find(|message| message.message_id == "read-result")
-        .unwrap()
-        .data_envelope
-        .as_ref()
-        .unwrap();
-    assert_eq!(
-        label.sensitivity,
-        desk_agent_protocol::data_lineage::Sensitivity::Secret
-    );
     let full = store
-        .result_for_owner("root", "1", "1", &task.task_id)
+        .result_for_owner("root", "1", "1", &task.task_id, None)
         .await
         .unwrap();
-    assert_eq!(
-        result.answer.as_deref(),
-        full.report.as_ref().map(|report| report.summary.as_str())
-    );
-    assert_eq!(result.acceptance_criteria, full.acceptance_criteria);
-    assert!(!full.objective.is_empty());
-    assert_eq!(
-        result.receipt_refs,
-        full.report.as_ref().unwrap().receipt_refs
-    );
-    let call = committed_call(
-        &db,
-        &mut parent,
-        "read-task",
-        tools::RESULT,
-        serde_json::json!({"task_id": &task.task_id, "include_task":true}),
-    )
-    .await;
-    let detailed = store
-        .execute_main_tool(
-            &mut parent,
-            &call,
-            Operation::ReadResult {
-                task_id: task.task_id.clone(),
-                include_task: true,
-            },
-            "read-task-result",
-        )
-        .await
-        .unwrap();
-    assert_eq!(detailed.payload["objective"], full.objective);
-    assert_eq!(detailed.payload["answer"], result.answer.unwrap());
-    let events = crate::entity::agent_subagent_inbox::Entity::find()
-        .all(&db)
-        .await
-        .unwrap();
-    assert!(
-        events
-            .iter()
-            .all(|event| event.model_observed_at_ms.is_none() && event.interpreted_at_ms.is_none())
-    );
+    assert_eq!(full.task.state, SubAgentState::Completed);
+    assert!(!full.report.unwrap().summary.is_empty());
 }
 
 #[tokio::test]
@@ -601,6 +621,7 @@ async fn projection_after_new_input_keeps_old_tasks_opaque_and_active_tasks_visi
         None,
         None,
         chrono::Utc::now().timestamp_millis(),
+        Default::default(),
     )
     .await
     .unwrap();
@@ -626,10 +647,10 @@ async fn projection_after_new_input_keeps_old_tasks_opaque_and_active_tasks_visi
 async fn short_task_ids_keep_query_wait_and_control_call_authority() {
     for tool in [
         tools::STATUS,
-        tools::RESULT,
-        tools::WAIT,
+        tools::REPORTS,
+        tools::WAIT_REPORTS,
         tools::CANCEL,
-        tools::MESSAGE,
+        tools::ADJUST,
     ] {
         let db = database().await;
         let (mut parent, calls) = super::creation::runnable_parent_with_source(
@@ -653,16 +674,18 @@ async fn short_task_ids_keep_query_wait_and_control_call_authority() {
         save_main_delegation_session(&db, &mut parent)
             .await
             .unwrap();
-        if matches!(tool, tools::RESULT | tools::WAIT) {
+        if matches!(tool, tools::REPORTS | tools::WAIT_REPORTS) {
             complete_child(&db, &native).await;
         }
         let arguments = match tool {
-            tools::WAIT => serde_json::json!({"task_ids":[native],"mode":"all_terminal"}),
-            tools::CANCEL => {
-                serde_json::json!({"task_id":native})
+            tools::WAIT_REPORTS => {
+                serde_json::json!({"requests":[{"request_id":native,"after_seq":0}],"kinds":["completed","failed"],"mode":"all_terminal"})
             }
-            tools::MESSAGE => {
-                serde_json::json!({"task_id":native,"message":"Check one additional symptom"})
+            tools::REPORTS | tools::CANCEL => {
+                serde_json::json!({"request_id":native})
+            }
+            tools::ADJUST => {
+                serde_json::json!({"request_id":native,"message":"Check one additional symptom"})
             }
             _ => serde_json::json!({"task_id":native}),
         };
@@ -676,12 +699,17 @@ async fn short_task_ids_keep_query_wait_and_control_call_authority() {
             .execute_main_tool(&mut parent, &resolved, operation, "short-result")
             .await
             .unwrap();
-        let returned_task = if tool == tools::WAIT {
+        let returned_task = if tool == tools::WAIT_REPORTS {
             &receipt.payload["tasks"][0]
         } else {
             &receipt.payload
         };
-        assert_eq!(returned_task["task_id"], native);
+        let key = if tool == tools::REPORTS {
+            "request_id"
+        } else {
+            "task_id"
+        };
+        assert_eq!(returned_task[key], native);
         assert_eq!(
             parent
                 .conversation
@@ -706,21 +734,21 @@ async fn short_task_ids_keep_query_wait_and_control_call_authority() {
             .unwrap();
         let output: serde_json::Value = serde_json::from_str(&output.text).unwrap();
         assert_eq!(
-            if tool == tools::WAIT {
+            if tool == tools::WAIT_REPORTS {
                 output["tasks"][0]["task_id"].as_str()
             } else {
-                output["task_id"].as_str()
+                output[key].as_str()
             },
             Some(native.as_str())
         );
         assert_eq!(request.messages, parent.conversation);
-        if matches!(tool, tools::STATUS | tools::RESULT | tools::WAIT) {
+        if matches!(tool, tools::STATUS | tools::REPORTS | tools::WAIT_REPORTS) {
             let mut changed: serde_json::Value =
                 serde_json::from_str(&resolved.arguments_json).unwrap();
-            if tool == tools::WAIT {
-                changed["task_ids"][0] = serde_json::json!("other-task");
+            if tool == tools::WAIT_REPORTS {
+                changed["requests"][0]["request_id"] = serde_json::json!("other-task");
             } else {
-                changed["task_id"] = serde_json::json!("other-task");
+                changed[key] = serde_json::json!("other-task");
             }
             let changed = ToolCall {
                 arguments_json: changed.to_string(),
@@ -759,7 +787,7 @@ async fn frozen_model_control_survives_session_decode_but_observation_race_keeps
             &mut parent,
             "frozen-cancel",
             tools::CANCEL,
-            serde_json::json!({"task_id":task.task_id}),
+            serde_json::json!({"request_id":task.task_id}),
         )
         .await;
         parent =
@@ -811,8 +839,8 @@ async fn a_child_finishing_after_observation_refuses_adjustment_with_an_actionab
         .spawn_for_turn(&parent, &calls[0], &super::creation::spawn_request())
         .await
         .unwrap();
-    let call = committed_call(&db, &mut parent, "late-followup", tools::MESSAGE,
-        serde_json::json!({"task_id":task.task_id,"message":"Please also check the additional symptom"}),
+    let call = committed_call(&db, &mut parent, "late-followup", tools::ADJUST,
+        serde_json::json!({"request_id":task.task_id,"message":"Please also check the additional symptom"}),
     ).await;
     store
         .control_for_owner(
@@ -838,4 +866,629 @@ async fn a_child_finishing_after_observation_refuses_adjustment_with_an_actionab
     assert!(matches!(result, Err(DbErr::Custom(ref code))
         if code == desk_diagnose_core::subagent::CONTROL_OBSERVATION_CHANGED));
     assert_eq!(load(&db, &task.task_id).await, before);
+}
+
+#[tokio::test]
+async fn worker_progress_and_terminal_reports_are_immutable_ordered_and_non_consuming() {
+    use crate::entity::agent_subagent_inbox as inbox;
+    use desk_diagnose_core::subagent::{report::ReportKind, state::CompletionDisposition};
+
+    let db = database().await;
+    let (mut parent, calls) = super::creation::runnable_parent_with_source(
+        &db,
+        super::creation::destination(),
+        desk_agent_protocol::data_lineage::Sensitivity::UserContent,
+    )
+    .await;
+    let store = SubAgentStore::new(db.clone());
+    let task = store
+        .spawn_for_turn(&parent, &calls[0], &super::creation::spawn_request())
+        .await
+        .unwrap();
+    let run = load(&db, &task.task_id).await;
+    let SubAgentClaimOutcome::Claimed(claimed) = store
+        .claim_child(
+            &super::creation::claim_params(&run),
+            &task.task_id,
+            run.fence(),
+            &super::creation::destination(),
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("worker request can be claimed");
+    };
+    let mut child = claimed.session;
+    let registry = tools::registry();
+    assert!(
+        desk_diagnose_core::registry::lookup_for_session(&registry, tools::REPORT, &parent)
+            .is_none()
+    );
+    assert!(
+        desk_diagnose_core::registry::lookup_for_session(&registry, tools::REPORT, &child)
+            .is_some()
+    );
+    assert!(
+        desk_diagnose_core::registry::lookup_for_session(&registry, tools::REPORTS, &child)
+            .is_none()
+    );
+
+    for sequence in 1..=2 {
+        let call = commit_worker_report_call(
+            &db,
+            &mut child,
+            &format!("progress-{sequence}"),
+            ReportKind::Progress,
+        )
+        .await;
+        let caller_id = format!("caller-{}", call.id);
+        let Operation::Report(content) = tools::parse(&child, &call).unwrap() else {
+            panic!("report tool parses on an active worker");
+        };
+        assert!(
+            store
+                .report_for_turn(&mut child, &call, content.clone(), &caller_id)
+                .await
+                .is_err()
+        );
+        let receipt = store
+            .report_for_turn(
+                &mut child,
+                &call,
+                content.clone(),
+                &format!("progress-ack-{sequence}"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(receipt.payload["seq"], sequence);
+        let replay = store
+            .report_for_turn(&mut child, &call, content, "unused-id")
+            .await
+            .unwrap();
+        assert_eq!(replay.result_message_id, receipt.result_message_id);
+        assert_eq!(replay.payload, receipt.payload);
+        assert_eq!(load(&db, &task.task_id).await.state, SubAgentState::Running);
+    }
+    let answer = super::lifecycle::report();
+    super::lifecycle::append_report(&db, &mut child, &answer).await;
+    child.finish_turn(TurnState::Idle, chrono::Utc::now().to_rfc3339());
+    assert_eq!(
+        store
+            .settle_answer_for_turn(&mut child, run.fence(), answer.summary.clone())
+            .await
+            .unwrap()
+            .unwrap(),
+        CompletionDisposition::Complete,
+    );
+    for (index, (after_seq, limit, expected_sequences, more)) in [
+        (0, 10, vec![1, 2, 3], false),
+        (0, 1, vec![1], true),
+        (1, 2, vec![2, 3], false),
+        (3, 2, vec![], false),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let id = format!("read-worker-reports-{index}");
+        let call = committed_call(
+            &db, &mut parent, &id, tools::REPORTS,
+            serde_json::json!({"request_id": &task.task_id, "after_seq": after_seq, "limit": limit}),
+        ).await;
+        let observed_before = parent.observed_subagent_results.len();
+        let operation = tools::parse(&parent, &call).unwrap();
+        let receipt = store
+            .execute_main_tool(&mut parent, &call, operation, &format!("{id}-receipt"))
+            .await
+            .unwrap();
+        let reports = receipt.payload["reports"].as_array().unwrap();
+        let sequences = reports
+            .iter()
+            .map(|report| report["seq"].as_u64().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(sequences, expected_sequences);
+        assert_eq!(receipt.payload["has_more"], more);
+        assert_eq!(
+            receipt.payload["next_after_seq"],
+            expected_sequences.last().copied().unwrap_or(after_seq)
+        );
+        if let Some(report) = reports.iter().find(|report| report["seq"] == 3) {
+            assert_eq!(report["content"]["kind"], "completed");
+            assert_eq!(report["content"]["summary"], answer.summary);
+            assert_eq!(
+                receipt.payload["acceptance_criteria"],
+                serde_json::json!(run.binding.acceptance_criteria)
+            );
+            assert_eq!(parent.observed_subagent_results.len(), observed_before + 1);
+            let observed = parent.observed_subagent_results.last().unwrap();
+            assert_eq!(report["report_id"], observed.report_id);
+            assert_eq!(
+                observed.state_revision,
+                load(&db, &task.task_id).await.state_revision
+            );
+        } else {
+            assert_eq!(parent.observed_subagent_results.len(), observed_before);
+        }
+    }
+    let stored = inbox::Entity::find()
+        .filter(inbox::Column::ReportSeq.is_not_null())
+        .order_by_asc(inbox::Column::ReportSeq)
+        .all(&db)
+        .await
+        .unwrap();
+    assert_eq!(stored.len(), 3);
+    assert_ne!(stored[0].event_id, stored[1].event_id);
+    assert!(
+        stored
+            .iter()
+            .all(|report| report.interpreted_at_ms.is_none()
+                && report.model_observed_at_ms.is_none())
+    );
+}
+
+pub(super) async fn commit_worker_report_call(
+    db: &DatabaseConnection,
+    child: &mut PersistedAgentSession,
+    id: &str,
+    kind: desk_diagnose_core::subagent::report::ReportKind,
+) -> ToolCall {
+    use desk_diagnose_core::chat::ToolCallRef;
+    let mut arguments = serde_json::json!({
+        "kind": kind,
+        "summary": "A repeatable intermediate observation",
+    });
+    if kind == desk_diagnose_core::subagent::report::ReportKind::NeedsInput {
+        arguments["question"] = serde_json::json!("Which environment should I verify first?");
+    }
+    let call = ToolCall {
+        id: id.into(),
+        name: tools::REPORT.into(),
+        arguments_json: arguments.to_string(),
+    };
+    let caller_id = format!("caller-{id}");
+    let mut message = desk_diagnose_core::chat::ChatMessage::assistant_tool_calls(
+        &caller_id,
+        "Reporting progress",
+        vec![ToolCallRef {
+            id: call.id.clone(),
+            name: call.name.clone(),
+            arguments_json: call.arguments_json.clone(),
+        }],
+    )
+    .with_turn_id(child.current_turn_id.clone().unwrap());
+    message.data_envelope = Some(
+        desk_diagnose_core::subagent::projection::envelope(
+            &caller_id,
+            &message.text,
+            "model-output",
+            &[child.conversation[0].data_envelope.clone().unwrap()],
+        )
+        .unwrap(),
+    );
+    child.conversation.push(message);
+    save_child_session(db, child).await.unwrap();
+    call
+}
+
+#[tokio::test]
+async fn worker_terminal_tool_commits_once_and_preserves_pending_approval() {
+    use desk_diagnose_core::subagent::report::{ReportKind, TERMINAL_REPORT_BLOCKED};
+
+    for (kind, pending, expected_state) in [
+        (ReportKind::Completed, false, SubAgentState::Completed),
+        (ReportKind::Failed, false, SubAgentState::Failed),
+        (ReportKind::Completed, true, SubAgentState::WaitingApproval),
+    ] {
+        let db = database().await;
+        let mut child = super::lifecycle::child(&db).await;
+        let binding = child.agent_role.binding().unwrap().clone();
+        if pending {
+            super::paused_permission::request(&mut child);
+        }
+        let call = commit_worker_report_call(&db, &mut child, "terminal-report", kind).await;
+        let store = SubAgentStore::new(db.clone());
+        let Operation::Report(content) = tools::parse(&child, &call).unwrap() else {
+            panic!("terminal report is a worker tool");
+        };
+        let held = child.clone();
+        let result = store
+            .report_for_turn(&mut child, &call, content.clone(), "terminal-receipt")
+            .await;
+        let run = load(&db, &binding.task_id).await;
+        assert_eq!(run.state, expected_state);
+        if pending {
+            assert!(
+                matches!(result, Err(DbErr::Custom(message)) if message == TERMINAL_REPORT_BLOCKED)
+            );
+            assert_eq!(child, held);
+            assert!(run.terminal_report.is_none());
+            continue;
+        }
+        assert_eq!(result.unwrap().payload["seq"], 1);
+        assert_eq!(child.turn_state, TurnState::Idle);
+        assert_eq!(child.handled_input_seq, child.latest_input_seq);
+        assert_eq!(child.lease_token, held.lease_token);
+        assert_eq!(
+            run.terminal_report.as_ref().unwrap().summary,
+            content.summary
+        );
+        let row = session_row::Entity::find()
+            .filter(session_row::Column::ConversationId.eq(&child.conversation_id))
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(row.lease_deadline.is_none());
+        assert_eq!(
+            PersistedAgentSession::decode_json(&row.state_json).unwrap(),
+            child
+        );
+        assert!(
+            store
+                .report_for_turn(&mut child, &call, content, "duplicate-receipt")
+                .await
+                .is_err()
+        );
+        let run = load(&db, &binding.task_id).await;
+        assert_eq!(run.state, expected_state);
+        let rows = crate::entity::agent_subagent_inbox::Entity::find()
+            .filter(crate::entity::agent_subagent_inbox::Column::TaskId.eq(&binding.task_id))
+            .filter(crate::entity::agent_subagent_inbox::Column::ReportSeq.is_not_null())
+            .count(&db)
+            .await
+            .unwrap();
+        assert_eq!(rows, 1);
+    }
+}
+
+#[tokio::test]
+async fn question_reply_resumes_only_the_original_request_with_its_budget() {
+    use desk_diagnose_core::subagent::report::{QUESTION_NOT_OPEN, ReportKind};
+
+    let db = database().await;
+    let (mut parent, calls) = super::creation::runnable_parent_with_source(
+        &db,
+        super::creation::destination(),
+        desk_agent_protocol::data_lineage::Sensitivity::UserContent,
+    )
+    .await;
+    let store = SubAgentStore::new(db.clone());
+    let task = store
+        .spawn_for_turn(&parent, &calls[0], &super::creation::spawn_request())
+        .await
+        .unwrap();
+    let original = load(&db, &task.task_id).await;
+    let SubAgentClaimOutcome::Claimed(claimed) = store
+        .claim_child(
+            &super::creation::claim_params(&original),
+            &task.task_id,
+            original.fence(),
+            &super::creation::destination(),
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("worker request can be claimed");
+    };
+    let mut child = claimed.session;
+    let call =
+        commit_worker_report_call(&db, &mut child, "ask-original", ReportKind::NeedsInput).await;
+    let Operation::Report(content) = tools::parse(&child, &call).unwrap() else {
+        panic!("question tool");
+    };
+    let question = store
+        .report_for_turn(&mut child, &call, content, "question-receipt")
+        .await
+        .unwrap();
+    let question_id = question.payload["question_id"].as_str().unwrap();
+    assert_eq!(child.turn_state, TurnState::Idle);
+    let waiting = load(&db, &task.task_id).await;
+    assert_eq!(waiting.state, SubAgentState::WaitingInput);
+    assert_eq!(waiting.pending_question_id.as_deref(), Some(question_id));
+    assert!(
+        store
+            .child_runtime_candidate(&task.task_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    store.reconcile_task(&task.task_id).await.unwrap();
+    assert_eq!(
+        load(&db, &task.task_id).await.state,
+        SubAgentState::WaitingInput
+    );
+
+    let read = committed_call(
+        &db,
+        &mut parent,
+        "read-question",
+        tools::REPORTS,
+        serde_json::json!({"request_id": task.task_id}),
+    )
+    .await;
+    let operation = tools::parse(&parent, &read).unwrap();
+    let read = store
+        .execute_main_tool(&mut parent, &read, operation, "read-question-receipt")
+        .await
+        .unwrap();
+    assert_eq!(read.payload["reports"][0]["question_id"], question_id);
+    assert_eq!(
+        read.payload["reports"][0]["content"]["question"],
+        "Which environment should I verify first?"
+    );
+
+    let group = group_row::Entity::find()
+        .filter(group_row::Column::GroupId.eq(&original.binding.group_id))
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    let arguments = serde_json::json!({
+        "request_id": task.task_id, "question_id": question_id, "message": "Check the staging environment first.",
+    });
+    let reply = committed_call(
+        &db,
+        &mut parent,
+        "answer-original",
+        tools::REPLY,
+        arguments.clone(),
+    )
+    .await;
+    let operation = tools::parse(&parent, &reply).unwrap();
+    let result = store
+        .execute_main_tool(
+            &mut parent,
+            &reply,
+            operation.clone(),
+            "answer-question-receipt",
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.payload["state"], "queued");
+    let repeated = store
+        .execute_main_tool(&mut parent, &reply, operation, "unused-receipt")
+        .await
+        .unwrap();
+    assert_eq!(result.payload, repeated.payload);
+    let resumed = load(&db, &task.task_id).await;
+    assert_eq!(resumed.binding, original.binding);
+    assert!(resumed.pending_question_id.is_none());
+    assert_eq!(
+        group_row::Entity::find_by_id(group.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap(),
+        group
+    );
+    let mut params = super::creation::claim_params(&resumed);
+    params.turn_id = "worker-after-question".into();
+    let SubAgentClaimOutcome::Claimed(claimed) = store
+        .claim_child(
+            &params,
+            &task.task_id,
+            resumed.fence(),
+            &super::creation::destination(),
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("answer resumes the same request");
+    };
+    assert_eq!(claimed.session.chain_id, child.chain_id);
+    assert_eq!(claimed.session.input_revision, child.input_revision);
+    let replies = claimed
+        .session
+        .conversation
+        .iter()
+        .filter(|message| message.message_id == format!("reply-{question_id}"))
+        .collect::<Vec<_>>();
+    assert_eq!(replies.len(), 1);
+    assert!(
+        replies[0]
+            .text
+            .contains("Check the staging environment first.")
+    );
+    assert!(
+        replies[0]
+            .data_envelope
+            .as_ref()
+            .unwrap()
+            .allowed_destinations
+            .contains(&super::creation::destination())
+    );
+
+    let replay = committed_call(&db, &mut parent, "answer-again", tools::REPLY, arguments).await;
+    let operation = tools::parse(&parent, &replay).unwrap();
+    assert!(matches!(
+        store.execute_main_tool(&mut parent, &replay, operation, "replayed-question-receipt").await,
+        Err(DbErr::Custom(message)) if message == QUESTION_NOT_OPEN
+    ));
+}
+
+#[tokio::test]
+async fn owner_reads_worker_report_pages_and_answers_only_the_open_question_once() {
+    use desk_agent_protocol::ai_assistant::subagent::{
+        AiAssistantSubAgentControl, SubAgentControlAction,
+    };
+    use desk_diagnose_core::subagent::report::ReportKind;
+    let db = database().await;
+    let (parent, calls) = super::creation::runnable_parent_with_source(
+        &db,
+        super::creation::destination(),
+        desk_agent_protocol::data_lineage::Sensitivity::UserContent,
+    )
+    .await;
+    let store = SubAgentStore::new(db.clone());
+    let task = store
+        .spawn_for_turn(&parent, &calls[0], &super::creation::spawn_request())
+        .await
+        .unwrap();
+    let original = load(&db, &task.task_id).await;
+    let SubAgentClaimOutcome::Claimed(claimed) = store
+        .claim_child(
+            &super::creation::claim_params(&original),
+            &task.task_id,
+            original.fence(),
+            &super::creation::destination(),
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("worker request can be claimed");
+    };
+    let mut child = claimed.session;
+    for seq in 1..=12 {
+        let kind = if seq == 12 {
+            ReportKind::NeedsInput
+        } else {
+            ReportKind::Progress
+        };
+        let id = format!("owner-report-{seq}");
+        let call = commit_worker_report_call(&db, &mut child, &id, kind).await;
+        let Operation::Report(content) = tools::parse(&child, &call).unwrap() else {
+            panic!("worker report");
+        };
+        store
+            .report_for_turn(&mut child, &call, content, &format!("{id}-receipt"))
+            .await
+            .unwrap();
+    }
+    let latest = store
+        .result_for_owner("root", "1", "1", &task.task_id, None)
+        .await
+        .unwrap();
+    assert_eq!(latest.task.state, SubAgentState::WaitingInput);
+    let question = latest.open_question.unwrap();
+    assert_eq!(question.text, "Which environment should I verify first?");
+    assert_eq!(
+        latest
+            .reports
+            .items
+            .iter()
+            .map(|report| report.seq)
+            .collect::<Vec<_>>(),
+        (3..=12).collect::<Vec<_>>()
+    );
+    assert_eq!(latest.reports.items[9].report_id, question.question_id);
+    assert_eq!(latest.reports.next_before_seq, Some(3));
+    let earlier = store
+        .result_for_owner(
+            "root",
+            "1",
+            "1",
+            &task.task_id,
+            latest.reports.next_before_seq,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        earlier
+            .reports
+            .items
+            .iter()
+            .map(|report| report.seq)
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    assert_eq!(earlier.reports.next_before_seq, None);
+    assert_eq!(earlier.open_question.as_ref(), Some(&question));
+    assert!(
+        store
+            .result_for_owner("root", "1", "1", &task.task_id, Some(0))
+            .await
+            .is_err()
+    );
+
+    let group_before = group_row::Entity::find()
+        .filter(group_row::Column::GroupId.eq(&original.binding.group_id))
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    let request = AiAssistantSubAgentControl {
+        client_request_id: "owner-answer".into(),
+        task_id: task.task_id.clone(),
+        expected_input_revision: task.input_revision,
+        expected_control_revision: task.control_revision,
+        action: SubAgentControlAction::Reply {
+            question_id: question.question_id.clone(),
+            message: "Verify staging first.".into(),
+        },
+    };
+    let mut wrong = request.clone();
+    wrong.action = SubAgentControlAction::Reply {
+        question_id: "unrelated-question".into(),
+        message: "This must not be sent.".into(),
+    };
+    assert!(
+        store
+            .control_for_owner("root", "1", "1", &wrong)
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .control_for_owner("root", "2", "1", &request)
+            .await
+            .is_err()
+    );
+    let answer = store
+        .control_for_owner("root", "1", "1", &request)
+        .await
+        .unwrap();
+    assert_eq!(answer.task.state, SubAgentState::Queued);
+    assert_eq!(answer.task.input_revision, task.input_revision);
+    assert_eq!(answer.task.control_revision, task.control_revision);
+    assert_eq!(
+        store
+            .control_for_owner("root", "1", "1", &request)
+            .await
+            .unwrap(),
+        answer
+    );
+    assert!(
+        store
+            .control_for_owner("root", "1", "1", &wrong)
+            .await
+            .is_err()
+    );
+    let late = AiAssistantSubAgentControl {
+        client_request_id: "late-answer".into(),
+        ..request
+    };
+    assert!(
+        store
+            .control_for_owner("root", "1", "1", &late)
+            .await
+            .is_err()
+    );
+    let after = store
+        .result_for_owner("root", "1", "1", &task.task_id, None)
+        .await
+        .unwrap();
+    assert!(after.open_question.is_none());
+    assert_eq!(after.reports, latest.reports);
+    let run = load(&db, &task.task_id).await;
+    assert_eq!(run.binding, original.binding);
+    assert_eq!(
+        group_row::Entity::find_by_id(group_before.id)
+            .one(&db)
+            .await
+            .unwrap(),
+        Some(group_before),
+    );
+    let resume = store
+        .child_runtime_candidate(&task.task_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        resume
+            .session()
+            .conversation
+            .iter()
+            .filter(|message| message.text.contains("Verify staging first."))
+            .count(),
+        1,
+    );
 }

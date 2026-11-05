@@ -22,6 +22,15 @@ pub struct ControlObservation {
     pub priority: u8,
     pub message_id: String,
     pub terminal: bool,
+    kind: ObservationKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ObservationKind {
+    Task,
+    Schedule,
+    Report,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -73,6 +82,41 @@ impl FrozenModelControls {
                 continue;
             };
             let source = label.provenance.source_tool_name.as_str();
+            if message.role == ChatRole::SystemEvent {
+                let reports = match source {
+                    "delegation_state" => {
+                        value.pointer("/runtime_delegation_state/pending_reports")
+                    }
+                    "subagent_notification"
+                        if session.has_workbench_report_notification()
+                            && session
+                                .ready_subagent_notification
+                                .as_ref()
+                                .is_some_and(|notice| notice.message_id == message.message_id) =>
+                    {
+                        value.get("reports")
+                    }
+                    _ => None,
+                };
+                for report in reports.and_then(Value::as_array).into_iter().flatten() {
+                    if let Some(id) = report["report_id"].as_str() {
+                        result.observations.push(ControlObservation {
+                            id: id.into(),
+                            input_revision: session.input_revision,
+                            control_revision: session.control_revision,
+                            schedule_revision: 0,
+                            envelope_id: label.envelope_id.clone(),
+                            digest_sha256: label.digest_sha256.clone(),
+                            provider: label.provenance.source_provider_id.clone(),
+                            tool: source.into(),
+                            priority: 1,
+                            message_id: message.message_id.clone(),
+                            terminal: false,
+                            kind: ObservationKind::Report,
+                        });
+                    }
+                }
+            }
             let (tasks, priority, schedule) = match source {
                 "delegation_state" if message.role == ChatRole::SystemEvent => (
                     value
@@ -145,6 +189,11 @@ impl FrozenModelControls {
                         task["state"].as_str(),
                         Some("completed" | "failed" | "cancelled" | "deleted" | "expired")
                     ),
+                    kind: if schedule {
+                        ObservationKind::Schedule
+                    } else {
+                        ObservationKind::Task
+                    },
                 });
             }
         }
@@ -180,26 +229,20 @@ impl FrozenModelControls {
         let targets = calls
             .iter()
             .filter(|call| is_control(&call.name))
-            .filter_map(|call| {
-                let value: Value = serde_json::from_str(&call.arguments_json).ok()?;
-                let schedule = call.name == crate::schedule::management_tools::CANCEL;
-                value[if schedule { "schedule_id" } else { "task_id" }]
-                    .as_str()
-                    .map(|id| (id.to_owned(), schedule))
-            })
+            .flat_map(control_targets)
             .collect::<Vec<_>>();
         self.observations.retain(|observation| {
-            targets.iter().any(|(id, schedule)| {
-                id == &observation.id && *schedule == (observation.schedule_revision > 0)
-            })
+            targets
+                .iter()
+                .any(|(id, kind)| id == &observation.id && *kind == observation.kind)
         });
     }
 
-    fn selected(&self, id: &str, schedule: bool) -> Result<&ControlObservation, AgentError> {
+    fn selected(&self, id: &str, kind: ObservationKind) -> Result<&ControlObservation, AgentError> {
         let matching = self
             .observations
             .iter()
-            .filter(|o| o.id == id && (o.schedule_revision > 0) == schedule)
+            .filter(|o| o.id == id && o.kind == kind)
             .collect::<Vec<_>>();
         let priority = matching
             .iter()
@@ -226,31 +269,56 @@ impl FrozenModelControls {
         call: &ToolCall,
         inputs: &[ModelInputLineage],
     ) -> Result<(), AgentError> {
-        let value: Value = serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?;
-        let schedule = call.name == crate::schedule::management_tools::CANCEL;
-        let id = value[if schedule { "schedule_id" } else { "task_id" }]
-            .as_str()
-            .ok_or_else(unavailable)?;
-        let selected = self.selected(id, schedule)?;
-        // An immediate export edge is acceptable. An ancestor of a summary is not.
-        if !inputs.iter().any(|input| {
-            input.digest_sha256 == selected.digest_sha256
-                && input.source_provider_id == selected.provider
-                && input.source_tool_name == selected.tool
-                && (input.envelope_id == selected.envelope_id
-                    || input.source_envelope_ids == [selected.envelope_id.clone()])
-        }) {
+        let targets = control_targets(call);
+        if targets.is_empty() {
             return Err(unavailable());
+        }
+        for (id, kind) in targets {
+            let selected = self.selected(&id, kind)?;
+            // An immediate export edge is acceptable. An ancestor of a summary is not.
+            if !inputs.iter().any(|input| {
+                input.digest_sha256 == selected.digest_sha256
+                    && input.source_provider_id == selected.provider
+                    && input.source_tool_name == selected.tool
+                    && (input.envelope_id == selected.envelope_id
+                        || input.source_envelope_ids == [selected.envelope_id.clone()])
+            }) {
+                return Err(unavailable());
+            }
         }
         Ok(())
     }
+}
+
+fn control_targets(call: &ToolCall) -> Vec<(String, ObservationKind)> {
+    let Ok(value) = serde_json::from_str::<Value>(&call.arguments_json) else {
+        return Vec::new();
+    };
+    if call.name == crate::subagent::tools::ACK_REPORTS {
+        return value["report_ids"].as_array().map_or_else(Vec::new, |ids| {
+            ids.iter()
+                .filter_map(|id| Some((id.as_str()?.to_owned(), ObservationKind::Report)))
+                .collect()
+        });
+    }
+    let (key, kind) = if call.name == crate::schedule::management_tools::CANCEL {
+        ("schedule_id", ObservationKind::Schedule)
+    } else {
+        ("request_id", ObservationKind::Task)
+    };
+    value[key]
+        .as_str()
+        .map(|id| (id.to_owned(), kind))
+        .into_iter()
+        .collect()
 }
 
 pub fn is_control(name: &str) -> bool {
     matches!(
         name,
         crate::subagent::tools::CANCEL
-            | crate::subagent::tools::MESSAGE
+            | crate::subagent::tools::ADJUST
+            | crate::subagent::tools::ACK_REPORTS
             | crate::schedule::management_tools::CANCEL
     )
 }
@@ -279,13 +347,10 @@ pub fn caller<'a>(
     Ok(first)
 }
 
-pub fn observation<'a>(
-    session: &'a PersistedAgentSession,
-    call: &ToolCall,
-    id: &str,
-    schedule: bool,
-) -> Result<&'a ControlObservation, AgentError> {
-    let caller = caller(session, call)?;
+pub fn current_binding<'a>(
+    session: &PersistedAgentSession,
+    caller: &'a ChatMessage,
+) -> Result<&'a FrozenModelControls, AgentError> {
     let binding = caller.model_controls.as_ref().ok_or_else(unavailable)?;
     if binding.conversation_id != session.conversation_id
         || binding.actor_id != session.actor_id
@@ -297,7 +362,22 @@ pub fn observation<'a>(
     {
         return Err(unavailable());
     }
-    let selected = binding.selected(id, schedule)?;
+    Ok(binding)
+}
+
+pub fn observation<'a>(
+    session: &'a PersistedAgentSession,
+    call: &ToolCall,
+    id: &str,
+    schedule: bool,
+) -> Result<&'a ControlObservation, AgentError> {
+    let binding = current_binding(session, caller(session, call)?)?;
+    let kind = if schedule {
+        ObservationKind::Schedule
+    } else {
+        ObservationKind::Task
+    };
+    let selected = binding.selected(id, kind)?;
     if selected.terminal {
         return Err(crate::subagent::invalid(
             "This observed task is terminal and cannot be controlled. Read its result or create a new task for subsequent work; do not retry this control.",
@@ -341,9 +421,9 @@ pub(crate) fn project_message(message: &mut ChatMessage) {
         }
         crate::subagent::tools::SPAWN
         | crate::subagent::tools::STATUS
-        | crate::subagent::tools::RESULT
         | crate::subagent::tools::CANCEL
-        | crate::subagent::tools::MESSAGE => task(&mut value),
+        | crate::subagent::tools::ADJUST
+        | crate::subagent::tools::REPLY => task(&mut value),
         crate::subagent::tools::LIST => {
             if let Some(items) = value["items"].as_array_mut() {
                 for item in items {
@@ -351,7 +431,7 @@ pub(crate) fn project_message(message: &mut ChatMessage) {
                 }
             }
         }
-        crate::subagent::tools::WAIT => {
+        crate::subagent::tools::WAIT_REPORTS => {
             if let Some(items) = value.get_mut("tasks").and_then(Value::as_array_mut) {
                 for item in items {
                     task(item)
@@ -425,7 +505,7 @@ mod tests {
         let call = ToolCall {
             id: "cancel".into(),
             name: tools::CANCEL.into(),
-            arguments_json: r#"{"task_id":"task"}"#.into(),
+            arguments_json: r#"{"request_id":"task"}"#.into(),
         };
         assert!(tools::parse(&session, &call).is_err());
         let input = input(3);
@@ -439,9 +519,22 @@ mod tests {
             }
         );
         let raw = session.conversation[0].tool_calls[0].arguments_json.clone();
+        for legacy in ["cancel_subagent", "send_subagent_message"] {
+            assert!(tools::effect(legacy).is_none());
+        }
+        assert!(
+            tools::parse(
+                &session,
+                &ToolCall {
+                    arguments_json: r#"{"task_id":"task"}"#.into(),
+                    ..call.clone()
+                }
+            )
+            .is_err()
+        );
         let supplied = ToolCall {
             arguments_json:
-                r#"{"task_id":"task","expected_input_revision":99,"expected_control_revision":2}"#
+                r#"{"request_id":"task","expected_input_revision":99,"expected_control_revision":2}"#
                     .into(),
             ..call.clone()
         };
@@ -450,7 +543,7 @@ mod tests {
         assert!(tools::parse(&session, &call).is_err());
         assert_eq!(session.conversation[0].tool_calls[0].arguments_json, raw);
         let conflict = FrozenModelControls::capture(&session, &[input, self::input(4)]);
-        assert!(conflict.selected("task", false).is_err());
+        assert!(conflict.selected("task", ObservationKind::Task).is_err());
     }
     #[test]
     fn direct_audited_input_required_and_summary_ancestor_is_not_an_observation() {
@@ -460,7 +553,7 @@ mod tests {
         let call = ToolCall {
             id: "cancel".into(),
             name: tools::CANCEL.into(),
-            arguments_json: r#"{"task_id":"task"}"#.into(),
+            arguments_json: r#"{"request_id":"task"}"#.into(),
         };
         let label = input.data_envelope.unwrap();
         let mut node = ModelInputLineage {
@@ -506,7 +599,13 @@ mod tests {
             .unwrap(),
         );
         let binding = FrozenModelControls::capture(&session, &[runtime.clone(), prior]);
-        assert_eq!(binding.selected("task", false).unwrap().input_revision, 3);
+        assert_eq!(
+            binding
+                .selected("task", ObservationKind::Task)
+                .unwrap()
+                .input_revision,
+            3
+        );
         let mut model = runtime.clone();
         project_message(&mut model);
         assert!(!model.text.contains("input_revision"));

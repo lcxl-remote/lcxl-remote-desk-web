@@ -60,12 +60,7 @@ pub async fn permits_current_target(
     let Some(generation) = session.assistant_request_device_generation(device_id) else {
         return Ok(true);
     };
-    let root = session
-        .agent_role
-        .binding()
-        .map_or(session.conversation_id.as_str(), |binding| {
-            binding.root_conversation_id.as_str()
-        });
+    let root = session.device_roster_conversation_id();
     Ok(load(db, &session.actor_id, root)
         .await?
         .is_some_and(|roster| roster.members.get(device_id) == Some(&generation)))
@@ -86,12 +81,7 @@ pub async fn current_request_devices(
     {
         return Ok(devices.to_vec());
     }
-    let root = session
-        .agent_role
-        .binding()
-        .map_or(session.conversation_id.as_str(), |binding| {
-            binding.root_conversation_id.as_str()
-        });
+    let root = session.device_roster_conversation_id();
     let roster = load(db, &session.actor_id, root).await?;
     Ok(devices
         .iter()

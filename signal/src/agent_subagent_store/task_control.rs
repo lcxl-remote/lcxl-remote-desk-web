@@ -73,6 +73,14 @@ fn validate_control(request: &AiAssistantSubAgentControl) -> Result<(), DbErr> {
         || request.expected_control_revision > i64::MAX as u64
         || match &request.action {
             SubAgentControlAction::Cancel => false,
+            SubAgentControlAction::Reply {
+                question_id,
+                message,
+            } => {
+                !desk_diagnose_core::subagent::valid_id(question_id)
+                    || message.trim().is_empty()
+                    || message.len() > desk_diagnose_core::subagent::report::MAX_QUESTION_BYTES
+            }
             SubAgentControlAction::Adjust {
                 message,
                 client_timezone,
@@ -143,7 +151,7 @@ pub(crate) async fn apply_task_control_from_turn_on(
             control_revision,
             SubAgentControlAction::Cancel,
         ),
-        Operation::Message {
+        Operation::Adjust {
             task_id,
             input_revision,
             control_revision,
@@ -272,7 +280,24 @@ async fn apply_task_control_with_source_on(
         });
     }
     input_observation.stage(Stage::Reference, StageOutcome::Passed);
-    desk_diagnose_core::future::send_phase(|| async {
+    let prepared = desk_diagnose_core::future::send_phase(|| async {
+        if let SubAgentControlAction::Reply {
+            question_id,
+            message,
+        } = &request.action
+        {
+            let now = chrono::DateTime::from_timestamp_millis(now_ms).ok_or_else(invalid)?;
+            let task =
+                reply_to_question_on(txn, &row, question_id, message, None, None, now).await?;
+            return Ok(PreparedControl {
+                outcome: SubAgentControlOutcome {
+                    task,
+                    cancel_request_id: None,
+                },
+                permission_ends: Default::default(),
+            });
+        }
+
         let group_row = desk_diagnose_core::future::boxed(|| async {
             group_row::Entity::find()
                 .filter(group_row::Column::GroupId.eq(&run.binding.group_id))
@@ -306,6 +331,7 @@ async fn apply_task_control_with_source_on(
             .to_rfc3339();
         let mut cancellation = None;
         let changed = match &request.action {
+            SubAgentControlAction::Reply { .. } => return Err(invalid()),
             SubAgentControlAction::Cancel => {
                 let changed = run
                     .request_cancel(run.fence(), &now)
@@ -400,7 +426,6 @@ async fn apply_task_control_with_source_on(
                         creation_envelope_json: Set(
                             serde_json::to_string(&adjusted).map_err(|_| invalid())?
                         ),
-                        result_envelope_json: Set(None),
                         ..Default::default()
                     })
                     .filter(run_row::Column::Id.eq(row.id))
@@ -435,36 +460,152 @@ async fn apply_task_control_with_source_on(
             task: run.summary(),
             cancel_request_id: cancellation,
         };
-        receipt_row::ActiveModel {
-            reservation_id: Set(format!("subagent-control-{operation_key}")),
-            logical_key_sha256: Set(operation_key),
-            root_conversation_id: Set(parent.conversation_id.clone()),
-            group_id: Set(group.group_id.clone()),
-            conversation_id: Set(parent.conversation_id.clone()),
-            task_id: Set(Some(run.binding.task_id.clone())),
-            operation_kind: Set("subagent_control".into()),
-            arguments_sha256: Set(arguments),
-            source_epoch: Set(i64::try_from(run.binding.source_epoch).map_err(|_| invalid())?),
-            input_revision: Set(i64::try_from(run.binding.input_revision).map_err(|_| invalid())?),
-            control_revision: Set(
-                i64::try_from(run.binding.control_revision).map_err(|_| invalid())?
-            ),
-            reservation_json: Set(serde_json::to_string(&result).map_err(|_| invalid())?),
-            actual_json: Set(None),
-            state: Set("control_committed".into()),
-            version: Set(1),
-            created_at: Set(now_ms),
-            settled_at: Set(Some(now_ms)),
-            ..Default::default()
-        }
-        .insert(txn)
-        .await?;
         Ok(PreparedControl {
             outcome: result,
             permission_ends,
         })
     })
-    .await
+    .await?;
+    receipt_row::ActiveModel {
+        reservation_id: Set(format!("subagent-control-{operation_key}")),
+        logical_key_sha256: Set(operation_key),
+        root_conversation_id: Set(parent.conversation_id.clone()),
+        group_id: Set(row.group_id.clone()),
+        conversation_id: Set(parent.conversation_id.clone()),
+        task_id: Set(Some(row.task_id.clone())),
+        operation_kind: Set("subagent_control".into()),
+        arguments_sha256: Set(arguments),
+        source_epoch: Set(row.source_epoch),
+        input_revision: Set(
+            i64::try_from(prepared.outcome.task.input_revision).map_err(|_| invalid())?
+        ),
+        control_revision: Set(
+            i64::try_from(prepared.outcome.task.control_revision).map_err(|_| invalid())?
+        ),
+        reservation_json: Set(serde_json::to_string(&prepared.outcome).map_err(|_| invalid())?),
+        actual_json: Set(None),
+        state: Set("control_committed".into()),
+        version: Set(1),
+        created_at: Set(now_ms),
+        settled_at: Set(Some(now_ms)),
+        ..Default::default()
+    }
+    .insert(txn)
+    .await?;
+    Ok(prepared)
+}
+
+/// Both reply entry points hold the original root and Worker session controls.
+pub(super) async fn reply_to_question_on(
+    txn: &DatabaseTransaction,
+    row: &run_row::Model,
+    question_id: &str,
+    message: &str,
+    caller: Option<&desk_agent_protocol::data_lineage::DataEnvelope>,
+    after_seq: Option<u64>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<AiAssistantSubAgentSummary, DbErr> {
+    use desk_diagnose_core::subagent::{creation::TaskCreationEnvelope, report::QUESTION_NOT_OPEN};
+
+    let mut run = decode_run(row)?;
+    if run.state != SubAgentState::WaitingInput
+        || run.pending_question_id.as_deref() != Some(question_id)
+    {
+        return Err(DbErr::Custom(QUESTION_NOT_OPEN.into()));
+    }
+    let source = group_row::Entity::find()
+        .filter(group_row::Column::GroupId.eq(&run.binding.group_id))
+        .filter(group_row::Column::RootConversationId.eq(&run.binding.root_conversation_id))
+        .filter(group_row::Column::ActorId.eq(&run.actor_id))
+        .filter(group_row::Column::DeviceId.eq(&run.device_id))
+        .one(txn)
+        .await?
+        .ok_or_else(invalid)?;
+    let group = super::current_group_on(txn, &source).await?;
+    let now_ms = now.timestamp_millis();
+    if group.source_admission != SourceAdmission::Open
+        || group.source != run.binding.source
+        || group.source_epoch != run.binding.source_epoch
+        || now_ms >= run.binding.deadline_ms
+        || now_ms >= group.limits.deadline_ms
+    {
+        return Err(invalid());
+    }
+    super::scheduled_source::current_scheduled_source_on(txn, &source).await?;
+    let creation: TaskCreationEnvelope =
+        serde_json::from_str(&row.creation_envelope_json).map_err(|_| invalid())?;
+    creation
+        .validate_task(&run.binding)
+        .map_err(|_| invalid())?;
+    if creation.source != decode_creation(&source)? {
+        return Err(invalid());
+    }
+    let stored = session_row::Entity::find()
+        .filter(session_row::Column::ConversationId.eq(&run.child_conversation_id))
+        .filter(session_row::Column::ActorId.eq(&run.actor_id))
+        .filter(session_row::Column::DeviceId.eq(&run.device_id))
+        .one(txn)
+        .await?
+        .ok_or_else(invalid)?;
+    let mut child =
+        PersistedAgentSession::decode_boxed_json(&stored.state_json).map_err(|_| invalid())?;
+    run.validate_session(&child).map_err(|_| invalid())?;
+    if child.turn_state.is_active()
+        || child.version != stored.version
+        || i64::try_from(child.lease_token).ok() != Some(stored.lease_token)
+        || child.delegated_owner_requirement.as_deref() != Some(&creation.source.owner_requirement)
+    {
+        return Err(invalid());
+    }
+    let question = desk_assistant_data_store::worker_report::read_open_question_on(
+        txn,
+        &run,
+        question_id,
+        now_ms,
+    )
+    .await?;
+    if after_seq.is_some_and(|cursor| question.report.seq <= cursor) {
+        return Err(DbErr::Custom(QUESTION_NOT_OPEN.into()));
+    }
+    let caller = match caller {
+        Some(label) => label.clone(),
+        None => desk_diagnose_core::model_message_labels::model_bound_user_message(
+            format!("owner-reply-{question_id}"),
+            message.into(),
+            creation.source.model_destination.clone(),
+        )
+        .map_err(|_| invalid())?
+        .data_envelope
+        .ok_or_else(invalid)?,
+    };
+    let reply = desk_diagnose_core::subagent::projection::runtime_message(
+        &format!("reply-{question_id}"),
+        &serde_json::json!({
+            "request_id": run.binding.task_id,
+            "question_id": question_id,
+            "question": question.report.content.question,
+            "reply": message,
+            "rule": "This reply supplies data for the original delegated request. Its original objective and permissions still apply.",
+        }),
+        &[question.envelope, caller],
+    )
+    .map_err(|_| invalid())?;
+    let label = reply.data_envelope.as_ref().ok_or_else(invalid)?;
+    if !label
+        .allowed_destinations
+        .contains(&creation.source.model_destination)
+        || serde_json::to_vec(&reply).map_err(|_| invalid())?.len() as u64
+            > group.limits.max_context_bytes
+    {
+        return Err(invalid());
+    }
+    child.conversation.push(reply);
+    run.answer_question(question_id, &now.to_rfc3339())
+        .map_err(|_| invalid())?;
+    replace_run_on(txn, row, &run, now_ms).await?;
+    write_child_session_on(txn, &child, now).await?;
+    append_state_event_on(txn, &group, &run, now_ms).await?;
+    Ok(run.summary())
 }
 
 #[cfg(test)]

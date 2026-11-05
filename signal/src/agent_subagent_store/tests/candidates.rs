@@ -90,7 +90,11 @@ async fn temporary_resource_wait_preserves_original_task_and_requires_target_ava
     assert_eq!(waiting.binding, run.binding);
     assert!(
         !store
-            .retry_resource_task(&run.binding.task_id, true)
+            .retry_resource_task(
+                &run.binding.task_id,
+                Some(&run.device_id),
+                desk_diagnose_core::subagent::device_wait::DeviceWaitStatus::Ready
+            )
             .await
             .unwrap()
     );
@@ -105,13 +109,21 @@ async fn temporary_resource_wait_preserves_original_task_and_requires_target_ava
         .unwrap();
     assert!(
         !store
-            .retry_resource_task(&run.binding.task_id, false)
+            .retry_resource_task(
+                &run.binding.task_id,
+                Some(&run.device_id),
+                desk_diagnose_core::subagent::device_wait::DeviceWaitStatus::Waiting
+            )
             .await
             .unwrap()
     );
     assert!(
         store
-            .retry_resource_task(&run.binding.task_id, true)
+            .retry_resource_task(
+                &run.binding.task_id,
+                Some(&run.device_id),
+                desk_diagnose_core::subagent::device_wait::DeviceWaitStatus::Ready
+            )
             .await
             .unwrap()
     );
@@ -217,7 +229,11 @@ async fn deadline_settlement_is_independent_of_resource_waits_and_never_revives_
     );
     assert!(
         !store
-            .retry_resource_task(&run.binding.task_id, true)
+            .retry_resource_task(
+                &run.binding.task_id,
+                Some(&run.device_id),
+                desk_diagnose_core::subagent::device_wait::DeviceWaitStatus::Ready
+            )
             .await
             .unwrap()
     );

@@ -7,6 +7,8 @@ use utoipa::ToSchema;
 pub struct SubAgentLimits {
     /// Includes approval and native-work waits, across all groups in a root chat.
     pub max_unfinished_per_root: u32,
+    /// Maximum elapsed time for a new task, including time spent waiting.
+    pub max_task_duration_minutes: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]

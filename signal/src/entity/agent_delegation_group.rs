@@ -19,6 +19,8 @@ pub struct Model {
     #[sea_orm(indexed)]
     pub device_id: String,
     #[sea_orm(indexed)]
+    pub source_workbench_id: Option<String>,
+    #[sea_orm(indexed)]
     pub source_goal_id: Option<String>,
     #[sea_orm(indexed)]
     pub source_schedule_id: Option<String>,

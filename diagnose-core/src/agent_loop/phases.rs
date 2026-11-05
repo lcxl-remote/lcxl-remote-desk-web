@@ -173,6 +173,19 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
         None
     };
     let mut step_inventory = deps.capability_inventory.map(|items| items.to_vec());
+    if session.agent_role.workbench_id().is_some()
+        && let Some((inventory, providers)) = step_inventory.as_mut().zip(deps.provider_registry)
+    {
+        inventory.retain(|item| {
+            providers
+                .capability_for_tool(&item.tool_name)
+                .is_some_and(|capability| {
+                    session
+                        .agent_role
+                        .allows_effect(ToolEffect::from_capability_effect(capability.wire.effect))
+                })
+        });
+    }
     if session.has_admitted_personal_input()
         && let Some(inventory) = step_inventory.as_mut()
     {
@@ -402,7 +415,11 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
         inferred_permission_candidates.as_slice()
     } else {
         deps.capability_permission_candidates
-    };
+    }
+    .iter()
+    .filter(|tool| session.agent_role.allows_effect(tool.effect))
+    .cloned()
+    .collect::<Vec<_>>();
     let tool_requirements =
         crate::model_capability::ModelRequirements::for_registered_tools(exposed.iter().copied());
     let completion_messages = if let Some(event_id) = deps.model.command_completion_event_id() {
@@ -571,7 +588,7 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
         .iter()
         .map(|tool| tool.spec.clone())
         .collect::<Vec<_>>();
-    let owned_permission_candidates = permission_candidates.to_vec();
+    let owned_permission_candidates = permission_candidates;
     let owned_exposed = exposed.into_iter().cloned().collect::<Vec<_>>();
     let prompt: PromptPhase<'a> = crate::future::phase(|| async move {
         let exposed = owned_exposed.iter().collect::<Vec<_>>();
@@ -687,6 +704,9 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
             if state.completion_protocol_retries > 0 {
                 system_prompt.text.push_str("\nYour previous response was discarded for emitting a tool invocation. Return only a natural-language interpretation; no additional operation has been executed.");
             }
+        }
+        if session.agent_role.workbench_id().is_some() {
+            system_prompt.text.push_str("\n\nWORKBENCH COORDINATION: Use the available reads to understand the work and its selected targets. Delegate work that changes a device or writes to an external system. Use the original request and report references for follow-up.");
         }
         if let Some(locale) = session.response_locale.as_deref() {
             system_prompt.text.push_str(&format!("\n\nWrite natural-language answers and progress explanations in BCP-47 locale {locale}. Tool names, commands, and JSON fields remain unchanged."));
@@ -3004,7 +3024,8 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                                         ToolEffect::SubAgentPlanning
                                         | ToolEffect::SubAgentControl
                                         | ToolEffect::SubAgentQuery
-                                        | ToolEffect::SubAgentWait => {
+                                        | ToolEffect::SubAgentWait
+                                        | ToolEffect::SubAgentReport => {
                                             crate::future::phase(|| async {
                                                 sink.on_tool_started(
                                                     &call.name,
@@ -3019,8 +3040,8 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                                                         &tool_observation,
                                                     ) {
                                                         Ok(operation)
-                                                            if call.name
-                                                                != crate::subagent::tools::WAIT
+                                                            if !operation
+                                                                .requires_single_call()
                                                                 || turn.tool_calls.len() == 1 =>
                                                         {
                                                             tool_observation.stage(
@@ -3056,7 +3077,7 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                                             None,
                                         );
                                                             Err(crate::subagent::invalid(
-                                                                "wait_subagents must be called alone",
+                                                                "delegation waits, questions and terminal reports must be called alone",
                                                             ))
                                                         }
                                                         Err(error) => Err(error),
@@ -3095,6 +3116,13 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                                                             ));
                                                         }
                                                         finish_tool(session, &call.id, true, sink);
+                                                        if tool.effect == ToolEffect::SubAgentReport
+                                                            && session.turn_state.is_settled()
+                                                        {
+                                                            return Ok(Some(
+                                                                LoopOutcome::SubAgentYielded,
+                                                            ));
+                                                        }
                                                         if let Some(wait) = &session.subagent_wait {
                                                             return Ok(Some(
                                                                 LoopOutcome::SubAgentsWaiting {
@@ -3438,7 +3466,7 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                                             crate::model_observability::InputIssue::Precondition,
                                         );
                                                         append_internal_tool_result(session, turn.provider_meta.data_envelope.as_ref(), (state.mint)(), &call.id,
-                                            "required_subagents_incomplete: read_subagent_result for each required child at its current state revision and assess its answer against the goal. Finished means the child returned, not that the goal was achieved. Use wait_subagents for unfinished dependencies. A failed or cancelled required dependency cannot be claimed as complete.".into(),
+                                            "required_subagents_incomplete: read_subagent_reports for each required request, page through to its current terminal report and assess it against the goal. Finished means the child returned, not that the goal was achieved. Use wait_subagent_reports for unfinished dependencies. A failed or cancelled required dependency cannot be claimed as complete.".into(),
                                             crate::goal_tools::CONTROL_GOAL_TOOL_NAME)?;
                                                         deps.session_seam.save(session).await?;
                                                         finish_tool(session, &call.id, false, sink);
@@ -3475,7 +3503,7 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                                                             .await?
                                                         else {
                                                             append_internal_tool_result(session, turn.provider_meta.data_envelope.as_ref(), (state.mint)(), &call.id,
-                                                "no_goal_background_tasks: no normal background task of this goal is available to wait for. Inspect saved results and choose continue, ask_user, complete, or blocked. Use wait_subagents for child dependencies.".into(),
+                                                "no_goal_background_tasks: no normal background task of this goal is available to wait for. Inspect saved results and choose continue, ask_user, complete, or blocked. Use wait_subagent_reports for child dependencies.".into(),
                                                 crate::goal_tools::CONTROL_GOAL_TOOL_NAME)?;
                                                             deps.session_seam.save(session).await?;
                                                             finish_tool(
@@ -4267,6 +4295,7 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                                 crate::application_ui::bind_request(&mut request, &session.conversation)?;
                                 crate::permission_tools::include_desktop_action_reads(&mut request, providers)?;
                                 validate_permission_request_availability(
+                                    &session.agent_role,
                                     &session.conversation,
                                     &request,
                                     providers,

@@ -133,6 +133,11 @@ impl SubAgentStore {
             super::scheduled_source::current_scheduled_source_on(&txn, &source).await
         })
         .await?;
+        if !desk_diagnose_core::future::boxed(|| super::candidates::is_worker_head_on(&txn, &row))
+            .await?
+        {
+            return Ok(SubAgentClaimOutcome::Blocked(SubAgentClaimBlock::NotReady));
+        }
         desk_diagnose_core::future::send_phase(|| async {
             let session_row = desk_diagnose_core::future::boxed(|| async {
                 session_row::Entity::find()
@@ -231,6 +236,22 @@ impl SubAgentStore {
                     .any(|trigger| trigger.chain_id == session.chain_id)
             {
                 return Ok(SubAgentClaimOutcome::Blocked(SubAgentClaimBlock::NotReady));
+            }
+            if row.workbench_id.is_some() && row.workbench_claimed_at_ms.is_none() {
+                let policy =
+                    desk_diagnose_core::future::boxed(|| crate::subagent_policy::read(&txn))
+                        .await?;
+                if !desk_diagnose_core::future::boxed(|| {
+                    desk_assistant_data_store::worker_request::workbench_has_slot_on(
+                        &txn,
+                        &row,
+                        policy.limits.max_unfinished_per_root,
+                    )
+                })
+                .await?
+                {
+                    return Ok(SubAgentClaimOutcome::Blocked(SubAgentClaimBlock::NotReady));
+                }
             }
             session
                 .lease_token

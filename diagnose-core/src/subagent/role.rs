@@ -13,6 +13,10 @@ pub enum DelegationSource {
     UserInput {
         input_revision: u64,
     },
+    WorkbenchOwner {
+        workbench_id: String,
+        input_revision: u64,
+    },
     Goal {
         goal_id: String,
     },
@@ -26,6 +30,10 @@ impl DelegationSource {
     pub fn validate(&self) -> Result<(), &'static str> {
         match self {
             Self::UserInput { input_revision } if *input_revision > 0 => Ok(()),
+            Self::WorkbenchOwner {
+                workbench_id,
+                input_revision,
+            } if valid_id(workbench_id) && *input_revision > 0 => Ok(()),
             Self::Goal { goal_id } if valid_id(goal_id) => Ok(()),
             Self::ScheduledOccurrence {
                 schedule_id,
@@ -36,7 +44,34 @@ impl DelegationSource {
     }
 
     pub fn allows_delegated_review(&self) -> bool {
-        matches!(self, Self::UserInput { .. } | Self::Goal { .. })
+        self.owner_input_revision().is_some() || self.goal_id().is_some()
+    }
+
+    pub fn owner_input(session: &crate::session::PersistedAgentSession) -> Self {
+        let input_revision = session.input_revision;
+        match session.agent_role.workbench_id() {
+            Some(workbench_id) => Self::WorkbenchOwner {
+                workbench_id: workbench_id.into(),
+                input_revision,
+            },
+            None => Self::UserInput { input_revision },
+        }
+    }
+
+    pub fn owner_input_revision(&self) -> Option<u64> {
+        match self {
+            Self::UserInput { input_revision } | Self::WorkbenchOwner { input_revision, .. } => {
+                Some(*input_revision)
+            }
+            _ => None,
+        }
+    }
+
+    pub fn workbench_id(&self) -> Option<&str> {
+        match self {
+            Self::WorkbenchOwner { workbench_id, .. } => Some(workbench_id),
+            _ => None,
+        }
     }
 
     pub fn goal_id(&self) -> Option<&str> {
@@ -54,6 +89,7 @@ pub struct DelegatedTaskBinding {
     pub group_id: String,
     pub task_id: String,
     pub source: DelegationSource,
+    pub targets: Vec<crate::dynamic_run::AssistantInputTarget>,
     pub objective: String,
     pub acceptance_criteria: Vec<String>,
     pub input_revision: u64,
@@ -76,7 +112,8 @@ impl DelegatedTaskBinding {
             return Err("invalid delegated task binding");
         }
         validate_task(&self.objective, &self.acceptance_criteria)?;
-        self.source.validate()
+        self.source.validate()?;
+        crate::dynamic_run::AssistantInputTarget::validate_all(&self.targets)
     }
 }
 
@@ -101,6 +138,10 @@ pub fn validate_task(objective: &str, criteria: &[String]) -> Result<(), &'stati
 pub enum AgentRole {
     #[default]
     Main,
+    Coordinator {
+        workbench_id: String,
+        request_id: Option<String>,
+    },
     SubAgent {
         binding: Box<DelegatedTaskBinding>,
     },
@@ -108,17 +149,37 @@ pub enum AgentRole {
 
 impl AgentRole {
     pub fn is_main(&self) -> bool {
-        matches!(self, Self::Main)
+        self.binding().is_none()
+    }
+
+    pub fn workbench_id(&self) -> Option<&str> {
+        match self {
+            Self::Coordinator { workbench_id, .. } => Some(workbench_id),
+            _ => None,
+        }
+    }
+
+    pub fn workbench_request_id(&self) -> Option<&str> {
+        match self {
+            Self::Coordinator { request_id, .. } => request_id.as_deref(),
+            _ => None,
+        }
     }
 
     pub fn binding(&self) -> Option<&DelegatedTaskBinding> {
         match self {
-            Self::Main => None,
+            Self::Main | Self::Coordinator { .. } => None,
             Self::SubAgent { binding } => Some(binding),
         }
     }
 
     pub fn allows_effect(&self, effect: ToolEffect) -> bool {
+        if effect == ToolEffect::SubAgentReport {
+            return self.binding().is_some();
+        }
+        if effect == ToolEffect::Mutating && self.workbench_id().is_some() {
+            return false;
+        }
         self.is_main()
             || !matches!(
                 effect,

@@ -34,7 +34,7 @@ use crate::context_attachment::{
 use crate::model_context::{ContextNotice, MAX_CONTEXT_NOTICES, ModelContextState};
 use crate::replay::{ReplayDisposition, ReplayUnavailableReason};
 
-pub const CONVERSATION_SCHEMA_VERSION: u16 = 18;
+pub const CONVERSATION_SCHEMA_VERSION: u16 = 22;
 /// Opaque replay is bounded independently from visible transcript text.
 pub const MAX_REPLAY_ENVELOPE_BYTES: usize = 256 * 1024;
 pub const MAX_SESSION_REPLAY_BYTES: usize = 2 * 1024 * 1024;
@@ -522,6 +522,10 @@ pub struct PersistedAgentSession {
     pub main_stopped: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub main_coordination: Option<MainCoordinationLease>,
+    /// The work occupying a workbench's coordination slot. The work's native
+    /// turn owns the lease and releases the slot as soon as it settles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coordinating_work: Option<String>,
     pub delegation_group_id: Option<String>,
     pub subagent_wait: Option<crate::subagent::wait::ParentWait>,
     /// Resolved wait awaiting its source-qualified coordinator, never owner input.
@@ -939,6 +943,47 @@ impl PersistedAgentSession {
                 "invalid delegation control state".into(),
             ));
         }
+        if session.agent_role.workbench_id().is_some_and(|id| {
+            !crate::subagent::valid_id(id)
+                || session.surface != AgentSessionSurface::AiAssistant
+                || !session.device_id.is_empty()
+                || match session.agent_role.workbench_request_id() {
+                    Some(request) => {
+                        !crate::native_ids::is(
+                            crate::native_ids::Kind::AssistantMainRequest,
+                            request,
+                        ) || crate::native_ids::workbench_work_conversation(
+                            &session.actor_id,
+                            id,
+                            request,
+                        ) != session.conversation_id
+                            || session.input_revision > 1
+                    }
+                    None => id != session.conversation_id || session.input_revision != 0,
+                }
+                || session.permission_requests.iter().any(|request| {
+                    request.items.iter().any(|item| {
+                        !session.agent_role.allows_effect(
+                            crate::registry::ToolEffect::from_capability_effect(
+                                item.expected_effect,
+                            ),
+                        )
+                    })
+                })
+        }) {
+            return Err(SessionDecodeError::InvalidDynamicRun(
+                "invalid workbench coordination session".into(),
+            ));
+        }
+        if session.coordinating_work.as_ref().is_some_and(|request| {
+            session.agent_role.workbench_id() != Some(session.conversation_id.as_str())
+                || session.agent_role.workbench_request_id().is_some()
+                || !crate::native_ids::is(crate::native_ids::Kind::AssistantMainRequest, request)
+        }) {
+            return Err(SessionDecodeError::InvalidDynamicRun(
+                "invalid workbench coordination slot".into(),
+            ));
+        }
         if let Some(binding) = session.agent_role.binding() {
             binding
                 .validate(&session.conversation_id)
@@ -946,6 +991,12 @@ impl PersistedAgentSession {
             if session.surface != AgentSessionSurface::AiAssistant
                 || session.input_revision != binding.input_revision
                 || session.control_revision != binding.control_revision
+                || (session.device_id.is_empty()
+                    && !crate::dynamic_run::AssistantInputTarget::matches_request(
+                        &binding.targets,
+                        &session,
+                    ))
+                || (!session.device_id.is_empty() && !binding.targets.is_empty())
                 || session.client_conversation_id.is_some()
                 || session.delegation_group_id.as_ref() != Some(&binding.group_id)
                 || session.subagent_wait.is_some()
@@ -1274,6 +1325,36 @@ impl PersistedAgentSession {
         Ok(session)
     }
 
+    /// The coordinator owns shared control. Each admitted work has a different
+    /// native session so new work cannot replace its input or pending recovery.
+    pub fn new_workbench_coordinator(
+        actor_id: &str,
+        workbench_id: &str,
+        request_id: Option<&str>,
+        policy_revision: i64,
+        scope: AgentScope,
+        now: &str,
+    ) -> Result<Self, &'static str> {
+        if !crate::subagent::valid_id(workbench_id)
+            || request_id.is_some_and(|id| {
+                !crate::native_ids::is(crate::native_ids::Kind::AssistantMainRequest, id)
+            })
+        {
+            return Err("invalid workbench identity");
+        }
+        let conversation_id = request_id.map_or_else(
+            || workbench_id.into(),
+            |id| crate::native_ids::workbench_work_conversation(actor_id, workbench_id, id),
+        );
+        let mut session = Self::new(conversation_id, actor_id, "", policy_revision, scope, now);
+        session.surface = AgentSessionSurface::AiAssistant;
+        session.agent_role = crate::subagent::AgentRole::Coordinator {
+            workbench_id: workbench_id.into(),
+            request_id: request_id.map(str::to_owned),
+        };
+        Ok(session)
+    }
+
     /// Start a brand-new session bound to a subject, with a turn-boundary scope.
     pub fn new(
         conversation_id: impl Into<String>,
@@ -1293,6 +1374,7 @@ impl PersistedAgentSession {
             control_revision: 1,
             main_stopped: false,
             main_coordination: None,
+            coordinating_work: None,
             delegation_group_id: None,
             subagent_wait: None,
             ready_subagent_wait: None,
@@ -1387,6 +1469,11 @@ impl PersistedAgentSession {
         session.latest_input_seq = 1;
         session.input_revision = binding.input_revision;
         session.control_revision = binding.control_revision;
+        if session.device_id.is_empty() {
+            session.bind_personal_assistant_request_targets(&binding.targets)?;
+        } else if !binding.targets.is_empty() {
+            return Err("device-bound delegated task cannot select personal targets");
+        }
         session.delegation_group_id = Some(binding.group_id.clone());
         session.agent_role = crate::subagent::AgentRole::SubAgent {
             binding: Box::new(binding),
@@ -1401,6 +1488,15 @@ impl PersistedAgentSession {
         self.agent_role.is_main()
             && self.trigger_origin == TriggerOrigin::ScheduledTask
             && (self.subagent_result_only || self.ready_subagent_notification.is_some())
+    }
+
+    pub fn has_ready_subagent_completion(&self) -> bool {
+        self.ready_subagent_wait.is_some() || self.has_workbench_report_notification()
+    }
+
+    pub fn has_workbench_report_notification(&self) -> bool {
+        self.agent_role.workbench_request_id().is_some()
+            && self.ready_subagent_notification.is_some()
     }
 
     pub fn allows_new_mutation(&self) -> bool {
@@ -1433,6 +1529,26 @@ impl PersistedAgentSession {
             .map_or(self.conversation_id.as_str(), |binding| {
                 binding.root_conversation_id.as_str()
             })
+    }
+
+    /// A work's source selects devices from its coordinator's roster.
+    pub fn device_roster_conversation_id(&self) -> &str {
+        if let Some(binding) = self.agent_role.binding() {
+            binding
+                .source
+                .workbench_id()
+                .unwrap_or(&binding.root_conversation_id)
+        } else {
+            self.agent_role
+                .workbench_id()
+                .unwrap_or(&self.conversation_id)
+        }
+    }
+
+    pub fn queue_conversation_id(&self) -> &str {
+        self.agent_role
+            .workbench_id()
+            .unwrap_or(&self.conversation_id)
     }
 
     /// Freeze targets at native assistant input admission, before committing

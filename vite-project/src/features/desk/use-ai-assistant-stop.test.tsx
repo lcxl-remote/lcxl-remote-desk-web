@@ -8,7 +8,7 @@ import { SIGNALING_TYPE_CODE_AI_ASSISTANT_SESSION_SELECTED, SIGNALING_TYPE_CODE_
 import type { SignalingSubscriber } from './use-desk-signaling';
 
 vi.mock('react-i18next', () => import('@/test-utils/i18n-mock').then(m => m.reactI18nextMock()));
-const child: AiAssistantSubAgentSummary = { task_id: 'task-1', child_session_id: 'child-session', group_id: 'group-1',
+const child: AiAssistantSubAgentSummary = { task_id: 'task-1', worker_id: "worker-1", child_session_id: 'child-session', group_id: 'group-1',
     name: 'Research', state: 'running', input_revision: 1, control_revision: 1, state_revision: 2,
     source_goal_id: null, source: { kind: 'user_input', input_revision: 1 }, wait_reason: null,
     created_at: '2026-09-30T00:00:00Z', updated_at: '2026-09-30T00:00:01Z' };
@@ -128,12 +128,13 @@ describe('durable owner stop', () => {
         unmount();
     });
 
-    it('waits for a durable snapshot before enabling stop on a new local turn', () => {
+    it('shows a new local submission as pending until a durable turn starts', () => {
         const sendMessage = vi.fn().mockReturnValue('local-request');
         const { result, unmount } = renderHook(() => useAiAssistantChat({ deskId: 'first-stop',
             subscribe: () => () => undefined, sendMessage }));
         act(() => { expect(result.current.start('A new request')).toBe(true); });
-        expect(result.current.turnRunning).toBe(true);
+        expect(result.current.deliveryState).toBe('sending');
+        expect(result.current.turnRunning).toBe(false);
         expect(result.current.canStop).toBe(false);
         act(() => result.current.stop());
         expect(result.current.stopping).toBe(false);

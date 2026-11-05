@@ -27,7 +27,7 @@ export function readAiAssistantSubagentResultQueryOptions(params: ReadAiAssistan
 }
 
 /**
- * @summary Read one subagent's bounded terminal or partial report
+ * @summary Read the Worker request, recent reports and any open question
  * {@link /api/my/ai-assistant-session/subagents/result}
  */
 export function useReadAiAssistantSubagentResult<TData = ReadAiAssistantSubagentResultQueryResponse, TQueryData = ReadAiAssistantSubagentResultQueryResponse, TQueryKey extends QueryKey = ReadAiAssistantSubagentResultQueryKey>(params: ReadAiAssistantSubagentResultQueryParams, options: 

@@ -2614,7 +2614,7 @@ function getControlAiAssistantSubagentUrl() {
 }
 
 /**
- * @summary Explicitly cancel or adjust one nonterminal subagent
+ * @summary Cancel or adjust a Worker request or answer its open question
  * {@link /api/my/ai-assistant-session/subagents/control}
  */
 export async function controlAiAssistantSubagent(data: ControlAiAssistantSubagentMutationRequest, config: Partial<RequestConfig<ControlAiAssistantSubagentMutationRequest>> & { client?: Client } = {}) {
@@ -2650,7 +2650,7 @@ function getReadAiAssistantSubagentResultUrl() {
 }
 
 /**
- * @summary Read one subagent's bounded terminal or partial report
+ * @summary Read the Worker request, recent reports and any open question
  * {@link /api/my/ai-assistant-session/subagents/result}
  */
 export async function readAiAssistantSubagentResult(params: ReadAiAssistantSubagentResultQueryParams, config: Partial<RequestConfig> & { client?: Client } = {}) {

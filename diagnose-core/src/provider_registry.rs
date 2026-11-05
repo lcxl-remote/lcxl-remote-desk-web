@@ -73,11 +73,7 @@ impl CapabilityDescriptor {
     }
 
     fn legacy_effect(&self) -> ToolEffect {
-        if self.wire.effect.is_side_effecting() {
-            ToolEffect::Mutating
-        } else {
-            ToolEffect::ReadOnly
-        }
+        ToolEffect::from_capability_effect(self.wire.effect)
     }
 
     pub fn registered_tool(&self) -> RegisteredTool {

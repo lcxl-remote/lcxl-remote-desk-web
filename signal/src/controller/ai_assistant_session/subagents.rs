@@ -82,10 +82,11 @@ pub async fn get_ai_assistant_subagent_status(
     Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(task)))
 }
 
-#[utoipa::path(tag = TAG, summary = "Read one subagent's bounded terminal or partial report",
+#[utoipa::path(tag = TAG, summary = "Read the Worker request, recent reports and any open question",
     params(
         ("connection" = String, Query), ("conversation" = Option<String>, Query),
         ("session" = Option<String>, Query), ("task_id" = String, Query),
+        ("before_report_seq" = Option<u64>, Query),
     ), responses((status = 200, body = RestResponse<AiAssistantSubAgentResult>)))]
 #[get("/my/ai-assistant-session/subagents/result")]
 pub async fn read_ai_assistant_subagent_result(
@@ -107,7 +108,13 @@ pub async fn read_ai_assistant_subagent_result(
         return Ok(not_accessible());
     };
     let result = crate::agent_subagent_store::SubAgentStore::new(db.clone())
-        .result_for_owner(&root, &actor_id, &device_id, &query.task_id)
+        .result_for_owner(
+            &root,
+            &actor_id,
+            &device_id,
+            &query.task_id,
+            query.before_report_seq,
+        )
         .await
         .map_err(|_| {
             DeskSignalError::new_custom_error(
@@ -118,7 +125,7 @@ pub async fn read_ai_assistant_subagent_result(
     Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(result)))
 }
 
-#[utoipa::path(tag = TAG, summary = "Explicitly cancel or adjust one nonterminal subagent",
+#[utoipa::path(tag = TAG, summary = "Cancel or adjust a Worker request or answer its open question",
     request_body = AiAssistantSubAgentControlBody,
     responses((status = 200, body = RestResponse<AiAssistantSubAgentSummary>)))]
 #[post("/my/ai-assistant-session/subagents/control")]

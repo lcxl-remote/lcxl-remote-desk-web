@@ -2,8 +2,36 @@
 use super::*;
 use crate::config::connection::DatabaseTransaction;
 use desk_diagnose_core::subagent::{
-    SubAgentWaitReason, runtime::RuntimeTurn, state::TaskDependency,
+    SubAgentWaitReason,
+    device_wait::{DeviceWaitStatus, finish_receipt},
+    runtime::RuntimeTurn,
+    state::TaskDependency,
 };
+
+pub(super) async fn device_wait_authorized_on(
+    txn: &DatabaseTransaction,
+    session: &PersistedAgentSession,
+    target: &desk_diagnose_core::dynamic_run::AssistantInputTarget,
+) -> Result<bool, DbErr> {
+    if !session.admits_assistant_device(&target.device_id)
+        || !desk_assistant_data_store::device_roster::permits_current_target(
+            txn,
+            session,
+            &target.device_id,
+        )
+        .await
+        .map_err(|_| invalid())?
+    {
+        return Ok(false);
+    }
+    Ok(crate::agent_run_event_store::eligible_request_device_ids(
+        txn,
+        std::slice::from_ref(&target.device_id),
+    )
+    .await
+    .map_err(|_| invalid())?
+    .contains(&target.device_id))
+}
 
 async fn begin_candidate_control(
     store: &SubAgentStore,
@@ -201,7 +229,8 @@ impl SubAgentStore {
     pub async fn retry_resource_task(
         &self,
         task_id: &str,
-        device_available: bool,
+        observed_device_id: Option<&str>,
+        availability: DeviceWaitStatus,
     ) -> Result<bool, DbErr> {
         let selected = run_row::Entity::find()
             .filter(run_row::Column::TaskId.eq(task_id))
@@ -220,16 +249,18 @@ impl SubAgentStore {
             || row
                 .next_attempt_at_ms
                 .is_none_or(|due| due > now.timestamp_millis())
-            || !device_available
+            || run.resource_device_id() != observed_device_id
             || now.timestamp_millis() >= run.binding.deadline_ms
             || !matches!(
                 run.dependencies.as_slice(),
-                [TaskDependency::Resource {
-                    reason: SubAgentWaitReason::ModelCapacity
-                        | SubAgentWaitReason::DeviceUnavailable
-                        | SubAgentWaitReason::WriterCapacity
-                }]
+                [TaskDependency::Resource { .. } | TaskDependency::Device { .. }]
             )
+        {
+            return Ok(false);
+        }
+        if run.waiting_target().is_none()
+            && observed_device_id.is_some()
+            && availability != DeviceWaitStatus::Ready
         {
             return Ok(false);
         }
@@ -240,6 +271,7 @@ impl SubAgentStore {
             .ok_or_else(|| invalid())?;
         let group = current_group_on(&txn, &source).await?;
         if group.source_admission != SourceAdmission::Open
+            || now.timestamp_millis() >= group.limits.deadline_ms
             || run.source_paused
             || group.source_epoch != run.binding.source_epoch
         {
@@ -250,7 +282,7 @@ impl SubAgentStore {
             .one(&txn)
             .await?
             .ok_or_else(|| invalid())?;
-        let session =
+        let mut session =
             PersistedAgentSession::decode_json(&stored.state_json).map_err(|_| invalid())?;
         run.validate_session(&session).map_err(|_| invalid())?;
         if session.turn_state.is_active()
@@ -262,6 +294,18 @@ impl SubAgentStore {
                 .any(|request| !request.state.is_terminal())
         {
             return Ok(false);
+        }
+        if let Some((target, message_id)) = run.waiting_target() {
+            let status = if !device_wait_authorized_on(&txn, &session, target).await? {
+                DeviceWaitStatus::Unavailable
+            } else if availability == DeviceWaitStatus::Waiting {
+                return Ok(false);
+            } else {
+                availability
+            };
+            finish_receipt(&mut session, message_id, &target.reference, status)
+                .map_err(|_| invalid())?;
+            write_child_session_on(&txn, &session, now).await?;
         }
         run.set_dependencies(Vec::new(), &now.to_rfc3339())
             .map_err(|_| invalid())?;

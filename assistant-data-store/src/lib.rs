@@ -22,6 +22,8 @@ pub mod projection;
 pub mod retrieval_cache;
 pub mod source_lifecycle;
 pub mod suppression;
+pub mod worker_report;
+pub mod worker_request;
 
 use entity::agent_assistant_quota as quota;
 use sea_orm::{

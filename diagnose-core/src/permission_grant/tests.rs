@@ -303,6 +303,7 @@ fn check_ai_permission_grant(child: bool) {
         session.conversation_id = "child".into();
         session.agent_role = crate::subagent::AgentRole::SubAgent {
             binding: Box::new(crate::subagent::DelegatedTaskBinding {
+                targets: Vec::new(),
                 root_conversation_id: root_conversation_id.clone(),
                 group_id: "group".into(),
                 task_id: "task".into(),

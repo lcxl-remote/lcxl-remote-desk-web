@@ -106,6 +106,7 @@ async fn initialize_goal_group_inner(
                 creation.original_read_context,
                 Some(goal),
                 now_ms,
+                Default::default(),
             )
             .await
         }
@@ -122,17 +123,19 @@ pub(crate) async fn initialize_input_group_on(
     read_context: Option<ReadContextSelection>,
     goal: Option<&GoalRun>,
     now_ms: i64,
+    admitted: desk_diagnose_core::subagent::creation::AcceptedOwnerSource<'_>,
 ) -> Result<(), DbErr> {
     let source = match goal {
         Some(goal) => DelegationSource::Goal {
             goal_id: goal.goal_id.clone(),
         },
-        None => DelegationSource::UserInput {
-            input_revision: session.input_revision,
-        },
+        None => DelegationSource::owner_input(session),
     };
-    let creation = CreationEnvelope::capture(session, source, owner_requirement, read_context)
-        .map_err(|error| DbErr::Custom(format!("capture delegation source: {}", error.message)))?;
+    let creation =
+        CreationEnvelope::capture(session, source, owner_requirement, read_context, admitted)
+            .map_err(|error| {
+                DbErr::Custom(format!("capture delegation source: {}", error.message))
+            })?;
     persist_source_group_on(db, session, &creation, goal, now_ms).await
 }
 
@@ -170,9 +173,11 @@ async fn persist_source_group_inner(
     )>,
 ) -> Result<(), DbErr> {
     let (db, session, creation, goal, now_ms) = *inputs;
-    let group = creation.new_group(now_ms, goal).map_err(|error| {
-        DbErr::Custom(format!("initialize delegation group: {}", error.message))
-    })?;
+    let build_group = |duration| {
+        creation.new_group(now_ms, goal, duration).map_err(|error| {
+            DbErr::Custom(format!("initialize delegation group: {}", error.message))
+        })
+    };
     let key = creation.source_key().map_err(|_| invalid())?;
     if let Some(existing) = group_row::Entity::find()
         .filter(group_row::Column::SourceKeySha256.eq(&key))
@@ -183,12 +188,15 @@ async fn persist_source_group_inner(
             return Err(invalid());
         }
         let existing = current_group_on(db, &existing).await?;
+        build_group(existing.max_task_duration_minutes)?;
         if !existing.can_interpret(session.input_revision, session.control_revision) {
             return Err(invalid());
         }
         session.delegation_group_id = Some(existing.group_id);
         return Ok(());
     }
+    let policy = crate::subagent_policy::read(db).await?;
+    let group = build_group(policy.limits.max_task_duration_minutes)?;
     let (source_schedule_id, source_occurrence_id) = match &group.source {
         DelegationSource::ScheduledOccurrence {
             schedule_id,
@@ -202,6 +210,7 @@ async fn persist_source_group_inner(
         root_conversation_id: Set(group.root_conversation_id.clone()),
         actor_id: Set(group.actor_id.clone()),
         device_id: Set(group.device_id.clone()),
+        source_workbench_id: Set(group.source.workbench_id().map(str::to_string)),
         source_goal_id: Set(group.source.goal_id().map(str::to_string)),
         source_schedule_id: Set(source_schedule_id),
         source_occurrence_id: Set(source_occurrence_id),

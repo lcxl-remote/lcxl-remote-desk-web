@@ -101,19 +101,21 @@ async fn validate_observation_on(
         .ok_or_else(|| invalid())?;
     let label = tool.data_envelope.as_ref().ok_or_else(|| invalid())?;
     label.validate().map_err(|_| invalid())?;
-    if label.provenance.source_tool_name != desk_diagnose_core::subagent::tools::RESULT
+    if label.provenance.source_tool_name != desk_diagnose_core::subagent::tools::REPORTS
         || label.digest_sha256 != format!("{:x}", Sha256::digest(tool.text.as_bytes()))
     {
         return Err(invalid());
     }
-    let result: desk_diagnose_core::subagent::result::SubAgentModelResult =
+    let page: desk_diagnose_core::subagent::report::WorkerReportPage =
         serde_json::from_str(&tool.text).map_err(|_| invalid())?;
-    if result.task_id != observation.task_id
-        || result.state_revision != observation.state_revision
-        || result.answer.is_none()
-    {
+    if page.request_id != observation.task_id {
         return Err(invalid());
     }
+    let report = page
+        .reports
+        .iter()
+        .find(|report| report.report_id == observation.report_id)
+        .ok_or_else(invalid)?;
     let response = parent
         .conversation
         .iter()
@@ -169,6 +171,7 @@ async fn validate_observation_on(
         .filter(inbox::Column::ActorId.eq(&parent.actor_id))
         .filter(inbox::Column::DeviceId.eq(&parent.device_id))
         .filter(inbox::Column::TaskId.eq(&observation.task_id))
+        .filter(inbox::Column::ReportSeq.is_null())
         .filter(
             inbox::Column::StateRevision
                 .eq(i64::try_from(observation.state_revision).map_err(|_| invalid())?),
@@ -176,15 +179,8 @@ async fn validate_observation_on(
         .one(txn)
         .await?
         .ok_or_else(|| invalid())?;
-    let original: desk_agent_protocol::ai_assistant::subagent::AiAssistantSubAgentEvent =
-        serde_json::from_str(&event.event_json).map_err(|_| invalid())?;
-    if original.task.task_id != result.task_id
-        || original.task.state_revision != result.state_revision
-        || original.task.state != result.state
-        || original.task.wait_reason != result.wait_reason
-    {
-        return Err(invalid());
-    }
+    desk_assistant_data_store::worker_report::validate_terminal_observation_on(txn, &event, report)
+        .await?;
     Ok(event)
 }
 

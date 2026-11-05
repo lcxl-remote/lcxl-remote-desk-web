@@ -6,7 +6,7 @@ use desk_diagnose_core::{
     session::TriggerOrigin,
     subagent::{
         DelegatedTaskBinding,
-        creation::{TaskCreationEnvelope, task_context},
+        creation::{TaskCreationEnvelope, first_dispatch_context, task_context},
         tools::{self, Operation, SpawnRequest},
     },
 };
@@ -33,6 +33,7 @@ pub(crate) async fn parent_planning_on(
         || held.current_turn_id != current.current_turn_id
         || current.current_turn_id.is_none()
         || held.delegation_group_id != current.delegation_group_id
+        || held.agent_role != current.agent_role
         || held.trigger_origin != current.trigger_origin
         || held.subagent_result_only != current.subagent_result_only
         || row
@@ -85,6 +86,82 @@ pub(crate) async fn spawn_on(
     if tools::parse(held, call).map_err(|_| invalid())? != Operation::Spawn(request.clone()) {
         return Err(invalid());
     }
+    let now = chrono::Utc::now();
+    let current =
+        desk_diagnose_core::future::boxed(|| parent_planning_on(txn, held, now.timestamp_millis()))
+            .await?;
+    create_request_on(txn, &current, SpawnOrigin::NativeTool(call), request, now).await
+}
+
+#[derive(Clone, Copy)]
+enum SpawnOrigin<'a> {
+    NativeTool(&'a ToolCall),
+    FirstDispatch(&'a str),
+}
+
+/// A staged route becomes a decision only with the native input and Worker.
+/// The caller holds the authenticated owner, workbench and native work locks.
+pub(crate) async fn first_dispatch_on(
+    txn: &DatabaseTransaction,
+    work: &mut PersistedAgentSession,
+    queued: &desk_assistant_data_store::entity::agent_main_request::Model,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<Option<String>, DbErr> {
+    use desk_assistant_data_store::main_request::dispatch::FirstDispatch;
+    let Some(request) = FirstDispatch::request_from(queued, work).map_err(|_| invalid())? else {
+        return Ok(None);
+    };
+    if let Some(worker_id) = &request.worker_id
+        && !worker_exists_on(txn, work, worker_id).await?
+    {
+        // An expired Worker identity does not discard the original owner input.
+        return Ok(None);
+    }
+    let result = desk_diagnose_core::future::boxed(|| {
+        create_request_on(
+            txn,
+            work,
+            SpawnOrigin::FirstDispatch(&queued.request_id),
+            &request,
+            now,
+        )
+    })
+    .await?;
+    work.handled_input_seq = work.latest_input_seq;
+    Ok(Some(result.task_id))
+}
+
+async fn worker_exists_on(
+    txn: &DatabaseTransaction,
+    parent: &PersistedAgentSession,
+    worker_id: &str,
+) -> Result<bool, DbErr> {
+    Ok(desk_assistant_data_store::worker_request::in_scope(
+        &parent.actor_id,
+        &parent.device_id,
+        &parent.conversation_id,
+        parent.agent_role.workbench_id(),
+    )
+    .filter(run_row::Column::WorkerId.eq(worker_id))
+    .select_only()
+    .column(run_row::Column::Id)
+    .into_tuple::<i64>()
+    .one(txn)
+    .await?
+    .is_some())
+}
+
+async fn create_request_on(
+    txn: &DatabaseTransaction,
+    held: &PersistedAgentSession,
+    origin: SpawnOrigin<'_>,
+    request: &SpawnRequest,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<AiAssistantSubAgentSummary, DbErr> {
+    let (kind, intent) = match origin {
+        SpawnOrigin::NativeTool(call) => ("subagent_creation", call.id.as_str()),
+        SpawnOrigin::FirstDispatch(request_id) => ("workbench_first_dispatch", request_id),
+    };
     let group_id = held
         .delegation_group_id
         .as_deref()
@@ -93,12 +170,12 @@ pub(crate) async fn spawn_on(
         "{:x}",
         Sha256::digest(
             serde_json::to_vec(&(
-                "subagent_creation",
+                kind,
                 &held.conversation_id,
                 group_id,
                 &held.actor_id,
                 &held.device_id,
-                &call.id,
+                intent,
             ))
             .map_err(|_| invalid())?
         )
@@ -111,15 +188,16 @@ pub(crate) async fn spawn_on(
         desk_diagnose_core::native_ids::Kind::ChildConversation,
         &creation_key,
     );
+    let worker_id = request.worker_id.clone().unwrap_or_else(|| {
+        desk_diagnose_core::native_ids::stable(
+            desk_diagnose_core::native_ids::Kind::Worker,
+            &creation_key,
+        )
+    });
     let task_id = desk_diagnose_core::native_ids::stable(
         desk_diagnose_core::native_ids::Kind::Task,
         &creation_key,
     );
-    let now = chrono::Utc::now();
-    let current = desk_diagnose_core::future::boxed(|| async {
-        parent_planning_on(txn, held, now.timestamp_millis()).await
-    })
-    .await?;
     let original_row = desk_diagnose_core::future::boxed(|| async {
         group_row::Entity::find()
             .filter(group_row::Column::GroupId.eq(group_id))
@@ -133,7 +211,9 @@ pub(crate) async fn spawn_on(
     .ok_or_else(|| invalid())?;
     let mut group = boxed_group(&original_row)?;
     let creation = decode_creation(&original_row)?;
-    if !group.can_interpret(held.input_revision, held.control_revision) {
+    if !group.can_interpret(held.input_revision, held.control_revision)
+        || group.source.workbench_id() != held.agent_role.workbench_id()
+    {
         return Err(invalid());
     }
     desk_diagnose_core::future::boxed(|| async {
@@ -152,6 +232,7 @@ pub(crate) async fn spawn_on(
         if existing.creation_arguments_sha256 != arguments_sha256
             || run.binding.task_id != task_id
             || run.child_conversation_id != child_id
+            || run.worker_id != worker_id
             || run.binding.group_id != group_id
             || run.binding.root_conversation_id != held.conversation_id
             || run.actor_id != held.actor_id
@@ -167,24 +248,35 @@ pub(crate) async fn spawn_on(
         }
         return Ok(run.summary());
     }
+    if matches!(origin, SpawnOrigin::NativeTool(_))
+        && let Some(worker_id) = &request.worker_id
+        && !worker_exists_on(txn, held, worker_id).await?
+    {
+        return Err(invalid());
+    }
     desk_diagnose_core::future::send_phase(|| async {
-        let unfinished = desk_diagnose_core::future::boxed(|| async {
-            run_row::Entity::find()
-                .filter(run_row::Column::RootConversationId.eq(&held.conversation_id))
-                .filter(run_row::Column::ActorId.eq(&held.actor_id))
-                .filter(run_row::Column::DeviceId.eq(&held.device_id))
-                .filter(run_row::Column::State.is_not_in(["completed", "failed", "cancelled"]))
-                .count(txn)
-                .await
+        let unfinished = desk_diagnose_core::future::boxed(|| {
+            desk_assistant_data_store::worker_request::unfinished_in_scope(
+                &held.actor_id,
+                &held.device_id,
+                &held.conversation_id,
+                group.source.workbench_id(),
+            )
+            .count(txn)
         })
         .await?;
         let policy =
             desk_diagnose_core::future::boxed(|| async { crate::subagent_policy::read(txn).await })
                 .await?;
-        if unfinished >= policy.limits.max_unfinished_per_root as u64 {
+        let mut admission_limits = policy.limits;
+        if group.source.workbench_id().is_some() {
+            admission_limits.max_unfinished_per_root =
+                desk_assistant_data_store::main_request::PENDING_PER_CONVERSATION as u32;
+        }
+        if unfinished >= u64::from(admission_limits.max_unfinished_per_root) {
             return Err(DbErr::Custom(
                 desk_diagnose_core::subagent::capacity_storage_message(
-                    policy.limits.max_unfinished_per_root,
+                    admission_limits.max_unfinished_per_root,
                 ),
             ));
         }
@@ -210,12 +302,34 @@ pub(crate) async fn spawn_on(
                 request.required_for_completion,
                 unfinished as usize,
                 now.timestamp_millis(),
-                policy.limits,
+                admission_limits,
             )
             .map_err(|_| invalid())?;
-        let context =
-            task_context(creation, &current, call, &child_id, request).map_err(|_| invalid())?;
+        let targets = creation
+            .select_targets(&request.target_refs)
+            .map_err(|_| invalid())?;
+        if !targets.is_empty() {
+            let live = desk_diagnose_core::future::boxed(|| {
+                desk_assistant_data_store::device_roster::current_request_devices(txn, held)
+            })
+            .await
+            .map_err(|_| invalid())?;
+            if targets
+                .iter()
+                .any(|target| !live.contains(&target.device_id))
+            {
+                return Err(invalid());
+            }
+        }
+        let context = match origin {
+            SpawnOrigin::NativeTool(call) => task_context(creation, held, call, &child_id, request),
+            SpawnOrigin::FirstDispatch(_) => {
+                first_dispatch_context(creation, held, &child_id, request)
+            }
+        }
+        .map_err(|_| invalid())?;
         let binding = DelegatedTaskBinding {
+            targets,
             root_conversation_id: held.conversation_id.clone(),
             group_id: group.group_id.clone(),
             task_id,
@@ -228,6 +342,7 @@ pub(crate) async fn spawn_on(
             deadline_ms: desk_diagnose_core::subagent::creation::child_deadline_ms(
                 group.limits.deadline_ms,
                 now.timestamp_millis(),
+                policy.limits.max_task_duration_minutes,
             )
             .map_err(|_| invalid())?,
         };
@@ -270,6 +385,7 @@ pub(crate) async fn spawn_on(
             return Err(invalid());
         }
         let run = SubAgentRun {
+            worker_id: worker_id.clone(),
             child_conversation_id: child_id.clone(),
             actor_id: held.actor_id.clone(),
             device_id: held.device_id.clone(),
@@ -279,6 +395,7 @@ pub(crate) async fn spawn_on(
             state_revision: 1,
             source_paused: false,
             dependencies: Vec::new(),
+            pending_question_id: None,
             partial_report: None,
             terminal_report: None,
             failure_reason: None,
@@ -296,6 +413,8 @@ pub(crate) async fn spawn_on(
             run_row::ActiveModel {
             task_id: Set(run.binding.task_id.clone()),
             child_conversation_id: Set(child_id.clone()),
+            worker_id: Set(worker_id),
+            workbench_id: Set(group.source.workbench_id().map(str::to_owned)),
             root_conversation_id: Set(held.conversation_id.clone()),
             group_id: Set(group.group_id.clone()),
             actor_id: Set(held.actor_id.clone()),
@@ -303,7 +422,6 @@ pub(crate) async fn spawn_on(
             creation_key_sha256: Set(creation_key),
             creation_arguments_sha256: Set(arguments_sha256),
             creation_envelope_json: Set(serde_json::to_string(&context).map_err(|_| invalid())?),
-            result_envelope_json: Set(None),
             state: Set(run.state.as_str().into()),
             input_revision: Set(1),
             control_revision: Set(1),

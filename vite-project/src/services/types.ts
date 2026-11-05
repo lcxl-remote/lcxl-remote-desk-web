@@ -354,7 +354,8 @@ export const subAgentStateEnum = {
     cancelling: "cancelling",
     completed: "completed",
     failed: "failed",
-    cancelled: "cancelled"
+    cancelled: "cancelled",
+    waiting_input: "waiting_input"
 } as const;
 
 export type SubAgentStateEnumKey = (typeof subAgentStateEnum)[keyof typeof subAgentStateEnum];
@@ -367,7 +368,8 @@ export const subAgentWaitReasonEnum = {
     model_capacity: "model_capacity",
     writer_capacity: "writer_capacity",
     source_paused: "source_paused",
-    device_unavailable: "device_unavailable"
+    device_unavailable: "device_unavailable",
+    main_agent_reply: "main_agent_reply"
 } as const;
 
 export type SubAgentWaitReasonEnumKey = (typeof subAgentWaitReasonEnum)[keyof typeof subAgentWaitReasonEnum];
@@ -425,6 +427,10 @@ export type AiAssistantSubAgentSummary = {
     */
     updated_at: string;
     wait_reason?: (null | SubAgentWaitReason);
+    /**
+     * @type string
+    */
+    worker_id: string;
 };
 
 export type AiAssistantSubAgentPage = {
@@ -3073,6 +3079,12 @@ export const subAgentControlActionKindEnum2 = {
 
 export type SubAgentControlActionKindEnum2Key = (typeof subAgentControlActionKindEnum2)[keyof typeof subAgentControlActionKindEnum2];
 
+export const subAgentControlActionKindEnum3 = {
+    reply: "reply"
+} as const;
+
+export type SubAgentControlActionKindEnum3Key = (typeof subAgentControlActionKindEnum3)[keyof typeof subAgentControlActionKindEnum3];
+
 export type SubAgentControlAction = ({
     /**
      * @type string
@@ -3091,6 +3103,19 @@ export type SubAgentControlAction = ({
      * @type string
     */
     message: string;
+} | {
+    /**
+     * @type string
+    */
+    kind: SubAgentControlActionKindEnum3Key;
+    /**
+     * @type string
+    */
+    message: string;
+    /**
+     * @type string
+    */
+    question_id: string;
 });
 
 /**
@@ -3138,6 +3163,17 @@ export type AiAssistantSubAgentControlBody = {
     session?: string | null;
 };
 
+export type AiAssistantSubAgentQuestion = {
+    /**
+     * @type string
+    */
+    question_id: string;
+    /**
+     * @type string
+    */
+    text: string;
+};
+
 export type AiAssistantSubAgentReadBody = {
     /**
      * @type string
@@ -3161,6 +3197,61 @@ export type AiAssistantSubAgentReadBody = {
      * @type integer, int64
     */
     through_state_revision: number;
+};
+
+export const subAgentReportKindEnum = {
+    progress: "progress",
+    needs_input: "needs_input",
+    completed: "completed",
+    failed: "failed"
+} as const;
+
+export type SubAgentReportKindEnumKey = (typeof subAgentReportKindEnum)[keyof typeof subAgentReportKindEnum];
+
+export type SubAgentReportKind = SubAgentReportKindEnumKey;
+
+export type AiAssistantSubAgentReport = {
+    /**
+     * @type array
+    */
+    evidence_refs: string[];
+    /**
+     * @type string
+    */
+    kind: SubAgentReportKind;
+    /**
+     * @type string,null
+    */
+    question?: string | null;
+    /**
+     * @type array
+    */
+    receipt_refs: string[];
+    /**
+     * @type string
+    */
+    report_id: string;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    seq: number;
+    /**
+     * @type string
+    */
+    summary: string;
+};
+
+export type AiAssistantSubAgentReports = {
+    /**
+     * @type array
+    */
+    items: AiAssistantSubAgentReport[];
+    /**
+     * @minLength 0
+     * @type integer,null, int64
+    */
+    next_before_seq?: number | null;
 };
 
 export const taskAssessmentEnum = {
@@ -3224,7 +3315,12 @@ export type AiAssistantSubAgentResult = {
      * @type string
     */
     objective: string;
+    open_question?: (null | AiAssistantSubAgentQuestion);
     report?: (null | TaskFinalReport);
+    /**
+     * @type object
+    */
+    reports: AiAssistantSubAgentReports;
     /**
      * @type object
     */
@@ -11123,7 +11219,12 @@ export type RestResponseAiAssistantSubAgentResult = {
          * @type string
         */
         objective: string;
+        open_question?: (null | AiAssistantSubAgentQuestion);
         report?: (null | TaskFinalReport);
+        /**
+         * @type object
+        */
+        reports: AiAssistantSubAgentReports;
         /**
          * @type object
         */
@@ -11198,6 +11299,10 @@ export type RestResponseAiAssistantSubAgentSummary = {
         */
         updated_at: string;
         wait_reason?: (null | SubAgentWaitReason);
+        /**
+         * @type string
+        */
+        worker_id: string;
     };
     /**
      * @type string,null
@@ -14464,6 +14569,12 @@ export type RestResponseServiceOperationStatus = {
 };
 
 export type SubAgentLimits = {
+    /**
+     * @description Maximum elapsed time for a new task, including time spent waiting.
+     * @minLength 0
+     * @type integer, int32
+    */
+    maxTaskDurationMinutes: number;
     /**
      * @description Includes approval and native-work waits, across all groups in a root chat.
      * @minLength 0
@@ -21296,6 +21407,11 @@ export type ReadAiAssistantSubagentResultQueryParams = {
      * @type string
     */
     task_id: string;
+    /**
+     * @minLength 0
+     * @type integer | undefined, int64
+    */
+    before_report_seq?: number;
 };
 
 export type ReadAiAssistantSubagentResult200 = RestResponseAiAssistantSubAgentResult;

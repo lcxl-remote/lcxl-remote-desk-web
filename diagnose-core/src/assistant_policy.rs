@@ -23,6 +23,7 @@ pub const PERSONAL_ASSISTANT_POLICY_REVISION: i64 = 1;
 pub fn is_targetless_web_tool(tool: &crate::registry::RegisteredTool) -> bool {
     crate::web_research::is_web_tool(tool.name())
         || tool.name() == crate::conversation_attachment::READ_ATTACHMENT_TOOL
+        || crate::subagent::tools::effect(tool.name()).is_some()
         || matches!(
             tool.effect,
             crate::registry::ToolEffect::PermissionPlanning
@@ -33,6 +34,7 @@ pub fn is_targetless_web_tool(tool: &crate::registry::RegisteredTool) -> bool {
 pub fn targetless_web_internal_tools() -> Vec<crate::registry::RegisteredTool> {
     let mut tools = crate::permission_tools::permission_planning_tool_registry();
     tools.extend(crate::capability_disclosure::capability_discovery_tool_registry());
+    tools.extend(crate::subagent::tools::registry());
     tools.extend(
         crate::conversation_history::conversation_history_tool_registry()
             .into_iter()
@@ -80,10 +82,7 @@ pub fn validate_targetless_input(
     continuation_id: Option<&str>,
     scope: &AgentScope,
 ) -> Result<(), &'static str> {
-    let Some(continuation_id) = continuation_id.filter(|id| is_valid_client_conversation_id(id))
-    else {
-        return Err("targetless input requires a valid continuation id");
-    };
+    let continuation_id = validate_personal_input_scope(continuation_id, scope)?;
     if run_id
         != derive_assistant_conversation_key(
             actor_id,
@@ -93,10 +92,22 @@ pub fn validate_targetless_input(
     {
         return Err("targetless input requires the personal conversation key");
     }
+    Ok(())
+}
+
+/// A workbench work uses a native conversation key. Its queue binding is
+/// verified separately by the host under the coordinator lock.
+pub fn validate_personal_input_scope<'a>(
+    continuation_id: Option<&'a str>,
+    scope: &AgentScope,
+) -> Result<&'a str, &'static str> {
+    let continuation_id = continuation_id
+        .filter(|id| is_valid_client_conversation_id(id))
+        .ok_or("targetless input requires a valid continuation id")?;
     if !is_targetless_scope(scope) {
         return Err("targetless input cannot carry device authority");
     }
-    Ok(())
+    Ok(continuation_id)
 }
 
 fn is_targetless_scope(scope: &AgentScope) -> bool {
@@ -120,7 +131,10 @@ pub fn permits_permission_request(
     session.has_admitted_personal_input()
         && session.agent_role.is_main()
         && (request.exact_command().is_some_and(|command| {
-            session.allows_new_mutation()
+            session
+                .agent_role
+                .allows_effect(crate::registry::ToolEffect::Mutating)
+                && session.allows_new_mutation()
                 && session.admits_assistant_device(&command.target_device_id)
                 && command.actor_id == session.actor_id
                 && command.input_revision == request.input_revision

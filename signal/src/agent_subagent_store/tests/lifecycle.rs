@@ -111,7 +111,6 @@ async fn report_session_terminal_state_and_inbox_commit_together() {
     let complete = decode_run(&row).unwrap();
     assert_eq!(complete.state, SubAgentState::Completed);
     assert_eq!(complete.terminal_report, Some(report()));
-    assert!(row.result_envelope_json.is_some());
     let child_row = session_row::Entity::find()
         .filter(session_row::Column::ConversationId.eq(&session.conversation_id))
         .one(&db)
@@ -130,6 +129,21 @@ async fn report_session_terminal_state_and_inbox_commit_together() {
         .unwrap();
     assert_eq!(events.len(), 1);
     assert!(events[0].model_observed_at_ms.is_none());
+    let report_row = crate::entity::agent_subagent_inbox::Entity::find()
+        .filter(crate::entity::agent_subagent_inbox::Column::TaskId.eq(&binding.task_id))
+        .filter(crate::entity::agent_subagent_inbox::Column::EventKind.eq("report_completed"))
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(report_row.state_revision, events[0].state_revision);
+    let stored: desk_diagnose_core::subagent::report::StoredReport =
+        serde_json::from_str(&report_row.event_json).unwrap();
+    stored.validate().unwrap();
+    assert_eq!(
+        stored.report.content.summary,
+        complete.terminal_report.as_ref().unwrap().summary
+    );
     assert!(
         store
             .settle_answer_for_turn(&mut session, task.fence(), report().summary)

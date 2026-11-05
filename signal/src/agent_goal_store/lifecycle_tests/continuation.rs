@@ -73,6 +73,7 @@ async fn claimed_fixture(
         None,
         Some(&goal),
         now.timestamp_millis(),
+        Default::default(),
     )
     .await
     .unwrap();

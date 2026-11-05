@@ -11,19 +11,11 @@ use desk_diagnose_core::{
 };
 
 pub(super) async fn read_report(db: &DatabaseConnection) -> PersistedAgentSession {
-    read_report_with_task(db, false).await
-}
-
-async fn read_report_with_task(
-    db: &DatabaseConnection,
-    include_task: bool,
-) -> PersistedAgentSession {
-    read_report_source(db, include_task, false).await
+    read_report_source(db, false).await
 }
 
 async fn read_report_source(
     db: &DatabaseConnection,
-    include_task: bool,
     retain_history: bool,
 ) -> PersistedAgentSession {
     let (mut parent, calls) = super::creation::runnable_parent_with_source(
@@ -72,17 +64,18 @@ async fn read_report_source(
         db,
         &mut parent,
         "read-observation",
-        tools::RESULT,
-        serde_json::json!({"task_id": &task.task_id, "include_task": include_task}),
+        tools::REPORTS,
+        serde_json::json!({"request_id": &task.task_id}),
     )
     .await;
     store
         .execute_main_tool(
             &mut parent,
             &call,
-            Operation::ReadResult {
-                task_id: task.task_id,
-                include_task,
+            Operation::ReadReports {
+                request_id: task.task_id,
+                after_seq: 0,
+                limit: 10,
             },
             "observed-report",
         )
@@ -153,12 +146,13 @@ pub(super) async fn record_accepted_provider(
         active_time_ms: 100,
         ..Default::default()
     };
+    let call_digest = &output.digest_sha256;
     let CallAdmission::Reserved(reservation) = store
         .reserve_runtime_call(
             parent,
-            "observed-physical-model",
+            &format!("observed-{call_digest}"),
             DelegationCallKind::Model,
-            &"a".repeat(64),
+            call_digest,
             upper,
             now.timestamp_millis(),
         )
@@ -167,7 +161,7 @@ pub(super) async fn record_accepted_provider(
     else {
         panic!("physical model reservation");
     };
-    let id = "b".repeat(64);
+    let id = call_digest.clone();
     store
         .link_model_receipt(&reservation, &id, now.timestamp_millis())
         .await
@@ -301,23 +295,26 @@ async fn accepted_model_response_and_interpretation_consume_exact_event_atomical
 }
 
 #[tokio::test]
-async fn original_task_read_preserves_current_result_review_and_parent_completion_gate() {
+async fn terminal_report_read_preserves_acceptance_criteria_and_parent_completion_gate() {
     let db = database().await;
-    let mut parent = read_report_with_task(&db, true).await;
+    let mut parent = read_report(&db).await;
     let message = parent
         .conversation
         .iter()
         .find(|message| message.message_id == "observed-report")
         .unwrap();
-    let result: desk_diagnose_core::subagent::result::SubAgentModelResult =
+    let page: desk_diagnose_core::subagent::report::WorkerReportPage =
         serde_json::from_str(&message.text).unwrap();
-    assert!(
-        result
-            .objective
-            .as_ref()
-            .is_some_and(|value| !value.is_empty())
+    assert_eq!(
+        page.acceptance_criteria,
+        super::creation::spawn_request().acceptance_criteria
     );
-    assert!(result.answer.is_some());
+    assert_eq!(page.reports.len(), 1);
+    assert!(!page.reports[0].content.summary.is_empty());
+    assert_eq!(
+        page.reports[0].report_id,
+        parent.observed_subagent_results[0].report_id
+    );
     let store = SubAgentStore::new(db.clone());
     assert!(
         !store
@@ -366,6 +363,28 @@ async fn labelled_answer_without_original_successful_provider_receipt_does_not_c
             .all(&db)
             .await
             .unwrap()
+            .iter()
+            .all(|event| event.model_observed_at_ms.is_none() && event.interpreted_at_ms.is_none())
+    );
+}
+
+#[tokio::test]
+async fn accepted_model_response_cannot_observe_a_different_report() {
+    let db = database().await;
+    let mut parent = read_report(&db).await;
+    parent.observed_subagent_results[0].report_id = "different-terminal-report".into();
+    response(&db, &mut parent, true).await;
+    assert!(
+        save_main_delegation_session(&db, &mut parent)
+            .await
+            .is_err()
+    );
+    let events = crate::entity::agent_subagent_inbox::Entity::find()
+        .all(&db)
+        .await
+        .unwrap();
+    assert!(
+        events
             .iter()
             .all(|event| event.model_observed_at_ms.is_none() && event.interpreted_at_ms.is_none())
     );
@@ -485,7 +504,7 @@ async fn finished_child_requires_current_model_review_before_parent_completion()
 #[tokio::test]
 async fn native_inventory_parent_observation_is_captured_after_original_result_acknowledgement() {
     let db = database().await;
-    let mut parent = read_report_source(&db, false, true).await;
+    let mut parent = read_report_source(&db, true).await;
     assert!(parent.assistant_data.is_some());
     // Completion is retained by its original transaction before the parent
     // observes the result or calls another model.

@@ -922,8 +922,8 @@ mod tests {
     fn final_schemas_hide_derived_fields_and_keep_business_identifiers() {
         for name in [
             "request_permissions",
-            "cancel_subagent",
-            "send_subagent_message",
+            "cancel_subagent_request",
+            "adjust_subagent_request",
             "cancel_scheduled_task",
             "preview_computer_action",
         ] {
@@ -1102,8 +1102,8 @@ mod tests {
                 json!({"kind":"fresh_task","title":"test","prompt":"test","rule":{"kind":"after_confirmation","delay_seconds":10},"time_input":{"timezone":"UTC","reference_date":"2026-10-07","local_time":"08:00:00","rule":{"kind":"once"}}}),
             ),
             (
-                "wait_subagents",
-                json!({"task_ids":["same","same"],"mode":"all_terminal"}),
+                "wait_subagent_reports",
+                json!({"requests":[{"request_id":"same","after_seq":0},{"request_id":"same","after_seq":0}],"kinds":["completed"]}),
             ),
             (
                 "create_word_report",

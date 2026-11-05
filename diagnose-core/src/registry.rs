@@ -67,6 +67,8 @@ pub enum ToolEffect {
     SubAgentQuery,
     /// Registers a durable dependency wait and releases the main turn lease.
     SubAgentWait,
+    /// Publishes status for the current delegated request.
+    SubAgentReport,
 }
 
 /// A model-facing tool, its optional device grant, and its effect. Internal data
@@ -79,6 +81,16 @@ pub struct RegisteredTool {
 }
 
 impl ToolEffect {
+    pub(crate) fn from_capability_effect(
+        effect: desk_agent_protocol::capability_provider::CapabilityEffect,
+    ) -> Self {
+        if effect.is_side_effecting() {
+            Self::Mutating
+        } else {
+            Self::ReadOnly
+        }
+    }
+
     #[cfg(test)]
     pub fn requires_device_capability(self) -> bool {
         matches!(self, Self::ReadOnly | Self::Mutating)
@@ -120,7 +132,8 @@ fn mode_allows_effect(mode: ExecutionMode, effect: ToolEffect) -> bool {
         | ToolEffect::SubAgentPlanning
         | ToolEffect::SubAgentControl
         | ToolEffect::SubAgentQuery
-        | ToolEffect::SubAgentWait => true,
+        | ToolEffect::SubAgentWait
+        | ToolEffect::SubAgentReport => true,
         ToolEffect::Mutating => matches!(
             mode,
             ExecutionMode::ConfirmEachAction
@@ -160,7 +173,7 @@ pub fn exposure_block_reason(
     }
     if matches!(
         tool.effect,
-        ToolEffect::SubAgentQuery | ToolEffect::SubAgentWait
+        ToolEffect::SubAgentQuery | ToolEffect::SubAgentWait | ToolEffect::SubAgentReport
     ) {
         return matches!(
             origin,
@@ -283,24 +296,7 @@ pub fn exposed_for_session<'a>(
         session.trigger_origin,
     )
     .into_iter()
-    .filter(|tool| {
-        session.agent_role.allows_effect(tool.effect)
-            && crate::ai_assistant::data_tools::session_allows(tool, session)
-            && (!session.is_subagent_result_turn()
-                || matches!(
-                    tool.effect,
-                    ToolEffect::SubAgentQuery
-                        | ToolEffect::SubAgentWait
-                        | ToolEffect::RunProjection
-                        | ToolEffect::ConversationHistory
-                ))
-            && (tool.effect != ToolEffect::ScheduleQuery
-                || !session.agent_role.is_main()
-                || matches!(
-                    session.trigger_origin,
-                    TriggerOrigin::User | TriggerOrigin::SubAgentCompletion
-                ))
-    })
+    .filter(|tool| available_to_session(tool, session))
     .collect()
 }
 
@@ -334,24 +330,30 @@ pub fn lookup_for_session<'a>(
                         session.trigger_origin,
                     ))
         })
-        .filter(|tool| {
-            session.agent_role.allows_effect(tool.effect)
-                && crate::ai_assistant::data_tools::session_allows(tool, session)
-                && (!session.is_subagent_result_turn()
-                    || matches!(
-                        tool.effect,
-                        ToolEffect::SubAgentQuery
-                            | ToolEffect::SubAgentWait
-                            | ToolEffect::RunProjection
-                            | ToolEffect::ConversationHistory
-                    ))
-                && (tool.effect != ToolEffect::ScheduleQuery
-                    || !session.agent_role.is_main()
-                    || matches!(
-                        session.trigger_origin,
-                        TriggerOrigin::User | TriggerOrigin::SubAgentCompletion
-                    ))
-        })
+        .filter(|tool| available_to_session(tool, session))
+}
+
+fn available_to_session(
+    tool: &RegisteredTool,
+    session: &crate::session::PersistedAgentSession,
+) -> bool {
+    session.agent_role.allows_effect(tool.effect)
+        && crate::ai_assistant::data_tools::session_allows(tool, session)
+        && crate::subagent::tools::available_for_session(tool.name(), session)
+        && (!session.is_subagent_result_turn()
+            || matches!(
+                tool.effect,
+                ToolEffect::SubAgentQuery
+                    | ToolEffect::SubAgentWait
+                    | ToolEffect::RunProjection
+                    | ToolEffect::ConversationHistory
+            ))
+        && (tool.effect != ToolEffect::ScheduleQuery
+            || !session.agent_role.is_main()
+            || matches!(
+                session.trigger_origin,
+                TriggerOrigin::User | TriggerOrigin::SubAgentCompletion
+            ))
 }
 
 #[cfg(test)]

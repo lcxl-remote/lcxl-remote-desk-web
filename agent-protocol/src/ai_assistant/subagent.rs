@@ -25,6 +25,7 @@ pub enum SubAgentState {
     Completed,
     Failed,
     Cancelled,
+    WaitingInput,
 }
 
 impl SubAgentState {
@@ -33,6 +34,7 @@ impl SubAgentState {
             Self::Queued => "queued",
             Self::Running => "running",
             Self::WaitingApproval => "waiting_approval",
+            Self::WaitingInput => "waiting_input",
             Self::WaitingWork => "waiting_work",
             Self::WaitingResource => "waiting_resource",
             Self::WaitingSource => "waiting_source",
@@ -59,6 +61,7 @@ pub enum SubAgentWaitReason {
     WriterCapacity,
     SourcePaused,
     DeviceUnavailable,
+    MainAgentReply,
 }
 
 #[derive(
@@ -168,6 +171,7 @@ pub enum SubAgentSource {
 #[serde(deny_unknown_fields)]
 pub struct AiAssistantSubAgentSummary {
     pub task_id: String,
+    pub worker_id: String,
     /// Recovery selector for this child; every read and decision rechecks ownership.
     pub child_session_id: String,
     pub group_id: String,
@@ -193,6 +197,48 @@ pub struct AiAssistantSubAgentResult {
     pub acceptance_criteria: Vec<String>,
     pub report: Option<TaskFinalReport>,
     pub failure_reason: Option<String>,
+    pub reports: AiAssistantSubAgentReports,
+    pub open_question: Option<AiAssistantSubAgentQuestion>,
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaRead, SchemaWrite, ToSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum SubAgentReportKind {
+    Progress,
+    NeedsInput,
+    Completed,
+    Failed,
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaRead, SchemaWrite, ToSchema,
+)]
+pub struct AiAssistantSubAgentReport {
+    pub report_id: String,
+    pub seq: u64,
+    pub kind: SubAgentReportKind,
+    pub summary: String,
+    pub question: Option<String>,
+    pub evidence_refs: Vec<String>,
+    pub receipt_refs: Vec<String>,
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, SchemaRead, SchemaWrite, ToSchema,
+)]
+pub struct AiAssistantSubAgentReports {
+    pub items: Vec<AiAssistantSubAgentReport>,
+    pub next_before_seq: Option<u64>,
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaRead, SchemaWrite, ToSchema,
+)]
+pub struct AiAssistantSubAgentQuestion {
+    pub question_id: String,
+    pub text: String,
 }
 
 /// Durable attention/progress notification. Reading it in the UI does not mark
@@ -258,6 +304,10 @@ pub enum SubAgentControlAction {
     Adjust {
         message: String,
         client_timezone: String,
+    },
+    Reply {
+        question_id: String,
+        message: String,
     },
 }
 

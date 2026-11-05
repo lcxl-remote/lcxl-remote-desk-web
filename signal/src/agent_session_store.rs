@@ -1953,6 +1953,16 @@ impl SessionSeam for SignalAgentSessionStore {
                     session
                         .check_surface(self.surface)
                         .map_err(ClaimError::Subject)?;
+                    if session.agent_role.workbench_id().is_some()
+                        && params.trigger_origin == desk_diagnose_core::session::TriggerOrigin::User
+                        && (session.agent_role.workbench_request_id().is_none()
+                            || session.agent_role.workbench_request_id()
+                                != self.queued_input.as_ref().map(|(id, _)| id.as_str()))
+                    {
+                        return Err(ClaimError::Backend(internal(
+                            "workbench claim source changed",
+                        )));
+                    }
                     if self.surface == AgentSessionSurface::AiAssistant
                         && params.device_id.is_empty()
                         && (!session.has_admitted_personal_input()
@@ -2111,6 +2121,19 @@ impl SessionSeam for SignalAgentSessionStore {
                         let txn = crate::db::begin_write(&self.db, agent_session::Entity)
                             .await
                             .map_err(|error| ClaimError::Backend(internal(error.to_string())))?;
+                        if let Some(workbench_id) = session.agent_role.workbench_id()
+                            && !crate::agent_run_event_store::main_requests::claim_workbench_on(
+                                &txn,
+                                &session.actor_id,
+                                workbench_id,
+                                request_id,
+                                now.timestamp_millis(),
+                            )
+                            .await
+                            .map_err(ClaimError::Backend)?
+                        {
+                            return Err(ClaimError::Busy);
+                        }
                         let result = update
                             .exec(&txn)
                             .await

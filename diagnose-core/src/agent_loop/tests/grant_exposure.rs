@@ -509,3 +509,236 @@ async fn permission_resume_keeps_scoped_prerequisites_and_validates_exact_grants
         }
     }
 }
+
+#[tokio::test]
+async fn workbench_coordinator_uses_reads_and_rejects_forged_writes_and_permissions() {
+    use crate::{native_ids, subagent::AgentRole};
+
+    struct SelectedRead(RefCell<Vec<String>>);
+
+    #[async_trait(?Send)]
+    impl ToolSeam for SelectedRead {
+        async fn run_read(&self, call: &ToolCall) -> Result<ToolRunOutput, AgentError> {
+            panic!("unexpected fixed-device read: {}", call.name)
+        }
+
+        async fn request_devices(
+            &self,
+            session: &PersistedAgentSession,
+        ) -> Result<Vec<crate::request_devices::RequestDevice>, AgentError> {
+            assert!(session.admits_assistant_device("device"));
+            Ok(vec![crate::request_devices::RequestDevice {
+                target_ref: "device".into(),
+                name: None,
+                platform: Some("macOS"),
+                online: true,
+                ready_capabilities: vec![Capability::SystemInfo, Capability::ShellExecConfirmed],
+            }])
+        }
+
+        async fn run_request_device_read(
+            &self,
+            session: &PersistedAgentSession,
+            call: &ToolCall,
+        ) -> Result<crate::seam::ReadOutcome, AgentError> {
+            let (target, _) = crate::request_devices::selected_system_info(call)?;
+            assert!(session.admits_assistant_device(&target));
+            self.0.borrow_mut().push(target);
+            Ok(crate::seam::ReadOutcome::Completed {
+                output: ToolRunOutput {
+                    format: crate::seam::ToolOutputFormat::Text,
+                    content: "macOS 15".into(),
+                    image_data_url: None,
+                    document_preview: None,
+                },
+                ok: true,
+                data_envelope: None,
+                event_id: None,
+                background_task: None,
+            })
+        }
+    }
+
+    let providers = crate::ai_assistant::ai_assistant_provider_registry();
+    let write = providers.capability_for_tool("browser_open_page").unwrap();
+    let write_provider = providers
+        .provider_for_capability(&write.wire.capability_id)
+        .unwrap();
+    let mut claim = claim();
+    claim.device_id.clear();
+    claim.current_pdp_scope.mode = ExecutionMode::ConfirmEachAction;
+    claim
+        .current_pdp_scope
+        .granted
+        .push(write.required_capability);
+    let request_id = native_ids::stable(native_ids::Kind::AssistantMainRequest, &"message");
+    let mut initial = PersistedAgentSession::new_workbench_coordinator(
+        &claim.actor_id,
+        "workbench",
+        Some(&request_id),
+        claim.policy_revision,
+        claim.current_pdp_scope.clone(),
+        &claim.now,
+    )
+    .unwrap();
+    claim.conversation_id = initial.conversation_id.clone();
+    initial.input_revision = 1;
+    initial.latest_input_seq = 1;
+    initial.focus_epoch.input_revision = 1;
+    initial
+        .bind_assistant_request_targets(vec!["device".into()])
+        .unwrap();
+    let candidates = [write.registered_tool()];
+    let inventory = [crate::capability_availability::CapabilityAvailability {
+        provider_id: write_provider.wire.provider_id.clone(),
+        capability_id: write.wire.capability_id.clone(),
+        tool_name: write.tool_spec.name.clone(),
+        compiled: true,
+        enabled: true,
+        connected: true,
+        ready: true,
+        reason: None,
+    }];
+    let proposal = ToolCall {
+        id: "proposal".into(),
+        name: crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME.into(),
+        arguments_json: serde_json::json!({"items":[{
+            "item_id": "open",
+            "tool_name": "browser_open_page",
+            "exact_input": {"target": {
+                "origin": {"kind":"https","host_ascii":"app.slack.com","port":443},
+                "url": "https://app.slack.com/"
+            }},
+            "suggested_ttl_seconds": 300,
+            "suggested_max_uses": 1,
+            "reason": "Open the page"
+        }]})
+        .to_string(),
+    };
+
+    // This is a valid native permission proposal and a requestable provider.
+    let request = crate::permission_tools::build_permission_request(
+        &proposal,
+        &providers,
+        "request".into(),
+        1,
+        claim.now.clone(),
+    )
+    .unwrap();
+    validate_permission_request_availability(
+        &AgentRole::Main,
+        &[],
+        &request,
+        &providers,
+        &inventory,
+        &[],
+        &candidates,
+    )
+    .unwrap();
+    assert!(
+        validate_permission_request_availability(
+            &initial.agent_role,
+            &[],
+            &request,
+            &providers,
+            &inventory,
+            &[],
+            &candidates,
+        )
+        .is_err()
+    );
+    let mut invalid = initial.clone();
+    invalid.permission_requests.push(request);
+    assert!(
+        PersistedAgentSession::decode_json(&serde_json::to_string(&invalid).unwrap())
+            .unwrap_err()
+            .to_string()
+            .contains("invalid workbench coordination session")
+    );
+
+    let session = MemSession {
+        inner: RefCell::new(Some(initial)),
+        ..Default::default()
+    };
+    let requests = Rc::new(RefCell::new(vec![]));
+    let model = ScriptModel {
+        turns: RefCell::new(
+            [
+                ModelTurn {
+                    tool_calls: vec![
+                        ToolCall {
+                            id: "write".into(),
+                            name: "browser_open_page".into(),
+                            arguments_json: "{}".into(),
+                        },
+                        proposal,
+                        ToolCall {
+                            id: "read".into(),
+                            name: crate::request_devices::SYSTEM_INFO_TOOL.into(),
+                            arguments_json: r#"{"target_ref":"device"}"#.into(),
+                        },
+                    ],
+                    stop_reason: StopReason::ToolUse,
+                    provider_meta: tool_meta(),
+                    ..Default::default()
+                },
+                answer("inspection complete"),
+            ]
+            .into(),
+        ),
+        requests: requests.clone(),
+    };
+    let tools = SelectedRead(RefCell::new(Vec::new()));
+    let mut registry = candidates.to_vec();
+    registry.extend(crate::permission_tools::permission_planning_tool_registry());
+    let clock = || "2026-06-20T00:00:01Z".to_string();
+    let mut deps = deps(&session, &model, &tools, &registry, &clock);
+    deps.provider_registry = Some(&providers);
+    deps.capability_inventory = Some(&inventory);
+    deps.capability_permission_candidates = &candidates;
+    run_agent_turn(
+        &deps,
+        claim,
+        ChatMessage::text("u", ChatRole::User, "inspect the environment"),
+        &mut NullTurnSink,
+    )
+    .await
+    .unwrap();
+
+    let saved = session.inner.borrow();
+    let saved = saved.as_ref().unwrap();
+    assert_eq!(
+        tools.0.borrow().as_slice(),
+        &["device"],
+        "{:?}",
+        saved.conversation
+    );
+    assert!(saved.permission_requests.is_empty());
+    for id in ["write", "proposal", "read"] {
+        assert!(
+            saved
+                .conversation
+                .iter()
+                .any(|message| message.tool_call_id.as_deref() == Some(id))
+        );
+    }
+    let requests = requests.borrow();
+    assert!(
+        requests[0]
+            .tools
+            .iter()
+            .any(|tool| tool.name == crate::request_devices::SYSTEM_INFO_TOOL)
+    );
+    assert!(
+        !requests[0]
+            .tools
+            .iter()
+            .any(|tool| tool.name == "browser_open_page")
+    );
+    assert!(
+        !requests[0]
+            .messages
+            .iter()
+            .any(|message| message.text.contains("browser_open_page"))
+    );
+}

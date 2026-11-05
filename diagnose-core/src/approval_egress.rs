@@ -847,6 +847,7 @@ mod tests {
         session.delegated_owner_requirement = Some(Box::new(owner.clone()));
         session.agent_role = AgentRole::SubAgent {
             binding: Box::new(DelegatedTaskBinding {
+                targets: Vec::new(),
                 root_conversation_id: "conversation".into(),
                 group_id: "group".into(),
                 task_id: "task".into(),

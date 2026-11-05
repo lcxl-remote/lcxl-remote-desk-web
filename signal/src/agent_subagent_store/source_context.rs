@@ -133,6 +133,7 @@ async fn child_resume_admitted_inner<C: ConnectionTrait + crate::config::ConfigC
         .checked_add(group.budget.child_outstanding)
         .map_err(|_| invalid())?;
     Ok(!run.source_paused
+        && run.pending_question_id.is_none()
         && group.source_admission == SourceAdmission::Open
         && group.limits.total.has_model_capacity(charged)
         && group.limits.child_ceiling().has_model_capacity(children))

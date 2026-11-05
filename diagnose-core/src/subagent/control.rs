@@ -63,6 +63,7 @@ pub fn stop_main_session(
     }
     next.main_stopped = true;
     next.main_coordination = None;
+    next.coordinating_work = None;
     if next.has_admitted_personal_input() {
         for request in &mut next.permission_requests {
             if request.state.can_user_decide() {
@@ -102,6 +103,7 @@ pub fn synchronize_session(
         || held.group_id != run.binding.group_id
         || held.task_id != run.binding.task_id
         || held.source != run.binding.source
+        || held.targets != run.binding.targets
         || held.deadline_ms != run.binding.deadline_ms
         || held.input_revision > run.binding.input_revision
         || held.control_revision > run.binding.control_revision
@@ -127,6 +129,9 @@ pub fn synchronize_session(
             .checked_add(1)
             .ok_or("child input sequence exhausted")?;
         updated.input_revision = run.binding.input_revision;
+        if updated.device_id.is_empty() {
+            updated.bind_personal_assistant_request_targets(&run.binding.targets)?;
+        }
     }
     updated.control_revision = run.binding.control_revision;
     updated.subagent_report_corrections_used = run.report_corrections_used;

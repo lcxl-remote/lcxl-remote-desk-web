@@ -11,6 +11,27 @@ use desk_diagnose_core::{
 
 fn delegation_storage(error: sea_orm::DbErr) -> AgentError {
     if let sea_orm::DbErr::Custom(message) = &error
+        && message == desk_diagnose_core::subagent::report::QUESTION_NOT_OPEN
+    {
+        return desk_diagnose_core::subagent::invalid(
+            "The request is no longer waiting for that question.",
+        );
+    }
+    if let sea_orm::DbErr::Custom(message) = &error
+        && message == desk_diagnose_core::subagent::device_wait::NATIVE_WORK_PENDING
+    {
+        return desk_diagnose_core::subagent::invalid(
+            "Finish or reconcile the pending work before waiting for a device.",
+        );
+    }
+    if let sea_orm::DbErr::Custom(message) = &error
+        && message == desk_diagnose_core::subagent::report::TERMINAL_REPORT_BLOCKED
+    {
+        return desk_diagnose_core::subagent::invalid(
+            "Finish or reconcile the pending native work before reporting completion or failure.",
+        );
+    }
+    if let sea_orm::DbErr::Custom(message) = &error
         && let Some(refusal) = desk_diagnose_core::subagent::capacity_error(message)
             .or_else(|| desk_diagnose_core::subagent::control_observation_error(message))
     {
@@ -87,10 +108,31 @@ impl SubAgentSeam for SignalAgentSessionStore {
         result_message_id: &str,
         observation: &desk_diagnose_core::model_observability::tool::ToolObservation,
     ) -> Result<ToolReceipt, AgentError> {
-        crate::agent_subagent_store::SubAgentStore::new(self.db.clone())
-            .execute_main_tool_observed(session, call, operation, result_message_id, observation)
-            .await
-            .map_err(delegation_storage)
+        let store = crate::agent_subagent_store::SubAgentStore::new(self.db.clone());
+        match operation {
+            Operation::WaitDevice { target_ref } => {
+                store
+                    .wait_for_device_for_turn(session, call, target_ref, result_message_id)
+                    .await
+            }
+            Operation::Report(content) => {
+                store
+                    .report_for_turn(session, call, content, result_message_id)
+                    .await
+            }
+            _ => {
+                store
+                    .execute_main_tool_observed(
+                        session,
+                        call,
+                        operation,
+                        result_message_id,
+                        observation,
+                    )
+                    .await
+            }
+        }
+        .map_err(delegation_storage)
     }
     async fn validate_child_admission(
         &self,

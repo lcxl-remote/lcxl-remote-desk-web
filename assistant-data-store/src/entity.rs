@@ -25,6 +25,8 @@ pub mod agent_memory_revision;
 pub mod agent_memory_source;
 pub mod agent_memory_tombstone;
 pub mod agent_memory_use;
+pub mod agent_subagent_inbox;
+pub mod agent_subagent_run;
 
 /// Add assistant tables to the host schema transaction.
 #[cfg(any(feature = "schema-sync", test))]
@@ -55,4 +57,6 @@ pub fn register_schema(schema: sea_orm::SchemaBuilder) -> sea_orm::SchemaBuilder
         .register(agent_memory_source::Entity)
         .register(agent_memory_tombstone::Entity)
         .register(agent_memory_use::Entity)
+        .register(agent_subagent_inbox::Entity)
+        .register(agent_subagent_run::Entity)
 }

@@ -7,7 +7,7 @@ mod control;
 mod facts;
 mod lifecycle;
 mod main_tools;
-mod notification;
+pub(crate) mod notification;
 mod observation;
 mod session;
 pub(crate) use notification::{
@@ -78,7 +78,7 @@ pub use claim::{ClaimedSubAgentTurn, SubAgentClaimBlock, SubAgentClaimOutcome};
 pub(crate) use control::{
     append_state_event_on, check_child_permission_on, synchronize_control_on,
 };
-pub(crate) use creation::parent_planning_on;
+pub(crate) use creation::{first_dispatch_on, parent_planning_on};
 pub(crate) use initialization::{
     decode_creation, initialize_goal_group_on, initialize_input_group_on,
 };
@@ -139,6 +139,7 @@ pub(crate) fn decode_group(row: &group_row::Model) -> Result<DelegationGroup, Db
         || group.root_conversation_id != row.root_conversation_id
         || group.actor_id != row.actor_id
         || group.device_id != row.device_id
+        || group.source.workbench_id() != row.source_workbench_id.as_deref()
         || group.source.goal_id() != row.source_goal_id.as_deref()
         || match &group.source {
             desk_diagnose_core::subagent::DelegationSource::ScheduledOccurrence {
@@ -163,27 +164,7 @@ pub(crate) fn decode_group(row: &group_row::Model) -> Result<DelegationGroup, Db
     Ok(group)
 }
 
-#[inline(never)]
-pub(crate) fn decode_run(row: &run_row::Model) -> Result<SubAgentRun, DbErr> {
-    let run: SubAgentRun = serde_json::from_str(&row.state_json).map_err(|_| invalid())?;
-    run.validate().map_err(|_| invalid())?;
-    if run.binding.task_id != row.task_id
-        || run.binding.group_id != row.group_id
-        || run.binding.root_conversation_id != row.root_conversation_id
-        || run.child_conversation_id != row.child_conversation_id
-        || run.actor_id != row.actor_id
-        || run.device_id != row.device_id
-        || run.state.as_str() != row.state
-        || i64::try_from(run.binding.input_revision).ok() != Some(row.input_revision)
-        || i64::try_from(run.binding.control_revision).ok() != Some(row.control_revision)
-        || i64::try_from(run.binding.source_epoch).ok() != Some(row.source_epoch)
-        || i64::try_from(run.state_revision).ok() != Some(row.state_revision)
-        || run.binding.deadline_ms != row.deadline_ms
-    {
-        return Err(invalid());
-    }
-    Ok(run)
-}
+pub(crate) use desk_assistant_data_store::worker_request::decode_run;
 
 fn admission_label(admission: SourceAdmission) -> &'static str {
     match admission {
@@ -301,10 +282,12 @@ impl SubAgentStore {
         device: &str,
         task_id: &str,
     ) -> Result<AiAssistantSubAgentSummary, DbErr> {
-        Ok(self
-            .result_for_owner(root, actor, device, task_id)
+        let txn = self.db.begin().await?;
+        let task = owned_task_on(&txn, root, actor, device, task_id)
             .await?
-            .task)
+            .summary();
+        txn.commit().await?;
+        Ok(task)
     }
 
     pub async fn result_for_owner(
@@ -313,21 +296,39 @@ impl SubAgentStore {
         actor: &str,
         device: &str,
         task_id: &str,
+        before_report_seq: Option<u64>,
     ) -> Result<AiAssistantSubAgentResult, DbErr> {
         let txn = self.db.begin().await?;
-        parent_on(&txn, root, actor, device).await?;
-        let row = run_row::Entity::find()
-            .filter(run_row::Column::RootConversationId.eq(root))
-            .filter(run_row::Column::ActorId.eq(actor))
-            .filter(run_row::Column::DeviceId.eq(device))
-            .filter(run_row::Column::TaskId.eq(task_id))
-            .one(&txn)
-            .await?
-            .ok_or_else(|| invalid())?;
-        let result = decode_run(&row)?.result();
+        let task = owned_task_on(&txn, root, actor, device, task_id).await?;
+        let result = desk_assistant_data_store::worker_report::owner_result_on(
+            &txn,
+            &task,
+            before_report_seq,
+            chrono::Utc::now().timestamp_millis(),
+        )
+        .await?;
         txn.commit().await?;
         Ok(result)
     }
+}
+
+async fn owned_task_on(
+    txn: &crate::config::connection::DatabaseTransaction,
+    root: &str,
+    actor: &str,
+    device: &str,
+    task_id: &str,
+) -> Result<SubAgentRun, DbErr> {
+    parent_on(txn, root, actor, device).await?;
+    let row = run_row::Entity::find()
+        .filter(run_row::Column::RootConversationId.eq(root))
+        .filter(run_row::Column::ActorId.eq(actor))
+        .filter(run_row::Column::DeviceId.eq(device))
+        .filter(run_row::Column::TaskId.eq(task_id))
+        .one(txn)
+        .await?
+        .ok_or_else(invalid)?;
+    decode_run(&row)
 }
 
 /// The caller holds owner/device and root conversation control. Acquire child
@@ -499,6 +500,10 @@ pub(crate) async fn replace_run_on<C: ConnectionTrait + crate::config::ConfigCon
                 SubAgentState::Queued | SubAgentState::WaitingResource
             )
             .then_some(now_ms)),
+            workbench_claimed_at_ms: Set(old.workbench_claimed_at_ms.or_else(|| {
+                (old.workbench_id.is_some() && run.state == SubAgentState::Running)
+                    .then_some(now_ms)
+            })),
             updated_at: Set(now_ms),
             ..Default::default()
         })
@@ -586,6 +591,8 @@ pub(crate) async fn check_child_action_on<C: ConnectionTrait + crate::config::Co
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+pub(crate) use tests::native_cancel::{assert_stop_only, seed_native as seed_native_stop_test};
 
 #[inline(never)]
 fn boxed_group(row: &group_row::Model) -> Result<Box<DelegationGroup>, DbErr> {

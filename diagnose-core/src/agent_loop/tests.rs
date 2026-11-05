@@ -9026,6 +9026,7 @@ fn browser_permission_references_must_match_unexpired_verified_edge_evidence() {
     }];
     assert!(
         validate_permission_request_availability(
+            &crate::subagent::AgentRole::Main,
             std::slice::from_ref(&browser_result),
             &snapshot_request,
             &providers,
@@ -9038,6 +9039,7 @@ fn browser_permission_references_must_match_unexpired_verified_edge_evidence() {
     );
     assert!(
         validate_permission_request_availability(
+            &crate::subagent::AgentRole::Main,
             &[],
             &snapshot_request,
             &providers,
@@ -9066,6 +9068,7 @@ fn browser_permission_references_must_match_unexpired_verified_edge_evidence() {
     let candidates = [content.registered_tool()];
     assert!(
         validate_permission_request_availability(
+            &crate::subagent::AgentRole::Main,
             &[],
             &content_request,
             &providers,
@@ -9077,6 +9080,7 @@ fn browser_permission_references_must_match_unexpired_verified_edge_evidence() {
     );
     assert!(
         validate_permission_request_availability(
+            &crate::subagent::AgentRole::Main,
             &[],
             &content_request,
             &providers,
@@ -9089,6 +9093,7 @@ fn browser_permission_references_must_match_unexpired_verified_edge_evidence() {
     content_inventory[0].ready = false;
     assert!(
         validate_permission_request_availability(
+            &crate::subagent::AgentRole::Main,
             &[],
             &content_request,
             &providers,

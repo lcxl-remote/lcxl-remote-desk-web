@@ -11,7 +11,7 @@ mod lifecycle;
 mod main_stop;
 mod main_tools;
 mod model_input_metrics;
-mod native_cancel;
+pub(super) mod native_cancel;
 mod notification;
 mod observation;
 mod parent_wait;
@@ -602,6 +602,7 @@ async fn seed_task(db: &DatabaseConnection, group_id: &str, goal_id: &str) -> Su
     txn.commit().await.unwrap();
     let task_id = format!("task-{group_id}");
     let binding = DelegatedTaskBinding {
+        targets: Vec::new(),
         root_conversation_id: "root".into(),
         group_id: group_id.into(),
         task_id: task_id.clone(),
@@ -628,6 +629,8 @@ async fn seed_task(db: &DatabaseConnection, group_id: &str, goal_id: &str) -> Su
     )
     .unwrap();
     let source = desk_diagnose_core::subagent::creation::CreationEnvelope {
+        main_request_id: None,
+        targets: Vec::new(),
         root_conversation_id: "root".into(),
         actor_id: "1".into(),
         device_id: "1".into(),
@@ -664,6 +667,8 @@ async fn seed_task(db: &DatabaseConnection, group_id: &str, goal_id: &str) -> Su
         parent_input_revision: 1,
         parent_control_revision: 1,
         parent_active: true,
+        max_task_duration_minutes:
+            desk_diagnose_core::subagent::policy::DEFAULT_TASK_DURATION_MINUTES,
         limits: DelegationLimits {
             total: Allowance {
                 model_calls: 10,
@@ -706,6 +711,7 @@ async fn seed_task(db: &DatabaseConnection, group_id: &str, goal_id: &str) -> Su
     .await
     .unwrap();
     let mut run = SubAgentRun {
+        worker_id: format!("worker-{group_id}"),
         child_conversation_id: format!("child-{group_id}"),
         actor_id: "1".into(),
         device_id: "1".into(),
@@ -715,6 +721,7 @@ async fn seed_task(db: &DatabaseConnection, group_id: &str, goal_id: &str) -> Su
         state_revision: 1,
         source_paused: false,
         dependencies: Vec::new(),
+        pending_question_id: None,
         partial_report: None,
         terminal_report: None,
         failure_reason: None,
@@ -732,6 +739,7 @@ async fn seed_task(db: &DatabaseConnection, group_id: &str, goal_id: &str) -> Su
     run_row::ActiveModel {
         task_id: Set(task_id.clone()),
         child_conversation_id: Set(run.child_conversation_id.clone()),
+        worker_id: Set(run.worker_id.clone()),
         root_conversation_id: Set("root".into()),
         group_id: Set(group_id.into()),
         actor_id: Set("1".into()),
@@ -739,7 +747,6 @@ async fn seed_task(db: &DatabaseConnection, group_id: &str, goal_id: &str) -> Su
         creation_key_sha256: Set(format!("creation-{task_id}")),
         creation_arguments_sha256: Set("arguments".into()),
         creation_envelope_json: Set(serde_json::to_string(&context).unwrap()),
-        result_envelope_json: Set(None),
         state: Set(run.state.as_str().into()),
         input_revision: Set(1),
         control_revision: Set(1),
@@ -908,13 +915,13 @@ async fn bounded_pages_and_results_are_owner_root_scoped() {
     assert!(!second_page.has_more);
     assert!(
         store
-            .result_for_owner("root", "2", "1", &first.binding.task_id)
+            .result_for_owner("root", "2", "1", &first.binding.task_id, None)
             .await
             .is_err()
     );
     assert!(
         store
-            .result_for_owner("root", "1", "other-device", &first.binding.task_id)
+            .result_for_owner("root", "1", "other-device", &first.binding.task_id, None)
             .await
             .is_err()
     );

@@ -23,6 +23,7 @@ use sha2::{Digest, Sha256};
 use crate::{AssistantStoreError, entity::agent_main_request as request, signed};
 
 pub mod coordination;
+pub mod dispatch;
 
 const QUEUED: &str = "queued";
 const ACTIVATED: &str = "activated";
@@ -50,11 +51,38 @@ pub enum OwnerQueueTurn {
     Activate {
         request_id: String,
         conversation_id: String,
+        execution_conversation_id: String,
         destination: DestinationIdentity,
     },
 }
 
 impl OwnerQueueTurn {
+    /// The client continuation still resolves the queue's subject. Only the
+    /// executor can route an item to its separate native work conversation.
+    pub fn execution_conversation<'a>(
+        &'a self,
+        actor: &str,
+        original_conversation: &str,
+    ) -> Result<Option<&'a str>, AssistantStoreError> {
+        let Self::Activate {
+            request_id,
+            conversation_id,
+            execution_conversation_id,
+            ..
+        } = self
+        else {
+            return Ok(None);
+        };
+        if original_conversation != conversation_id
+            || (execution_conversation_id != conversation_id
+                && *execution_conversation_id
+                    != native_ids::workbench_work_conversation(actor, conversation_id, request_id))
+        {
+            return Err(AssistantStoreError::Inaccessible);
+        }
+        Ok(Some(execution_conversation_id))
+    }
+
     pub fn admission(&self) -> OwnerAdmission<'_> {
         match self {
             Self::Submit {
@@ -86,6 +114,7 @@ pub enum OwnerAdmission<'a> {
 pub enum OwnerAdmissionResult<R> {
     Native(R),
     Queued(Box<request::Model>),
+    Dispatched,
     Waiting,
 }
 
@@ -269,7 +298,11 @@ pub async fn fail_unclaimed(
     now: chrono::DateTime<chrono::Utc>,
     reason: MainRequestFailure,
 ) -> Result<bool, AssistantStoreError> {
-    if session.conversation_id != row.conversation_id
+    if session.queue_conversation_id() != row.conversation_id
+        || session
+            .agent_role
+            .workbench_request_id()
+            .is_some_and(|id| id != row.request_id)
         || session.actor_id != row.actor_id
         || row.input_revision != Some(signed(session.input_revision)?)
         || session.main_stopped
@@ -479,6 +512,133 @@ pub async fn load(
         .filter(request::Column::RequestId.eq(request_id))
         .one(db)
         .await?)
+}
+
+/// A native work conversation can only be activated by its exact queued owner
+/// request. The host verifies the returned coordinator under its control lock.
+pub async fn workbench_for_activation(
+    db: &impl ConnectionTrait,
+    admission: OwnerAdmission<'_>,
+    actor_id: &str,
+    work_conversation_id: &str,
+) -> Result<Option<String>, AssistantStoreError> {
+    if !native_ids::is(Kind::WorkbenchWorkConversation, work_conversation_id) {
+        return Ok(None);
+    }
+    let OwnerAdmission::Activate { request_id } = admission else {
+        return Err(AssistantStoreError::Inaccessible);
+    };
+    let workbench_id = request::Entity::find()
+        .select_only()
+        .column(request::Column::ConversationId)
+        .filter(request::Column::RequestId.eq(request_id))
+        .filter(request::Column::ActorId.eq(actor_id))
+        .into_tuple::<String>()
+        .one(db)
+        .await?
+        .ok_or(AssistantStoreError::Inaccessible)?;
+    if native_ids::workbench_work_conversation(actor_id, &workbench_id, request_id)
+        != work_conversation_id
+    {
+        return Err(AssistantStoreError::Inaccessible);
+    }
+    Ok(Some(workbench_id))
+}
+
+pub fn decode_workbench_coordinator(
+    state_json: &str,
+    actor_id: &str,
+    workbench_id: &str,
+) -> Result<Box<PersistedAgentSession>, AssistantStoreError> {
+    let session = PersistedAgentSession::decode_boxed_json(state_json)
+        .map_err(|_| AssistantStoreError::Invalid("Invalid workbench coordinator"))?;
+    if session.actor_id != actor_id
+        || session.conversation_id != workbench_id
+        || !is_workbench_root(&session)
+    {
+        return Err(AssistantStoreError::Inaccessible);
+    }
+    Ok(session)
+}
+
+pub fn is_workbench_root(session: &PersistedAgentSession) -> bool {
+    session.agent_role.workbench_id() == Some(session.conversation_id.as_str())
+        && session.agent_role.workbench_request_id().is_none()
+}
+
+/// Native work identity is derived from its durable activation receipt.
+pub async fn activated_workbench_conversations_on(
+    db: &impl ConnectionTrait,
+    root: &PersistedAgentSession,
+) -> Result<std::collections::BTreeSet<String>, sea_orm::DbErr> {
+    let requests = request::Entity::find()
+        .filter(request::Column::ActorId.eq(&root.actor_id))
+        .filter(request::Column::ConversationId.eq(&root.conversation_id))
+        .filter(request::Column::InputRevision.is_not_null())
+        .select_only()
+        .column(request::Column::RequestId)
+        .into_tuple::<String>()
+        .all(db)
+        .await?;
+    Ok(requests
+        .into_iter()
+        .map(|request| {
+            native_ids::workbench_work_conversation(&root.actor_id, &root.conversation_id, &request)
+        })
+        .collect())
+}
+
+/// Activations that have not begun execution remain in the paused intake queue.
+pub async fn unclaimed_workbench_conversations(
+    db: &impl ConnectionTrait,
+    root: &PersistedAgentSession,
+) -> Result<std::collections::BTreeSet<String>, AssistantStoreError> {
+    let requests = request::Entity::find()
+        .filter(request::Column::ActorId.eq(&root.actor_id))
+        .filter(request::Column::ConversationId.eq(&root.conversation_id))
+        .filter(request::Column::State.eq(ACTIVATED))
+        .filter(request::Column::PendingInputJson.is_not_null())
+        .select_only()
+        .column(request::Column::RequestId)
+        .into_tuple::<String>()
+        .all(db)
+        .await?;
+    Ok(requests
+        .into_iter()
+        .map(|request| {
+            native_ids::workbench_work_conversation(&root.actor_id, &root.conversation_id, &request)
+        })
+        .collect())
+}
+
+pub fn coordinating_work_conversation(session: &PersistedAgentSession) -> Option<String> {
+    let request = session.coordinating_work.as_deref()?;
+    Some(native_ids::workbench_work_conversation(
+        &session.actor_id,
+        &session.conversation_id,
+        request,
+    ))
+}
+
+pub fn workbench_execution(
+    root: &PersistedAgentSession,
+    row: &request::Model,
+) -> Result<Option<String>, AssistantStoreError> {
+    let Some(workbench_id) = root.agent_role.workbench_id() else {
+        return Ok(None);
+    };
+    if workbench_id != row.conversation_id
+        || root.conversation_id != row.conversation_id
+        || root.actor_id != row.actor_id
+        || root.agent_role.workbench_request_id().is_some()
+    {
+        return Err(AssistantStoreError::Inaccessible);
+    }
+    Ok(Some(native_ids::workbench_work_conversation(
+        &row.actor_id,
+        workbench_id,
+        &row.request_id,
+    )))
 }
 
 /// Active queue entries and recent failures, or a specific receipt regardless
@@ -722,27 +882,54 @@ pub async fn activate(
     input_revision: u64,
     now_ms: i64,
 ) -> Result<bool, AssistantStoreError> {
-    if input_revision == 0 {
-        return Err(AssistantStoreError::Invalid(
-            "Invalid assistant input revision",
-        ));
+    activate_with_dispatch(txn, row, input_revision, now_ms, None).await
+}
+
+/// The caller commits this receipt, the native input and the Worker in one transaction.
+pub async fn activate_with_dispatch(
+    txn: &impl ConnectionTrait,
+    row: &request::Model,
+    input_revision: u64,
+    now_ms: i64,
+    worker_request: Option<&str>,
+) -> Result<bool, AssistantStoreError> {
+    if input_revision == 0
+        || worker_request
+            .is_some_and(|id| row.first_dispatch_json.is_none() || !native_ids::is(Kind::Task, id))
+    {
+        return Err(AssistantStoreError::Invalid("Invalid assistant activation"));
     }
-    Ok(pending_row_update(row)
+    let update = pending_row_update(row)
         .filter(
             Condition::any()
                 .add(request::Column::Coordinated.eq(true))
+                .add(request::Column::FirstDispatchJson.is_not_null())
                 .add(request::Column::CoordinationAttempts.lt(coordination::MAX_ATTEMPTS)),
         )
+        .filter(request::Column::FirstDispatchJson.eq(row.first_dispatch_json.clone()))
         .col_expr(request::Column::State, Expr::value(ACTIVATED))
         .col_expr(
             request::Column::InputRevision,
             Expr::value(signed(input_revision)?),
         )
-        .col_expr(request::Column::UpdatedAtMs, Expr::value(now_ms))
-        .exec(txn)
-        .await?
-        .rows_affected
-        == 1)
+        .col_expr(request::Column::UpdatedAtMs, Expr::value(now_ms));
+    let update = if row.first_dispatch_json.is_some() {
+        let update = update.col_expr(request::Column::Coordinated, Expr::value(true));
+        if let Some(worker_request) = worker_request {
+            clear_payload(update, now_ms).col_expr(
+                request::Column::FirstWorkerRequestId,
+                Expr::value(worker_request),
+            )
+        } else {
+            update.col_expr(
+                request::Column::FirstDispatchJson,
+                Expr::value(None::<String>),
+            )
+        }
+    } else {
+        update
+    };
+    Ok(update.exec(txn).await?.rows_affected == 1)
 }
 
 /// Remove the recovery copy when the first native claim durably owns this input.
@@ -754,9 +941,16 @@ pub async fn mark_claimed(
     message_id: &str,
     now_ms: i64,
 ) -> Result<bool, AssistantStoreError> {
+    if session
+        .agent_role
+        .workbench_request_id()
+        .is_some_and(|expected| expected != request_id)
+    {
+        return Ok(false);
+    }
     Ok(clear_payload(request::Entity::update_many(), now_ms)
         .filter(request::Column::RequestId.eq(request_id))
-        .filter(request::Column::ConversationId.eq(&session.conversation_id))
+        .filter(request::Column::ConversationId.eq(session.queue_conversation_id()))
         .filter(request::Column::ActorId.eq(&session.actor_id))
         .filter(request::Column::ClientMessageId.eq(message_id))
         .filter(request::Column::InputRevision.eq(signed(session.input_revision)?))
@@ -780,6 +974,10 @@ fn clear_payload(
     now_ms: i64,
 ) -> sea_orm::UpdateMany<request::Entity> {
     update
+        .col_expr(
+            request::Column::FirstDispatchJson,
+            Expr::value(None::<String>),
+        )
         .col_expr(
             request::Column::PendingInputJson,
             Expr::value(None::<String>),

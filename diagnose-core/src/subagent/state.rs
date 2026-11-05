@@ -19,10 +19,22 @@ pub struct PlanningFence {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TaskDependency {
-    Approval { permission_request_id: String },
-    DirectoryApproval { directory_request_id: String },
-    Work { work_id: String },
-    Resource { reason: SubAgentWaitReason },
+    Approval {
+        permission_request_id: String,
+    },
+    DirectoryApproval {
+        directory_request_id: String,
+    },
+    Work {
+        work_id: String,
+    },
+    Resource {
+        reason: SubAgentWaitReason,
+    },
+    Device {
+        target_ref: String,
+        result_message_id: String,
+    },
 }
 
 impl TaskDependency {
@@ -35,6 +47,16 @@ impl TaskDependency {
                 directory_request_id,
             } => valid_id(directory_request_id),
             Self::Work { work_id } => valid_id(work_id),
+            Self::Device {
+                target_ref,
+                result_message_id,
+            } => {
+                valid_id(result_message_id)
+                    && desk_agent_protocol::ai_assistant::validate_target_refs(
+                        [target_ref.as_str()],
+                    )
+                    .is_ok()
+            }
             Self::Resource { reason } => matches!(
                 reason,
                 SubAgentWaitReason::ModelCapacity
@@ -48,6 +70,7 @@ impl TaskDependency {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SubAgentRun {
+    pub worker_id: String,
     pub child_conversation_id: String,
     pub actor_id: String,
     pub device_id: String,
@@ -57,6 +80,7 @@ pub struct SubAgentRun {
     pub state_revision: u64,
     pub source_paused: bool,
     pub dependencies: Vec<TaskDependency>,
+    pub pending_question_id: Option<String>,
     pub partial_report: Option<TaskFinalReport>,
     pub terminal_report: Option<TaskFinalReport>,
     pub failure_reason: Option<String>,
@@ -96,13 +120,14 @@ impl SubAgentRun {
         &self,
     ) -> desk_agent_protocol::ai_assistant::subagent::AiAssistantSubAgentSummary {
         desk_agent_protocol::ai_assistant::subagent::AiAssistantSubAgentSummary {
-            task_id: self.binding.task_id.clone(), group_id: self.binding.group_id.clone(),
+            task_id: self.binding.task_id.clone(), worker_id: self.worker_id.clone(), group_id: self.binding.group_id.clone(),
             child_session_id: self.child_conversation_id.clone(),
             name: self.name.clone(), state: self.state, wait_reason: self.wait_reason(),
             input_revision: self.binding.input_revision, control_revision: self.binding.control_revision,
             state_revision: self.state_revision, source_goal_id: self.binding.source.goal_id().map(str::to_owned),
             source: match &self.binding.source {
-                super::role::DelegationSource::UserInput { input_revision } => desk_agent_protocol::ai_assistant::subagent::SubAgentSource::UserInput { input_revision: *input_revision },
+                super::role::DelegationSource::UserInput { input_revision }
+                | super::role::DelegationSource::WorkbenchOwner { input_revision, .. } => desk_agent_protocol::ai_assistant::subagent::SubAgentSource::UserInput { input_revision: *input_revision },
                 super::role::DelegationSource::Goal { goal_id } => desk_agent_protocol::ai_assistant::subagent::SubAgentSource::Goal { goal_id: goal_id.clone() },
                 super::role::DelegationSource::ScheduledOccurrence { schedule_id, occurrence_id } => desk_agent_protocol::ai_assistant::subagent::SubAgentSource::ScheduledOccurrence { schedule_id: schedule_id.clone(), occurrence_id: occurrence_id.clone() },
             },
@@ -120,14 +145,18 @@ impl SubAgentRun {
             objective: self.binding.objective.clone(),
             acceptance_criteria: self.binding.acceptance_criteria.clone(),
             failure_reason: self.failure_reason.clone(),
+            reports: Default::default(),
+            open_question: None,
         }
     }
 
     pub fn validate(&self) -> Result<(), &'static str> {
         self.binding.validate(&self.child_conversation_id)?;
-        if !valid_id(&self.child_conversation_id)
+        if !valid_id(&self.worker_id)
+            || !valid_id(&self.child_conversation_id)
             || self.actor_id.is_empty()
-            || self.device_id.is_empty()
+            || (self.device_id.is_empty() && self.binding.source.owner_input_revision().is_none())
+            || (!self.device_id.is_empty() && !self.binding.targets.is_empty())
             || self.name.trim().is_empty()
             || self.name.chars().count() > super::MAX_SUBAGENT_NAME_CHARS
             || self.state_revision == 0
@@ -137,6 +166,27 @@ impl SubAgentRun {
                 .dependencies
                 .iter()
                 .any(|dependency| !dependency.validate())
+            || self.dependencies.iter().any(|dependency| match dependency {
+                TaskDependency::Device { target_ref, .. } => {
+                    self.dependencies.len() != 1
+                        || !self
+                            .binding
+                            .targets
+                            .iter()
+                            .any(|target| target.reference == *target_ref)
+                }
+                _ => false,
+            })
+            || self.pending_question_id.as_deref().is_some_and(|id| {
+                !valid_id(id)
+                    || !matches!(
+                        self.state,
+                        SubAgentState::WaitingInput
+                            | SubAgentState::WaitingSource
+                            | SubAgentState::Cancelling
+                    )
+            })
+            || (self.state == SubAgentState::WaitingInput && self.pending_question_id.is_none())
             || (self.state.is_terminal() && !self.dependencies.is_empty())
             || (self.state == SubAgentState::Completed
                 && self
@@ -177,6 +227,9 @@ impl SubAgentRun {
         }
         if self.state.is_terminal() || self.state == SubAgentState::Cancelling {
             return Err("delegated task no longer admits planning or actions");
+        }
+        if self.pending_question_id.is_some() {
+            return Err("delegated request is waiting for a reply");
         }
         if self.source_paused {
             return Err("delegation source is paused");
@@ -220,17 +273,45 @@ impl SubAgentRun {
     pub fn wait_reason(&self) -> Option<SubAgentWaitReason> {
         match self.state {
             SubAgentState::WaitingSource => Some(SubAgentWaitReason::SourcePaused),
+            SubAgentState::WaitingInput => Some(SubAgentWaitReason::MainAgentReply),
             SubAgentState::WaitingApproval => Some(SubAgentWaitReason::OwnerApproval),
             SubAgentState::WaitingWork => Some(SubAgentWaitReason::BackgroundWork),
-            SubAgentState::WaitingResource => self.dependencies.iter().find_map(|dependency| {
-                if let TaskDependency::Resource { reason } = dependency {
-                    Some(*reason)
-                } else {
-                    None
-                }
-            }),
+            SubAgentState::WaitingResource => {
+                self.dependencies
+                    .iter()
+                    .find_map(|dependency| match dependency {
+                        TaskDependency::Resource { reason } => Some(*reason),
+                        TaskDependency::Device { .. } => {
+                            Some(SubAgentWaitReason::DeviceUnavailable)
+                        }
+                        _ => None,
+                    })
+            }
             _ => None,
         }
+    }
+
+    pub fn waiting_target(&self) -> Option<(&crate::dynamic_run::AssistantInputTarget, &str)> {
+        let [
+            TaskDependency::Device {
+                target_ref,
+                result_message_id,
+            },
+        ] = self.dependencies.as_slice()
+        else {
+            return None;
+        };
+        self.binding
+            .targets
+            .iter()
+            .find(|target| target.reference == *target_ref)
+            .map(|target| (target, result_message_id.as_str()))
+    }
+
+    pub fn resource_device_id(&self) -> Option<&str> {
+        self.waiting_target()
+            .map(|(target, _)| target.device_id.as_str())
+            .or_else(|| (!self.device_id.is_empty()).then_some(self.device_id.as_str()))
     }
 
     fn next_state_revision(&self) -> Result<u64, &'static str> {
@@ -242,6 +323,8 @@ impl SubAgentRun {
     fn waiting_state(&self) -> SubAgentState {
         if self.source_paused {
             SubAgentState::WaitingSource
+        } else if self.pending_question_id.is_some() {
+            SubAgentState::WaitingInput
         } else if self.dependencies.iter().any(|dependency| {
             matches!(
                 dependency,
@@ -260,6 +343,32 @@ impl SubAgentRun {
         } else {
             SubAgentState::Queued
         }
+    }
+
+    pub fn ask_question(&mut self, question_id: String, now: &str) -> Result<(), &'static str> {
+        self.require_current(self.fence())?;
+        if !valid_id(&question_id) {
+            return Err("invalid delegated question id");
+        }
+        self.state_revision = self.next_state_revision()?;
+        self.pending_question_id = Some(question_id);
+        self.state = self.waiting_state();
+        self.updated_at = now.into();
+        Ok(())
+    }
+
+    /// Reply keeps the original task, source, native dependencies and budget.
+    pub fn answer_question(&mut self, question_id: &str, now: &str) -> Result<(), &'static str> {
+        if self.state != SubAgentState::WaitingInput
+            || self.pending_question_id.as_deref() != Some(question_id)
+        {
+            return Err("the delegated question is no longer open");
+        }
+        self.state_revision = self.next_state_revision()?;
+        self.pending_question_id = None;
+        self.state = self.waiting_state();
+        self.updated_at = now.into();
+        Ok(())
     }
 
     /// Called in the same source/root transaction that closes group admission.
@@ -332,7 +441,11 @@ impl SubAgentRun {
         }
         let mut next = self.clone();
         next.dependencies = dependencies;
-        next.state = if planning_active && next.dependencies.is_empty() && !next.source_paused {
+        next.state = if planning_active
+            && next.dependencies.is_empty()
+            && next.pending_question_id.is_none()
+            && !next.source_paused
+        {
             SubAgentState::Running
         } else {
             next.waiting_state()
@@ -379,6 +492,7 @@ impl SubAgentRun {
         let revision = self.next_state_revision()?;
         self.state = SubAgentState::Cancelled;
         self.dependencies.clear();
+        self.pending_question_id = None;
         self.terminal_report = self.partial_report.clone();
         self.state_revision = revision;
         self.updated_at = now.into();
@@ -509,6 +623,7 @@ impl SubAgentRun {
         self.failure_reason = Some(reason.into());
         self.terminal_report = self.partial_report.clone();
         self.dependencies.clear();
+        self.pending_question_id = None;
         self.state_revision = revision;
         self.updated_at = now.into();
         Ok(true)

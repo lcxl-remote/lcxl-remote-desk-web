@@ -247,6 +247,7 @@ async fn policy_compare_and_swap_preserves_other_sections() {
         expected_revision: initial.revision,
         limits: desk_agent_protocol::ai_assistant::subagent_policy::SubAgentLimits {
             max_unfinished_per_root: 8,
+            max_task_duration_minutes: 45,
         },
     };
     let (first, second) = tokio::join!(
@@ -265,6 +266,7 @@ async fn policy_compare_and_swap_preserves_other_sections() {
     .unwrap();
     let saved = db.config_read().await;
     assert_eq!(saved.subagent_policy.limits.max_unfinished_per_root, 8);
+    assert_eq!(saved.subagent_policy.limits.max_task_duration_minutes, 45);
     assert_eq!(saved.usage_retention.turn_days, 7);
 }
 

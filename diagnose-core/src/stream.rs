@@ -382,6 +382,7 @@ pub fn terminal_error_for(outcome: &LoopOutcome) -> Option<AgentError> {
         | LoopOutcome::RequestQueued { .. }
         | LoopOutcome::GoalOpenRequested { .. }
         | LoopOutcome::SubAgentsWaiting { .. }
+        | LoopOutcome::SubAgentYielded
         | LoopOutcome::DelegationSourcePaused => return None,
         LoopOutcome::ContentRejected(_) => crate::content_safety::content_blocked_error(),
         LoopOutcome::ContentSafetyUnavailable(error) => error.clone(),

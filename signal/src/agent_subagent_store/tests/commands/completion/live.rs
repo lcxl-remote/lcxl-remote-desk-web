@@ -251,8 +251,10 @@ async fn live_project_model_subagent_completion() {
 #[ignore = "requires explicit project-model credentials and public network access"]
 async fn live_project_model_subagent_concise_result() {
     use desk_diagnose_core::subagent::{
-        report::{REPORT_INSTRUCTION, from_answer},
-        result::SubAgentModelResult,
+        report::{
+            REPORT_INSTRUCTION, ReportContent, ReportKind, StoredReport, WorkerReport, from_answer,
+            report_page,
+        },
         state::CompletionFacts,
         tools::{SPAWN, SpawnRequest},
     };
@@ -377,47 +379,57 @@ async fn live_project_model_subagent_concise_result() {
         file.write_all(answer.text.as_bytes()).unwrap();
     }
     let report = from_answer(&answer.text, false, &facts).unwrap();
-    let full = desk_agent_protocol::ai_assistant::subagent::AiAssistantSubAgentResult {
-        task: desk_agent_protocol::ai_assistant::subagent::AiAssistantSubAgentSummary {
-            task_id: "synthetic-task".into(),
-            child_session_id: "synthetic-child".into(),
-            group_id: "synthetic-group".into(),
-            name: delegated.name,
-            state: SubAgentState::Completed,
-            wait_reason: None,
-            input_revision: 1,
-            control_revision: 1,
-            state_revision: 2,
-            source_goal_id: None,
-            source: desk_agent_protocol::ai_assistant::subagent::SubAgentSource::UserInput {
-                input_revision: 1,
+    let source = desk_diagnose_core::model_message_labels::model_bound_user_message(
+        "synthetic-owner-input".into(),
+        delegated.task.clone(),
+        super::super::super::creation::destination(),
+    )
+    .unwrap()
+    .data_envelope
+    .unwrap();
+    let report = StoredReport::new(
+        WorkerReport {
+            report_id: "synthetic-report".into(),
+            worker_id: "worker-test".into(),
+            request_id: "synthetic-task".into(),
+            execution_generation: 1,
+            seq: 1,
+            question_id: None,
+            content: ReportContent {
+                kind: ReportKind::Completed,
+                summary: report.summary,
+                question: None,
+                evidence_refs: report.evidence_refs,
             },
-            created_at: "test-start".into(),
-            updated_at: "test-end".into(),
+            receipt_refs: report.receipt_refs,
         },
-        objective: delegated.task,
-        acceptance_criteria: delegated.acceptance_criteria,
-        report: Some(report),
-        failure_reason: None,
-    };
-    let compact = SubAgentModelResult::from_result(&full, false);
-    let detailed = SubAgentModelResult::from_result(&full, true);
+        &[source],
+    )
+    .unwrap();
+    let page = report_page(
+        "synthetic-task",
+        delegated.acceptance_criteria.clone(),
+        0,
+        10,
+        64 * 1024,
+        vec![report],
+        &mut Vec::new(),
+    )
+    .unwrap();
+    let original_answer_preserved = page.reports[0].content.summary == answer.text;
     let functional_passed = answer.stop_reason == StopReason::EndTurn
         && answer.tool_calls.is_empty()
         && !answer.text.trim().is_empty()
-        && compact.answer.as_deref() == Some(answer.text.as_str())
-        && compact.objective.is_none()
-        && detailed.objective.as_deref() == Some(full.objective.as_str());
-    let passed = functional_passed && full.objective.len() <= 600 && answer.text.len() <= 768;
-    let evidence = serde_json::json!({"scope":"configured_thinking_model_real_shared_spawn_description_and_child_prompt_shared_result_projection_synthetic_receipt_no_agent_store_no_host_send",
+        && original_answer_preserved
+        && page.acceptance_criteria == delegated.acceptance_criteria;
+    let passed = functional_passed && delegated.task.len() <= 600 && answer.text.len() <= 768;
+    let evidence = serde_json::json!({"scope":"configured_thinking_model_real_shared_spawn_description_and_child_prompt_shared_report_page_synthetic_receipt_no_agent_store_no_host_send",
         "profile":{"model":config.model,"thinking":"enabled","output_limit":4096},
         "results":[{"case":"concise_result","passed":passed,"functional_passed":functional_passed,"host_commands_sent":0,"model_calls":2,
-            "delegation_arguments_bytes":proposal.tool_calls[0].arguments_json.len(),"delegated_task_bytes":full.objective.len(),
-            "criteria_count":full.acceptance_criteria.len(),"answer_bytes":answer.text.len(),"answer_characters":answer.text.chars().count(),
-            "full_result_bytes":serde_json::to_vec(&full).unwrap().len(),"compact_result_bytes":serde_json::to_vec(&compact).unwrap().len(),
-            "detailed_result_bytes":serde_json::to_vec(&detailed).unwrap().len(),"answer_sha256":format!("{:x}",Sha256::digest(answer.text.as_bytes())),
-            "original_answer_preserved":compact.answer.as_deref()==Some(answer.text.as_str()),"original_task_available_on_request":true,
-            "usage":[proposal.usage,answer.usage],"report_correction_calls":0}]});
+            "delegation_arguments_bytes":proposal.tool_calls[0].arguments_json.len(),"delegated_task_bytes":delegated.task.len(),
+            "criteria_count":page.acceptance_criteria.len(),"answer_bytes":answer.text.len(),"answer_characters":answer.text.chars().count(),
+            "report_page_bytes":serde_json::to_vec(&page).unwrap().len(),"answer_sha256":format!("{:x}",Sha256::digest(answer.text.as_bytes())),
+            "original_answer_preserved":original_answer_preserved,"usage":[proposal.usage,answer.usage],"report_correction_calls":0}]});
     std::fs::write(
         std::env::var("LRD_LIVE_SUBAGENT_EVIDENCE_PATH").unwrap(),
         serde_json::to_string_pretty(&evidence).unwrap(),

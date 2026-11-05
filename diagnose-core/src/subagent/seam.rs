@@ -16,6 +16,7 @@ use crate::{
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObservedResult {
     pub task_id: String,
+    pub report_id: String,
     pub state_revision: u64,
     pub tool_call_id: String,
     pub result_message_id: String,
@@ -26,6 +27,7 @@ pub struct ObservedResult {
 impl ObservedResult {
     pub fn validate(&self) -> Result<(), &'static str> {
         if !super::valid_id(&self.task_id)
+            || !super::valid_id(&self.report_id)
             || !super::valid_id(&self.tool_call_id)
             || !super::valid_id(&self.result_message_id)
             || self.state_revision == 0
@@ -90,7 +92,7 @@ pub trait SubAgentSeam {
     /// Creation uses the stable tool-call ID and argument digest for idempotency.
     /// Commit the labelled tool result and updated session together with creation,
     /// controls or wait check/registration. The held session advances only after
-    /// commit. Reading a result stages observation; it does not consume the inbox.
+    /// commit. Reading a terminal report stages observation without consuming it.
     async fn execute(
         &self,
         session: &mut PersistedAgentSession,

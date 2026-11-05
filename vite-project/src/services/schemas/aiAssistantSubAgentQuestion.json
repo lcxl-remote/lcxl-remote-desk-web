@@ -1,0 +1,1 @@
+{"type":"object","required":["question_id","text"],"properties":{"question_id":{"type":"string"},"text":{"type":"string"}},"x-readme-ref-name":"AiAssistantSubAgentQuestion"}

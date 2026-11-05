@@ -3,6 +3,8 @@ use super::*;
 use desk_diagnose_core::subagent::{creation::TaskCreationEnvelope, runtime::RuntimeTurn};
 use sea_orm::{ExprTrait, QueryTrait};
 
+pub(super) use desk_assistant_data_store::worker_request::is_worker_head_on;
+
 type RootWaitPage = (Vec<group_row::Model>, Option<i64>);
 
 impl SubAgentStore {
@@ -71,6 +73,12 @@ impl SubAgentStore {
                 )))
                 .all(&self.db)
                 .await?;
+            let wake_groups = desk_assistant_data_store::worker_report::pending_wake_groups_on(
+                &self.db,
+                rows.iter().map(|row| row.group_id.clone()),
+                chrono::Utc::now().timestamp_millis(),
+            )
+            .await?;
             let mut seen = std::collections::BTreeSet::new();
             let mut candidates = Vec::new();
             for row in rows {
@@ -96,7 +104,12 @@ impl SubAgentStore {
                     && session.agent_role.is_main()
                     && session.check_subject(&row.actor_id, &row.device_id).is_ok()
                     && !session.turn_state.is_active()
-                    && (session.subagent_wait.is_some() || session.ready_subagent_wait.is_some())
+                    && (session.subagent_wait.is_some()
+                        || session.has_ready_subagent_completion()
+                        || (session.agent_role.workbench_request_id().is_some()
+                            && session.delegation_group_id.as_deref()
+                                == Some(row.group_id.as_str())
+                            && wake_groups.contains(&row.group_id)))
                 {
                     candidates.push(row);
                 }
@@ -128,7 +141,10 @@ impl SubAgentStore {
             .await?
             .ok_or_else(|| invalid())?;
         let run = decode_run(&row)?;
-        if run.state != SubAgentState::Queued || run.source_paused {
+        if run.state != SubAgentState::Queued
+            || run.source_paused
+            || !is_worker_head_on(&txn, &row).await?
+        {
             return Ok(None);
         }
         let group_row = group_row::Entity::find()
@@ -178,7 +194,7 @@ impl SubAgentStore {
         device: &str,
     ) -> Result<Option<RuntimeTurn>, DbErr> {
         let txn = crate::db::begin_write(&self.db, session_row::Entity).await?;
-        let session = parent_on(&txn, root, actor, device).await?;
+        let mut session = parent_on(&txn, root, actor, device).await?;
         if session.turn_state.is_active()
             || session.turn_state == desk_diagnose_core::session::TurnState::Cancelled
         {
@@ -187,20 +203,24 @@ impl SubAgentStore {
         if session.trigger_origin == desk_diagnose_core::session::TriggerOrigin::ScheduledTask {
             return Ok(None);
         }
-        if session.ready_subagent_wait.is_none() || session.terminal_permission_request_id.is_some()
+        if session.main_stopped
+            || session.subagent_wait.is_some()
+            || session.terminal_permission_request_id.is_some()
         {
             return Ok(None);
         }
-        let Some((group, source)) =
+        let source = if session.ready_subagent_wait.is_some() {
             super::parent_wait::ready_parent_source_on(&txn, &session).await?
-        else {
+        } else if session.agent_role.workbench_request_id().is_some() {
+            super::notification::prepare_workbench_wake_on(&txn, &mut session).await?
+        } else {
+            None
+        };
+        let Some((group, source)) = source else {
             txn.commit().await?;
             return Ok(None);
         };
-        if !matches!(
-            group.source,
-            desk_diagnose_core::subagent::DelegationSource::UserInput { .. }
-        ) {
+        if group.source.owner_input_revision().is_none() {
             return Ok(None);
         }
         let candidate = RuntimeTurn::ParentCompletion {

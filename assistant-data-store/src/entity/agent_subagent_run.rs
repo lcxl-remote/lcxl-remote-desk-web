@@ -13,7 +13,13 @@ pub struct Model {
     #[sea_orm(unique)]
     pub child_conversation_id: String,
     #[sea_orm(indexed)]
+    pub worker_id: String,
+    #[sea_orm(indexed)]
     pub root_conversation_id: String,
+    #[sea_orm(indexed)]
+    pub workbench_id: Option<String>,
+    /// A Workbench request holds a Worker slot from first claim until terminal.
+    pub workbench_claimed_at_ms: Option<i64>,
     #[sea_orm(indexed)]
     pub group_id: String,
     pub actor_id: String,
@@ -22,7 +28,6 @@ pub struct Model {
     pub creation_key_sha256: String,
     pub creation_arguments_sha256: String,
     pub creation_envelope_json: String,
-    pub result_envelope_json: Option<String>,
     #[sea_orm(indexed)]
     pub state: String,
     pub input_revision: i64,

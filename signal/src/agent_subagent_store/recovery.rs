@@ -21,6 +21,7 @@ impl SubAgentStore {
                 "queued",
                 "running",
                 "waiting_approval",
+                "waiting_input",
                 "waiting_work",
                 "waiting_source",
             ]))

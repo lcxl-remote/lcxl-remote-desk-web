@@ -6,7 +6,7 @@ import { useAiAssistantSubagents } from './use-ai-assistant-subagents';
 import type { PersistedSnapshot } from './use-ai-assistant-chat';
 
 vi.mock('react-i18next', () => import('@/test-utils/i18n-mock').then(m => m.reactI18nextMock()));
-const task: AiAssistantSubAgentSummary = { task_id: 'task-1', child_session_id: 'child-1', group_id: 'group-1',
+const task: AiAssistantSubAgentSummary = { task_id: 'task-1', worker_id: "worker-1", child_session_id: 'child-1', group_id: 'group-1',
     name: 'Independent research', state: 'waiting_approval', input_revision: 1, control_revision: 1, state_revision: 3,
     source_goal_id: null, source: { kind: 'user_input', input_revision: 1 }, wait_reason: 'owner_approval',
     created_at: '2026-09-30T00:00:00Z', updated_at: '2026-09-30T00:00:01Z' };
@@ -14,7 +14,8 @@ const snapshot: AiAssistantDelegationSnapshot = { parent_session_id: null, task:
     attention_tasks: [task], attention_count: 1,
     tasks: { items: [task], total: 1, unfinished: 1, next_cursor: null, has_more: false } };
 const report: AiAssistantSubAgentResult = { task, objective: 'Read the original evidence',
-    acceptance_criteria: ['Cite the evidence'], report: null, failure_reason: null };
+    acceptance_criteria: ['Cite the evidence'], report: null, failure_reason: null,
+    reports: { items: [], next_before_seq: null }, open_question: null };
 const permission = { requestId: 'child-permission', inputRevision: 1, state: 'pending', items: [] } as unknown as PermissionRequestDto;
 const child: PersistedSnapshot = { sessionId: 'child-1', seq: 2, active: false, requestId: 'child-request',
     inputRevision: 1, controlRevision: 1, mainStopped: false, messages: [], permissionRequests: [permission],
@@ -37,6 +38,45 @@ describe('owner subagent views', () => {
         expect(JSON.parse(submitted![1]!.body as string).control.action).toEqual({
             kind: 'adjust', message: '检查昨天的日志',
             client_timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        });
+        unmount();
+    });
+
+    it('loads earlier reports under the original request and keeps the live question for replies', async () => {
+        const item = (seq: number) => ({ report_id: `report-${seq}`, seq, kind: 'progress' as const,
+            summary: `Report ${seq}`, question: null, evidence_refs: [], receipt_refs: [] });
+        const latest = { ...report, reports: { items: [item(2)], next_before_seq: 2 },
+            open_question: { question_id: 'original-question', text: 'Which environment?' } };
+        const fetch = vi.fn(async (url: string, _init?: RequestInit) => {
+            if (url.includes('before_report_seq=2')) {
+                return ok({ ...latest, reports: { items: [item(1)], next_before_seq: null },
+                    open_question: { question_id: 'old-question', text: 'Obsolete question' } });
+            }
+            if (url.includes('/subagents/result')) return ok(latest);
+            if (url.endsWith('/subagents/control')) return ok(task);
+            if (url.endsWith('/subagents/read')) return ok(true);
+            return ok(child);
+        });
+        vi.stubGlobal('fetch', fetch);
+        const { result, unmount } = renderHook(() => useAiAssistantSubagents(props));
+        act(() => result.current.openDetail(task));
+        await waitFor(() => expect(result.current.reports?.items[0].seq).toBe(2));
+        await act(async () => { await result.current.loadOlderReports(); });
+        expect(result.current.reports?.items[0].seq).toBe(1);
+        expect(result.current.detail?.result.open_question?.question_id).toBe('original-question');
+        const earlier = fetch.mock.calls.find(([url]) => url.includes('before_report_seq=2'))?.[0];
+        expect(earlier).toContain('session=root-1');
+        expect(earlier).toContain('task_id=task-1');
+        act(() => result.current.showLatestReports());
+        expect(result.current.reports?.items[0].seq).toBe(2);
+        expect(await result.current.control(task, { kind: 'reply', question_id: 'old-question', message: 'Ignore.' })).toBe(false);
+        await act(async () => {
+            expect(await result.current.control(task, { kind: 'reply', question_id: 'original-question', message: 'Staging.' })).toBe(true);
+        });
+        const submitted = fetch.mock.calls.find(([url]) => url.endsWith('/subagents/control'));
+        expect(JSON.parse(submitted![1]!.body as string).control).toMatchObject({
+            task_id: task.task_id, expected_input_revision: task.input_revision, expected_control_revision: task.control_revision,
+            action: { kind: 'reply', question_id: 'original-question', message: 'Staging.' },
         });
         unmount();
     });
