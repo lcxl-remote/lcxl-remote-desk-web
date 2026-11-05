@@ -113,9 +113,12 @@ impl DelegationGroup {
             return Ok(self.source_epoch);
         }
         if admission == SourceAdmission::Paused
-            && !matches!(self.source, DelegationSource::Goal { .. })
+            && !matches!(
+                self.source,
+                DelegationSource::Goal { .. } | DelegationSource::IssueWork { .. }
+            )
         {
-            return Err("only a main goal can pause its delegated source");
+            return Err("this delegated source cannot be paused");
         }
         let epoch = self
             .source_epoch

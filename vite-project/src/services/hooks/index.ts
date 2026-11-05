@@ -45,6 +45,8 @@ export type { GetMyIssueConnectionsQueryKey } from "./aiAssistantSessionControll
 export type { GetMyIssueConnectionsSuspenseQueryKey } from "./aiAssistantSessionController/useGetMyIssueConnectionsSuspense.ts";
 export type { ListAiAssistantAttentionQueryKey } from "./aiAssistantSessionController/useListAiAssistantAttention.ts";
 export type { ListAiAssistantAttentionSuspenseQueryKey } from "./aiAssistantSessionController/useListAiAssistantAttentionSuspense.ts";
+export type { ListAiAssistantIssueSubscriptionsQueryKey } from "./aiAssistantSessionController/useListAiAssistantIssueSubscriptions.ts";
+export type { ListAiAssistantIssueSubscriptionsSuspenseQueryKey } from "./aiAssistantSessionController/useListAiAssistantIssueSubscriptionsSuspense.ts";
 export type { ListAiAssistantMainRequestsQueryKey } from "./aiAssistantSessionController/useListAiAssistantMainRequests.ts";
 export type { ListAiAssistantMainRequestsSuspenseQueryKey } from "./aiAssistantSessionController/useListAiAssistantMainRequestsSuspense.ts";
 export type { ListAiAssistantSessionsQueryKey } from "./aiAssistantSessionController/useListAiAssistantSessions.ts";
@@ -62,6 +64,8 @@ export type { ReadAiAssistantSubagentResultSuspenseQueryKey } from "./aiAssistan
 export type { ReadAssistantAttachmentMutationKey } from "./aiAssistantSessionController/useReadAssistantAttachment.ts";
 export type { ResumeAiAssistantMainRequestsMutationKey } from "./aiAssistantSessionController/useResumeAiAssistantMainRequests.ts";
 export type { RevokeAiAssistantCapabilityGrantMutationKey } from "./aiAssistantSessionController/useRevokeAiAssistantCapabilityGrant.ts";
+export type { SaveAiAssistantIssueSubscriptionMutationKey } from "./aiAssistantSessionController/useSaveAiAssistantIssueSubscription.ts";
+export type { SetAiAssistantIssueSubscriptionEnabledMutationKey } from "./aiAssistantSessionController/useSetAiAssistantIssueSubscriptionEnabled.ts";
 export type { StopAiAssistantSessionMutationKey } from "./aiAssistantSessionController/useStopAiAssistantSession.ts";
 export type { UpdateAiAssistantDeviceRosterMutationKey } from "./aiAssistantSessionController/useUpdateAiAssistantDeviceRoster.ts";
 export type { QueryAiAssistantSettingsQueryKey } from "./aiModelController/useQueryAiAssistantSettings.ts";
@@ -401,6 +405,12 @@ export { useListAiAssistantAttention } from "./aiAssistantSessionController/useL
 export { listAiAssistantAttentionSuspenseQueryKey } from "./aiAssistantSessionController/useListAiAssistantAttentionSuspense.ts";
 export { listAiAssistantAttentionSuspenseQueryOptions } from "./aiAssistantSessionController/useListAiAssistantAttentionSuspense.ts";
 export { useListAiAssistantAttentionSuspense } from "./aiAssistantSessionController/useListAiAssistantAttentionSuspense.ts";
+export { listAiAssistantIssueSubscriptionsQueryKey } from "./aiAssistantSessionController/useListAiAssistantIssueSubscriptions.ts";
+export { listAiAssistantIssueSubscriptionsQueryOptions } from "./aiAssistantSessionController/useListAiAssistantIssueSubscriptions.ts";
+export { useListAiAssistantIssueSubscriptions } from "./aiAssistantSessionController/useListAiAssistantIssueSubscriptions.ts";
+export { listAiAssistantIssueSubscriptionsSuspenseQueryKey } from "./aiAssistantSessionController/useListAiAssistantIssueSubscriptionsSuspense.ts";
+export { listAiAssistantIssueSubscriptionsSuspenseQueryOptions } from "./aiAssistantSessionController/useListAiAssistantIssueSubscriptionsSuspense.ts";
+export { useListAiAssistantIssueSubscriptionsSuspense } from "./aiAssistantSessionController/useListAiAssistantIssueSubscriptionsSuspense.ts";
 export { listAiAssistantMainRequestsQueryKey } from "./aiAssistantSessionController/useListAiAssistantMainRequests.ts";
 export { listAiAssistantMainRequestsQueryOptions } from "./aiAssistantSessionController/useListAiAssistantMainRequests.ts";
 export { useListAiAssistantMainRequests } from "./aiAssistantSessionController/useListAiAssistantMainRequests.ts";
@@ -452,6 +462,12 @@ export { useResumeAiAssistantMainRequests } from "./aiAssistantSessionController
 export { revokeAiAssistantCapabilityGrantMutationKey } from "./aiAssistantSessionController/useRevokeAiAssistantCapabilityGrant.ts";
 export { revokeAiAssistantCapabilityGrantMutationOptions } from "./aiAssistantSessionController/useRevokeAiAssistantCapabilityGrant.ts";
 export { useRevokeAiAssistantCapabilityGrant } from "./aiAssistantSessionController/useRevokeAiAssistantCapabilityGrant.ts";
+export { saveAiAssistantIssueSubscriptionMutationKey } from "./aiAssistantSessionController/useSaveAiAssistantIssueSubscription.ts";
+export { saveAiAssistantIssueSubscriptionMutationOptions } from "./aiAssistantSessionController/useSaveAiAssistantIssueSubscription.ts";
+export { useSaveAiAssistantIssueSubscription } from "./aiAssistantSessionController/useSaveAiAssistantIssueSubscription.ts";
+export { setAiAssistantIssueSubscriptionEnabledMutationKey } from "./aiAssistantSessionController/useSetAiAssistantIssueSubscriptionEnabled.ts";
+export { setAiAssistantIssueSubscriptionEnabledMutationOptions } from "./aiAssistantSessionController/useSetAiAssistantIssueSubscriptionEnabled.ts";
+export { useSetAiAssistantIssueSubscriptionEnabled } from "./aiAssistantSessionController/useSetAiAssistantIssueSubscriptionEnabled.ts";
 export { stopAiAssistantSessionMutationKey } from "./aiAssistantSessionController/useStopAiAssistantSession.ts";
 export { stopAiAssistantSessionMutationOptions } from "./aiAssistantSessionController/useStopAiAssistantSession.ts";
 export { useStopAiAssistantSession } from "./aiAssistantSessionController/useStopAiAssistantSession.ts";

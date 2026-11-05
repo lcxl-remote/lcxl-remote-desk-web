@@ -31,9 +31,14 @@ pub const TAG: &str = "AiAssistantSession";
 mod command_tasks;
 pub use command_tasks::cancel_ai_assistant_command;
 mod device_roster;
+pub(crate) mod issue_subscriptions;
 #[cfg(test)]
 pub(crate) use device_roster::update_roster;
 pub use device_roster::{get_ai_assistant_device_roster, update_ai_assistant_device_roster};
+pub use issue_subscriptions::{
+    list_ai_assistant_issue_subscriptions, save_ai_assistant_issue_subscription,
+    set_ai_assistant_issue_subscription_enabled,
+};
 mod directories;
 mod main_requests;
 mod stop;

@@ -55,6 +55,38 @@ pub struct RestIssueSnapshot {
 }
 
 impl IssueConnection {
+    /// Bind a user-selected issue locator using only identities returned by the forge.
+    pub async fn bind_subscription(
+        &self,
+        connection_ref: &str,
+        owner: &str,
+        repository: &str,
+        issue_number: Option<u64>,
+    ) -> Result<
+        (
+            IssueRepositoryScope,
+            Option<desk_diagnose_core::issue_authority::IssueFilter>,
+        ),
+        McpClientError,
+    > {
+        let scope = self
+            .bind_repository(connection_ref, owner, repository)
+            .await?;
+        let filter = if let Some(number) = issue_number {
+            let issue = self
+                .read_issue_snapshot(&scope, number)
+                .await?
+                .ok_or(McpClientError::TargetChanged)?;
+            Some(desk_diagnose_core::issue_authority::IssueFilter {
+                issue_id: issue.target.issue_id,
+                issue_number: issue.target.issue_number,
+            })
+        } else {
+            None
+        };
+        Ok((scope, filter))
+    }
+
     pub async fn bind_repository(
         &self,
         connection_ref: &str,

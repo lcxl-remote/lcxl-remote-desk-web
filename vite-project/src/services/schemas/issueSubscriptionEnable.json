@@ -1,0 +1,1 @@
+{"type":"object","required":["expectedRevision","enabled"],"properties":{"enabled":{"type":"boolean"},"expectedRevision":{"type":"integer","format":"int64","minimum":0}},"additionalProperties":false,"x-readme-ref-name":"IssueSubscriptionEnable"}

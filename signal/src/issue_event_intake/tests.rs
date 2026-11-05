@@ -387,10 +387,77 @@ async fn frozen_comment_uses_native_queue_and_cannot_claim_as_owner() {
     );
     assert_eq!(creation.owner_requirement, input.message);
 
+    use crate::controller::ai_assistant_session::issue_subscriptions::set_enabled;
+    use desk_agent_protocol::ai_assistant::{
+        issue_subscription::{IssueSourceAccess, IssueSubscriptionEnable},
+        subagent::SubAgentState,
+    };
+    use desk_assistant_data_store::{
+        entity::agent_subagent_run, issue_authority::settings::WriteResult,
+    };
+    use desk_diagnose_core::{
+        chat::{ChatMessage, ToolCall},
+        subagent::{
+            projection,
+            tools::{SPAWN, SpawnRequest},
+        },
+    };
+    let worker_request = SpawnRequest {
+        worker_id: None,
+        target_refs: vec![],
+        name: "Issue worker".into(),
+        task: "Analyze the current issue".into(),
+        acceptance_criteria: vec!["Report the analysis".into()],
+        required_for_completion: true,
+    };
+    let spawn_call = ToolCall {
+        id: "create-issue-worker".into(),
+        name: SPAWN.into(),
+        arguments_json: serde_json::to_string(&worker_request).unwrap(),
+    };
+    let requirement_label = input.message.data_envelope.clone().unwrap();
+    let mut caller = ChatMessage::assistant_tool_calls(
+        "subscribed-spawn",
+        "Delegate issue analysis",
+        vec![spawn_call.to_ref()],
+    );
+    caller.turn_id = held.current_turn_id.clone();
+    caller.data_envelope = Some(
+        projection::envelope(
+            &caller.message_id,
+            &caller.text,
+            "model-output",
+            std::slice::from_ref(&requirement_label),
+        )
+        .unwrap(),
+    );
+    held.conversation.push(caller);
+    crate::agent_session_store::SignalAgentSessionStore::new(db.clone())
+        .save(&mut held)
+        .await
+        .unwrap();
+    let worker = crate::agent_subagent_store::SubAgentStore::new(db.clone())
+        .spawn_for_turn(&held, &spawn_call, &worker_request)
+        .await
+        .unwrap();
+    let mut result = ChatMessage::tool_result(
+        "subscribed-worker-created",
+        &spawn_call.id,
+        "Issue worker created",
+    );
+    result.data_envelope = Some(
+        projection::envelope(
+            &result.message_id,
+            &result.text,
+            "subagent_spawn",
+            &[requirement_label],
+        )
+        .unwrap(),
+    );
+    held.conversation.push(result);
     // Save and settle a real native permission request before polling the
     // next comment. Attachment must leave the entire waiting session intact.
     use desk_diagnose_core::{
-        chat::ToolCall,
         dynamic_run::*,
         permission_grant::PermissionGrantIssuanceContext,
         permission_tools::{REQUEST_CAPABILITY_GRANTS_TOOL_NAME, build_permission_request},
@@ -484,6 +551,41 @@ async fn frozen_comment_uses_native_queue_and_cannot_claim_as_owner() {
         "attached"
     );
     assert_eq!(waiting().await, waiting_row);
+    let paused = set_enabled(
+        &db,
+        ACTOR,
+        &policy.subscription_id,
+        IssueSubscriptionEnable {
+            expected_revision: policy.revision,
+            enabled: false,
+        },
+    )
+    .await
+    .unwrap();
+    let WriteResult::Saved { view, affected } = paused else {
+        panic!("expected pause");
+    };
+    assert_eq!(affected.len(), 1);
+    assert_eq!(affected[0].request_id, queued.request_id);
+    assert_eq!(
+        view.latest_intake
+            .unwrap()
+            .authorization_change
+            .unwrap()
+            .source_access,
+        IssueSourceAccess::Paused
+    );
+    let worker_row = || async {
+        agent_subagent_run::Entity::find()
+            .filter(agent_subagent_run::Column::TaskId.eq(&worker.task_id))
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap()
+    };
+    let paused_worker = worker_row().await;
+    assert_eq!(paused_worker.state, SubAgentState::WaitingSource.as_str());
+    assert_eq!(paused_worker.input_revision, worker.input_revision as i64);
     let grant_context = PermissionGrantIssuanceContext {
         surface: desk_agent_protocol::capability_provider::ProductSurface::OssPersonalOwner,
         registry: &registry,
@@ -525,17 +627,45 @@ async fn frozen_comment_uses_native_queue_and_cannot_claim_as_owner() {
         now: chrono::Utc::now().to_rfc3339(),
         trigger_origin: TriggerOrigin::PermissionDecision,
     };
-    let resumed = permission
+    let permission = permission
         .with_client_metadata(held.client_conversation_id.clone(), held.surface)
         .with_expected_input_revision(held.input_revision)
         .with_permission_resume(
             requested.request.request_id.clone(),
             waiting_after_decision.version,
             vec![],
-        )
-        .claim_turn(claim)
-        .await
-        .unwrap();
+        );
+    assert!(matches!(
+        permission.claim_turn(claim.clone()).await,
+        Err(desk_diagnose_core::seam::ClaimError::Busy)
+    ));
+    let reopened = set_enabled(
+        &db,
+        ACTOR,
+        &policy.subscription_id,
+        IssueSubscriptionEnable {
+            expected_revision: view.revision,
+            enabled: true,
+        },
+    )
+    .await
+    .unwrap();
+    let WriteResult::Saved { view, affected } = reopened else {
+        panic!("expected resume");
+    };
+    assert_eq!(affected.len(), 1);
+    assert_eq!(
+        view.latest_intake
+            .unwrap()
+            .authorization_change
+            .unwrap()
+            .source_access,
+        IssueSourceAccess::Open
+    );
+    let reopened_worker = worker_row().await;
+    assert_eq!(reopened_worker.state, SubAgentState::Queued.as_str());
+    assert!(reopened_worker.source_epoch > paused_worker.source_epoch);
+    let resumed = permission.claim_turn(claim).await.unwrap();
     assert_eq!(resumed.input_revision, held.input_revision);
     assert_eq!(resumed.chain_id, held.chain_id);
     assert_eq!(resumed.automation_turns_used, held.automation_turns_used);
@@ -561,4 +691,129 @@ async fn frozen_comment_uses_native_queue_and_cannot_claim_as_owner() {
     assert_eq!(fixture.reads(), 0);
     assert_eq!(fixture.writes(), 0);
     fixture.stop().await;
+}
+
+#[actix_web::test]
+async fn issue_subscription_settings_bind_native_identity_and_pause_without_connection() {
+    use crate::controller::ai_assistant_session::issue_subscriptions::{save, set_enabled};
+    use desk_agent_protocol::ai_assistant::issue_subscription::{
+        IssueSubscriptionEnable, IssueSubscriptionSave,
+    };
+    use desk_assistant_data_store::{
+        AssistantStoreError,
+        issue_authority::settings::{self, WriteResult},
+    };
+
+    let db = database().await;
+    let fixture = IssueFixture::start_for(IssuePlatform::Gitea).await;
+    let configuration = fixture.update(ACTOR);
+    issue_connections::update(&db, &configuration)
+        .await
+        .unwrap();
+    let input = IssueSubscriptionSave {
+        subscription_id: None,
+        expected_revision: 0,
+        workbench_id: root_id(),
+        connection_ref: "forge".into(),
+        owner: "Org".into(),
+        repository: "Project".into(),
+        issue_number: Some(4),
+        allowed_sender_ids: vec![7, 7],
+        automation_sender_ids: vec![8],
+        work_kind: IssueWorkKind::Analysis,
+        auto_reply: true,
+        enabled: true,
+    };
+    assert!(matches!(
+        save(&db, "foreign-owner", input.clone()).await,
+        Err(AssistantStoreError::Inaccessible)
+    ));
+    let mut invalid = input.clone();
+    invalid.workbench_id = "work-a".into();
+    assert!(matches!(
+        save(&db, ACTOR, invalid).await,
+        Err(AssistantStoreError::Inaccessible)
+    ));
+    let WriteResult::Saved {
+        view: saved,
+        affected,
+    } = save(&db, ACTOR, input.clone()).await.unwrap()
+    else {
+        panic!("first subscription should save");
+    };
+    assert!(affected.is_empty());
+    assert_eq!(saved.revision, 1);
+    assert_eq!(saved.owner, "Org");
+    assert_eq!(saved.repository, "Project");
+    assert_eq!(saved.issue_number, Some(4));
+    assert_eq!(saved.allowed_sender_ids, vec![7]);
+    assert!(saved.last_checked_at_ms.is_none());
+    let mut overlapping = input;
+    overlapping.issue_number = None;
+    let WriteResult::Overlap(existing) = save(&db, ACTOR, overlapping).await.unwrap() else {
+        panic!("a whole-repository subscription should conflict");
+    };
+    assert_eq!(existing.subscription_id, saved.subscription_id);
+    let before = agent_issue_source::Entity::find()
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+
+    fixture.stop().await;
+    let paused = set_enabled(
+        &db,
+        ACTOR,
+        &saved.subscription_id,
+        IssueSubscriptionEnable {
+            expected_revision: 1,
+            enabled: false,
+        },
+    )
+    .await
+    .unwrap();
+    let WriteResult::Saved { view: paused, .. } = paused else {
+        panic!("pause must save locally");
+    };
+    assert_eq!(paused.revision, 2);
+    assert!(!paused.enabled);
+    let after = agent_issue_source::Entity::find()
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.watermark_ms, before.watermark_ms);
+    assert_eq!(after.first_enabled_at_ms, before.first_enabled_at_ms);
+    assert!(matches!(
+        set_enabled(
+            &db,
+            ACTOR,
+            &saved.subscription_id,
+            IssueSubscriptionEnable {
+                expected_revision: 1,
+                enabled: true,
+            }
+        )
+        .await,
+        Err(AssistantStoreError::Stale {
+            current_revision: 2
+        }),
+    ));
+    assert!(matches!(
+        set_enabled(
+            &db,
+            ACTOR,
+            &saved.subscription_id,
+            IssueSubscriptionEnable {
+                expected_revision: 2,
+                enabled: true,
+            }
+        )
+        .await,
+        Err(AssistantStoreError::SourceUnavailable),
+    ));
+    assert_eq!(
+        settings::list_on(&db, ACTOR, &root_id()).await.unwrap(),
+        vec![paused]
+    );
 }

@@ -15,6 +15,7 @@ use crate::computer_use::{ObjectKind, ObjectRef};
 pub mod goal_budget;
 pub mod history;
 pub mod history_window;
+pub mod issue_subscription;
 pub mod memory;
 pub mod owner_history;
 pub mod policy;

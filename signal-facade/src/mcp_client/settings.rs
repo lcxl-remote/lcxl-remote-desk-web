@@ -140,6 +140,30 @@ impl IssueConnectionConfig {
                 .any(|allowed| allowed == actor)
     }
 
+    pub async fn resolve_subscription(
+        &self,
+        owner: &str,
+        repository: &str,
+        issue_number: Option<u64>,
+    ) -> Result<
+        (
+            desk_diagnose_core::issue_authority::IssueRepositoryScope,
+            Option<desk_diagnose_core::issue_authority::IssueFilter>,
+        ),
+        McpClientError,
+    > {
+        let config = self.clone();
+        let client = tokio::task::spawn_blocking(move || config.client())
+            .await
+            .map_err(|_| McpClientError::Unavailable)??;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            client.bind_subscription(&self.connection_ref, owner, repository, issue_number),
+        )
+        .await
+        .map_err(|_| McpClientError::Unavailable)?
+    }
+
     /// Creating the HTTP client loads OS roots. Hosts run this at a blocking I/O boundary.
     pub fn client(&self) -> Result<IssueConnection, McpClientError> {
         self.validate()
@@ -171,6 +195,16 @@ impl IssueConnectionConfig {
 }
 
 impl IssueConnectionsConfig {
+    pub fn connection_for_actor(
+        &self,
+        actor: &str,
+        reference: &str,
+    ) -> Option<&IssueConnectionConfig> {
+        self.connections
+            .iter()
+            .find(|connection| connection.connection_ref == reference && connection.permits(actor))
+    }
+
     pub fn connection_for_repository(
         &self,
         actor: &str,

@@ -905,7 +905,8 @@ async fn routed_work_uses_the_first_comment_and_header_without_expanding_origina
     other_policy.allowed_sender_ids = vec![9];
     let txn = db.begin().await.unwrap();
     let other_policy = issue_authority::put(&txn, other_policy, 0, 120_010)
-        .await.unwrap();
+        .await
+        .unwrap();
     txn.commit().await.unwrap();
     let mut other = first.clone();
     other.repository = other_policy.repository.clone();
@@ -913,25 +914,46 @@ async fn routed_work_uses_the_first_comment_and_header_without_expanding_origina
     other.created_at_ms = 120_011;
     other.updated_at_ms = 120_011;
     page(&db, &other_policy, &[other], None, 120_012).await;
-    let hint = routing::candidates_on(&db, 0, 4).await.unwrap().pop().unwrap();
+    let hint = routing::candidates_on(&db, 0, 4)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
     let txn = db.begin().await.unwrap();
     let pending = routing::pending_on(&txn, &hint).await.unwrap().unwrap();
     let mut other_header = header.clone();
     other_header.issue.target.repository_id = 43;
     other_header.issue.target.repository = "OtherProject".into();
-    assert!(routing::freeze_header_on(&txn, &pending, &other_header, 120_013).await.unwrap());
+    assert!(
+        routing::freeze_header_on(&txn, &pending, &other_header, 120_013)
+            .await
+            .unwrap()
+    );
     let pending = routing::pending_on(&txn, &hint).await.unwrap().unwrap();
-    let other_request = routing::enqueue_on(&txn, &pending, &root, &[], &destination, 120_013, 240_013)
-        .await.unwrap();
+    let other_request =
+        routing::enqueue_on(&txn, &pending, &root, &[], &destination, 120_013, 240_013)
+            .await
+            .unwrap();
     let queued = main_request::load(&txn, &root.actor_id, &root.conversation_id, &other_request)
-        .await.unwrap().unwrap();
+        .await
+        .unwrap()
+        .unwrap();
     let other_frozen = FrozenRequestInput::decode(&queued).unwrap();
     let other_source = other_frozen.issue_source.as_deref().unwrap();
     assert_eq!(other_source.workbench_id, first_source.workbench_id);
     assert_ne!(other_source.work_id, first_source.work_id);
     assert_eq!(other_source.subscription_id, other_policy.subscription_id);
-    assert!(issue_authority::resolve_work_source(
-        &txn, &root.actor_id, other_source, &header.issue, 120_013,
-    ).await.unwrap().is_none());
+    assert!(
+        issue_authority::resolve_work_source(
+            &txn,
+            &root.actor_id,
+            other_source,
+            &header.issue,
+            120_013,
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
     txn.commit().await.unwrap();
 }

@@ -4,6 +4,8 @@ use crate::config::connection::DatabaseConnection;
 mod history;
 pub(crate) use history::group_children_on;
 mod control;
+mod issue_control;
+pub(crate) use issue_control::apply_issue_changes_on;
 mod facts;
 mod lifecycle;
 mod main_tools;
@@ -390,9 +392,6 @@ pub(crate) async fn apply_goal_source_on<C: ConnectionTrait + crate::config::Con
     };
     let mut permission_ends =
         desk_diagnose_core::model_observability::permission::PendingEnds::default();
-    let now = chrono::DateTime::from_timestamp_millis(now_ms)
-        .ok_or_else(|| invalid())?
-        .to_rfc3339();
     let groups = desk_diagnose_core::future::boxed(|| async {
         group_row::Entity::find()
             .filter(group_row::Column::RootConversationId.eq(root))
@@ -405,75 +404,88 @@ pub(crate) async fn apply_goal_source_on<C: ConnectionTrait + crate::config::Con
     })
     .await?;
     for row in groups {
-        let mut group = current_group_on(db, &row).await?;
-        if group.source_admission == SourceAdmission::Closed {
+        permission_ends.extend(apply_group_admission_on(db, &row, admission, now_ms).await?);
+    }
+    Ok(permission_ends)
+}
+
+async fn apply_group_admission_on<C: ConnectionTrait + crate::config::ConfigConnection>(
+    db: &C,
+    row: &group_row::Model,
+    admission: SourceAdmission,
+    now_ms: i64,
+) -> Result<desk_diagnose_core::model_observability::permission::PendingEnds, DbErr> {
+    let mut permission_ends =
+        desk_diagnose_core::model_observability::permission::PendingEnds::default();
+    let now = chrono::DateTime::from_timestamp_millis(now_ms)
+        .ok_or_else(|| invalid())?
+        .to_rfc3339();
+    let mut group = current_group_on(db, row).await?;
+    if group.source_admission == SourceAdmission::Closed {
+        return Ok(permission_ends);
+    }
+    let epoch = group
+        .set_source_admission(admission)
+        .map_err(|_| invalid())?;
+    if group.limits.deadline_ms != row.deadline_ms && group.version == row.version as u64 {
+        group.version = group.version.checked_add(1).ok_or_else(|| invalid())?;
+    }
+    desk_diagnose_core::future::boxed(|| replace_group_on(db, row, &group, now_ms)).await?;
+    let runs = desk_diagnose_core::future::boxed(|| async {
+        run_row::Entity::find()
+            .filter(run_row::Column::GroupId.eq(&group.group_id))
+            .filter(run_row::Column::RootConversationId.eq(&group.root_conversation_id))
+            .filter(run_row::Column::ActorId.eq(&group.actor_id))
+            .filter(run_row::Column::DeviceId.eq(&group.device_id))
+            .order_by_asc(run_row::Column::Id)
+            .all(db)
+            .await
+    })
+    .await?;
+    for row in runs {
+        let mut run = decode_run(&row)?;
+        if run.state.is_terminal() || run.state == SubAgentState::Cancelling {
             continue;
         }
-        let epoch = group
-            .set_source_admission(admission)
-            .map_err(|_| invalid())?;
-        if group.limits.deadline_ms != row.deadline_ms && group.version == row.version as u64 {
-            group.version = group.version.checked_add(1).ok_or_else(|| invalid())?;
+        match admission {
+            SourceAdmission::Paused if !run.source_paused || run.binding.source_epoch != epoch => {
+                run.pause_source(epoch, &now).map_err(|_| invalid())?;
+            }
+            SourceAdmission::Open if now_ms >= run.binding.deadline_ms => {
+                run.fail("delegation_deadline_reached", &now)
+                    .map_err(|_| invalid())?;
+            }
+            SourceAdmission::Open if run.source_paused => {
+                run.resume_source(epoch, &now).map_err(|_| invalid())?;
+            }
+            SourceAdmission::Closed => {
+                run.request_cancel(run.fence(), &now)
+                    .map_err(|_| invalid())?;
+                run.binding.source_epoch = epoch;
+                run.settle_cancel(&now).map_err(|_| invalid())?;
+            }
+            _ => continue,
         }
-        desk_diagnose_core::future::boxed(|| replace_group_on(db, &row, &group, now_ms)).await?;
-        let runs = desk_diagnose_core::future::boxed(|| async {
-            run_row::Entity::find()
-                .filter(run_row::Column::GroupId.eq(&group.group_id))
-                .filter(run_row::Column::RootConversationId.eq(root))
-                .filter(run_row::Column::ActorId.eq(actor))
-                .filter(run_row::Column::DeviceId.eq(device))
-                .order_by_asc(run_row::Column::Id)
-                .all(db)
-                .await
+        desk_diagnose_core::future::boxed(|| async {
+            replace_run_on(db, &row, &run, now_ms).await
         })
         .await?;
-        for row in runs {
-            let mut run = decode_run(&row)?;
-            if run.state.is_terminal() || run.state == SubAgentState::Cancelling {
-                continue;
-            }
-            match admission {
-                SourceAdmission::Paused
-                    if !run.source_paused || run.binding.source_epoch != epoch =>
-                {
-                    run.pause_source(epoch, &now).map_err(|_| invalid())?;
-                }
-                SourceAdmission::Open if now_ms >= run.binding.deadline_ms => {
-                    run.fail("delegation_deadline_reached", &now)
-                        .map_err(|_| invalid())?;
-                }
-                SourceAdmission::Open if run.source_paused => {
-                    run.resume_source(epoch, &now).map_err(|_| invalid())?;
-                }
-                SourceAdmission::Closed => {
-                    run.request_cancel(run.fence(), &now)
-                        .map_err(|_| invalid())?;
-                    run.binding.source_epoch = epoch;
-                    run.settle_cancel(&now).map_err(|_| invalid())?;
-                }
-                _ => continue,
-            }
+        permission_ends.extend(
             desk_diagnose_core::future::boxed(|| async {
-                replace_run_on(db, &row, &run, now_ms).await
+                synchronize_control_on(
+                    db,
+                    &run,
+                    now_ms,
+                    admission == SourceAdmission::Open && now_ms >= run.binding.deadline_ms,
+                )
+                .await
             })
-            .await?;
-            permission_ends.extend(
-                desk_diagnose_core::future::boxed(|| async {
-                    synchronize_control_on(
-                        db,
-                        &run,
-                        now_ms,
-                        admission == SourceAdmission::Open && now_ms >= run.binding.deadline_ms,
-                    )
-                    .await
-                })
-                .await?,
-            );
-            desk_diagnose_core::future::boxed(|| async {
-                append_state_event_on(db, &group, &run, now_ms).await
-            })
-            .await?;
-        }
+            .await?,
+        );
+        desk_diagnose_core::future::boxed(|| async {
+            append_state_event_on(db, &group, &run, now_ms).await
+        })
+        .await?;
     }
     Ok(permission_ends)
 }

@@ -1,0 +1,1 @@
+{"type":"string","enum":["analysis","device_investigation"],"x-readme-ref-name":"IssueWorkKind"}

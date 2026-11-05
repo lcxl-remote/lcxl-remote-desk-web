@@ -27,6 +27,8 @@ pub struct Model {
     pub retired_at_ms: Option<i64>,
     #[sea_orm(indexed)]
     pub content_expires_at_ms: Option<i64>,
+    #[sea_orm(column_type = "Text")]
+    pub authorization_change_json: Option<String>,
     pub created_at_ms: i64,
 }
 impl ActiveModelBehavior for ActiveModel {}

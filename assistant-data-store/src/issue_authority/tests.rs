@@ -591,3 +591,110 @@ async fn source_retirement_and_expiry_erase_snapshots_without_recreating_on_repl
     );
     assert!(admit(&db, &second).await.is_err());
 }
+
+#[tokio::test]
+async fn settings_narrow_only_affected_requests_and_keep_original_admissions() {
+    use desk_agent_protocol::ai_assistant::issue_subscription::{
+        IssueAuthorizationChange, IssueSourceAccess,
+    };
+    use desk_diagnose_core::subagent::group::SourceAdmission;
+    use settings::WriteResult;
+
+    let db = setup().await;
+    let mut initial = policy();
+    initial.work_kind = IssueWorkKind::DeviceInvestigation;
+    let first = put(&db, initial, 0, 1000).await.unwrap();
+    let a = admitted(first.clone());
+    admit(&db, &a).await.unwrap();
+    let mut b = admitted(first.clone());
+    b.event_id = "comment-22".into();
+    b.authorization_id = IssueAdmission::id(&first, &b.event_id);
+    b.request_id = native_ids::stable(Kind::AssistantMainRequest, &"request-b");
+    b.execution_root_id = "native-root-b".into();
+    b.sender_id = 12;
+    b.workset.comments[0].author_id = 12;
+    admit(&db, &b).await.unwrap();
+
+    let mut narrower = first.clone();
+    narrower.allowed_sender_ids = vec![12];
+    let txn = db.begin().await.unwrap();
+    let WriteResult::Saved { view, affected } =
+        settings::put_on(&txn, narrower, 1100).await.unwrap()
+    else {
+        panic!("scope change should save");
+    };
+    assert_eq!(view.revision, 2);
+    assert_eq!(affected.len(), 1);
+    assert_eq!(affected[0].request_id, a.request_id);
+    assert_eq!(affected[0].source_admission, SourceAdmission::Paused);
+    txn.commit().await.unwrap();
+
+    let read_row = |snapshot: &IssueAdmission| {
+        let key = snapshot.authorization_id.clone();
+        async {
+            admission::Entity::find()
+                .filter(admission::Column::AuthorizationId.eq(key))
+                .one(&db)
+                .await
+                .unwrap()
+                .unwrap()
+        }
+    };
+    let a_row = read_row(&a).await;
+    assert_eq!(decode_admission(&a_row).unwrap(), a);
+    assert_eq!(
+        serde_json::from_str::<IssueAuthorizationChange>(
+            a_row.authorization_change_json.as_deref().unwrap()
+        )
+        .unwrap(),
+        IssueAuthorizationChange {
+            revision: 2,
+            changed_at_ms: 1100,
+            source_access: IssueSourceAccess::Withdrawn,
+            device_access: false,
+            auto_reply: false,
+        },
+    );
+    let b_row = read_row(&b).await;
+    assert!(b_row.authorization_change_json.is_none());
+    let (unchanged, current) = resolve(&db, "owner", &reference(&b), &b.issue, 1100)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(unchanged, b);
+    assert!(b.can_use_devices(&current, 1100) && b.can_publish(&current, 1100));
+
+    let mut revised = current;
+    revised.auto_reply = false;
+    revised.work_kind = IssueWorkKind::Analysis;
+    let txn = db.begin().await.unwrap();
+    let WriteResult::Saved { affected, .. } = settings::put_on(&txn, revised, 1200).await.unwrap()
+    else {
+        panic!("device and reply scope change should save");
+    };
+    assert!(affected.is_empty());
+    txn.commit().await.unwrap();
+    assert_eq!(read_row(&a).await, a_row);
+    let changed_b = read_row(&b).await;
+    let change = serde_json::from_str::<IssueAuthorizationChange>(
+        changed_b.authorization_change_json.as_deref().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(change.revision, 3);
+    assert_eq!(change.source_access, IssueSourceAccess::Open);
+    assert!(!change.device_access && !change.auto_reply);
+
+    let mut restored = first;
+    restored.revision = 3;
+    let txn = db.begin().await.unwrap();
+    let WriteResult::Saved { affected, .. } = settings::put_on(&txn, restored, 1300).await.unwrap()
+    else {
+        panic!("restoration should save");
+    };
+    assert_eq!(affected.len(), 1);
+    assert_eq!(affected[0].request_id, a.request_id);
+    assert_eq!(affected[0].source_admission, SourceAdmission::Open);
+    txn.rollback().await.unwrap();
+    assert_eq!(read_row(&a).await, a_row);
+    assert_eq!(read_row(&b).await, changed_b);
+}

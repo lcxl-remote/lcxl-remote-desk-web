@@ -7916,6 +7916,43 @@ export type InstallServiceRequest = {
     install_path?: string | null;
 };
 
+export const issueSourceAccessEnum = {
+    open: "open",
+    paused: "paused",
+    withdrawn: "withdrawn"
+} as const;
+
+export type IssueSourceAccessEnumKey = (typeof issueSourceAccessEnum)[keyof typeof issueSourceAccessEnum];
+
+export type IssueSourceAccess = IssueSourceAccessEnumKey;
+
+/**
+ * @description Recorded when an existing request\'s effective authorization changes.
+*/
+export type IssueAuthorizationChange = {
+    /**
+     * @type boolean
+    */
+    autoReply: boolean;
+    /**
+     * @type integer, int64
+    */
+    changedAtMs: number;
+    /**
+     * @type boolean
+    */
+    deviceAccess: boolean;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    revision: number;
+    /**
+     * @type string
+    */
+    sourceAccess: IssueSourceAccess;
+};
+
 export const issuePlatformEnum = {
     gitea: "gitea",
     github: "github"
@@ -8067,6 +8104,183 @@ export type IssueConnectionsUpdate = {
      * @type integer, int64
     */
     expected_revision: number;
+};
+
+export type IssueSubscriptionEnable = {
+    /**
+     * @type boolean
+    */
+    enabled: boolean;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    expectedRevision: number;
+};
+
+export type IssueSubscriptionIntake = {
+    authorizationChange?: (null | IssueAuthorizationChange);
+    /**
+     * @type integer, int64
+    */
+    commentId: number;
+    /**
+     * @type integer,null, int64
+    */
+    issueNumber?: number | null;
+    /**
+     * @type integer, int64
+    */
+    observedAtMs: number;
+    /**
+     * @type string
+    */
+    reason: string;
+    /**
+     * @type string,null
+    */
+    requestId?: string | null;
+    /**
+     * @type integer,null, int64
+    */
+    senderId?: number | null;
+    /**
+     * @type string
+    */
+    state: string;
+    /**
+     * @type integer, int64
+    */
+    subscriptionRevision: number;
+};
+
+export const issueWorkKindEnum = {
+    analysis: "analysis",
+    device_investigation: "device_investigation"
+} as const;
+
+export type IssueWorkKindEnumKey = (typeof issueWorkKindEnum)[keyof typeof issueWorkKindEnum];
+
+export type IssueWorkKind = IssueWorkKindEnumKey;
+
+export type IssueSubscriptionSave = {
+    /**
+     * @type array
+    */
+    allowedSenderIds: number[];
+    /**
+     * @type boolean
+    */
+    autoReply: boolean;
+    /**
+     * @type array
+    */
+    automationSenderIds: number[];
+    /**
+     * @type string
+    */
+    connectionRef: string;
+    /**
+     * @type boolean
+    */
+    enabled: boolean;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    expectedRevision: number;
+    /**
+     * @minLength 0
+     * @type integer,null, int64
+    */
+    issueNumber?: number | null;
+    /**
+     * @type string
+    */
+    owner: string;
+    /**
+     * @type string
+    */
+    repository: string;
+    /**
+     * @description Omit for a new subscription.
+     * @type string,null
+    */
+    subscriptionId?: string | null;
+    /**
+     * @type string
+    */
+    workKind: IssueWorkKind;
+    /**
+     * @type string
+    */
+    workbenchId: string;
+};
+
+export type IssueSubscriptionView = {
+    /**
+     * @type array
+    */
+    allowedSenderIds: number[];
+    /**
+     * @type boolean
+    */
+    autoReply: boolean;
+    /**
+     * @type array
+    */
+    automationSenderIds: number[];
+    /**
+     * @type string
+    */
+    connectionRef: string;
+    /**
+     * @type boolean
+    */
+    enabled: boolean;
+    /**
+     * @minLength 0
+     * @type integer,null, int64
+    */
+    issueNumber?: number | null;
+    /**
+     * @type integer,null, int64
+    */
+    lastCheckedAtMs?: number | null;
+    latestIntake?: (null | IssueSubscriptionIntake);
+    /**
+     * @type string
+    */
+    owner: string;
+    /**
+     * @type string
+    */
+    platform: IssuePlatform;
+    /**
+     * @type string
+    */
+    repository: string;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    revision: number;
+    /**
+     * @type string,null
+    */
+    sourceError?: string | null;
+    /**
+     * @type string
+    */
+    subscriptionId: string;
+    /**
+     * @type string
+    */
+    workKind: IssueWorkKind;
+    /**
+     * @type string
+    */
+    workbenchId: string;
 };
 
 /**
@@ -13530,6 +13744,89 @@ export type RestResponseIssueConnectionsPublic = {
     success: boolean;
 };
 
+export type RestResponseIssueSubscriptionView = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @type array
+        */
+        allowedSenderIds: number[];
+        /**
+         * @type boolean
+        */
+        autoReply: boolean;
+        /**
+         * @type array
+        */
+        automationSenderIds: number[];
+        /**
+         * @type string
+        */
+        connectionRef: string;
+        /**
+         * @type boolean
+        */
+        enabled: boolean;
+        /**
+         * @minLength 0
+         * @type integer,null, int64
+        */
+        issueNumber?: number | null;
+        /**
+         * @type integer,null, int64
+        */
+        lastCheckedAtMs?: number | null;
+        latestIntake?: (null | IssueSubscriptionIntake);
+        /**
+         * @type string
+        */
+        owner: string;
+        /**
+         * @type string
+        */
+        platform: IssuePlatform;
+        /**
+         * @type string
+        */
+        repository: string;
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        revision: number;
+        /**
+         * @type string,null
+        */
+        sourceError?: string | null;
+        /**
+         * @type string
+        */
+        subscriptionId: string;
+        /**
+         * @type string
+        */
+        workKind: IssueWorkKind;
+        /**
+         * @type string
+        */
+        workbenchId: string;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
 export type RestResponseLogSettings = {
     /**
      * @type integer, int32
@@ -15769,6 +16066,89 @@ export type RestResponseVecIssueConnectionChoice = {
          * @type string
         */
         platform: IssuePlatform;
+    }[];
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponseVecIssueSubscriptionView = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type array | undefined
+    */
+    data?: {
+        /**
+         * @type array
+        */
+        allowedSenderIds: number[];
+        /**
+         * @type boolean
+        */
+        autoReply: boolean;
+        /**
+         * @type array
+        */
+        automationSenderIds: number[];
+        /**
+         * @type string
+        */
+        connectionRef: string;
+        /**
+         * @type boolean
+        */
+        enabled: boolean;
+        /**
+         * @minLength 0
+         * @type integer,null, int64
+        */
+        issueNumber?: number | null;
+        /**
+         * @type integer,null, int64
+        */
+        lastCheckedAtMs?: number | null;
+        latestIntake?: (null | IssueSubscriptionIntake);
+        /**
+         * @type string
+        */
+        owner: string;
+        /**
+         * @type string
+        */
+        platform: IssuePlatform;
+        /**
+         * @type string
+        */
+        repository: string;
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        revision: number;
+        /**
+         * @type string,null
+        */
+        sourceError?: string | null;
+        /**
+         * @type string
+        */
+        subscriptionId: string;
+        /**
+         * @type string
+        */
+        workKind: IssueWorkKind;
+        /**
+         * @type string
+        */
+        workbenchId: string;
     }[];
     /**
      * @type string,null
@@ -21690,6 +22070,55 @@ export type GetMyIssueConnectionsQueryResponse = GetMyIssueConnections200;
 
 export type GetMyIssueConnectionsQuery = {
     Response: GetMyIssueConnections200;
+    Errors: any;
+};
+
+export type ListAiAssistantIssueSubscriptionsQueryParams = {
+    /**
+     * @type string
+    */
+    workbench: string;
+};
+
+export type ListAiAssistantIssueSubscriptions200 = RestResponseVecIssueSubscriptionView;
+
+export type ListAiAssistantIssueSubscriptionsQueryResponse = ListAiAssistantIssueSubscriptions200;
+
+export type ListAiAssistantIssueSubscriptionsQuery = {
+    Response: ListAiAssistantIssueSubscriptions200;
+    QueryParams: ListAiAssistantIssueSubscriptionsQueryParams;
+    Errors: any;
+};
+
+export type SaveAiAssistantIssueSubscription200 = RestResponseIssueSubscriptionView;
+
+export type SaveAiAssistantIssueSubscriptionMutationRequest = IssueSubscriptionSave;
+
+export type SaveAiAssistantIssueSubscriptionMutationResponse = SaveAiAssistantIssueSubscription200;
+
+export type SaveAiAssistantIssueSubscriptionMutation = {
+    Response: SaveAiAssistantIssueSubscription200;
+    Request: SaveAiAssistantIssueSubscriptionMutationRequest;
+    Errors: any;
+};
+
+export type SetAiAssistantIssueSubscriptionEnabledPathParams = {
+    /**
+     * @type string
+    */
+    subscription_id: string;
+};
+
+export type SetAiAssistantIssueSubscriptionEnabled200 = RestResponseIssueSubscriptionView;
+
+export type SetAiAssistantIssueSubscriptionEnabledMutationRequest = IssueSubscriptionEnable;
+
+export type SetAiAssistantIssueSubscriptionEnabledMutationResponse = SetAiAssistantIssueSubscriptionEnabled200;
+
+export type SetAiAssistantIssueSubscriptionEnabledMutation = {
+    Response: SetAiAssistantIssueSubscriptionEnabled200;
+    Request: SetAiAssistantIssueSubscriptionEnabledMutationRequest;
+    PathParams: SetAiAssistantIssueSubscriptionEnabledPathParams;
     Errors: any;
 };
 

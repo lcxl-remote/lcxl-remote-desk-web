@@ -23,6 +23,7 @@ pub struct Model {
     pub lease_until_ms: Option<i64>,
     #[sea_orm(indexed)]
     pub next_poll_at_ms: i64,
+    pub last_checked_at_ms: Option<i64>,
     pub last_error: Option<String>,
     pub updated_at_ms: i64,
 }

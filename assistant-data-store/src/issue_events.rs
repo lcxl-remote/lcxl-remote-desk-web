@@ -283,6 +283,7 @@ pub async fn commit_page_on(
             lease_until_ms: Set(None),
             next_poll_at_ms: Set(if finished { next_poll_at_ms } else { now }),
             last_error: Set(None),
+            last_checked_at_ms: Set(Some(now)),
             updated_at_ms: Set(now),
             ..Default::default()
         })
@@ -319,6 +320,7 @@ pub async fn retry_on(
             lease_until_ms: Set(None),
             next_poll_at_ms: Set(next_poll_at_ms),
             last_error: Set(Some(reason.into())),
+            last_checked_at_ms: Set(Some(now)),
             updated_at_ms: Set(now),
             ..Default::default()
         })

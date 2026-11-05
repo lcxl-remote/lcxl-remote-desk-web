@@ -14,6 +14,9 @@ use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, Set, sea_q
 use sha2::{Digest, Sha256};
 
 const MAX_POLICY_BYTES: usize = 64 * 1024;
+const OVERLAPPING: &str = "overlapping issue subscription";
+
+pub mod settings;
 
 pub fn decode_subscription(
     row: &subscription::Model,
@@ -84,19 +87,8 @@ pub async fn put(
         _ => {}
     }
     let previous = original.as_ref().map(decode_subscription).transpose()?;
-    let others = subscription::Entity::find()
-        .filter(subscription::Column::ActorId.eq(&policy.actor_id))
-        .filter(subscription::Column::ConversationId.eq(&policy.conversation_id))
-        .filter(subscription::Column::Enabled.eq(true))
-        .filter(subscription::Column::SubscriptionId.ne(&policy.subscription_id))
-        .all(db)
-        .await?;
-    for other in others {
-        if policy.overlaps(&decode_subscription(&other)?) {
-            return Err(AssistantStoreError::Invalid(
-                "overlapping issue subscription",
-            ));
-        }
+    if overlapping_on(db, &policy).await?.is_some() {
+        return Err(AssistantStoreError::Invalid(OVERLAPPING));
     }
     let changed = if let Some(row) = original {
         subscription::Entity::update_many()
@@ -150,6 +142,29 @@ pub async fn put(
     }
     crate::issue_events::policy_changed_on(db, previous.as_ref(), &policy, now).await?;
     Ok(policy)
+}
+
+async fn overlapping_on(
+    db: &impl ConnectionTrait,
+    policy: &IssueSubscription,
+) -> Result<Option<IssueSubscription>, AssistantStoreError> {
+    if !policy.enabled {
+        return Ok(None);
+    }
+    let others = subscription::Entity::find()
+        .filter(subscription::Column::ActorId.eq(&policy.actor_id))
+        .filter(subscription::Column::ConversationId.eq(&policy.conversation_id))
+        .filter(subscription::Column::Enabled.eq(true))
+        .filter(subscription::Column::SubscriptionId.ne(&policy.subscription_id))
+        .all(db)
+        .await?;
+    for row in others {
+        let existing = decode_subscription(&row)?;
+        if policy.overlaps(&existing) {
+            return Ok(Some(existing));
+        }
+    }
+    Ok(None)
 }
 
 pub fn decode_admission(row: &admission::Model) -> Result<IssueAdmission, AssistantStoreError> {

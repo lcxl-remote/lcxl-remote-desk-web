@@ -13,12 +13,7 @@ pub use workset::{
     IssueCommentSnapshot, IssueWorkset, is_issue_supplement_label, is_issue_workset_label,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum IssueWorkKind {
-    Analysis,
-    DeviceInvestigation,
-}
+pub use desk_agent_protocol::ai_assistant::issue_subscription::IssueWorkKind;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
