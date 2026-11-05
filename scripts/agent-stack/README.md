@@ -81,7 +81,7 @@ Redis 必须为隔离测试实例。Manager 的并发事务证明测试另使用
 
 Signal 原始回执收尾还须包含原生会话完整读取、原命令核验、原能力动作核验、命令来源和电脑结果恢复的实际 poll。各阶段沿用调用方的原事务，保留全部查询与原始身份验证；读取仍逐次完整解码，失败时不把部分恢复的 after-image 覆盖原会话。
 
-输入接收还须覆盖两宿主原 `append_user_input_inner` / `append_user_followup_inner`、`prepare_input_goals_on` 和 `write_input_goal_events_on` 的实际 poll。原入口持有事务与会话，Goal 准备阶段拥有待提交状态，事件阶段完成后由原入口处理 CAS 回滚或继续提交；原查询、锁、审批围栏和输入幂等保持。显式 1 MiB/2 MiB 组合覆盖普通/Goal 输入的现行状态、实际失败回滚、重放与原检索预算保留。Schema 夹具在限定线程外建立，夹具运行时继续处理连接池；产品接收、完整 decode 和事务断言都在限定线程中运行。两个新阶段在类型擦除前继续检查 16 KiB 原始 future。
+输入接收还须覆盖两宿主的 `admit_user_input`、`prepare_input_goals_on` 和 `write_input_goal_events_on` 的实际 poll。原入口持有事务与会话，Goal 准备阶段拥有待提交状态，Manager 的 `persist_input_on` 写入原生会话和输入事件并标记旧恢复，原入口处理 CAS 回滚或继续提交；原查询、锁、审批围栏和输入幂等保持。显式 1 MiB/2 MiB 组合覆盖普通/Goal 输入的现行状态、实际失败回滚、重放与原检索预算保留。Schema 夹具在限定线程外建立，夹具运行时继续处理连接池；产品接收、完整 decode 和事务断言都在限定线程中运行。各执行阶段在类型擦除前检查 16 KiB 原始 future。
 
 历史最终落库须覆盖两宿主 `history::staged::write::write_on`、`write_conversation_on` 和 Signal 的 `write_binding_on` 实际 poll，阶段原始 future 在类型擦除前检查 16 KiB。写入只使用原准备阶段核验的来源、同事务自己的已提交单元及原 CAS，最终配额更新后不补发原生来源 SELECT。显式 1 MiB/2 MiB 组合覆盖多单元成功、首/中单元失败、重放和外层回滚；失败单元不得推进缓存、来源代次或留下绑定，成功前缀与未失败单元继续按原规则入库。
 

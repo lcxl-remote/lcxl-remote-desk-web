@@ -166,7 +166,8 @@ pub async fn pending_permission_reviews(
             let Some(session_row) = session_row else {
                 continue;
             };
-            let Ok(session) = PersistedAgentSession::decode_json(&session_row.state_json) else {
+            let Ok(session) = PersistedAgentSession::decode_boxed_json(&session_row.state_json)
+            else {
                 // Invalid current-format data must not block unrelated conversations.
                 log::debug!(
                     "Skipping invalid current-format assistant snapshot in batch scan: {}",
@@ -177,12 +178,14 @@ pub async fn pending_permission_reviews(
             if session.surface != AgentSessionSurface::AiAssistant
                 || !session.allows_delegated_review()
                 || session.approval_delegation_conversation_id() != row.conversation_id
-                || !crate::agent_subagent_store::shared_approval_current_on(
-                    db,
-                    &session,
-                    as_i64(now_unix_ms)?,
-                )
-                .await?
+            {
+                continue;
+            }
+            let now_ms = as_i64(now_unix_ms)?;
+            if !desk_diagnose_core::future::send_phase(|| {
+                crate::agent_subagent_store::shared_approval_current_on(db, &session, now_ms)
+            })
+            .await?
             {
                 continue;
             }

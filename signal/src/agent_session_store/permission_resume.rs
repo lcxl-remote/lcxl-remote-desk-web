@@ -258,7 +258,7 @@ impl SignalAgentSessionStore {
             .await
             .map_err(storage)?;
         txn.commit().await.map_err(storage)?;
-        Ok(Some((session, grants)))
+        Ok(Some((*session, grants)))
     }
 
     pub fn with_permission_resume(
@@ -392,7 +392,7 @@ impl SignalAgentSessionStore {
         }
         desk_diagnose_core::assistant_policy::require_current_policy(session.policy_revision)?;
         txn.commit().await.map_err(storage)?;
-        Ok(Some(session))
+        Ok(Some(*session))
     }
 
     pub(super) async fn claim_permission_resume(
@@ -578,7 +578,7 @@ impl SignalAgentSessionStore {
         txn.commit()
             .await
             .map_err(|e| ClaimError::Backend(storage(e)))?;
-        Ok(session)
+        Ok(*session)
     }
 }
 

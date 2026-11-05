@@ -29,8 +29,9 @@ pub(super) fn session(
     run_id: &str,
     actor_id: &str,
     device_id: &str,
-) -> Result<PersistedAgentSession, AgentError> {
-    let mut session = PersistedAgentSession::decode_json(&row.state_json).map_err(|_| invalid())?;
+) -> Result<Box<PersistedAgentSession>, AgentError> {
+    let mut session =
+        PersistedAgentSession::decode_boxed_json(&row.state_json).map_err(|_| invalid())?;
     if row.conversation_id != run_id
         || row.actor_id != actor_id
         || row.device_id != device_id

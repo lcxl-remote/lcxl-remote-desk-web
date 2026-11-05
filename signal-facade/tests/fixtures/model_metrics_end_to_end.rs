@@ -316,6 +316,7 @@ async fn execute(protocol: WireProtocol, mode: CaptureMode) -> BusinessResult {
                 let overview = store.overview(&range, now()).await.unwrap();
                 let status = store.status(now()).await.unwrap();
                 if count(&overview.summary, "correction_accepted") == Some("1")
+                    && count(&overview.summary, "returned") == Some("3")
                     && status.backlog.as_deref() == Some("0") && status.last_aggregated.is_some() {
                     break overview;
                 }

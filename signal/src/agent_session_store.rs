@@ -480,18 +480,20 @@ impl SignalAgentSessionStore {
                     hmac_key,
                     unstarted_failures,
                 } => Some(
-                    crate::agent_approval_store::reviewed_permission_batch_on(
-                        &txn,
-                        &session,
-                        &requested,
-                        candidates,
-                        unstarted_failures,
-                        grant_context.registry,
-                        grant_context.surface,
-                        hmac_key,
-                        grant_context.readiness_revision,
-                        grant_context.now_unix_ms,
-                    )
+                    desk_diagnose_core::future::boxed(|| {
+                        crate::agent_approval_store::reviewed_permission_batch_on(
+                            &txn,
+                            &session,
+                            &requested,
+                            candidates,
+                            unstarted_failures,
+                            grant_context.registry,
+                            grant_context.surface,
+                            hmac_key,
+                            grant_context.readiness_revision,
+                            grant_context.now_unix_ms,
+                        )
+                    })
                     .await
                     .map_err(|_| internal("AI permission reviews are no longer current"))?,
                 ),
@@ -520,10 +522,13 @@ impl SignalAgentSessionStore {
                 PermissionDecisionAuthority::NoReview {
                     device_allows_unattended,
                 } => {
-                    let mode = crate::model_provider::load(&txn)
-                        .await
-                        .map_err(|_| internal("unattended command host ceiling is unavailable"))?
-                        .execution_mode;
+                    let mode =
+                        desk_diagnose_core::future::boxed(|| crate::model_provider::load(&txn))
+                            .await
+                            .map_err(|_| {
+                                internal("unattended command host ceiling is unavailable")
+                            })?
+                            .execution_mode;
                     let device = permission_device_id(&session, &requested);
                     no_review_preference
                         .as_ref()
@@ -557,7 +562,10 @@ impl SignalAgentSessionStore {
                     &requested,
                     &decision_items,
                 ) {
-                crate::agent_run_event_store::input_context::original_on(&txn, &session).await?
+                desk_diagnose_core::future::boxed(|| {
+                    crate::agent_run_event_store::input_context::original_on(&txn, &session)
+                })
+                .await?
             } else {
                 None
             };

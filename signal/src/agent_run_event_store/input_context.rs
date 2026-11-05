@@ -33,8 +33,8 @@ impl<'a> From<&'a AppendUserFollowupParams> for InputSubject<'a> {
 pub(super) fn decode_session(
     row: &agent_session::Model,
     subject: InputSubject<'_>,
-) -> Result<PersistedAgentSession, AgentError> {
-    let mut session = PersistedAgentSession::decode_json(&row.state_json)
+) -> Result<Box<PersistedAgentSession>, AgentError> {
+    let mut session = PersistedAgentSession::decode_boxed_json(&row.state_json)
         .map_err(|_| internal("invalid input session"))?;
     if row.conversation_id != subject.run_id
         || row.actor_id != subject.actor_id

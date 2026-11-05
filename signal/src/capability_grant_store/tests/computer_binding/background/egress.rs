@@ -477,10 +477,13 @@ async fn exercise(stack_bytes: Option<usize>) {
             assert!(!body.contains("test-only-never-a-real-key"));
             assert!(!body.contains("data_envelope"));
             let json: serde_json::Value = serde_json::from_str(&body).unwrap();
-            assert!(
-                json.get("tools")
-                    .is_none_or(|value| value.as_array().is_some_and(Vec::is_empty))
-            );
+            let tools = json["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|tool| tool["function"]["name"].as_str().unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(tools, [desk_diagnose_core::skills::LOAD_TOOL], "{case}");
             assert_eq!(receipts.len(), 1, "{case}");
             assert_eq!(
                 receipts[0].state,

@@ -312,36 +312,11 @@ impl SignalAgentRunEventStore {
                     );
                     (session, row.version, Some(row.id))
                 }
-                None => {
-                    let mut session = if let Some(workbench_id) = &workbench_id {
-                        let OwnerAdmission::Activate { request_id, .. } = admission else {
-                            unreachable!()
-                        };
-                        PersistedAgentSession::new_workbench_coordinator(
-                            &params.actor_id,
-                            workbench_id,
-                            Some(request_id),
-                            params.policy_revision,
-                            params.current_scope.clone(),
-                            &params.created_at,
-                        )
-                        .map_err(internal)?
-                    } else {
-                        PersistedAgentSession::new(
-                            params.run_id.clone(),
-                            params.actor_id.clone(),
-                            params.device_id.clone(),
-                            params.policy_revision,
-                            params.current_scope.clone(),
-                            params.created_at.clone(),
-                        )
-                    };
-                    session.adopt_client_metadata(
-                        params.client_conversation_id.as_deref(),
-                        params.surface,
-                    );
-                    (session, 0, None)
-                }
+                None => (
+                    new_input_session(params, workbench_id.as_deref(), admission)?,
+                    0,
+                    None,
+                ),
             };
 
             if (workbench_id.is_some()
@@ -384,15 +359,17 @@ impl SignalAgentRunEventStore {
                         &params.message,
                     )
                     .map_err(|error| error.into_agent_error())?;
-                    let queued = main_request::enqueue(
-                        &txn,
-                        &params.actor_id,
-                        &params.run_id,
-                        &frozen,
-                        reply_connection_id,
-                        limit,
-                        now.timestamp_millis(),
-                    )
+                    let queued = desk_diagnose_core::future::boxed(|| {
+                        main_request::enqueue(
+                            &txn,
+                            &params.actor_id,
+                            &params.run_id,
+                            &frozen,
+                            reply_connection_id,
+                            limit,
+                            now.timestamp_millis(),
+                        )
+                    })
                     .await
                     .map_err(|error| error.into_agent_error())?;
                     txn.commit()
@@ -547,21 +524,23 @@ impl SignalAgentRunEventStore {
             } else {
                 0
             };
-            crate::agent_subagent_store::initialize_input_group_on(
-                &txn,
-                &mut session,
-                params.message.clone(),
-                params.read_context.clone(),
-                goals
-                    .opened_goal
-                    .as_ref()
-                    .or_else(|| goals.revised_goal.as_ref().map(|(goal, _)| goal)),
-                now.timestamp_millis(),
-                desk_diagnose_core::subagent::creation::AcceptedOwnerSource {
-                    targets: &followup.targets,
-                    main_request_id: activation.as_ref().map(|row| row.request_id.as_str()),
-                },
-            )
+            desk_diagnose_core::future::boxed(|| {
+                crate::agent_subagent_store::initialize_input_group_on(
+                    &txn,
+                    &mut session,
+                    params.message.clone(),
+                    params.read_context.clone(),
+                    goals
+                        .opened_goal
+                        .as_ref()
+                        .or_else(|| goals.revised_goal.as_ref().map(|(goal, _)| goal)),
+                    now.timestamp_millis(),
+                    desk_diagnose_core::subagent::creation::AcceptedOwnerSource {
+                        targets: &followup.targets,
+                        main_request_id: activation.as_ref().map(|row| row.request_id.as_str()),
+                    },
+                )
+            })
             .await
             .map_err(|error| internal(format!("initialize delegation source: {error}")))?;
             let dispatched = match activation
@@ -738,6 +717,38 @@ impl SignalAgentRunEventStore {
             })
             .collect()
     }
+}
+
+fn new_input_session(
+    params: &AppendUserFollowupParams,
+    workbench_id: Option<&str>,
+    admission: OwnerAdmission<'_>,
+) -> Result<Box<PersistedAgentSession>, AgentError> {
+    let mut session = Box::new(if let Some(workbench_id) = workbench_id {
+        let OwnerAdmission::Activate { request_id, .. } = admission else {
+            unreachable!()
+        };
+        PersistedAgentSession::new_workbench_coordinator(
+            &params.actor_id,
+            workbench_id,
+            Some(request_id),
+            params.policy_revision,
+            params.current_scope.clone(),
+            &params.created_at,
+        )
+        .map_err(internal)?
+    } else {
+        PersistedAgentSession::new(
+            params.run_id.clone(),
+            params.actor_id.clone(),
+            params.device_id.clone(),
+            params.policy_revision,
+            params.current_scope.clone(),
+            params.created_at.clone(),
+        )
+    });
+    session.adopt_client_metadata(params.client_conversation_id.as_deref(), params.surface);
+    Ok(session)
 }
 
 // Owned Goal after-image for the original input transaction. Preparing this

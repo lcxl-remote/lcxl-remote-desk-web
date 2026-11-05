@@ -2821,6 +2821,7 @@ fn assert_targetless_web_tools(request: &serde_json::Value, approved: bool) {
         names.iter().all(|name| matches!(
             *name,
             "describe_tools"
+                | "load_skill"
                 | "request_permissions"
                 | "fetch_public_web_page"
                 | "read_conversation_attachment"

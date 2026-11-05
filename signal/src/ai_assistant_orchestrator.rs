@@ -2775,7 +2775,7 @@ async fn prepare_composed_turn(
         };
                                         if let Some(runtime) = delegated {
                                             return desk_diagnose_core::future::phase(|| async move {
-                let claim = ClaimTurnParams {
+                let claim = Box::new(ClaimTurnParams {
                     conversation_id,
                     actor_id,
                     device_id: target_device_id,
@@ -2786,7 +2786,7 @@ async fn prepare_composed_turn(
                     connection_id: None,
                     trigger_origin: runtime.origin(),
                     now: clock(),
-                };
+                });
                 let store = crate::agent_subagent_store::SubAgentStore::new(db.clone());
                 let mut sink =
                     StreamingTurnSink::starting_at(|_event: AiAssistantEvent| {}, request_id, 0);
