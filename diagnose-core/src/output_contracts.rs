@@ -60,6 +60,11 @@ catalog!(
         "AiAssistantSubAgentSummary",
         Inline
     ),
+    (
+        "ask_owner_for_subagent",
+        "WorkerQuestionHandoffReceipt",
+        Inline
+    ),
     ("wait_subagent_reports", "SubAgentWaitReceipt", Inline),
     ("cancel_subagent_request", "SubAgentControlReceipt", Inline),
     ("adjust_subagent_request", "SubAgentControlReceipt", Inline),
@@ -487,7 +492,7 @@ mod tests {
         ] {
             assert!(for_tool(builtin).is_some());
         }
-        assert_eq!(ALL.len(), 93);
+        assert_eq!(ALL.len(), 94);
     }
 
     #[test]

@@ -16,6 +16,7 @@
 | `report_subagent_status` | `WorkerReportReceipt` | 1 | inline |
 | `wait_for_subagent_device` | `WorkerDeviceWaitReceipt` | 1 | inline |
 | `reply_subagent_request` | `AiAssistantSubAgentSummary` | 1 | inline |
+| `ask_owner_for_subagent` | `WorkerQuestionHandoffReceipt` | 1 | inline |
 | `wait_subagent_reports` | `SubAgentWaitReceipt` | 1 | inline |
 | `cancel_subagent_request` | `SubAgentControlReceipt` | 1 | inline |
 | `adjust_subagent_request` | `SubAgentControlReceipt` | 1 | inline |
