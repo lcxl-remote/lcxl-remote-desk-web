@@ -207,6 +207,24 @@ impl SubAgentStore {
             BTreeSet::new()
         };
         let now = chrono::Utc::now();
+        if control.subagent_choice == Some(SubAgentStopChoice::IncludeSubAgents) {
+            desk_assistant_data_store::issue_authority::stop_conversation(
+                &txn,
+                actor,
+                root,
+                now.timestamp_millis(),
+            )
+            .await
+            .map_err(|_| invalid())?;
+            desk_assistant_data_store::issue_reply::lifecycle::cancel_conversation_on(
+                &txn,
+                actor,
+                root,
+                now.timestamp_millis(),
+            )
+            .await
+            .map_err(|_| invalid())?;
+        }
         let scope = StopScope {
             children: &children,
             key: &key,

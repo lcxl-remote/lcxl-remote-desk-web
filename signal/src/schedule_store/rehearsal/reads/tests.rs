@@ -114,6 +114,8 @@ async fn fixture_with_text(
     .await
     .unwrap();
     let original = ReadContextSelection {
+        external_issues: Vec::new(),
+        external_issue_sources: Vec::new(),
         tool_names: vec![call.name.clone()],
         expires_at: Some((now + chrono::Duration::minutes(2)).to_rfc3339()),
         object_attachments: vec![],

@@ -118,6 +118,47 @@ pub enum OwnerAdmissionResult<R> {
     Waiting,
 }
 
+/// Queue retries and activation reuse the accepted binding. Remote name lookup
+/// is reserved for first intake; a later repository may reuse the same name.
+pub async fn frozen_read_selection(
+    db: &impl ConnectionTrait,
+    queue: Option<&OwnerQueueTurn>,
+    actor: &str,
+    conversation: &str,
+    device: &str,
+    ask: &AiAssistantAsk,
+) -> Result<Option<ReadContextSelection>, AssistantStoreError> {
+    let row = match queue {
+        None => return Ok(None),
+        Some(OwnerQueueTurn::Submit { ask: original, .. }) => {
+            if original.selected_issues != ask.selected_issues {
+                return Err(AssistantStoreError::Inaccessible);
+            }
+            replay(db, actor, conversation, original, device).await?
+        }
+        Some(OwnerQueueTurn::Activate {
+            request_id,
+            conversation_id,
+            ..
+        }) => Some(
+            load(db, actor, conversation_id, request_id)
+                .await?
+                .ok_or(AssistantStoreError::Inaccessible)?,
+        ),
+    };
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    if row.pending_input_json.is_none() {
+        return Ok(Some(ReadContextSelection::default()));
+    }
+    let frozen = FrozenOwnerInput::decode(&row)?;
+    if frozen.ask.selected_issues != ask.selected_issues {
+        return Err(AssistantStoreError::Inaccessible);
+    }
+    Ok(Some(frozen.reads))
+}
+
 impl<R> OwnerAdmissionResult<R> {
     pub fn native(self) -> Result<R, AssistantStoreError> {
         match self {
@@ -437,6 +478,8 @@ impl FrozenOwnerInput {
     ) -> Result<Self, AssistantStoreError> {
         let invalid =
             || AssistantStoreError::Invalid("Assistant request differs from its native input");
+        let reads = reads.ok_or_else(invalid)?;
+        reads.validate().map_err(|_| invalid())?;
         let [destination] = message
             .data_envelope
             .as_ref()
@@ -448,6 +491,13 @@ impl FrozenOwnerInput {
         if ask.start_goal
             || ask.previous_completed_goal_id.is_some()
             || ask.question != message.text
+            || reads.external_issues.len() != ask.selected_issues.len()
+            || !ask.selected_issues.iter().all(|selected| {
+                reads
+                    .external_issues
+                    .iter()
+                    .any(|access| access.matches_selection(selected))
+            })
             || ask.client_message_id != message.message_id
             || !ask
                 .target_refs
@@ -461,7 +511,7 @@ impl FrozenOwnerInput {
             ask: ask.clone(),
             device_id: device_id.into(),
             targets: targets.to_vec(),
-            reads: reads.ok_or_else(invalid)?.clone(),
+            reads: reads.clone(),
             destination: destination.clone(),
         })
     }

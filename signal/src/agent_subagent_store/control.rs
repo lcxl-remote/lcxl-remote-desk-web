@@ -48,6 +48,21 @@ pub(crate) async fn synchronize_control_on<C: ConnectionTrait + crate::config::C
             deadline_reached,
         );
     let input_changed = session.input_revision != run.binding.input_revision;
+    if input_changed {
+        desk_assistant_data_store::issue_reply::lifecycle::cancel_request_on(
+            db,
+            &session.actor_id,
+            &session.conversation_id,
+            session.input_revision,
+            "work_changed",
+            now_ms,
+        )
+        .await
+        .map_err(|error| match error {
+            desk_assistant_data_store::AssistantStoreError::Backend(error) => error,
+            _ => invalid(),
+        })?;
+    }
     synchronize_session(&mut session, run, &now.to_rfc3339()).map_err(|_| invalid())?;
     if input_changed {
         let task = desk_diagnose_core::future::boxed(|| async {

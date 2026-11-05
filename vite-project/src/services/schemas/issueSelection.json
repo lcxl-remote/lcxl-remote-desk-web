@@ -1,0 +1,1 @@
+{"type":"object","required":["connection_ref","owner","repository","issue_number"],"properties":{"connection_ref":{"type":"string"},"issue_number":{"type":"integer","format":"int64","minimum":0},"owner":{"type":"string"},"repository":{"type":"string"}},"additionalProperties":false,"x-readme-ref-name":"IssueSelection"}

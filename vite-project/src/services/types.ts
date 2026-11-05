@@ -137,6 +137,92 @@ export type AgentError = {
     safe_for_model: boolean;
 };
 
+export type IssueSelection = {
+    /**
+     * @type string
+    */
+    connection_ref: string;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    issue_number: number;
+    /**
+     * @type string
+    */
+    owner: string;
+    /**
+     * @type string
+    */
+    repository: string;
+};
+
+/**
+ * @description Browser to central brain: one owner-authenticated AI Assistant turn.
+*/
+export type AiAssistantAsk = {
+    /**
+     * @description Stable idempotency identity for this user message. It is distinct from\nthe transport request id so reconnect/retry cannot duplicate input.
+     * @type string
+    */
+    client_message_id: string;
+    /**
+     * @description IANA time zone observed by the sending client for this exact input.
+     * @type string
+    */
+    client_timezone: string;
+    /**
+     * @description Stable client intent for multi-turn continuity. The server validates and\nsubject-namespaces it before using it as a persistence key.
+     * @type string,null
+    */
+    conversation_id?: string | null;
+    /**
+     * @description BCP-47 response locale (for example `zh-CN`).
+     * @type string,null
+    */
+    locale?: string | null;
+    /**
+     * @description Explicitly continue one completed goal. Valid only with start_goal.
+     * @type string,null
+    */
+    previous_completed_goal_id?: string | null;
+    /**
+     * @description The owner\'s natural-language request.
+     * @type string
+    */
+    question: string;
+    /**
+     * @description Exact durable object attachments frozen for this turn. The server\nresolves these ids from the subject-scoped session and never accepts an\nObjectRef directly from model arguments.
+     * @type array | undefined
+    */
+    selected_attachment_ids?: string[];
+    /**
+     * @description Exact user-selected read contexts for this turn. Empty means the model\nreceives the question but no device/Office read tool. The server matches\nthese ids against the current Provider Registry and live readiness.
+     * @type array | undefined
+    */
+    selected_capability_ids?: string[];
+    /**
+     * @description Exact external issues selected for this input. The host resolves their\naccount and native identities before durable admission.
+     * @type array | undefined
+    */
+    selected_issues?: IssueSelection[];
+    /**
+     * @description The owner explicitly asks the server to open a durable, bounded goal\nwith server-selected limits. This is not permission for device actions.
+     * @type boolean | undefined
+    */
+    start_goal?: boolean;
+    /**
+     * @description Stable device references selected for this personal-conversation input.
+     * @type array | undefined
+    */
+    target_refs?: string[];
+    /**
+     * @description Optional first-input choice; an existing conversation keeps its frozen mode.
+     * @type boolean,null
+    */
+    temporary_conversation?: boolean | null;
+};
+
 export const aiAssistantAttentionReasonEnum = {
     goal_open_approval: "goal_open_approval",
     permission_approval: "permission_approval",
@@ -1957,6 +2043,16 @@ export type CommandConfirmationDto = {
     timeoutMs: number;
 };
 
+export const externalIssueAudienceEnum = {
+    public: "public",
+    internal: "internal",
+    private: "private"
+} as const;
+
+export type ExternalIssueAudienceEnumKey = (typeof externalIssueAudienceEnum)[keyof typeof externalIssueAudienceEnum];
+
+export type ExternalIssueAudience = ExternalIssueAudienceEnumKey;
+
 export const destinationIdentityKindEnum = {
     model: "model"
 } as const;
@@ -1986,6 +2082,12 @@ export const destinationIdentityKindEnum5 = {
 } as const;
 
 export type DestinationIdentityKindEnum5Key = (typeof destinationIdentityKindEnum5)[keyof typeof destinationIdentityKindEnum5];
+
+export const destinationIdentityKindEnum6 = {
+    external_issue: "external_issue"
+} as const;
+
+export type DestinationIdentityKindEnum6Key = (typeof destinationIdentityKindEnum6)[keyof typeof destinationIdentityKindEnum6];
 
 export type DestinationIdentity = ({
     /**
@@ -2045,6 +2147,38 @@ export type DestinationIdentity = ({
      * @type string
     */
     workspace_id: string;
+} | {
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    account_id: number;
+    /**
+     * @type string
+    */
+    audience: ExternalIssueAudience;
+    /**
+     * @type string
+    */
+    connection_id: string;
+    /**
+     * @type string
+    */
+    instance_sha256: string;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    issue_id: number;
+    /**
+     * @type string
+    */
+    kind: DestinationIdentityKindEnum6Key;
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    repository_id: number;
 });
 
 export type ExternalSendAttachmentDto = {
@@ -7759,6 +7893,159 @@ export type InstallServiceRequest = {
     install_path?: string | null;
 };
 
+export const issuePlatformEnum = {
+    gitea: "gitea",
+    github: "github"
+} as const;
+
+export type IssuePlatformEnumKey = (typeof issuePlatformEnum)[keyof typeof issuePlatformEnum];
+
+export type IssuePlatform = IssuePlatformEnumKey;
+
+export type IssueConnectionChoice = {
+    /**
+     * @type string
+    */
+    connection_ref: string;
+    /**
+     * @type string
+    */
+    instance_url: string;
+    /**
+     * @type string
+    */
+    name: string;
+    /**
+     * @type string
+    */
+    platform: IssuePlatform;
+};
+
+export type IssueConnectionProbe = {
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    account_id: number;
+    /**
+     * @type string
+    */
+    account_login: string;
+    /**
+     * @type boolean
+    */
+    can_read_issues: boolean;
+    /**
+     * @type boolean
+    */
+    can_reply: boolean;
+};
+
+export type IssueConnectionPublic = {
+    /**
+     * @type array
+    */
+    allowed_actor_ids: string[];
+    /**
+     * @type string
+    */
+    connection_ref: string;
+    /**
+     * @type boolean
+    */
+    enabled: boolean;
+    /**
+     * @type boolean
+    */
+    has_custom_ca: boolean;
+    /**
+     * @type boolean
+    */
+    has_token: boolean;
+    /**
+     * @type string
+    */
+    instance_url: string;
+    /**
+     * @type string
+    */
+    mcp_url: string;
+    /**
+     * @type string
+    */
+    name: string;
+    /**
+     * @type string
+    */
+    platform: IssuePlatform;
+};
+
+/**
+ * @description Omitted secrets preserve the credential of the same configured connection.
+*/
+export type IssueConnectionUpdate = {
+    /**
+     * @type array
+    */
+    allowed_actor_ids: string[];
+    /**
+     * @type string
+    */
+    connection_ref: string;
+    /**
+     * @type boolean
+    */
+    enabled: boolean;
+    /**
+     * @type string,null
+    */
+    extra_ca_pem?: string | null;
+    /**
+     * @type string
+    */
+    instance_url: string;
+    /**
+     * @type string
+    */
+    mcp_url: string;
+    /**
+     * @type string
+    */
+    name: string;
+    /**
+     * @type string
+    */
+    platform: IssuePlatform;
+    /**
+     * @type string,null
+    */
+    token?: string | null;
+};
+
+export type IssueConnectionsPublic = {
+    /**
+     * @type array
+    */
+    connections: IssueConnectionPublic[];
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    revision: number;
+};
+
+export type IssueConnectionsUpdate = {
+    /**
+     * @type array
+    */
+    connections: IssueConnectionUpdate[];
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    expected_revision: number;
+};
+
 /**
  * @description Keyboard event data structure\nhttps://developer.mozilla.org/zh-CN/docs/Web/API/KeyboardEvent
 */
@@ -13154,6 +13441,72 @@ export type RestResponseInitRequirementsDto = {
     success: boolean;
 };
 
+export type RestResponseIssueConnectionProbe = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        account_id: number;
+        /**
+         * @type string
+        */
+        account_login: string;
+        /**
+         * @type boolean
+        */
+        can_read_issues: boolean;
+        /**
+         * @type boolean
+        */
+        can_reply: boolean;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponseIssueConnectionsPublic = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @type array
+        */
+        connections: IssueConnectionPublic[];
+        /**
+         * @minLength 0
+         * @type integer, int64
+        */
+        revision: number;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
 export type RestResponseLogSettings = {
     /**
      * @type integer, int32
@@ -15357,6 +15710,42 @@ export type RestResponseVecConnectionModel = {
         */
         peer: PeerInfo;
         version_info?: (null | VersionInfo);
+    }[];
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponseVecIssueConnectionChoice = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type array | undefined
+    */
+    data?: {
+        /**
+         * @type string
+        */
+        connection_ref: string;
+        /**
+         * @type string
+        */
+        instance_url: string;
+        /**
+         * @type string
+        */
+        name: string;
+        /**
+         * @type string
+        */
+        platform: IssuePlatform;
     }[];
     /**
      * @type string,null
@@ -18569,6 +18958,44 @@ export type UpdateGoalBudgetPolicyMutation = {
     Errors: any;
 };
 
+export type GetIssueConnections200 = RestResponseIssueConnectionsPublic;
+
+export type GetIssueConnectionsQueryResponse = GetIssueConnections200;
+
+export type GetIssueConnectionsQuery = {
+    Response: GetIssueConnections200;
+    Errors: any;
+};
+
+export type UpdateIssueConnections200 = RestResponseIssueConnectionsPublic;
+
+export type UpdateIssueConnectionsMutationRequest = IssueConnectionsUpdate;
+
+export type UpdateIssueConnectionsMutationResponse = UpdateIssueConnections200;
+
+export type UpdateIssueConnectionsMutation = {
+    Response: UpdateIssueConnections200;
+    Request: UpdateIssueConnectionsMutationRequest;
+    Errors: any;
+};
+
+export type TestIssueConnectionPathParams = {
+    /**
+     * @type string
+    */
+    connection_ref: string;
+};
+
+export type TestIssueConnection200 = RestResponseIssueConnectionProbe;
+
+export type TestIssueConnectionMutationResponse = TestIssueConnection200;
+
+export type TestIssueConnectionMutation = {
+    Response: TestIssueConnection200;
+    PathParams: TestIssueConnectionPathParams;
+    Errors: any;
+};
+
 export type GetScheduleBudgetPolicy200 = RestResponseScheduleBudgetPolicy;
 
 export type GetScheduleBudgetPolicyQueryResponse = GetScheduleBudgetPolicy200;
@@ -21231,6 +21658,15 @@ export type ListAssistantImagesQueryResponse = ListAssistantImages200;
 export type ListAssistantImagesQuery = {
     Response: ListAssistantImages200;
     QueryParams: ListAssistantImagesQueryParams;
+    Errors: any;
+};
+
+export type GetMyIssueConnections200 = RestResponseVecIssueConnectionChoice;
+
+export type GetMyIssueConnectionsQueryResponse = GetMyIssueConnections200;
+
+export type GetMyIssueConnectionsQuery = {
+    Response: GetMyIssueConnections200;
     Errors: any;
 };
 

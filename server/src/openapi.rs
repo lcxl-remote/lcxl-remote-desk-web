@@ -35,6 +35,7 @@ use desk_input_injection::model::data_channel::{KeyboardEventData, MouseEventDat
 /// API version
 #[derive(OpenApi)]
 #[openapi(components(schemas(
+    desk_agent_protocol::ai_assistant::AiAssistantAsk,
     ScheduleManagementRequest,
     ScheduleManagementResponse,
     SignalingModel,

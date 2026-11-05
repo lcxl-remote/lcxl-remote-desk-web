@@ -10,7 +10,8 @@
 //! Read tools are exposed in every mode (reads are not "execution"); a mutating
 //! tool is exposed only at `ConfirmEachAction` or higher. The same matrix is used
 //! both to advertise tools to the model and to validate a tool call the model
-//! returns, so the two can never disagree.
+//! returns, so the two can never disagree. External issue publication uses
+//! separate host authority; device execution modes do not grant that authority.
 
 use desk_agent_protocol::{AgentScope, Capability, ExecutionMode};
 use serde::{Deserialize, Serialize};
@@ -24,6 +25,10 @@ use crate::session::{ExecutionState, TriggerOrigin};
 pub enum ToolEffect {
     /// Reads device state; runs immediately, no approval.
     ReadOnly,
+    /// Reads only the external issue targets selected in the accepted input.
+    ExternalRead,
+    /// Registers delivery to an original external issue under host publication authority.
+    ExternalWrite,
     /// Changes device state; requires user approval before running.
     Mutating,
     /// Waits on the session's own in-flight background task; changes no device
@@ -114,8 +119,11 @@ impl RegisteredTool {
 /// confirm-or-higher mode.
 fn mode_allows_effect(mode: ExecutionMode, effect: ToolEffect) -> bool {
     match effect {
-        // Reads and waiting on one's own task are allowed in every mode.
+        // These tools do not use the device execution mode. Their own source,
+        // lifecycle and host authority gates still apply.
         ToolEffect::ReadOnly
+        | ToolEffect::ExternalRead
+        | ToolEffect::ExternalWrite
         | ToolEffect::WaitTask
         | ToolEffect::RunProjection
         | ToolEffect::PermissionPlanning
@@ -191,6 +199,16 @@ pub fn exposure_block_reason(
     }
     if tool.effect == ToolEffect::RunProjection {
         return None;
+    }
+    if matches!(
+        tool.effect,
+        ToolEffect::ExternalRead | ToolEffect::ExternalWrite
+    ) {
+        return matches!(
+            origin,
+            TriggerOrigin::ExecCompletion | TriggerOrigin::WorkCompletion { .. }
+        )
+        .then_some("command_completion_has_no_tools");
     }
     if tool.effect == ToolEffect::GoalControl {
         return (origin != TriggerOrigin::GoalContinuation).then_some("not_a_goal_segment");

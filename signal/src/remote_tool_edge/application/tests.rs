@@ -79,6 +79,8 @@ async fn application_catalog_passes_observation_gate_and_reaches_remote_dispatch
         .bind_original_input(
             1,
             desk_diagnose_core::input_read_context::ReadContextSelection {
+                external_issues: Vec::new(),
+                external_issue_sources: Vec::new(),
                 tool_names: vec!["list_applications".into()],
                 expires_at: None,
                 object_attachments: vec![],

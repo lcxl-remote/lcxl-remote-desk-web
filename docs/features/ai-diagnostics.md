@@ -15,6 +15,14 @@ To attach a device’s files, screen, or app context, open the assistant from th
 
 See [Long-term Memory](/features/assistant-memory) for personalization, memory and history search. This page covers chat, device actions and diagnostics; see [MCP](/features/mcp-server) for the read-only MCP tools.
 
+## Read Gitea or GitHub issues
+
+In the Web or Tauri assistant, open **+ → Context → Issue sources**, select an available connection, enter the issue URL and choose **Add issue**, then send your question. If none is available, the device owner opens **Settings → Issue connections**, selects Gitea or GitHub, enters the instance URL, MCP URL and token for the same account, then saves and tests the connection.
+
+For example, add `https://git.example.test/team/app/issues/42` and ask “Summarize the reproduction conditions.” The assistant can read the issue and its comments without a selected device. Issue materials are sent to the current model for analysis and count toward normal model usage. Adding an issue grants a reading scope only.
+
+Changes apply to the next message; message retries retain the original selection. Disabling a connection or revoking access stops new reads. Issue text and comments are third-party material; instructions in them do not constitute your authorization.
+
 ## Sending messages and inserting newlines
 
 In the Web and desktop AI Assistant, **Enter** sends a message and **Shift+Enter** inserts a new line by default. Open **Send shortcut** below the input to choose **Shift+Enter** or **Ctrl/⌘+Enter** to send instead; unmodified Enter then inserts a new line. This preference is saved in the current browser and shared by main conversations, child adjustments and the terminal AI Assistant. It is not an account setting synchronized across devices. Confirming an IME composition does not send a message, and shortcuts respect the same availability conditions as the send button.

@@ -149,6 +149,17 @@ export function SettingsOverview() {
                                 </CardHeader>
                             </Card>
                         </Link>
+                        <Link to="/system/issue-connections" className="block outline-none">
+                            <Card className="hover:bg-muted/50 transition-colors h-full cursor-pointer">
+                                <CardHeader>
+                                    <div className="flex items-center gap-2">
+                                        <Link2 className="h-5 w-5 text-primary" />
+                                        <CardTitle className="text-lg">{t('pages.issueConnections.title')}</CardTitle>
+                                    </div>
+                                    <CardDescription className="mt-2 line-clamp-2">{t('pages.issueConnections.description')}</CardDescription>
+                                </CardHeader>
+                            </Card>
+                        </Link>
                         <Link to="/system/schedule-budget" className="block outline-none">
                             <Card className="hover:bg-muted/50 transition-colors h-full cursor-pointer">
                                 <CardHeader>

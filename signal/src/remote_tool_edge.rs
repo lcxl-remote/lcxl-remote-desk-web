@@ -8,6 +8,7 @@ use crate::config::connection::DatabaseConnection;
 mod application;
 pub(crate) mod directory;
 pub(crate) mod document_preview;
+mod issue_tools;
 mod object_read;
 mod request_devices;
 pub(crate) use request_devices::request_device_catalogue;
@@ -6485,6 +6486,44 @@ impl SignalAiAssistantTools {
 
 #[async_trait(?Send)]
 impl ToolSeam for SignalAiAssistantTools {
+    async fn issue_reply_access(
+        &self,
+        session: &desk_diagnose_core::session::PersistedAgentSession,
+    ) -> Result<Vec<desk_diagnose_core::external_tools::IssueAccess>, AgentError> {
+        desk_diagnose_core::future::boxed(|| self.current_reply_access(session)).await
+    }
+    async fn prepare_issue_reply(
+        &self,
+        session: &desk_diagnose_core::session::PersistedAgentSession,
+        call: &ToolCall,
+    ) -> Result<desk_diagnose_core::issue_reply::ReplyGeneration, AgentError> {
+        desk_diagnose_core::future::boxed(|| self.prepare_external_reply(session, call)).await
+    }
+    async fn freeze_issue_reply(
+        &self,
+        session: &desk_diagnose_core::session::PersistedAgentSession,
+        publication: desk_diagnose_core::issue_reply::ReplyPublication,
+        turn: desk_diagnose_core::chat::ModelTurn,
+    ) -> Result<desk_diagnose_core::issue_reply::ReplyToolReceipt, AgentError> {
+        desk_diagnose_core::future::boxed(|| self.freeze_external_reply(session, publication, turn))
+            .await
+    }
+
+    async fn external_issue_access(
+        &self,
+        session: &desk_diagnose_core::session::PersistedAgentSession,
+    ) -> Result<Vec<desk_diagnose_core::external_tools::IssueAccess>, AgentError> {
+        desk_diagnose_core::future::boxed(|| self.current_issue_access(session)).await
+    }
+
+    async fn run_external_read(
+        &self,
+        session: &desk_diagnose_core::session::PersistedAgentSession,
+        call: &ToolCall,
+    ) -> Result<ReadOutcome, AgentError> {
+        desk_diagnose_core::future::boxed(|| self.read_external_issue(session, call)).await
+    }
+
     async fn execute_selected_command(
         &self,
         call: &ToolCall,

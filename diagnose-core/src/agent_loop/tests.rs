@@ -22,6 +22,8 @@ mod command_completion;
 mod conversation_title;
 mod delegation_budget;
 mod egress;
+mod external_tools;
+mod issue_reply;
 mod original_results;
 mod retrieval_accounting;
 mod subagents;

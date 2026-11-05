@@ -12,7 +12,7 @@ base64 = { workspace = true }
 desk-utils = { workspace = true }
 desk-agent-protocol = { workspace = true }
 desk-diagnose-core = { workspace = true }
-desk-signal-facade = { workspace = true }
+desk-signal-facade = { workspace = true, features = ["mcp-client"] }
 desk-server-version = { workspace = true }
 desk-server-user = { workspace = true }
 desk-turn = { workspace = true }

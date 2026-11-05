@@ -1,6 +1,46 @@
 use super::*;
 use sea_orm::TransactionTrait;
 
+#[test]
+fn issue_connection_arrays_round_trip_credentials_and_detect_manual_withdrawal() {
+    use desk_signal_facade::mcp_client::settings::{IssueConnectionUpdate, IssueConnectionsUpdate};
+    let mut config = GlobalConfig::default();
+    config.issue_connections = config
+        .issue_connections
+        .candidate(&IssueConnectionsUpdate {
+            expected_revision: 0,
+            connections: vec![IssueConnectionUpdate {
+                platform: desk_agent_protocol::external_tools::IssuePlatform::Gitea,
+                connection_ref: "forge".into(),
+                name: "Internal forge".into(),
+                enabled: true,
+                instance_url: "https://forge.test".into(),
+                mcp_url: "https://mcp.test/mcp".into(),
+                allowed_actor_ids: vec!["1".into()],
+                token: Some("synthetic-issue-secret".into()),
+                extra_ca_pem: None,
+            }],
+        })
+        .unwrap();
+    config.initialize_metadata().unwrap();
+    let document = toml::to_string(&config).unwrap();
+    assert!(document.contains("[[issue_connections.connections]]"));
+    let mut reopened: GlobalConfig = toml::from_str(&document).unwrap();
+    reopened.initialize_metadata().unwrap();
+    assert_eq!(reopened.issue_connections, config.issue_connections);
+    assert!(reopened.issue_connections.connections[0].permits("1"));
+    let mut value: toml::Value = toml::from_str(&document).unwrap();
+    value["issue_connections"]["connections"][0]["enabled"] = toml::Value::Boolean(false);
+    let mut edited: GlobalConfig = toml::from_str(&toml::to_string(&value).unwrap()).unwrap();
+    edited.initialize_metadata().unwrap();
+    assert_eq!(
+        edited.issue_connections.revision,
+        config.issue_connections.revision + 1
+    );
+    assert!(!edited.issue_connections.connections[0].permits("1"));
+    assert!(edited.issue_connections.public().connections[0].has_token);
+}
+
 #[tokio::test]
 async fn assistant_settings_and_limits_survive_runtime_database_recreation_in_the_original_config_file()
  {

@@ -1,0 +1,1 @@
+{"type":"string","enum":["public","internal","private"],"x-readme-ref-name":"ExternalIssueAudience"}

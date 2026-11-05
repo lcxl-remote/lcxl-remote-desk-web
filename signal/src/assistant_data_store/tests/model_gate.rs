@@ -251,6 +251,7 @@ pub(super) async fn native_on(
         db,
         call,
         request.context_conversation_id.as_deref().unwrap(),
+        false,
     )
     .await
     .unwrap();

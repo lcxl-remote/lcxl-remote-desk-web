@@ -25,6 +25,13 @@ fn canonical_mobile_contract_decodes_with_the_shared_protocol() {
         serde_json::from_value(root["asks"]["full"].clone()).expect("full ask");
     minimal.validate().expect("minimal ask is valid");
     full.validate().expect("full ask is valid");
+    assert!(minimal.selected_issues.is_empty());
+    assert_eq!(full.selected_issues[0].connection_ref, "forge");
+    assert_eq!(full.selected_issues[0].issue_number, 4);
+    assert_eq!(
+        serde_json::to_value(&full).unwrap()["selected_issues"],
+        root["asks"]["full"]["selected_issues"]
+    );
 
     let events: Vec<AgentEvent> =
         serde_json::from_value(root["events"].clone()).expect("agent events");

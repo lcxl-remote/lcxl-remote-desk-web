@@ -23,6 +23,10 @@ fn raw(config: &GlobalConfig) -> Result<Map<String, Value>, DbErr> {
         ("approval_runtime".into(), value(&config.approval_runtime)?),
         ("web_search".into(), value(&config.web_search)?),
         (
+            "issue_connections".into(),
+            value(&config.issue_connections)?,
+        ),
+        (
             "context_management".into(),
             value(&config.context_management)?,
         ),
@@ -58,6 +62,12 @@ fn raw(config: &GlobalConfig) -> Result<Map<String, Value>, DbErr> {
 }
 
 fn encode_fields(value: &mut Value, path: &str, keep_null: bool) {
+    if let Value::Array(items) = value {
+        for item in items {
+            encode_fields(item, path, keep_null);
+        }
+        return;
+    }
     let Value::Object(map) = value else {
         return;
     };
@@ -84,6 +94,12 @@ fn encode_fields(value: &mut Value, path: &str, keep_null: bool) {
 }
 
 fn decode_fields(value: &mut Value, path: &str) -> Result<(), DbErr> {
+    if let Value::Array(items) = value {
+        for item in items {
+            decode_fields(item, path)?;
+        }
+        return Ok(());
+    }
     let Value::Object(map) = value else {
         return Ok(());
     };
@@ -193,6 +209,8 @@ impl<'de> Deserialize<'de> for GlobalConfig {
             approval_runtime: decode(take("approval_runtime"), "approval_runtime")
                 .map_err(serde::de::Error::custom)?,
             web_search: decode(take("web_search"), "web_search")
+                .map_err(serde::de::Error::custom)?,
+            issue_connections: decode(take("issue_connections"), "issue_connections")
                 .map_err(serde::de::Error::custom)?,
             assistant_data_policy: decode(take("assistant_data_policy"), "assistant_data_policy")
                 .map_err(serde::de::Error::custom)?,
@@ -334,6 +352,7 @@ pub(super) fn revision(config: &GlobalConfig, key: &str) -> String {
             config.approval_gateway.configuration_revision.to_string()
         }
         "web_search" => config.web_search.revision.to_string(),
+        "issue_connections" => config.issue_connections.revision.to_string(),
         "context_management" => config.context_management.revision.to_string(),
         "assistant_data_policy" => config.assistant_data_policy.revision.to_string(),
         "assistant_data_settings" => config.assistant_data_settings.revision.to_string(),
@@ -403,6 +422,7 @@ pub(super) fn advance_revision(
             .ok_or_else(|| invalid(key))?;
         match key {
             "web_search" => config.web_search.revision = next,
+            "issue_connections" => config.issue_connections.revision = next,
             "context_management" => config.context_management.revision = next,
             "assistant_data_policy" => config.assistant_data_policy.revision = next,
             "assistant_data_settings" => config.assistant_data_settings.revision = next,

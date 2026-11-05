@@ -180,6 +180,8 @@ fn read_context(
     let mut tool_names: Vec<_> = tools.iter().map(|name| (*name).to_string()).collect();
     tool_names.sort();
     ReadContextSelection {
+        external_issues: Vec::new(),
+        external_issue_sources: Vec::new(),
         tool_names,
         expires_at: None,
         object_attachments: session.context_attachments.clone(),

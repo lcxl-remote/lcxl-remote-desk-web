@@ -10,6 +10,8 @@ import { assistantMessageId } from './assistant-native-ids';
 
 import type { AiProvenance } from '@/components/ai-generated-mark';
 import type {
+    AiAssistantAsk,
+    IssueSelection,
     AssistantCitation,
     BackgroundTaskDto,
     AiAssistantDelegationSnapshot,
@@ -1534,6 +1536,7 @@ export function useAiAssistantChat({
         selectedCapabilityIds: string[] = [],
         startGoal = false,
         previousCompletedGoalId: string | null = null,
+        selectedIssues: IssueSelection[] = [],
     ) => {
         if (rehearsal && (rehearsal.status !== 'pending' || rehearsalSent.current || question !== rehearsal.prompt || conversationId.current !== rehearsal.client_conversation_id)) return false;
         const trimmed = rehearsal ? rehearsal.prompt : question.trim();
@@ -1584,7 +1587,8 @@ export function useAiAssistantChat({
                 previous_completed_goal_id: deskId && !rehearsal && startGoal ? previousCompletedGoalId : null,
                 selected_attachment_ids: rehearsal || !deskId ? [] : selectedObjects
                     .map((attachment) => attachment.id),
-            };
+                ...(!rehearsal && selectedIssues.length ? { selected_issues: selectedIssues.map(issue => ({ ...issue })) } : {}),
+            } satisfies AiAssistantAsk;
         pendingDelivery.current = { id: clientMessageId, question: trimmed,
             conversation: conversationId.current!, requestId, payload, sentAt: Date.now() };
         setDeliveryState('sending');

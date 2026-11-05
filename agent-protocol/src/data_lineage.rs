@@ -42,6 +42,28 @@ pub enum Sensitivity {
 #[derive(
     Debug,
     Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    SchemaWrite,
+    SchemaRead,
+    ToSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ExternalIssueAudience {
+    Public,
+    Internal,
+    Private,
+}
+
+#[derive(
+    Debug,
+    Clone,
     PartialEq,
     Eq,
     PartialOrd,
@@ -73,6 +95,14 @@ pub enum DestinationIdentity {
     LocalArtifact {
         workspace_id: String,
     },
+    ExternalIssue {
+        connection_id: String,
+        instance_sha256: String,
+        account_id: u64,
+        repository_id: u64,
+        issue_id: u64,
+        audience: ExternalIssueAudience,
+    },
 }
 
 impl DestinationIdentity {
@@ -96,6 +126,26 @@ impl DestinationIdentity {
             Self::WebResearch { connector_id } => validate_id("connector_id", connector_id)?,
             Self::EmailAccount { account_id } | Self::ChatAccount { account_id } => {
                 validate_id("account_id", account_id)?
+            }
+            Self::ExternalIssue {
+                connection_id,
+                instance_sha256,
+                account_id,
+                repository_id,
+                issue_id,
+                ..
+            } => {
+                validate_id("connection_id", connection_id)?;
+                validate_sha256(instance_sha256)?;
+                for (field, id) in [
+                    ("account_id", account_id),
+                    ("repository_id", repository_id),
+                    ("issue_id", issue_id),
+                ] {
+                    if *id == 0 {
+                        return Err(DataLineageError::EmptyField(field));
+                    }
+                }
             }
             Self::LocalArtifact { workspace_id } => validate_id("workspace_id", workspace_id)?,
         }

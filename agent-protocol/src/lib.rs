@@ -53,6 +53,7 @@ pub mod exec_lifecycle;
 pub mod exec_policy;
 pub mod exec_pty;
 pub mod exec_pty_wire;
+pub mod external_tools;
 pub mod file_recovery;
 pub mod model_proxy;
 pub mod native_diagnostic;

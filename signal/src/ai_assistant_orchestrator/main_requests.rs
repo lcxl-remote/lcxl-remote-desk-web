@@ -36,6 +36,25 @@ impl SignalMainRequestExecutor {
     }
 
     pub async fn run(self) {
+        tokio::join!(self.run_requests(), self.run_replies());
+    }
+
+    async fn run_replies(&self) {
+        loop {
+            let token = uuid::Uuid::new_v4().to_string();
+            let delivery = if self.gate.is_enabled() {
+                crate::issue_replies::deliver_next(&self.db, "local", &token).await
+            } else {
+                Ok(false)
+            };
+            if delivery.is_err() {
+                log::warn!("[issue-reply] durable delivery deferred");
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }
+
+    async fn run_requests(&self) {
         let mut cursor = 0;
         loop {
             cursor = match self.scan_once(cursor).await {
@@ -85,6 +104,13 @@ impl SignalMainRequestExecutor {
             Some(MainRequestFailure::CoordinationExhausted)
         } else if frozen.authorization_expired(now_ms)
             || !self.targets_authorized(&row, &frozen).await?
+            || !crate::issue_connections::permits_issues(
+                &self.db,
+                &row.actor_id,
+                &frozen.reads.external_issues,
+            )
+            .await
+            .map_err(|_| super::transport_error("External connection settings are unavailable"))?
         {
             Some(MainRequestFailure::SourceUnavailable)
         } else {

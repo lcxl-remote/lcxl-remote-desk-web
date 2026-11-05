@@ -3,6 +3,78 @@ use crate::model::settings::{Args, Settings};
 use desk_signal::config::{ConfigConnection, SECTION_NAMES};
 
 #[tokio::test]
+async fn issue_credentials_and_revocations_survive_file_reload_and_runtime_database_rebuild() {
+    use desk_signal::config::connection::DatabaseConnection;
+    use desk_signal::issue_connections;
+    use desk_signal_facade::mcp_client::settings::{IssueConnectionUpdate, IssueConnectionsUpdate};
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("selected-profile.toml");
+    let mut initial = Settings::for_test_config(&path);
+    initial.global_config.initialize_metadata().unwrap();
+    initial.save().unwrap();
+    let configuration = context(Arc::new(SharedSettings::from(initial)))
+        .await
+        .unwrap();
+    let db = DatabaseConnection::new(
+        sea_orm::Database::connect("sqlite::memory:").await.unwrap(),
+        configuration,
+    );
+    let mut request = IssueConnectionsUpdate {
+        expected_revision: 0,
+        connections: vec![IssueConnectionUpdate {
+            platform: desk_agent_protocol::external_tools::IssuePlatform::Gitea,
+            connection_ref: "forge".into(),
+            name: "Internal Gitea".into(),
+            enabled: true,
+            instance_url: "https://forge.invalid".into(),
+            mcp_url: "https://mcp.invalid/mcp".into(),
+            allowed_actor_ids: vec!["1".into()],
+            token: Some("synthetic-issue-secret".into()),
+            extra_ca_pem: None,
+        }],
+    };
+    let saved = issue_connections::update(&db, &request).await.unwrap();
+    assert_eq!(saved.revision, 1);
+    assert!(saved.connections[0].permits("1"));
+    assert!(!format!("{saved:?}").contains("synthetic-issue-secret"));
+    assert!(matches!(
+        issue_connections::update(&db, &request).await,
+        Err(issue_connections::WriteError::Conflict)
+    ));
+    drop(db);
+
+    let reloaded = Settings::load_readonly(&Args {
+        config_file_path: Some(path.clone()),
+        ..Default::default()
+    })
+    .unwrap();
+    assert_eq!(reloaded.global_config.issue_connections, saved);
+    let restarted = context(Arc::new(SharedSettings::from(reloaded)))
+        .await
+        .unwrap();
+    let rebuilt = DatabaseConnection::new(
+        sea_orm::Database::connect("sqlite::memory:").await.unwrap(),
+        restarted,
+    );
+    assert_eq!(issue_connections::read(&rebuilt).await.unwrap(), saved);
+    request.expected_revision = 1;
+    request.connections[0].enabled = false;
+    request.connections[0].token = None;
+    let disabled = issue_connections::update(&rebuilt, &request).await.unwrap();
+    assert!(!disabled.connections[0].permits("1"));
+    assert!(disabled.public().connections[0].has_token);
+    drop(rebuilt);
+    let reloaded = Settings::load_readonly(&Args {
+        config_file_path: Some(path),
+        ..Default::default()
+    })
+    .unwrap();
+    assert_eq!(reloaded.global_config.issue_connections, disabled);
+    assert!(!reloaded.global_config.issue_connections.connections[0].permits("1"));
+}
+
+#[tokio::test]
 async fn reused_approval_credentials_survive_reload_and_runtime_database_rebuild() {
     use desk_signal::approval_model_provider::{self, ApprovalModelReuseParams};
     use desk_signal::config::connection::DatabaseConnection;

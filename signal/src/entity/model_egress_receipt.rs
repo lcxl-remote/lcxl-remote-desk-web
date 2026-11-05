@@ -36,6 +36,9 @@ pub struct Model {
     pub provider_context_observation_json: Option<String>,
     #[sea_orm(indexed)]
     pub context_conversation_id: Option<String>,
+    /// Isolated publication calls must not replace planning context on recovery.
+    #[sea_orm(default_value = false)]
+    pub context_isolated: bool,
     pub completed_at: Option<DateTimeUtc>,
     /// Immutable normalized usage from a returned provider turn; absent means
     /// no terminal usage was recorded and the task reservation must be retained.

@@ -132,6 +132,10 @@ pub struct AiAssistantAsk {
     pub start_goal: bool,
     /// Explicitly continue one completed goal. Valid only with start_goal.
     pub previous_completed_goal_id: Option<String>,
+    /// Exact external issues selected for this input. The host resolves their
+    /// account and native identities before durable admission.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub selected_issues: Vec<crate::external_tools::IssueSelection>,
 }
 
 /// Browser to central brain: independently reconcile the durable context
@@ -341,6 +345,7 @@ impl AiAssistantAsk {
     }
     pub fn validate(&self) -> Result<(), &'static str> {
         let question = self.question.trim();
+        crate::external_tools::validate_selections(&self.selected_issues)?;
         if question.is_empty() {
             return Err("AI Assistant question must not be empty");
         }
@@ -445,6 +450,7 @@ mod tests {
             selected_attachment_ids: Vec::new(),
             start_goal: false,
             previous_completed_goal_id: None,
+            selected_issues: Vec::new(),
         };
         let value = serde_json::to_value(&ask).unwrap();
         assert!(value.get("action").is_none());

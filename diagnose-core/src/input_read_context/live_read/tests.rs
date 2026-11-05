@@ -56,6 +56,8 @@ fn now() -> u64 {
 
 fn selection(names: &[&str]) -> ReadContextSelection {
     ReadContextSelection {
+        external_issues: Vec::new(),
+        external_issue_sources: Vec::new(),
         tool_names: names.iter().map(|s| (*s).into()).collect(),
         expires_at: None,
         object_attachments: vec![],

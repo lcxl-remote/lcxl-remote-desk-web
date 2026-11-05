@@ -118,7 +118,7 @@ async fn admit_followup(
     )
     .await
     .unwrap();
-    SignalModelEgressStore::link_context_dispatch_on(&txn, "followup-native", "root")
+    SignalModelEgressStore::link_context_dispatch_on(&txn, "followup-native", "root", false)
         .await
         .unwrap();
     model_gate::authorize_on(&txn, Some(&prepared), &request, "followup-native")

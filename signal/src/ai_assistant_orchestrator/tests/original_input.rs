@@ -17,20 +17,25 @@ async fn personal_input_with_selected_targets_runs_under_the_same_account() {
 
 #[actix_web::test]
 async fn queued_owner_input_runs_after_reopen_without_the_submitting_connection() {
-    desk_diagnose_core::future::boxed(|| queued_owner_input_roundtrip(false, false)).await;
+    desk_diagnose_core::future::boxed(|| queued_owner_input_roundtrip(false, false, false)).await;
 }
 
 #[actix_web::test]
 async fn workbench_queue_scans_into_independent_native_conversations() {
-    desk_diagnose_core::future::boxed(|| queued_owner_input_roundtrip(true, false)).await;
+    desk_diagnose_core::future::boxed(|| queued_owner_input_roundtrip(true, false, false)).await;
 }
 
 #[actix_web::test]
 async fn deleting_workbench_closes_native_work_and_preserves_dispatched_actions() {
-    desk_diagnose_core::future::boxed(|| queued_owner_input_roundtrip(true, true)).await;
+    desk_diagnose_core::future::boxed(|| queued_owner_input_roundtrip(true, true, false)).await;
 }
 
-async fn queued_owner_input_roundtrip(workbench: bool, delete_workbench: bool) {
+#[actix_web::test]
+async fn workbench_batch_reads_selected_issues_before_dispatch() {
+    desk_diagnose_core::future::boxed(|| queued_owner_input_roundtrip(true, false, true)).await;
+}
+
+async fn queued_owner_input_roundtrip(workbench: bool, delete_workbench: bool, with_issues: bool) {
     use sea_orm::{ColumnTrait, QueryFilter};
     crate::ai_assistant_gate::enable_test_host();
     let listener = std::sync::Arc::new(TcpListener::bind("127.0.0.1:0").await.unwrap());
@@ -42,6 +47,24 @@ async fn queued_owner_input_roundtrip(workbench: bool, delete_workbench: bool) {
     let connect = || crate::config::test_support::Database::connect(&url);
     let db = connect().await.unwrap();
     crate::db::initialize_schema(&db).await.unwrap();
+    let issue_fixture = if with_issues {
+        Some(desk_signal_facade::mcp_client::test_support::IssueFixture::start().await)
+    } else {
+        None
+    };
+    let issue_binding = if let Some(fixture) = &issue_fixture {
+        crate::issue_connections::update(&db, &fixture.update("1"))
+            .await
+            .unwrap();
+        Some(
+            crate::issue_connections::select_issues(&db, "1", &[fixture.selection()])
+                .await
+                .unwrap()[0]
+                .clone(),
+        )
+    } else {
+        None
+    };
     crate::model_provider::save(
         &db,
         crate::model_provider::ModelProviderConfig {
@@ -263,6 +286,11 @@ async fn queued_owner_input_roundtrip(workbench: bool, delete_workbench: bool) {
                 } else {
                     vec![]
                 },
+                selected_issues: issue_fixture
+                    .iter()
+                    .filter(|_| id == "queued-b")
+                    .map(|fixture| fixture.selection())
+                    .collect(),
                 question: question.into(),
                 client_message_id: id.into(),
                 ..ask.clone()
@@ -300,6 +328,39 @@ async fn queued_owner_input_roundtrip(workbench: bool, delete_workbench: bool) {
             })
             .await,
         )
+    } else {
+        None
+    };
+    let pending_delivery = if let Some(fixture) = &issue_fixture {
+        let destination = desk_assistant_data_store::main_request::FrozenOwnerInput::decode(&b)
+            .unwrap()
+            .destination;
+        let (admitted, artifact) = fixture
+            .publication_for(&row.actor_id, &row.conversation_id, destination)
+            .await;
+        desk_assistant_data_store::issue_authority::put(&db, admitted.subscription.clone(), 0, 0)
+            .await
+            .unwrap();
+        desk_assistant_data_store::issue_authority::admit(&db, &admitted)
+            .await
+            .unwrap();
+        let saved = desk_assistant_data_store::issue_reply::freeze(
+            &db,
+            &artifact,
+            desk_assistant_data_store::issue_reply::DeliveryMode::Automatic,
+            chrono::Utc::now().timestamp_millis(),
+        )
+        .await
+        .unwrap();
+        fixture.enable_replies(false);
+        fixture.pause_next_reply();
+        let delivery_db = db.clone();
+        let delivery = actix_web::rt::spawn(async move {
+            crate::issue_replies::deliver_next(&delivery_db, "node-delivery", "pending-a").await
+        });
+        fixture.wait_for_read().await;
+        assert_eq!(fixture.writes(), 1);
+        Some((saved, delivery))
     } else {
         None
     };
@@ -381,6 +442,20 @@ async fn queued_owner_input_roundtrip(workbench: bool, delete_workbench: bool) {
                 serde_json::json!({"request_id":"unleased-owner-request"}),
             );
             foreign_request["index"] = 7.into();
+            if let Some(issue) = &issue_binding {
+                write = report_test_call(
+                    "batch-issue-read",
+                    "call_external_tool",
+                    serde_json::json!({"request_id":pending_request_id,"tool_ref":issue.tool_ref(),"args":{"method":"get"}}),
+                );
+                write["index"] = 2.into();
+                uncited = report_test_call(
+                    "batch-forged-issue-write",
+                    "call_external_tool",
+                    serde_json::json!({"request_id":pending_request_id,"tool_ref":issue.tool_ref(),"args":{"method":"add_comment"}}),
+                );
+                uncited["index"] = 5.into();
+            }
             let original = capture_one_openai_request_with_sse(
                 listener.as_ref(),
                 &memory_sse(
@@ -409,7 +484,15 @@ async fn queued_owner_input_roundtrip(workbench: bool, delete_workbench: bool) {
                 "Which version should I use?"
             );
             assert_eq!(results[1], serde_json::json!({"status":"unavailable"}));
-            assert_eq!(results[2], results[1]);
+            if issue_binding.is_some() {
+                assert!(
+                    results[2]
+                        .to_string()
+                        .contains("Reproduce the macOS problem")
+                );
+            } else {
+                assert_eq!(results[2], results[1]);
+            }
             assert_eq!(results[0]["worker"]["state"], "waiting_input");
             assert_eq!(results[0]["worker"]["wait_reason"], "main_agent_reply");
             assert_eq!(results[3]["request_id"], results[0]["request_id"]);
@@ -445,6 +528,54 @@ async fn queued_owner_input_roundtrip(workbench: bool, delete_workbench: bool) {
         .await
         .unwrap()
         .unwrap();
+    if let Some((saved, delivery)) = pending_delivery {
+        let live =
+            desk_assistant_data_store::issue_reply::load(&db, &row.actor_id, &saved.artifact_id)
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            live.state,
+            desk_assistant_data_store::issue_reply::DISPATCHED
+        );
+        for pending in [&b, &c] {
+            let routed = desk_assistant_data_store::main_request::load(
+                &db,
+                &row.actor_id,
+                &row.conversation_id,
+                &pending.request_id,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert!(routed.coordinated || routed.first_dispatch_json.is_some());
+        }
+        let before_release = crate::entity::agent_session::Entity::find()
+            .filter(crate::entity::agent_session::Column::ConversationId.eq(&row.conversation_id))
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        issue_fixture.as_ref().unwrap().release_read();
+        assert!(delivery.await.unwrap().unwrap());
+        let completed =
+            desk_assistant_data_store::issue_reply::load(&db, &row.actor_id, &saved.artifact_id)
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            completed.state,
+            desk_assistant_data_store::issue_reply::DELIVERED
+        );
+        assert_eq!(
+            crate::entity::agent_session::Entity::find_by_id(before_release.id)
+                .one(&db)
+                .await
+                .unwrap()
+                .unwrap(),
+            before_release
+        );
+    }
     let batch_body: serde_json::Value = serde_json::from_slice(&captured).unwrap();
     let projected = batch_body["messages"].to_string();
     assert!(projected.contains("Coordinate request B"));
@@ -452,11 +583,14 @@ async fn queued_owner_input_roundtrip(workbench: bool, delete_workbench: bool) {
     assert!(!projected.contains(&ask.question));
     if let Some((task, reports)) = &wake {
         let tools = batch_body["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 4);
+        assert_eq!(tools.len(), if with_issues { 5 } else { 4 });
         assert_eq!(tools[0]["function"]["name"], "read_coordination_report");
         assert_eq!(tools[1]["function"]["name"], "read_coordination_request");
         assert_eq!(tools[2]["function"]["name"], "list_subagents");
         assert_eq!(tools[3]["function"]["name"], "get_subagent_status");
+        if with_issues {
+            assert_eq!(tools[4]["function"]["name"], "call_external_tool");
+        }
         assert!(projected.contains(&reports[0].event_id));
         assert!(projected.contains(&reports[1].event_id));
         assert!(!projected.contains("Which version should I use?"));
@@ -981,6 +1115,10 @@ async fn queued_owner_input_roundtrip(workbench: bool, delete_workbench: bool) {
         native_state().await.input_revision,
         if workbench { 0 } else { 2 }
     );
+    if let Some(fixture) = issue_fixture {
+        assert_eq!(fixture.writes(), 1);
+        fixture.stop().await;
+    }
 }
 
 async fn verify_workbench_deletion(

@@ -70,7 +70,7 @@ async fn actual_authorizer_snapshot_records_original_export_sources_and_does_not
     )
     .await
     .unwrap();
-    SignalModelEgressStore::link_context_dispatch_on(&txn, "export-source", "root")
+    SignalModelEgressStore::link_context_dispatch_on(&txn, "export-source", "root", false)
         .await
         .unwrap();
     txn.commit().await.unwrap();

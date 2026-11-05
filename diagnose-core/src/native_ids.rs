@@ -35,6 +35,9 @@ pub enum Kind {
     AssistantPageCursor,
     AssistantMainRequest,
     WorkbenchWorkConversation,
+    IssueReply,
+    IssueSubscription,
+    IssueAdmission,
 }
 
 impl Kind {
@@ -69,6 +72,9 @@ impl Kind {
             Self::AssistantPageCursor => "page",
             Self::AssistantMainRequest => "request",
             Self::WorkbenchWorkConversation => "work",
+            Self::IssueReply => "reply",
+            Self::IssueSubscription => "subscription",
+            Self::IssueAdmission => "admission",
         }
     }
 }

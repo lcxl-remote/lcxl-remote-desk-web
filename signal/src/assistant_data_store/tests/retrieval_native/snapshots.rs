@@ -271,6 +271,7 @@ async fn exercise_accepted(
         &txn,
         "snapshot-answer",
         &frame.session.conversation_id,
+        false,
     )
     .await
     .unwrap();

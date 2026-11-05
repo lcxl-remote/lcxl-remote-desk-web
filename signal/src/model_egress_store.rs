@@ -68,17 +68,19 @@ impl SignalModelEgressStore {
         receipt_id: &str,
         conversation_id: &str,
     ) -> Result<(), DbErr> {
-        Self::link_context_dispatch_on(&self.db, receipt_id, conversation_id).await
+        Self::link_context_dispatch_on(&self.db, receipt_id, conversation_id, false).await
     }
 
     pub(crate) async fn link_context_dispatch_on<C: ConnectionTrait>(
         db: &C,
         receipt_id: &str,
         conversation_id: &str,
+        isolated: bool,
     ) -> Result<(), DbErr> {
         let changed = model_egress_receipt::Entity::update_many()
             .set(model_egress_receipt::ActiveModel {
                 context_conversation_id: Set(Some(conversation_id.into())),
+                context_isolated: Set(isolated),
                 ..Default::default()
             })
             .filter(model_egress_receipt::Column::ReceiptId.eq(receipt_id))
@@ -93,7 +95,8 @@ impl SignalModelEgressStore {
         Ok(())
     }
 
-    /// Some(None) means the latest dispatch has no trustworthy terminal observation.
+    /// Some(None) means the latest planning dispatch has no trustworthy terminal
+    /// observation. Isolated publication does not replace planning context.
     pub async fn latest_context(
         &self,
         conversation_id: &str,
@@ -104,6 +107,7 @@ impl SignalModelEgressStore {
         use sea_orm::QueryOrder;
         let row = model_egress_receipt::Entity::find()
             .filter(model_egress_receipt::Column::ContextConversationId.eq(conversation_id))
+            .filter(model_egress_receipt::Column::ContextIsolated.eq(false))
             .order_by_desc(model_egress_receipt::Column::AuthorizedAt)
             .order_by_desc(model_egress_receipt::Column::ModelCallOrdinal)
             .one(&self.db)
@@ -241,6 +245,7 @@ impl SignalModelEgressStore {
             completed_at: Set(None),
             provider_context_observation_json: Set(None),
             context_conversation_id: Set(None),
+            context_isolated: Set(false),
             usage_json: Set(None),
             usage_recorded_at: Set(None),
         }

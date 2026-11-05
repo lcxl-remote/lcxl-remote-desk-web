@@ -280,6 +280,14 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
             current_unix_ms(deps.clock)?,
         ));
     }
+    if let Some(tool) =
+        crate::external_tools::read_tool(&deps.tools.external_issue_access(session).await?)?
+    {
+        callable_registry.push(tool);
+    }
+    if let Some(tool) = crate::issue_reply::tool(&deps.tools.issue_reply_access(session).await?)? {
+        callable_registry.push(tool);
+    }
     let mut exposed = exposed_for_session(&callable_registry, session);
     if deps.session_seam.subagents(session).is_none() {
         exposed.retain(|tool| crate::subagent::tools::effect(tool.name()).is_none());
@@ -1475,6 +1483,7 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                 preparation: None,
                 assistant_data: None,
                 compression_identity: None,
+                issue_reply: None,
                 caller_output_hard_cap: None,
             });
             if session.surface == crate::session::AgentSessionSurface::TerminalAiAssistant
@@ -2971,6 +2980,50 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                                         },
                                     ));
                                     let action: ToolPhase<'_> = match tool.effect {
+                                        ToolEffect::ExternalWrite => {
+                                            crate::future::phase(|| async {
+                                                sink.on_tool_started(
+                                                    &call.name,
+                                                    &call.id,
+                                                    &call.arguments_json,
+                                                );
+                                                let result = crate::future::boxed(|| {
+                                                    issue_reply::run(deps, session, call)
+                                                })
+                                                .await;
+                                                let (content, ok) = match result {
+                                                    Ok(receipt) => (
+                                                        serde_json::to_string(&receipt).map_err(
+                                                            |_| {
+                                                                crate::subagent::invalid(
+                                                                    "Invalid publication receipt",
+                                                                )
+                                                            },
+                                                        )?,
+                                                        true,
+                                                    ),
+                                                    Err(error) if error.safe_for_model => (
+                                                        crate::model_input::describe_error(
+                                                            &call.name,
+                                                            &error.message,
+                                                        ),
+                                                        false,
+                                                    ),
+                                                    Err(error) => return Err(error),
+                                                };
+                                                append_internal_tool_result(
+                                                    session,
+                                                    turn.provider_meta.data_envelope.as_ref(),
+                                                    (state.mint)(),
+                                                    &call.id,
+                                                    content,
+                                                    &call.name,
+                                                )?;
+                                                deps.session_seam.save(session).await?;
+                                                finish_tool(session, &call.id, ok, sink);
+                                                Ok(None)
+                                            })
+                                        }
                                         ToolEffect::MemoryQuery
                                         | ToolEffect::MemoryWrite
                                         | ToolEffect::AssistantHistory => {
@@ -3153,202 +3206,220 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                                                 Ok(None)
                                             })
                                         }
-                                        ToolEffect::ReadOnly => crate::future::phase(|| async {
-                                            // A read tool error is reported back as a tool result;
-                                            // the backend transport itself does not fail the turn.
-                                            sink.on_tool_started(
-                                                &call.name,
-                                                &call.id,
-                                                &call.arguments_json,
-                                            );
-                                            let read_requires_version = !selected_device_read
-                                                && deps.tools.read_requires_version(call);
-                                            let version = if read_requires_version {
-                                                // Durable Provider work compares this persisted action boundary.
-                                                session.turn_state = TurnState::AwaitingApproval;
-                                                deps.session_seam.save(session).await?;
-                                                crate::action_version::ActionVersion::capture(
-                                                    session, &call.id,
-                                                )?
-                                            } else {
-                                                None
-                                            };
-                                            let completion = if selected_device_read {
-                                                crate::seam::ReadCompletion {
-                                                    outcome: crate::future::boxed(|| {
-                                                        deps.tools
-                                                            .run_request_device_read(session, call)
-                                                    })
-                                                    .await,
-                                                    version_advance: None,
-                                                }
-                                            } else {
-                                                let ctx = ExecContext {
-                                                    // Central web reads use the host's original input and lease
-                                                    // checks. A device action fence always needs a real device.
-                                                    assistant_turn_fence: if session
-                                                        .has_admitted_personal_input()
-                                                        && crate::web_research::is_web_tool(
-                                                            &call.name,
-                                                        ) {
-                                                        None
-                                                    } else {
-                                                        crate::action_turn_fence::AssistantTurnFence::from_session(session)?
-                                                    },
-                                                    conversation_id: session
-                                                        .conversation_id
-                                                        .clone(),
-                                                    turn_id: turn_id.to_string(),
-                                                    tool_call_id: call.id.clone(),
-                                                    actor_id: session.actor_id.clone(),
-                                                    policy_revision: session.policy_revision,
-                                                    scope: session.scope_snapshot.clone(),
-                                                    connection_id: session
-                                                        .active_control_connection_id
-                                                        .clone(),
+                                        ToolEffect::ReadOnly | ToolEffect::ExternalRead => {
+                                            crate::future::phase(|| async {
+                                                // A read tool error is reported back as a tool result;
+                                                // the backend transport itself does not fail the turn.
+                                                sink.on_tool_started(
+                                                    &call.name,
+                                                    &call.id,
+                                                    &call.arguments_json,
+                                                );
+                                                let external_read =
+                                                    tool.effect == ToolEffect::ExternalRead;
+                                                let read_requires_version = !external_read
+                                                    && !selected_device_read
+                                                    && deps.tools.read_requires_version(call);
+                                                let version = if read_requires_version {
+                                                    // Durable Provider work compares this persisted action boundary.
+                                                    session.turn_state =
+                                                        TurnState::AwaitingApproval;
+                                                    deps.session_seam.save(session).await?;
+                                                    crate::action_version::ActionVersion::capture(
+                                                        session, &call.id,
+                                                    )?
+                                                } else {
+                                                    None
                                                 };
-                                                deps.tools
-                                                    .run_read_versioned(
-                                                        call,
-                                                        &ctx,
-                                                        version.as_ref(),
-                                                    )
-                                                    .await
-                                            };
-                                            if let Some(advance) = completion.version_advance {
-                                                advance.apply(session, version.as_ref())?;
-                                            }
-                                            if read_requires_version {
-                                                session.turn_state = TurnState::Running;
-                                            }
-                                            let (
-                                                mut out,
-                                                ok,
-                                                event_id,
-                                                provided_envelope,
-                                                background_task,
-                                            ) = match completion.outcome {
-                                                Ok(ReadOutcome::PermissionRequired { request }) => {
-                                                    return (task_permission::pause(
+                                                let completion = if external_read {
+                                                    crate::seam::ReadCompletion {
+                                                        outcome: deps
+                                                            .tools
+                                                            .run_external_read(session, call)
+                                                            .await,
+                                                        version_advance: None,
+                                                    }
+                                                } else if selected_device_read {
+                                                    crate::seam::ReadCompletion {
+                                                        outcome: crate::future::boxed(|| {
+                                                            deps.tools.run_request_device_read(
+                                                                session, call,
+                                                            )
+                                                        })
+                                                        .await,
+                                                        version_advance: None,
+                                                    }
+                                                } else {
+                                                    let ctx = ExecContext {
+                                                        // Central web reads use the host's original input and lease
+                                                        // checks. A device action fence always needs a real device.
+                                                        assistant_turn_fence: if session
+                                                            .has_admitted_personal_input()
+                                                            && crate::web_research::is_web_tool(
+                                                                &call.name,
+                                                            ) {
+                                                            None
+                                                        } else {
+                                                            crate::action_turn_fence::AssistantTurnFence::from_session(session)?
+                                                        },
+                                                        conversation_id: session
+                                                            .conversation_id
+                                                            .clone(),
+                                                        turn_id: turn_id.to_string(),
+                                                        tool_call_id: call.id.clone(),
+                                                        actor_id: session.actor_id.clone(),
+                                                        policy_revision: session.policy_revision,
+                                                        scope: session.scope_snapshot.clone(),
+                                                        connection_id: session
+                                                            .active_control_connection_id
+                                                            .clone(),
+                                                    };
+                                                    deps.tools
+                                                        .run_read_versioned(
+                                                            call,
+                                                            &ctx,
+                                                            version.as_ref(),
+                                                        )
+                                                        .await
+                                                };
+                                                if let Some(advance) = completion.version_advance {
+                                                    advance.apply(session, version.as_ref())?;
+                                                }
+                                                if read_requires_version {
+                                                    session.turn_state = TurnState::Running;
+                                                }
+                                                let (
+                                                    mut out,
+                                                    ok,
+                                                    event_id,
+                                                    provided_envelope,
+                                                    background_task,
+                                                ) = match completion.outcome {
+                                                    Ok(ReadOutcome::PermissionRequired {
+                                                        request,
+                                                    }) => {
+                                                        return (task_permission::pause(
+                                                            deps,
+                                                            session,
+                                                            call,
+                                                            &turn.tool_calls[call_index + 1..],
+                                                            request,
+                                                            &mut (state.mint),
+                                                            sink,
+                                                            &tool_observation,
+                                                        )
+                                                        .await)
+                                                            .map(Some);
+                                                    }
+                                                    Ok(ReadOutcome::Completed {
+                                                        output,
+                                                        ok,
+                                                        event_id,
+                                                        data_envelope,
+                                                        background_task,
+                                                    }) => (
+                                                        output,
+                                                        ok,
+                                                        event_id,
+                                                        data_envelope,
+                                                        background_task,
+                                                    ),
+                                                    Err(e) => (
+                                                        crate::model_input::error_output(
+                                                            &call.name, &e,
+                                                        ),
+                                                        false,
+                                                        None,
+                                                        None,
+                                                        None,
+                                                    ),
+                                                };
+                                                if let Some(action) = background_task {
+                                                    if !ok
+                                                        || event_id.is_some()
+                                                        || provided_envelope.is_some()
+                                                        || out.image_data_url.is_some()
+                                                        || out.document_preview.is_some()
+                                                    {
+                                                        return Err(invalid_original_result());
+                                                    }
+                                                    append_mutating_result(
                                                         deps,
                                                         session,
                                                         call,
+                                                        ChatMessage::background_task_running(
+                                                            (state.mint)(),
+                                                            &call.id,
+                                                            &action.action_request_id,
+                                                        ),
+                                                    )?;
+                                                    session.execution_state.insert(
+                                                        ExecutionState::Executing { action },
+                                                    );
+                                                    finish_tool(session, &call.id, true, sink);
+                                                    deps.session_seam.save(session).await?;
+                                                    return Ok(None);
+                                                }
+                                                let document_preview = out.document_preview.take();
+                                                if document_preview.is_some()
+                                                    && call.name != "preview_document"
+                                                {
+                                                    return Err(invalid_original_result());
+                                                }
+                                                // A model-visible tool error is still data produced by
+                                                // the selected source. Information-flow-enforced
+                                                // surfaces must label it before the next model call in
+                                                // exactly the same way as a successful read result.
+                                                let mut data_envelope = match provided_envelope {
+                                                    Some(envelope) => {
+                                                        envelope.validate().map_err(|_| {
+                                                            invalid_original_result()
+                                                        })?;
+                                                        Some(envelope)
+                                                    }
+                                                    None if selected_device_read && !ok => {
+                                                        derive_internal_tool_result_envelope(
+                                                            turn.provider_meta
+                                                                .data_envelope
+                                                                .as_ref(),
+                                                            &call.id,
+                                                            &out.content,
+                                                            &call.name,
+                                                        )?
+                                                    }
+                                                    None => {
+                                                        deps.tools.read_data_envelope(call, &out)?
+                                                    }
+                                                };
+                                                bind_tool_input_envelopes(
+                                                    session,
+                                                    call,
+                                                    &mut data_envelope,
+                                                )?;
+                                                let failure = append_reviewed_tool_result(
+                                                    deps,
+                                                    session,
+                                                    (state.mint)(),
+                                                    &call.id,
+                                                    out,
+                                                    data_envelope,
+                                                )
+                                                .await?;
+                                                if let Some(failure) = failure {
+                                                    return (finish_tool_output_safety_failure(
+                                                        deps,
+                                                        session,
+                                                        &call.id,
                                                         &turn.tool_calls[call_index + 1..],
-                                                        request,
                                                         &mut (state.mint),
                                                         sink,
-                                                        &tool_observation,
+                                                        failure,
                                                     )
                                                     .await)
                                                         .map(Some);
                                                 }
-                                                Ok(ReadOutcome::Completed {
-                                                    output,
-                                                    ok,
-                                                    event_id,
-                                                    data_envelope,
-                                                    background_task,
-                                                }) => (
-                                                    output,
-                                                    ok,
-                                                    event_id,
-                                                    data_envelope,
-                                                    background_task,
-                                                ),
-                                                Err(e) => (
-                                                    crate::model_input::error_output(
-                                                        &call.name, &e,
-                                                    ),
-                                                    false,
-                                                    None,
-                                                    None,
-                                                    None,
-                                                ),
-                                            };
-                                            if let Some(action) = background_task {
-                                                if !ok
-                                                    || event_id.is_some()
-                                                    || provided_envelope.is_some()
-                                                    || out.image_data_url.is_some()
-                                                    || out.document_preview.is_some()
-                                                {
-                                                    return Err(invalid_original_result());
-                                                }
-                                                append_mutating_result(
-                                                    deps,
-                                                    session,
-                                                    call,
-                                                    ChatMessage::background_task_running(
-                                                        (state.mint)(),
-                                                        &call.id,
-                                                        &action.action_request_id,
-                                                    ),
-                                                )?;
-                                                session
-                                                    .execution_state
-                                                    .insert(ExecutionState::Executing { action });
-                                                finish_tool(session, &call.id, true, sink);
-                                                deps.session_seam.save(session).await?;
-                                                return Ok(None);
-                                            }
-                                            let document_preview = out.document_preview.take();
-                                            if document_preview.is_some()
-                                                && call.name != "preview_document"
-                                            {
-                                                return Err(invalid_original_result());
-                                            }
-                                            // A model-visible tool error is still data produced by
-                                            // the selected source. Information-flow-enforced
-                                            // surfaces must label it before the next model call in
-                                            // exactly the same way as a successful read result.
-                                            let mut data_envelope = match provided_envelope {
-                                                Some(envelope) => {
-                                                    envelope
-                                                        .validate()
-                                                        .map_err(|_| invalid_original_result())?;
-                                                    Some(envelope)
-                                                }
-                                                None if selected_device_read && !ok => {
-                                                    derive_internal_tool_result_envelope(
-                                                        turn.provider_meta.data_envelope.as_ref(),
-                                                        &call.id,
-                                                        &out.content,
-                                                        &call.name,
-                                                    )?
-                                                }
-                                                None => {
-                                                    deps.tools.read_data_envelope(call, &out)?
-                                                }
-                                            };
-                                            bind_tool_input_envelopes(
-                                                session,
-                                                call,
-                                                &mut data_envelope,
-                                            )?;
-                                            let failure = append_reviewed_tool_result(
-                                                deps,
-                                                session,
-                                                (state.mint)(),
-                                                &call.id,
-                                                out,
-                                                data_envelope,
-                                            )
-                                            .await?;
-                                            if let Some(failure) = failure {
-                                                return (finish_tool_output_safety_failure(
-                                                    deps,
-                                                    session,
-                                                    &call.id,
-                                                    &turn.tool_calls[call_index + 1..],
-                                                    &mut (state.mint),
-                                                    sink,
-                                                    failure,
-                                                )
-                                                .await)
-                                                    .map(Some);
-                                            }
-                                            if ok {
-                                                crate::visual_evidence::note_successful_observation(
+                                                if ok {
+                                                    crate::visual_evidence::note_successful_observation(
                                                 session, &call.id, &call.name,
                                             )
                                             .map_err(
@@ -3360,37 +3431,40 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                                                     error_code: None,
                                                 },
                                             )?;
-                                            }
-                                            if let Some(current_input_revision) =
-                                                input_revision_advanced(deps, session).await?
-                                            {
-                                                append_superseded_tool_results(
-                                                    session,
-                                                    &turn.tool_calls[call_index + 1..],
-                                                    turn.provider_meta.data_envelope.as_ref(),
-                                                    &mut (state.mint),
-                                                )?;
-                                                return Ok(Some(LoopOutcome::Superseded {
-                                                    previous_input_revision: session.input_revision,
-                                                    current_input_revision,
-                                                }));
-                                            }
-                                            // Persist each read-only result before advancing to the
-                                            // next call. On a crash, the OSS recovery layer can then
-                                            // distinguish the still-unstarted calls from any later
-                                            // durable mutating task instead of treating the whole
-                                            // assistant batch as an unknown execution.
-                                            deps.session_seam.save(session).await?;
-                                            if let Some(preview) = document_preview.as_ref() {
-                                                sink.on_document_preview(preview);
-                                            }
-                                            finish_tool(session, &call.id, ok, sink);
-                                            if let Some(event_id) = event_id {
-                                                let _ = deps.tools.ack_delivery(&event_id).await;
-                                            }
+                                                }
+                                                if let Some(current_input_revision) =
+                                                    input_revision_advanced(deps, session).await?
+                                                {
+                                                    append_superseded_tool_results(
+                                                        session,
+                                                        &turn.tool_calls[call_index + 1..],
+                                                        turn.provider_meta.data_envelope.as_ref(),
+                                                        &mut (state.mint),
+                                                    )?;
+                                                    return Ok(Some(LoopOutcome::Superseded {
+                                                        previous_input_revision: session
+                                                            .input_revision,
+                                                        current_input_revision,
+                                                    }));
+                                                }
+                                                // Persist each read-only result before advancing to the
+                                                // next call. On a crash, the OSS recovery layer can then
+                                                // distinguish the still-unstarted calls from any later
+                                                // durable mutating task instead of treating the whole
+                                                // assistant batch as an unknown execution.
+                                                deps.session_seam.save(session).await?;
+                                                if let Some(preview) = document_preview.as_ref() {
+                                                    sink.on_document_preview(preview);
+                                                }
+                                                finish_tool(session, &call.id, ok, sink);
+                                                if let Some(event_id) = event_id {
+                                                    let _ =
+                                                        deps.tools.ack_delivery(&event_id).await;
+                                                }
 
-                                            Ok(None)
-                                        }),
+                                                Ok(None)
+                                            })
+                                        }
                                         ToolEffect::Mutating => crate::future::phase(|| async {
                                             if let Some(outcome) = crate::future::boxed(|| {
                                                 run_mutating(

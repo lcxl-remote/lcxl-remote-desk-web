@@ -119,6 +119,8 @@ fn live_read_authority_uses_original_targets_on_both_surfaces() {
                 .to_rfc3339(),
         };
         let original = ReadContextSelection {
+            external_issues: Vec::new(),
+            external_issue_sources: Vec::new(),
             tool_names: vec![name.into()],
             expires_at: None,
             object_attachments: vec![],
@@ -191,6 +193,8 @@ fn selected_device_read_is_bounded_and_mutations_or_unselected_calls_are_refused
     let registry = ai_assistant_provider_registry();
     let destination = destination();
     let mut original = ReadContextSelection {
+        external_issues: Vec::new(),
+        external_issue_sources: Vec::new(),
         tool_names: vec!["read_system_info".into()],
         expires_at: None,
         object_attachments: vec![],
@@ -273,6 +277,8 @@ fn web_fetch_preflight_reuses_host_scope_on_both_surfaces_and_freezes_each_input
     let registry = ai_assistant_provider_registry();
     let destination = destination();
     let original = ReadContextSelection {
+        external_issues: Vec::new(),
+        external_issue_sources: Vec::new(),
         tool_names: vec![crate::web_research::WEB_FETCH_TOOL_NAME.into()],
         expires_at: None,
         object_attachments: vec![],
@@ -319,6 +325,8 @@ fn web_fetch_preflight_reuses_host_scope_on_both_surfaces_and_freezes_each_input
             assert_eq!(authority.operation_scope, ["fetch_public_web"]);
             assert!(inputs.insert(authority.canonical_input_digest_sha256.to_string()));
             let unselected = ReadContextSelection {
+                external_issues: Vec::new(),
+                external_issue_sources: Vec::new(),
                 tool_names: vec![],
                 ..original.clone()
             };
@@ -336,6 +344,8 @@ fn web_fetch_preflight_reuses_host_scope_on_both_surfaces_and_freezes_each_input
                 .is_err()
             );
             let expired = ReadContextSelection {
+                external_issues: Vec::new(),
+                external_issue_sources: Vec::new(),
                 expires_at: Some("1970-01-01T00:00:01Z".into()),
                 ..original.clone()
             };
@@ -366,6 +376,8 @@ fn central_web_authority_is_exact_and_fixes_the_search_destination() {
     ));
     let destination = destination();
     let original = ReadContextSelection {
+        external_issues: Vec::new(),
+        external_issue_sources: Vec::new(),
         tool_names: vec!["search_public_web".into()],
         expires_at: None,
         object_attachments: vec![],
@@ -471,6 +483,8 @@ fn terminal_authority_uses_only_original_attachment_refs() {
             panic!("attachment");
         };
         let original = ReadContextSelection {
+            external_issues: Vec::new(),
+            external_issue_sources: Vec::new(),
             tool_names: vec![name.into()],
             expires_at: None,
             object_attachments: vec![attachment],
@@ -538,6 +552,8 @@ fn unselected_desktop_preflight_requires_explicit_r1_authority_on_both_surfaces(
     let registry = ai_assistant_provider_registry();
     let destination = destination();
     let original = ReadContextSelection {
+        external_issues: Vec::new(),
+        external_issue_sources: Vec::new(),
         tool_names: vec![],
         expires_at: None,
         object_attachments: vec![],

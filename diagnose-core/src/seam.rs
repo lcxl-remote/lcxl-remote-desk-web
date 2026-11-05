@@ -34,6 +34,8 @@ pub struct ModelRequest {
     pub preparation: Option<Box<crate::model_preparation::ModelRequestPreparation>>,
     /// Stable server identity for one compression source range.
     pub compression_identity: Option<String>,
+    /// Original publication purpose; never serialized into the provider body.
+    pub issue_reply: Option<Box<crate::issue_reply::ReplyModelCall>>,
     /// Host-only observation lineage; never serialized into the provider body.
     pub observation: Option<crate::model_observability::ObservationContext>,
     pub messages: Vec<ChatMessage>,
@@ -155,6 +157,7 @@ impl ModelRequest {
             preparation: None,
             assistant_data: None,
             compression_identity: None,
+            issue_reply: None,
             messages,
             tools: Vec::new(),
             tool_requirements: crate::model_capability::ModelRequirements::TEXT_ONLY,
@@ -785,6 +788,59 @@ pub struct ExecContext {
 /// approval + real execution via [`confirm_and_exec`](ToolSeam::confirm_and_exec).
 #[async_trait(?Send)]
 pub trait ToolSeam {
+    /// Only host-verified references frozen with this request may be advertised.
+    async fn external_issue_access(
+        &self,
+        _session: &PersistedAgentSession,
+    ) -> Result<Vec<crate::external_tools::IssueAccess>, AgentError> {
+        Ok(Vec::new())
+    }
+
+    /// Reads use the same held input and lease as the caller. They create no
+    /// device authority and cannot dispatch external writes.
+    async fn run_external_read(
+        &self,
+        _session: &PersistedAgentSession,
+        _call: &ToolCall,
+    ) -> Result<ReadOutcome, AgentError> {
+        Err(crate::subagent::invalid(
+            "External issue reads are unavailable",
+        ))
+    }
+
+    /// Only original issues with current, explicit publication authority.
+    async fn issue_reply_access(
+        &self,
+        _session: &PersistedAgentSession,
+    ) -> Result<Vec<crate::external_tools::IssueAccess>, AgentError> {
+        Ok(Vec::new())
+    }
+
+    /// Check the original input and current grant, then reuse its immutable
+    /// artifact or supply an isolated issue workset. No model call occurs here.
+    async fn prepare_issue_reply(
+        &self,
+        _session: &PersistedAgentSession,
+        _call: &ToolCall,
+    ) -> Result<crate::issue_reply::ReplyGeneration, AgentError> {
+        Err(crate::subagent::invalid(
+            "Original issue publication is unavailable",
+        ))
+    }
+
+    /// Freeze the actual successful native model receipt under the original work.
+    /// This only hands delivery off; it never adds a current-session auto trigger.
+    async fn freeze_issue_reply(
+        &self,
+        _session: &PersistedAgentSession,
+        _publication: crate::issue_reply::ReplyPublication,
+        _turn: crate::chat::ModelTurn,
+    ) -> Result<crate::issue_reply::ReplyToolReceipt, AgentError> {
+        Err(crate::subagent::invalid(
+            "Original issue publication is unavailable",
+        ))
+    }
+
     /// Project current routing metadata without expanding any device authority.
     async fn request_devices(
         &self,
@@ -1529,6 +1585,7 @@ mod tests {
             preparation: None,
             assistant_data: None,
             compression_identity: None,
+            issue_reply: None,
             caller_output_hard_cap: None,
         };
 

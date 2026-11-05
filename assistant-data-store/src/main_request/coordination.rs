@@ -12,11 +12,19 @@ use desk_diagnose_core::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
+mod external_reads;
+pub use external_reads::{ExternalIssueReader, IssueReadScope};
 mod pending_reads;
 mod report_reads;
 mod work_context;
 
 pub use work_context::{ContextRead, ContextSelector, project_work_context};
+
+/// Read adapters for the original devices and issues of queued requests.
+pub struct RequestReadPorts<'a, D, I> {
+    pub devices: D,
+    pub issues: &'a I,
+}
 
 const MAX_ITEMS: u64 = 8;
 const MAX_INPUT_BYTES: usize = 16 * 1024;
@@ -40,6 +48,8 @@ struct Item {
     attempts: i32,
     target_refs: Vec<String>,
     dispatchable: bool,
+    external_issues: Vec<desk_diagnose_core::external_tools::IssueAccess>,
+    frozen_sha256: String,
 }
 
 pub struct Batch {
@@ -245,6 +255,16 @@ pub async fn reserve(
             attempts: row.coordination_attempts + 1,
             target_refs: frozen.ask.target_refs,
             dispatchable,
+            external_issues: frozen.reads.external_issues,
+            frozen_sha256: format!(
+                "{:x}",
+                Sha256::digest(
+                    row.pending_input_json
+                        .as_ref()
+                        .ok_or(AssistantStoreError::Inaccessible)?
+                        .as_bytes()
+                )
+            ),
         });
     }
     let mut reports = Vec::new();

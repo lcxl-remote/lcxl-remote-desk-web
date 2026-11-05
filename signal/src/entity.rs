@@ -74,3 +74,6 @@ pub use desk_assistant_data_store::entity::agent_assistant_read_projection;
 pub use desk_assistant_data_store::entity::agent_assistant_retrieval_query;
 pub use desk_assistant_data_store::entity::agent_assistant_source_suppression;
 pub use desk_assistant_data_store::entity::agent_main_request;
+pub use desk_assistant_data_store::entity::{
+    agent_issue_admission, agent_issue_reply, agent_issue_subscription,
+};

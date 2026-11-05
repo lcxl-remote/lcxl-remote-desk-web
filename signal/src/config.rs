@@ -25,12 +25,13 @@ use crate::{
     usage_retention::UsageRetentionConfig,
 };
 
-pub const SECTION_NAMES: [&str; 18] = [
+pub const SECTION_NAMES: [&str; 19] = [
     "ai_gateway",
     "approval_gateway",
     "approval_trace",
     "approval_runtime",
     "web_search",
+    "issue_connections",
     "context_management",
     "assistant_data_policy",
     "assistant_data_settings",
@@ -64,6 +65,7 @@ pub struct GlobalConfig {
     pub approval_trace: desk_signal_facade::model::approval_trace::ApprovalTraceSettings,
     pub approval_runtime: desk_signal_facade::model::approval_runtime::ApprovalRuntimeSettings,
     pub web_search: SearchConfig,
+    pub issue_connections: desk_signal_facade::mcp_client::settings::IssueConnectionsConfig,
     pub context_management: PlatformContextPolicy,
     pub assistant_data_policy:
         desk_agent_protocol::ai_assistant::user_instructions::AssistantDataPolicy,
@@ -92,6 +94,7 @@ impl Default for GlobalConfig {
                 desk_signal_facade::model::approval_trace::ApprovalTraceSettings::defaults(false),
             approval_runtime: Default::default(),
             web_search: SearchConfig::default(),
+            issue_connections: Default::default(),
             context_management: PlatformContextPolicy::default(),
             assistant_data_policy:
                 desk_agent_protocol::ai_assistant::user_instructions::AssistantDataPolicy::default(),
@@ -139,6 +142,9 @@ impl GlobalConfig {
         self.web_search
             .validate()
             .map_err(|_| invalid("web_search"))?;
+        self.issue_connections
+            .validate()
+            .map_err(|_| invalid("issue_connections"))?;
         self.context_management
             .validate()
             .map_err(|_| invalid("context_management"))?;

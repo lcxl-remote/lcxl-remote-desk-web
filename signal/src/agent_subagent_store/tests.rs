@@ -7,6 +7,7 @@ mod funding;
 mod goal_approval;
 mod goal_role_guard;
 mod input_sources;
+mod issue_replies;
 mod lifecycle;
 mod main_stop;
 mod main_tools;

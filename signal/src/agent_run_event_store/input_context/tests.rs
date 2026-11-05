@@ -13,6 +13,7 @@ use desk_diagnose_core::{
 };
 use sea_orm::{ConnectionTrait, sea_query::Expr};
 
+mod external_reads;
 mod grants;
 mod live_targets;
 mod wire;
@@ -228,6 +229,8 @@ fn input(id: &str, mut objects: Vec<ContextAttachment>) -> AppendUserFollowupPar
             policy_name: None,
         },
         read_context: Some(ReadContextSelection {
+            external_issues: Vec::new(),
+            external_issue_sources: Vec::new(),
             tool_names: vec!["read_text_file".into()],
             expires_at: None,
             object_attachments: objects,
@@ -509,6 +512,8 @@ async fn shared_object_binding_clamps_all_file_reads_and_rejects_expired_or_chan
         "inspect_keynote_file",
     ] {
         let selection = ReadContextSelection {
+            external_issues: Vec::new(),
+            external_issue_sources: Vec::new(),
             tool_names: vec![name.into()],
             expires_at: None,
             object_attachments: vec![object.clone()],

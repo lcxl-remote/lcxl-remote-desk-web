@@ -261,6 +261,9 @@ async fn explicit_adjustment_delivers_dependency_changed_instead_of_waiting_for_
 {
     let db = database().await;
     let (mut parent, task_id) = waiting_parent(&db).await;
+    let child = load(&db, &task_id).await;
+    let child_reply = super::issue_replies::seed(&db, &child.child_conversation_id, "root").await;
+    let main_reply = super::issue_replies::seed(&db, "root", "root").await;
     parent.finish_turn(TurnState::Idle, chrono::Utc::now().to_rfc3339());
     save_main_delegation_session(&db, &mut parent)
         .await
@@ -285,6 +288,17 @@ async fn explicit_adjustment_delivers_dependency_changed_instead_of_waiting_for_
         )
         .await
         .unwrap();
+    let changed_reply = super::issue_replies::read(&db, &child_reply).await;
+    assert_eq!(
+        changed_reply.state,
+        desk_assistant_data_store::issue_reply::NOT_SENT
+    );
+    assert_eq!(changed_reply.reason.as_deref(), Some("work_changed"));
+    assert_eq!(changed_reply.artifact_json, child_reply.artifact_json);
+    assert_eq!(
+        super::issue_replies::read(&db, &main_reply).await,
+        main_reply
+    );
     let ParentWaitResolution::Ready(wait) =
         store.resolve_parent_wait("root", "1", "1").await.unwrap()
     else {

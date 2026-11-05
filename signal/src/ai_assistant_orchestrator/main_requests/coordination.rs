@@ -1,3 +1,5 @@
+mod issue_reads;
+
 use super::*;
 use crate::config::connection::DatabaseTransaction;
 use desk_assistant_data_store::{
@@ -272,7 +274,16 @@ impl SignalMainRequestExecutor {
                     )
                     .await
                 },
-                async |row, input| self.pending_devices(row, input).await,
+                coordination::RequestReadPorts {
+                    devices: async |row: &agent_main_request::Model, input: &FrozenOwnerInput| {
+                        self.pending_devices(row, input).await
+                    },
+                    issues: &issue_reads::Reader {
+                        executor: self,
+                        head,
+                        batch,
+                    },
+                },
             )
             .await
     }

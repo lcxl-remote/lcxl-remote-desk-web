@@ -1,6 +1,7 @@
 //! SQLite append-only event ledger for the OSS dynamic AI Assistant run.
 
 use crate::config::connection::{DatabaseConnection, DatabaseTransaction};
+mod external_reads;
 pub(crate) mod input_context;
 pub(crate) mod main_requests;
 pub use desk_diagnose_core::input_read_context::ReadContextSelection;
@@ -2002,6 +2003,8 @@ mod tests {
             input.client_conversation_id.as_deref().unwrap(),
         );
         input.read_context = Some(ReadContextSelection {
+            external_issues: Vec::new(),
+            external_issue_sources: Vec::new(),
             tool_names: vec![desk_diagnose_core::web_research::WEB_FETCH_TOOL_NAME.into()],
             expires_at: None,
             object_attachments: vec![],
@@ -2164,6 +2167,8 @@ mod tests {
         let tool = desk_diagnose_core::web_research::WEB_FETCH_TOOL_NAME;
         input.current_scope.granted = vec![desk_agent_protocol::Capability::WebResearchFetch];
         input.read_context = Some(ReadContextSelection {
+            external_issues: Vec::new(),
+            external_issue_sources: Vec::new(),
             tool_names: vec![tool.into()],
             expires_at: None,
             object_attachments: vec![],

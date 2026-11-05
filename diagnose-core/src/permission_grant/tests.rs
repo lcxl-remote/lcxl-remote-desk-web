@@ -103,6 +103,8 @@ fn web_host_grants_reuse_urls_until_expiry_on_both_surfaces() {
         reason: None,
     }];
     let original = ReadContextSelection {
+        external_issues: Vec::new(),
+        external_issue_sources: Vec::new(),
         tool_names: vec![item.tool_name.clone()],
         expires_at: None,
         object_attachments: vec![],
@@ -773,6 +775,8 @@ fn approved_ui_root_id_matches_resolved_read_on_both_surfaces() {
         ChatMessage::tool_result("observation", "observe", serde_json::json!({"ReadContext":{"DesktopSessionInspect":{"session":{"token":"session-id","snapshot_id":"identity-1","object_kind":"desktop_session","expires_at":""}}}}).to_string()),
     ];
     let original = ReadContextSelection {
+        external_issues: Vec::new(),
+        external_issue_sources: Vec::new(),
         tool_names: vec![],
         expires_at: None,
         object_attachments: vec![],

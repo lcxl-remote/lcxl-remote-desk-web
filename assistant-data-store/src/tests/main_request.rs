@@ -15,6 +15,8 @@ fn input(message_id: &str, text: &str) -> FrozenOwnerInput {
         device_id: String::new(),
         targets: Vec::new(),
         reads: ReadContextSelection {
+            external_issues: Vec::new(),
+            external_issue_sources: Vec::new(),
             tool_names: Vec::new(),
             expires_at: None,
             object_attachments: Vec::new(),
@@ -22,6 +24,104 @@ fn input(message_id: &str, text: &str) -> FrozenOwnerInput {
         },
         destination: destination("model"),
     }
+}
+
+#[tokio::test]
+async fn queued_issue_access_keeps_its_original_native_target_after_activation() {
+    use desk_agent_protocol::external_tools::IssueSelection;
+    use desk_diagnose_core::external_tools::{IssueAccess, IssueTarget};
+    let TestStore { db } = setup().await;
+    let mut original = input("issue-message", "Investigate the selected issue");
+    original.ask.selected_issues.push(IssueSelection {
+        connection_ref: "forge".into(),
+        owner: "org".into(),
+        repository: "project".into(),
+        issue_number: 4,
+    });
+    original.reads.external_issues.push(IssueAccess {
+        connection_ref: "forge".into(),
+        target: IssueTarget {
+            platform: desk_agent_protocol::external_tools::IssuePlatform::Gitea,
+            instance: "https://forge.test/".into(),
+            account_id: 3,
+            repository_id: 42,
+            owner: "org".into(),
+            repository: "project".into(),
+            issue_number: 4,
+            issue_id: 82,
+            private: true,
+            internal: false,
+        },
+    });
+    original.reads.external_issue_sources.push(
+        desk_diagnose_core::issue_authority::IssueSourceRef {
+            authorization_id: desk_diagnose_core::native_ids::stable(
+                desk_diagnose_core::native_ids::Kind::IssueAdmission,
+                &"accepted-source",
+            ),
+            subscription_revision: 3,
+            tool_ref: original.reads.external_issues[0].tool_ref(),
+        },
+    );
+    let txn = db.begin().await.unwrap();
+    let queued = queue::enqueue(&txn, "owner", "root", &original, None, 32, 100)
+        .await
+        .unwrap();
+    txn.commit().await.unwrap();
+    original.reads.external_issues[0].target.issue_id = 999;
+    let restored = queue::first_pending(&db, "owner", "root")
+        .await
+        .unwrap()
+        .unwrap();
+    let frozen = FrozenOwnerInput::decode(&restored).unwrap();
+    assert_eq!(frozen.reads.external_issues[0].target.issue_id, 82);
+    assert!(frozen.reads.external_issues[0].matches_selection(&frozen.ask.selected_issues[0]));
+    let txn = db.begin().await.unwrap();
+    assert!(queue::activate(&txn, &queued, 1, 101).await.unwrap());
+    txn.commit().await.unwrap();
+    let activated = queue::load(&db, "owner", "root", &queued.request_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(FrozenOwnerInput::decode(&activated).unwrap(), frozen);
+    let activation = queue::OwnerQueueTurn::Activate {
+        request_id: queued.request_id.clone(),
+        conversation_id: "root".into(),
+        execution_conversation_id: "root".into(),
+        destination: frozen.destination.clone(),
+    };
+    let selected =
+        queue::frozen_read_selection(&db, Some(&activation), "owner", "root", "", &original.ask)
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(selected, frozen.reads);
+    let mut changed = original.ask.clone();
+    changed.selected_issues[0].issue_number = 5;
+    assert!(
+        queue::frozen_read_selection(&db, Some(&activation), "owner", "root", "", &changed)
+            .await
+            .is_err()
+    );
+    let retry = queue::OwnerQueueTurn::Submit {
+        ask: original.ask.clone(),
+        reply_connection_id: "browser".into(),
+    };
+    assert_eq!(
+        queue::frozen_read_selection(&db, Some(&retry), "owner", "root", "", &original.ask)
+            .await
+            .unwrap(),
+        Some(selected)
+    );
+    queue::retire_superseded(&db, &activated, 102)
+        .await
+        .unwrap();
+    assert_eq!(
+        queue::frozen_read_selection(&db, Some(&retry), "owner", "root", "", &original.ask)
+            .await
+            .unwrap(),
+        Some(ReadContextSelection::default())
+    );
 }
 
 #[test]

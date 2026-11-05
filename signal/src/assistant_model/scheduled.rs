@@ -60,6 +60,7 @@ impl MeteredModel {
         authorized: &AuthorizedModelRequest,
         ordinal: u64,
         ordinary_id: String,
+        export_authorization_id: &str,
     ) -> Result<DispatchReceipt, ModelAdmissionError<DbErr>> {
         let input_snapshot = authorized.input_snapshot().map_err(|_| denied())?;
         if let Some(reservation) = authorized.request.delegation_call.as_ref() {
@@ -107,7 +108,7 @@ impl MeteredModel {
                 crate::model_egress_store::SignalModelEgressStore::record_snapshot_intent_on(
                     &txn,
                     ordinary_id.clone(),
-                    self.export_authorization_id.clone(),
+                    export_authorization_id.to_owned(),
                     ordinal,
                     &input_snapshot,
                 )
@@ -211,7 +212,7 @@ impl MeteredModel {
                 crate::model_egress_store::SignalModelEgressStore::record_snapshot_intent_on(
                     &txn,
                     ordinary_id.clone(),
-                    self.export_authorization_id.clone(),
+                    export_authorization_id.to_owned(),
                     ordinal,
                     &input_snapshot,
                 )
@@ -239,7 +240,7 @@ impl MeteredModel {
                         input_sha256: &digest,
                         units,
                     },
-                    &self.export_authorization_id,
+                    export_authorization_id,
                     ordinal,
                     authorized.request.compression_identity.as_deref(),
                     &input_snapshot,
@@ -325,6 +326,8 @@ async fn link_dispatch_context_on(
     request: &desk_diagnose_core::seam::ModelRequest,
     receipt_id: &str,
 ) -> Result<(), DbErr> {
+    desk_diagnose_core::future::boxed(|| crate::issue_replies::authorize_model_on(txn, request))
+        .await?;
     if request.assistant_data.is_some() && request.context_conversation_id.is_none() {
         return Err(denied());
     }
@@ -336,6 +339,7 @@ async fn link_dispatch_context_on(
             txn,
             receipt_id,
             conversation,
+            request.issue_reply.is_some(),
         )
         .await?;
     }

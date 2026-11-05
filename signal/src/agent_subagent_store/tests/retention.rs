@@ -18,6 +18,10 @@ async fn deletion_tombstone_source_epochs_and_child_control_share_one_commit() {
     let db = database().await;
     seed_parent(&db).await;
     let original = seed_task(&db, "deleted", "goal-deleted").await;
+    let main_reply = super::issue_replies::seed(&db, "root", "root").await;
+    let child_reply =
+        super::issue_replies::seed(&db, &original.child_conversation_id, "root").await;
+    let other_reply = super::issue_replies::seed(&db, "other-chat", "other-chat").await;
     let parent = parent(&db).await;
     let txn = db.begin().await.unwrap();
     close_root_on(&txn, &parent, 100).await.unwrap();
@@ -30,10 +34,31 @@ async fn deletion_tombstone_source_epochs_and_child_control_share_one_commit() {
     txn.rollback().await.unwrap();
     assert!(!deleted_on(&db, "root").await.unwrap());
     assert_eq!(load(&db, &original.binding.task_id).await, original);
+    assert_eq!(
+        super::issue_replies::read(&db, &main_reply).await,
+        main_reply
+    );
+    assert_eq!(
+        super::issue_replies::read(&db, &child_reply).await,
+        child_reply
+    );
     assert_eq!(inbox::Entity::find().count(&db).await.unwrap(), 0);
     let txn = db.begin().await.unwrap();
     close_root_on(&txn, &parent, 200).await.unwrap();
     txn.commit().await.unwrap();
+    for artifact in [&main_reply, &child_reply] {
+        let removed = super::issue_replies::read(&db, artifact).await;
+        assert!(removed.artifact_json.is_none());
+        assert_eq!(removed.retired_at_ms, Some(200));
+        assert_eq!(
+            removed.state,
+            desk_assistant_data_store::issue_reply::NOT_SENT
+        );
+    }
+    assert_eq!(
+        super::issue_replies::read(&db, &other_reply).await,
+        other_reply
+    );
     let run = load(&db, &original.binding.task_id).await;
     assert_eq!(run.state, SubAgentState::Cancelled);
     assert!(run.binding.control_revision > original.binding.control_revision);

@@ -112,6 +112,7 @@ pub(super) async fn apply_checkpoint(
         preparation: None,
         assistant_data: None,
         compression_identity: None,
+        issue_reply: None,
         caller_output_hard_cap: Some(i64::from(plan.policy.summary_max_output_tokens)),
     });
     let _observation_preflight =

@@ -296,6 +296,7 @@ pub fn configure_api_surface(
                         .service(desk_signal::controller::ai_assistant_session::mark_ai_assistant_subagent_read)
                         .service(desk_signal::controller::goal_budget_policy::get_my_goal_budget_policy)
                 .service(desk_signal::controller::subagent_policy::get_my_subagent_policy)
+                .service(desk_signal::controller::issue_connections::get_my_issue_connections)
                         .service(list_assistant_images)
                         .service(desk_signal::controller::ai_assistant_session::list_assistant_attachments)
                         .service(desk_signal::controller::ai_assistant_session::get_assistant_attachment)
@@ -472,6 +473,9 @@ pub fn configure_api_surface(
                 .service(desk_signal::controller::subagent_policy::update_subagent_policy)
                     .service(desk_signal::controller::web_search::update_web_search)
                     .service(desk_signal::controller::web_search::test_web_search)
+                    .service(desk_signal::controller::issue_connections::get_issue_connections)
+                    .service(desk_signal::controller::issue_connections::update_issue_connections)
+                    .service(desk_signal::controller::issue_connections::test_issue_connection)
                     // Usage-retention windows govern both rollup tables; the row
                     // lives in the same local signal DB, present whenever the
                     // usage view is.

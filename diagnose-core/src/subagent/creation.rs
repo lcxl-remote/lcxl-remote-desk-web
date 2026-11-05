@@ -340,6 +340,8 @@ impl CreationEnvelope {
     pub fn child_read_context(&self) -> Option<ReadContextSelection> {
         let mut selection = self.original_read_context.clone().or_else(|| {
             self.device_id.is_empty().then(|| ReadContextSelection {
+                external_issues: Vec::new(),
+                external_issue_sources: Vec::new(),
                 tool_names: Vec::new(),
                 expires_at: None,
                 object_attachments: Vec::new(),

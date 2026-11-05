@@ -1068,6 +1068,7 @@ pub(crate) async fn decide_permission_on(
             .and_then(|(creation, _)| creation.response_locale.clone());
         let resume_request_id = format!("permission-resume-{}", body.request_id);
         let resume_ask = AiAssistantAsk {
+            selected_issues: Vec::new(),
             target_refs: Vec::new(),
             client_timezone: String::new(),
             temporary_conversation: None,

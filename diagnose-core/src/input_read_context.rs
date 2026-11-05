@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 
 const MAX_READ_TOOLS: usize = 128;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReadContextSelection {
     pub tool_names: Vec<String>,
@@ -30,6 +30,10 @@ pub struct ReadContextSelection {
     pub object_attachments: Vec<ContextAttachment>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub live_targets: Vec<live_read::LiveReadTarget>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub external_issues: Vec<crate::external_tools::IssueAccess>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub external_issue_sources: Vec<crate::issue_authority::IssueSourceRef>,
 }
 
 impl ReadContextSelection {
@@ -58,12 +62,32 @@ impl ReadContextSelection {
             expires_at: scope.expires_at.clone(),
             object_attachments: Vec::new(),
             live_targets: Vec::new(),
+            external_issues: Vec::new(),
+            external_issue_sources: Vec::new(),
         };
         selection.validate()?;
         Ok(selection)
     }
 
     pub fn validate(&self) -> Result<(), AgentError> {
+        crate::external_tools::validate_accesses(&self.external_issues)?;
+        let mut refs = std::collections::BTreeSet::new();
+        if self.external_issue_sources.len() > self.external_issues.len()
+            || self.external_issue_sources.iter().any(|source| {
+                !crate::native_ids::is(
+                    crate::native_ids::Kind::IssueAdmission,
+                    &source.authorization_id,
+                ) || source.subscription_revision == 0
+                    || source.subscription_revision > i64::MAX as u64
+                    || !refs.insert(source.tool_ref.as_str())
+                    || !self
+                        .external_issues
+                        .iter()
+                        .any(|issue| issue.tool_ref() == source.tool_ref)
+            })
+        {
+            return Err(invalid("invalid original issue source references"));
+        }
         validate_objects(&self.object_attachments)?;
         live_read::validate_targets(self)?;
         let providers = crate::ai_assistant::ai_assistant_provider_registry_ref();

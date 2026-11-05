@@ -191,6 +191,7 @@ async fn fixture(
             &txn,
             "original-proposal",
             &f.session.conversation_id,
+            false,
         )
         .await
         .unwrap();

@@ -64,6 +64,9 @@
       "selected_attachment_ids": [
         "attachment-1"
       ],
+      "selected_issues": [
+        {"connection_ref": "forge", "owner": "Org", "repository": "Project", "issue_number": 4}
+      ],
       "client_timezone": "America/Los_Angeles"
     }
   },

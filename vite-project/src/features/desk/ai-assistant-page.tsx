@@ -19,6 +19,8 @@ import { AssistantSubagentApprovalNotice, AssistantSubagents, AssistantConversat
 import { AssistantStopConfirmation } from './assistant-stop-confirmation';
 import { AssistantComposerActions } from './assistant-composer-actions';
 import { AssistantRequestDevices, type AssistantRequestDevice } from './assistant-request-devices';
+import { AssistantIssueSources } from './assistant-issue-sources';
+import type { IssueSelection } from '@/services/types';
 import { AssistantAutomaticApproval } from './assistant-automatic-approval';
 import { useAiAssistantSubagents } from './use-ai-assistant-subagents';
 import { ScheduleProposalCards } from '@/features/schedules/proposal-card';
@@ -368,8 +370,9 @@ export function AiAssistantWorkspace({
     useEffect(() => { setPermissionHistorySession(null); }, [permissionHistoryKey]);
     useEffect(() => { setPendingScheduleCount(0); }, [permissionHistoryKey]);
     const [selectedCapabilityIds, setSelectedCapabilityIds] = useState<string[]>([]);
+    const [selectedIssues, setSelectedIssues] = useState<IssueSelection[]>([]);
     const selectedContextCount = new Set([...selectedCapabilityIds,
-        ...chat.attachments.filter(item => item.state === 'active').map(item => item.capabilityId)]).size;
+        ...chat.attachments.filter(item => item.state === 'active').map(item => item.capabilityId)]).size + selectedIssues.length;
     const [startGoal, setStartGoal] = useState(false);
     const [goalBudgetPolicy, setGoalBudgetPolicy] = useState<GoalBudgetPolicy | null>(null);
     useEffect(() => {
@@ -467,17 +470,19 @@ export function AiAssistantWorkspace({
         event.preventDefault();
         if (sendDisabled) return;
         const selectedContext = featureProfile.object_context ? selectedCapabilityIds : [];
-        chat.start(question, i18n.language, selectedContext, startGoal, previousCompletedGoalId);
+        chat.start(question, i18n.language, selectedContext, startGoal, previousCompletedGoalId, selectedIssues);
     };
 
     const resetConversation = (temporary = false) => {
         chat.reset(temporary);
         setSelectedCapabilityIds([]);
+        setSelectedIssues([]);
         setStartGoal(false);
         setPreviousCompletedGoalId(null);
     };
 
     const displayNameForTool = (name: string) => {
+        if (name === 'call_external_tool') return t('pages.aiAssistant.issueSources.readTool');
         const key = capabilities.snapshot?.entries.find(entry => entry.capability.tool_name === name)?.capability.display_name_key;
         return key ? t(key, { defaultValue: name }) : name;
     };
@@ -648,6 +653,9 @@ export function AiAssistantWorkspace({
         ] },
     ];
 
+    const issueSources = !rehearsal ? <AssistantIssueSources value={selectedIssues} onChange={setSelectedIssues}
+        disabled={!assistantEnabled || chat.hydrating || !!chat.deliveryState || chat.historyRestoreFailed} /> : null;
+
     return (
         <>
             <AssistantDetailsSheet panel={panel} onPanelChange={setPanel} sections={{
@@ -750,6 +758,7 @@ export function AiAssistantWorkspace({
                 </CardContent>
             </Card>
             )}
+                {issueSources}
 </>,
                 connection: <>
             {(recoveryConnection?.connection_id === deskId) && <FileRecoverySettings
@@ -784,7 +793,7 @@ export function AiAssistantWorkspace({
                 />
             </div>
 </>,
-                } : {}),
+                } : (issueSources ? { context: issueSources } : {})),
             }} />
             {hasDevice && <SessionTargetDialog
                 targets={chat.sessionTargets}
@@ -844,11 +853,12 @@ export function AiAssistantWorkspace({
                         </div>
                         <div className="assistant-header-actions flex shrink-0 items-center gap-1">
                             <AssistantHistory deskId={deskId} deviceId={recoveryConnection?.device_id} disabled={!!rehearsal || chat.hydrating || chat.contextUpdating || chat.permissionUpdating || !!chat.grantRevoking}
-                                onDeleted={id => { if (chat.forgetConversation(id)) setSelectedCapabilityIds([]); }}
+                                onDeleted={id => { if (chat.forgetConversation(id)) { setSelectedCapabilityIds([]); setSelectedIssues([]); } }}
                                 onSelect={(id) => {
                                     if (!chat.selectConversation(id)) return false;
                                     setQuestion('');
                                     setSelectedCapabilityIds([]);
+                                    setSelectedIssues([]);
                                     return true;
                                 }} onNew={resetConversation} />
                         </div>
@@ -1102,13 +1112,16 @@ export function AiAssistantWorkspace({
                             className="min-h-16 max-h-40 w-full resize-y rounded-md border-0 bg-background px-3 py-2 shadow-sm outline-none placeholder:text-muted-foreground focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
                         />
                         <div className="flex min-w-0 items-center gap-1">
-                            <AssistantComposerMenu key={`${permissionHistoryKey}:${subagents.selected?.task_id ?? 'main'}`} sections={menuSections} onContext={hasDevice ? () => setPanel('context') : undefined}
+                            <AssistantComposerMenu key={`${permissionHistoryKey}:${subagents.selected?.task_id ?? 'main'}`} sections={menuSections} onContext={hasDevice || issueSources ? () => setPanel('context') : undefined}
                                 goal={hasDevice && !rehearsal ? {
                                     checked: startGoal, disabled: !assistantEnabled || chat.turnRunning || !!chat.deliveryState,
                                     onCheckedChange: checked => { setStartGoal(checked); setPreviousCompletedGoalId(null); },
                                     summary: startGoal && goalBudgetPolicy ? <GoalLimitsSummary policy={goalBudgetPolicy} /> : undefined,
                                 } : undefined} />
                             {personalScope && <AssistantRequestDevices selected={requestDevices} onChange={setRequestDevices} />}
+                            {!hasDevice && selectedIssues.length > 0 && <Button type="button" variant="ghost" size="sm" onClick={() => setPanel('context')}>
+                                {t('pages.aiAssistant.issueSources.selected', { count: selectedIssues.length })}
+                            </Button>}
                             {hasDevice && <AssistantComposerStatus automaticApproval={automaticApproval} onApprovalSettings={() => setApprovalSettingsOpen(true)}
                                 contextCount={selectedContextCount} onContext={() => setPanel('context')} startGoal={startGoal}
                                 onClearGoal={() => { setStartGoal(false); setPreviousCompletedGoalId(null); }} />}

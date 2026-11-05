@@ -452,6 +452,7 @@ mod assistant_data;
 mod call_budget;
 mod fresh_task;
 mod goal_control;
+mod issue_reply;
 mod retrieval_accounting;
 pub use fresh_task::{
     resume_claimed_fresh_task_children_turn, resume_claimed_fresh_task_notification_turn,

@@ -1,0 +1,1 @@
+{"type":"object","required":["account_id","account_login","can_read_issues","can_reply"],"properties":{"account_id":{"type":"integer","format":"int64","minimum":0},"account_login":{"type":"string"},"can_read_issues":{"type":"boolean"},"can_reply":{"type":"boolean"}},"x-readme-ref-name":"IssueConnectionProbe"}

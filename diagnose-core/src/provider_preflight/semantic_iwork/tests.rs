@@ -95,6 +95,8 @@ fn reference(kind: ObjectKind) -> ObjectRef {
 
 fn original(read_tool: &str, object_ref: ObjectRef) -> ReadContextSelection {
     ReadContextSelection {
+        external_issues: Vec::new(),
+        external_issue_sources: Vec::new(),
         tool_names: vec![read_tool.into()],
         expires_at: None,
         object_attachments: vec![],
@@ -273,6 +275,8 @@ fn changed_or_missing_original_live_target_fails_closed() {
             ProductSurface::ManagerPersonalOwner,
             &call,
             &ReadContextSelection {
+                external_issues: Vec::new(),
+                external_issue_sources: Vec::new(),
                 tool_names: vec!["inspect_live_document".into()],
                 expires_at: None,
                 object_attachments: vec![],
@@ -503,6 +507,8 @@ fn batch_iwork_calls_require_the_exact_selected_file_and_directory() {
             arguments_json: arguments.to_string(),
         };
         let original = ReadContextSelection {
+            external_issues: Vec::new(),
+            external_issue_sources: Vec::new(),
             tool_names: vec![read_tool.into()],
             expires_at: None,
             object_attachments: vec![

@@ -834,6 +834,8 @@ async fn child_read_binding_is_narrowed_and_parent_completion_has_no_binding() {
         session.input_revision = 7;
         creation.source.original_read_context = Some(
             desk_diagnose_core::input_read_context::ReadContextSelection {
+                external_issues: Vec::new(),
+                external_issue_sources: Vec::new(),
                 tool_names: vec!["read_system_info".into()],
                 expires_at: None,
                 object_attachments: vec![],

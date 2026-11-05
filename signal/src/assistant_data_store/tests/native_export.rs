@@ -152,6 +152,7 @@ async fn seed_native_batch_on(
         db,
         physical,
         &proof.root_conversation_id,
+        false,
     )
     .await
     .unwrap();

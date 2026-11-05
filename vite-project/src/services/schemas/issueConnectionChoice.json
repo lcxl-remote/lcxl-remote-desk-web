@@ -1,0 +1,1 @@
+{"type":"object","required":["platform","connection_ref","name","instance_url"],"properties":{"connection_ref":{"type":"string"},"instance_url":{"type":"string"},"name":{"type":"string"},"platform":{"type":"string","enum":["gitea","github"],"x-readme-ref-name":"IssuePlatform"}},"x-readme-ref-name":"IssueConnectionChoice"}

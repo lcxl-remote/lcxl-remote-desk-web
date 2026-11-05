@@ -14,6 +14,19 @@ pub(crate) async fn cancel_native_actions_on<
     operation: &str,
     now_ms: i64,
 ) -> Result<(), DbErr> {
+    desk_assistant_data_store::issue_reply::lifecycle::cancel_request_on(
+        txn,
+        &session.actor_id,
+        &session.conversation_id,
+        session.input_revision,
+        "work_stopped",
+        now_ms,
+    )
+    .await
+    .map_err(|error| match error {
+        desk_assistant_data_store::AssistantStoreError::Backend(error) => error,
+        _ => invalid(),
+    })?;
     cancel_native_actions_for_subject_on(
         txn,
         &session.conversation_id,

@@ -2795,6 +2795,7 @@ mod tests {
             preparation: None,
             assistant_data: None,
             compression_identity: None,
+            issue_reply: None,
             caller_output_hard_cap: None,
         }
     }
@@ -3786,6 +3787,7 @@ mod tests {
                 preparation: None,
                 assistant_data: None,
                 compression_identity: None,
+                issue_reply: None,
                 caller_output_hard_cap: Some(1024),
             };
             let mut sink = desk_diagnose_core::seam::NullTurnSink;
@@ -4205,6 +4207,7 @@ mod tests {
                 preparation: None,
                 assistant_data: None,
                 compression_identity: None,
+                issue_reply: None,
                 caller_output_hard_cap: Some(1024),
             };
             let mut sink = desk_diagnose_core::seam::NullTurnSink;

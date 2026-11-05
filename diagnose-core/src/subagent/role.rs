@@ -177,7 +177,9 @@ impl AgentRole {
         if effect == ToolEffect::SubAgentReport {
             return self.binding().is_some();
         }
-        if effect == ToolEffect::Mutating && self.workbench_id().is_some() {
+        if matches!(effect, ToolEffect::Mutating | ToolEffect::ExternalWrite)
+            && self.workbench_id().is_some()
+        {
             return false;
         }
         self.is_main()

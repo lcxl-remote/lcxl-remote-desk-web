@@ -66,6 +66,7 @@ struct ReadChecks<'a> {
     worker_status: bool,
     context: Vec<ContextCheck<'a>>,
     pending: Vec<PendingRead>,
+    issues: Vec<IssueReadScope>,
 }
 
 fn selected_report<'a>(
@@ -144,12 +145,23 @@ impl Batch {
             ContextSelector<'a>,
             usize,
         ) -> Result<Option<ContextRead>, sea_orm::DbErr>,
-        read_devices: impl AsyncFn(
-            &request::Model,
-            &FrozenOwnerInput,
-        ) -> Result<Option<Vec<RequestDevice>>, AssistantStoreError>,
+        read_ports: RequestReadPorts<
+            '_,
+            impl AsyncFn(
+                &request::Model,
+                &FrozenOwnerInput,
+            ) -> Result<Option<Vec<RequestDevice>>, AssistantStoreError>,
+            impl ExternalIssueReader,
+        >,
     ) -> Result<ModelTurn, AgentError> {
+        let RequestReadPorts {
+            devices: read_devices,
+            issues: issue_reader,
+        } = read_ports;
         check().await?;
+        if let Some(tool) = self.issue_tool(db, issue_reader).await? {
+            request.tools.push(tool);
+        }
         if request.tools.is_empty() {
             return model.call(request, &mut NullTurnSink).await;
         }
@@ -176,10 +188,24 @@ impl Batch {
                 turn,
                 &scopes,
                 &read_context,
-                &read_devices,
+                RequestReadPorts {
+                    devices: &read_devices,
+                    issues: issue_reader,
+                },
             )
             .await
             .map_err(|error| error.into_agent_error())?;
+        for source in &reads.issues {
+            if !self
+                .issue_source_current(db, source)
+                .await
+                .map_err(|error| error.into_agent_error())?
+                || !issue_reader.permitted(&source.access).await?
+            {
+                return Err(inaccessible());
+            }
+        }
+        let fetched_issues = !reads.issues.is_empty();
         let fetched_context = !reads.context.is_empty();
         let fetched_pending = !reads.pending.is_empty();
         if fetched_context {
@@ -207,7 +233,12 @@ impl Batch {
                 return Err(inaccessible());
             }
         }
-        if reads.report_history || reads.worker_status || fetched_context || fetched_pending {
+        if reads.report_history
+            || reads.worker_status
+            || fetched_context
+            || fetched_pending
+            || fetched_issues
+        {
             check().await?;
         }
         model.call(request, &mut NullTurnSink).await
@@ -225,11 +256,19 @@ impl Batch {
             ContextSelector<'a>,
             usize,
         ) -> Result<Option<ContextRead>, sea_orm::DbErr>,
-        read_devices: &impl AsyncFn(
-            &request::Model,
-            &FrozenOwnerInput,
-        ) -> Result<Option<Vec<RequestDevice>>, AssistantStoreError>,
+        read_ports: RequestReadPorts<
+            '_,
+            impl AsyncFn(
+                &request::Model,
+                &FrozenOwnerInput,
+            ) -> Result<Option<Vec<RequestDevice>>, AssistantStoreError>,
+            impl ExternalIssueReader,
+        >,
     ) -> Result<ReadChecks<'_>, AssistantStoreError> {
+        let RequestReadPorts {
+            devices: read_devices,
+            issues: issue_reader,
+        } = read_ports;
         let label = turn
             .provider_meta
             .data_envelope
@@ -254,13 +293,28 @@ impl Batch {
         for (index, call) in turn.tool_calls.iter().enumerate() {
             let mut labels = vec![label.clone()];
             let body = if call.name == READ_PENDING {
-                match self.pending_call(db, call, read_devices).await? {
+                match self.pending_call(db, call, &read_devices).await? {
                     Some(result) if result.body.len() <= remaining => {
                         remaining -= result.body.len();
                         labels.push(result.label.clone());
                         let body = result.body.clone();
                         reads.pending.push(result);
                         body
+                    }
+                    Some(_) => r#"{"status":"exceeds_batch_context"}"#.into(),
+                    None => r#"{"status":"unavailable"}"#.into(),
+                }
+            } else if call.name == desk_diagnose_core::external_tools::TOOL_NAME {
+                match self
+                    .issue_call(db, issue_reader, call)
+                    .await
+                    .map_err(|_| AssistantStoreError::Inaccessible)?
+                {
+                    Some(result) if result.content.len() <= remaining => {
+                        remaining -= result.content.len();
+                        labels.push(result.label);
+                        reads.issues.push(result.source);
+                        result.content
                     }
                     Some(_) => r#"{"status":"exceeds_batch_context"}"#.into(),
                     None => r#"{"status":"unavailable"}"#.into(),
@@ -364,6 +418,9 @@ impl Batch {
             let mut message = ChatMessage::tool_result(&id, &call.id, &body);
             let tool = match call.name.as_str() {
                 READ_PENDING => READ_PENDING,
+                desk_diagnose_core::external_tools::TOOL_NAME => {
+                    desk_diagnose_core::external_tools::TOOL_NAME
+                }
                 tools::LIST => tools::LIST,
                 tools::STATUS => tools::STATUS,
                 _ => READ_REPORT,

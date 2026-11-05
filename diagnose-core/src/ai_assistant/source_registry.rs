@@ -29,6 +29,7 @@ pub enum RegisteredSourceContract {
     FrozenPersonalization,
     PublicSystem,
     PublicResearchResult,
+    ExternalIssueResult,
     DeviceObservation,
     UiObservation,
     MediaObservation,
@@ -139,7 +140,8 @@ fn registration(
             false,
             envelope.sensitivity != Sensitivity::Secret,
         ),
-        RegisteredSourceContract::PublicResearchResult => {
+        RegisteredSourceContract::PublicResearchResult
+        | RegisteredSourceContract::ExternalIssueResult => {
             (SourcePolicyClass::VisibleProviderText, false, false, true)
         }
         RegisteredSourceContract::DeviceObservation | RegisteredSourceContract::UiObservation => {
@@ -221,6 +223,11 @@ fn classify(envelope: &DataEnvelope) -> RegisteredSourceContract {
             }
             _ => {}
         }
+    }
+    if crate::external_tools::is_issue_read_label(envelope)
+        || crate::issue_authority::is_issue_workset_label(envelope)
+    {
+        return RegisteredSourceContract::ExternalIssueResult;
     }
     let registry = super::ai_assistant_provider_registry_ref();
     let Some(capability) = registry.capability_for_tool(&envelope.provenance.source_tool_name)

@@ -46,6 +46,8 @@ impl ModelSeam for MeteredModel {
             .model_egress_policy()?
             .ok_or_else(|| transport_error("AI assistant model egress policy is unavailable"))?;
         let authorized = policy
+            .for_request(request)
+            .map_err(|error| error.agent_error())?
             .authorize_request(request.clone())
             .map_err(|error| error.agent_error())?;
         self.inner.prepare_request(&authorized.request)
@@ -74,6 +76,8 @@ impl ModelSeam for MeteredModel {
             .model_egress_policy()?
             .ok_or_else(|| transport_error("AI assistant model egress policy is unavailable"))?;
         let authorized = policy
+            .for_request(request)
+            .map_err(|error| error.agent_error())?
             .authorize_request(request.clone())
             .map_err(|error| error.agent_error())?;
         self.inner
@@ -178,6 +182,9 @@ impl ModelSeam for MeteredModel {
         let policy = self
             .model_egress_policy()?
             .ok_or_else(|| transport_error("AI assistant model egress policy is unavailable"))?;
+        let policy = policy
+            .for_request(&request)
+            .map_err(|error| error.agent_error())?;
         let authorized = Box::new(policy.authorize_request(*request).map_err(|error| {
             log::warn!("[ai-assistant] model egress denied: {error}");
             error.agent_error()
@@ -211,13 +218,13 @@ impl ModelSeam for MeteredModel {
         let ordinary_receipt_id = format!(
             "model-egress-{:x}",
             Sha256::digest(
-                format!("{}:{physical_identity}", self.export_authorization_id).as_bytes(),
+                format!("{}:{physical_identity}", policy.export_authorization_id).as_bytes(),
             )
         );
         let egress_store = crate::model_egress_store::SignalModelEgressStore::new(self.db.clone());
         preflight.reason(desk_diagnose_core::model_observability::NotStartedReason::Unknown);
         let dispatch = desk_diagnose_core::future::boxed(|| async {
-            self.record_dispatch(&authorized, model_call_ordinal, ordinary_receipt_id)
+            self.record_dispatch(&authorized, model_call_ordinal, ordinary_receipt_id, &policy.export_authorization_id)
                 .await
         })
         .await
@@ -396,3 +403,6 @@ impl ModelSeam for MeteredModel {
 
 mod identity;
 pub(crate) use identity::{ModelExportSource, model_export_id};
+
+#[cfg(test)]
+mod tests;

@@ -221,6 +221,8 @@ fn prepare_live_targets(
     names.dedup();
     live_read::capture(
         &ReadContextSelection {
+            external_issues: Vec::new(),
+            external_issue_sources: Vec::new(),
             tool_names: names,
             expires_at: None,
             object_attachments: vec![],
@@ -2504,6 +2506,23 @@ async fn prepare_composed_turn(
                                     Ok(mut selection) => {
                                         selection.object_attachments = selected_objects;
                                         selection.live_targets = live_targets;
+                                        selection.external_issues =
+                                            if let Some(original) = &original_read_context {
+                                                selection.external_issue_sources = original.external_issue_sources.clone();
+                                                original.external_issues.clone()
+                                            } else if let Some(frozen)=desk_assistant_data_store::main_request::frozen_read_selection(
+                                                &db,owner_queue.as_deref(),&actor_id,&conversation_id,&target_device_id,&ask,
+                                            ).await.map_err(|error| error.into_agent_error())? {
+                                                selection.external_issue_sources = frozen.external_issue_sources;
+                                                frozen.external_issues
+                                            } else {
+                                                crate::issue_connections::select_issues(
+                                                    &db,
+                                                    &actor_id,
+                                                    &ask.selected_issues,
+                                                )
+                                                .await?
+                                            };
                                         selection
                                     }
                                     Err(error) => {

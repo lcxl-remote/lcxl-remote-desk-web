@@ -193,6 +193,8 @@ mod tests {
                 member_generation: Some(1),
             }],
             reads: desk_diagnose_core::input_read_context::ReadContextSelection {
+                external_issues: Vec::new(),
+                external_issue_sources: Vec::new(),
                 tool_names: Vec::new(),
                 expires_at: None,
                 object_attachments: Vec::new(),

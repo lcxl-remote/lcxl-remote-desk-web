@@ -201,6 +201,10 @@ export const router = createBrowserRouter([
                         lazy: async () => ({ Component: (await import('@/features/settings/web-search-settings')).WebSearchSettings }),
                     },
                     {
+                        path: 'issue-connections',
+                        lazy: async () => ({ Component: (await import('@/features/settings/issue-connections-settings')).IssueConnectionsSettings }),
+                    },
+                    {
                         path: 'schedule-budget',
                         lazy: async () => ({ Component: (await import('@/features/settings/schedule-budget-settings')).default }),
                     },

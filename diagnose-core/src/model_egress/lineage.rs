@@ -58,7 +58,8 @@ pub(crate) fn is_public_system_prompt(input: &DataEnvelope) -> bool {
         && input.sensitivity == Sensitivity::Public
         && input.retention.expires_at_unix_ms.is_none()
         && !input.retention.delete_with_run
-        && input.allowed_destinations.len() == 1
+        && (input.allowed_destinations.len() == 1
+            || super::issue_reply::is_issue_reply_instruction(input))
         && matches!(&input.content, ContentRef::ImmutableBlob {blob_id, sha256, size_bytes, media_type}
             if blob_id == &format!("system-prompt-content-{}", &input.digest_sha256[..32])
                 && sha256 == &input.digest_sha256 && *size_bytes > 0

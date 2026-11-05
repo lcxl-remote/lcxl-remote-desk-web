@@ -176,6 +176,18 @@ pub(crate) async fn cleanup_agent_sessions(
     cutoff: DateTimeUtc,
     now: DateTimeUtc,
 ) -> Result<(u64, u64), DbErr> {
+    let txn = crate::db::begin_write(db, crate::entity::agent_issue_reply::Entity).await?;
+    desk_assistant_data_store::issue_reply::lifecycle::expire_on(
+        &txn,
+        now.timestamp_millis(),
+        AGENT_SESSION_BATCH_ROWS,
+    )
+    .await
+    .map_err(|error| match error {
+        desk_assistant_data_store::AssistantStoreError::Backend(error) => error,
+        _ => DbErr::Custom("Issue reply expiry failed".into()),
+    })?;
+    txn.commit().await?;
     let store = crate::agent_session_store::SignalAgentSessionStore::new(db.clone());
     crate::agent_session_store::retire_unsupported_sessions(
         db,

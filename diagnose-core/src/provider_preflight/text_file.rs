@@ -2162,6 +2162,8 @@ mod tests {
                     .is_ok()
             );
             let original = crate::input_read_context::ReadContextSelection {
+                external_issues: Vec::new(),
+                external_issue_sources: Vec::new(),
                 tool_names: vec![name.into()],
                 expires_at: None,
                 object_attachments: vec![],

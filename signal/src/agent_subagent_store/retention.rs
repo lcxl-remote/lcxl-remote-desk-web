@@ -53,6 +53,17 @@ pub(crate) async fn tombstone_on<C: ConnectionTrait + crate::config::ConfigConne
     if row.actor_id != actor || row.device_id != device {
         return Err(invalid());
     }
+    desk_assistant_data_store::issue_reply::lifecycle::retire_conversation_on(
+        db,
+        actor,
+        conversation,
+        now_ms,
+    )
+    .await
+    .map_err(|error| match error {
+        desk_assistant_data_store::AssistantStoreError::Backend(error) => error,
+        _ => invalid(),
+    })?;
     Ok(())
 }
 

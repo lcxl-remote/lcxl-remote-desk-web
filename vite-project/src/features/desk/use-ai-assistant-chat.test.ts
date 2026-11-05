@@ -30,6 +30,22 @@ function stubSnapshotFetch<Args extends unknown[]>(fetchSnapshot: (...args: Args
 }
 
 describe('useAiAssistantChat', () => {
+    it('freezes issue selections with the original message when delivery is retried', async () => {
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: null }) }));
+        const sendMessage = vi.fn((_type: number, _payload: unknown, _to?: string, request?: string) => request!)
+            .mockImplementationOnce(() => { throw new Error('offline'); });
+        const { result } = renderHook(() => useAiAssistantChat({ deskId: '', conversationStorageScope: 'personal:issue-sources',
+            subscribe: () => () => undefined, sendMessage }));
+        const issue = { connection_ref: 'forge', owner: 'Org', repository: 'Project', issue_number: 4 };
+        act(() => { expect(result.current.start('Read this issue', 'en-US', [], false, null, [issue])).toBe(true); });
+        issue.issue_number = 5;
+        await act(async () => { await result.current.retryDelivery(); });
+        expect(sendMessage.mock.calls[0][1]).toMatchObject({ selected_issues: [{
+            connection_ref: 'forge', owner: 'Org', repository: 'Project', issue_number: 4,
+        }] });
+        expect(sendMessage.mock.calls[1]).toEqual(sendMessage.mock.calls[0]);
+    });
+
     it('retries a personal request with its original device selection', async () => {
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: null }) }));
         const sendMessage = vi.fn((_type: number, _payload: unknown, _to?: string, request?: string) => request!)

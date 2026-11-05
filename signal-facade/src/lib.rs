@@ -4,6 +4,8 @@ pub mod controller;
 pub mod device_code;
 pub mod error;
 pub mod grant;
+#[cfg(feature = "mcp-client")]
+pub mod mcp_client;
 pub mod model;
 pub mod service;
 pub mod terminal_completion;

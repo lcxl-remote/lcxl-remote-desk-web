@@ -17,6 +17,8 @@ fn word_approval_requires_authenticated_read_selected_source_and_current_directo
     directory.token = "directory".into();
     let document = derived_reference(ObjectKind::Document);
     let original = ReadContextSelection {
+        external_issues: Vec::new(),
+        external_issue_sources: Vec::new(),
         tool_names: vec![windows_word::INSPECT_TOOL.into()],
         expires_at: None,
         object_attachments: vec![attachment("file", ContextAttachmentKind::File, &file)],

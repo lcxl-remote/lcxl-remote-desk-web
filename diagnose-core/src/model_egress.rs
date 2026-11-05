@@ -24,8 +24,11 @@ use crate::sink_authorizer::{
 mod lineage;
 pub(crate) use lineage::is_public_system_prompt;
 mod input_snapshot;
+mod issue_reply;
 mod native_output;
 pub use input_snapshot::{NativeModelInputExport, NativeModelInputSnapshot};
+pub use issue_reply::authorize_issue_delivery;
+pub(crate) use issue_reply::validate_issue_reply_messages;
 pub use lineage::{
     InvalidModelInputLineage, ModelInputLineage, is_audited_public_system_prompt,
     model_output_message_envelope, project_model_input_lineage, validate_model_input_lineage,
@@ -709,6 +712,207 @@ mod tests {
             byte_cap: MAX_SINK_BYTES,
             permission_resume: false,
         }
+    }
+
+    #[test]
+    fn issue_delivery_requires_every_input_to_allow_the_exact_audience() {
+        use crate::sink_authorizer::SinkInput;
+        use desk_agent_protocol::data_lineage::ExternalIssueAudience;
+
+        let issue = |issue_id, audience| DestinationIdentity::ExternalIssue {
+            connection_id: "gitea-test".into(),
+            instance_sha256: "a".repeat(64),
+            account_id: 1,
+            repository_id: 2,
+            issue_id,
+            audience,
+        };
+        let original = issue(3, ExternalIssueAudience::Private);
+        let work_item = envelope(
+            "issue-context",
+            "call_external_tool",
+            b"Frozen issue",
+            Sensitivity::UserContent,
+            vec![destination(), original.clone()],
+        );
+        let report = ModelTurn {
+            text: "Frozen reply".into(),
+            ..Default::default()
+        };
+        let policy = policy(&[]);
+        let authorize = |target: &DestinationIdentity, derived: &DataEnvelope| {
+            DefaultSinkAuthorizer.authorize(
+                target,
+                &[SinkInput {
+                    envelope: derived,
+                    bytes: report.text.as_bytes(),
+                }],
+                100,
+                MAX_SINK_BYTES,
+            )
+        };
+        let derived = policy
+            .derive_model_output_envelope(&report, std::slice::from_ref(&work_item))
+            .unwrap();
+        assert!(authorize(&original, &derived).is_ok());
+        for target in [
+            issue(4, ExternalIssueAudience::Private),
+            issue(3, ExternalIssueAudience::Public),
+        ] {
+            assert_eq!(
+                authorize(&target, &derived).unwrap_err(),
+                SinkAuthorizationError::DestinationNotAllowed
+            );
+        }
+
+        let device_only = envelope(
+            "device-evidence",
+            "read_recent_logs",
+            b"Private log",
+            Sensitivity::Sensitive,
+            vec![destination()],
+        );
+        let mixed = policy
+            .derive_model_output_envelope(&report, &[work_item, device_only])
+            .unwrap();
+        assert_eq!(
+            authorize(&original, &mixed).unwrap_err(),
+            SinkAuthorizationError::DestinationNotAllowed
+        );
+    }
+
+    #[test]
+    fn issue_reply_uses_fixed_instructions_and_rechecks_the_original_source_expiry() {
+        let access = crate::external_tools::IssueAccess {
+            connection_ref: "gitea-test".into(),
+            target: crate::external_tools::IssueTarget {
+                platform: desk_agent_protocol::external_tools::IssuePlatform::Gitea,
+                instance: "https://forge.test/".into(),
+                account_id: 1,
+                repository_id: 2,
+                owner: "org".into(),
+                repository: "project".into(),
+                issue_number: 3,
+                issue_id: 3,
+                private: true,
+                internal: false,
+            },
+        };
+        let issue = access.target.destination(access.connection_ref.clone());
+        let origin = crate::issue_reply::ReplyOrigin {
+            actor_id: "owner".into(),
+            root_conversation_id: "root".into(),
+            request_id: "request-a".into(),
+            execution_conversation_id: "issue-work".into(),
+            tool_call_id: "publish-1".into(),
+            input_revision: 1,
+            control_revision: 0,
+            authorization_id: "grant-a".into(),
+            authorization_revision: 1,
+        };
+        let mut label = envelope(
+            "issue-context",
+            "call_external_tool",
+            b"Original issue",
+            Sensitivity::UserContent,
+            vec![destination(), issue.clone()],
+        );
+        let expiry = 120_000;
+        label.retention.expires_at_unix_ms = Some(expiry);
+        let material = message(
+            "issue-material",
+            ChatRole::UntrustedOutput,
+            "Original issue",
+            Some(label),
+        );
+        let policy = policy(&[]);
+        let request = policy
+            .prepare_issue_reply_call(origin.clone(), access.clone(), vec![material.clone()])
+            .unwrap();
+        let export_id = crate::issue_reply::publication_export_id(&origin, &access);
+        assert_ne!(policy.export_authorization_id, export_id);
+        assert_eq!(request.issue_reply.as_ref().unwrap().origin(), &origin);
+        assert_eq!(request.issue_reply.as_ref().unwrap().access(), &access);
+        for change in 0..6 {
+            let mut altered = request.clone();
+            match change {
+                0 => altered.context_conversation_id = Some("other-work".into()),
+                1 => altered.messages.push(ChatMessage::text(
+                    "private",
+                    ChatRole::User,
+                    "Private history",
+                )),
+                2 => altered.messages[0].text.push_str(" Extra instruction"),
+                3 => altered.compression_identity = Some("summary".into()),
+                4 => altered.tools.push(crate::chat::ToolSpec {
+                    name: "write".into(),
+                    description: "write".into(),
+                    parameters_schema: serde_json::json!({}),
+                }),
+                _ => altered.messages[1].data_envelope = None,
+            }
+            assert!(
+                policy.clone().for_request(&altered).is_err(),
+                "case {change}"
+            );
+        }
+        let ordinary = ModelRequest::text_only(Vec::new(), crate::prompt::ResponseFormatSpec::None);
+        assert_eq!(
+            policy
+                .clone()
+                .for_request(&ordinary)
+                .unwrap()
+                .export_authorization_id,
+            policy.export_authorization_id
+        );
+        let policy = policy.for_request(&request).unwrap();
+        assert_eq!(policy.export_authorization_id, export_id);
+        let prepared = policy.authorize_request(request).unwrap();
+        assert!(prepared.request.tools.is_empty());
+        assert_eq!(prepared.request.messages.len(), 2);
+        assert_eq!(prepared.request.messages[0].role, ChatRole::System);
+        assert_eq!(prepared.request.messages[1], material);
+        let inputs =
+            project_model_input_lineage(&prepared.audit, &prepared.input_envelopes).unwrap();
+        assert!(inputs[0].public_system_prompt);
+        let turn = ModelTurn {
+            text: "Frozen reply".into(),
+            ..Default::default()
+        };
+        let output = policy
+            .derive_model_output_envelope(&turn, &prepared.input_envelopes)
+            .unwrap();
+        let snapshot = prepared.input_snapshot().unwrap();
+        let evidence = NativeModelOutputEvidence::from_receipt(
+            "physical-call",
+            "issue-work",
+            &policy.export_authorization_id,
+            policy.now_unix_ms,
+            200,
+            &prepared.audit,
+            &inputs,
+            &snapshot,
+            &output,
+        )
+        .unwrap();
+        let proof = NativeModelOutputSources {
+            evidence,
+            inputs,
+            input_snapshot: snapshot,
+        };
+        authorize_issue_delivery(&issue, &proof, &output, &turn.text, 300).unwrap();
+        assert!(matches!(
+            authorize_issue_delivery(&issue, &proof, &output, &turn.text, expiry),
+            Err(ModelEgressError::Sink(
+                SinkAuthorizationError::ExpiredEnvelope
+            ))
+        ));
+        assert!(matches!(
+            authorize_issue_delivery(&issue, &proof, &output, "Changed body", 300),
+            Err(ModelEgressError::Sink(
+                SinkAuthorizationError::DigestMismatch
+            ))
+        ));
     }
 
     #[test]

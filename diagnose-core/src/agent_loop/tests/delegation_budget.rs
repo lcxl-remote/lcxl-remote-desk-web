@@ -10,9 +10,10 @@ use crate::{
 #[derive(Default)]
 pub(super) struct BudgetSessions {
     pub(super) sessions: MemSession,
-    deny: Option<DelegationCallKind>,
+    pub(super) deny: Option<DelegationCallKind>,
+    pub(super) deny_publication: bool,
     pub(super) reservations: RefCell<Vec<DelegationCallReservation>>,
-    settlements: RefCell<Vec<(String, Option<GoalUsage>)>>,
+    pub(super) settlements: RefCell<Vec<(String, Option<GoalUsage>)>>,
 }
 
 #[async_trait(?Send)]
@@ -40,7 +41,9 @@ impl SessionSeam for BudgetSessions {
         upper: GoalUsage,
         _now: &str,
     ) -> Result<CallAdmission, AgentError> {
-        if self.deny == Some(kind) {
+        if self.deny == Some(kind)
+            || (self.deny_publication && logical_id.starts_with("issue-reply:"))
+        {
             return Ok(CallAdmission::Rejected(
                 crate::subagent::reservation::CallRejection::Budget(
                     crate::subagent::budget::BudgetDimension::ModelTokens,

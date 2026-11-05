@@ -80,6 +80,8 @@ async fn all_object_read_grants_ignore_later_objects_display_names_and_ambient_r
                 implicit_fresh_object_refs: &ambient,
             };
             let original = ReadContextSelection {
+                external_issues: Vec::new(),
+                external_issue_sources: Vec::new(),
                 tool_names: vec![name.into()],
                 expires_at: Some(
                     chrono::DateTime::from_timestamp_millis(deadline as i64)

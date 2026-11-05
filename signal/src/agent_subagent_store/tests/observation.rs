@@ -218,6 +218,7 @@ pub(super) async fn record_accepted_provider(
             &txn,
             &id,
             &parent.conversation_id,
+            false,
         )
         .await
         .unwrap();

@@ -138,7 +138,7 @@ async fn prepare_plain(label: &str, needs_export: bool) -> PlainAdmission {
     )
     .await
     .unwrap();
-    SignalModelEgressStore::link_context_dispatch_on(&txn, "plain-native", "root")
+    SignalModelEgressStore::link_context_dispatch_on(&txn, "plain-native", "root", false)
         .await
         .unwrap();
     model_gate::authorize_on(&txn, Some(&prepared), &request, "plain-native")
