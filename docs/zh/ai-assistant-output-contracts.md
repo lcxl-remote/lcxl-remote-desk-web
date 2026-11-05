@@ -28,6 +28,7 @@
 | `cancel_scheduled_task` | `ScheduledTaskCancellationReceipt` | 1 | inline |
 | `request_permissions` | `PermissionRequestReceipt` | 1 | inline |
 | `describe_tools` | `ToolDescriptionList` | 1 | inline |
+| `load_skill` | `SkillLoadReceipt` | 1 | inline |
 | `read_conversation_attachment` | `ReadPage` | 1 | inline |
 | `load_conversation_history` | `HistoryPage` | 1 | inline |
 | `search_memories` | `MemorySearchResult` | 1 | inline |

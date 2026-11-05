@@ -307,6 +307,7 @@ fn native_control(source: &DataEnvelope) -> bool {
             | "schedule_query"
             | "schedule_cancellation"
             | "schedule_proposal_failed"
+            | crate::skills::LOAD_TOOL
             | crate::issue_reply::PREPARE_TOOL_NAME => {
                 let Some(id) = source.envelope_id.strip_prefix("status-result-") else {
                     return false;

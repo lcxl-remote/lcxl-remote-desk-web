@@ -26,6 +26,7 @@ mod external_tools;
 mod issue_reply;
 mod original_results;
 mod retrieval_accounting;
+mod skills;
 mod subagents;
 mod tool_input_metrics;
 mod version_handoff;
@@ -1369,7 +1370,14 @@ async fn targetless_assistant_answers_without_advertising_device_tools() {
         LoopOutcome::Answered("I can help with that".into())
     );
     assert!(tools.calls.borrow().is_empty());
-    assert!(model.requests.borrow()[0].tools.is_empty());
+    assert_eq!(
+        model.requests.borrow()[0]
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>(),
+        [crate::skills::LOAD_TOOL]
+    );
     let stored = sess.inner.borrow();
     let stored = stored.as_ref().unwrap();
     assert_eq!(stored.turn_state, TurnState::Idle);
@@ -4920,7 +4928,7 @@ async fn exact_permission_resume_preserves_other_tool_definitions() {
             .iter()
             .map(|tool| tool.name.as_str())
             .collect::<Vec<_>>(),
-        vec!["exact_action", "inspect"]
+        vec!["exact_action", "inspect", "load_skill"]
     );
     assert!(
         requests[1].tools.iter().any(|tool| tool.name == "inspect"),
@@ -5019,7 +5027,7 @@ async fn exact_provider_permission_resume_preserves_capability_discovery() {
             .iter()
             .map(|tool| tool.name.as_str())
             .collect::<Vec<_>>(),
-        vec!["describe_tools", "read_system_info"]
+        vec!["describe_tools", "load_skill", "read_system_info"]
     );
     assert!(
         requests.borrow()[0].tools.iter().any(
@@ -5302,7 +5310,7 @@ async fn exact_permissioned_read_clears_the_continuation_checkpoint_after_the_ca
             .iter()
             .map(|tool| tool.name.as_str())
             .collect::<Vec<_>>(),
-        vec!["exact_read", "inspect"]
+        vec!["exact_read", "inspect", "load_skill"]
     );
     assert!(requests[1].tools.iter().any(|tool| tool.name == "inspect"));
     assert!(

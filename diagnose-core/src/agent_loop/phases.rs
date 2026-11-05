@@ -288,6 +288,12 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
     if let Some(tool) = crate::issue_reply::tool(&deps.tools.issue_reply_access(session).await?)? {
         callable_registry.push(tool);
     }
+    if session.surface == AgentSessionSurface::AiAssistant
+        && deps.model.command_completion_event_id().is_none()
+    {
+        session.skills.reset_for_input(session.input_revision);
+        callable_registry.push(session.skills.tool(session.input_revision));
+    }
     let mut exposed = exposed_for_session(&callable_registry, session);
     if deps.session_seam.subagents(session).is_none() {
         exposed.retain(|tool| crate::subagent::tools::effect(tool.name()).is_none());
@@ -832,6 +838,16 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
             _ => None,
         };
         let mut messages = vec![*system_prompt];
+        if session.surface == AgentSessionSurface::AiAssistant
+            && deps.model.command_completion_event_id().is_none()
+            && let Some(policy) = deps.model.model_egress_policy()?
+        {
+            messages.extend(
+                session
+                    .skills
+                    .project(session.input_revision, &policy.destination)?,
+            );
+        }
         if session.surface == AgentSessionSurface::AiAssistant
             && session.agent_role.binding().is_none()
             && let Some(data) = &session.assistant_data
@@ -4744,6 +4760,40 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                                                     }
                                                 }
 
+                                                Ok(None)
+                                            })
+                                        }
+                                        ToolEffect::SkillLoading => {
+                                            crate::future::phase(|| async {
+                                                sink.on_tool_started(
+                                                    &call.name,
+                                                    &call.id,
+                                                    &call.arguments_json,
+                                                );
+                                                let result = session
+                                                    .skills
+                                                    .apply(session.input_revision, call);
+                                                tool_observation.preflight_result(&result);
+                                                let (content, ok) = match result {
+                                                    Ok(content) => (content, true),
+                                                    Err(error) => (
+                                                        crate::model_input::describe_error(
+                                                            &call.name,
+                                                            &error.message,
+                                                        ),
+                                                        false,
+                                                    ),
+                                                };
+                                                append_internal_tool_result(
+                                                    session,
+                                                    turn.provider_meta.data_envelope.as_ref(),
+                                                    (state.mint)(),
+                                                    &call.id,
+                                                    content,
+                                                    crate::skills::LOAD_TOOL,
+                                                )?;
+                                                deps.session_seam.save(session).await?;
+                                                finish_tool(session, &call.id, ok, sink);
                                                 Ok(None)
                                             })
                                         }

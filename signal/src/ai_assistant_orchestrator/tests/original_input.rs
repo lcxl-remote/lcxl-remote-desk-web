@@ -583,13 +583,14 @@ async fn queued_owner_input_roundtrip(workbench: bool, delete_workbench: bool, w
     assert!(!projected.contains(&ask.question));
     if let Some((task, reports)) = &wake {
         let tools = batch_body["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), if with_issues { 5 } else { 4 });
+        assert_eq!(tools.len(), if with_issues { 6 } else { 5 });
         assert_eq!(tools[0]["function"]["name"], "read_coordination_report");
         assert_eq!(tools[1]["function"]["name"], "read_coordination_request");
-        assert_eq!(tools[2]["function"]["name"], "list_subagents");
-        assert_eq!(tools[3]["function"]["name"], "get_subagent_status");
+        assert_eq!(tools[2]["function"]["name"], "load_skill");
+        assert_eq!(tools[3]["function"]["name"], "list_subagents");
+        assert_eq!(tools[4]["function"]["name"], "get_subagent_status");
         if with_issues {
-            assert_eq!(tools[4]["function"]["name"], "call_external_tool");
+            assert_eq!(tools[5]["function"]["name"], "call_external_tool");
         }
         assert!(projected.contains(&reports[0].event_id));
         assert!(projected.contains(&reports[1].event_id));

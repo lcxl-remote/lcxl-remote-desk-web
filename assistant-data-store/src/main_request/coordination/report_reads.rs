@@ -64,6 +64,7 @@ struct ContextCheck<'a> {
 struct ReadChecks<'a> {
     report_history: bool,
     worker_status: bool,
+    skill_loaded: bool,
     context: Vec<ContextCheck<'a>>,
     pending: Vec<PendingRead>,
     issues: Vec<IssueReadScope>,
@@ -235,6 +236,7 @@ impl Batch {
         }
         if reads.report_history
             || reads.worker_status
+            || reads.skill_loaded
             || fetched_context
             || fetched_pending
             || fetched_issues
@@ -290,9 +292,35 @@ impl Batch {
 
         let mut remaining = MAX_INPUT_BYTES;
         let mut reads = ReadChecks::default();
+        let mut skills = desk_diagnose_core::skills::SkillState::default();
+        let mut skill_bytes = 0;
         for (index, call) in turn.tool_calls.iter().enumerate() {
             let mut labels = vec![label.clone()];
-            let body = if call.name == READ_PENDING {
+            let body = if self.workbench && call.name == desk_diagnose_core::skills::LOAD_TOOL {
+                let mut next = skills.clone();
+                match next.apply(0, call) {
+                    Ok(receipt) => {
+                        let projected = next
+                            .project(0, &self.destination)
+                            .map_err(|_| AssistantStoreError::Inaccessible)?;
+                        let bytes = projected
+                            .iter()
+                            .skip(1)
+                            .map(|message| message.text.len())
+                            .sum::<usize>();
+                        if bytes.saturating_sub(skill_bytes) <= remaining {
+                            remaining -= bytes.saturating_sub(skill_bytes);
+                            skill_bytes = bytes;
+                            skills = next;
+                            reads.skill_loaded = true;
+                            receipt
+                        } else {
+                            r#"{"status":"exceeds_batch_context"}"#.into()
+                        }
+                    }
+                    Err(_) => r#"{"status":"unavailable"}"#.into(),
+                }
+            } else if call.name == READ_PENDING {
                 match self.pending_call(db, call, &read_devices).await? {
                     Some(result) if result.body.len() <= remaining => {
                         remaining -= result.body.len();
@@ -417,6 +445,7 @@ impl Batch {
             let id = format!("{}-read-{index}", self.id);
             let mut message = ChatMessage::tool_result(&id, &call.id, &body);
             let tool = match call.name.as_str() {
+                desk_diagnose_core::skills::LOAD_TOOL => desk_diagnose_core::skills::LOAD_TOOL,
                 READ_PENDING => READ_PENDING,
                 desk_diagnose_core::external_tools::TOOL_NAME => {
                     desk_diagnose_core::external_tools::TOOL_NAME
@@ -431,6 +460,13 @@ impl Batch {
             );
             request.messages.push(message);
         }
+        request.messages.extend(
+            skills
+                .project(0, &self.destination)
+                .map_err(|_| AssistantStoreError::Inaccessible)?
+                .into_iter()
+                .skip(1),
+        );
         request.tools.clear();
         Ok(reads)
     }

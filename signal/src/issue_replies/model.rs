@@ -67,7 +67,10 @@ pub(crate) async fn authorize_model_on(
     };
     if work.origin != *origin
         || work.access != *binding.access()
-        || request.messages.get(1..) != Some(std::slice::from_ref(&work.material))
+        || binding
+            .issue_materials(&request.messages)
+            .map_err(|_| denied())?
+            != std::slice::from_ref(&work.material)
     {
         return Err(denied());
     }

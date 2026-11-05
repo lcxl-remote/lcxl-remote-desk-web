@@ -9,6 +9,139 @@ struct Reader {
     reads: AtomicUsize,
 }
 
+struct SkillRoutingModel {
+    policy: desk_diagnose_core::model_egress::ModelEgressPolicy,
+    requests: std::cell::RefCell<Vec<ModelRequest>>,
+}
+
+#[async_trait::async_trait(?Send)]
+impl desk_diagnose_core::seam::ModelSeam for SkillRoutingModel {
+    fn model_output_token_limit(&self, _: &ModelRequest) -> Result<i64, AgentError> {
+        Ok(1024)
+    }
+    async fn context_policy(
+        &self,
+        _: desk_diagnose_core::model_capability::ModelRequirements,
+    ) -> Result<desk_diagnose_core::model_context::PinnedContextPolicy, AgentError> {
+        Err(desk_diagnose_core::subagent::invalid(
+            "Unexpected context-policy lookup in routing seam",
+        ))
+    }
+    async fn call(
+        &self,
+        request: ModelRequest,
+        _: &mut dyn desk_diagnose_core::seam::TurnSink,
+    ) -> Result<desk_diagnose_core::chat::ModelTurn, AgentError> {
+        use desk_diagnose_core::{
+            chat::{ModelTurn, StopReason},
+            model_profile::WireProtocol,
+            replay::{ProviderResponseMeta, ReplayDisposition, SourceContextKey},
+        };
+        let first = self.requests.borrow().is_empty();
+        let authorized = self
+            .policy
+            .authorize_request(request.clone())
+            .map_err(|error| error.agent_error())?;
+        self.requests.borrow_mut().push(request);
+        let mut turn = if first {
+            ModelTurn { stop_reason: StopReason::ToolUse, tool_calls: vec![
+                ToolCall { id: "load-skill".into(), name: desk_diagnose_core::skills::LOAD_TOOL.into(), arguments_json: serde_json::json!({"skill_ref":"issue-analysis"}).to_string() },
+                ToolCall { id: "load-reference".into(), name: desk_diagnose_core::skills::LOAD_TOOL.into(), arguments_json: serde_json::json!({"skill_ref":"issue-analysis","resource":"references/checklist.md"}).to_string() },
+            ], provider_meta: ProviderResponseMeta { stop_reason: StopReason::ToolUse,
+                replay: Some(ReplayDisposition::NotRequired { source_context_key: SourceContextKey::derive(WireProtocol::OpenAiChatCompletions, "test", "test", "test") }), ..Default::default() }, ..Default::default() }
+        } else {
+            ModelTurn {
+                text: "routed".into(),
+                ..Default::default()
+            }
+        };
+        turn.provider_meta.data_envelope = Some(
+            self.policy
+                .derive_model_output_envelope(&turn, &authorized.input_envelopes)
+                .map_err(|error| error.agent_error())?,
+        );
+        Ok(turn)
+    }
+}
+
+#[tokio::test]
+async fn batch_skill_load_projects_first_party_text_and_rechecks_its_original_lease() {
+    for revoke in [false, true] {
+        let (db, _, batch, request) = setup().await;
+        let model = SkillRoutingModel {
+            policy: desk_diagnose_core::model_egress::ModelEgressPolicy {
+                destination: batch.destination.clone(),
+                selected_source_tools: Default::default(),
+                export_authorization_id: batch.id.clone(),
+                now_unix_ms: chrono::Utc::now().timestamp_millis() as u64,
+                byte_cap: desk_diagnose_core::sink_authorizer::MAX_SINK_BYTES,
+                permission_resume: false,
+            },
+            requests: Default::default(),
+        };
+        let checks = AtomicUsize::new(0);
+        let reader = Reader {
+            allowed: AtomicBool::new(false),
+            reads: AtomicUsize::new(0),
+        };
+        let result = batch
+            .route(
+                &model,
+                &db,
+                request,
+                async || {
+                    let index = checks.fetch_add(1, Ordering::SeqCst);
+                    if revoke && index >= 2 {
+                        return Err(desk_diagnose_core::subagent::invalid(
+                            "Original lease revoked",
+                        ));
+                    }
+                    Ok(BTreeMap::new())
+                },
+                async |_, _, _, _| Ok(None),
+                RequestReadPorts {
+                    devices: async |_: &request::Model, _: &FrozenOwnerInput| Ok(None),
+                    issues: &reader,
+                },
+            )
+            .await;
+        assert_eq!(result.is_err(), revoke);
+        assert_eq!(checks.load(Ordering::SeqCst), 3);
+        let requests = model.requests.borrow();
+        assert_eq!(requests.len(), if revoke { 1 } else { 2 });
+        assert!(
+            requests[0]
+                .tools
+                .iter()
+                .any(|tool| tool.name == desk_diagnose_core::skills::LOAD_TOOL)
+        );
+        assert!(
+            !requests[0]
+                .messages
+                .iter()
+                .any(|message| message.text.contains("# Issue analysis"))
+        );
+        if !revoke {
+            assert!(requests[1].tools.is_empty());
+            assert!(
+                requests[1]
+                    .messages
+                    .iter()
+                    .any(|message| message.role == ChatRole::System
+                        && message.text.contains("# Issue analysis"))
+            );
+            assert!(
+                requests[1]
+                    .messages
+                    .iter()
+                    .any(|message| message.role == ChatRole::UntrustedOutput
+                        && message.text.contains("# Investigation and reply checklist"))
+            );
+        }
+        assert_eq!(reader.reads.load(Ordering::SeqCst), 0);
+    }
+}
+
 #[async_trait::async_trait]
 impl ExternalIssueReader for Reader {
     async fn permitted(&self, _: &IssueAccess) -> Result<bool, AgentError> {

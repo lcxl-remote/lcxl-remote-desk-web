@@ -28,6 +28,7 @@ pub fn is_targetless_web_tool(tool: &crate::registry::RegisteredTool) -> bool {
             tool.effect,
             crate::registry::ToolEffect::PermissionPlanning
                 | crate::registry::ToolEffect::CapabilityDiscovery
+                | crate::registry::ToolEffect::SkillLoading
         )
 }
 

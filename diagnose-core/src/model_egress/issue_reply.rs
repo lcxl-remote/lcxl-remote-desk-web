@@ -102,11 +102,12 @@ pub fn authorize_issue_delivery(
 
 pub(crate) fn validate_issue_reply_messages(
     messages: &[ChatMessage],
+    materials: &[ChatMessage],
     issue: &DestinationIdentity,
     now_unix_ms: u64,
     byte_cap: usize,
 ) -> Result<(), ModelEgressError> {
-    let Some((instruction, materials)) = messages.split_first() else {
+    let Some((instruction, _)) = messages.split_first() else {
         return Err(ModelEgressError::EmptyInputs);
     };
     if instruction.role != ChatRole::System

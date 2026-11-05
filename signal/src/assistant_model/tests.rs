@@ -121,12 +121,26 @@ async fn publication_gateway_keeps_the_exact_original_issue_proof() {
             vec![admitted.publication_material(&policy.destination).unwrap()],
         )
         .unwrap();
-    request
-        .issue_reply
-        .as_mut()
-        .unwrap()
-        .bind_native_input(&held)
+    request.bind_issue_reply_native_input(&held).unwrap();
+    let mut missing_skill = held.clone();
+    missing_skill.skills.reset_for_input(0);
+    let mut without_skill = policy
+        .prepare_issue_reply_call(
+            origin.clone(),
+            access.clone(),
+            vec![admitted.publication_material(&policy.destination).unwrap()],
+        )
         .unwrap();
+    without_skill
+        .bind_issue_reply_native_input(&missing_skill)
+        .unwrap();
+    assert!(model.prepare_request(&without_skill).is_ok());
+    assert!(
+        model
+            .call(without_skill, &mut desk_diagnose_core::seam::NullTurnSink)
+            .await
+            .is_err()
+    );
     let mut changed = request.clone();
     changed
         .messages
@@ -155,12 +169,7 @@ async fn publication_gateway_keeps_the_exact_original_issue_proof() {
             ],
         )
         .unwrap();
-    forged
-        .issue_reply
-        .as_mut()
-        .unwrap()
-        .bind_native_input(&held)
-        .unwrap();
+    forged.bind_issue_reply_native_input(&held).unwrap();
     assert!(
         model
             .call(forged, &mut desk_diagnose_core::seam::NullTurnSink)
@@ -171,11 +180,9 @@ async fn publication_gateway_keeps_the_exact_original_issue_proof() {
     another_holder.lease_token += 1;
     let mut stale = request.clone();
     stale
-        .issue_reply
-        .as_mut()
-        .unwrap()
-        .bind_native_input(&another_holder)
+        .bind_issue_reply_native_input(&another_holder)
         .unwrap();
+    assert!(model.prepare_request(&stale).is_ok());
     assert!(
         model
             .call(stale, &mut desk_diagnose_core::seam::NullTurnSink)
@@ -250,12 +257,7 @@ async fn publication_gateway_keeps_the_exact_original_issue_proof() {
             vec![admitted.publication_material(&policy.destination).unwrap()],
         )
         .unwrap();
-    revoked
-        .issue_reply
-        .as_mut()
-        .unwrap()
-        .bind_native_input(&held)
-        .unwrap();
+    revoked.bind_issue_reply_native_input(&held).unwrap();
     assert!(
         model
             .call(revoked, &mut desk_diagnose_core::seam::NullTurnSink)
@@ -267,6 +269,8 @@ async fn publication_gateway_keeps_the_exact_original_issue_proof() {
     let body = requests[1].to_string();
     assert!(!body.contains("PRIVATE_PREVIOUS_INPUT"));
     assert!(body.contains("macOS problem"));
+    assert!(body.contains("# Issue analysis"));
+    assert!(body.contains("# Investigation and reply checklist"));
     assert!(!body.contains("PRIVATE_WORKER_HISTORY"));
     assert!(!body.contains("issue_reply"));
     assert!(!body.contains(&admitted.authorization_id));
@@ -387,6 +391,25 @@ async fn seed_native_publication(
         .claim_turn(claim)
         .await
         .unwrap();
+    for resource in [None, Some("references/checklist.md")] {
+        held.skills
+            .apply(
+                held.input_revision,
+                &desk_diagnose_core::chat::ToolCall {
+                    id: if resource.is_some() {
+                        "native-skill-reference"
+                    } else {
+                        "native-skill-load"
+                    }
+                    .into(),
+                    name: desk_diagnose_core::skills::LOAD_TOOL.into(),
+                    arguments_json:
+                        serde_json::json!({"skill_ref":"issue-analysis","resource":resource})
+                            .to_string(),
+                },
+            )
+            .unwrap();
+    }
     held.conversation.push(ChatMessage::assistant_tool_calls(
         "publisher",
         "",

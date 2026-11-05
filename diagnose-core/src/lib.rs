@@ -123,6 +123,7 @@ pub mod session_reclaim;
 #[cfg(any(test, feature = "test-support"))]
 pub mod simulated_grant;
 pub mod sink_authorizer;
+pub mod skills;
 pub mod spreadsheet_formula;
 pub mod stream;
 pub mod subagent;

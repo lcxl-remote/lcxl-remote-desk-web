@@ -28,10 +28,7 @@ pub(super) async fn run(
             .map_err(|error| error.agent_error())?,
     );
     request
-        .issue_reply
-        .as_mut()
-        .ok_or_else(|| crate::subagent::invalid("Missing publication binding"))?
-        .bind_native_input(session)
+        .bind_issue_reply_native_input(session)
         .map_err(|error| error.agent_error())?;
     request.observation = deps.model.observation_context(
         crate::model_profile::ModelUseCase::Agent,

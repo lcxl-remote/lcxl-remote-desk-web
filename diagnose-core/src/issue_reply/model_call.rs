@@ -14,6 +14,7 @@ pub struct ReplyModelCall {
     origin: ReplyOrigin,
     access: IssueAccess,
     native_fence: Option<ReplyModelFence>,
+    skills: Option<crate::skills::SkillSnapshot>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,6 +47,7 @@ impl ReplyModelCall {
             lease_token: held.lease_token,
             turn_id: held.current_turn_id.clone().ok_or_else(invalid)?,
         });
+        self.skills = held.skills.publication_snapshot(held.input_revision);
         Ok(())
     }
     pub fn native_input_matches(&self, held: &crate::session::PersistedAgentSession) -> bool {
@@ -57,6 +59,73 @@ impl ReplyModelCall {
             && self.origin.execution_conversation_id == held.conversation_id
             && self.origin.input_revision == held.input_revision
             && self.origin.control_revision == held.control_revision
+            && self.skills == held.skills.publication_snapshot(held.input_revision)
+    }
+
+    /// The original issue material remains separate from first-party guidance.
+    pub fn issue_materials<'a>(
+        &self,
+        messages: &'a [crate::chat::ChatMessage],
+    ) -> Result<&'a [crate::chat::ChatMessage], ModelEgressError> {
+        let destination = messages
+            .first()
+            .and_then(|message| message.data_envelope.as_ref())
+            .and_then(|label| {
+                label.allowed_destinations.iter().find(|destination| {
+                    matches!(
+                        destination,
+                        desk_agent_protocol::data_lineage::DestinationIdentity::Model { .. }
+                    )
+                })
+            })
+            .ok_or_else(invalid)?;
+        let expected = self.skill_messages(destination)?;
+        if messages.get(1..1 + expected.len()) != Some(expected.as_slice()) {
+            return Err(invalid());
+        }
+        messages.get(1 + expected.len()..).ok_or_else(invalid)
+    }
+
+    fn skill_messages(
+        &self,
+        destination: &desk_agent_protocol::data_lineage::DestinationIdentity,
+    ) -> Result<Vec<crate::chat::ChatMessage>, ModelEgressError> {
+        self.skills
+            .as_ref()
+            .map(|skills| {
+                skills
+                    .publication_messages(
+                        destination,
+                        &self
+                            .access
+                            .target
+                            .destination(self.access.connection_ref.clone()),
+                    )
+                    .map_err(|_| invalid())
+            })
+            .transpose()
+            .map(Option::unwrap_or_default)
+    }
+}
+
+impl ModelRequest {
+    pub fn bind_issue_reply_native_input(
+        &mut self,
+        held: &crate::session::PersistedAgentSession,
+    ) -> Result<(), ModelEgressError> {
+        let previous = self.issue_reply.as_ref().ok_or_else(invalid)?;
+        let old_prefix_end = self.messages.len() - previous.issue_materials(&self.messages)?.len();
+        let call = self.issue_reply.as_mut().ok_or_else(invalid)?;
+        call.bind_native_input(held)?;
+        let destination = self
+            .messages
+            .first()
+            .and_then(|message| message.data_envelope.as_ref())
+            .and_then(|label| label.allowed_destinations.first())
+            .ok_or_else(invalid)?;
+        let messages = call.skill_messages(destination)?;
+        self.messages.splice(1..old_prefix_end, messages);
+        Ok(())
     }
 }
 
@@ -84,6 +153,7 @@ impl ModelEgressPolicy {
             origin,
             access,
             native_fence: None,
+            skills: None,
         }));
         Ok(request)
     }
@@ -111,6 +181,7 @@ impl ModelEgressPolicy {
         self.export_authorization_id = publication_export_id(&call.origin, &call.access);
         crate::model_egress::validate_issue_reply_messages(
             &request.messages,
+            call.issue_materials(&request.messages)?,
             &call
                 .access
                 .target

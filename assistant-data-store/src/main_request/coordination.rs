@@ -409,6 +409,13 @@ pub async fn reserve(
     }
     if workbench {
         use desk_diagnose_core::subagent::tools;
+        let skills = desk_diagnose_core::skills::SkillState::default();
+        input.messages.extend(
+            skills
+                .project(0, &destination)
+                .map_err(|_| AssistantStoreError::Inaccessible)?,
+        );
+        input.tools.push(skills.tool(0).spec);
         input.tools.push(tools::worker_list_tool());
         input.tools.push(tools::worker_status_tool(false));
     }

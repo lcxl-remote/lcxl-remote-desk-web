@@ -80,6 +80,7 @@ catalog!(
     ),
     ("request_permissions", "PermissionRequestReceipt", Inline),
     ("describe_tools", "ToolDescriptionList", Inline),
+    ("load_skill", "SkillLoadReceipt", Inline),
     ("read_conversation_attachment", "ReadPage", Inline),
     ("load_conversation_history", "HistoryPage", Inline),
     ("search_memories", "MemorySearchResult", Inline),
@@ -473,6 +474,7 @@ mod tests {
             "cancel_scheduled_task",
             "request_permissions",
             "describe_tools",
+            "load_skill",
             "read_conversation_attachment",
             "load_conversation_history",
             "search_memories",
@@ -485,7 +487,7 @@ mod tests {
         ] {
             assert!(for_tool(builtin).is_some());
         }
-        assert_eq!(ALL.len(), 92);
+        assert_eq!(ALL.len(), 93);
     }
 
     #[test]

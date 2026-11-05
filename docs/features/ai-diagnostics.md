@@ -15,6 +15,12 @@ To attach a device’s files, screen, or app context, open the assistant from th
 
 See [Long-term Memory](/features/assistant-memory) for personalization, memory and history search. This page covers chat, device actions and diagnostics; see [MCP](/features/mcp-server) for the read-only MCP tools.
 
+## Built-in issue analysis guidance
+
+The assistant can load the bundled issue analysis skill when useful. It helps organize reproduction conditions, select suitable authorized devices, distinguish reports from observations, and prepare a supported reply. For example: “Analyze this issue, reproduce it on a suitable macOS device, and check for a regression on Linux.”
+
+The skill provides steps and a reference checklist. Operations use the current request's tools and approvals. Resumed work retains its loaded guidance; private investigation evidence remains subject to the original issue's publication scope.
+
 ## Read Gitea or GitHub issues
 
 In the Web or Tauri assistant, open **+ → Context → Issue sources**, select an available connection, enter the issue URL and choose **Add issue**, then send your question. If none is available, the device owner opens **Settings → Issue connections**, selects Gitea or GitHub, enters the instance URL, MCP URL and token for the same account, then saves and tests the connection.

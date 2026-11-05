@@ -225,6 +225,7 @@ fn invalid(error: CapabilityDisclosureError) -> AgentError {
                     name.as_str(),
                     "request_permissions"
                         | "describe_tools"
+                        | "load_skill"
                         | "update_task_status"
                         | "control_goal"
                         | "load_conversation_history"

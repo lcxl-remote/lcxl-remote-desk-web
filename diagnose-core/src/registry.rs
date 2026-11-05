@@ -74,6 +74,8 @@ pub enum ToolEffect {
     SubAgentWait,
     /// Publishes status for the current delegated request.
     SubAgentReport,
+    /// Loads compiled first-party instructions, without granting tool authority.
+    SkillLoading,
 }
 
 /// A model-facing tool, its optional device grant, and its effect. Internal data
@@ -141,7 +143,8 @@ fn mode_allows_effect(mode: ExecutionMode, effect: ToolEffect) -> bool {
         | ToolEffect::SubAgentControl
         | ToolEffect::SubAgentQuery
         | ToolEffect::SubAgentWait
-        | ToolEffect::SubAgentReport => true,
+        | ToolEffect::SubAgentReport
+        | ToolEffect::SkillLoading => true,
         ToolEffect::Mutating => matches!(
             mode,
             ExecutionMode::ConfirmEachAction
@@ -219,7 +222,10 @@ pub fn exposure_block_reason(
     if tool.effect == ToolEffect::PermissionPlanning {
         return None;
     }
-    if tool.effect == ToolEffect::CapabilityDiscovery {
+    if matches!(
+        tool.effect,
+        ToolEffect::CapabilityDiscovery | ToolEffect::SkillLoading
+    ) {
         return None;
     }
     if tool.effect == ToolEffect::ConversationHistory {

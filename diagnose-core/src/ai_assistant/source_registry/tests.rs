@@ -450,6 +450,7 @@ fn native_controls_require_their_actual_parents_and_never_become_independent_fac
         "schedule_cancellation",
         "schedule_proposal_failed",
         crate::issue_reply::PREPARE_TOOL_NAME,
+        crate::skills::LOAD_TOOL,
     ] {
         let owner = user();
         let control = crate::model_message_labels::internal_tool_result_envelope(
@@ -606,6 +607,7 @@ fn a_native_control_cannot_launder_unknown_private_or_secret_parent_content() {
             "schedule_cancellation",
             "schedule_proposal_failed",
             crate::issue_reply::PREPARE_TOOL_NAME,
+            crate::skills::LOAD_TOOL,
         ] {
             let control = crate::model_message_labels::internal_tool_result_envelope(
                 Some(&parent),
