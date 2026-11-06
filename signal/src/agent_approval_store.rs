@@ -318,18 +318,21 @@ pub(crate) async fn permission_authority_on(
     readiness_revision: u64,
     now_unix_ms: u64,
 ) -> Result<Vec<ApprovalAuthorityFact>, DbErr> {
-    let grants = crate::capability_grant_store::SignalCapabilityGrantStore::list_for_subject_on(
-        txn,
-        &session.conversation_id,
-        &session.actor_id,
-        &session.device_id,
-    )
-    .await?;
+    use desk_diagnose_core::permission_grant::permission_device_id;
+
     let target = session
         .permission_requests
         .iter()
         .find(|request| request.request_id == target_request_id)
         .ok_or_else(|| invalid())?;
+    let target_device_id = permission_device_id(session, target);
+    let grants = crate::capability_grant_store::SignalCapabilityGrantStore::list_for_subject_on(
+        txn,
+        &session.conversation_id,
+        &session.actor_id,
+        target_device_id,
+    )
+    .await?;
     let mut facts = permission_request_authority_on(
         txn,
         session,
@@ -343,7 +346,10 @@ pub(crate) async fn permission_authority_on(
         return Err(invalid());
     }
     for request in session.permission_requests.iter().rev() {
-        if request.request_id == target_request_id {
+        // The current device's readiness revision only describes its own grants.
+        if request.request_id == target_request_id
+            || permission_device_id(session, request) != target_device_id
+        {
             continue;
         }
         if facts.len().saturating_add(request.items.len()) > MAX_APPROVAL_REFERENCES {

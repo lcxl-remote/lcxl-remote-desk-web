@@ -2493,6 +2493,43 @@ async fn run_selected_command(finish: SelectedCommandFinish) {
     assert_eq!(task.conversation_id, run);
     assert_eq!(task.target_connection_id, "live-command-selected");
     assert_eq!(task.status, crate::agent_exec_store::STATUS_DONE);
+    if stream_resume {
+        use desk_diagnose_core::approval_review::{ApprovalAuthorityStatus, ApprovalSource};
+        use desk_diagnose_core::dynamic_run::PermissionRequestState;
+        use desk_diagnose_core::session::PersistedAgentSession;
+        use sea_orm::TransactionTrait;
+
+        let txn = db.begin().await.unwrap();
+        let row = crate::entity::agent_session::Entity::find()
+            .one(&txn)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut session = PersistedAgentSession::decode_json(&row.state_json).unwrap();
+        let mut next = permission.clone();
+        next.request_id = "next-command-approval".into();
+        assert_eq!(next.state, PermissionRequestState::Pending);
+        session.add_permission_request(next.clone()).unwrap();
+        let facts = crate::agent_approval_store::permission_authority_on(
+            &txn,
+            &session,
+            &next.request_id,
+            1,
+            chrono::Utc::now().timestamp_millis() as u64,
+        )
+        .await
+        .unwrap();
+        let [current, previous] = facts.as_slice() else {
+            panic!("expected both command requests for the selected device")
+        };
+        assert_eq!(current.status, ApprovalAuthorityStatus::Pending);
+        assert_eq!(previous.status, ApprovalAuthorityStatus::Exhausted);
+        assert!(matches!(
+            &previous.source,
+            ApprovalSource::PermissionItem { request_id, .. } if request_id == &permission.request_id
+        ));
+        txn.rollback().await.unwrap();
+    }
     if background {
         assert_eq!(
             task.delivery_state,
