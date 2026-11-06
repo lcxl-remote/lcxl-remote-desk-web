@@ -1513,7 +1513,7 @@ fn convert_document_tool() -> RegisteredTool {
                         "type": "object",
                         "properties": {
                             "kind": {"type":"string","enum":["pdf_to_markdown","pdf_to_text","markdown_to_pdf","text_to_pdf","typst_to_pdf"]},
-                            "pages": {"type":"array","maxItems":64,"items":{"type":"object","properties":{"start":{"type":"integer","minimum":1,"maximum":500},"end":{"type":"integer","minimum":1,"maximum":500}},"required":["start","end"],"additionalProperties":false}},
+                            "pages": {"type":"array","maxItems":64,"default":[],"x-canonical-omit-default":true,"items":{"type":"object","properties":{"start":{"type":"integer","minimum":1,"maximum":500},"end":{"type":"integer","minimum":1,"maximum":500}},"required":["start","end"],"additionalProperties":false}},
                             "page_markers": {"type":"string","enum":["none","html_comment","plain_text"]}
                         },
                         "required": ["kind"],
@@ -1669,6 +1669,8 @@ fn prepare_gmail_web_handoff_tool() -> RegisteredTool {
                     "body_field": browser_element_schema(),
                     "attachment": {
                         "type": ["object", "null"],
+                        "default": null,
+                        "x-canonical-omit-default": true,
                         "properties": {
                             "element": browser_element_schema(),
                             "artifact": {
@@ -2207,6 +2209,8 @@ fn exec_command_tool() -> RegisteredTool {
                     },
                     "cwd": {
                         "type": ["string", "null"],
+                        "default": null,
+                        "x-canonical-omit-default": true,
                         "minLength": 1,
                         "maxLength": 4096
                     },
@@ -2218,6 +2222,8 @@ fn exec_command_tool() -> RegisteredTool {
                     "io_mode": {
                         "type": "string",
                         "enum": ["non_interactive", "pty"],
+                        "default": "non_interactive",
+                        "x-canonical-omit-default": true,
                         "description": "Omit or use non_interactive by default. Use pty only when the command genuinely needs a terminal (prompts, TTY checks, sudo/doas password entry). A pty command must be requested alone; the owner keeps a live terminal open, types any input and can stop it. Output is merged into one stream."
                     }
                 },

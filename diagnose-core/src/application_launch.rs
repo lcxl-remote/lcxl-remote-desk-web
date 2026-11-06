@@ -29,7 +29,7 @@ pub fn tool() -> crate::registry::RegisteredTool {
                             "value":{"type":"string","minLength":1,"maxLength":4096}},
                         "required":["kind","value"]},
                     "args":{"type":"array","maxItems":256,"items":{"type":"string","maxLength":16384},"default":[]},
-                    "cwd":{"type":["string","null"],"minLength":1,"maxLength":4096},
+                    "cwd":{"type":["string","null"],"minLength":1,"maxLength":4096,"default":null},
                     "run_as_admin":{"type":"boolean","default":false}
                 }, "required":["target"]
             }),

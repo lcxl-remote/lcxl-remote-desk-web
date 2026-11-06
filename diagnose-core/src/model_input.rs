@@ -87,11 +87,21 @@ pub(crate) fn validate_server_metadata(
     Ok(())
 }
 
-fn fill(schema: &Value, input: &mut Value) {
+fn fill(schema: &Value, input: &mut Value, canonical: bool) {
     if let (Some(properties), Some(object)) =
         (schema["properties"].as_object(), input.as_object_mut())
     {
         for (name, schema) in properties {
+            // Some native defaults already use omission in stored exact inputs.
+            // Preserve that representation without inventing arguments at runtime.
+            if schema["x-canonical-omit-default"] == true
+                && let Some(default) = schema.get("default")
+            {
+                if canonical && object.get(name) == Some(default) {
+                    object.remove(name);
+                }
+                continue;
+            }
             if let Some(default) = schema.get("const").or_else(|| schema.get("default")) {
                 object
                     .entry(name.clone())
@@ -100,13 +110,13 @@ fn fill(schema: &Value, input: &mut Value) {
         }
         for (key, value) in object {
             if let Some(child) = properties.get(key) {
-                fill(child, value);
+                fill(child, value, canonical);
             }
         }
     }
     if let Some(items) = input.as_array_mut() {
         for value in items {
-            fill(&schema["items"], value);
+            fill(&schema["items"], value, canonical);
         }
     }
     for key in ["oneOf", "anyOf", "allOf"] {
@@ -115,7 +125,7 @@ fn fill(schema: &Value, input: &mut Value) {
                 if variant["properties"]["kind"]["const"].is_null()
                     || variant["properties"]["kind"]["const"] == input["kind"]
                 {
-                    fill(variant, input);
+                    fill(variant, input, canonical);
                 }
             }
         }
@@ -123,6 +133,14 @@ fn fill(schema: &Value, input: &mut Value) {
 }
 
 pub fn fill_versions(name: &str, input: &mut Value) {
+    fill_arguments(name, input, false);
+}
+
+pub(crate) fn fill_canonical_arguments(name: &str, input: &mut Value) {
+    fill_arguments(name, input, true);
+}
+
+fn fill_arguments(name: &str, input: &mut Value, canonical: bool) {
     if name == "request_permissions"
         && let Some(items) = input.get_mut("items").and_then(Value::as_array_mut)
     {
@@ -131,12 +149,12 @@ pub fn fill_versions(name: &str, input: &mut Value) {
                 && name != "request_permissions"
                 && let Some(exact) = item.get_mut("exact_input")
             {
-                fill_versions(&name, exact);
+                fill_arguments(&name, exact, canonical);
             }
         }
     }
     if let Some(tool) = tools().get(name) {
-        fill(&tool.parameters_schema, input);
+        fill(&tool.parameters_schema, input, canonical);
     }
     if name == "request_permissions"
         && let Some(items) = input.get_mut("items").and_then(Value::as_array_mut)
@@ -307,6 +325,54 @@ fn project_versions(schema: &Value, input: &mut Value) {
 #[cfg(test)]
 mod protocol_version_tests {
     use super::*;
+
+    #[test]
+    fn registered_tool_defaults_preserve_exact_argument_identity() {
+        fn check_defaults(tool: &str, schema: &Value, path: &str) {
+            if let Some(properties) = schema["properties"].as_object() {
+                for (field, property) in properties {
+                    let path = format!("{path}.{field}");
+                    let omit = property["x-canonical-omit-default"] == true;
+                    let default = property.get("default");
+                    if omit {
+                        assert!(default.is_some(), "{tool} {path} has no default");
+                        assert!(property.get("const").is_none(), "{tool} {path} is fixed");
+                        assert!(
+                            !schema["required"].as_array().is_some_and(|required| {
+                                required.iter().any(|value| value == field.as_str())
+                            }),
+                            "{tool} {path} cannot omit a required field"
+                        );
+                    }
+                    if let Some(default) = default {
+                        check(property, default, &path, 0).unwrap_or_else(|error| {
+                            panic!("{tool} {path} has an invalid default: {}", error.message)
+                        });
+                        let mut omitted = json!({});
+                        let mut explicit = json!({field: default});
+                        fill(schema, &mut omitted, true);
+                        fill(schema, &mut explicit, true);
+                        assert_eq!(omitted, explicit, "{tool} {path}");
+                    }
+                    check_defaults(tool, property, &path);
+                }
+            }
+            if let Some(items) = schema.get("items") {
+                check_defaults(tool, items, &format!("{path}[]"));
+            }
+            for key in ["oneOf", "anyOf", "allOf"] {
+                if let Some(variants) = schema[key].as_array() {
+                    for (index, variant) in variants.iter().enumerate() {
+                        check_defaults(tool, variant, &format!("{path}.{key}[{index}]"));
+                    }
+                }
+            }
+        }
+
+        for (name, spec) in tools() {
+            check_defaults(name, &spec.parameters_schema, "$");
+        }
+    }
 
     #[test]
     fn registered_tool_versions_round_trip_without_changing_business_arguments() {

@@ -93,8 +93,8 @@ pub fn read_tool_registry() -> Vec<RegisteredTool> {
             json!({
                 "type": "object",
                 "properties": {
-                    "include_hardware": {"type": "boolean"},
-                    "include_network_summary": {"type": "boolean"}
+                    "include_hardware": {"type": "boolean", "default": false, "x-canonical-omit-default": true},
+                    "include_network_summary": {"type": "boolean", "default": false, "x-canonical-omit-default": true}
                 },
                 "additionalProperties": false
             }),
@@ -106,12 +106,12 @@ pub fn read_tool_registry() -> Vec<RegisteredTool> {
             json!({
                 "type": "object",
                 "properties": {
-                    "limit": {"type": "integer", "minimum": 0, "maximum": MAX_PROCESS_LIST_ENTRIES},
-                    "sort": {"type": "string", "enum": ["cpu_desc", "memory_desc", "pid"]},
-                    "include_command_line": {"type": "boolean"},
+                    "limit": {"type": "integer", "minimum": 0, "maximum": MAX_PROCESS_LIST_ENTRIES, "default": 0, "x-canonical-omit-default": true},
+                    "sort": {"type": "string", "enum": ["cpu_desc", "memory_desc", "pid"], "default": "cpu_desc", "x-canonical-omit-default": true},
+                    "include_command_line": {"type": "boolean", "default": false, "x-canonical-omit-default": true},
                     "include_details": {"type":"boolean", "default":false},
                     "allow_unfiltered": {"type":"boolean", "default":false, "description":"Explicitly allow bounded enumeration without search conditions; use only when targeted lookup is insufficient. Does not bypass authorization or limits."},
-                    "queries": {"type":"array", "maxItems":16, "items":{"type":"string","minLength":1,"maxLength":128}}
+                    "queries": {"type":"array", "maxItems":16, "items":{"type":"string","minLength":1,"maxLength":128}, "default": [], "x-canonical-omit-default": true}
                 },
                 "additionalProperties": false
             }),
@@ -133,11 +133,11 @@ pub fn read_tool_registry() -> Vec<RegisteredTool> {
             json!({
                 "type": "object",
                 "properties": {
-                    "queries":{"type":"array","maxItems":16,"items":{"type":"string","minLength":1,"maxLength":128}},
+                    "queries":{"type":"array","maxItems":16,"items":{"type":"string","minLength":1,"maxLength":128},"default":[],"x-canonical-omit-default":true},
                     "allow_unfiltered":{"type":"boolean","default":false},
-                    "start_types":{"type":"array","maxItems":16,"items":{"type":"string","enum":desk_agent_protocol::service_status::WINDOWS_START_TYPES}},
-                    "unit_file_states":{"type":"array","maxItems":16,"items":{"type":"string","enum":desk_agent_protocol::service_status::UNIT_FILE_STATES}},
-                    "launch_policies":{"type":"array","maxItems":16,"items":{"type":"string","enum":desk_agent_protocol::service_status::LAUNCH_POLICIES}},
+                    "start_types":{"type":"array","maxItems":16,"items":{"type":"string","enum":desk_agent_protocol::service_status::WINDOWS_START_TYPES},"default":[],"x-canonical-omit-default":true},
+                    "unit_file_states":{"type":"array","maxItems":16,"items":{"type":"string","enum":desk_agent_protocol::service_status::UNIT_FILE_STATES},"default":[],"x-canonical-omit-default":true},
+                    "launch_policies":{"type":"array","maxItems":16,"items":{"type":"string","enum":desk_agent_protocol::service_status::LAUNCH_POLICIES},"default":[],"x-canonical-omit-default":true},
                     "scope":{"type":"string","enum":["system","user","all"]},
                     "limit":{"type":"integer","minimum":1,"maximum":200,"default":50},
                     "cursor":{"type":"string","maxLength":4096}
@@ -159,7 +159,9 @@ pub fn read_tool_registry() -> Vec<RegisteredTool> {
                         "type": "array",
                         "items": {"type": "string", "enum": ["error", "warning", "info", "debug"]},
                         "maxItems": 4,
-                        "uniqueItems": true
+                        "uniqueItems": true,
+                        "default": [],
+                        "x-canonical-omit-default": true
                     }
                 },
                 "additionalProperties": false
@@ -200,7 +202,7 @@ pub fn ai_assistant_read_tool_registry() -> Vec<RegisteredTool> {
                     "queries":{"type":"array","maxItems":16,"items":{"type":"string","minLength":1,"maxLength":128}},
                     "allow_unfiltered":{"type":"boolean","default":false},
                     "limit":{"type":"integer","minimum":1,"maximum":100,"default":20},
-                    "cursor":{"type":["string","null"],"minLength":1,"maxLength":512}
+                    "cursor":{"type":["string","null"],"minLength":1,"maxLength":512,"default":null,"x-canonical-omit-default":true}
                 }, "additionalProperties":false
             }),
         ),
@@ -302,10 +304,10 @@ pub fn ai_assistant_read_tool_registry() -> Vec<RegisteredTool> {
                     "directory_request_id": {"type":"string", "minLength":1, "maxLength":256},
                     "max_entries": {"type":"integer", "minimum":1, "maximum":256, "default":256},
                     "max_bytes": {"type":"integer", "minimum":1024, "maximum":32768, "default":32768},
-                    "min_file_bytes": {"type": ["integer", "null"], "minimum": 0},
-                    "max_file_bytes": {"type": ["integer", "null"], "minimum": 0},
-                    "modified_after": {"type": ["string", "null"], "format": "date-time"},
-                    "modified_before": {"type": ["string", "null"], "format": "date-time"}
+                    "min_file_bytes": {"type": ["integer", "null"], "minimum": 0, "default": null, "x-canonical-omit-default": true},
+                    "max_file_bytes": {"type": ["integer", "null"], "minimum": 0, "default": null, "x-canonical-omit-default": true},
+                    "modified_after": {"type": ["string", "null"], "format": "date-time", "default": null, "x-canonical-omit-default": true},
+                    "modified_before": {"type": ["string", "null"], "format": "date-time", "default": null, "x-canonical-omit-default": true}
                 },
                 "additionalProperties": false
             }),
@@ -343,7 +345,7 @@ pub fn ai_assistant_read_tool_registry() -> Vec<RegisteredTool> {
             json!({
                 "type": "object",
                 "properties": {
-                    "source_sheet": {"type": ["string", "null"], "maxLength": 128},
+                    "source_sheet": {"type": ["string", "null"], "maxLength": 128, "default": null, "x-canonical-omit-default": true},
                     "max_rows": {"type":"integer", "minimum":1, "maximum":1000, "default":1000},
                     "max_bytes": {"type":"integer", "minimum":1024, "maximum":32768, "default":32768},
                     "header_row": {"type": "integer", "minimum": 1, "maximum": 32, "default": 1},
@@ -366,7 +368,7 @@ pub fn ai_assistant_read_tool_registry() -> Vec<RegisteredTool> {
                             "type": "object",
                             "properties": {
                                 "operation": {"type": "string", "enum": ["count", "sum", "average", "min", "max"]},
-                                "column": {"type": ["string", "null"], "maxLength": 128},
+                                "column": {"type": ["string", "null"], "maxLength": 128, "default": null, "x-canonical-omit-default": true},
                                 "group_by": {"type": "array", "maxItems": 4, "items": {"type": "string", "minLength": 1, "maxLength": 128}, "default": []}
                             },
                             "required": ["operation"],
@@ -1465,6 +1467,43 @@ fn object_ref_schema() -> serde_json::Value {
 #[cfg(test)]
 mod required_search_tests {
     use super::*;
+
+    #[test]
+    fn read_defaults_match_native_operations_and_exact_permission_inputs() {
+        for (name, omitted, explicit) in [
+            (
+                "read_system_info",
+                json!({}),
+                json!({"include_hardware":false,"include_network_summary":false}),
+            ),
+            (
+                "read_process_list",
+                json!({"allow_unfiltered":true}),
+                json!({"allow_unfiltered":true,"queries":[],"limit":0,"sort":"cpu_desc","include_command_line":false}),
+            ),
+            (
+                "read_service_status",
+                json!({"allow_unfiltered":true}),
+                json!({"allow_unfiltered":true,"queries":[],"start_types":[],"unit_file_states":[],"launch_policies":[]}),
+            ),
+            ("read_recent_logs", json!({}), json!({"severity":[]})),
+        ] {
+            let operation = |input: &serde_json::Value| {
+                build_read_operation(&ToolCall {
+                    id: "read".into(),
+                    name: name.into(),
+                    arguments_json: input.to_string(),
+                })
+                .unwrap()
+            };
+            assert_eq!(operation(&omitted), operation(&explicit), "{name}");
+            let canonical = |input| {
+                crate::permission_tools::canonical_tool_permission_input_json(name, input).unwrap()
+            };
+            assert_eq!(canonical(omitted), canonical(explicit), "{name}");
+        }
+    }
+
     #[test]
     fn tool_arguments_require_filters_before_enumeration() {
         for name in ["read_process_list", "inspect_desktop_ui"] {

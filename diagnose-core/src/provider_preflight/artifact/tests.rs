@@ -264,6 +264,19 @@ fn document_conversion_binds_both_resources_and_the_earliest_expiry_on_both_host
         "convert_document",
         json!({"source":{"kind":"artifact_result", "file_result_call_id":"observed-source"}, "output_name":"converted.pdf", "conversion":{"kind":"markdown_to_pdf"}}),
     );
+    let mut explicit_pages: serde_json::Value =
+        serde_json::from_str(&action.arguments_json).unwrap();
+    explicit_pages["conversion"]["pages"] = json!([]);
+    let explicit = call(&action.name, explicit_pages.clone());
+    explicit_pages["conversion"]["pages"] = json!([{"start":1,"end":2}]);
+    assert_ne!(
+        canonical_tool_permission_input_json(&action.name, explicit_pages).unwrap(),
+        canonical_tool_permission_input_json(
+            &action.name,
+            serde_json::from_str(&action.arguments_json).unwrap(),
+        )
+        .unwrap(),
+    );
     for surface in [
         ProductSurface::OssPersonalOwner,
         ProductSurface::ManagerPersonalOwner,
@@ -278,6 +291,20 @@ fn document_conversion_binds_both_resources_and_the_earliest_expiry_on_both_host
             NOW,
         )
         .unwrap();
+        let explicit_plan = ArtifactCallPreflight::build_document(
+            &registry,
+            surface,
+            &explicit,
+            &source,
+            Some("c".repeat(64)),
+            &directory(),
+            NOW,
+        )
+        .unwrap();
+        assert_eq!(
+            plan.canonical_input_json(),
+            explicit_plan.canonical_input_json()
+        );
         assert_eq!(plan.resource_scope().len(), 2);
         assert_eq!(plan.valid_until_unix_ms(), NOW + 30_000);
         assert_eq!(

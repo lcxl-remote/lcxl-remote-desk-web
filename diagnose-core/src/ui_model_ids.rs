@@ -650,8 +650,8 @@ pub fn same_call_input_with_references(
     ) else {
         return false;
     };
-    crate::model_input::fill_versions(tool, &mut left);
-    crate::model_input::fill_versions(tool, &mut right);
+    crate::model_input::fill_canonical_arguments(tool, &mut left);
+    crate::model_input::fill_canonical_arguments(tool, &mut right);
     if left == right {
         return true;
     }

@@ -748,33 +748,17 @@ pub fn canonical_permission_input_json(
     serde_json::to_string(&sort_json(value))
 }
 
-/// Canonicalize semantically equivalent defaults and server-resolved references
-/// for exact-grant matching. Native reference validity is checked at dispatch.
-/// Keep this list closed: adding an entry changes exact-grant matching and must
-/// be backed by a matching runtime default and regression test.
+/// Canonicalize declared tool defaults and server-resolved references for
+/// exact-grant matching. Native reference validity is checked at dispatch.
 pub fn canonical_tool_permission_input_json(
     tool_name: &str,
     mut value: serde_json::Value,
 ) -> Result<String, serde_json::Error> {
-    crate::model_input::fill_versions(tool_name, &mut value);
+    crate::model_input::fill_canonical_arguments(tool_name, &mut value);
     if tool_name == "launch_application" {
         let request: desk_agent_protocol::application_launch::LaunchApplicationRequest =
             serde_json::from_value(value)?;
         value = serde_json::to_value(request)?;
-    }
-    if tool_name == crate::command_confirmation::COMMAND_TOOL
-        && let Some(input) = value.as_object_mut()
-        && input.get("io_mode").and_then(serde_json::Value::as_str) == Some("non_interactive")
-    {
-        // Omission and an explicit default produce the same native command plan.
-        input.remove("io_mode");
-    }
-    if tool_name == "search_public_web"
-        && let serde_json::Value::Object(input) = &mut value
-    {
-        input
-            .entry("max_results".to_string())
-            .or_insert_with(|| serde_json::json!(5));
     }
     let reference_selector = match tool_name {
         "read_current_screen" => Some(("window", "window_id")),
@@ -2383,6 +2367,27 @@ mod tests {
                 .any(|scope| scope == "model:chosen")
         );
 
+        let command_call = |args: serde_json::Value| ToolCall {
+            id: "approved-command-call".into(),
+            name: "exec_command".into(),
+            arguments_json: args.to_string(),
+        };
+        let mut equivalent: serde_json::Value =
+            serde_json::from_str(item.canonical_input_json.as_deref().unwrap()).unwrap();
+        equivalent["cwd"] = serde_json::Value::Null;
+        equivalent["io_mode"] = json!("non_interactive");
+        let (_, runtime_input) =
+            crate::request_devices::command_input(&command_call(equivalent.clone()), false)
+                .unwrap();
+        assert_eq!(
+            item.canonical_input_json.as_deref(),
+            Some(runtime_input.as_str())
+        );
+        equivalent["io_mode"] = json!("pty");
+        let (_, changed) =
+            crate::request_devices::command_input(&command_call(equivalent), false).unwrap();
+        assert_ne!(changed, runtime_input);
+
         let off_template = r#"{"items":[{"item_id":"command","provider_id":"system.command","tool_name":"exec_command","expected_effect":"execute_command","exact_input":{"schema_version":1,"shell":"powershell","command":"Remove-Item C:\\temp\\anything","timeout_ms":10000},"suggested_ttl_seconds":60,"suggested_max_uses":1,"reason":"Delete files"}]}"#;
         let error = build_permission_request(
             &call(off_template),
@@ -3503,6 +3508,44 @@ mod tests {
         );
 
         let mut invalid = serde_json::from_str::<serde_json::Value>(&arguments).unwrap();
+        let execution_call = |input: &serde_json::Value| ToolCall {
+            id: "approved-gmail-draft".into(),
+            name: "prepare_gmail_draft".into(),
+            arguments_json: input.to_string(),
+        };
+        let without_attachment = invalid["items"][0]["exact_input"].clone();
+        let mut explicit_none = without_attachment.clone();
+        explicit_none["attachment"] = serde_json::Value::Null;
+        assert_eq!(
+            crate::provider_preflight::browser_action_from_call(
+                &execution_call(&without_attachment),
+                "call-gmail",
+            )
+            .unwrap(),
+            crate::provider_preflight::browser_action_from_call(
+                &execution_call(&explicit_none),
+                "call-gmail",
+            )
+            .unwrap(),
+        );
+        let canonical =
+            canonical_tool_permission_input_json("prepare_gmail_draft", explicit_none.clone())
+                .unwrap();
+        assert_eq!(
+            item.canonical_input_json.as_deref(),
+            Some(canonical.as_str())
+        );
+        assert!(crate::ui_model_ids::same_call_input(
+            "prepare_gmail_draft",
+            &without_attachment.to_string(),
+            &explicit_none.to_string(),
+        ));
+        explicit_none["draft"]["body_plain_text"] = json!("Changed draft body");
+        assert_ne!(
+            canonical_tool_permission_input_json("prepare_gmail_draft", explicit_none).unwrap(),
+            canonical
+        );
+
         invalid["items"][0]["exact_input"]["body_field"]["element_id"] =
             invalid["items"][0]["exact_input"]["subject_field"]["element_id"].clone();
         assert!(
