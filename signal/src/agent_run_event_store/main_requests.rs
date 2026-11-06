@@ -4,7 +4,7 @@ use super::*;
 use crate::{
     agent_background_task_store::{self, BACKGROUND_ACTION_KIND},
     agent_exec_store::{DELIVERY_PENDING, DELIVERY_PUBLISHED},
-    capability_grant_store::CapabilityDispatchPayload,
+    capability_grant_store::{CAPABILITY_WORK_KIND, CapabilityDispatchPayload},
     entity::{
         agent_action_item, agent_capability_dispatch_outbox as dispatch, agent_exec_task,
         agent_permission_resume,
@@ -188,8 +188,26 @@ pub(crate) async fn slot_held(
                         .is_in(crate::usage_retention::UNRESOLVED_ACTION_STATES),
                 )
                 .add(
-                    agent_action_item::Column::CompletionDeliveryState
-                        .is_in([DELIVERY_PENDING, DELIVERY_PUBLISHED]),
+                    Condition::all()
+                        .add(
+                            agent_action_item::Column::CompletionDeliveryState
+                                .is_in([DELIVERY_PENDING, DELIVERY_PUBLISHED]),
+                        )
+                        // Only background providers and durable Computer Actions
+                        // have a completion publisher. Inline provider receipts
+                        // retain their initial delivery state after the turn ends.
+                        .add(
+                            Condition::any()
+                                .add(agent_action_item::Column::Kind.eq(BACKGROUND_ACTION_KIND))
+                                .add(
+                                    Condition::all()
+                                        .add(
+                                            agent_action_item::Column::Kind
+                                                .eq(CAPABILITY_WORK_KIND),
+                                        )
+                                        .add(agent_action_item::Column::ResultSchemaVersion.eq(2)),
+                                ),
+                        ),
                 ),
         )
         .all(txn)

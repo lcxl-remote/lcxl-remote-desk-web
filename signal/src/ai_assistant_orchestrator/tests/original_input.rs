@@ -2573,7 +2573,7 @@ async fn respond_to_selected_command(
 }
 
 #[actix_web::test]
-async fn personal_input_reads_selected_devices_and_keeps_their_distinct_results() {
+async fn personal_input_reads_selected_devices_then_runs_the_queued_followup() {
     use desk_agent_protocol::{Capability, computer_use::*};
     use desk_signal_facade::model::os::OperationSystemEnum;
     use serde_json::{Value, json};
@@ -2657,7 +2657,12 @@ async fn personal_input_reads_selected_devices_and_keeps_their_distinct_results(
         }).await;
         let answer = memory_sse(json!({"content":"Compared both selected devices"}), "stop");
         let (second, _) = capture_openai_answer_with_title(&listener, &answer).await;
-        [first, second]
+        let followup = capture_one_openai_request_with_sse(
+            &listener,
+            &memory_sse(json!({"content":"The follow-up ran"}), "stop"),
+        )
+        .await;
+        [first, second, followup]
     });
     let owner = crate::control_authorizer::SINGLE_ACCOUNT_USER_ID;
     let turn = run_turn(
@@ -2692,13 +2697,6 @@ async fn personal_input_reads_selected_devices_and_keeps_their_distinct_results(
     tokio::time::timeout(SCENARIO_TIMEOUT, async { tokio::join!(turn, mac, linux) })
         .await
         .unwrap();
-    let [_, response] = tokio::time::timeout(MODEL_IO_TIMEOUT, model)
-        .await
-        .unwrap()
-        .unwrap();
-    let response = String::from_utf8(response).unwrap();
-    assert!(response.contains("fixture-macos-version"));
-    assert!(response.contains("fixture-linux-version"));
     let work = crate::entity::agent_action_item::Entity::find()
         .all(&db)
         .await
@@ -2709,6 +2707,68 @@ async fn personal_input_reads_selected_devices_and_keeps_their_distinct_results(
         .collect::<Vec<_>>();
     targets.sort_unstable();
     assert_eq!(targets, ["compare-linux", "compare-mac"]);
+
+    let followup = AiAssistantAsk {
+        question: "Summarize the differences".into(),
+        client_message_id: "selected-read-followup".into(),
+        conversation_id: Some("selected-read-conversation".into()),
+        client_timezone: "UTC".into(),
+        ..Default::default()
+    };
+    submit_owner_turn(
+        connections.clone(),
+        db.clone(),
+        "selected-read-followup-frame".into(),
+        "owner-browser".into(),
+        String::new(),
+        owner,
+        String::new(),
+        followup.clone(),
+    )
+    .await;
+    let [row]: [_; 1] = main_request::recovery_heads(&db, 0, 2)
+        .await
+        .unwrap()
+        .try_into()
+        .unwrap();
+    assert_eq!(row.client_message_id, followup.client_message_id);
+    let executor = main_requests::SignalMainRequestExecutor::new(
+        db.clone(),
+        connections,
+        crate::ai_assistant_gate::global_ai_assistant_gate(),
+    );
+    tokio::time::timeout(SCENARIO_TIMEOUT, executor.scan_once(0))
+        .await
+        .unwrap()
+        .unwrap();
+    let activated =
+        desk_assistant_data_store::entity::agent_main_request::Entity::find_by_id(row.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(activated.input_revision, Some(2));
+    let [_, response, followup_request] = tokio::time::timeout(MODEL_IO_TIMEOUT, model)
+        .await
+        .unwrap()
+        .unwrap();
+    let response = String::from_utf8(response).unwrap();
+    assert!(response.contains("fixture-macos-version"));
+    assert!(response.contains("fixture-linux-version"));
+    assert!(
+        String::from_utf8(followup_request)
+            .unwrap()
+            .contains(&followup.question)
+    );
+    let snapshot = crate::agent_session_store::SignalAgentSessionStore::new(db)
+        .read_snapshot_for_subject(&row.conversation_id, &row.actor_id, "")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        latest_committed_answer(&snapshot).as_deref(),
+        Some("The follow-up ran")
+    );
 }
 
 async fn respond_to_system_info(
