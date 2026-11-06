@@ -2043,6 +2043,58 @@ describe('useAiAssistantChat', () => {
         expect(result.current.messages.at(-1)?.text).toBe('Disk report ready');
     });
 
+    it('recovers a completed approval continuation when only the queued turn start arrived', async () => {
+        vi.useFakeTimers();
+        let subscriber: SignalingSubscriber | null = null;
+        let finished = false;
+        const sendMessage = vi.fn((_type: number, _payload: unknown, _to?: string, id?: string) => id!);
+        vi.stubGlobal('fetch', vi.fn(async (url: string) => ({
+            ok: true, json: async () => {
+                const input = sendMessage.mock.calls[0]?.[1] as { client_message_id: string };
+                const receipt = { requestId: 'parent', clientMessageId: input.client_message_id,
+                    state: 'activated', inputRevision: 1, acceptedAtMs: 1 };
+                return { data: url.includes('/requests?') ? { sessionId: 'root', items: [receipt] } : {
+                    ...snapshotFields, sessionId: 'root', seq: finished ? 4 : 1, active: false,
+                    requestId: finished ? 'permission-resume' : undefined, latestInputSeq: 1,
+                    handledInputSeq: finished ? 1 : 0, mainRequests: [receipt],
+                    messages: [{ id: input.client_message_id, role: 'user', text: 'Check both devices' },
+                        ...(finished ? [{ id: 'answer', role: 'assistant', text: 'Both checks complete' }] : [])],
+                } };
+            },
+        })));
+        const { result, unmount } = renderHook(() => useAiAssistantChat({ deskId: '', connected: true,
+            targetRefs: ['mac', 'linux'], subscribe: handler => { subscriber = handler; return () => { subscriber = null; }; }, sendMessage }));
+        const deliver = (id: string, event: Record<string, unknown>) => subscriber?.({
+            request_id: id, signaling_type: SIGNALING_TYPE_CODE_AI_ASSISTANT_UPDATED,
+            signaling_data: { request_id: id, ...event },
+        });
+        try {
+            act(() => { expect(result.current.start('Check both devices')).toBe(true); });
+            await act(async () => {
+                deliver(sendMessage.mock.calls[0][3]!, { kind: 'status', status: 'queued', seq: 1,
+                    main_request_id: 'parent', main_request_session_id: 'root' });
+                deliver('parent', { kind: 'turn_started', seq: 2 });
+            });
+            expect(result.current.turnRunning).toBe(true);
+            expect(result.current.deliveryState).toBeNull();
+
+            finished = true;
+            await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+            expect(result.current.running).toBe(false);
+            expect(result.current.status).toBe('done');
+            expect(result.current.messages.at(-1)?.text).toBe('Both checks complete');
+
+            act(() => {
+                deliver('permission-resume', { kind: 'turn_started', seq: 0,
+                    main_request_id: 'parent', main_request_session_id: 'root' });
+                deliver('permission-resume', { kind: 'partial', seq: 1, partial_summary: 'Late progress' });
+            });
+            expect(result.current.running).toBe(false);
+            expect(result.current.partial).toBe('');
+            expect(result.current.messages.at(-1)?.text).toBe('Both checks complete');
+        } finally { unmount(); }
+    });
+
     it('accepts B and C while A runs, and cancels only the selected queued request', async () => {
         let subscriber: SignalingSubscriber | null = null;
         const items: { requestId: string; clientMessageId: string; state: 'queued'; acceptedAtMs: number }[] = [];

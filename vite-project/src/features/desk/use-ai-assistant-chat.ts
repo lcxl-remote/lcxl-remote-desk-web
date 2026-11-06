@@ -563,6 +563,7 @@ export function useAiAssistantChat({
         requestOrder: number;
         inputRevision?: number;
         controlRevision: number;
+        settledRequestIds: Set<string>;
     } | null>(null);
     // Retain only durable snapshots, not optimistic/streaming messages. Once
     // history is expanded, tail polling must not collapse the loaded window.
@@ -765,6 +766,20 @@ export function useAiAssistantChat({
                 temporaryConversationRef.current = snapshot.temporaryConversation;
                 setTemporaryConversation(snapshot.temporaryConversation);
             }
+            const settledRequestIds = new Set<string>();
+            if (!snapshot.active) {
+                if (snapshot.requestId) settledRequestIds.add(snapshot.requestId);
+                // An approval continuation uses a new execution ID. The queue
+                // receipt and handled input still identify the original stream.
+                if (typeof snapshot.inputRevision === 'number' && typeof snapshot.latestInputSeq === 'number'
+                    && snapshot.latestInputSeq > 0 && snapshot.handledInputSeq === snapshot.latestInputSeq
+                    && Array.isArray(snapshot.mainRequests)) {
+                    for (const item of snapshot.mainRequests) {
+                        if (item.state === 'activated' && typeof item.inputRevision === 'number'
+                            && item.inputRevision <= snapshot.inputRevision) settledRequestIds.add(item.requestId);
+                    }
+                }
+            }
             snapshotWatermark.current = {
                 conversationId: expectedConversationId,
                 sessionId: snapshot.sessionId,
@@ -772,6 +787,7 @@ export function useAiAssistantChat({
                 requestOrder: expectedRequestOrder,
                 inputRevision: snapshot.inputRevision,
                 controlRevision: snapshot.controlRevision,
+                settledRequestIds,
             };
             if (queueEnabled && expectedQueueOrder === queueReadOrder.current && Array.isArray(snapshot.mainRequests)) {
                 queueReadOrder.current += 1;
@@ -785,8 +801,8 @@ export function useAiAssistantChat({
             const local = activeRequest.current;
             if (local && snapshot.active && snapshot.requestId === local) acknowledgeActiveRequest(local);
             const ack = activeRequestAck.current;
-            if (local && ack?.requestId === local && expectedRequestOrder > ack.order
-                && (!snapshot.active || snapshot.requestId !== local)) {
+            if (local && (settledRequestIds.has(local) || (ack?.requestId === local
+                && expectedRequestOrder > ack.order && (!snapshot.active || snapshot.requestId !== local)))) {
                 // A snapshot newer than the acknowledgement shows the local
                 // request is over (its terminal event was lost). Stop targeting
                 // it: the server's active request, if any, is the current one.
@@ -796,9 +812,6 @@ export function useAiAssistantChat({
             }
             if (!snapshot.active) {
                 if (!stopPending.current) clearStopping();
-                // An expired server lease also settles a locally bound request
-                // whose terminal event was lost during a disconnect or restart.
-                if (activeRequest.current === snapshot.requestId) activeRequest.current = null;
             }
             setContextUsage(snapshot.contextUsage ?? null);
             setContextNotices([...new Map((snapshot.contextNotices ?? []).map(notice => [notice.id, notice])).values()]);
@@ -1246,10 +1259,11 @@ export function useAiAssistantChat({
             return;
         }
         const currentSession = snapshotWatermark.current?.sessionId ?? queuedSession.current?.sessionId;
-        const resumesQueuedStream = event.kind === 'turn_started'
+        const streamSettled = snapshotWatermark.current?.settledRequestIds.has(event.request_id);
+        const resumesQueuedStream = !streamSettled && event.kind === 'turn_started'
             && event.main_request_session_id === currentSession
             && !!event.main_request_id && queueStreamIds.current.has(event.main_request_id);
-        const beginsQueuedStream = resumesQueuedStream || (queueStreamIds.current.has(event.request_id)
+        const beginsQueuedStream = resumesQueuedStream || (!streamSettled && queueStreamIds.current.has(event.request_id)
             && (event.kind === 'turn_started' || (event.kind === 'status' && event.status === 'accepted')));
         if ((!activeRequest.current && (currentSubmission || beginsQueuedStream))
             || (resumesQueuedStream && activeRequest.current === event.main_request_id)) {
@@ -1262,10 +1276,10 @@ export function useAiAssistantChat({
         if (message.request_id !== activeRequest.current) return;
         if (event.seq <= lastSeq.current) return;
         lastSeq.current = event.seq;
-        // The stream's start and intake acknowledgement can precede the native
-        // claim. An idle snapshot in that window cannot retire this stream.
-        if (event.kind !== 'turn_started' && event.status !== 'accepting'
-            && !(event.status === 'accepted' && queueStreamIds.current.has(event.request_id))) {
+        // The linked resume starts after the native claim. An ordinary start
+        // and its intake acknowledgement can precede the claim.
+        if (resumesQueuedStream || (event.kind !== 'turn_started' && event.status !== 'accepting'
+            && !(event.status === 'accepted' && queueStreamIds.current.has(event.request_id)))) {
             acknowledgeActiveRequest(message.request_id);
         }
 
