@@ -6,6 +6,8 @@ Device owners can open [Model call metrics](/features/model-metrics) from **Usag
 
 Open **AI Assistant → Multi-device conversation**. To compare devices, select them in **Devices** in the composer and send your question. For example, select two devices and ask for their OS versions. Each command approval shows the device and exact command, and its result returns to the original conversation. Changes to the selection apply to your next message.
 
+Web and Tauri save the device selection to the current conversation. It is restored when you refresh or open the same conversation on another client. To investigate CPU or disk usage, the assistant can read current system information and request a diagnostic command for process or directory details under the conversation's approval mode.
+
 To attach a device’s files, screen, or app context, open the assistant from that device.
 
 1. Sign in, open an online device you own and turn on **AI Assistant enabled** for that device.

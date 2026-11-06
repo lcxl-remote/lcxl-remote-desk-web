@@ -1,4 +1,4 @@
-//! A coordinator's device configuration is independent of its active turn lease.
+//! Session device configuration is independent of the active turn lease.
 
 use std::collections::BTreeMap;
 
@@ -12,6 +12,8 @@ use sea_orm::{
 
 use crate::{AssistantStoreError, entity::agent_assistant_device_roster as roster};
 
+const PERSONAL_SELECTION_PREFIX: &str = "personal-selection:";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceRoster {
     pub revision: u64,
@@ -22,7 +24,40 @@ pub fn configured_conversation_ids() -> sea_orm::sea_query::SelectStatement {
     roster::Entity::find()
         .select_only()
         .column(roster::Column::ConversationId)
+        .filter(roster::Column::ConversationId.not_like(format!("{PERSONAL_SELECTION_PREFIX}%")))
         .into_query()
+}
+
+/// Personal choices are presentation preferences. Only a roster at the native
+/// conversation ID participates in workbench membership and execution fences.
+pub fn personal_selection_key(conversation_id: &str) -> String {
+    format!("{PERSONAL_SELECTION_PREFIX}{conversation_id}")
+}
+
+pub fn initial_personal_state(
+    actor: &str,
+    run: &str,
+    conversation: &str,
+    now: &str,
+) -> Result<(String, i64), AssistantStoreError> {
+    let mut session = Box::new(PersistedAgentSession::new(
+        run,
+        actor,
+        "",
+        desk_diagnose_core::assistant_policy::PERSONAL_ASSISTANT_POLICY_REVISION,
+        desk_agent_protocol::AgentScope {
+            granted: vec![],
+            mode: desk_agent_protocol::ExecutionMode::ReadOnly,
+            expires_at: None,
+            policy_name: None,
+        },
+        now,
+    ));
+    session.adopt_client_metadata(Some(conversation), AgentSessionSurface::AiAssistant);
+    let json = session
+        .encode_json_for_storage()
+        .map_err(|_| AssistantStoreError::Invalid("Invalid personal conversation"))?;
+    Ok((json, session.version))
 }
 
 pub async fn delete(
@@ -31,7 +66,10 @@ pub async fn delete(
     conversation_id: &str,
 ) -> Result<(), sea_orm::DbErr> {
     roster::Entity::delete_many()
-        .filter(roster::Column::ConversationId.eq(conversation_id))
+        .filter(roster::Column::ConversationId.is_in([
+            conversation_id.to_owned(),
+            personal_selection_key(conversation_id),
+        ]))
         .filter(roster::Column::ActorId.eq(actor_id))
         .exec(db)
         .await?;
@@ -126,6 +164,17 @@ pub async fn load(
         roster::Entity::find_by_id(conversation_id).one(db).await?,
         actor_id,
     )
+}
+
+pub async fn load_configuration(
+    db: &impl ConnectionTrait,
+    actor: &str,
+    conversation_id: &str,
+) -> Result<Option<DeviceRoster>, AssistantStoreError> {
+    if let Some(roster) = load(db, actor, conversation_id).await? {
+        return Ok(Some(roster));
+    }
+    load(db, actor, &personal_selection_key(conversation_id)).await
 }
 
 /// Postgres callers use the same conversation lock before initializing a roster

@@ -577,6 +577,14 @@ async fn delete_expired_session_candidates(
             .await?;
         let mut history = Vec::new();
         for row in &rows {
+            if row.device_id.is_empty() {
+                desk_assistant_data_store::device_roster::delete(
+                    &txn,
+                    &row.actor_id,
+                    &row.conversation_id,
+                )
+                .await?;
+            }
             if let Some(scope) = crate::assistant_data_store::native_scope_on(
                 &txn,
                 &row.actor_id,

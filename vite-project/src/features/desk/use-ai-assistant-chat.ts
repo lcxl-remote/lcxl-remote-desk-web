@@ -1541,6 +1541,7 @@ export function useAiAssistantChat({
         startGoal = false,
         previousCompletedGoalId: string | null = null,
         selectedIssues: IssueSelection[] = [],
+        requestTargetRefs = targetRefs,
     ) => {
         if (rehearsal && (rehearsal.status !== 'pending' || rehearsalSent.current || question !== rehearsal.prompt || conversationId.current !== rehearsal.client_conversation_id)) return false;
         const trimmed = rehearsal ? rehearsal.prompt : question.trim();
@@ -1585,7 +1586,7 @@ export function useAiAssistantChat({
                 client_timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
                 conversation_id: conversationId.current,
                 locale: rehearsal ? rehearsal.locale ?? undefined : locale,
-                ...(!deskId && targetRefs?.length ? { target_refs: [...targetRefs] } : {}),
+                ...(!deskId && requestTargetRefs?.length ? { target_refs: [...requestTargetRefs] } : {}),
                 selected_capability_ids: deskId ? [...selectedCapabilityIds] : [],
                 start_goal: Boolean(deskId) && !rehearsal && startGoal,
                 previous_completed_goal_id: deskId && !rehearsal && startGoal ? previousCompletedGoalId : null,
@@ -2105,6 +2106,7 @@ export function useAiAssistantChat({
     return {
         temporaryConversation,
         conversationId: conversationId.current,
+        ensureConversation,
         sessionId: snapshotWatermark.current?.conversationId === conversationId.current ? snapshotWatermark.current.sessionId : undefined,
         inputRevision: snapshotWatermark.current?.conversationId === conversationId.current ? snapshotWatermark.current.inputRevision : undefined,
         controlRevision: snapshotWatermark.current?.conversationId === conversationId.current ? snapshotWatermark.current.controlRevision : undefined,

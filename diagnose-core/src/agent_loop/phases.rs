@@ -187,10 +187,22 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
         });
     }
     if session.has_admitted_personal_input()
-        && let Some(inventory) = step_inventory.as_mut()
+        && let Some((inventory, providers)) = step_inventory.as_mut().zip(deps.provider_registry)
     {
-        // The fixed-device inventory cannot describe per-request readiness.
-        inventory.retain(|item| item.tool_name != crate::request_devices::SYSTEM_INFO_TOOL);
+        // The fixed-device inventory has no edge binding in a personal turn.
+        // Selected-device reads and command approval use their own projection below.
+        inventory.retain(|item| {
+            providers
+                .capability_for_tool(&item.tool_name)
+                .is_some_and(|capability| {
+                    capability.wire.execution_locality
+                        == desk_agent_protocol::capability_provider::ExecutionLocality::Central
+                })
+        });
+        session
+            .capability_disclosure
+            .loaded_tool_names
+            .retain(|name| inventory.iter().any(|item| item.tool_name == *name));
     }
     if let Some((snapshot, inventory)) = authority.as_ref().zip(step_inventory.as_mut()) {
         snapshot.narrow_inventory(
@@ -399,6 +411,10 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
         .filter(|tool| {
             deps.provider_registry
                 .is_some_and(|registry| registry.capability_for_tool(tool.name()).is_some())
+                && (!session.has_admitted_personal_input()
+                    || step_inventory.as_ref().is_none_or(|inventory| {
+                        inventory.iter().any(|item| item.tool_name == tool.name())
+                    }))
         })
         .map(|tool| (*tool).clone())
         .collect::<Vec<_>>();
@@ -566,6 +582,7 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
         exposed.retain(|candidate| candidate.name() != tool.name());
         exposed.push(tool);
     }
+    let can_request_selected_command = selected_permission_tool.is_some();
     let selected_command_tool = if state.permission_continuation_pending
         && deps
             .permission_continuation_exact_tools
@@ -750,16 +767,26 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                 })
                 .cloned()
                 .collect::<Vec<_>>();
+            // The selected command stays part of the approval continuation
+            // protocol even though it has no fixed-device catalogue entry.
+            let indexed_pins = if state.permission_continuation_pending {
+                continuation_tools
+                    .iter()
+                    .filter(|name| {
+                        !session.has_admitted_personal_input()
+                            || inventory.iter().any(|item| item.tool_name == **name)
+                    })
+                    .cloned()
+                    .collect()
+            } else {
+                Vec::new()
+            };
             let projection = crate::capability_disclosure::project_capability_disclosure(
                 providers,
                 inventory,
                 &continuation_provider_tools,
                 permission_candidates,
-                if state.permission_continuation_pending {
-                    &continuation_tools
-                } else {
-                    &[]
-                },
+                &indexed_pins,
                 &session.capability_disclosure,
                 pinned_context.max_context_bytes,
             )
@@ -795,7 +822,11 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
             disclosure_projection = Some(projection);
         }
         if !request_devices.is_empty() {
-            crate::request_devices::append_catalogue(&mut system_prompt.text, &request_devices);
+            crate::request_devices::append_catalogue(
+                &mut system_prompt.text,
+                &request_devices,
+                can_request_selected_command,
+            );
         }
         if system_prompt
             .data_envelope

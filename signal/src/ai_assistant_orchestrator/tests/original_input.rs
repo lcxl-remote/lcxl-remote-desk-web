@@ -2087,6 +2087,10 @@ async fn run_selected_command(finish: SelectedCommandFinish) {
             assert!(spec["function"]["parameters"]["properties"]["target_ref"].is_object());
             assert!(request["messages"].to_string().contains("command-selected"));
             assert!(!request["messages"].to_string().contains("command-outside"));
+            let messages = request["messages"].to_string();
+            assert!(!messages.contains("edge_disconnected"));
+            assert!(!messages.contains("read_process_list"));
+            assert!(messages.contains("process-level CPU or disk details"));
             reply("command-outside")
         })
         .await;
@@ -2203,7 +2207,7 @@ async fn run_selected_command(finish: SelectedCommandFinish) {
             owner,
             String::new(),
             AiAssistantAsk {
-                question: "Check disk space on this device".into(),
+                question: "Check CPU-intensive processes and disk usage on this device".into(),
                 client_message_id: "selected-command-input".into(),
                 conversation_id: Some(intent.into()),
                 client_timezone: "UTC".into(),

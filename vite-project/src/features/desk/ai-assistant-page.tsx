@@ -18,7 +18,7 @@ import { AssistantBackgroundTasks } from './assistant-background-tasks';
 import { AssistantSubagentApprovalNotice, AssistantSubagents, AssistantConversationTabs, type AssistantSubagentPanel } from './assistant-subagents';
 import { AssistantStopConfirmation } from './assistant-stop-confirmation';
 import { AssistantComposerActions } from './assistant-composer-actions';
-import { AssistantRequestDevices, type AssistantRequestDevice } from './assistant-request-devices';
+import { AssistantRequestDevices, useConversationRequestDevices } from './assistant-request-devices';
 import { AssistantIssueSources } from './assistant-issue-sources';
 import type { IssueSelection } from '@/services/types';
 import { AssistantAutomaticApproval } from './assistant-automatic-approval';
@@ -262,7 +262,6 @@ export function AiAssistantWorkspace({
     const { t } = useTranslation();
     const { i18n } = useTranslation();
     const hasDevice = Boolean(deskId);
-    const [requestDevices, setRequestDevices] = useState<AssistantRequestDevice[]>([]);
     const { isConnected, subscribe, sendMessage } = useDeskSignaling({ usePrepared: hasDevice });
     const { entries, inspectSession, inspectUi, scheduleUi, cancelDelayedUi, remainingSeconds, applications, listApplications, applicationSelectionAvailable } = useAiAssistantObservation({
         deskId,
@@ -276,12 +275,12 @@ export function AiAssistantWorkspace({
         rehearsal,
         initialConversationId,
         deskId,
-        targetRefs: requestDevices.map(device => device.id),
         connected: isConnected,
         conversationStorageScope: personalScope ?? stableDeviceId,
         subscribe,
         sendMessage,
     });
+    const requestDevices = useConversationRequestDevices(personalScope, chat.conversationId, chat.ensureConversation);
     const subagents = useAiAssistantSubagents({ connection: deskId, conversation: chat.conversationId,
         session: chat.sessionId, snapshot: chat.subagents, connected: isConnected, onChanged: chat.refreshSnapshot });
     const capabilities = useAiAssistantCapabilities({
@@ -469,12 +468,13 @@ export function AiAssistantWorkspace({
     const sendDisabled = (!canQueueInput && chat.turnRunning) || chat.stopping || !!chat.deliveryState || !rehearsalCanStart
         || !assistantEnabled || !question.trim() || !isConnected || chat.hydrating || chat.historyRestoreFailed || !chat.sessionTargetReady
         || chat.sessionTargetResolving || chat.contextUpdating || !providerConfig?.api_key_set
-        || !providerConfig?.model || (startGoal && !goalBudgetPolicy);
+        || !providerConfig?.model || !requestDevices.ready || (startGoal && !goalBudgetPolicy);
     const submit = (event: FormEvent) => {
         event.preventDefault();
         if (sendDisabled) return;
         const selectedContext = featureProfile.object_context ? selectedCapabilityIds : [];
-        chat.start(question, i18n.language, selectedContext, startGoal, previousCompletedGoalId, selectedIssues);
+        chat.start(question, i18n.language, selectedContext, startGoal, previousCompletedGoalId, selectedIssues,
+            requestDevices.selected.map(device => device.id));
     };
 
     const resetConversation = (temporary = false) => {
@@ -1122,7 +1122,12 @@ export function AiAssistantWorkspace({
                                     onCheckedChange: checked => { setStartGoal(checked); setPreviousCompletedGoalId(null); },
                                     summary: startGoal && goalBudgetPolicy ? <GoalLimitsSummary policy={goalBudgetPolicy} /> : undefined,
                                 } : undefined} />
-                            {personalScope && <AssistantRequestDevices selected={requestDevices} onChange={setRequestDevices} />}
+                            {personalScope && <AssistantRequestDevices selected={requestDevices.selected}
+                                disabled={!requestDevices.ready || chat.hydrating} onChange={requestDevices.update} />}
+                            {personalScope && requestDevices.error && <Button type="button" variant="ghost" size="sm"
+                                aria-label={t(requestDevices.error)} onClick={requestDevices.reload}>
+                                <RefreshCw className="h-4 w-4" aria-hidden="true" />
+                            </Button>}
                             {!hasDevice && selectedIssues.length > 0 && <Button type="button" variant="ghost" size="sm" onClick={() => setPanel('context')}>
                                 {t('pages.aiAssistant.issueSources.selected', { count: selectedIssues.length })}
                             </Button>}

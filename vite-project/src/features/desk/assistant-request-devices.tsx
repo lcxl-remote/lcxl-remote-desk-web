@@ -1,8 +1,10 @@
 import { useTranslation } from 'react-i18next';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Check, Monitor } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { useListConnections } from '@/services/hooks/connectionController/useListConnections';
+import { getAiAssistantDeviceRoster, updateAiAssistantDeviceRoster } from '@/services/clients';
 import { isAiAssistantEnabled } from './ai-assistant-switch';
 
 export type AssistantRequestDevice = {
@@ -10,6 +12,53 @@ export type AssistantRequestDevice = {
     name: string;
     platform: string;
 };
+
+export function useConversationRequestDevices(
+    scope: string | undefined,
+    conversation: string | null,
+    ensureConversation: () => string,
+) {
+    const client = useQueryClient();
+    const key = (id: string | null) => ['ai-assistant-request-devices', scope, id] as const;
+    const save = useMutation({
+        mutationFn: async (input: { conversation: string; expectedRevision: number; targetRefs: string[] }) => {
+            const response = await updateAiAssistantDeviceRoster(input);
+            if (!response.success || !response.data) throw new Error('Device selection could not be saved');
+            return response.data;
+        },
+        onSuccess: (data, input) => client.setQueryData(key(input.conversation), data),
+    });
+    const saving = save.isPending && save.variables?.conversation === conversation;
+    const roster = useQuery({
+        queryKey: key(conversation),
+        enabled: !!scope && !!conversation && !saving,
+        queryFn: async ({ signal }) => {
+            const response = await getAiAssistantDeviceRoster({ conversation: conversation! }, { signal });
+            if (!response.success || !response.data) throw new Error('Device selection unavailable');
+            return response.data;
+        },
+    });
+    const ready = !scope || (!saving && (!conversation || !!roster.data));
+    return {
+        ready,
+        selected: roster.data?.targetRefs.map(id => ({ id, name: id, platform: '' })) ?? [],
+        update(devices: AssistantRequestDevice[]) {
+            if (!ready) return;
+            save.mutate({
+                conversation: ensureConversation(),
+                expectedRevision: roster.data?.revision ?? 0,
+                targetRefs: devices.map(device => device.id),
+            });
+        },
+        error: (save.isError && save.variables?.conversation === conversation)
+            ? 'pages.aiAssistant.workbench.saveFailed'
+            : roster.isError ? 'pages.aiAssistant.conversations.loadFailed' : null,
+        reload() {
+            save.reset();
+            void roster.refetch();
+        },
+    };
+}
 
 export function AssistantRequestDevices({ selected, onChange, disabled, showStatus }: {
     selected: AssistantRequestDevice[];
@@ -45,7 +94,7 @@ export function AssistantRequestDevices({ selected, onChange, disabled, showStat
             </DropdownMenuItem>}
             {[...choices.values()].map(device => {
                 const checked = selected.some(value => value.id === device.id);
-                return <DropdownMenuItem key={device.id} role="menuitemcheckbox" aria-checked={checked}
+                return <DropdownMenuItem key={device.id} role="menuitemcheckbox" aria-checked={checked} disabled={disabled}
                     onSelect={event => {
                         event.preventDefault();
                         onChange(checked ? selected.filter(value => value.id !== device.id) : [...selected, device]);
