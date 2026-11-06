@@ -30,6 +30,12 @@ ai_attention:
   subagent_result:
     en: A subagent result is ready to review
     zh-CN: 子 agent 结果已就绪，等待查看
+  worker_question:
+    en: Worker needs your answer
+    zh-CN: Worker 等待你的答复
+  issue_reply_needs_attention:
+    en: Issue reply needs attention
+    zh-CN: 工单回复待核对
 tray_active_sessions:
   en: "LCXL Remote Desktop — %{count} remote session(s) active"
   zh-CN: "LCXL 远程桌面 — %{count} 个远程会话正在进行"

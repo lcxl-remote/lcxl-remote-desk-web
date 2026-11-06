@@ -636,7 +636,7 @@ fn handle_service_op(
         // single management entry and avoids two code paths racing on the same
         // plist. The frontend also hides the service install/uninstall UI on
         // macOS, so this is not expected to be reached.
-        let _ = (&sidecar, &op);
+        let _ = (&sidecar, &op, config_override);
         log::warn!(
             "Service op requested on macOS; ignored (auto-start is managed via the LaunchAgent)"
         );

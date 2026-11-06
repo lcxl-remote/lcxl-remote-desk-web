@@ -28,6 +28,10 @@ fn label(reason: AiAssistantAttentionReason, locale: &str) -> String {
         AiAssistantAttentionReason::GoalBlocked => "ai_attention.blocked",
         AiAssistantAttentionReason::GoalDeadlineSoon => "ai_attention.deadline",
         AiAssistantAttentionReason::SubAgentResult => "ai_attention.subagent_result",
+        AiAssistantAttentionReason::WorkerQuestion => "ai_attention.worker_question",
+        AiAssistantAttentionReason::IssueReplyNeedsAttention => {
+            "ai_attention.issue_reply_needs_attention"
+        }
     };
     rust_i18n::t!(key, locale = locale).to_string()
 }
@@ -135,5 +139,24 @@ mod tests {
             label(AiAssistantAttentionReason::PermissionApproval, "zh-CN"),
             "AI 申请权限，需要审批"
         );
+    }
+
+    #[test]
+    fn workbench_notifications_use_localized_status() {
+        for (reason, english, chinese) in [
+            (
+                AiAssistantAttentionReason::WorkerQuestion,
+                "Worker needs your answer",
+                "Worker 等待你的答复",
+            ),
+            (
+                AiAssistantAttentionReason::IssueReplyNeedsAttention,
+                "Issue reply needs attention",
+                "工单回复待核对",
+            ),
+        ] {
+            assert_eq!(label(reason, "en"), english);
+            assert_eq!(label(reason, "zh-CN"), chinese);
+        }
     }
 }
