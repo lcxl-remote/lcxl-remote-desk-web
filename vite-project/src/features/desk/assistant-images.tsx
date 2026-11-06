@@ -71,11 +71,13 @@ function StoredImage({ frame, onDelete, autoLoad = false, readOnly = false }: {
     </div>;
 }
 
-function ActivityGroup({ count, hasImages, focused, children }: { count: number; hasImages: boolean; focused?: boolean; children: ReactNode }) {
+function ActivityGroup({ count, hasImages, focused, atTail, children }: {
+    count: number; hasImages: boolean; focused?: boolean; atTail: boolean; children: ReactNode;
+}) {
     const { t } = useTranslation();
     // Follow asynchronously loaded screenshots until the user chooses a state.
     const [expanded, setExpanded] = useState<boolean | null>(null);
-    return <Disclosure open={expanded ?? (hasImages || focused)} onOpenChange={setExpanded}
+    return <Disclosure open={expanded ?? (atTail || hasImages || focused)} onOpenChange={setExpanded}
         title={t('pages.aiAssistant.activityGroup', { count })}
         className="w-full max-w-full rounded-lg border bg-muted/30 px-3 py-2 text-sm sm:max-w-[90%]"
         summaryClassName="text-muted-foreground">
@@ -164,7 +166,7 @@ export function AssistantImages({ sessionId, evidence, messages, renderMessage, 
             const index = anchorFor(frame);
             if (index !== undefined) byMessage.set(index, [...(byMessage.get(index) ?? []), frame]);
         }
-        type TimelineEntry = { key: string; kind: 'body' | 'boundary' | 'activity'; count: number; hasImages?: boolean; focused?: boolean; content: ReactNode };
+        type TimelineEntry = { key: string; kind: 'body' | 'boundary' | 'reasoning' | 'tool' | 'activity'; count: number; hasImages?: boolean; focused?: boolean; content: ReactNode };
         const timeline: TimelineEntry[] = [];
         let group: AiAssistantMessage[] = [];
         let groupEnd = -1;
@@ -174,7 +176,7 @@ export function AssistantImages({ sessionId, evidence, messages, renderMessage, 
             const end = groupEnd;
             timeline.push({
                 key: `tool-group:${members[0].id}`,
-                kind: 'activity',
+                kind: 'tool',
                 focused: members.some(message => message.id === focusedMessageId),
                 hasImages: byMessage.has(end),
                 count: new Set(members.map(item => item.toolCallId).filter(Boolean)).size
@@ -194,21 +196,20 @@ export function AssistantImages({ sessionId, evidence, messages, renderMessage, 
                 return;
             }
             flushGroup();
+            // Prose saved with a tool call belongs to the work leading to that call.
+            const next = messages[index + 1];
+            const assistantBody = message.role === 'assistant' && message.text.trim()
+                && !(next?.role === 'tool_call' && next.contextBoundaryIds?.includes(message.id));
             if (message.role === 'assistant' && renderReasoning && message.reasoning?.trim()) {
-                timeline.push({ key: `reasoning:${message.id}`, kind: 'activity', count: 1,
+                timeline.push({ key: `reasoning:${message.id}`, kind: 'reasoning', count: 1,
                     content: renderReasoning(message) });
-                if (message.text.trim()) {
-                    timeline.push({ key: message.id, kind: 'body', count: 0,
-                        content: <>{renderMessage({ ...message, reasoning: null })}{renderImages(byMessage.get(index) ?? [], true)}</> });
-                } else {
-                    timeline.push({ key: `reasoning-notices:${message.id}`, kind: 'activity', count: 0,
-                        hasImages: byMessage.has(index),
-                        content: <>{renderMessage({ ...message, reasoning: null })}{renderImages(byMessage.get(index) ?? [], true)}</> });
-                }
+                timeline.push({ key: message.id, kind: assistantBody ? 'body' : 'activity', count: 0,
+                    hasImages: byMessage.has(index), focused: message.id === focusedMessageId,
+                    content: <>{renderMessage({ ...message, reasoning: null })}{renderImages(byMessage.get(index) ?? [], true)}</> });
             } else {
                 timeline.push({ key: message.id,
-                    kind: message.role === 'assistant' && message.text.trim() ? 'body'
-                        : message.role === 'user' || message.role === 'goal_decision' ? 'boundary' : 'activity',
+                    kind: assistantBody ? 'body' : message.role === 'user' || message.role === 'goal_decision' ? 'boundary'
+                        : message.role === 'tool_call' || message.role === 'tool_result' ? 'tool' : 'activity',
                     count: message.role === 'tool_call' ? 1 : 0,
                     focused: message.id === focusedMessageId,
                     hasImages: byMessage.has(index),
@@ -219,11 +220,12 @@ export function AssistantImages({ sessionId, evidence, messages, renderMessage, 
         const folded: ReactNode[] = [];
         const pending: TimelineEntry[] = [];
         let previousBody = false;
-        const flushPending = (closedByBody: boolean) => {
+        const flushPending = (closedByBody: boolean, atTail = false) => {
             if (!pending.length) return;
             const count = pending.reduce((sum, entry) => sum + entry.count, 0);
-            if (previousBody && closedByBody && count > 1) {
-                folded.push(<ActivityGroup key={`activity:${pending[0].key}`} count={count}
+            const hasReasoningAndTools = pending.some(entry => entry.kind === 'reasoning') && pending.some(entry => entry.kind === 'tool');
+            if (count > 1 && ((previousBody && closedByBody) || hasReasoningAndTools)) {
+                folded.push(<ActivityGroup key={`activity:${pending[0].key}`} count={count} atTail={atTail}
                     hasImages={pending.some(entry => entry.hasImages)} focused={pending.some(entry => entry.focused)}>
                     {pending.map(entry => <Fragment key={entry.key}>{entry.content}</Fragment>)}
                 </ActivityGroup>);
@@ -241,10 +243,9 @@ export function AssistantImages({ sessionId, evidence, messages, renderMessage, 
                 flushPending(false);
                 folded.push(<Fragment key={entry.key}>{entry.content}</Fragment>);
                 previousBody = false;
-            } else if (previousBody) pending.push(entry);
-            else folded.push(<Fragment key={entry.key}>{entry.content}</Fragment>);
+            } else pending.push(entry);
         }
-        flushPending(false);
+        flushPending(false, true);
         return <>
             {controls}
             {earlier.length > 0 && <>

@@ -518,7 +518,9 @@ A completed UI action batch means its steps were dispatched; the application sta
 
 On Web and Tauri, pages open to the same conversation sync saved messages, approval records, and tool results. When the model provides reasoning, it appears before the corresponding tool call. Expand a tool card to see its inputs. Outputs appear after the tool returns a result. When a call requires approval, you can inspect the inputs before following the approval prompt.
 
-On Web, Android, and iOS, two or more thinking sections or tool calls between two non-empty assistant replies form a **Work process** group, collapsed by default. On Web, a group containing screenshots opens by default and screenshot cards show thumbnails; sibling tool calls and thinking sections remain collapsed and can be opened individually. Screenshots loaded asynchronously open their group, while subsequent updates preserve a manual collapse. A single item stays visible without an outer group. User messages break the group, and activity before the first or after the last assistant reply stays directly visible.
+On Web and Tauri, adjacent reasoning and tool calls appear in order in a **Work process** group. Open the group to expand individual reasoning sections and tool details. A group at the end of the conversation opens by default and collapses by default when a reply arrives. Groups with screenshots open by default, including when screenshots arrive later. If you open or close a group yourself, the page keeps your choice. User messages and standalone assistant replies separate groups. A single activity appears on its own.
+
+On Android and iOS, two or more thinking sections or tool calls between two non-empty assistant replies form a **Work process** group, collapsed by default.
 
 For new screenshots, **Observation recorded** shows when the server received that screenshot result, in the browser's local time zone. It does not establish the source's exact render time or current freshness. Historical screenshots without a valid timestamp show **Time not recorded**; refreshing does not fill in a time. Device-reported frame status and receipt age appear separately.
 

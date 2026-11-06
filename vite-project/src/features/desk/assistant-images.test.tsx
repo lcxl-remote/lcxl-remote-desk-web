@@ -6,6 +6,7 @@ import { AssistantToolCall } from './assistant-tool-call';
 import { AssistantToolGroup } from './assistant-tool-group';
 import { deleteAssistantImage, getAssistantImage, listAssistantImages } from '@/services/clients';
 import type { AiAssistantVisualEvidence } from './ai-assistant-event';
+import type { AiAssistantMessage } from './use-ai-assistant-chat';
 vi.mock('@/services/clients', () => ({ deleteAssistantImage: vi.fn(), getAssistantImage: vi.fn(), listAssistantImages: vi.fn() }));
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string, values?: { count?: number; time?: string }) =>
     values?.time !== undefined ? `${key}:${values.time}` : values?.count === undefined ? key : `${key}:${values.count}` }) }));
@@ -261,7 +262,37 @@ describe('assistant activity folding', () => {
         expect(screen.getAllByRole('button', { name: 'pages.aiAssistant.activityGroup:2' })).toHaveLength(1);
     });
 
-    it('does not fold across a user message or hide unfinished activity', () => {
+    it('groups the first reasoning and its tools while running and after the answer arrives', () => {
+        const messages: AiAssistantMessage[] = [
+            { id: 'question', role: 'user', text: 'Check the disk' },
+            { id: 'plan', role: 'assistant', text: 'I will check free space.', reasoning: 'Inspect the current usage.' },
+            { id: 'call', role: 'tool_call', toolCallId: 'disk', text: 'Disk tool input', contextBoundaryIds: ['plan'] },
+        ];
+        const renderConversation = (records: AiAssistantMessage[]) => <AssistantImages evidence={[]} messages={records}
+            renderMessage={renderMessage} renderReasoning={renderReasoning} renderToolGroup={renderToolGroup} />;
+        const view = render(renderConversation(messages));
+        const group = screen.getByRole('button', { name: 'pages.aiAssistant.activityGroup:2' });
+        expect(group.getAttribute('data-state')).toBe('open');
+        const panel = group.closest('[data-slot="disclosure"]');
+        const thought = screen.getByText('Inspect the current usage.');
+        const input = screen.getByText('Disk tool input');
+        expect(panel?.contains(thought)).toBe(true);
+        expect(panel?.contains(screen.getByText('I will check free space.'))).toBe(true);
+        expect(panel?.contains(input)).toBe(true);
+        expect(thought.compareDocumentPosition(input) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+        view.rerender(renderConversation([...messages,
+            { id: 'result', role: 'tool_result', toolCallId: 'disk', text: '41 GB free' },
+            { id: 'answer', role: 'assistant', text: 'The disk has 41 GB free.' },
+        ]));
+        expect(screen.getByRole('button', { name: 'pages.aiAssistant.activityGroup:2' })).toBe(group);
+        expect(group.getAttribute('data-state')).toBe('closed');
+        fireEvent.click(group);
+        expect(panel?.contains(screen.getByText('41 GB free'))).toBe(true);
+        expect(panel?.contains(screen.getByText('The disk has 41 GB free.'))).toBe(false);
+    });
+
+    it('does not group across a user message and keeps the last process open', () => {
         vi.mocked(listAssistantImages).mockResolvedValue({ data: [], success: true, code: 0 });
         render(<AssistantImages sessionId="stored-run" evidence={[]} messages={[
             { id: 'early', role: 'tool_call', turnId: 'start', toolCallId: 'early', text: 'Early call' },
@@ -273,10 +304,15 @@ describe('assistant activity folding', () => {
             { id: 'call-three', role: 'tool_call', turnId: 'three', toolCallId: 'three', text: 'Unfinished call' },
             { id: 'thought', role: 'assistant', text: '', reasoning: 'Still thinking' },
         ]} renderMessage={renderMessage} renderReasoning={renderReasoning} renderToolGroup={renderToolGroup} />);
-        expect(screen.queryByRole('button', { name: /pages.aiAssistant.activityGroup/ })).toBeNull();
-        expect(screen.getByText('Early call')).toBeTruthy();
-        expect(screen.getByText('Unfinished call')).toBeTruthy();
-        expect(screen.getByText('Still thinking')).toBeTruthy();
+        const groups = screen.getAllByRole('button', { name: /pages.aiAssistant.activityGroup/ });
+        expect(groups).toHaveLength(1);
+        expect(groups[0].getAttribute('data-state')).toBe('open');
+        const panel = groups[0].closest('[data-slot="disclosure"]');
+        for (const text of ['Early call', 'First call', 'New question', 'Second call']) {
+            expect(panel?.contains(screen.getByText(text))).toBe(false);
+        }
+        expect(panel?.contains(screen.getByText('Unfinished call'))).toBe(true);
+        expect(panel?.contains(screen.getByText('Still thinking'))).toBe(true);
     });
     it('keeps a committed goal-review reason outside folded tool activity', () => {
         vi.mocked(listAssistantImages).mockResolvedValue({ data: [], success: true, code: 0 });
