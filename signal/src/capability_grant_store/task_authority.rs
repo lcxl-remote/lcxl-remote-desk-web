@@ -35,20 +35,19 @@ pub(super) async fn match_current_on(
     if let Some(session) = &session
         && !session.agent_role.is_main()
     {
-        if session.actor_id != call.actor_id
-            || session.device_id != call.target_device_id
-            || session.input_revision != call.input_revision
-        {
+        if session.actor_id != call.actor_id || session.input_revision != call.input_revision {
             return Err(invalid());
         }
         desk_diagnose_core::future::boxed(|| async {
             crate::agent_subagent_store::lock_child_source_on(txn, session).await
         })
         .await?;
-        let fence =
-            desk_diagnose_core::action_turn_fence::AssistantTurnFence::from_session(session)
-                .map_err(|_| invalid())?
-                .ok_or_else(invalid)?;
+        let fence = desk_diagnose_core::action_turn_fence::AssistantTurnFence::for_device(
+            session,
+            call.target_device_id,
+        )
+        .map_err(|_| invalid())?
+        .ok_or_else(invalid)?;
         let now_ms = i64::try_from(call.now_unix_ms)
             .map_err(|_| invalid())?
             .max(chrono::Utc::now().timestamp_millis());
@@ -101,14 +100,8 @@ pub(super) async fn match_current_on(
             match_no_review_command_grant(grant, call, &current, reserved).map_err(|_| invalid())
         } else if matches!(grant.issued_by, CapabilityGrantIssuer::AiApproval(_)) {
             let session = session.ok_or_else(invalid)?;
-            if session.actor_id != call.actor_id
-                || (session.device_id != call.target_device_id
-                    && !(session.device_id.is_empty()
-                        && call.tool_name
-                            == desk_diagnose_core::command_confirmation::COMMAND_TOOL))
-            {
-                return Err(invalid());
-            }
+            // The recorded decision binds the grant to the action device even
+            // when the conversation itself has no fixed device.
             let current = desk_diagnose_core::future::boxed(|| async {
                 crate::agent_approval_store::current_grant_parent_on(
                     txn,

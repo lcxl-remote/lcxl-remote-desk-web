@@ -240,21 +240,21 @@ pub fn validate_permission_resume_claim(
     require_current_policy(params.policy_revision)?;
     require_current_policy(session.policy_revision)?;
     use crate::dynamic_run::PermissionDecisionSource;
-    let selected_command = session.permission_requests.iter().any(|request| {
+    let selected_request = session.permission_requests.iter().find(|request| {
         request.request_id == decision.request_id
             && request.input_revision == decision.request_input_revision
             && request.state == decision.resulting_state
-            && request.exact_command().is_some()
+            && request.selected_device_id().is_some()
             && permits_permission_request(session, request)
     });
     let authorized_decision = match &decision.decision_source {
         PermissionDecisionSource::UserDecision => true,
         PermissionDecisionSource::AutomaticReview { .. }
         | PermissionDecisionSource::SystemDecision { .. } => {
-            selected_command && session.allows_delegated_review()
+            selected_request.is_some() && session.allows_delegated_review()
         }
         PermissionDecisionSource::OwnerNoReview { authorization } => {
-            selected_command
+            selected_request.is_some_and(|request| request.exact_command().is_some())
                 && session.has_direct_approval_origin()
                 && authorization.root_conversation_id
                     == session.approval_delegation_conversation_id()
@@ -262,7 +262,7 @@ pub fn validate_permission_resume_claim(
     };
     if session.has_admitted_personal_input()
         && (session.agent_role.is_main()
-            || (session.agent_role.binding().is_some() && selected_command))
+            || (session.agent_role.binding().is_some() && selected_request.is_some()))
         && params.trigger_origin == TriggerOrigin::PermissionDecision
         && session.input_revision == decision.request_input_revision
         && authorized_decision

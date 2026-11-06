@@ -1273,7 +1273,7 @@ fn concrete_ui_nodes() -> Vec<UiNodeProjection> {
     .collect()
 }
 
-fn concrete_review_reply(body: &[u8], approve: bool) -> String {
+pub(super) fn concrete_review_reply(body: &[u8], approve: bool) -> String {
     let request: serde_json::Value = serde_json::from_slice(body).unwrap();
     let prompt = request["messages"][1]["content"].as_str().unwrap();
     let candidate_json = prompt

@@ -3002,7 +3002,9 @@ async fn respond_to_system_info(
 
 #[actix_web::test]
 async fn personal_selected_desktop_read_and_whole_screen_resume_on_signal() {
+    use super::desktop_permission::concrete_review_reply;
     use super::permission_object::tool_reply;
+    use crate::config::ConfigConnection;
     use crate::controller::ai_assistant_session::{PermissionDecisionBody, decide_permission_on};
     use desk_agent_protocol::{Capability, computer_use::*};
     use desk_signal_facade::model::os::OperationSystemEnum;
@@ -3010,6 +3012,8 @@ async fn personal_selected_desktop_read_and_whole_screen_resume_on_signal() {
     use serde_json::{Value, json};
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let reviewer = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let reviewer_address = reviewer.local_addr().unwrap();
     let directory = tempfile::tempdir().unwrap();
     let url = format!(
         "sqlite://{}?mode=rwc",
@@ -3202,24 +3206,73 @@ async fn personal_selected_desktop_read_and_whole_screen_resume_on_signal() {
             );
         };
         assert_eq!(request.selected_device_id(), Some(target));
-        let item = &request.items[0];
-        let body: PermissionDecisionBody = serde_json::from_value(json!({
-            "conversation":intent, "requestId":request.request_id, "items":[{
-                "itemId":item.item_id,"decision":"approve","resource_scope":item.resource_scope,
-                "operation_scope":item.operation_scope,"ttl_seconds":60,"max_uses":1
-            }]
-        }))
-        .unwrap();
-        let decision = decide_permission_on(&db, connections.clone(), web::Json(body))
+        if index == 0 {
+            let item = &request.items[0];
+            let body: PermissionDecisionBody = serde_json::from_value(json!({
+                "conversation":intent, "requestId":request.request_id, "items":[{
+                    "itemId":item.item_id,"decision":"approve","resource_scope":item.resource_scope,
+                    "operation_scope":item.operation_scope,"ttl_seconds":60,"max_uses":1
+                }]
+            }))
+            .unwrap();
+            let decision = decide_permission_on(&db, connections.clone(), web::Json(body))
+                .await
+                .unwrap();
+            let response: Value = serde_json::from_slice(
+                &actix_web::body::to_bytes(decision.into_body())
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(response["data"]["state"], "approved", "{response}");
+        } else {
+            let mut config = crate::approval_model_provider::ApprovalModelConfig {
+                enabled: true,
+                ..Default::default()
+            };
+            config.gateway.wire_protocol =
+                Some(desk_diagnose_core::model_profile::WireProtocol::OpenAiChatCompletions);
+            config.gateway.model = Some("selected-screen-reviewer".into());
+            config.gateway.base_url = Some(format!("http://{reviewer_address}"));
+            config.gateway.api_key = Some("test-only-key".into());
+            db.config_context()
+                .update::<_, sea_orm::DbErr, _>(|file| {
+                    file.approval_gateway = config;
+                    Ok(Some(()))
+                })
+                .await
+                .unwrap();
+            let now = chrono::Utc::now().timestamp_millis() as u64;
+            crate::agent_approval_store::discover_default_review_roots(&db, 0, 64, now)
+                .await
+                .unwrap();
+            let (pending, _) =
+                crate::agent_approval_store::pending_permission_reviews(&db, 0, 64, now)
+                    .await
+                    .unwrap();
+            let subject = pending
+                .into_iter()
+                .find(|review| review.request_id == request.request_id)
+                .expect("discover the selected screenshot for independent review");
+            assert_eq!(subject.target_device_id, target);
+            let (captured, decided) = tokio::time::timeout(MODEL_IO_TIMEOUT, async {
+                tokio::join!(
+                    capture_one_openai_request_with_reply(&reviewer, |body| concrete_review_reply(
+                        body, true
+                    )),
+                    crate::approval_dispatch::process_pending_permission_review(
+                        db.clone(),
+                        connections.clone(),
+                        subject
+                    ),
+                )
+            })
             .await
             .unwrap();
-        let response: Value = serde_json::from_slice(
-            &actix_web::body::to_bytes(decision.into_body())
-                .await
-                .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(response["data"]["state"], "approved", "{response}");
+            assert!(decided);
+            let review: Value = serde_json::from_slice(&captured).unwrap();
+            assert_eq!(review["model"], "selected-screen-reviewer");
+        }
         tokio::time::timeout(
             SCENARIO_TIMEOUT,
             respond_to_selected_desktop(&connections, target, peer, index == 1),
@@ -3249,6 +3302,14 @@ async fn personal_selected_desktop_read_and_whole_screen_resume_on_signal() {
             snapshot.terminal_error
         );
         if index == 1 {
+            use desk_diagnose_core::dynamic_run::PermissionDecisionActor;
+            assert!(
+                snapshot
+                    .permission_decisions
+                    .iter()
+                    .any(|decision| decision.request_id == request.request_id
+                        && decision.actor == PermissionDecisionActor::AiApproval)
+            );
             let row = crate::entity::agent_session::Entity::find()
                 .filter(crate::entity::agent_session::Column::ConversationId.eq(&run))
                 .one(&db)
