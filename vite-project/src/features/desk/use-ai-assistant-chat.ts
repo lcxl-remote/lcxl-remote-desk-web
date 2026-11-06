@@ -8,7 +8,6 @@ import { agentErrorMessage } from '@/lib/agent-error-i18n';
 import { v4 } from 'uuid';
 import { assistantMessageId } from './assistant-native-ids';
 
-import type { AiProvenance } from '@/components/ai-generated-mark';
 import type {
     AiAssistantAsk,
     IssueSelection,
@@ -61,11 +60,11 @@ export type AiAssistantMessage = {
     turnId?: string | null;
     text: string;
     reasoning?: string | null;
-    provenance?: AiProvenance | null;
 };
 
 export type AiAssistantToolActivity = {
     permissionReason?: string;
+    permissionReview?: { state: PermissionRequestDto['state']; source?: NonNullable<PermissionRequestDto['decision']>['source'] };
     callId: string;
     name: string;
     status: 'running' | 'ok' | 'failed' | 'returned';
@@ -311,6 +310,7 @@ export function projectPersistedSnapshot(snapshot: Pick<PersistedSnapshot, 'mess
     const messages: AiAssistantMessage[] = [];
     let tools: AiAssistantToolActivity[] = [];
     let draft: ComputerActionDraftPreview | null = null;
+    const permissions = new Map(snapshot.permissionRequests?.map(request => [request.requestId, request]));
     for (const message of snapshot.messages) {
         const goalReceipt = projectGoalReviewReceipt(message);
         if (goalReceipt) messages.push(goalReceipt);
@@ -347,9 +347,14 @@ export function projectPersistedSnapshot(snapshot: Pick<PersistedSnapshot, 'mess
             let nativeFailed = false;
             let nativeVerified = false;
             let nativeFileResult = false;
+            let permissionReview: AiAssistantToolActivity['permissionReview'];
             try {
                 const native = JSON.parse(message.text);
                 permissionReason = snapshot.actionPermissionReasons?.[String(native.work_id)];
+                if (existing?.name === 'request_permissions' && native.status === 'pending_user_decision') {
+                    const request = permissions.get(native.request_id);
+                    if (request) permissionReview = { state: request.state, source: request.decision?.source };
+                }
                 nativeFailed = ['definitely_not_started', 'failed'].includes(native.result)
                     || ['failed', 'error'].includes(native.status)
                     || native.ok === false || native.success === false
@@ -361,6 +366,7 @@ export function projectPersistedSnapshot(snapshot: Pick<PersistedSnapshot, 'mess
             tools = upsertTool(tools, {
                 callId: message.toolCallId,
                 permissionReason,
+                ...(permissionReview && { permissionReview }),
                 name: existing?.name ?? 'unknown',
                 status: backgroundRunning ? 'running'
                     : typeof message.toolOk === 'boolean' ? (message.toolOk ? 'ok' : 'failed')
@@ -577,8 +583,6 @@ export function useAiAssistantChat({
     } | null>(null);
     const olderRequest = useRef<object | null>(null);
     const lastSeq = useRef(-1);
-    const currentTurnId = useRef<string | null>(null);
-    const previewArgs = useRef(new Map<string, string>());
     const sessionTargetRequest = useRef<string | null>(null);
 
     const observeQueue = useCallback((conversation: string, queue: AiAssistantMainRequestsDto) => {
@@ -767,16 +771,16 @@ export function useAiAssistantChat({
                 setTemporaryConversation(snapshot.temporaryConversation);
             }
             const settledRequestIds = new Set<string>();
-            if (!snapshot.active) {
-                if (snapshot.requestId) settledRequestIds.add(snapshot.requestId);
-                // An approval continuation uses a new execution ID. The queue
-                // receipt and handled input still identify the original stream.
-                if (typeof snapshot.inputRevision === 'number' && typeof snapshot.latestInputSeq === 'number'
-                    && snapshot.latestInputSeq > 0 && snapshot.handledInputSeq === snapshot.latestInputSeq
-                    && Array.isArray(snapshot.mainRequests)) {
-                    for (const item of snapshot.mainRequests) {
-                        if (item.state === 'activated' && typeof item.inputRevision === 'number'
-                            && item.inputRevision <= snapshot.inputRevision) settledRequestIds.add(item.requestId);
+            if (!snapshot.active && snapshot.requestId) settledRequestIds.add(snapshot.requestId);
+            const inputHandled = !snapshot.active && (snapshot.latestInputSeq ?? 0) > 0
+                && snapshot.handledInputSeq === snapshot.latestInputSeq;
+            // A continuation keeps the input revision and uses a new stream ID.
+            if (typeof snapshot.inputRevision === 'number' && Array.isArray(snapshot.mainRequests)) {
+                for (const item of snapshot.mainRequests) {
+                    if (item.state === 'activated' && typeof item.inputRevision === 'number'
+                        && item.inputRevision <= snapshot.inputRevision
+                        && (inputHandled || (snapshot.active && snapshot.requestId && snapshot.requestId !== item.requestId))) {
+                        settledRequestIds.add(item.requestId);
                     }
                 }
             }
@@ -808,6 +812,7 @@ export function useAiAssistantChat({
                 // it: the server's active request, if any, is the current one.
                 activeRequest.current = null;
                 activeRequestAck.current = null;
+                setPartial('');
                 if (stoppingRequest.current === local) clearStopping();
             }
             if (!snapshot.active) {
@@ -857,13 +862,25 @@ export function useAiAssistantChat({
                     ? { ...next, status: live.status, preview_data_url: live.preview_data_url }
                     : next;
             }));
+            // The stream can preview text, but only the snapshot orders
+            // committed reasoning, tool calls, and results.
+            const optimisticInput = pendingDelivery.current;
+            setMessages(optimisticInput?.conversation === expectedConversationId
+                && !windowMessages.some(message => message.id === optimisticInput.id)
+                ? [...windowMessages, { id: optimisticInput.id, role: 'user', text: optimisticInput.question }]
+                : windowMessages);
+            setTools(windowTools);
+            setDraft(projected.draft);
+            if (activeRequest.current) {
+                const previousIds = new Set(previous?.messages.map(message => message.id));
+                const committedText = projected.messages.filter(message => message.role === 'assistant'
+                    && message.text && !previousIds.has(message.id));
+                if (committedText.length) {
+                    setPartial(current => committedText.some(message => message.text.startsWith(current)) ? '' : current);
+                }
+            }
             setRemoteActive(Boolean(snapshot.active || activeRequest.current));
             if (!activeRequest.current) {
-                const pending = pendingDelivery.current;
-                setMessages(pending && pending.conversation === expectedConversationId && !windowMessages.some(m => m.id === pending.id)
-                    ? [...windowMessages, { id: pending.id, role: 'user', text: pending.question }] : windowMessages);
-                setTools(windowTools);
-                setDraft(projected.draft);
                 setPartial('');
                 const last = projected.messages.at(-1);
                 if (deliveryFailure.current) {
@@ -921,6 +938,34 @@ export function useAiAssistantChat({
             }
         }
     }, [acknowledgeDelivery, deskId, observeQueue, queueEnabled, queueOnly]);
+
+    const timelineRead = useRef<{ conversation: string; epoch: number; invalidated: boolean } | null>(null);
+    const refreshTimeline = useCallback((invalidated = false) => {
+        const conversation = conversationId.current;
+        if (!conversation) return;
+        const epoch = snapshotEpoch.current;
+        const current = timelineRead.current;
+        if (current?.conversation === conversation && current.epoch === epoch) {
+            current.invalidated ||= invalidated;
+            return;
+        }
+        const read = { conversation, epoch, invalidated: false };
+        timelineRead.current = read;
+        void (async () => {
+            try {
+                do {
+                    read.invalidated = false;
+                    const outcome = await loadSnapshot(conversation);
+                    if (timelineRead.current !== read || conversationId.current !== conversation
+                        || snapshotEpoch.current !== epoch) return;
+                    if (outcome === 'missing' || !snapshotWatermark.current) await loadRequestQueue(conversation);
+                } while (read.invalidated && timelineRead.current === read
+                    && conversationId.current === conversation && snapshotEpoch.current === epoch);
+            } finally {
+                if (timelineRead.current === read) timelineRead.current = null;
+            }
+        })();
+    }, [loadRequestQueue, loadSnapshot]);
 
     const loadOlderMessages = useCallback(async () => {
         const cursor = messagePage.nextBeforeMessageId;
@@ -997,7 +1042,6 @@ export function useAiAssistantChat({
         conversationId.current = stored;
         temporaryConversationRef.current = false;
         setTemporaryConversation(false);
-        currentTurnId.current = null;
         rehearsalSent.current = false;
         setMessages([]);
         setTools([]);
@@ -1043,7 +1087,6 @@ export function useAiAssistantChat({
         setMessagePage({ hasMore: false, nextBeforeMessageId: null });
         setLoadingOlderMessages(false);
         lastSeq.current = -1;
-        previewArgs.current.clear();
         if (!stored) return;
 
         void loadSnapshot(stored, true).then(outcome => {
@@ -1052,20 +1095,12 @@ export function useAiAssistantChat({
     }, [conversationStorageScope, initialConversationId, loadRequestQueue, loadSnapshot, rehearsal?.client_conversation_id]);
 
     useEffect(() => {
-        // A slow snapshot must not stack further requests behind it.
-        let polling = false;
-        const poll = () => {
-            if (!conversationId.current || polling) return;
-            polling = true;
-            const selected = conversationId.current;
-            void loadSnapshot(selected).then(outcome => {
-                if (outcome === 'missing' || !snapshotWatermark.current) return loadRequestQueue(selected);
-            })
-                .finally(() => { polling = false; });
+        const interval = window.setInterval(refreshTimeline, 2_000);
+        return () => {
+            window.clearInterval(interval);
+            timelineRead.current = null;
         };
-        const interval = window.setInterval(poll, 2_000);
-        return () => window.clearInterval(interval);
-    }, [loadRequestQueue, loadSnapshot]);
+    }, [refreshTimeline]);
 
     useEffect(() => {
         const onStorage = (event: StorageEvent) => {
@@ -1114,9 +1149,7 @@ export function useAiAssistantChat({
             conversationId.current = event.newValue;
             temporaryConversationRef.current = false;
             setTemporaryConversation(false);
-            currentTurnId.current = null;
             lastSeq.current = -1;
-            previewArgs.current.clear();
             setMessages([]);
             setTools([]);
             setDraft(null);
@@ -1265,11 +1298,11 @@ export function useAiAssistantChat({
             && !!event.main_request_id && queueStreamIds.current.has(event.main_request_id);
         const beginsQueuedStream = resumesQueuedStream || (!streamSettled && queueStreamIds.current.has(event.request_id)
             && (event.kind === 'turn_started' || (event.kind === 'status' && event.status === 'accepted')));
-        if ((!activeRequest.current && (currentSubmission || beginsQueuedStream))
+        const observesSnapshotStream = !streamSettled && snapshotActiveRequest.current === event.request_id;
+        if ((!activeRequest.current && (currentSubmission || beginsQueuedStream || observesSnapshotStream))
             || (resumesQueuedStream && activeRequest.current === event.main_request_id)) {
             activeRequest.current = event.request_id;
             lastSeq.current = -1;
-            currentTurnId.current = null;
             setPartial('');
             setRemoteActive(true);
         }
@@ -1301,51 +1334,20 @@ export function useAiAssistantChat({
                 setPartial((current) => current + (event.partial_summary ?? ''));
                 break;
             case 'partial_committed':
+                refreshTimeline(true);
                 break;
             case 'turn_started':
-                currentTurnId.current = event.turn_id ?? null;
                 if (resumesQueuedStream) setStatus('modeling');
                 break;
-            case 'tool_started': {
-                const callId = event.tool_call_id ?? `tool-${event.seq}`;
-                const argumentsJson = event.tool_arguments_json ?? '{}';
-                if (event.tool_name === PREVIEW_TOOL) {
-                    previewArgs.current.set(callId, argumentsJson);
-                }
-                setTools((current) => upsertTool(current, {
-                    callId,
-                    name: event.tool_name ?? 'unknown',
-                    status: 'running',
-                    argumentsJson,
-                    output: null,
-                }));
-                setMessages(current => current.some(message => message.toolCallId === callId) ? current : [...current, {
-                    id: `tool-call-${callId}`, role: 'tool_call', toolCallId: callId, turnId: currentTurnId.current, text: '',
-                }]);
-                setStatus('using_tool');
+            case 'tool_started':
+                setPartial('');
+                setStatus(event.awaiting_approval ? 'permission_required' : 'using_tool');
+                refreshTimeline(true);
                 break;
-            }
-            case 'tool_finished': {
-                const callId = event.tool_call_id ?? `tool-${event.seq}`;
-                setMessages(current => current.some(message => message.toolCallId === callId) ? current : [...current, {
-                    id: `tool-call-${callId}`, role: 'tool_call', toolCallId: callId, turnId: currentTurnId.current, text: '',
-                }]);
-                setTools((current) => {
-                    const existing = current.find((tool) => tool.callId === callId);
-                    return upsertTool(current, {
-                        callId,
-                        name: existing?.name ?? 'unknown',
-                        status: event.tool_ok ? 'ok' : 'failed',
-                        argumentsJson: existing?.argumentsJson ?? '{}',
-                        output: event.tool_output ?? null,
-                    });
-                });
-                if (event.tool_ok) {
-                    const parsed = parseDraft(previewArgs.current.get(callId));
-                    if (parsed) setDraft(parsed);
-                }
+            case 'tool_finished':
+                setPartial('');
+                refreshTimeline(true);
                 break;
-            }
             case 'visual_evidence':
                 if (event.visual_evidence) {
                     setVisualEvidence((current) => upsertVisualEvidence(current, event.visual_evidence!));
@@ -1361,27 +1363,17 @@ export function useAiAssistantChat({
                 }
                 break;
             case 'answer':
-                queueStreamIds.current.delete(event.request_id);
-                setMessages((current) => [...current, {
-                    id: `assistant-${event.request_id}-${event.seq}`,
-                    role: 'assistant',
-                    text: event.answer ?? '',
-                    provenance: event.provenance,
-                }]);
-                setPartial('');
-                setStatus('done');
-                activeRequest.current = null;
-                clearStopping();
-                setRemoteActive(false);
-                if (conversationId.current) void loadSnapshot(conversationId.current);
-                break;
             case 'permission_required':
+                if (event.kind === 'answer') queueStreamIds.current.delete(event.request_id);
+                snapshotAcceptanceFloor.current = snapshotRequestOrder.current + 1;
+                snapshotActiveRequest.current = null;
                 setPartial('');
-                setStatus('permission_required');
+                setStatus(event.kind === 'answer' ? 'done' : 'permission_required');
                 activeRequest.current = null;
+                activeRequestAck.current = null;
                 clearStopping();
                 setRemoteActive(false);
-                if (conversationId.current) void loadSnapshot(conversationId.current);
+                refreshTimeline(true);
                 break;
             case 'error':
             case 'retracted':
@@ -1396,7 +1388,7 @@ export function useAiAssistantChat({
                 if (conversationId.current) void loadSnapshot(conversationId.current);
                 break;
         }
-    }), [acknowledgeDelivery, loadRequestQueue, loadSnapshot, rehearsal, rememberQueueStream, subscribe]);
+    }), [acknowledgeDelivery, loadRequestQueue, loadSnapshot, refreshTimeline, rehearsal, rememberQueueStream, subscribe]);
 
     const ensureConversation = useCallback(() => {
         if (!conversationId.current) {
@@ -1592,11 +1584,9 @@ export function useAiAssistantChat({
             text: trimmed,
         }]);
         if (nativeTurn) {
-            setTools([]);
             setDraft(null);
             setPartial('');
             setRemoteActive(true);
-            previewArgs.current.clear();
             documentPreviewPageRequests.current.clear();
         }
         setError(null);
@@ -2024,9 +2014,7 @@ export function useAiAssistantChat({
         historyWindow.current = null;
         olderRequest.current = null;
         conversationId.current = null;
-        currentTurnId.current = null;
         lastSeq.current = -1;
-        previewArgs.current.clear();
         setMessages([]);
         setTools([]);
         setDraft(null);

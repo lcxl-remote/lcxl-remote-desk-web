@@ -28,6 +28,7 @@ export type AiAssistantEvent = {
     tool_name?: string | null;
     tool_arguments_json?: string | null;
     tool_call_id?: string | null;
+    awaiting_approval?: boolean;
     tool_ok?: boolean | null;
     tool_output?: string | null;
     visual_evidence?: AiAssistantVisualEvidence | null;

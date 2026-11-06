@@ -56,16 +56,20 @@ export function AssistantToolCall({ tool, running, displayName, initialOpen = fa
     const permissionSubmission = isPermissionSubmissionReceipt(tool);
     const outcomeUnknown = hasUnknownActionResult(tool.output, tool.callId);
     const status = tool.status === 'running' && !running ? 'missing' : tool.status;
-    const displayStatus = status === 'ok' && isConfirmedNotSent(tool.name, tool.output) ? 'returned' : status;
+    const displayStatus = tool.permissionReview?.state === 'approved' ? 'ok'
+        : tool.permissionReview?.state === 'denied' ? 'failed'
+        : permissionSubmission || (status === 'ok' && isConfirmedNotSent(tool.name, tool.output)) ? 'returned' : status;
     const StatusIcon = permissionSkip || outcomeUnknown ? CircleHelp : displayStatus === 'ok' ? CheckCircle2 : displayStatus === 'failed' ? XCircle : displayStatus === 'running' ? Loader2 : displayStatus === 'returned' ? CircleDot : CircleHelp;
-    const statusLabel = t(`${prefix}${permissionSkip ? 'skippedForPermission' : outcomeUnknown ? 'outcomeUnknown' : displayStatus === 'ok' ? 'success' : displayStatus === 'failed' ? 'failure' : displayStatus === 'running' ? 'waiting' : displayStatus === 'returned' ? 'returned' : 'missing'}`);
+    const statusLabel = tool.permissionReview
+        ? t(`pages.aiAssistant.permissionState.${tool.permissionReview.state}`)
+        : t(`${prefix}${permissionSkip ? 'skippedForPermission' : outcomeUnknown ? 'outcomeUnknown' : displayStatus === 'ok' ? 'success' : displayStatus === 'failed' ? 'failure' : displayStatus === 'running' ? 'waiting' : displayStatus === 'returned' ? 'returned' : 'missing'}`);
     const statusClass = permissionSkip || outcomeUnknown ? 'text-amber-700 dark:text-amber-300' : displayStatus === 'ok' ? 'text-green-600 dark:text-green-400' : displayStatus === 'failed' ? 'text-destructive' : 'text-muted-foreground';
     return <Disclosure open={open} onOpenChange={setOpen} className="min-w-0 rounded-md border bg-muted/30 px-3 py-2" title={<>
             <span role="img" aria-label={statusLabel} title={statusLabel} className={`mr-2 inline-flex align-middle ${statusClass}`}>
                 <StatusIcon aria-hidden="true" className={`size-4 shrink-0${status === 'running' && !permissionSkip && !outcomeUnknown ? ' animate-spin motion-reduce:animate-none' : ''}`} />
             </span>
             {t(`${prefix}title`)} · {tool.name === 'unknown' ? t(`${prefix}unknown`) : displayName ?? tool.name}
-            {permissionSkip && <> · {statusLabel}</>}
+            {(permissionSkip || tool.permissionReview) && <> · {statusLabel}</>}
             {outcomeUnknown && !batch && <> · {t(`${prefix}inspectBeforeRetry`)}</>}
             {batch && <> · {t(`${prefix}${batch.key}`, { count: batch.count })}</>}
             {batch?.stage && <> · {t(`${prefix}${batch.stage}`, { count: batch.completed })}</>}
@@ -73,12 +77,13 @@ export function AssistantToolCall({ tool, running, displayName, initialOpen = fa
 
         {open && <div className="mt-3 min-w-0 space-y-3 text-xs">
             {permissionSkip && <p className="text-amber-700 dark:text-amber-300">{t('pages.aiAssistant.historicalPermissionSkip')}</p>}
-            {permissionSubmission && <p className="text-muted-foreground">{t('pages.aiAssistant.permissionSubmissionReceipt')}</p>}
             {tool.permissionReason && <p className="whitespace-pre-wrap break-words">{t('pages.aiAssistant.permissionReasonLabel', { reason: tool.permissionReason })}</p>}
             <AssistantCodeBlock label={t(`${prefix}input`)} text={tool.name === 'unknown' ? t(`${prefix}missingInput`) : tool.argumentsJson} />
-            <AssistantCodeBlock label={t(`${prefix}output`)} text={tool.output === null
-                ? t(`${prefix}${running && tool.status === 'running' ? 'waiting' : 'missing'}`)
-                : tool.output === '' ? t(`${prefix}empty`) : tool.output} />
+            {tool.permissionReview?.source && <p className="text-muted-foreground">{t(`pages.aiAssistant.permissionDecisionSource.${tool.permissionReview.source}`)}</p>}
+            {permissionSubmission && <p className="text-muted-foreground">{t('pages.aiAssistant.permissionSubmissionReceipt')}</p>}
+            {tool.output === null
+                ? <p className="text-muted-foreground">{statusLabel}</p>
+                : <AssistantCodeBlock label={t(`${prefix}output`)} text={tool.output === '' ? t(`${prefix}empty`) : tool.output} />}
         </div>}
     </Disclosure>;
 }

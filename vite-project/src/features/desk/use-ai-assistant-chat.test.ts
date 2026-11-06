@@ -1704,13 +1704,13 @@ describe('useAiAssistantChat', () => {
         );
     });
 
-    it('streams a read-only answer and exposes a validated typed preview event', () => {
+    it('reads the saved preview and answer after the stream signals completion', async () => {
         let subscriber: SignalingSubscriber | null = null;
         const subscribe = (handler: SignalingSubscriber) => {
             subscriber = handler;
             return () => { subscriber = null; };
         };
-        const sendMessage = vi.fn(() => 'assistant-request-1');
+        const sendMessage = vi.fn((_type: number, _payload: { client_message_id: string }) => 'assistant-request-1');
         const { result } = renderHook(() => useAiAssistantChat({
             deskId: 'desk-1',
             subscribe,
@@ -1754,7 +1754,19 @@ describe('useAiAssistantChat', () => {
                 verification: 'Inspect focus state again.',
             }],
         };
-        act(() => {
+        const input = sendMessage.mock.calls[0][1];
+        stubSnapshotFetch(vi.fn(async () => ({ ok: true, json: async () => ({ data: {
+            ...snapshotFields, sessionId: 'preview-session', requestId: 'assistant-request-1', seq: 3, active: false,
+            messages: [
+                { id: input.client_message_id, role: 'user', text: 'Inspect Word and prepare a focus preview.' },
+                { id: 'reasoning', role: 'assistant', text: '', reasoning: 'Preview the change first.', toolCalls: [
+                    { id: 'draft-1', name: 'preview_computer_action', argumentsJson: JSON.stringify(draft) },
+                ] },
+                { id: 'preview-output', role: 'tool', text: JSON.stringify(draft), toolCallId: 'draft-1', toolOk: true },
+                { id: 'saved-answer', role: 'assistant', text: 'I prepared a focus preview. Nothing was executed.' },
+            ],
+        } }) })));
+        await act(async () => {
             subscriber?.({
                 request_id: 'assistant-request-1',
                 signaling_type: SIGNALING_TYPE_CODE_AI_ASSISTANT_UPDATED,
@@ -1801,7 +1813,9 @@ describe('useAiAssistantChat', () => {
             });
         });
 
-        expect(result.current.messages.filter(message => message.toolCallId === 'draft-1')).toHaveLength(1);
+        expect(result.current.messages.map(message => message.id)).toEqual([
+            input.client_message_id, 'reasoning', 'tool-call-draft-1', 'saved-answer',
+        ]);
         expect(result.current.tools.find(tool => tool.callId === 'draft-1')).toMatchObject({
             name: 'preview_computer_action', argumentsJson: JSON.stringify(draft), output: JSON.stringify(draft), status: 'ok',
         });
@@ -1966,10 +1980,15 @@ describe('useAiAssistantChat', () => {
 
     it('streams the stable queued request while another submission awaits acknowledgement', async () => {
         let subscriber: SignalingSubscriber | null = null;
-        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({
-            success: false, code: deskErrorCodeEnum.PERMISSION_ERROR, data: null,
-        }) }));
+        let finished = false;
         const sendMessage = vi.fn((_type: number, _payload: unknown, _to?: string, id?: string) => id!);
+        vi.stubGlobal('fetch', vi.fn(async (url: string) => ({ ok: true, json: async () => finished && !url.includes('/requests?')
+            ? { data: { ...snapshotFields, sessionId: 'root', requestId: 'request-a', seq: 2, active: false, messages: [
+                { id: (sendMessage.mock.calls[0][1] as { client_message_id: string }).client_message_id, role: 'user', text: 'A' },
+                { id: 'answer-a', role: 'assistant', text: 'A done' },
+            ] } }
+            : { success: false, code: deskErrorCodeEnum.PERMISSION_ERROR, data: null },
+        })));
         const { result, unmount } = renderHook(() => useAiAssistantChat({ deskId: '', connected: true,
             subscribe: handler => { subscriber = handler; return () => { subscriber = null; }; }, sendMessage }));
         const deliver = (requestId: string, data: Record<string, unknown>) => subscriber?.({
@@ -1989,9 +2008,10 @@ describe('useAiAssistantChat', () => {
             act(() => deliver('request-a', { seq: 2, kind: 'partial', partial_summary: 'one' }));
             expect(result.current.partial).toBe('Part one');
             expect(result.current.deliveryState).toBe('sending');
-            act(() => deliver('request-a', { seq: 3, kind: 'answer', answer: 'A done' }));
+            finished = true;
+            await act(async () => deliver('request-a', { seq: 3, kind: 'answer', answer: 'A done' }));
             expect(result.current.deliveryState).toBe('sending');
-            expect(result.current.messages.at(-1)?.text).toBe('A done');
+            expect(result.current.messages.map(message => message.text)).toEqual(['A', 'A done', 'B']);
             act(() => receipt(sendMessage.mock.calls[1][3]!, 'request-b'));
             act(() => {
                 deliver('request-a', { seq: 4, kind: 'partial', partial_summary: 'late' });
@@ -2005,10 +2025,13 @@ describe('useAiAssistantChat', () => {
 
     it('keeps a queued stream through a pre-claim snapshot and shows the approval continuation live', async () => {
         let subscriber: SignalingSubscriber | null = null;
+        let finished = false;
         const fetchMock = vi.fn(async (url: string, _options?: RequestInit) => ({
             ok: true, json: async () => ({ success: true, data: url.includes('/requests?')
                 ? { sessionId: 'root', items: [] }
-                : { ...snapshotFields, sessionId: 'root', seq: 1, active: false, messages: [] } }),
+                : { ...snapshotFields, sessionId: 'root', seq: finished ? 2 : 1, active: false,
+                    requestId: finished ? 'resume' : undefined,
+                    messages: finished ? [{ id: 'saved-report', role: 'assistant', text: 'Disk report ready' }] : [] } }),
         }));
         vi.stubGlobal('fetch', fetchMock);
         const sendMessage = vi.fn((_type: number, _payload: unknown, _to?: string, id?: string) => id!);
@@ -2039,8 +2062,9 @@ describe('useAiAssistantChat', () => {
             deliver('resume', { kind: 'partial', seq: 1, partial_summary: 'Approved command' });
         });
         expect(result.current.partial).toBe('Approved command');
-        act(() => deliver('resume', { kind: 'answer', seq: 2, answer: 'Disk report ready' }));
-        expect(result.current.messages.at(-1)?.text).toBe('Disk report ready');
+        finished = true;
+        await act(async () => deliver('resume', { kind: 'answer', seq: 2, answer: 'Disk report ready' }));
+        expect(result.current.messages.at(-1)).toMatchObject({ id: 'saved-report', text: 'Disk report ready' });
     });
 
     it('recovers a completed approval continuation when only the queued turn start arrived', async () => {
@@ -2093,6 +2117,89 @@ describe('useAiAssistantChat', () => {
             expect(result.current.partial).toBe('');
             expect(result.current.messages.at(-1)?.text).toBe('Both checks complete');
         } finally { unmount(); }
+    });
+
+    it('converges two pages on the same saved timeline during approval and after missed events', async () => {
+        vi.useFakeTimers();
+        let subscriber: SignalingSubscriber | undefined;
+        const sendMessage = vi.fn();
+        const receipt = { requestId: 'parent', clientMessageId: 'input', state: 'activated', inputRevision: 1, acceptedAtMs: 1 };
+        const permission = { requestId: 'approval', inputRevision: 1, state: 'pending', items: [] };
+        const user = { id: 'input', role: 'user', text: 'Check disk space' };
+        const proposal = { id: 'proposal', role: 'assistant', text: '', reasoning: 'Ask for permission first.', toolCalls: [
+            { id: 'review', name: 'request_permissions', argumentsJson: '{"command":"df -h"}' },
+        ] };
+        const receiptMessage = { id: 'receipt', role: 'tool', toolCallId: 'review', toolOk: true,
+            text: '{"status":"pending_user_decision","request_id":"approval"}' };
+        const exec = { id: 'exec', role: 'assistant', text: '', reasoning: 'Run the approved command.', toolCalls: [
+            { id: 'disk', name: 'exec_command', argumentsJson: '{"command":"df -h"}' },
+        ] };
+        const resultMessage = { id: 'output', role: 'tool', toolCallId: 'disk', toolOk: true, text: 'exit_code=0\nFree space: 41 GB' };
+        const approved = { ...permission, state: 'approved', decision: { source: 'ai_approval', items: [] } };
+        const base = { ...snapshotFields, sessionId: 'root', latestInputSeq: 1, mainRequests: [receipt] };
+        let snapshot = { ...base, seq: 1, active: true, requestId: 'parent', handledInputSeq: 0,
+            messages: [user], permissionRequests: [] as (typeof approved | typeof permission)[] };
+        vi.stubGlobal('fetch', vi.fn(async (url: string) => ({
+            ok: true, json: async () => ({ data: url.includes('/requests?') ? { sessionId: 'root', items: [receipt] } : snapshot }),
+        })));
+        const original = renderHook(() => useAiAssistantChat({ deskId: '', initialConversationId: 'shared-chat',
+            subscribe: handler => { subscriber = handler; return () => { subscriber = undefined; }; }, sendMessage }));
+        const reopened = renderHook(() => useAiAssistantChat({ deskId: '', initialConversationId: 'shared-chat',
+            subscribe: () => () => undefined, sendMessage }));
+        const deliver = (id: string, seq: number, event: Record<string, unknown>) => subscriber?.({
+            request_id: id, signaling_type: SIGNALING_TYPE_CODE_AI_ASSISTANT_UPDATED,
+            signaling_data: { request_id: id, seq, ...event },
+        });
+        const poll = () => act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+        const expectSameTimeline = (ids: string[]) => {
+            expect(original.result.current.messages.map(message => message.id)).toEqual(ids);
+            expect(original.result.current.messages).toEqual(reopened.result.current.messages);
+            expect(original.result.current.tools).toEqual(reopened.result.current.tools);
+            expect(original.result.current.turnRunning).toBe(reopened.result.current.turnRunning);
+        };
+        try {
+            await poll();
+            act(() => deliver('parent', 1, { kind: 'partial', partial_summary: 'Checking' }));
+            expect(original.result.current.partial).toBe('Checking');
+            await act(async () => deliver('parent', 2, { kind: 'tool_started', tool_name: 'request_permissions', tool_call_id: 'review' }));
+            expectSameTimeline(['input']);
+
+            snapshot = { ...snapshot, seq: 2, active: false, handledInputSeq: 1,
+                messages: [user, proposal, receiptMessage], permissionRequests: [permission] };
+            await poll();
+            expectSameTimeline(['input', 'proposal', 'tool-call-review']);
+            expect(original.result.current.status).toBe('permission_required');
+            expect(original.result.current.tools[0].permissionReview?.state).toBe('pending');
+
+            snapshot = { ...snapshot, seq: 3, active: true, requestId: 'resume',
+                messages: [...snapshot.messages, exec], permissionRequests: [approved] };
+            await poll();
+            expectSameTimeline(['input', 'proposal', 'tool-call-review', 'exec', 'tool-call-disk']);
+            expect(original.result.current.tools[0].permissionReview).toEqual({ state: 'approved', source: 'ai_approval' });
+            expect(original.result.current.tools[1].output).toBeNull();
+            act(() => {
+                deliver('parent', 3, { kind: 'turn_started' });
+                deliver('resume', 1, { kind: 'partial', partial_summary: 'Summarizing' });
+            });
+            expect(original.result.current.partial).toBe('Summarizing');
+
+            snapshot = { ...snapshot, seq: 4, messages: [...snapshot.messages, resultMessage] };
+            await poll();
+            expectSameTimeline(['input', 'proposal', 'tool-call-review', 'exec', 'tool-call-disk', 'output']);
+            expect(original.result.current.tools[1]).toMatchObject({ output: resultMessage.text, status: 'ok' });
+            expect(original.result.current.turnRunning).toBe(true);
+
+            snapshot = { ...snapshot, seq: 5, active: false, messages: [...snapshot.messages,
+                { id: 'answer', role: 'assistant', text: 'Summarizing disk usage.' }] };
+            await poll();
+            expectSameTimeline(['input', 'proposal', 'tool-call-review', 'exec', 'tool-call-disk', 'output', 'answer']);
+            expect(original.result.current.turnRunning).toBe(false);
+            expect(original.result.current.partial).toBe('');
+            expect(original.result.current.status).toBe('done');
+        } finally {
+            original.unmount();
+            reopened.unmount();
+        }
     });
 
     it('accepts B and C while A runs, and cancels only the selected queued request', async () => {

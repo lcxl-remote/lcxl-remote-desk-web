@@ -38,6 +38,21 @@ describe('tool call transcript', () => {
         expect(screen.getByText('pages.aiAssistant.permissionSubmissionReceipt')).toBeTruthy();
     });
 
+    it.each(['ai_approval', 'owner'] as const)('shows the saved %s decision after the input', source => {
+        const review = { ...tool, name: 'request_permissions', status: 'ok' as const,
+            output: '{"status":"pending_user_decision","request_id":"request-1"}' };
+        const { rerender } = render(<AssistantToolCall running={false} tool={{
+            ...review, permissionReview: { state: 'pending' },
+        }} />);
+        expect(screen.getByRole('img', { name: 'pages.aiAssistant.permissionState.pending' })).toBeTruthy();
+        expect(screen.queryByRole('img', { name: 'pages.aiAssistant.toolCall.success' })).toBeNull();
+        fireEvent.click(screen.getByText(/request_permissions/));
+        const input = screen.getByLabelText('pages.aiAssistant.toolCall.input');
+        rerender(<AssistantToolCall running={false} tool={{ ...review, permissionReview: { state: 'approved', source } }} />);
+        const decision = screen.getByText(`pages.aiAssistant.permissionDecisionSource.${source}`);
+        expect(input.compareDocumentPosition(decision) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    });
+
     it('shows an associated unknown file result while folded without calling it success or ordinary failure', () => {
         const output = { work_id: 'work', action_request_id: tool.callId, execution_generation: 'generation',
             result: 'outcome_unknown', facts: [{ index: 0, changed: true, verified: false }], output: null };
@@ -91,12 +106,14 @@ describe('tool call transcript', () => {
         expect(container.querySelector('[data-slot="disclosure"]')?.getAttribute('data-state') === 'open').toBe(false);
         expect(container.querySelector('pre')).toBeNull();
         fireEvent.click(screen.getByText(/inspect_desktop_ui/));
-        await waitFor(() => expect(container.querySelectorAll('pre')).toHaveLength(2));
+        await waitFor(() => expect(container.querySelectorAll('pre')).toHaveLength(1));
         expect(container.querySelector('pre')?.textContent).toBe(JSON.stringify(JSON.parse(tool.argumentsJson), null, 2));
         expect(screen.getByText('pages.aiAssistant.toolCall.waiting')).toBeTruthy();
+        expect(screen.queryByLabelText('pages.aiAssistant.toolCall.output')).toBeNull();
         rerender(<AssistantToolCall tool={{ ...tool, status: 'failed', output: 'tool error: access denied <script>alert(1)</script>' }} running={false} />);
         expect(container.querySelector('[data-slot="disclosure"]')?.getAttribute('data-state') === 'open').toBe(true);
         expect(screen.getByText(/tool error: access denied/)).toBeTruthy();
+        expect(screen.getByLabelText('pages.aiAssistant.toolCall.output')).toBeTruthy();
         expect(container.querySelector('script')).toBeNull();
     });
 

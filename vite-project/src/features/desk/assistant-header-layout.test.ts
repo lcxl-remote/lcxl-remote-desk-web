@@ -32,7 +32,7 @@ it('keeps the context trigger below the input beside send or stop', () => {
     expect(composer).toContain('sections={menuSections}');
     expect(status).toBeGreaterThan(add);
     expect(composer.slice(status, statusEnd)).toContain('automaticApproval={automaticApproval}');
-    expect(composer.slice(status, statusEnd)).toContain('contextCount={selectedContextCount}');
+    expect(composer.slice(status, statusEnd)).toContain('contextCount={hasDevice ? selectedContextCount : 0}');
     expect(send).toBeGreaterThan(statusEnd);
     const main = page.slice(page.indexOf('id="assistant-main-panel"'), page.indexOf('data-testid="assistant-scroll-area"'));
     expect(main).not.toContain('approvalDelegation');
