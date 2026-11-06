@@ -8,10 +8,18 @@ vi.mock('react-i18next', () => import('@/test-utils/i18n-mock').then(module => m
 it('opens conversations, attention, and scheduled tasks from the AI Assistant overview cards', () => {
     render(<MemoryRouter><AiAssistantOverview /></MemoryRouter>);
 
+    expect(screen.getByRole('link', { name: /Multi-device conversation/ })).toHaveAttribute('href', '/ai-assistant/conversation');
     expect(screen.getByRole('link', { name: /AI conversations/ })).toHaveAttribute('href', '/ai-assistant/conversations');
     expect(screen.getByRole('link', { name: /AI Assistant attention/ })).toHaveAttribute('href', '/ai-assistant/attention');
     expect(screen.getByRole('link', { name: /Scheduled tasks/ })).toHaveAttribute('href', '/schedules');
     expect(screen.getByRole('link', { name: /Long-term memory/ })).toHaveAttribute('href', '/ai-assistant/memories');
     expect(screen.getByRole('link', { name: /Personalization/ })).toHaveAttribute('href', '/ai-assistant/personalization');
     expect(screen.queryByText('pages.aiAssistant.processing.description')).toBeNull();
+});
+
+it('keeps the personal conversation entry out of the organization overview', () => {
+    render(<MemoryRouter><AiAssistantOverview showPersonalConversation={false} showWorkbench={false} /></MemoryRouter>);
+
+    expect(screen.queryByRole('link', { name: /Multi-device conversation/ })).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /AI conversations/ })).toBeInTheDocument();
 });

@@ -1,15 +1,29 @@
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { Activity, Bell, Brain, CalendarClock, ListTodo, Search, SlidersHorizontal } from 'lucide-react';
+import { Activity, Bell, Brain, CalendarClock, ListTodo, MessagesSquare, Search, SlidersHorizontal } from 'lucide-react';
 import { Card, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { AiAssistantIcon } from '@/components/ai-assistant-icon';
 
-export function AiAssistantOverview({ showWorkbench = true }: { showWorkbench?: boolean }) {
+export function AiAssistantOverview({ showPersonalConversation = true, showWorkbench = true }: {
+    showPersonalConversation?: boolean;
+    showWorkbench?: boolean;
+}) {
     const { t } = useTranslation();
 
     return <div className="mx-auto w-full max-w-6xl p-6">
         <h1 className="mb-4 text-2xl font-bold tracking-tight">{t('pages.aiAssistant.title')}</h1>
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
+            {showPersonalConversation && <Link to="/ai-assistant/conversation" className="block rounded-xl outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2">
+                <Card className="h-full cursor-pointer transition-colors hover:bg-muted/50">
+                    <CardHeader>
+                        <div className="flex items-center gap-2">
+                            <MessagesSquare className="h-5 w-5 text-primary" aria-hidden="true" />
+                            <CardTitle className="text-lg">{t('pages.aiAssistant.conversations.personal')}</CardTitle>
+                        </div>
+                        <CardDescription className="mt-2 line-clamp-2">{t('pages.aiAssistant.overview.personalConversationDescription')}</CardDescription>
+                    </CardHeader>
+                </Card>
+            </Link>}
             {showWorkbench && <Link to="/ai-assistant/workbench" className="block rounded-xl outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2">
                 <Card className="h-full cursor-pointer transition-colors hover:bg-muted/50">
                     <CardHeader>

@@ -4,7 +4,7 @@ Device owners can open [Model call metrics](/features/model-metrics) from **Usag
 
 ## Get started
 
-Open **AI Assistant → Conversations → Personal conversation**. To compare devices, select them in **Devices** in the composer and send your question. For example, select two devices and ask for their OS versions. Each command approval shows the device and exact command, and its result returns to the original conversation. Changes to the selection apply to your next message.
+Open **AI Assistant → Multi-device conversation**. To compare devices, select them in **Devices** in the composer and send your question. For example, select two devices and ask for their OS versions. Each command approval shows the device and exact command, and its result returns to the original conversation. Changes to the selection apply to your next message.
 
 To attach a device’s files, screen, or app context, open the assistant from that device.
 

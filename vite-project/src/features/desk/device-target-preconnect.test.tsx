@@ -4,10 +4,13 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { useEffect } from 'react';
 import { afterEach, expect, it, vi } from 'vitest';
 import { DeviceTargetBoundary, useDeviceTarget, type DeviceTarget } from './device-target-context';
+import OwnerDeviceTarget from './device-target';
 import { useDeskSignaling } from './use-desk-signaling';
 import type { ConnectionModel } from '@/services/types';
 const get = vi.hoisted(() => vi.fn());
+const account = vi.hoisted(() => vi.fn());
 vi.mock('@/services/clients', () => ({ getDeviceConnection: get }));
+vi.mock('@/services/hooks/userController/useGetCurrentUser', () => ({ useGetCurrentUser: account }));
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
 class Socket {
     static readonly CONNECTING=0; static readonly OPEN=1; static readonly CLOSED=3;
@@ -27,7 +30,35 @@ function Main() {
     },[transport.isConnected,transport.sendMessage,target.connectionId]);
     return <p>{target.connectionId}:{String(transport.isConnected)}</p>;
 }
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); get.mockReset(); Socket.instances=[]; });
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); get.mockReset(); account.mockReset(); Socket.instances=[]; });
+
+function renderOwnerAssistant() {
+    return render(<QueryClientProvider client={new QueryClient()}><MemoryRouter initialEntries={['/desk/device/device/assistant']}>
+        <Routes><Route path="/desk/device/:deviceId" element={<OwnerDeviceTarget />}>
+            <Route path="assistant" element={<Main />} />
+        </Route></Routes>
+    </MemoryRouter></QueryClientProvider>);
+}
+
+it('opens the AI Assistant route for the signed-in OSS owner without a numeric user ID', async () => {
+    vi.stubGlobal('WebSocket', Socket);
+    account.mockReturnValue({ data: { data: { access: 'admin', user_id: null } } });
+    get.mockResolvedValue({ success: true, code: 0, data: { connection_id: 'owner-connection', device_id: 'device' } });
+    renderOwnerAssistant();
+
+    expect(await screen.findByText('owner-connection:false')).toBeInTheDocument();
+    expect(get).toHaveBeenCalledExactlyOnceWith('device', { scope: 'personal' }, expect.objectContaining({ signal: expect.any(AbortSignal) }));
+});
+
+it('does not start owner discovery for a device-code account', () => {
+    vi.stubGlobal('WebSocket', Socket);
+    account.mockReturnValue({ data: { data: { access: 'device_user', user_id: null, target_connection_id: 'fixed' } } });
+    renderOwnerAssistant();
+
+    expect(get).not.toHaveBeenCalled();
+    expect(Socket.instances).toHaveLength(0);
+});
+
 it('overlaps discovery with one unadmitted socket, then adopts an already-open socket without another handshake', async () => {
     vi.stubGlobal('WebSocket',Socket);
     let resolve!: (value:unknown)=>void;

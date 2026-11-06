@@ -56,7 +56,7 @@ it.each([null, 7])('opens and sends a personal conversation from an empty device
         </Routes>
     </MemoryRouter></QueryClientProvider>);
 
-    fireEvent.click(screen.getByRole('link', { name: 'Personal conversation' }));
+    fireEvent.click(screen.getByRole('link', { name: 'Multi-device conversation' }));
     expect(signaling.sendMessage).not.toHaveBeenCalled();
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Summarize this idea' } });
     fireEvent.click(screen.getByRole('button', { name: 'Send' }));
