@@ -1223,18 +1223,20 @@ pub async fn mark_claimed(
     {
         return Ok(false);
     }
-    Ok(clear_payload(request::Entity::update_many(), now_ms)
-        .filter(request::Column::RequestId.eq(request_id))
-        .filter(request::Column::ConversationId.eq(session.queue_conversation_id()))
-        .filter(request::Column::ActorId.eq(&session.actor_id))
-        .filter(request::Column::ClientMessageId.eq(message_id))
-        .filter(request::Column::InputRevision.eq(signed(session.input_revision)?))
-        .filter(request::Column::State.eq(ACTIVATED))
-        .filter(request::Column::PendingInputJson.is_not_null())
-        .exec(txn)
-        .await?
-        .rows_affected
-        == 1)
+    Ok(
+        clear_recovery_payload(request::Entity::update_many(), now_ms)
+            .filter(request::Column::RequestId.eq(request_id))
+            .filter(request::Column::ConversationId.eq(session.queue_conversation_id()))
+            .filter(request::Column::ActorId.eq(&session.actor_id))
+            .filter(request::Column::ClientMessageId.eq(message_id))
+            .filter(request::Column::InputRevision.eq(signed(session.input_revision)?))
+            .filter(request::Column::State.eq(ACTIVATED))
+            .filter(request::Column::PendingInputJson.is_not_null())
+            .exec(txn)
+            .await?
+            .rows_affected
+            == 1,
+    )
 }
 
 fn pending_row_update(row: &request::Model) -> sea_orm::UpdateMany<request::Entity> {
@@ -1248,6 +1250,16 @@ fn clear_payload(
     update: sea_orm::UpdateMany<request::Entity>,
     now_ms: i64,
 ) -> sea_orm::UpdateMany<request::Entity> {
+    clear_recovery_payload(update, now_ms).col_expr(
+        request::Column::ReplyConnectionId,
+        Expr::value(None::<String>),
+    )
+}
+
+fn clear_recovery_payload(
+    update: sea_orm::UpdateMany<request::Entity>,
+    now_ms: i64,
+) -> sea_orm::UpdateMany<request::Entity> {
     update
         .col_expr(
             request::Column::FirstDispatchJson,
@@ -1257,11 +1269,31 @@ fn clear_payload(
             request::Column::PendingInputJson,
             Expr::value(None::<String>),
         )
-        .col_expr(
-            request::Column::ReplyConnectionId,
-            Expr::value(None::<String>),
-        )
         .col_expr(request::Column::UpdatedAtMs, Expr::value(now_ms))
+}
+
+/// The submitting connection is a delivery hint only. The host must still
+/// authenticate it against the owner before sending any turn frames.
+pub async fn reply_for_input(
+    db: &impl ConnectionTrait,
+    actor: &str,
+    conversation: &str,
+    revision: u64,
+) -> Result<Option<(String, String)>, AssistantStoreError> {
+    use request::Column;
+    let row = request::Entity::find()
+        .select_only()
+        .columns([Column::RequestId, Column::ReplyConnectionId])
+        .filter(Column::ActorId.eq(actor))
+        .filter(Column::ConversationId.eq(conversation))
+        .filter(Column::InputRevision.eq(signed(revision)?))
+        .filter(Column::State.eq(ACTIVATED))
+        .filter(Column::PendingInputJson.is_null())
+        .filter(Column::ReplyConnectionId.is_not_null())
+        .into_tuple::<(String, String)>()
+        .one(db)
+        .await?;
+    Ok(row)
 }
 
 fn fail_payload(

@@ -607,7 +607,7 @@ export function useAiAssistantChat({
                 : { conversation: expectedConversation });
         try {
             const response = await fetch(`${REQUEST_QUEUE_PATH}?${query}`, {
-                credentials: 'include', headers: { Accept: 'application/json' },
+                credentials: 'include', cache: 'no-store', headers: { Accept: 'application/json' },
                 signal: AbortSignal.timeout(SNAPSHOT_TIMEOUT_MS),
             });
             const queue = response.ok ? (await response.json())?.data as AiAssistantMainRequestsDto | undefined : undefined;
@@ -708,7 +708,7 @@ export function useAiAssistantChat({
         try {
             const response = await fetch(
                 sessionQuery(deskId, expectedConversationId),
-            { credentials: 'include', headers: { Accept: 'application/json' }, signal: controller.signal },
+            { credentials: 'include', cache: 'no-store', headers: { Accept: 'application/json' }, signal: controller.signal },
             );
             const body = response.ok ? await response.json() : null;
             if (
@@ -844,7 +844,7 @@ export function useAiAssistantChat({
                     ? { ...next, status: live.status, preview_data_url: live.preview_data_url }
                     : next;
             }));
-            setRemoteActive(Boolean(snapshot.active));
+            setRemoteActive(Boolean(snapshot.active || activeRequest.current));
             if (!activeRequest.current) {
                 const pending = pendingDelivery.current;
                 setMessages(pending && pending.conversation === expectedConversationId && !windowMessages.some(m => m.id === pending.id)
@@ -1245,9 +1245,14 @@ export function useAiAssistantChat({
             if (conversationId.current) void loadSnapshot(conversationId.current);
             return;
         }
-        const beginsQueuedStream = queueStreamIds.current.has(event.request_id)
-            && (event.kind === 'turn_started' || (event.kind === 'status' && event.status === 'accepted'));
-        if (!activeRequest.current && (currentSubmission || beginsQueuedStream)) {
+        const currentSession = snapshotWatermark.current?.sessionId ?? queuedSession.current?.sessionId;
+        const resumesQueuedStream = event.kind === 'turn_started'
+            && event.main_request_session_id === currentSession
+            && !!event.main_request_id && queueStreamIds.current.has(event.main_request_id);
+        const beginsQueuedStream = resumesQueuedStream || (queueStreamIds.current.has(event.request_id)
+            && (event.kind === 'turn_started' || (event.kind === 'status' && event.status === 'accepted')));
+        if ((!activeRequest.current && (currentSubmission || beginsQueuedStream))
+            || (resumesQueuedStream && activeRequest.current === event.main_request_id)) {
             activeRequest.current = event.request_id;
             lastSeq.current = -1;
             currentTurnId.current = null;
@@ -1257,7 +1262,12 @@ export function useAiAssistantChat({
         if (message.request_id !== activeRequest.current) return;
         if (event.seq <= lastSeq.current) return;
         lastSeq.current = event.seq;
-        if (event.status !== 'accepting') acknowledgeActiveRequest(message.request_id);
+        // The stream's start and intake acknowledgement can precede the native
+        // claim. An idle snapshot in that window cannot retire this stream.
+        if (event.kind !== 'turn_started' && event.status !== 'accepting'
+            && !(event.status === 'accepted' && queueStreamIds.current.has(event.request_id))) {
+            acknowledgeActiveRequest(message.request_id);
+        }
 
         if (event.kind === 'status' && event.status === 'accepted' && currentSubmission) acknowledgeDelivery();
         if (event.kind === 'error' && event.seq <= 1 && currentSubmission && !stopPending.current) {
@@ -1280,6 +1290,7 @@ export function useAiAssistantChat({
                 break;
             case 'turn_started':
                 currentTurnId.current = event.turn_id ?? null;
+                if (resumesQueuedStream) setStatus('modeling');
                 break;
             case 'tool_started': {
                 const callId = event.tool_call_id ?? `tool-${event.seq}`;
@@ -1351,7 +1362,6 @@ export function useAiAssistantChat({
                 if (conversationId.current) void loadSnapshot(conversationId.current);
                 break;
             case 'permission_required':
-                queueStreamIds.current.delete(event.request_id);
                 setPartial('');
                 setStatus('permission_required');
                 activeRequest.current = null;

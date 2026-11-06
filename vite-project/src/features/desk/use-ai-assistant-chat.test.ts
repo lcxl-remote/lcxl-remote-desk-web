@@ -2003,6 +2003,46 @@ describe('useAiAssistantChat', () => {
         } finally { unmount(); }
     });
 
+    it('keeps a queued stream through a pre-claim snapshot and shows the approval continuation live', async () => {
+        let subscriber: SignalingSubscriber | null = null;
+        const fetchMock = vi.fn(async (url: string, _options?: RequestInit) => ({
+            ok: true, json: async () => ({ success: true, data: url.includes('/requests?')
+                ? { sessionId: 'root', items: [] }
+                : { ...snapshotFields, sessionId: 'root', seq: 1, active: false, messages: [] } }),
+        }));
+        vi.stubGlobal('fetch', fetchMock);
+        const sendMessage = vi.fn((_type: number, _payload: unknown, _to?: string, id?: string) => id!);
+        const { result } = renderHook(() => useAiAssistantChat({ deskId: '', connected: true,
+            subscribe: handler => { subscriber = handler; return () => { subscriber = null; }; }, sendMessage }));
+        const deliver = (id: string, data: Record<string, unknown>) => subscriber?.({
+            request_id: id, signaling_type: SIGNALING_TYPE_CODE_AI_ASSISTANT_UPDATED,
+            signaling_data: { request_id: id, ...data },
+        });
+        act(() => { expect(result.current.start('Check disk space')).toBe(true); });
+        act(() => {
+            deliver(sendMessage.mock.calls[0][3]!, { kind: 'status', status: 'queued', seq: 1,
+                main_request_id: 'parent', main_request_session_id: 'root' });
+            deliver('parent', { kind: 'turn_started', seq: 2 });
+        });
+        await waitFor(() => expect(result.current.sessionId).toBe('root'));
+        expect(fetchMock.mock.calls.some(([url, options]) =>
+            url.includes('/ai-assistant-session?') && options?.cache === 'no-store')).toBe(true);
+        act(() => {
+            deliver('parent', { kind: 'partial', seq: 3, partial_summary: 'Checking' });
+        });
+        expect(result.current.partial).toBe('Checking');
+        act(() => deliver('parent', { kind: 'permission_required', seq: 4 }));
+        act(() => {
+            deliver('foreign', { kind: 'turn_started', seq: 0, main_request_id: 'parent', main_request_session_id: 'other' });
+            deliver('foreign', { kind: 'partial', seq: 1, partial_summary: 'Foreign' });
+            deliver('resume', { kind: 'turn_started', seq: 0, main_request_id: 'parent', main_request_session_id: 'root' });
+            deliver('resume', { kind: 'partial', seq: 1, partial_summary: 'Approved command' });
+        });
+        expect(result.current.partial).toBe('Approved command');
+        act(() => deliver('resume', { kind: 'answer', seq: 2, answer: 'Disk report ready' }));
+        expect(result.current.messages.at(-1)?.text).toBe('Disk report ready');
+    });
+
     it('accepts B and C while A runs, and cancels only the selected queued request', async () => {
         let subscriber: SignalingSubscriber | null = null;
         const items: { requestId: string; clientMessageId: string; state: 'queued'; acceptedAtMs: number }[] = [];

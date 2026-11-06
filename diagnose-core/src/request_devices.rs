@@ -64,7 +64,7 @@ pub(crate) fn command_permission_tool(
         "description": "For an exact command, copy the target_ref of one ready device in REQUEST DEVICES. Omit for central web tools."
     });
     tool.spec.description.push_str(
-        "\nTo request a device command, supply target_ref and exactly one exec_command item. Put shell, command and timeout_ms in exact_input; cwd and io_mode are optional. A command requires its own approval on that device.",
+        "\nTo request a device command, supply target_ref and exactly one exec_command item. Put shell, command and timeout_ms in exact_input. Use the shell name bash, sh, powershell, or pwsh, without a filesystem path. cwd and io_mode are optional. A command requires its own approval on that device.",
     );
     Some(tool)
 }

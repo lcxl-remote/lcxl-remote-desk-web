@@ -762,6 +762,13 @@ pub fn canonical_tool_permission_input_json(
             serde_json::from_value(value)?;
         value = serde_json::to_value(request)?;
     }
+    if tool_name == crate::command_confirmation::COMMAND_TOOL
+        && let Some(input) = value.as_object_mut()
+        && input.get("io_mode").and_then(serde_json::Value::as_str) == Some("non_interactive")
+    {
+        // Omission and an explicit default produce the same native command plan.
+        input.remove("io_mode");
+    }
     if tool_name == "search_public_web"
         && let serde_json::Value::Object(input) = &mut value
     {

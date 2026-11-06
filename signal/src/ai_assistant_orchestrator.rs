@@ -3029,6 +3029,45 @@ async fn prepare_composed_turn(
                     return Ok(None);
                 }
             };
+            let reply = if let Some(snapshot) = &snapshot {
+                desk_diagnose_core::future::boxed(|| main_request::reply_for_input(
+                    &db, &actor_id, &conversation_id, snapshot.input_revision,
+                )).await.unwrap_or_else(|_| {
+                    log::debug!("[ai-assistant] permission stream route unavailable");
+                    None
+                })
+            } else {
+                None
+            };
+            let forwarder = if let Some((parent_request, browser)) = reply {
+                let (send, mut events) = tokio::sync::mpsc::unbounded_channel::<AiAssistantEvent>();
+                let connections = connections.clone();
+                let session_id = conversation_id.clone();
+                let resumed_turn_id = turn_id.clone();
+                let task = actix_web::rt::spawn(async move {
+                    let mut started = false;
+                    while let Some(event) = events.recv().await {
+                        if !connections.read().await.get(&browser).is_some_and(|connection| {
+                            connection.auth_context.is_browser_user(actor_user_id)
+                                && !connection.lifecycle.is_retired()
+                        }) {
+                            break;
+                        }
+                        if !started {
+                            let mut start = AgentEvent::turn_started(&event.request_id, 0, &resumed_turn_id);
+                            start.main_request_id = Some(parent_request.clone());
+                            start.main_request_session_id = Some(session_id.clone());
+                            stream_event(connections.as_ref(), &browser, &start).await;
+                            started = true;
+                        }
+                        stream_event(connections.as_ref(), &browser, &event).await;
+                    }
+                });
+                Some((send, task))
+            } else {
+                None
+            };
+            let (sender, task) = forwarder.unzip();
             let claim = ClaimTurnParams {
                 conversation_id,
                 actor_id,
@@ -3036,18 +3075,23 @@ async fn prepare_composed_turn(
                 policy_revision: PERSONAL_ASSISTANT_POLICY_REVISION,
                 current_pdp_scope: scope,
                 turn_id: turn_id.clone(),
-                request_id: None,
+                request_id: sender.as_ref().map(|_| request_id.clone()),
                 connection_id: None,
                 trigger_origin: TriggerOrigin::PermissionDecision,
                 now: accepted_at,
             };
+            let emitted = std::cell::Cell::new(false);
             let mut sink =
-                StreamingTurnSink::starting_at(|_event: AiAssistantEvent| {}, request_id, 0);
+                StreamingTurnSink::starting_at(|event: AiAssistantEvent| {
+                    if let Some(sender) = &sender {
+                        emitted.set(true);
+                        let _ = sender.send(event);
+                    }
+                }, request_id, 1);
             sink.set_provenance(AiProvenance::stamp(
                 config.model,
                 Some(chrono::Utc::now().to_rfc3339()),
             ));
-            sink.turn_started(&turn_id);
             match desk_diagnose_core::future::boxed(|| {
                 resume_agent_turn_after_permission(&deps, claim, decision_message, &mut sink)
             })
@@ -3076,8 +3120,15 @@ async fn prepare_composed_turn(
                     );
                     desk_diagnose_core::future::boxed(|| async { rehearsal::finish_error(&db, actor_user_id, rehearsal_conversation.as_deref())
                         .await }).await;
-                    sink.error(error);
+                    if emitted.get() {
+                        sink.error(error);
+                    }
                 }
+            }
+            drop(sink);
+            drop(sender);
+            if let Some(task) = task {
+                let _ = task.await;
             }
             Ok(None)
 

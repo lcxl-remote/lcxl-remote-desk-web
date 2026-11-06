@@ -1974,6 +1974,7 @@ async fn run_selected_command(finish: SelectedCommandFinish) {
     );
     let no_review = matches!(finish, SelectedCommandFinish::NoReview);
     let retired = matches!(finish, SelectedCommandFinish::Retired);
+    let stream_resume = matches!(finish, SelectedCommandFinish::Foreground);
     static DEVICE_FIXTURE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     let _fixture = DEVICE_FIXTURE.lock().await;
     use crate::controller::ai_assistant_session::decide_permission_on;
@@ -2057,6 +2058,24 @@ async fn run_selected_command(finish: SelectedCommandFinish) {
     }
     let intent = "selected-command-conversation";
     let owner = crate::control_authorizer::SINGLE_ACCOUNT_USER_ID;
+    let browser_peer = if stream_resume {
+        use desk_signal_facade::model::{auth_context::AuthContext, signal::RemoteDeskTypeEnum};
+        let peer = register_request_device(
+            &connections,
+            "command-browser",
+            "Browser",
+            OperationSystemEnum::Mac,
+        )
+        .await;
+        let mut connections = connections.write().await;
+        let mut browser = connections.get("live-command-browser").unwrap().clone();
+        browser.auth_context = AuthContext::cookie(owner, RemoteDeskTypeEnum::Browser);
+        browser.lifecycle = Default::default();
+        connections.insert("live-command-browser".into(), browser);
+        Some(peer)
+    } else {
+        None
+    };
     let actor = owner.to_string();
     let run =
         derive_assistant_conversation_key(&actor, AssistantConversationScope::Personal, intent);
@@ -2139,7 +2158,7 @@ async fn run_selected_command(finish: SelectedCommandFinish) {
             assert!(spec["function"]["parameters"]["required"].as_array().unwrap().contains(&json!("target_ref")));
             memory_sse(json!({"tool_calls":[{"index":0,"id":"execute-selected","type":"function","function":{
                 "name":"exec_command","arguments":json!({"target_ref":"command-selected",
-                    "shell":"bash","command":"df -h","timeout_ms":1000}).to_string()
+                    "shell":"bash","command":"df -h","timeout_ms":1000,"io_mode":"non_interactive"}).to_string()
             }}]}), "tool_calls")
         }).await;
         capture_one_openai_request_with_reply(&listener, |body| {
@@ -2196,26 +2215,49 @@ async fn run_selected_command(finish: SelectedCommandFinish) {
     .await
     .unwrap();
     assert_eq!(roster.revision, 1);
-    tokio::time::timeout(
-        SCENARIO_TIMEOUT,
-        run_turn(
-            connections.clone(),
-            db.clone(),
-            "selected-command-transport".into(),
-            "owner-browser".into(),
-            String::new(),
-            owner,
-            String::new(),
-            AiAssistantAsk {
-                question: "Check CPU-intensive processes and disk usage on this device".into(),
-                client_message_id: "selected-command-input".into(),
-                conversation_id: Some(intent.into()),
-                client_timezone: "UTC".into(),
-                target_refs: vec!["command-selected".into()],
-                ..Default::default()
-            },
-        ),
-    )
+    let ask = AiAssistantAsk {
+        question: "Check CPU-intensive processes and disk usage on this device".into(),
+        client_message_id: "selected-command-input".into(),
+        conversation_id: Some(intent.into()),
+        client_timezone: "UTC".into(),
+        target_refs: vec!["command-selected".into()],
+        ..Default::default()
+    };
+    tokio::time::timeout(SCENARIO_TIMEOUT, async {
+        if stream_resume {
+            submit_owner_turn(
+                connections.clone(),
+                db.clone(),
+                "selected-command-transport".into(),
+                "live-command-browser".into(),
+                String::new(),
+                owner,
+                String::new(),
+                ask,
+            )
+            .await;
+            main_requests::SignalMainRequestExecutor::new(
+                db.clone(),
+                connections.clone(),
+                crate::ai_assistant_gate::global_ai_assistant_gate(),
+            )
+            .scan_once(0)
+            .await
+            .unwrap();
+        } else {
+            run_turn(
+                connections.clone(),
+                db.clone(),
+                "selected-command-transport".into(),
+                "owner-browser".into(),
+                String::new(),
+                owner,
+                String::new(),
+                ask,
+            )
+            .await;
+        }
+    })
     .await
     .unwrap();
     let snapshot = crate::agent_session_store::SignalAgentSessionStore::new(db.clone())
@@ -2415,6 +2457,17 @@ async fn run_selected_command(finish: SelectedCommandFinish) {
             async {
                 model.await.unwrap();
             },
+            async {
+                if let Some(peer) = browser_peer {
+                    let (parent, browser) =
+                        main_request::reply_for_input(&db, &actor, &run, snapshot.input_revision)
+                            .await
+                            .unwrap()
+                            .unwrap();
+                    assert_eq!(browser, "live-command-browser");
+                    assert_permission_resume_frames(peer, &run, &parent).await;
+                }
+            },
         );
     })
     .await;
@@ -2489,6 +2542,49 @@ async fn run_selected_command(finish: SelectedCommandFinish) {
             .native()
             .unwrap();
         assert_eq!(receipt.input_revision, session.input_revision + 1);
+    }
+}
+
+async fn assert_permission_resume_frames(
+    peer: actix_web::HttpResponse,
+    session: &str,
+    parent: &str,
+) {
+    use actix_http::ws::{Codec, Frame};
+    use actix_web::body::MessageBody;
+    use desk_agent_protocol::agent_event::AgentEventKind;
+    use tokio_util::codec::Decoder;
+
+    let mut body = std::pin::pin!(peer.into_body());
+    let mut codec = Codec::new().client_mode();
+    let mut buffer = bytes::BytesMut::new();
+    let mut resume = None;
+    let mut partial = false;
+    loop {
+        let chunk = std::future::poll_fn(|cx| body.as_mut().poll_next(cx))
+            .await
+            .unwrap()
+            .unwrap();
+        buffer.extend_from_slice(&chunk);
+        while let Some(Frame::Text(text)) = codec.decode(&mut buffer).unwrap() {
+            let frame: SignalingModel = serde_json::from_slice(&text).unwrap();
+            let event: AiAssistantEvent = frame.get_data().unwrap();
+            if event.kind == AgentEventKind::TurnStarted
+                && event.main_request_id.as_deref() == Some(parent)
+            {
+                assert_eq!(event.main_request_session_id.as_deref(), Some(session));
+                assert_ne!(event.request_id, parent);
+                resume = Some(event.request_id.clone());
+            }
+            if resume.as_deref() == Some(&event.request_id) {
+                partial |= event.kind == AgentEventKind::Partial;
+                if event.kind == AgentEventKind::Answer {
+                    assert!(partial);
+                    assert_eq!(event.answer.as_deref(), Some("Received the disk report."));
+                    return;
+                }
+            }
+        }
     }
 }
 

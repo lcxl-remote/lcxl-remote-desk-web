@@ -593,9 +593,30 @@ async fn duplicate_intake_keeps_the_first_frozen_input_and_fifo_order() {
             .unwrap();
         assert_eq!(stored.input_revision, revision);
         assert!(stored.pending_input_json.is_none());
-        assert!(stored.reply_connection_id.is_none());
+        assert_eq!(
+            stored.reply_connection_id.as_deref(),
+            revision.map(|_| "first-connection")
+        );
         assert!(FrozenRequestInput::decode(&stored).is_err());
     }
+    assert!(
+        queue::reply_for_input(&db, "owner", "root", 5)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        queue::reply_for_input(&db, "other-owner", "root", 5)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        queue::reply_for_input(&db, "owner", "root", 4)
+            .await
+            .unwrap()
+            .is_none()
+    );
     assert!(
         queue::first_pending(&db, "owner", "root")
             .await
