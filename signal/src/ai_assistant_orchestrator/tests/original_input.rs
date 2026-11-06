@@ -143,6 +143,10 @@ async fn queued_owner_input_roundtrip(workbench: bool, delete_workbench: bool, w
         ask.clone(),
     )
     .await;
+    if !workbench {
+        use futures_util::FutureExt;
+        assert!(main_requests::wait_for_scan().now_or_never().is_some());
+    }
     assert_eq!(
         crate::entity::agent_session::Entity::find()
             .one(&db)

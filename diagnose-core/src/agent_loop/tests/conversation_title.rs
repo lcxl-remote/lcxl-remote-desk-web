@@ -1,9 +1,11 @@
 use super::*;
 use crate::model_profile::ModelUseCase;
+use desk_agent_protocol::agent_event::{AgentEvent, AgentEventKind};
 
 struct NamingModel {
     script: ScriptModel,
     title_error: Option<AgentErrorKind>,
+    events: Rc<RefCell<Vec<AgentEvent>>>,
 }
 #[async_trait(?Send)]
 impl ModelSeam for NamingModel {
@@ -21,17 +23,21 @@ impl ModelSeam for NamingModel {
         request: ModelRequest,
         sink: &mut dyn TurnSink,
     ) -> Result<ModelTurn, AgentError> {
-        if request.use_case == ModelUseCase::ConversationTitle
-            && let Some(kind) = &self.title_error
-        {
-            self.script.requests.borrow_mut().push(request);
-            return Err(AgentError {
-                kind: *kind,
-                message: "synthetic optional naming failure".into(),
-                retryable: false,
-                safe_for_model: false,
-                error_code: None,
-            });
+        if request.use_case == ModelUseCase::ConversationTitle {
+            assert!(self.events.borrow().iter().any(|event| {
+                event.kind == AgentEventKind::Answer
+                    && event.answer.as_deref() == Some("The original answer")
+            }));
+            if let Some(kind) = &self.title_error {
+                self.script.requests.borrow_mut().push(request);
+                return Err(AgentError {
+                    kind: *kind,
+                    message: "synthetic optional naming failure".into(),
+                    retryable: false,
+                    safe_for_model: false,
+                    error_code: None,
+                });
+            }
         }
         self.script.call(request, sink).await
     }
@@ -76,16 +82,21 @@ async fn exercise_with_error(
         turns: RefCell::new([answer("The original answer"), answer(title_output)].into()),
         requests: requests.clone(),
     };
+    let events = Rc::new(RefCell::new(Vec::new()));
     let model = NamingModel {
         script: model,
         title_error,
+        events: events.clone(),
     };
     let tools = RecordingTools {
         calls: Rc::new(RefCell::new(Vec::new())),
         reply: String::new(),
     };
     let clock = || "2026-10-20T00:00:01Z".to_string();
-    let mut sink = Collector(Rc::new(RefCell::new(String::new())));
+    let mut sink = crate::stream::StreamingTurnSink::new(
+        |event| events.borrow_mut().push(event),
+        "naming-test",
+    );
     let user = crate::model_message_labels::model_bound_user_message(
         "original-input".into(),
         "Find my report".into(),
@@ -127,7 +138,14 @@ async fn exercise_with_error(
     assert_eq!(request.messages[1].message_id, "original-input");
     assert_eq!(request.messages[1].text, "Find my report");
     assert!(request.tools.is_empty());
-    assert!(!sink.0.borrow().contains("title"));
+    let events = events.borrow();
+    let [terminal]: [_; 1] = events
+        .iter()
+        .filter(|event| event.is_terminal())
+        .collect::<Vec<_>>()
+        .try_into()
+        .unwrap();
+    assert_eq!(terminal.answer.as_deref(), Some("The original answer"));
 }
 
 #[tokio::test]

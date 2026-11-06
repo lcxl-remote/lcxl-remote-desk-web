@@ -15,6 +15,18 @@ mod coordination;
 pub(super) use coordination::fail_destination;
 
 const BATCH_SIZE: u64 = 32;
+static REQUEST_READY: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
+pub(super) fn wake() {
+    REQUEST_READY.notify_one();
+}
+
+pub(super) async fn wait_for_scan() {
+    tokio::select! {
+        () = REQUEST_READY.notified() => {},
+        () = tokio::time::sleep(Duration::from_secs(1)) => {},
+    }
+}
 
 pub struct SignalMainRequestExecutor {
     db: DatabaseConnection,
@@ -84,7 +96,7 @@ impl SignalMainRequestExecutor {
                     0
                 }
             };
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            wait_for_scan().await;
         }
     }
 

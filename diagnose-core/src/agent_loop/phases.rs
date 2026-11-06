@@ -2380,13 +2380,14 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                                     sink.on_partial_committed();
                                     return Ok(None);
                                 }
-                                title::generate(deps, session).await;
                                 if terminal_answer && let Some(context) = observation.clone() {
                                     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
                                         || sink.on_answer_observation(context),
                                     ));
                                 }
                                 sink.on_answer_committed(&turn.text);
+                                // Naming uses the current lease after the saved answer is visible.
+                                title::generate(deps, session).await;
                                 return Ok(Some(LoopOutcome::Answered(turn.text)));
                             }
                             TurnDisposition::Discard => {

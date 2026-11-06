@@ -3152,6 +3152,7 @@ async fn prepare_composed_turn(
                     connections.as_ref(), &browser_connection_id,
                     &event,
                 )).await;
+                main_requests::wake();
                 return Ok(Some(LoopOutcome::RequestQueued {
                     request_id: row.request_id,
                     session_id: row.conversation_id,
