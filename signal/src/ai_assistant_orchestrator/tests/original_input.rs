@@ -2150,11 +2150,32 @@ async fn run_selected_command(finish: SelectedCommandFinish) {
             reply("command-selected")
         })
         .await;
+        if stream_resume {
+            capture_one_openai_request_with_reply(&listener, |body| {
+                let request: Value = serde_json::from_slice(body).unwrap();
+                let [tool] = request["tools"].as_array().unwrap().as_slice() else {
+                    panic!("only the approved command should be offered during resume");
+                };
+                assert_eq!(tool["function"]["name"], "exec_command");
+                assert_eq!(request["tool_choice"], "required");
+                memory_sse(json!({"tool_calls":[{"index":0,"id":"unrelated-read","type":"function","function":{
+                    "name":"read_system_info","arguments":"{\"target_ref\":\"command-selected\"}"
+                }}]}), "tool_calls")
+            }).await;
+        }
         capture_one_openai_request_with_reply(&listener, |body| {
             let request: Value = serde_json::from_slice(body).unwrap();
             let spec = request["tools"].as_array().unwrap().iter()
                 .find(|tool| tool["function"]["name"] == "exec_command")
                 .unwrap_or_else(|| panic!("approved command is missing: {request}"));
+            if stream_resume {
+                assert_eq!(request["tools"].as_array().unwrap().len(), 1);
+                assert!(request["messages"].as_array().unwrap().iter().any(|message| {
+                    message["role"] == "tool"
+                        && message["tool_call_id"] == "unrelated-read"
+                        && message["content"].as_str().is_some_and(|text| text.contains("tool_not_advertised"))
+                }));
+            }
             assert!(spec["function"]["parameters"]["required"].as_array().unwrap().contains(&json!("target_ref")));
             memory_sse(json!({"tool_calls":[{"index":0,"id":"execute-selected","type":"function","function":{
                 "name":"exec_command","arguments":json!({"target_ref":"command-selected",

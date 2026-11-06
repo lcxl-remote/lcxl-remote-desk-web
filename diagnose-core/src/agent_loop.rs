@@ -2302,7 +2302,7 @@ async fn run_inner_impl(
     let post_tool_permission_protocol_retries: u8 = 0;
     let invalid_tool_argument_retries: u8 = 0;
     let goal_correction_attempted = false;
-    let goal_required_choice_rejected = false;
+    let required_tool_choice_rejected = false;
     let physical_model_attempt = 0u32;
     // A permission decision resumes at the authorization boundary, not at the
     // beginning of the user's workflow. Keep a recency-edge checkpoint in
@@ -2330,7 +2330,7 @@ async fn run_inner_impl(
         post_tool_permission_protocol_retries,
         invalid_tool_argument_retries,
         goal_correction_attempted,
-        goal_required_choice_rejected,
+        required_tool_choice_rejected,
         physical_model_attempt,
         permission_continuation_pending,
     });

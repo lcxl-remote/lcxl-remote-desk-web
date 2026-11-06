@@ -18,7 +18,7 @@ pub(super) struct LoopState<M> {
     pub post_tool_permission_protocol_retries: u8,
     pub invalid_tool_argument_retries: u8,
     pub goal_correction_attempted: bool,
-    pub goal_required_choice_rejected: bool,
+    pub required_tool_choice_rejected: bool,
     pub physical_model_attempt: u32,
     pub permission_continuation_pending: bool,
 }
@@ -583,7 +583,9 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
         exposed.push(tool);
     }
     let can_request_selected_command = selected_permission_tool.is_some();
-    let selected_command_tool = if state.permission_continuation_pending
+    let selected_command_tool = if !goal_control_only
+        && planning_goal.is_none()
+        && state.permission_continuation_pending
         && deps
             .permission_continuation_exact_tools
             .iter()
@@ -596,9 +598,12 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
         None
     };
     if let Some(tool) = &selected_command_tool {
-        exposed.retain(|candidate| candidate.name() != tool.name());
+        // Selected-device permission proposals contain a single command. Finish
+        // that decision before starting another device read or a new proposal.
+        exposed.clear();
         exposed.push(tool);
     }
+    let require_tool_choice = goal_control_only || selected_command_tool.is_some();
 
     // Approval cannot override execution-state or scope restrictions. Keep
     // recovery tools available if none of the approved tools can run.
@@ -1512,7 +1517,7 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                 messages,
                 tools: specs,
                 tool_requirements,
-                tool_choice: if goal_control_only && !state.goal_required_choice_rejected {
+                tool_choice: if require_tool_choice && !state.required_tool_choice_rejected {
                     crate::chat::ToolChoice::Required
                 } else {
                     crate::chat::ToolChoice::Auto
@@ -1888,8 +1893,8 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                                                 .any(|message| message.role == ChatRole::System)
                                     }
                                     ProtocolCorrectionReason::ToolChoiceFallback => {
-                                        goal_control_only
-                                            && state.goal_required_choice_rejected
+                                        require_tool_choice
+                                            && state.required_tool_choice_rejected
                                             && matches!(
                                                 request.tool_choice,
                                                 crate::chat::ToolChoice::Auto
@@ -1918,17 +1923,17 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                         correction.dial_result(dial_result.is_ok());
                     }
                     call_budget::settle_model(deps, session, budget, &dial_result).await?;
-                    if goal_control_only
-                        && !state.goal_required_choice_rejected
+                    if require_tool_choice
+                        && !state.required_tool_choice_rejected
                         && dial_result
                             .as_ref()
                             .err()
                             .is_some_and(rejects_required_tool_choice)
                     {
                         // Some compatible gateways reject `required`. Keep the single
-                        // control tool exposed and retry once with normal tool selection;
+                        // tool exposed and retry once with normal tool selection;
                         // this failed request has already been conservatively charged.
-                        state.goal_required_choice_rejected = true;
+                        state.required_tool_choice_rejected = true;
                         state.pending_protocol_correction = PendingProtocolCorrection::open(
                             observation.clone(),
                             correction_fence.clone(),

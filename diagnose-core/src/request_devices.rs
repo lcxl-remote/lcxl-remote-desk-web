@@ -280,6 +280,6 @@ pub(crate) fn append_catalogue(
     prompt.push_str(&serde_json::json!({ "request_devices": devices }).to_string());
     prompt.push_str("\nWhen advertised, use read_system_info to check current CPU, memory, and disk capacity. Use the online field for device connectivity and the advertised tools for operations available in this conversation.");
     if can_request_command {
-        prompt.push_str(" If process-level CPU or disk details require an OS command, use request_permissions now with the selected target_ref and one exact exec_command item. Choose a bounded, non-modifying command for the device's platform. The exact command is exposed after approval, so submit the permission request directly without describe_tools or an extra chat confirmation.");
+        prompt.push_str(" If process-level CPU or disk details require an OS command, call request_permissions directly with target_ref and one item with tool_name=exec_command, reason, and exact_input containing shell, command and timeout_ms. Choose a bounded, non-modifying command for the device's platform. Run cheap diagnostics first and narrow expensive recursive scans to one relevant directory at a time. If a scan times out, use its partial output and narrow the scan before requesting another command. The exact command is exposed after approval; do not call describe_tools or ask for a separate chat confirmation.");
     }
 }
