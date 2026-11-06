@@ -1177,7 +1177,7 @@ impl PersistedAgentSession {
             .map_err(|error| SessionDecodeError::InvalidDynamicRun(error.into()))?;
         if session.visual_evidence.iter().any(|frame| {
             frame.conversation_id != session.conversation_id
-                || frame.device_id != session.device_id
+                || (!session.device_id.is_empty() && frame.device_id != session.device_id)
                 || frame.focus_input_revision > session.input_revision
         }) {
             return Err(SessionDecodeError::InvalidDynamicRun(
@@ -3310,6 +3310,7 @@ mod tests {
             state,
             items: vec![GrantRequestItem {
                 command_confirmation: None,
+                selected_read_target: None,
                 launch_confirmation: None,
                 item_id: format!("item-{id}"),
                 provider_id: "file.artifact".into(),

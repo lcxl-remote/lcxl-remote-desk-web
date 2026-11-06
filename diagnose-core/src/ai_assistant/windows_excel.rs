@@ -74,6 +74,7 @@ pub(super) fn patch_tool() -> RegisteredTool {
 }
 pub(super) fn provider() -> ProviderDescriptor {
     let read = provider_for_tool(
+        TargetBinding::NativeContext,
         crate::tool_exposure::ExposureRequirement::NoAttachment,
         PROVIDER_ID,
         INSPECT_CAPABILITY_ID,
@@ -88,6 +89,7 @@ pub(super) fn provider() -> ProviderDescriptor {
         inspect_tool(),
     );
     let write = provider_for_tool(
+        TargetBinding::NativeContext,
         crate::tool_exposure::ExposureRequirement::NoAttachment,
         PROVIDER_ID,
         PATCH_CAPABILITY_ID,

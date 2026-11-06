@@ -863,6 +863,7 @@ export default {
   "pages.aiAssistant.launchArgs": "完整启动参数（按顺序）",
   "pages.aiAssistant.launchSummaryMissing": "完整应用启动确认信息缺失或无效，请让 AI 重新申请。",
   "pages.aiAssistant.commandConfirmTitle": "确认执行命令",
+  "pages.aiAssistant.permissionReadTarget": "设备 {{target}}",
   'pages.aiAssistant.commandResultTitle': '命令执行结果（来自设备）',
   'pages.aiAssistant.commandReceipt.exitCode': '退出码',
   'pages.aiAssistant.commandReceipt.duration': '执行耗时',

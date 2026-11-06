@@ -119,6 +119,14 @@ pub fn record_live_observation(
     envelope
         .validate()
         .map_err(|_| "visual evidence has an invalid data envelope")?;
+    let device_id = if session.device_id.is_empty() {
+        let device = selected_image_device(envelope, call_id)
+            .filter(|device| session.admits_assistant_device(device))
+            .ok_or("visual evidence is not bound to the selected device")?;
+        device.to_owned()
+    } else {
+        session.device_id.clone()
+    };
     let (frame_id, expires_at_unix_ms) = match &envelope.content {
         ContentRef::EphemeralObservation {
             observation_id,
@@ -168,7 +176,7 @@ pub fn record_live_observation(
         // the producer's presentation clock. Device frame timing stays separate.
         captured_at_unix_ms: recorded_at_unix_ms,
         expires_at_unix_ms,
-        device_id: session.device_id.clone(),
+        device_id,
         display_summary: None,
         application_summary: window_summary,
         content: Some(envelope.content.clone()),
@@ -191,6 +199,16 @@ pub fn record_live_observation(
         }
     }
     Ok(frame)
+}
+
+pub(crate) fn selected_image_device<'a>(
+    envelope: &'a desk_agent_protocol::data_lineage::DataEnvelope,
+    call_id: &str,
+) -> Option<&'a str> {
+    let source = envelope.provenance.source_object_id.as_deref()?;
+    let prefix = source.strip_suffix(call_id)?.strip_suffix(':')?;
+    (!prefix.is_empty() && envelope.provenance.source_tool_name == "read_current_screen")
+        .then_some(prefix)
 }
 
 pub fn durable_projection(

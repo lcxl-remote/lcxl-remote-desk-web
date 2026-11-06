@@ -162,7 +162,7 @@ pub(crate) async fn permission_work_current(
     match crate::issue_connections::check_work_on(
         txn,
         session,
-        request.exact_command().is_some() || !session.device_id.is_empty(),
+        request.selected_device_id().is_some() || !session.device_id.is_empty(),
         chrono::Utc::now().timestamp_millis(),
     )
     .await
@@ -179,16 +179,12 @@ async fn permission_roster_current(
     session: &PersistedAgentSession,
     request: &PermissionRequest,
 ) -> Result<bool, AgentError> {
-    let Some(command) = request.exact_command() else {
+    let Some(device_id) = request.selected_device_id() else {
         return Ok(true);
     };
-    desk_assistant_data_store::device_roster::permits_current_target(
-        txn,
-        session,
-        &command.target_device_id,
-    )
-    .await
-    .map_err(|error| error.into_agent_error())
+    desk_assistant_data_store::device_roster::permits_current_target(txn, session, device_id)
+        .await
+        .map_err(|error| error.into_agent_error())
 }
 
 async fn validate_permission_target_on(
@@ -197,11 +193,11 @@ async fn validate_permission_target_on(
     request: &PermissionRequest,
 ) -> Result<(), AgentError> {
     if session.device_id.is_empty()
-        && let Some(command) = request.exact_command()
-        && (!session.admits_assistant_device(&command.target_device_id)
+        && let Some(device_id) = request.selected_device_id()
+        && (!session.admits_assistant_device(device_id)
             || crate::agent_run_event_store::eligible_request_device_ids(
                 txn,
-                std::slice::from_ref(&command.target_device_id),
+                &[device_id.to_owned()],
             )
             .await?
             .is_empty())

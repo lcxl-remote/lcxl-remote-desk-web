@@ -175,6 +175,7 @@ export function AssistantPermissionRequest({ request, canDecide, disabled = fals
                                 </div>}
                                 <p className="mt-1 break-all text-xs text-muted-foreground">
                                     {permissionToolLabel(t, item.toolName)} · {permissionEffectLabel(t, item.expectedEffect)}
+                                    {item.selectedReadDeviceRef && <> · {t('pages.aiAssistant.permissionReadTarget', { target: item.selectedReadDeviceRef })}</>}
                                 </p>
                                 {item.applicationScope && (
                                     <div data-testid="application-ui-scope" className="mt-3 space-y-1 rounded-md border p-3 text-xs">

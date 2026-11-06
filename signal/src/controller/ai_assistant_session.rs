@@ -765,17 +765,22 @@ pub(crate) async fn decide_permission_on(
             })?
             .and_then(|snapshot| {
                 snapshot.permission_requests.into_iter().find(|request| {
-                    request.request_id == body.request_id && request.exact_command().is_some()
+                    request.request_id == body.request_id && request.selected_device_id().is_some()
                 })
             })
     } else {
         None
     };
-    let selected_command = personal_request
-        .as_ref()
-        .and_then(|request| request.exact_command());
-    let connection = if let Some(command) = selected_command {
-        let connection = command.target_connection_id();
+    let selected_device = personal_request.as_ref().and_then(|request| {
+        let device = request.selected_device_id()?;
+        let connection = if let Some(read) = request.selected_read_target() {
+            read.connection_id.as_str()
+        } else {
+            request.exact_command()?.target_connection_id()
+        };
+        Some((device, connection))
+    });
+    let connection = if let Some((device, connection)) = selected_device {
         if body
             .connection
             .as_deref()
@@ -784,17 +789,15 @@ pub(crate) async fn decide_permission_on(
             return Ok(not_accessible());
         }
         let map = connection_map.read().await;
-        let available = map
-            .current_oss_server(&command.target_device_id)
-            .is_some_and(|state| {
-                state.model.connection_id == connection
-                    && !state.lifecycle.is_retired()
-                    && state
-                        .model
-                        .ai_assistant_settings
-                        .as_ref()
-                        .is_some_and(|settings| settings.enabled)
-            });
+        let available = map.current_oss_server(device).is_some_and(|state| {
+            state.model.connection_id == connection
+                && !state.lifecycle.is_retired()
+                && state
+                    .model
+                    .ai_assistant_settings
+                    .as_ref()
+                    .is_some_and(|settings| settings.enabled)
+        });
         if !available {
             return Ok(not_accessible());
         }
@@ -802,7 +805,7 @@ pub(crate) async fn decide_permission_on(
     } else {
         body.connection.as_deref()
     };
-    let target_audience = if selected_command.is_some() {
+    let target_audience = if selected_device.is_some() {
         String::new()
     } else {
         let Some(audience) = permission_device(&connection_map, connection).await else {

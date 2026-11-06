@@ -863,6 +863,7 @@ export default {
   "pages.aiAssistant.launchArgs": "Complete arguments (in order)",
   "pages.aiAssistant.launchSummaryMissing": "The complete application launch confirmation is missing or invalid. Ask the AI to request it again.",
   "pages.aiAssistant.commandConfirmTitle": "Confirm command execution",
+  "pages.aiAssistant.permissionReadTarget": "Device {{target}}",
   'pages.aiAssistant.commandResultTitle': 'Command result (from device)',
   'pages.aiAssistant.commandReceipt.exitCode': 'Exit code',
   'pages.aiAssistant.commandReceipt.duration': 'Execution time',

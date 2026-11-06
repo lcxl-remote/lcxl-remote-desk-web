@@ -1722,6 +1722,7 @@ pub struct GrantRequestItemDto {
     pub suggested_ttl_seconds: u32,
     pub suggested_max_uses: u32,
     pub reason: String,
+    pub selected_read_device_ref: Option<String>,
     pub external_send_confirmation: Option<ExternalSendConfirmationDto>,
     pub command_confirmation: Option<CommandConfirmationDto>,
     pub launch_confirmation: Option<LaunchConfirmationDto>,
@@ -2152,6 +2153,9 @@ impl From<desk_diagnose_core::dynamic_run::PermissionRequest> for PermissionRequ
                         export_destinations: item.export_destinations,
                         suggested_ttl_seconds: item.suggested_ttl_seconds,
                         suggested_max_uses: item.suggested_max_uses,
+                        selected_read_device_ref: item
+                            .selected_read_target
+                            .map(|target| target.target_ref),
                         reason: item.reason,
                         external_send_confirmation,
                         command_confirmation,

@@ -693,6 +693,8 @@ pub struct GrantRequestItem {
     /// Server-authored plan reviewed with an exact command permission.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command_confirmation: Option<crate::command_confirmation::CommandConfirmation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_read_target: Option<crate::request_devices::SelectedReadTarget>,
     /// Host-resolved identity and exact arguments frozen before owner approval.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_confirmation: Option<crate::application_launch::LaunchApprovalBinding>,
@@ -746,6 +748,23 @@ impl GrantRequestItem {
         {
             return Err(DynamicRunContractError::InvalidCanonicalPermissionInput);
         }
+        if let Some(target) = &self.selected_read_target {
+            validate_id("selected_read_device", &target.device_id)?;
+            validate_id("selected_read_connection", &target.connection_id)?;
+            if desk_agent_protocol::ai_assistant::validate_target_refs([target.target_ref.as_str()])
+                .is_err()
+                || target.readiness_revision == 0
+                || self.canonical_input_json.is_none()
+                || !matches!(
+                    self.expected_effect,
+                    CapabilityEffect::ReadDevice | CapabilityEffect::CaptureScreen
+                )
+                || self.command_confirmation.is_some()
+                || self.launch_confirmation.is_some()
+            {
+                return Err(DynamicRunContractError::InvalidCanonicalPermissionInput);
+            }
+        }
         if let Some(binding) = &self.launch_confirmation {
             let canonical = self
                 .canonical_input_json
@@ -796,6 +815,22 @@ impl PermissionRequest {
             .flatten()
     }
 
+    pub fn selected_read_target(&self) -> Option<&crate::request_devices::SelectedReadTarget> {
+        let [item] = self.items.as_slice() else {
+            return None;
+        };
+        item.selected_read_target.as_ref()
+    }
+
+    pub fn selected_device_id(&self) -> Option<&str> {
+        self.exact_command()
+            .map(|command| command.target_device_id.as_str())
+            .or_else(|| {
+                self.selected_read_target()
+                    .map(|target| target.device_id.as_str())
+            })
+    }
+
     pub fn validate(&self) -> Result<(), DynamicRunContractError> {
         if self.schema_version != PERMISSION_REQUEST_SCHEMA_VERSION {
             return Err(DynamicRunContractError::UnsupportedPermissionVersion(
@@ -809,6 +844,14 @@ impl PermissionRequest {
         validate_text("permission_created_at", &self.created_at, MAX_RUN_EVENT_IDS)?;
         if self.items.is_empty() || self.items.len() > MAX_PERMISSION_REQUEST_ITEMS {
             return Err(DynamicRunContractError::InvalidPermissionItemCount);
+        }
+        if self
+            .items
+            .iter()
+            .any(|item| item.selected_read_target.is_some())
+            && (self.selected_read_target().is_none() || self.exact_command().is_some())
+        {
+            return Err(DynamicRunContractError::InvalidCanonicalPermissionInput);
         }
         let mut ids = BTreeSet::new();
         for item in &self.items {
@@ -1504,6 +1547,7 @@ mod tests {
             state: PermissionRequestState::Pending,
             items: vec![GrantRequestItem {
                 command_confirmation: None,
+                selected_read_target: None,
                 launch_confirmation: None,
                 item_id: "write-report".into(),
                 provider_id: "file.workspace".into(),

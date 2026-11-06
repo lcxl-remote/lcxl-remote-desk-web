@@ -406,6 +406,56 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
     }
     // The model can consume the preceding screenshot in this request.
     // Only targeting in the screenshot-producing batch is fenced below.
+    let request_devices = if session.has_admitted_personal_input()
+        && !session.has_admitted_targetless_input()
+        && deps.model.command_completion_event_id().is_none()
+    {
+        crate::future::boxed(|| deps.tools.request_devices(session)).await?
+    } else {
+        Vec::new()
+    };
+    let selected_reads = if !goal_control_only
+        && planning_goal.is_none()
+        && crate::request_devices::accepts_device_reads(session)
+    {
+        crate::request_devices::read_tools(
+            &request_devices,
+            deps.provider_registry
+                .unwrap_or_else(|| crate::ai_assistant::ai_assistant_provider_registry_ref()),
+            deps.model.supports_image_input(),
+        )
+    } else {
+        Vec::new()
+    };
+    if let Some(inventory) = step_inventory.as_mut() {
+        for (tool, _) in &selected_reads {
+            let providers = deps
+                .provider_registry
+                .expect("selected reads have a Provider inventory");
+            let descriptor = providers
+                .capability_for_tool(tool.name())
+                .expect("selected read is registered");
+            let provider = providers
+                .provider_for_capability(&descriptor.wire.capability_id)
+                .expect("selected read has a Provider");
+            inventory.push(crate::capability_availability::CapabilityAvailability {
+                provider_id: provider.wire.provider_id.clone(),
+                capability_id: descriptor.wire.capability_id.clone(),
+                tool_name: tool.name().into(),
+                compiled: true,
+                enabled: true,
+                connected: true,
+                ready: true,
+                reason: None,
+            });
+        }
+    }
+    for (tool, callable) in &selected_reads {
+        exposed.retain(|candidate| candidate.name() != tool.name());
+        if *callable {
+            exposed.push(tool);
+        }
+    }
     let raw_provider_exposed = exposed
         .iter()
         .filter(|tool| {
@@ -439,7 +489,7 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
         } else {
             Vec::new()
         };
-    let permission_candidates = if planning_goal.is_some() {
+    let mut permission_candidates = if planning_goal.is_some() {
         &[][..]
     } else if deps.capability_permission_candidates.is_empty() {
         inferred_permission_candidates.as_slice()
@@ -450,6 +500,7 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
     .filter(|tool| session.agent_role.allows_effect(tool.effect))
     .cloned()
     .collect::<Vec<_>>();
+    permission_candidates.extend(selected_reads.iter().map(|(tool, _)| tool.clone()));
     let tool_requirements =
         crate::model_capability::ModelRequirements::for_registered_tools(exposed.iter().copied());
     let completion_messages = if let Some(event_id) = deps.model.command_completion_event_id() {
@@ -478,6 +529,13 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
     let mut pinned_context = deps.model.context_policy(request_requirements).await?;
     pinned_context.preserve_history = session.surface == AgentSessionSurface::AiAssistant;
     let mut definition_registry = callable_registry.clone();
+    for (tool, callable) in &selected_reads {
+        definition_registry.retain(|candidate| candidate.name() != tool.name());
+        if *callable {
+            definition_registry.push(tool.clone());
+        }
+    }
+
     if disclosure_enabled && let Some(providers) = deps.provider_registry {
         for name in &session.capability_disclosure.advertised_tool_names {
             if definition_registry
@@ -486,7 +544,10 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
             {
                 continue;
             }
-            if let Some(capability) = providers.capability_for_tool(name) {
+            if let Some(capability) = providers.capability_for_tool(name)
+                && !(session.has_admitted_personal_input()
+                    && crate::request_devices::selected_read_descriptor(capability))
+            {
                 definition_registry.push(capability.registered_tool());
             }
         }
@@ -552,37 +613,23 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
         });
     }
 
-    let request_devices = if session.has_admitted_personal_input()
-        && !session.has_admitted_targetless_input()
-        && deps.model.command_completion_event_id().is_none()
-    {
-        crate::future::boxed(|| deps.tools.request_devices(session)).await?
-    } else {
-        Vec::new()
-    };
-    let selected_device_read = if !goal_control_only
-        && planning_goal.is_none()
-        && crate::request_devices::accepts_device_reads(session)
-    {
-        crate::request_devices::system_info_tool(&request_devices)
-    } else {
-        None
-    };
-    if let Some(tool) = &selected_device_read {
-        exposed.retain(|candidate| candidate.name() != tool.name());
-        exposed.push(tool);
-    }
     let selected_permission_tool = exposed
         .iter()
         .find(|tool| tool.name() == crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME)
         .and_then(|tool| {
-            crate::request_devices::command_permission_tool(session, &request_devices, tool)
+            crate::request_devices::device_permission_tool(
+                session,
+                &request_devices,
+                &selected_reads,
+                tool,
+            )
         });
     if let Some(tool) = &selected_permission_tool {
         exposed.retain(|candidate| candidate.name() != tool.name());
         exposed.push(tool);
     }
-    let can_request_selected_command = selected_permission_tool.is_some();
+    let can_request_selected_command = selected_permission_tool.is_some()
+        && crate::request_devices::can_request_command(session, &request_devices);
     let selected_command_tool = if !goal_control_only
         && planning_goal.is_none()
         && state.permission_continuation_pending
@@ -829,7 +876,9 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
         if !request_devices.is_empty() {
             crate::request_devices::append_catalogue(
                 &mut system_prompt.text,
+                session,
                 &request_devices,
+                &selected_reads,
                 can_request_selected_command,
             );
         }
@@ -2915,9 +2964,10 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                                         );
                                     }
                                     let call = &resolved_call;
-                                    let selected_device_read = call.name
-                                        == crate::request_devices::SYSTEM_INFO_TOOL
-                                        && crate::request_devices::accepts_device_reads(session);
+                                    let selected_device_read =
+                                        crate::request_devices::is_selected_read_tool(
+                                            tool, session,
+                                        );
 
                                     let selected_device_command = call.name
                                         == crate::command_confirmation::COMMAND_TOOL
@@ -4369,10 +4419,12 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                                                     ),
                                                 );
                                                 let selected_request = crate::future::boxed(|| {
-                                                    crate::request_devices::plan_command_permission(
+                                                    crate::request_devices::plan_device_permission(
                                                         deps.tools,
                                                         deps.provider_registry,
                                                         session,
+                                                        &request_devices,
+                                                        &selected_reads,
                                                         call,
                                                         &request_id,
                                                         &created_at,

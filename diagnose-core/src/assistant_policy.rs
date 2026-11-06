@@ -126,9 +126,24 @@ pub fn permits_permission_request(
     request: &crate::dynamic_run::PermissionRequest,
 ) -> bool {
     if !session.device_id.is_empty() {
-        return true;
+        return request.selected_read_target().is_none();
     }
     let registry = crate::ai_assistant::ai_assistant_provider_registry_ref();
+    if let Some(target) = request.selected_read_target() {
+        let item = &request.items[0];
+        return crate::request_devices::accepts_device_reads(session)
+            && session.admits_assistant_device(&target.device_id)
+            && request.validate().is_ok()
+            && registry
+                .capability_for_tool(&item.tool_name)
+                .is_some_and(|capability| {
+                    crate::request_devices::selected_read_descriptor(capability)
+                        && capability.wire.effect == item.expected_effect
+                        && registry
+                            .provider_for_capability(&capability.wire.capability_id)
+                            .is_some_and(|provider| provider.wire.provider_id == item.provider_id)
+                });
+    }
     session.has_admitted_personal_input()
         && (request.exact_command().is_some_and(|command| {
             session

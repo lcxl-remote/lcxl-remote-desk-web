@@ -59,6 +59,7 @@ use crate::edge_registry::{
 };
 use crate::provider_registry::{
     CapabilityDescriptor, ProviderDescriptor, ProviderRegistry, ProviderRegistryBuilder,
+    TargetBinding,
 };
 use crate::read_tools::{ai_assistant_read_tool_registry, read_tool_registry};
 use crate::registry::{RegisteredTool, ToolEffect};
@@ -2293,6 +2294,7 @@ fn search_public_web_tool() -> RegisteredTool {
 
 #[allow(clippy::too_many_arguments)]
 fn provider_for_tool(
+    target_binding: TargetBinding,
     exposure: crate::tool_exposure::ExposureRequirement,
     provider_id: &str,
     capability_id: &str,
@@ -2389,6 +2391,7 @@ fn provider_for_tool(
             capabilities: vec![wire.clone()],
         },
         capabilities: vec![CapabilityDescriptor {
+            target_binding,
             exposure,
             wire,
             tool_spec: tool.spec,
@@ -2465,6 +2468,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
     }
 
     let session = provider_for_tool(
+        TargetBinding::RequestDevice,
         crate::tool_exposure::ExposureRequirement::DesktopRead,
         DESKTOP_SESSION_PROVIDER_ID,
         DESKTOP_SESSION_CAPABILITY_ID,
@@ -2481,6 +2485,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
             .expect("static desktop session tool exists"),
     );
     let system_info = provider_for_tool(
+        TargetBinding::RequestDevice,
         crate::tool_exposure::ExposureRequirement::NoAttachment,
         SYSTEM_INFO_PROVIDER_ID,
         SYSTEM_INFO_CAPABILITY_ID,
@@ -2497,6 +2502,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
             .expect("static system info tool exists"),
     );
     let system_process = provider_for_tool(
+        TargetBinding::RequestDevice,
         crate::tool_exposure::ExposureRequirement::NoAttachment,
         SYSTEM_PROCESS_PROVIDER_ID,
         SYSTEM_PROCESS_CAPABILITY_ID,
@@ -2513,6 +2519,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
             .expect("static process list tool exists"),
     );
     let system_network = provider_for_tool(
+        TargetBinding::RequestDevice,
         crate::tool_exposure::ExposureRequirement::NoAttachment,
         SYSTEM_NETWORK_PROVIDER_ID,
         SYSTEM_NETWORK_CAPABILITY_ID,
@@ -2529,6 +2536,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
             .expect("static network ports tool exists"),
     );
     let system_service = provider_for_tool(
+        TargetBinding::RequestDevice,
         crate::tool_exposure::ExposureRequirement::NoAttachment,
         SYSTEM_SERVICE_PROVIDER_ID,
         SYSTEM_SERVICE_CAPABILITY_ID,
@@ -2545,6 +2553,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
             .expect("static service status tool exists"),
     );
     let system_log = provider_for_tool(
+        TargetBinding::RequestDevice,
         crate::tool_exposure::ExposureRequirement::NoAttachment,
         SYSTEM_LOG_PROVIDER_ID,
         SYSTEM_LOG_CAPABILITY_ID,
@@ -2561,6 +2570,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
             .expect("static recent logs tool exists"),
     );
     let system_container = provider_for_tool(
+        TargetBinding::RequestDevice,
         crate::tool_exposure::ExposureRequirement::NoAttachment,
         SYSTEM_CONTAINER_PROVIDER_ID,
         SYSTEM_CONTAINER_CAPABILITY_ID,
@@ -2577,6 +2587,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
             .expect("static container list tool exists"),
     );
     let mut system_command = provider_for_tool(
+        TargetBinding::RequestDevice,
         crate::tool_exposure::ExposureRequirement::NoAttachment,
         SYSTEM_COMMAND_PROVIDER_ID,
         SYSTEM_COMMAND_CAPABILITY_ID,
@@ -2595,6 +2606,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
     );
     configure_command_execution(&mut system_command);
     let mut application_launch = provider_for_tool(
+        TargetBinding::NativeContext,
         crate::tool_exposure::ExposureRequirement::NoAttachment,
         crate::application_launch::PROVIDER_ID,
         crate::application_launch::CAPABILITY_ID,
@@ -2622,6 +2634,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
             .push(CapabilityPlatform::Linux);
     }
     let mut application_catalog = provider_for_tool(
+        TargetBinding::RequestDevice,
         crate::tool_exposure::ExposureRequirement::DesktopRead,
         APPLICATION_CATALOG_PROVIDER_ID,
         APPLICATION_LIST_CAPABILITY_ID,
@@ -2654,6 +2667,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
             .push(CapabilityPlatform::Linux);
     }
     let ui = provider_for_tool(
+        TargetBinding::RequestDevice,
         crate::tool_exposure::ExposureRequirement::DesktopRead,
         DESKTOP_UI_PROVIDER_ID,
         DESKTOP_UI_CAPABILITY_ID,
@@ -2674,6 +2688,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
             .expect("static desktop UI tool exists"),
     );
     let ui_action = provider_for_tool(
+        TargetBinding::NativeContext,
         crate::tool_exposure::ExposureRequirement::NoAttachment,
         DESKTOP_UI_ACTION_PROVIDER_ID,
         DESKTOP_UI_ACTION_CAPABILITY_ID,
@@ -2692,6 +2707,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
         execute_ui_actions_tool(),
     );
     let mut background_input = provider_for_tool(
+        TargetBinding::NativeContext,
         crate::tool_exposure::ExposureRequirement::NoAttachment,
         "desktop.input.background",
         "desktop.input.background.confirmed",
@@ -2713,6 +2729,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
         .prerequisites
         .platforms = vec![CapabilityPlatform::Macos];
     let mut raw_input = provider_for_tool(
+        TargetBinding::NativeContext,
         crate::tool_exposure::ExposureRequirement::NoAttachment,
         DESKTOP_RAW_INPUT_PROVIDER_ID,
         DESKTOP_RAW_INPUT_CAPABILITY_ID,
@@ -2732,6 +2749,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
     raw_input.wire.capabilities[0].prerequisites.platforms = vec![CapabilityPlatform::Windows];
     raw_input.capabilities[0].wire.prerequisites.platforms = vec![CapabilityPlatform::Windows];
     let office = provider_for_tool(
+        TargetBinding::NativeContext,
         crate::tool_exposure::ExposureRequirement::SelectedContext,
         OFFICE_DOCUMENT_PROVIDER_ID,
         OFFICE_DOCUMENT_CAPABILITY_ID,
@@ -2751,6 +2769,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
         merge_provider_capabilities(
             merge_provider_capabilities(
                 provider_for_tool(
+                    TargetBinding::NativeContext,
                     crate::tool_exposure::ExposureRequirement::SelectedContext,
                     SPREADSHEET_LIVE_PROVIDER_ID,
                     SPREADSHEET_LIVE_INSPECT_CAPABILITY_ID,
@@ -2770,6 +2789,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
                     ),
                 ),
                 provider_for_tool(
+                    TargetBinding::NativeContext,
                     crate::tool_exposure::ExposureRequirement::NoAttachment,
                     SPREADSHEET_LIVE_PROVIDER_ID,
                     SPREADSHEET_BATCH_INSPECT_CAPABILITY_ID,
@@ -2789,6 +2809,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
                 ),
             ),
             provider_for_tool(
+                TargetBinding::NativeContext,
                 crate::tool_exposure::ExposureRequirement::SelectedContext,
                 SPREADSHEET_LIVE_PROVIDER_ID,
                 SPREADSHEET_LIVE_PATCH_CAPABILITY_ID,
@@ -2804,6 +2825,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
             ),
         ),
         provider_for_tool(
+            TargetBinding::NativeContext,
             crate::tool_exposure::ExposureRequirement::NoAttachment,
             SPREADSHEET_LIVE_PROVIDER_ID,
             SPREADSHEET_BATCH_PATCH_CAPABILITY_ID,
@@ -2823,6 +2845,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
         merge_provider_capabilities(
             merge_provider_capabilities(
                 provider_for_tool(
+                    TargetBinding::NativeContext,
                     crate::tool_exposure::ExposureRequirement::SelectedContext,
                     DOCUMENT_LIVE_PROVIDER_ID,
                     DOCUMENT_LIVE_INSPECT_CAPABILITY_ID,
@@ -2842,6 +2865,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
                     ),
                 ),
                 provider_for_tool(
+                    TargetBinding::NativeContext,
                     crate::tool_exposure::ExposureRequirement::NoAttachment,
                     DOCUMENT_LIVE_PROVIDER_ID,
                     DOCUMENT_BATCH_INSPECT_CAPABILITY_ID,
@@ -2861,6 +2885,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
                 ),
             ),
             provider_for_tool(
+                TargetBinding::NativeContext,
                 crate::tool_exposure::ExposureRequirement::SelectedContext,
                 DOCUMENT_LIVE_PROVIDER_ID,
                 DOCUMENT_LIVE_PATCH_CAPABILITY_ID,
@@ -2876,6 +2901,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
             ),
         ),
         provider_for_tool(
+            TargetBinding::NativeContext,
             crate::tool_exposure::ExposureRequirement::NoAttachment,
             DOCUMENT_LIVE_PROVIDER_ID,
             DOCUMENT_BATCH_PATCH_CAPABILITY_ID,
@@ -2895,6 +2921,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
         merge_provider_capabilities(
             merge_provider_capabilities(
                 provider_for_tool(
+                    TargetBinding::NativeContext,
                     crate::tool_exposure::ExposureRequirement::SelectedContext,
                     PRESENTATION_LIVE_PROVIDER_ID,
                     PRESENTATION_LIVE_INSPECT_CAPABILITY_ID,
@@ -2914,6 +2941,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
                     ),
                 ),
                 provider_for_tool(
+                    TargetBinding::NativeContext,
                     crate::tool_exposure::ExposureRequirement::NoAttachment,
                     PRESENTATION_LIVE_PROVIDER_ID,
                     PRESENTATION_BATCH_INSPECT_CAPABILITY_ID,
@@ -2933,6 +2961,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
                 ),
             ),
             provider_for_tool(
+                TargetBinding::NativeContext,
                 crate::tool_exposure::ExposureRequirement::SelectedContext,
                 PRESENTATION_LIVE_PROVIDER_ID,
                 PRESENTATION_LIVE_PATCH_CAPABILITY_ID,
@@ -2948,6 +2977,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
             ),
         ),
         provider_for_tool(
+            TargetBinding::NativeContext,
             crate::tool_exposure::ExposureRequirement::NoAttachment,
             PRESENTATION_LIVE_PROVIDER_ID,
             PRESENTATION_BATCH_PATCH_CAPABILITY_ID,
@@ -2964,6 +2994,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
     );
     configure_macos_only(&mut presentation_live);
     let files = provider_for_tool(
+        TargetBinding::NativeContext,
         crate::tool_exposure::ExposureRequirement::NoAttachment,
         FILE_WORKSPACE_PROVIDER_ID,
         FILE_METADATA_CAPABILITY_ID,
@@ -2980,6 +3011,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
             .expect("static selected file metadata tool exists"),
     );
     let file_content = provider_for_tool(
+        TargetBinding::NativeContext,
         crate::tool_exposure::ExposureRequirement::NoAttachment,
         FILE_CONTENT_PROVIDER_ID,
         FILE_CONTENT_CAPABILITY_ID,
@@ -2996,6 +3028,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
             .expect("static selected text file tool exists"),
     );
     let spreadsheet_file = provider_for_tool(
+        TargetBinding::NativeContext,
         crate::tool_exposure::ExposureRequirement::NoAttachment,
         SPREADSHEET_FILE_PROVIDER_ID,
         SPREADSHEET_FILE_CAPABILITY_ID,
@@ -3012,6 +3045,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
             .expect("static selected spreadsheet tool exists"),
     );
     let spreadsheet_merge = provider_for_tool(
+        TargetBinding::NativeContext,
         crate::tool_exposure::ExposureRequirement::NoAttachment,
         SPREADSHEET_MERGE_PROVIDER_ID,
         SPREADSHEET_MERGE_CAPABILITY_ID,
@@ -3028,6 +3062,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
             .expect("static spreadsheet merge preview tool exists"),
     );
     let spreadsheet_artifact = provider_for_tool(
+        TargetBinding::NativeContext,
         crate::tool_exposure::ExposureRequirement::NoAttachment,
         SPREADSHEET_ARTIFACT_PROVIDER_ID,
         SPREADSHEET_WORKBOOK_CREATE_CAPABILITY_ID,
@@ -3042,6 +3077,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
         create_spreadsheet_artifact_tool(),
     );
     let spreadsheet_formula_artifact = provider_for_tool(
+        TargetBinding::NativeContext,
         crate::tool_exposure::ExposureRequirement::NoAttachment,
         SPREADSHEET_FORMULA_ARTIFACT_PROVIDER_ID,
         SPREADSHEET_FORMULA_WORKBOOK_CREATE_CAPABILITY_ID,
@@ -3056,6 +3092,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
         create_spreadsheet_formula_artifact_tool(),
     );
     let word_document = provider_for_tool(
+        TargetBinding::NativeContext,
         crate::tool_exposure::ExposureRequirement::NoAttachment,
         WORD_DOCUMENT_PROVIDER_ID,
         WORD_DOCUMENT_CREATE_CAPABILITY_ID,
@@ -3070,6 +3107,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
         create_word_report_artifact_tool(),
     );
     let web_research = provider_for_tool(
+        TargetBinding::Host,
         crate::tool_exposure::ExposureRequirement::NoAttachment,
         WEB_RESEARCH_PROVIDER_ID,
         WEB_RESEARCH_FETCH_CAPABILITY_ID,
@@ -3084,6 +3122,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
         fetch_public_web_page_tool(),
     );
     let web_search = provider_for_tool(
+        TargetBinding::Host,
         crate::tool_exposure::ExposureRequirement::NoAttachment,
         WEB_SEARCH_PROVIDER_ID,
         WEB_RESEARCH_SEARCH_CAPABILITY_ID,
@@ -3101,6 +3140,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
         search_public_web_tool(),
     );
     let file_artifact = provider_for_tool(
+        TargetBinding::NativeContext,
         crate::tool_exposure::ExposureRequirement::NoAttachment,
         FILE_ARTIFACT_PROVIDER_ID,
         FILE_ARTIFACT_CREATE_CAPABILITY_ID,
@@ -3117,6 +3157,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
     let mut text_tools = crate::provider_preflight::text_file::registered_tools().into_iter();
     let text_files = merge_provider_capabilities(
         provider_for_tool(
+            TargetBinding::NativeContext,
             crate::tool_exposure::ExposureRequirement::NoAttachment,
             TEXT_FILE_PROVIDER_ID,
             TEXT_FILE_UPDATE_CAPABILITY_ID,
@@ -3138,6 +3179,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
             text_tools.next().expect("update text tool"),
         ),
         provider_for_tool(
+            TargetBinding::NativeContext,
             crate::tool_exposure::ExposureRequirement::NoAttachment,
             TEXT_FILE_PROVIDER_ID,
             TEXT_FILE_DELETE_CAPABILITY_ID,
@@ -3160,6 +3202,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
         ),
     );
     let local_communication_draft = provider_for_tool(
+        TargetBinding::NativeContext,
         crate::tool_exposure::ExposureRequirement::NoAttachment,
         LOCAL_COMMUNICATION_DRAFT_PROVIDER_ID,
         LOCAL_COMMUNICATION_DRAFT_CREATE_CAPABILITY_ID,
@@ -3177,6 +3220,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
         create_local_message_draft_tool(),
     );
     let mut outlook_new_handoff = provider_for_tool(
+        TargetBinding::NativeContext,
         crate::tool_exposure::ExposureRequirement::SelectedContext,
         OUTLOOK_NEW_HANDOFF_PROVIDER_ID,
         OUTLOOK_NEW_HANDOFF_CAPABILITY_ID,
@@ -3201,6 +3245,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
         .prerequisites
         .platforms = vec![CapabilityPlatform::Windows];
     let gmail_web_handoff = provider_for_tool(
+        TargetBinding::NativeContext,
         crate::tool_exposure::ExposureRequirement::SelectedContext,
         GMAIL_WEB_HANDOFF_PROVIDER_ID,
         GMAIL_WEB_HANDOFF_CAPABILITY_ID,
@@ -3219,6 +3264,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
         prepare_gmail_web_handoff_tool(),
     );
     let slack_web_handoff = provider_for_tool(
+        TargetBinding::NativeContext,
         crate::tool_exposure::ExposureRequirement::SelectedContext,
         SLACK_WEB_HANDOFF_PROVIDER_ID,
         SLACK_WEB_HANDOFF_CAPABILITY_ID,
@@ -3237,6 +3283,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
         prepare_slack_web_handoff_tool(),
     );
     let gmail_web_send = provider_for_tool(
+        TargetBinding::NativeContext,
         crate::tool_exposure::ExposureRequirement::SelectedContext,
         GMAIL_WEB_SEND_PROVIDER_ID,
         GMAIL_WEB_SEND_CAPABILITY_ID,
@@ -3255,6 +3302,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
         send_gmail_message_tool(),
     );
     let slack_web_send = provider_for_tool(
+        TargetBinding::NativeContext,
         crate::tool_exposure::ExposureRequirement::SelectedContext,
         SLACK_WEB_SEND_PROVIDER_ID,
         SLACK_WEB_SEND_CAPABILITY_ID,
@@ -3273,6 +3321,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
         send_slack_message_tool(),
     );
     let terminal = provider_for_tool(
+        TargetBinding::NativeContext,
         crate::tool_exposure::ExposureRequirement::SelectedContext,
         TERMINAL_OUTPUT_PROVIDER_ID,
         TERMINAL_OUTPUT_CAPABILITY_ID,
@@ -3289,6 +3338,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
             .expect("static selected terminal output tool exists"),
     );
     let mut current_screen = provider_for_tool(
+        TargetBinding::RequestDevice,
         crate::tool_exposure::ExposureRequirement::DesktopRead,
         CURRENT_SCREEN_PROVIDER_ID,
         CURRENT_SCREEN_CAPABILITY_ID,
@@ -3307,6 +3357,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
     current_screen.wire.capabilities[0].limits.max_output_bytes = CURRENT_SCREEN_MAX_OUTPUT_BYTES;
     current_screen.capabilities[0].wire.limits.max_output_bytes = CURRENT_SCREEN_MAX_OUTPUT_BYTES;
     let browser_open = provider_for_tool(
+        TargetBinding::NativeContext,
         crate::tool_exposure::ExposureRequirement::SelectedContext,
         BROWSER_OPEN_PROVIDER_ID,
         BROWSER_OPEN_CAPABILITY_ID,
@@ -3321,6 +3372,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
         browser_open_tool(),
     );
     let browser_navigate = provider_for_tool(
+        TargetBinding::NativeContext,
         crate::tool_exposure::ExposureRequirement::SelectedContext,
         BROWSER_NAVIGATE_PROVIDER_ID,
         BROWSER_NAVIGATE_CAPABILITY_ID,
@@ -3335,6 +3387,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
         browser_navigate_tool(),
     );
     let browser_snapshot = provider_for_tool(
+        TargetBinding::NativeContext,
         crate::tool_exposure::ExposureRequirement::SelectedContext,
         BROWSER_SNAPSHOT_PROVIDER_ID,
         BROWSER_SNAPSHOT_CAPABILITY_ID,
@@ -3349,6 +3402,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
         browser_snapshot_tool(),
     );
     let mut browser_wait = provider_for_tool(
+        TargetBinding::NativeContext,
         crate::tool_exposure::ExposureRequirement::SelectedContext,
         BROWSER_WAIT_PROVIDER_ID,
         BROWSER_WAIT_CAPABILITY_ID,
@@ -3364,6 +3418,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
     );
     configure_browser_wait_execution(&mut browser_wait);
     let browser_fill = provider_for_tool(
+        TargetBinding::NativeContext,
         crate::tool_exposure::ExposureRequirement::SelectedContext,
         BROWSER_FILL_PROVIDER_ID,
         BROWSER_FILL_CAPABILITY_ID,
@@ -3381,6 +3436,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
         browser_fill_tool(),
     );
     let browser_activate = provider_for_tool(
+        TargetBinding::NativeContext,
         crate::tool_exposure::ExposureRequirement::SelectedContext,
         BROWSER_ACTIVATE_PROVIDER_ID,
         BROWSER_ACTIVATE_CAPABILITY_ID,
@@ -3395,6 +3451,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
         browser_activate_tool(),
     );
     let mut document_preview = provider_for_tool(
+        TargetBinding::NativeContext,
         crate::tool_exposure::ExposureRequirement::NoAttachment,
         DOCUMENT_PREVIEW_PROVIDER_ID,
         DOCUMENT_PREVIEW_CAPABILITY_ID,
@@ -3409,6 +3466,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
         preview_document_tool(),
     );
     let mut document_conversion = provider_for_tool(
+        TargetBinding::NativeContext,
         crate::tool_exposure::ExposureRequirement::NoAttachment,
         DOCUMENT_CONVERSION_PROVIDER_ID,
         DOCUMENT_CONVERT_CAPABILITY_ID,
@@ -3437,6 +3495,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
     }
     assert!(reads.is_empty(), "unmapped AI Assistant read tool");
     let preview = provider_for_tool(
+        TargetBinding::NativeContext,
         crate::tool_exposure::ExposureRequirement::NoAttachment,
         ACTION_PREVIEW_PROVIDER_ID,
         ACTION_PREVIEW_CAPABILITY_ID,
@@ -4088,6 +4147,7 @@ mod tests {
                 canonical_input_json: None,
                 canonical_input_digest_sha256: None,
                 command_confirmation: None,
+                selected_read_target: None,
                 launch_confirmation: None,
                 suggested_ttl_seconds: 300,
                 suggested_max_uses: 1,

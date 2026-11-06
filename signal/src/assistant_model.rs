@@ -37,6 +37,9 @@ pub(crate) struct MeteredModel {
 
 #[async_trait::async_trait(?Send)]
 impl ModelSeam for MeteredModel {
+    fn supports_image_input(&self) -> bool {
+        self.inner.supports_image_input()
+    }
     fn prepare_request(
         &self,
         request: &ModelRequest,

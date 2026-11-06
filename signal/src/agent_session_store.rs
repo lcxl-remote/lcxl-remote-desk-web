@@ -2719,12 +2719,7 @@ impl SessionSeam for SignalAgentSessionStore {
         }
 
         if !session.agent_role.is_main() {
-            let target = update
-                .request
-                .exact_command()
-                .map_or(session.device_id.as_str(), |command| {
-                    &command.target_device_id
-                });
+            let target = permission_device_id(session, &update.request);
             let fence = desk_diagnose_core::action_turn_fence::AssistantTurnFence::for_device(
                 session, target,
             )?
@@ -4023,6 +4018,7 @@ mod tests {
             state: PermissionRequestState::Pending,
             items: vec![GrantRequestItem {
                 command_confirmation: None,
+                selected_read_target: None,
                 launch_confirmation: None,
                 item_id: "matrix-read".into(),
                 provider_id: "file.read".into(),
@@ -4341,6 +4337,7 @@ mod tests {
             state: PermissionRequestState::Pending,
             items: vec![GrantRequestItem {
                 command_confirmation: None,
+                selected_read_target: None,
                 launch_confirmation: None,
                 item_id: "inspect".into(),
                 provider_id: "desktop.session".into(),
@@ -4427,6 +4424,7 @@ mod tests {
             state: PermissionRequestState::Pending,
             items: vec![GrantRequestItem {
                 command_confirmation: None,
+                selected_read_target: None,
                 launch_confirmation: None,
                 item_id: "inspect".into(),
                 provider_id: "desktop.session".into(),
@@ -4586,6 +4584,7 @@ mod tests {
             state: PermissionRequestState::Pending,
             items: vec![GrantRequestItem {
                 command_confirmation: None,
+                selected_read_target: None,
                 launch_confirmation: None,
                 item_id: "ui-action".into(),
                 provider_id: desk_diagnose_core::ai_assistant::DESKTOP_UI_ACTION_PROVIDER_ID.into(),

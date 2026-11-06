@@ -3,7 +3,7 @@
 use super::*;
 use desk_diagnose_core::{
     action_turn_fence::AssistantTurnFence,
-    request_devices::{RequestDevice, selected_system_info},
+    request_devices::{RequestDevice, selected_read},
     session::PersistedAgentSession,
 };
 
@@ -121,7 +121,7 @@ impl SignalAiAssistantTools {
         session: &PersistedAgentSession,
         call: &ToolCall,
     ) -> Result<ReadOutcome, AgentError> {
-        let (reference, native_call) = selected_system_info(call)?;
+        let (reference, native_call) = selected_read(call)?;
         if !self
             .original_input
             .get()
@@ -135,6 +135,16 @@ impl SignalAiAssistantTools {
                 .get_fresh(&connection_id, chrono::Utc::now())
                 .map(|current| current.readiness.revision)
                 .ok_or_else(unavailable)?;
+        desk_diagnose_core::request_devices::require_current_read_target(
+            session,
+            &native_call,
+            &desk_diagnose_core::request_devices::SelectedReadTarget {
+                device_id: held.device_id.clone(),
+                target_ref: reference,
+                connection_id: connection_id.clone(),
+                readiness_revision,
+            },
+        )?;
 
         let scoped =
             self.scoped_request_device(held, connection_id, readiness_revision, Vec::new(), 0);
@@ -269,7 +279,28 @@ impl SignalAiAssistantTools {
             desk_assistant_data_store::device_roster::current_request_devices(&self.db, session)
                 .await
                 .map_err(|error| error.into_agent_error())?;
-        request_device_catalogue(&self.db, &self.connections, &selected).await
+        let mut devices = request_device_catalogue(&self.db, &self.connections, &selected).await?;
+        let store = SignalCapabilityGrantStore::new(self.db.clone());
+        let now = chrono::Utc::now().timestamp_millis().max(0) as u64;
+        for device in &mut devices {
+            if let Some(target) = &device.read_target
+                && session
+                    .permission_requests
+                    .iter()
+                    .any(|request| request.selected_read_target() == Some(target))
+            {
+                let grants = desk_diagnose_core::future::boxed(|| {
+                    store.list_for_subject(&self.run_id, &self.actor_id, &target.device_id)
+                })
+                .await
+                .map_err(|_| unavailable())?;
+                device.approved_read_tools =
+                    desk_diagnose_core::request_devices::approved_read_tools(
+                        session, target, &grants, now,
+                    );
+            }
+        }
+        Ok(devices)
     }
 }
 
@@ -298,14 +329,32 @@ pub(crate) async fn request_device_catalogue(
             }) {
                 return None;
             }
-            let ready_capabilities = connection
-                .and_then(|state| readiness.get_fresh(&state.model.connection_id, now))
+            let current =
+                connection.and_then(|state| readiness.get_fresh(&state.model.connection_id, now));
+            let ready_capabilities = current
+                .as_ref()
                 .into_iter()
-                .flat_map(|current| current.readiness.capabilities)
+                .flat_map(|current| &current.readiness.capabilities)
                 .filter(|item| item.supported && item.ready)
                 .map(|item| item.capability)
                 .collect();
             Some(RequestDevice {
+                read_target: connection.zip(current.as_ref()).map(|(state, current)| {
+                    desk_diagnose_core::request_devices::SelectedReadTarget {
+                        device_id: id.clone(),
+                        target_ref: id.clone(),
+                        connection_id: state.model.connection_id.clone(),
+                        readiness_revision: current.readiness.revision,
+                    }
+                }),
+                ready_provider_ids: current
+                    .as_ref()
+                    .and_then(|current| {
+                        desk_diagnose_core::request_devices::ready_provider_ids(&current.readiness)
+                            .ok()
+                    })
+                    .unwrap_or_default(),
+                approved_read_tools: Vec::new(),
                 target_ref: id.clone(),
                 name: connection.and_then(|state| state.model.peer.display_name.clone()),
                 platform: connection.and_then(|state| {

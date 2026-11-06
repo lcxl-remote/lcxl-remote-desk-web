@@ -1429,7 +1429,16 @@ pub(crate) async fn current_grant_parent_on(
         || session.actor_id != grant.actor_id
         || (session.device_id != grant.target_device_id
             && !(session.device_id.is_empty()
-                && grant.tool_name == desk_diagnose_core::command_confirmation::COMMAND_TOOL))
+                && session.permission_requests.iter().any(|request| {
+                    request.selected_device_id() == Some(grant.target_device_id.as_str())
+                        && request.items.iter().any(|item| {
+                            desk_diagnose_core::permission_grant::permission_item_grant_id(
+                                &session.conversation_id,
+                                request,
+                                &item.item_id,
+                            ) == grant.grant_id
+                        })
+                })))
     {
         return Err(invalid());
     }

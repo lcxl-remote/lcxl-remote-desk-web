@@ -21,6 +21,7 @@ pub(super) const READINESS_IDENTITIES: [(&str, &str, &str, &str); 1] = [(
 
 pub(super) fn provider() -> ProviderDescriptor {
     let mut descriptor = provider_for_tool(
+        TargetBinding::NativeContext,
         crate::tool_exposure::ExposureRequirement::NoAttachment,
         PROVIDER_ID,
         INSPECT_CAPABILITY_ID,
@@ -41,6 +42,7 @@ pub(super) fn provider() -> ProviderDescriptor {
     descriptor = merge_provider_capabilities(
         descriptor,
         provider_for_tool(
+            TargetBinding::NativeContext,
             crate::tool_exposure::ExposureRequirement::NoAttachment,
             PROVIDER_ID,
             PATCH_CAPABILITY_ID,

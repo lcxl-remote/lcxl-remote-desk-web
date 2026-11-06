@@ -492,8 +492,8 @@ pub fn project_permission_authority(
         valid_id(device_id)?;
     }
     if request
-        .exact_command()
-        .is_some_and(|command| command.target_device_id != device_id)
+        .selected_device_id()
+        .is_some_and(|target| target != device_id)
     {
         return Err(ApprovalReviewError::InvalidContext);
     }
@@ -947,15 +947,37 @@ impl ApprovalReviewCandidate {
             return Err(ApprovalReviewError::InvalidCandidate);
         }
         if self.device_id.is_empty() {
-            let target = action
-                .get("command_confirmation")
-                .and_then(|confirmation| confirmation.get("target_device_id"))
-                .and_then(serde_json::Value::as_str)
-                .ok_or(ApprovalReviewError::InvalidCandidate)?;
-            valid_id(target)?;
+            let (target, selected_read) = if let Some(target) = action.get("selected_read_target") {
+                let target: crate::request_devices::SelectedReadTarget =
+                    serde_json::from_value(target.clone())
+                        .map_err(|_| ApprovalReviewError::InvalidCandidate)?;
+                valid_id(&target.connection_id)?;
+                if target.readiness_revision == 0 {
+                    return Err(ApprovalReviewError::InvalidCandidate);
+                }
+                (target.device_id, true)
+            } else {
+                (
+                    action
+                        .get("command_confirmation")
+                        .and_then(|confirmation| confirmation.get("target_device_id"))
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or(ApprovalReviewError::InvalidCandidate)?
+                        .to_owned(),
+                    false,
+                )
+            };
+            valid_id(&target)?;
+            let valid_tool = if selected_read {
+                crate::ai_assistant::ai_assistant_provider_registry_ref()
+                    .capability_for_tool(&self.tool_name)
+                    .is_some_and(crate::request_devices::selected_read_descriptor)
+            } else {
+                self.tool_name == crate::command_confirmation::COMMAND_TOOL
+            };
             if !matches!(self.source, ApprovalSource::PermissionItem { .. })
                 || self.input_kind != ApprovalInputKind::ExactCall
-                || self.tool_name != crate::command_confirmation::COMMAND_TOOL
+                || !valid_tool
             {
                 return Err(ApprovalReviewError::InvalidCandidate);
             }
@@ -1575,15 +1597,18 @@ pub fn permission_item_action_json(
                 .ok_or(ApprovalReviewError::InvalidCandidate)?;
             let exact_input: serde_json::Value = serde_json::from_str(exact_input)
                 .map_err(|_| ApprovalReviewError::InvalidCandidate)?;
-            serde_json::json!({
+            let mut action = serde_json::json!({
                 "exact_input": exact_input,
                 "command_confirmation": &item.command_confirmation,
                 "launch_confirmation": &item.launch_confirmation,
                 "resource_scope": &item.resource_scope,
                 "operation_scope": &item.operation_scope,
                 "export_destinations": &item.export_destinations,
-            })
-            .to_string()
+            });
+            if let Some(target) = &item.selected_read_target {
+                action["selected_read_target"] = serde_json::json!(target);
+            }
+            action.to_string()
         }
         ApprovalInputKind::Scope => serde_json::json!({
             "resource_scope": &item.resource_scope,
@@ -2470,6 +2495,7 @@ mod tests {
                     canonical_input_json: None,
                     canonical_input_digest_sha256: None,
                     command_confirmation: None,
+                    selected_read_target: None,
                     launch_confirmation: None,
                     suggested_ttl_seconds: 300,
                     suggested_max_uses: 1,

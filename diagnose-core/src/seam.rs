@@ -412,6 +412,9 @@ pub enum ContextCompressionAuditOutcome {
 /// (text + tool calls + stop reason + usage).
 #[async_trait(?Send)]
 pub trait ModelSeam {
+    fn supports_image_input(&self) -> bool {
+        false
+    }
     /// Uses the same authorization and protocol projection as the actual sender.
     /// It must not acquire admission, write audit records or make network calls.
     fn prepare_request(

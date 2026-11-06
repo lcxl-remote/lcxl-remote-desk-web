@@ -928,6 +928,9 @@ fn non_empty(value: Option<&str>) -> Option<String> {
 
 #[async_trait(?Send)]
 impl ModelSeam for SignalModelSeam {
+    fn supports_image_input(&self) -> bool {
+        self.capabilities.image_input
+    }
     fn prepare_request(
         &self,
         request: &ModelRequest,

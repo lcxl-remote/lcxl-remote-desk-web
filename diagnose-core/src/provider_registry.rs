@@ -20,8 +20,16 @@ use crate::{
 
 pub const MAX_TOOL_SCHEMA_BYTES: usize = 64 * 1024;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetBinding {
+    Host,
+    NativeContext,
+    RequestDevice,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapabilityDescriptor {
+    pub target_binding: TargetBinding,
     pub exposure: crate::tool_exposure::ExposureRequirement,
     pub wire: CapabilityWireDescriptor,
     pub tool_spec: ToolSpec,
@@ -47,6 +55,24 @@ impl CapabilityDescriptor {
             ));
         }
         if !self.tool_spec.parameters_schema.is_object() {
+            return Err(RegistryError::InvalidToolSchema(
+                self.tool_spec.name.clone(),
+            ));
+        }
+        if self.target_binding == TargetBinding::RequestDevice
+            && (self.wire.execution_locality
+                != desk_agent_protocol::capability_provider::ExecutionLocality::Edge
+                || self
+                    .tool_spec
+                    .parameters_schema
+                    .pointer("/properties/target_ref")
+                    .is_some()
+                || (!matches!(
+                    self.wire.effect,
+                    desk_agent_protocol::capability_provider::CapabilityEffect::ReadDevice
+                        | desk_agent_protocol::capability_provider::CapabilityEffect::CaptureScreen
+                ) && self.tool_spec.name != crate::command_confirmation::COMMAND_TOOL))
+        {
             return Err(RegistryError::InvalidToolSchema(
                 self.tool_spec.name.clone(),
             ));
@@ -479,6 +505,7 @@ mod tests {
             surfaces: vec![ProductSurface::OssPersonalOwner],
         };
         let capability = CapabilityDescriptor {
+            target_binding: TargetBinding::NativeContext,
             exposure: crate::tool_exposure::ExposureRequirement::NoAttachment,
             wire: wire.clone(),
             tool_spec: ToolSpec {

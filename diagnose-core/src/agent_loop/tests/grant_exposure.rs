@@ -327,6 +327,7 @@ async fn permission_resume_keeps_scoped_prerequisites_and_validates_exact_grants
             state: PermissionRequestState::Approved,
             items: vec![GrantRequestItem {
                 command_confirmation: None,
+                selected_read_target: None,
                 launch_confirmation: None,
                 item_id: "launch".into(),
                 provider_id: grant.provider_id.clone(),
@@ -528,6 +529,9 @@ async fn workbench_coordinator_uses_reads_and_rejects_forged_writes_and_permissi
         ) -> Result<Vec<crate::request_devices::RequestDevice>, AgentError> {
             assert!(session.admits_assistant_device("device"));
             Ok(vec![crate::request_devices::RequestDevice {
+                read_target: None,
+                ready_provider_ids: vec![crate::ai_assistant::SYSTEM_INFO_CAPABILITY_ID.into()],
+                approved_read_tools: Vec::new(),
                 target_ref: "device".into(),
                 name: None,
                 platform: Some("macOS"),
@@ -541,7 +545,7 @@ async fn workbench_coordinator_uses_reads_and_rejects_forged_writes_and_permissi
             session: &PersistedAgentSession,
             call: &ToolCall,
         ) -> Result<crate::seam::ReadOutcome, AgentError> {
-            let (target, _) = crate::request_devices::selected_system_info(call)?;
+            let (target, _) = crate::request_devices::selected_read(call)?;
             assert!(session.admits_assistant_device(&target));
             self.0.borrow_mut().push(target);
             Ok(crate::seam::ReadOutcome::Completed {

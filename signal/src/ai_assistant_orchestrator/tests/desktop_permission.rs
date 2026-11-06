@@ -1405,6 +1405,7 @@ async fn seed_command_history(db: &crate::config::connection::DatabaseConnection
         let item = GrantRequestItem {
             resource_scope: confirmation.resource_scope().unwrap(),
             command_confirmation: Some(confirmation),
+            selected_read_target: None,
             launch_confirmation: None,
             item_id: "command".into(),
             provider_id: provider.wire.provider_id.clone(),

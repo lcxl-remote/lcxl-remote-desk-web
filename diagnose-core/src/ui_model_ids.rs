@@ -1117,6 +1117,7 @@ pub fn project_tool(tool: &mut crate::chat::ToolSpec) {
     crate::application_batch::project_schema(tool);
     crate::model_actions::project_tool(tool);
     crate::model_constraints::project(tool);
+    crate::request_devices::project_read_spec(tool);
 }
 
 #[cfg(test)]

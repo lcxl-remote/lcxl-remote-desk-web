@@ -501,6 +501,7 @@ mod tests {
             created_at: "now".into(),
             items: vec![GrantRequestItem {
                 command_confirmation: Some(confirmation.clone()),
+                selected_read_target: None,
                 launch_confirmation: None,
                 item_id: "command".into(),
                 provider_id: "file.workspace".into(),

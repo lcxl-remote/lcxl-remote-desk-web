@@ -329,17 +329,13 @@ pub fn lookup_for_session<'a>(
     name: &str,
     session: &crate::session::PersistedAgentSession,
 ) -> Option<&'a RegisteredTool> {
-    let selected_read = name == crate::request_devices::SYSTEM_INFO_TOOL
-        && crate::request_devices::accepts_device_reads(session);
     let selected_command = name == crate::command_confirmation::COMMAND_TOOL
         && crate::request_devices::selected_command_turn(session);
     registry
         .iter()
         .find(|tool| {
             tool.name() == name
-                && ((selected_read
-                    && tool.effect == ToolEffect::ReadOnly
-                    && tool.required_device_capability == Some(Capability::SystemInfo))
+                && (crate::request_devices::is_selected_read_tool(tool, session)
                     || (selected_command
                         && tool.effect == ToolEffect::Mutating
                         && tool

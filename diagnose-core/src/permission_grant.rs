@@ -256,7 +256,12 @@ pub fn build_permission_grants(
         .clone()
         .apply_user_decision(decisions)
         .map_err(|error| internal(format!("invalid permission decision: {error}")))?;
-    if context.readiness_revision == 0 || context.now_unix_ms == 0 {
+    if context.readiness_revision == 0
+        || context.now_unix_ms == 0
+        || request
+            .selected_read_target()
+            .is_some_and(|target| target.readiness_revision != context.readiness_revision)
+    {
         return Err(internal("invalid grant issuance readiness or clock"));
     }
     let decisions = decisions
@@ -712,15 +717,29 @@ pub fn build_permission_grants(
         } else {
             resource_scope.clone()
         };
-        let risk_tier = classify_capability_risk(
-            capability.wire.effect,
-            CapabilityRiskSignals {
-                sensitive_content,
-                external_egress: capability.wire.data_policy.may_export_data,
-                destructive_or_overwrite: text_mutation,
-                unpredictable_input: false,
-            },
-        );
+        let risk_tier = if requested.selected_read_target.is_some() {
+            crate::provider_preflight::classify_provider_call(
+                capability,
+                &crate::chat::ToolCall {
+                    id: requested.item_id.clone(),
+                    name: requested.tool_name.clone(),
+                    arguments_json: requested
+                        .canonical_input_json
+                        .clone()
+                        .ok_or_else(|| internal("missing selected read input"))?,
+                },
+            )?
+        } else {
+            classify_capability_risk(
+                capability.wire.effect,
+                CapabilityRiskSignals {
+                    sensitive_content,
+                    external_egress: capability.wire.data_policy.may_export_data,
+                    destructive_or_overwrite: text_mutation,
+                    unpredictable_input: false,
+                },
+            )
+        };
         let (use_policy, canonical_input_digest_sha256) = if external_web_host {
             (CapabilityGrantUsePolicy::UntilExpiry, None)
         } else if application_scope.is_some() {
@@ -917,16 +936,15 @@ pub fn permission_item_grant_id(
     )
 }
 
-/// Only a personal conversation's single exact command separates the grant
-/// target from the native session subject.
+/// Personal device proposals bind a grant target independently of the session subject.
 pub fn permission_device_id<'a>(
     session: &'a PersistedAgentSession,
     request: &'a PermissionRequest,
 ) -> &'a str {
     if session.device_id.is_empty()
-        && let Some(command) = request.exact_command()
+        && let Some(device_id) = request.selected_device_id()
     {
-        return &command.target_device_id;
+        return device_id;
     }
     &session.device_id
 }

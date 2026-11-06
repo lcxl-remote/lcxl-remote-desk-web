@@ -312,7 +312,14 @@ pub fn capability_name_index_prompt(
             if availability.callable() && requestable.contains(name) {
                 permission_input_modes.insert(
                     name,
-                    crate::permission_tools::permission_input_mode(capability),
+                    if permission_candidates.iter().any(|tool| {
+                        tool.name() == name
+                            && crate::request_devices::has_target_selector(&tool.spec)
+                    }) {
+                        "exact_input"
+                    } else {
+                        crate::permission_tools::permission_input_mode(capability)
+                    },
                 );
             }
             if advertised_tool_names.contains(name) {
@@ -389,8 +396,17 @@ fn detail_entries(
                 return Some(json!({"tool_name": name, "state": "callable_when_loaded"}));
             }
             if availability.callable() && requestable.contains(name.as_str()) {
-                let mut model_spec = capability.tool_spec.clone();
+                let candidate = permission_candidates.iter().find(|tool| tool.name() == name)?;
+                let mut model_spec = candidate.spec.clone();
                 crate::ui_model_ids::project_tool(&mut model_spec);
+                let selected = crate::request_devices::has_target_selector(&model_spec);
+                if selected {
+                    let schema = &mut model_spec.parameters_schema;
+                    schema["properties"].as_object_mut()?.remove("target_ref");
+                    if let Some(required) = schema["required"].as_array_mut() {
+                        required.retain(|field| field != "target_ref");
+                    }
+                }
                 return Some(json!({
                     "provider_id": provider.wire.provider_id,
                     "capability_id": capability.wire.capability_id,
@@ -401,7 +417,7 @@ fn detail_entries(
                     "input_schema": model_spec.parameters_schema,
                     "execution_policy": capability.wire.execution_policy,
                     "authorization_hint": capability.wire.authorization_hint,
-                    "permission_input_mode": crate::permission_tools::permission_input_mode(capability),
+                    "permission_input_mode": if selected { "exact_input" } else { crate::permission_tools::permission_input_mode(capability) },
                     "limits": capability.wire.limits,
                     "supports_progress": capability.wire.supports_progress,
                     "supports_cancel": capability.wire.supports_cancel,

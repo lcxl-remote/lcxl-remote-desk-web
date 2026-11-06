@@ -2640,6 +2640,10 @@ export type GrantRequestItemDto = {
     */
     resourceScope: string[];
     /**
+     * @type string,null
+    */
+    selectedReadDeviceRef?: string | null;
+    /**
      * @minLength 0
      * @type integer, int32
     */

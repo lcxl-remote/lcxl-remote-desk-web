@@ -37,7 +37,9 @@ impl ImageAttachment {
             AttachmentMetadata, Availability, ContentKind, digest,
         };
         if self.frame.conversation_id != session.conversation_id
-            || self.frame.device_id != session.device_id
+            || !self.matches_device_scope(&session.device_id)
+            || (session.device_id.is_empty()
+                && !session.admits_assistant_device(&self.frame.device_id))
         {
             return Err(error("Screenshot belongs to another conversation"));
         }
@@ -73,6 +75,15 @@ impl ImageAttachment {
             metadata,
             content: pixels.to_vec(),
         })
+    }
+
+    pub(crate) fn matches_device_scope(&self, device_id: &str) -> bool {
+        if !device_id.is_empty() {
+            return self.frame.device_id == device_id;
+        }
+        self.message.data_envelope.as_ref().and_then(|envelope| {
+            crate::visual_evidence::selected_image_device(envelope, &self.frame.tool_call_id)
+        }) == Some(self.frame.device_id.as_str())
     }
 
     pub fn prepare(

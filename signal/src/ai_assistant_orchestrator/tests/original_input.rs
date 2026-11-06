@@ -3000,6 +3000,389 @@ async fn respond_to_system_info(
     }
 }
 
+#[actix_web::test]
+async fn personal_selected_desktop_read_and_whole_screen_resume_on_signal() {
+    use super::permission_object::tool_reply;
+    use crate::controller::ai_assistant_session::{PermissionDecisionBody, decide_permission_on};
+    use desk_agent_protocol::{Capability, computer_use::*};
+    use desk_signal_facade::model::os::OperationSystemEnum;
+    use sea_orm::{ColumnTrait, QueryFilter};
+    use serde_json::{Value, json};
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let url = format!(
+        "sqlite://{}?mode=rwc",
+        directory.path().join("desktop.db").display()
+    );
+    let db = crate::config::test_support::Database::connect(url)
+        .await
+        .unwrap();
+    crate::db::initialize_schema(&db).await.unwrap();
+    crate::ai_assistant_gate::enable_test_host();
+    crate::model_provider::save(
+        &db,
+        crate::model_provider::ModelProviderConfig {
+            wire_protocol: Some(
+                desk_diagnose_core::model_profile::WireProtocol::OpenAiChatCompletions,
+            ),
+            model: Some("selected-desktop-model".into()),
+            base_url: Some(format!("http://{}", listener.local_addr().unwrap())),
+            api_key: Some("test-only-key".into()),
+            max_context_bytes: Some(131_072),
+            supports_image_input: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let owner = crate::control_authorizer::SINGLE_ACCOUNT_USER_ID;
+    let connections = web::Data::new(SharedConnectionMap::new_oss());
+    let devices = ["selected-desktop-a", "selected-desktop-b"];
+    let now = chrono::Utc::now();
+    let mut peers = Vec::new();
+    for (device, capability, adapter) in [
+        (
+            devices[0],
+            Capability::DesktopSessionInspect,
+            ComputerUseAdapterKind::MacosAccessibility,
+        ),
+        (
+            devices[1],
+            Capability::ScreenCaptureCurrent,
+            ComputerUseAdapterKind::ScreenCapture,
+        ),
+    ] {
+        crate::device_code_store::get_or_create(&db, device)
+            .await
+            .unwrap();
+        peers.push(
+            register_request_device(&connections, device, device, OperationSystemEnum::Mac).await,
+        );
+        crate::computer_use_readiness::global_computer_use_readiness_cache()
+            .update(
+                &format!("live-{device}"),
+                ComputerUseReadiness {
+                    schema_version: COMPUTER_USE_SCHEMA_VERSION,
+                    revision: 1,
+                    observed_at: now.to_rfc3339(),
+                    expires_at: (now + chrono::Duration::minutes(5)).to_rfc3339(),
+                    server_api_version: 1,
+                    os: "macos".into(),
+                    interactive_user_home: None,
+                    interactive_session_incarnation: "selected-desktop-worker".into(),
+                    local_ceiling_revision: 1,
+                    unattended_command_execution: false,
+                    capabilities: vec![ComputerUseCapabilityReadiness {
+                        capability,
+                        adapter: ComputerUseAdapterRef {
+                            kind: adapter,
+                            version: "1".into(),
+                        },
+                        supported: true,
+                        ready: true,
+                        reason: None,
+                    }],
+                    context_references: vec![],
+                },
+                now,
+            )
+            .unwrap();
+    }
+    let gateway = actix_web::rt::spawn(async move {
+        for (target, name) in [
+            (devices[0], "inspect_desktop_session"),
+            (devices[1], "read_current_screen"),
+        ] {
+            capture_one_openai_request_with_reply(&listener, |body| {
+                let request: Value = serde_json::from_slice(body).unwrap();
+                assert!(
+                    !request["tools"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|t| t["function"]["name"] == name)
+                );
+                tool_reply(
+                    "request_permissions",
+                    json!({"target_ref":target, "items":[{
+                        "tool_name":name, "reason":"Read what the owner asked for", "exact_input":{}
+                    }]}),
+                )
+            })
+            .await;
+            capture_one_openai_request_with_reply(&listener, |body| {
+                let request: Value = serde_json::from_slice(body).unwrap();
+                let advertised = request["tools"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|t| t["function"]["name"] == name)
+                    .unwrap_or_else(|| panic!("{name} was not restored"));
+                assert!(
+                    advertised["function"]["parameters"]["required"]
+                        .as_array()
+                        .unwrap()
+                        .contains(&json!("target_ref"))
+                );
+                assert!(
+                    !advertised["function"]["parameters"]["properties"]
+                        .as_object()
+                        .unwrap()
+                        .contains_key("window_id")
+                );
+                tool_reply(name, json!({"target_ref":target}))
+            })
+            .await;
+            capture_one_openai_request_with_reply(&listener, |body| {
+                let request: Value = serde_json::from_slice(body).unwrap();
+                let messages = request["messages"].to_string();
+                if name == "read_current_screen" {
+                    assert!(messages.contains("data:image/png;base64,"), "{messages}");
+                } else {
+                    assert!(messages.contains("fixture-display"), "{messages}");
+                }
+                memory_sse(json!({"content":"Selected device read complete."}), "stop")
+            })
+            .await;
+            capture_one_openai_request_with_reply(&listener, |body| {
+                let request: Value = serde_json::from_slice(body).unwrap();
+                assert!(
+                    request["messages"][0]["content"]
+                        .as_str()
+                        .unwrap()
+                        .contains("Create a short conversation title")
+                );
+                memory_sse(json!({"content":r#"{"title":"Selected device"}"#}), "stop")
+            })
+            .await;
+        }
+    });
+    for (index, (target, peer)) in devices.into_iter().zip(peers).enumerate() {
+        let intent = format!("selected-desktop-run-{index}");
+        let actor = owner.to_string();
+        let run = derive_assistant_conversation_key(
+            &actor,
+            AssistantConversationScope::Personal,
+            &intent,
+        );
+        let store = crate::agent_session_store::SignalAgentSessionStore::new(db.clone());
+        run_turn(
+            connections.clone(),
+            db.clone(),
+            format!("desktop-{index}"),
+            "owner-browser".into(),
+            String::new(),
+            owner,
+            String::new(),
+            AiAssistantAsk {
+                target_refs: vec![target.into()],
+                question: if index == 0 {
+                    "Read desktop information"
+                } else {
+                    "Capture the whole display"
+                }
+                .into(),
+                client_message_id: format!("desktop-message-{index}"),
+                conversation_id: Some(intent.clone()),
+                client_timezone: "UTC".into(),
+                ..Default::default()
+            },
+        )
+        .await;
+        let pending = store
+            .read_snapshot_for_subject(&run, &actor, "")
+            .await
+            .unwrap()
+            .unwrap();
+        let [request] = pending.permission_requests.as_slice() else {
+            panic!(
+                "expected one permission request: {:?}",
+                pending.messages.last()
+            );
+        };
+        assert_eq!(request.selected_device_id(), Some(target));
+        let item = &request.items[0];
+        let body: PermissionDecisionBody = serde_json::from_value(json!({
+            "conversation":intent, "requestId":request.request_id, "items":[{
+                "itemId":item.item_id,"decision":"approve","resource_scope":item.resource_scope,
+                "operation_scope":item.operation_scope,"ttl_seconds":60,"max_uses":1
+            }]
+        }))
+        .unwrap();
+        let decision = decide_permission_on(&db, connections.clone(), web::Json(body))
+            .await
+            .unwrap();
+        let response: Value = serde_json::from_slice(
+            &actix_web::body::to_bytes(decision.into_body())
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(response["data"]["state"], "approved", "{response}");
+        tokio::time::timeout(
+            SCENARIO_TIMEOUT,
+            respond_to_selected_desktop(&connections, target, peer, index == 1),
+        )
+        .await
+        .unwrap();
+        let snapshot = tokio::time::timeout(SCENARIO_TIMEOUT, async {
+            loop {
+                let snapshot = store
+                    .read_snapshot_for_subject(&run, &actor, "")
+                    .await
+                    .unwrap()
+                    .unwrap();
+                if latest_committed_answer(&snapshot).is_some() || snapshot.terminal_error.is_some()
+                {
+                    break snapshot;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            latest_committed_answer(&snapshot).as_deref(),
+            Some("Selected device read complete."),
+            "{:?}",
+            snapshot.terminal_error
+        );
+        if index == 1 {
+            let row = crate::entity::agent_session::Entity::find()
+                .filter(crate::entity::agent_session::Column::ConversationId.eq(&run))
+                .one(&db)
+                .await
+                .unwrap()
+                .unwrap();
+            let saved =
+                desk_diagnose_core::session::PersistedAgentSession::decode_json(&row.state_json)
+                    .unwrap();
+            assert_eq!(
+                saved.visual_evidence.last().map(|f| f.device_id.as_str()),
+                Some(target)
+            );
+            let images = crate::agent_image_store::list(&db, &run, &actor, None)
+                .await
+                .unwrap();
+            let [frame] = images.as_slice() else {
+                panic!("expected one saved screenshot");
+            };
+            let (image, pixels) =
+                crate::agent_image_store::read(&db, &run, &actor, Some(&frame.evidence_id), None)
+                    .await
+                    .unwrap();
+            assert_eq!(image.frame.device_id, target);
+            assert!(image.restore(&pixels).unwrap().image_data_url.is_some());
+        }
+    }
+    gateway.await.unwrap();
+}
+
+async fn respond_to_selected_desktop(
+    connections: &SharedConnectionMap,
+    target: &str,
+    peer: actix_web::HttpResponse,
+    screen: bool,
+) {
+    use desk_agent_protocol::{
+        AgentOutcome, ContextKind, ImageFormat, OperationOutput, ReadContextOutput,
+        ScreenCaptureOutput, computer_use::*, remote_tool::*,
+    };
+    use desk_signal_facade::service::RemoteToolObserver;
+    let frame = receive_device_frame(peer).await;
+    assert_eq!(frame.signaling_type, SignalingType::InvokeRemoteTool);
+    let read: RemoteToolRequest = frame.get_data().unwrap();
+    assert_eq!(read.envelope.target.device_id, target);
+    let (value, image) = if screen {
+        assert!(
+            matches!(read.envelope.operation.input.kind, ContextKind::ScreenCaptureCurrent(ref params) if params.window.is_none())
+        );
+        let base64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jOioAAAAASUVORK5CYII=";
+        (
+            ReadContextOutput::ScreenCaptureCurrent(ScreenCaptureOutput {
+                display: "fixture-display".into(),
+                format: ImageFormat::Png,
+                width: 1,
+                height: 1,
+                dpi_x: 96,
+                dpi_y: 96,
+                frame_observation: None,
+                window: None,
+                window_geometry: None,
+                image: vec![],
+                truncated: false,
+            }),
+            Some(RemoteToolImage {
+                data_url: format!("data:image/png;base64,{base64}"),
+                media_type: "image/png".into(),
+                width: 1,
+                height: 1,
+                decoded_bytes: 68,
+            }),
+        )
+    } else {
+        assert!(matches!(
+            read.envelope.operation.input.kind,
+            ContextKind::DesktopSessionInspect(_)
+        ));
+        (
+            ReadContextOutput::DesktopSessionInspect(DesktopSessionInspectOutput {
+                session: ObjectRef {
+                    token: "fixture-session".into(),
+                    snapshot_id: "fixture-snapshot".into(),
+                    object_kind: ObjectKind::DesktopSession,
+                    expires_at: String::new(),
+                },
+                os: "macos".into(),
+                interactive_session_incarnation: "fixture-desktop".into(),
+                active_application: None,
+                active_application_name: None,
+                displays: vec![ScreenCaptureDisplay {
+                    display: "fixture-display".into(),
+                    name: "Fixture display".into(),
+                    width: 1024,
+                    height: 768,
+                    x: 0,
+                    y: 0,
+                }],
+                display_list_error: None,
+            }),
+            None,
+        )
+    };
+    let result = RemoteToolOutput {
+        outcome: AgentOutcome::Ok(OperationOutput::ReadContext(value)),
+        image,
+        document_preview: None,
+        document_preview_page: None,
+    };
+    let source = connections
+        .read()
+        .await
+        .current_oss_server(target)
+        .unwrap()
+        .clone();
+    let observer = crate::remote_tool_edge::SignalRemoteToolObserver::new(
+        crate::remote_tool_edge::global_remote_tool_pending(),
+    );
+    for chunk in desk_diagnose_core::chunk::chunk_bytes(
+        &read.request_id,
+        &serde_json::to_vec(&result).unwrap(),
+        256,
+    ) {
+        let response = SignalingModel::new(
+            "selected-desktop-result",
+            SignalingType::RemoteToolOutputUpdated,
+            None,
+            None,
+            Some(serde_json::to_value(RemoteToolResponse::Chunk(chunk)).unwrap()),
+            None,
+        );
+        observer.on_remote_tool_response(&source, &response).await;
+    }
+}
+
 async fn receive_device_frame(peer: actix_web::HttpResponse) -> SignalingModel {
     use actix_http::ws::{Codec, Frame};
     use actix_web::body::MessageBody;

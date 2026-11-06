@@ -75,7 +75,9 @@ impl AttachmentMetadata {
         .iter()
         .any(|value| value.is_empty() || value.len() > 256)
             || self.device_id.len() > 256
-            || (self.device_id.is_empty() && self.kind == ContentKind::Image)
+            || (self.device_id.is_empty()
+                && self.kind == ContentKind::Image
+                && self.image_source.is_none())
             || self.part.is_empty()
             || self.part.len() > 32
             || self.media_type.len() > 128
@@ -157,7 +159,7 @@ impl AttachmentMetadata {
             if self.kind != ContentKind::Image
                 || source.frame.evidence_id != self.attachment_id
                 || source.frame.conversation_id != self.conversation_id
-                || source.frame.device_id != self.device_id
+                || !source.matches_device_scope(&self.device_id)
                 || source.frame.tool_call_id != self.tool_call_id
                 || source.frame.media_type.as_deref() != Some(self.media_type.as_str())
                 || source.message.message_id != self.message_id

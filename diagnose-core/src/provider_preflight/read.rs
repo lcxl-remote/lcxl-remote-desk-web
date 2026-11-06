@@ -96,16 +96,17 @@ impl ReadCallPreflight {
         call: &ToolCall,
         binding: &ObjectReadBinding<'_>,
     ) -> Result<Self, AgentError> {
-        if call.name != crate::request_devices::SYSTEM_INFO_TOOL
+        let descriptor = registry
+            .capability_for_tool(&call.name)
+            .ok_or_else(unavailable)?;
+        if !crate::request_devices::selected_read_descriptor(descriptor)
             || !binding.original.is_host_web_only()
         {
             return Err(unavailable());
         }
-        let read = Self::build_edge(registry, surface, call, binding, true)?;
-        if read.risk_tier != CapabilityRiskTier::R0 {
-            return Err(unavailable());
-        }
-        Ok(read)
+        let input = serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?;
+        crate::request_devices::validate_native_read(descriptor, &input)?;
+        Self::build_edge(registry, surface, call, binding, true)
     }
 
     fn build_edge(

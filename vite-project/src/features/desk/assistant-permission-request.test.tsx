@@ -2,7 +2,9 @@ import { fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import type { GrantRequestItemDto, PermissionRequestDto } from '@/services/types';
 import { AssistantPermissionRequest } from './assistant-permission-request';
-vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
+vi.mock('react-i18next', () => ({ useTranslation: () => ({
+    t: (key: string, options?: { target?: string }) => options?.target ? `${key}: ${options.target}` : key,
+}) }));
 const item = (overrides: Partial<GrantRequestItemDto> = {}): GrantRequestItemDto => ({
     itemId: 'read', providerId: 'desktop.session', toolName: 'inspect_desktop_session',
     reason: 'Inspect selected device', expectedEffect: 'read_device', resourceScope: ['target:a', 'target:b'],
@@ -15,6 +17,12 @@ const request = (items = [item()]): PermissionRequestDto => ({
 });
 const submit = () => screen.getByRole('button', { name: 'pages.aiAssistant.permissionSubmitSelection' });
 describe('shared permission review', () => {
+    it('shows the host-selected device for a screen read approval', () => {
+        render(<AssistantPermissionRequest request={request([item({
+            toolName: 'read_current_screen', expectedEffect: 'capture_screen', selectedReadDeviceRef: 'mac-a',
+        })])} canDecide onDecide={vi.fn()} />);
+        expect(screen.getByText(/permissionReadTarget: mac-a/)).toBeInTheDocument();
+    });
     it('shows host expiry reuse and omits the counted-use control for web reads', () => {
         const onDecide = vi.fn().mockResolvedValue(true);
         const value = request([item({ toolName: 'fetch_public_web_page', providerId: 'web.research',

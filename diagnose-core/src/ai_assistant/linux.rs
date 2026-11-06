@@ -56,6 +56,7 @@ pub(super) fn output_tool() -> RegisteredTool {
 
 pub(super) fn output_provider() -> ProviderDescriptor {
     let mut provider = provider_for_tool(
+        TargetBinding::NativeContext,
         crate::tool_exposure::ExposureRequirement::NoAttachment,
         OUTPUT_PROVIDER_ID,
         OUTPUT_CAPABILITY_ID,

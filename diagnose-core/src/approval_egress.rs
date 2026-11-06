@@ -1172,6 +1172,7 @@ mod tests {
                     Sha256::digest(exact.as_bytes())
                 )),
                 command_confirmation: None,
+                selected_read_target: None,
                 launch_confirmation: None,
                 suggested_ttl_seconds: 300,
                 suggested_max_uses: 1,

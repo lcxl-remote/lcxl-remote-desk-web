@@ -228,6 +228,9 @@ mod tests {
                     .targets
                     .iter()
                     .map(|target| RequestDevice {
+                        read_target: None,
+                        ready_provider_ids: Vec::new(),
+                        approved_read_tools: Vec::new(),
                         target_ref: target.reference.clone(),
                         name: None,
                         platform: None,

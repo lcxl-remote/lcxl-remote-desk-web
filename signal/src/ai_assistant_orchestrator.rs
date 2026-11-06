@@ -1763,7 +1763,7 @@ async fn prepare_composed_turn(
     .await }).await;
                         return Ok(PreparationStep::Ready(None));
                     }
-                    let selected_command = targetless
+                    let selected_permission = targetless
                         .then(|| {
                             let permission_id = resume_conversation_id
                                 .as_ref()?
@@ -1773,21 +1773,33 @@ async fn prepare_composed_turn(
                                 .as_ref()?
                                 .permission_requests
                                 .iter()
-                                .find(|request| request.request_id == permission_id)?
-                                .exact_command()
+                                .find(|request| request.request_id == permission_id)
                         })
                         .flatten();
-                    let (grant_device, grant_readiness_revision) = selected_command.map_or(
-                        (target_device_id.as_str(), readiness_revision),
-                        |command| {
-                            let revision =
+                    let (grant_device, grant_readiness_revision) = selected_permission
+                        .and_then(|request| {
+                            let device = request.selected_device_id()?;
+                            let connection = request
+                                .selected_read_target()
+                                .map(|target| target.connection_id.as_str())
+                                .or_else(|| {
+                                    request
+                                        .exact_command()
+                                        .map(|command| command.target_connection_id())
+                                })?;
+                            Some((device, connection))
+                        })
+                        .map_or(
+                            (target_device_id.as_str(), readiness_revision),
+                            |(device, connection)| {
+                                let revision =
                                 crate::computer_use_readiness::global_computer_use_readiness_cache(
                                 )
-                                .get_fresh(command.target_connection_id(), chrono::Utc::now())
+                                .get_fresh(connection, chrono::Utc::now())
                                 .map_or(0, |current| current.readiness.revision);
-                            (command.target_device_id.as_str(), revision)
-                        },
-                    );
+                                (device, revision)
+                            },
+                        );
                     let capability_grants = match desk_diagnose_core::future::boxed(|| async {
                         crate::capability_grant_store::SignalCapabilityGrantStore::new(db.clone())
                             .list_for_subject(&conversation_id, &actor_id, grant_device)
@@ -1864,6 +1876,24 @@ async fn prepare_composed_turn(
                     // for read-back. Device invocation and model egress remain separate checks.
                     selected_source_tools
                         .extend(resumed_desktop_reads.iter().map(|name| (*name).to_string()));
+                    if let Some(request) = selected_permission
+                        && let Some(target) = request.selected_read_target()
+                        && grant_readiness_revision == target.readiness_revision
+                    {
+                        if request.state == desk_diagnose_core::dynamic_run::PermissionRequestState::Approved
+                            && capability_grants.iter().any(|grant| {
+                                grant.grant_id == desk_diagnose_core::permission_grant::permission_item_grant_id(
+                                    &conversation_id, request, &request.items[0].item_id,
+                                )
+                                    && grant.readiness_revision == target.readiness_revision
+                                    && grant.revoked_at_unix_ms.is_none()
+                                    && grant.remaining_uses > 0
+                                    && grant.expires_at_unix_ms > now_unix_ms
+                            })
+                        {
+                            selected_source_tools.insert(request.items[0].tool_name.clone());
+                        }
+                    }
                     if !selected_file_roots.is_empty() {
                         selected_source_tools.insert("inspect_files".into());
                         let selected_file_count = selected_file_roots
@@ -1960,11 +1990,20 @@ async fn prepare_composed_turn(
                         .insert(crate::web_research::WEB_FETCH_TOOL_NAME.to_string());
                     selected_source_tools
                         .insert(crate::web_research::WEB_SEARCH_TOOL_NAME.to_string());
-                    selected_source_tools.extend(
-                        desk_diagnose_core::ai_assistant::SYSTEM_DIAGNOSTIC_TOOL_NAMES
-                            .into_iter()
-                            .map(str::to_string),
-                    );
+                    if targetless {
+                        selected_source_tools.extend(
+                            desk_diagnose_core::request_devices::default_read_source_tools(
+                                &provider_registry,
+                            )
+                            .map(str::to_owned),
+                        );
+                    } else {
+                        selected_source_tools.extend(
+                            desk_diagnose_core::ai_assistant::SYSTEM_DIAGNOSTIC_TOOL_NAMES
+                                .into_iter()
+                                .map(str::to_owned),
+                        );
+                    }
                     selected_source_tools.insert("exec_command".into());
                     // Candidates only. Directory consent and every read/write grant remain
                     // independently checked against the authoritative conversation.
