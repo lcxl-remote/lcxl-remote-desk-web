@@ -219,13 +219,15 @@ describe('assistant activity folding', () => {
         expect(await screen.findByRole('dialog')).toBeVisible();
     });
 
-    it('opens when screenshots arrive asynchronously and preserves a subsequent manual collapse', async () => {
+    it('shows a late screenshot in the first completed process and preserves a subsequent manual collapse', async () => {
         let resolveImages!: (value: Awaited<ReturnType<typeof listAssistantImages>>) => void;
         vi.mocked(listAssistantImages).mockReturnValue(new Promise(resolve => { resolveImages = resolve; }));
         const messages = [
-            { id: 'first', role: 'assistant' as const, text: 'First answer' },
+            { id: 'question', role: 'user' as const, text: 'Look at the screen' },
+            { id: 'thought', role: 'assistant' as const, text: '', reasoning: 'Capture the display.' },
             { id: 'capture', role: 'tool_call' as const, turnId: 'turn', toolCallId: 'capture-call', text: 'Capture tool' },
-            { id: 'second', role: 'assistant' as const, text: 'Second answer', reasoning: 'Checked the image' },
+            { id: 'result', role: 'tool_result' as const, turnId: 'turn', toolCallId: 'capture-call', text: 'Capture result' },
+            { id: 'answer', role: 'assistant' as const, text: 'Screen summary' },
         ];
         const evidence: AiAssistantVisualEvidence[] = [];
         const view = render(<AssistantImages sessionId="stored-run" evidence={evidence} messages={messages}
@@ -233,12 +235,14 @@ describe('assistant activity folding', () => {
         const outer = screen.getByRole('button', { name: 'pages.aiAssistant.activityGroup:2' });
         expect(outer.getAttribute('data-state')).toBe('closed');
         resolveImages({ data: [frame], success: true, code: 0 });
-        expect(await screen.findByRole('img')).toBeVisible();
+        const thumbnail = await screen.findByRole('img', { name: 'pages.aiAssistant.visualEvidenceAlt' });
+        expect(thumbnail).toBeVisible();
+        expect(outer.closest('[data-slot="disclosure"]')?.contains(thumbnail)).toBe(true);
         expect(outer.getAttribute('data-state')).toBe('open');
         fireEvent.click(outer);
         expect(outer.getAttribute('data-state')).toBe('closed');
         view.rerender(<AssistantImages sessionId="stored-run" evidence={evidence}
-            messages={messages.map(message => message.id === 'second' ? { ...message, text: 'Updated answer' } : message)}
+            messages={messages.map(message => message.id === 'answer' ? { ...message, text: 'Updated answer' } : message)}
             renderMessage={renderMessage} renderReasoning={renderReasoning} renderToolGroup={renderToolGroup} />);
         expect(outer.getAttribute('data-state')).toBe('closed');
         expect(screen.getByAltText('pages.aiAssistant.visualEvidenceAlt').closest('[data-state="closed"]')).toBeTruthy();
