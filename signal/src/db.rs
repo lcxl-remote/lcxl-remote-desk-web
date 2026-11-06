@@ -239,6 +239,7 @@ pub async fn init_db(
 
 const SIGNAL_SCHEMA_VERSION: i32 = 51;
 const SCHEMA_LOCK_TABLE: &str = "signal_schema_init_lock";
+const LEGACY_SCHEMA_LOCK_TABLE: &str = "signal_schema_migration_lock";
 
 #[derive(Debug, FromQueryResult)]
 struct NameRow {
@@ -707,6 +708,8 @@ async fn validate_latest_schema<C: ConnectionTrait + crate::config::ConfigConnec
 ) -> Result<(), DbErr> {
     use sea_orm::{EntityName, Iterable, sea_query::Iden};
     let mut remaining = tables.clone();
+    // The old SQLite write lock carries no application data or schema version.
+    remaining.remove(LEGACY_SCHEMA_LOCK_TABLE);
     macro_rules! check_entity {
         ($module:ident) => {{
             let table = crate::entity::$module::Entity.table_name();
@@ -1051,6 +1054,41 @@ mod tests {
         assert_eq!(
             query_user_version(&db).await.unwrap(),
             SIGNAL_SCHEMA_VERSION
+        );
+    }
+
+    #[tokio::test]
+    async fn current_schema_accepts_the_old_lock_but_rejects_unknown_tables() {
+        let db = crate::config::test_support::Database::connect("sqlite::memory:")
+            .await
+            .unwrap();
+        initialize_schema(&db).await.unwrap();
+        db.execute_unprepared(&format!(
+            "CREATE TABLE {LEGACY_SCHEMA_LOCK_TABLE} (id INTEGER PRIMARY KEY CHECK (id = 1)); \
+             INSERT INTO {LEGACY_SCHEMA_LOCK_TABLE}(id) VALUES (1);"
+        ))
+        .await
+        .unwrap();
+
+        initialize_schema(&db).await.unwrap();
+        assert_eq!(
+            query_user_version(&db).await.unwrap(),
+            SIGNAL_SCHEMA_VERSION
+        );
+        assert!(
+            application_tables(&db)
+                .await
+                .unwrap()
+                .contains(LEGACY_SCHEMA_LOCK_TABLE)
+        );
+
+        db.execute_unprepared("CREATE TABLE unexpected_table (id INTEGER PRIMARY KEY)")
+            .await
+            .unwrap();
+        let error = initialize_schema(&db).await.unwrap_err().to_string();
+        assert!(
+            error.contains("signal schema has unexpected tables: {\"unexpected_table\"}"),
+            "{error}"
         );
     }
 
