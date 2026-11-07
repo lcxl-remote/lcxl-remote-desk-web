@@ -541,13 +541,7 @@ impl AssistantInputTarget {
         targets: &[Self],
         session: &crate::session::PersistedAgentSession,
     ) -> bool {
-        session
-            .assistant_request_devices()
-            .is_some_and(|devices| targets.iter().map(|target| &target.device_id).eq(devices))
-            && targets.iter().all(|target| {
-                target.member_generation
-                    == session.assistant_request_device_generation(&target.device_id)
-            })
+        session.assistant_request_targets() == Some(targets)
     }
 }
 

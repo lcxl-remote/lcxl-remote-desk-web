@@ -82,10 +82,68 @@ pub(crate) fn read_tools(
                         .contains(&descriptor.wire.tool_name)
                 });
             let mut tool = descriptor.registered_tool();
-            add_target_selector(&mut tool, true);
+            add_target_selector(&mut tool, !has_single_target(session));
             Some((tool, callable))
         })
         .collect()
+}
+
+pub(crate) fn has_single_target(session: &PersistedAgentSession) -> bool {
+    matches!(session.assistant_request_targets(), Some([_]))
+}
+
+pub(crate) fn infer_single_target(
+    call: &ToolCall,
+    session: &PersistedAgentSession,
+) -> Result<Option<ToolCall>, AgentError> {
+    let Some([target]) = session.assistant_request_targets() else {
+        return Ok(None);
+    };
+    if !session.has_admitted_personal_input() {
+        return Ok(None);
+    }
+    let registry = crate::ai_assistant::ai_assistant_provider_registry_ref();
+    let device_tool = |name| {
+        registry
+            .capability_for_tool(name)
+            .is_some_and(|descriptor| {
+                descriptor.target_binding == crate::provider_registry::TargetBinding::RequestDevice
+            })
+            || name == crate::directory_tools::REQUEST_DIRECTORY
+    };
+    let permission = call.name == REQUEST_CAPABILITY_GRANTS_TOOL_NAME;
+    if !permission && !device_tool(&call.name) {
+        return Ok(None);
+    }
+    let mut value: serde_json::Value = serde_json::from_str(&call.arguments_json)
+        .map_err(|_| crate::subagent::invalid("Tool arguments must be valid JSON"))?;
+    if permission {
+        let Some([item]) = value
+            .get("items")
+            .and_then(|items| items.as_array())
+            .map(Vec::as_slice)
+        else {
+            return Ok(None);
+        };
+        if !item
+            .get("tool_name")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(device_tool)
+        {
+            return Ok(None);
+        }
+    }
+    let input = value
+        .as_object_mut()
+        .ok_or_else(|| crate::subagent::invalid("Tool arguments must be a JSON object"))?;
+    if input.contains_key("target_ref") {
+        return Ok(None);
+    }
+    input.insert("target_ref".into(), serde_json::json!(target.reference));
+    Ok(Some(ToolCall {
+        arguments_json: value.to_string(),
+        ..call.clone()
+    }))
 }
 
 pub(crate) fn has_target_selector(spec: &crate::chat::ToolSpec) -> bool {
@@ -158,7 +216,7 @@ pub(crate) fn device_permission_tool(
     });
     if !reads.is_empty() {
         tool.spec.description.push_str(
-            "\nFor a device read permission, supply target_ref and one read item. Put the exact native arguments in exact_input, omitting target_ref from that object. Use {} when no native arguments are needed. Use inspect_desktop_session for display identifiers before capturing on a device with multiple displays.",
+            "\nFor a device read permission, supply one read item and select its target_ref when the request includes more than one device. Put the exact native arguments in exact_input, omitting target_ref from that object. Use {} when no native arguments are needed. Use inspect_desktop_session for display identifiers before capturing on a device with multiple displays.",
         );
     }
     if commands {
@@ -231,7 +289,7 @@ pub(crate) fn command_tool(
     let mut tool = registry
         .capability_for_tool(crate::command_confirmation::COMMAND_TOOL)?
         .registered_tool();
-    add_target_selector(&mut tool, true);
+    add_target_selector(&mut tool, !has_single_target(session));
     tool.spec
         .description
         .push_str("\nUse the exact approved arguments and the original target_ref.");

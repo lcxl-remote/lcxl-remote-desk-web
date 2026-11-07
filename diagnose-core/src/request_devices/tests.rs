@@ -684,3 +684,59 @@ async fn explicit_display_must_have_been_observed_on_the_selected_device() {
         assert_eq!(request.is_ok(), permitted, "{target}/{display}");
     }
 }
+
+#[test]
+fn sole_target_uses_its_frozen_public_reference_after_reopen() {
+    use crate::dynamic_run::AssistantInputTarget;
+
+    let mut session = session();
+    let read = tool("read_system_info", json!({}));
+    assert!(infer_single_target(&read, &session).unwrap().is_none());
+    session.input_revision += 1;
+    session
+        .begin_focus_epoch(session.input_revision, Vec::new())
+        .unwrap();
+    let only = AssistantInputTarget {
+        reference: "public-mac".into(),
+        device_id: "42".into(),
+        member_generation: Some(2),
+    };
+    session
+        .bind_assistant_input_targets(std::slice::from_ref(&only))
+        .unwrap();
+    assert!(
+        session
+            .bind_assistant_input_targets(&[AssistantInputTarget {
+                reference: "renamed".into(),
+                ..only.clone()
+            }])
+            .is_err()
+    );
+    let restored =
+        PersistedAgentSession::decode_json(&session.encode_json_for_storage().unwrap()).unwrap();
+    assert_eq!(restored.assistant_request_device("public-mac"), Some(&only));
+    assert!(restored.assistant_request_device("42").is_none());
+    let inferred = infer_single_target(&read, &restored).unwrap().unwrap();
+    assert_eq!(selected_read(&inferred).unwrap().0, "public-mac");
+    let explicit = tool("read_system_info", json!({"target_ref":"unknown"}));
+    assert!(infer_single_target(&explicit, &restored).unwrap().is_none());
+
+    let ask = tool(
+        REQUEST_CAPABILITY_GRANTS_TOOL_NAME,
+        json!({"items":[{"tool_name":"inspect_desktop_ui","exact_input":{}}]}),
+    );
+    let inferred = infer_single_target(&ask, &restored).unwrap().unwrap();
+    let args: Value = serde_json::from_str(&inferred.arguments_json).unwrap();
+    assert_eq!(args["target_ref"], "public-mac");
+    assert!(
+        args["items"][0]["exact_input"]
+            .as_object()
+            .unwrap()
+            .is_empty()
+    );
+    let web = tool(
+        REQUEST_CAPABILITY_GRANTS_TOOL_NAME,
+        json!({"items":[{"tool_name":"fetch_public_web_page","exact_input":{"url":"https://example.com/"}}]}),
+    );
+    assert!(infer_single_target(&web, &restored).unwrap().is_none());
+}

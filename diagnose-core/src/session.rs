@@ -21,7 +21,7 @@ mod executions;
 pub mod management;
 pub use executions::{BackgroundExecution, UnknownExecution};
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 
 use desk_agent_protocol::AgentScope;
 use serde::{Deserialize, Serialize};
@@ -34,7 +34,7 @@ use crate::context_attachment::{
 use crate::model_context::{ContextNotice, MAX_CONTEXT_NOTICES, ModelContextState};
 use crate::replay::{ReplayDisposition, ReplayUnavailableReason};
 
-pub const CONVERSATION_SCHEMA_VERSION: u16 = 30;
+pub const CONVERSATION_SCHEMA_VERSION: u16 = 31;
 /// Opaque replay is bounded independently from visible transcript text.
 pub const MAX_REPLAY_ENVELOPE_BYTES: usize = 256 * 1024;
 pub const MAX_SESSION_REPLAY_BYTES: usize = 2 * 1024 * 1024;
@@ -759,25 +759,19 @@ pub enum SubjectMismatch {
 #[serde(deny_unknown_fields)]
 struct AssistantRequestTargets {
     input_revision: u64,
-    device_ids: Vec<String>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    member_generations: BTreeMap<String, u64>,
+    targets: Vec<crate::dynamic_run::AssistantInputTarget>,
 }
 
 impl AssistantRequestTargets {
     fn matches_fixed_target(&self, device_id: &str) -> bool {
         device_id.is_empty()
-            || (self.device_ids == [device_id] && self.member_generations.is_empty())
+            || matches!(self.targets.as_slice(), [target]
+                if target.device_id == device_id && target.reference == device_id
+                    && target.member_generation.is_none())
     }
 
     fn valid_membership(&self) -> bool {
-        self.member_generations.is_empty()
-            || (self.member_generations.len() == self.device_ids.len()
-                && self.device_ids.iter().all(|id| {
-                    self.member_generations
-                        .get(id)
-                        .is_some_and(|revision| *revision > 0 && *revision <= i64::MAX as u64)
-                }))
+        crate::dynamic_run::AssistantInputTarget::validate_all(&self.targets).is_ok()
     }
 }
 
@@ -1679,7 +1673,16 @@ impl PersistedAgentSession {
         &mut self,
         device_ids: Vec<String>,
     ) -> Result<(), &'static str> {
-        self.bind_request_targets(device_ids, BTreeMap::new())
+        self.bind_request_targets(
+            device_ids
+                .into_iter()
+                .map(|device_id| crate::dynamic_run::AssistantInputTarget {
+                    reference: device_id.clone(),
+                    device_id,
+                    member_generation: None,
+                })
+                .collect(),
+        )
     }
 
     pub fn bind_assistant_input_targets(
@@ -1690,37 +1693,22 @@ impl PersistedAgentSession {
             if !targets.is_empty() {
                 return Err("a fixed assistant request cannot select other targets");
             }
-            return self.bind_request_targets(vec![self.device_id.clone()], BTreeMap::new());
+            return self.bind_assistant_request_targets(vec![self.device_id.clone()]);
         }
-        crate::dynamic_run::AssistantInputTarget::validate_all(targets)?;
-        self.bind_request_targets(
-            targets
-                .iter()
-                .map(|target| target.device_id.clone())
-                .collect(),
-            targets
-                .iter()
-                .filter_map(|target| Some((target.device_id.clone(), target.member_generation?)))
-                .collect(),
-        )
+        self.bind_request_targets(targets.to_vec())
     }
 
     fn bind_request_targets(
         &mut self,
-        device_ids: Vec<String>,
-        member_generations: BTreeMap<String, u64>,
+        targets: Vec<crate::dynamic_run::AssistantInputTarget>,
     ) -> Result<(), &'static str> {
         if self.surface != AgentSessionSurface::AiAssistant || self.input_revision == 0 {
             return Err("device targets require an admitted assistant input");
         }
         let targets = AssistantRequestTargets {
             input_revision: self.input_revision,
-            device_ids,
-            member_generations,
+            targets,
         };
-        desk_agent_protocol::ai_assistant::validate_target_refs(
-            targets.device_ids.iter().map(String::as_str),
-        )?;
         if !targets.valid_membership() || !targets.matches_fixed_target(&self.device_id) {
             return Err("invalid assistant device membership snapshot");
         }
@@ -1742,30 +1730,37 @@ impl PersistedAgentSession {
         self.surface == AgentSessionSurface::AiAssistant
             && self.device_id.is_empty()
             && self.input_revision > 0
-            && self.assistant_request_devices().is_some()
+            && self.assistant_request_targets().is_some()
     }
 
     pub fn has_admitted_targetless_input(&self) -> bool {
         self.has_admitted_personal_input()
             && self
-                .assistant_request_devices()
+                .assistant_request_targets()
                 .is_some_and(<[_]>::is_empty)
     }
 
-    pub fn assistant_request_devices(&self) -> Option<&[String]> {
+    pub fn assistant_request_targets(&self) -> Option<&[crate::dynamic_run::AssistantInputTarget]> {
         self.assistant_request_targets
             .as_ref()
             .filter(|targets| targets.input_revision == self.input_revision)
-            .map(|targets| targets.device_ids.as_slice())
+            .map(|targets| targets.targets.as_slice())
+    }
+
+    pub fn assistant_request_device(
+        &self,
+        reference: &str,
+    ) -> Option<&crate::dynamic_run::AssistantInputTarget> {
+        self.assistant_request_targets()?
+            .iter()
+            .find(|target| target.reference == reference)
     }
 
     pub fn assistant_request_device_generation(&self, device_id: &str) -> Option<u64> {
-        self.assistant_request_targets
-            .as_ref()
-            .filter(|targets| targets.input_revision == self.input_revision)?
-            .member_generations
-            .get(device_id)
-            .copied()
+        self.assistant_request_targets()?
+            .iter()
+            .find(|target| target.device_id == device_id)?
+            .member_generation
     }
 
     /// Resolve one action from the held input. Selectors must already be mapped
@@ -1779,16 +1774,16 @@ impl PersistedAgentSession {
             return Err("assistant device differs from the resource device");
         }
         let devices = self
-            .assistant_request_devices()
+            .assistant_request_targets()
             .ok_or("assistant request targets are no longer current")?;
         match explicit.or(resource_device) {
             Some(device) => devices
                 .iter()
-                .find(|target| target.as_str() == device)
-                .map(String::as_str)
+                .find(|target| target.device_id == device)
+                .map(|target| target.device_id.as_str())
                 .ok_or("assistant device is outside the original request"),
             None => match devices {
-                [device] => Ok(device),
+                [device] => Ok(&device.device_id),
                 [] => Err("the assistant request has no device"),
                 _ => Err("select a device for this assistant action"),
             },

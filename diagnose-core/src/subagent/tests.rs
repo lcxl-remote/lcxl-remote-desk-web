@@ -153,7 +153,12 @@ fn personal_worker_targets_are_a_frozen_subset_across_adjustment() {
     )
     .unwrap();
     assert_eq!(
-        worker.assistant_request_devices().unwrap(),
+        worker
+            .assistant_request_targets()
+            .unwrap()
+            .iter()
+            .map(|target| target.device_id.as_str())
+            .collect::<Vec<_>>(),
         ["device-2", "device-3"]
     );
     assert_eq!(
@@ -170,7 +175,12 @@ fn personal_worker_targets_are_a_frozen_subset_across_adjustment() {
     .unwrap();
     control::synchronize_session(&mut worker, &run, now).unwrap();
     assert_eq!(
-        worker.assistant_request_devices().unwrap(),
+        worker
+            .assistant_request_targets()
+            .unwrap()
+            .iter()
+            .map(|target| target.device_id.as_str())
+            .collect::<Vec<_>>(),
         ["device-2", "device-3"]
     );
     assert_eq!(

@@ -108,7 +108,10 @@ pub(crate) fn selected_tool(
         return None;
     }
     let mut tool = registry().into_iter().next()?;
-    crate::request_devices::add_target_selector(&mut tool, true);
+    crate::request_devices::add_target_selector(
+        &mut tool,
+        !crate::request_devices::has_single_target(session),
+    );
     Some(tool)
 }
 

@@ -386,10 +386,12 @@ async fn resolve_device_on(
             .is_none_or(|reference| reference == session.device_id)
             .then(|| (scope.current_device_ref.clone(), None)));
     }
-    let Some(audience) = request_memory_target(
-        session.assistant_request_devices().unwrap_or_default(),
-        draft.target_ref.as_deref(),
-    ) else {
+    let targets = session.assistant_request_targets().unwrap_or_default();
+    let devices = targets
+        .iter()
+        .map(|target| target.device_id.clone())
+        .collect::<Vec<_>>();
+    let Some(audience) = request_memory_target(&devices, draft.target_ref.as_deref()) else {
         return Ok(None);
     };
     let instance = session

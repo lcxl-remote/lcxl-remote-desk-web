@@ -253,9 +253,25 @@ pub(crate) fn resolve_with_references(
     {
         requested.push(("attachment.element".into(), id));
     }
+    let mut expected_pages = expected
+        .iter()
+        .filter_map(|value| serde_json::from_value::<BrowserPageRef>(value.clone()).ok())
+        .filter(|page| page.page_id == page_id);
+    let expected_page = expected_pages.next();
+    if expected_pages.any(|page| Some(&page) != expected_page.as_ref()) {
+        return Err(invalid(
+            "Conflicting browser references; select an observed page",
+        ));
+    }
     let results = observed_browser_results(history, now_ms);
-    let latest = results.iter().find(|result| result.page.page_id == page_id);
-    if let Some(latest) = latest
+    let latest = results.iter().find(|result| {
+        result.page.page_id == page_id
+            && expected_page
+                .as_ref()
+                .is_none_or(|page| page.adapter == result.page.adapter)
+    });
+    if expected_page.is_none()
+        && let Some(latest) = latest
         && results.iter().any(|result| {
             result.page.page_id == page_id && result.page.adapter != latest.page.adapter
         })
@@ -264,9 +280,7 @@ pub(crate) fn resolve_with_references(
             "page_id is ambiguous across browser profiles; refresh the page",
         ));
     }
-    let page = latest.map(|result| result.page.clone()).or_else(|| expected.iter()
-        .filter_map(|value| serde_json::from_value::<desk_agent_protocol::browser_control::BrowserPageRef>(value.clone()).ok())
-        .find(|page| page.page_id == page_id))
+    let page = latest.map(|result| result.page.clone()).or(expected_page)
         .ok_or_else(|| invalid("page_id was not observed in a current verified browser result or authorized attachment"))?;
     page.validate()
         .map_err(|_| invalid("invalid observed browser page"))?;
@@ -661,6 +675,30 @@ mod tests {
         let refreshed = [history[0].clone(), receipt("device:a", &newer, "refresh-a")];
         assert!(require_device_page(&refreshed, "device:a", &page, 3).is_err());
         require_device_page(&refreshed, "device:a", &newer, 3).unwrap();
+
+        let mut other_profile = newer.clone();
+        other_profile.adapter.profile_incarnation = "another-profile".into();
+        let profiles = [
+            history[0].clone(),
+            receipt("device-b", &other_profile, "open-other"),
+        ];
+        let snapshot = call(
+            "browser_take_snapshot",
+            json!({"page_id":page.page_id,"max_elements":8}),
+        );
+        let mut input: Value = serde_json::from_str(&snapshot.arguments_json).unwrap();
+        assert!(resolve_with_references(&snapshot, &mut input, &profiles, 3, &[]).is_err());
+        let mut input: Value = serde_json::from_str(&snapshot.arguments_json).unwrap();
+        let selected = serde_json::to_value(&page).unwrap();
+        resolve_with_references(
+            &snapshot,
+            &mut input,
+            &profiles,
+            3,
+            std::slice::from_ref(&selected),
+        )
+        .unwrap();
+        assert_eq!(input["page"], selected);
     }
 
     #[test]

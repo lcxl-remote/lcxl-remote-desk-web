@@ -196,7 +196,10 @@ pub(crate) async fn batch_report_context_on(
     let current = desk_assistant_data_store::device_roster::current_request_devices(db, &session)
         .await
         .map_err(|_| invalid())?;
-    if session.assistant_request_devices() != Some(current.as_slice()) {
+    if !session
+        .assistant_request_targets()
+        .is_some_and(|targets| targets.iter().map(|target| &target.device_id).eq(&current))
+    {
         return Ok(None);
     }
     if !retained_devices_are_eligible_on(db, &current).await? {

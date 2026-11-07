@@ -1915,7 +1915,7 @@ mod tests {
                 panic!("personal Worker should claim without a bound device");
             };
             let mut worker = claimed.session;
-            assert_eq!(worker.assistant_request_devices().unwrap().len(), 2);
+            assert_eq!(worker.assistant_request_targets().unwrap().len(), 2);
             use desk_diagnose_core::subagent::device_wait::DeviceWaitStatus;
             let child_sessions =
                 crate::agent_session_store::SignalAgentSessionStore::new(db.clone())

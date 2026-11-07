@@ -83,7 +83,10 @@ impl SignalAiAssistantTools {
         )
         .await
         .map_err(|error| error.into_agent_error())?;
-        let held = AssistantTurnFence::for_device(session, reference)
+        let target = session
+            .assistant_request_device(reference)
+            .ok_or_else(unavailable)?;
+        let held = AssistantTurnFence::for_device(session, &target.device_id)
             .map_err(|_| unavailable())?
             .ok_or_else(unavailable)?;
         if !desk_assistant_data_store::device_roster::permits_current_target(
@@ -100,7 +103,7 @@ impl SignalAiAssistantTools {
             .connections
             .read()
             .await
-            .current_oss_server(reference)
+            .current_oss_server(&target.device_id)
             .filter(|state| selected_read_connection(state))
             .map(|state| state.model.connection_id.clone())
             .ok_or_else(|| {

@@ -1863,8 +1863,13 @@ async fn personal_input_roundtrip(target_refs: Vec<String>) {
             .unwrap();
     assert!(stored.device_id.is_empty());
     assert_eq!(
-        stored.assistant_request_devices(),
-        Some(target_refs.as_slice())
+        stored
+            .assistant_request_targets()
+            .unwrap()
+            .iter()
+            .map(|target| target.reference.as_str())
+            .collect::<Vec<_>>(),
+        target_refs
     );
     let receipts = crate::entity::model_egress_receipt::Entity::find()
         .all(&db)
@@ -2176,7 +2181,8 @@ async fn run_selected_command(finish: SelectedCommandFinish) {
                         && message["content"].as_str().is_some_and(|text| text.contains("tool_not_advertised"))
                 }));
             }
-            assert!(spec["function"]["parameters"]["required"].as_array().unwrap().contains(&json!("target_ref")));
+            assert!(spec["function"]["parameters"]["properties"].get("target_ref").is_some());
+            assert!(!spec["function"]["parameters"]["required"].as_array().unwrap().contains(&json!("target_ref")));
             memory_sse(json!({"tool_calls":[{"index":0,"id":"execute-selected","type":"function","function":{
                 "name":"exec_command","arguments":json!({"target_ref":"command-selected",
                     "shell":"bash","command":"df -h","timeout_ms":1000,"io_mode":"non_interactive"}).to_string()
@@ -3237,7 +3243,8 @@ async fn run_selected_device_reads(scenario: SelectedReadScenario) {
                 capture_one_openai_request_with_reply(&listener, |body| {
                     let request: Value = serde_json::from_slice(body).unwrap();
                     let tool = request["tools"].as_array().unwrap().iter().find(|tool| tool["function"]["name"] == "request_directory").expect("directory proposal tool is callable");
-                    assert!(tool["function"]["parameters"]["required"].as_array().unwrap().contains(&json!("target_ref")));
+                    assert!(tool["function"]["parameters"]["properties"].get("target_ref").is_some());
+                    assert!(!tool["function"]["parameters"]["required"].as_array().unwrap().contains(&json!("target_ref")));
                     tool_reply("request_directory", json!({"target_ref":target,"path":"/fixture-folder","purpose":"List the chosen directory"}))
                 }).await;
             }
@@ -3286,10 +3293,14 @@ async fn run_selected_device_reads(scenario: SelectedReadScenario) {
                     .find(|t| t["function"]["name"] == name)
                     .unwrap_or_else(|| panic!("{name} was not restored"));
                 assert!(
-                    advertised["function"]["parameters"]["required"]
+                    advertised["function"]["parameters"]["properties"]
+                        .get("target_ref")
+                        .is_some()
+                );
+                assert!(
+                    !advertised["function"]["parameters"]["required"]
                         .as_array()
-                        .unwrap()
-                        .contains(&json!("target_ref"))
+                        .is_some_and(|required| required.contains(&json!("target_ref")))
                 );
                 assert_eq!(
                     advertised["function"]["parameters"]["properties"]
@@ -3298,7 +3309,9 @@ async fn run_selected_device_reads(scenario: SelectedReadScenario) {
                     name == "read_current_screen",
                 );
                 let mut arguments = directory_exact.clone().unwrap_or_else(|| exact.clone());
-                arguments["target_ref"] = json!(target);
+                if !live {
+                    arguments["target_ref"] = json!(target);
+                }
                 tool_reply(name, arguments)
             })
             .await;

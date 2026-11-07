@@ -110,27 +110,30 @@ pub async fn current_request_devices(
     db: &impl ConnectionTrait,
     session: &PersistedAgentSession,
 ) -> Result<Vec<String>, AssistantStoreError> {
-    let devices = session
-        .assistant_request_devices()
+    let targets = session
+        .assistant_request_targets()
         .ok_or(AssistantStoreError::Inaccessible)?;
-    if devices
+    if targets
         .iter()
-        .all(|id| session.assistant_request_device_generation(id).is_none())
+        .all(|target| target.member_generation.is_none())
     {
-        return Ok(devices.to_vec());
+        return Ok(targets
+            .iter()
+            .map(|target| target.device_id.clone())
+            .collect());
     }
     let root = session.device_roster_conversation_id();
     let roster = load(db, &session.actor_id, root).await?;
-    Ok(devices
+    Ok(targets
         .iter()
-        .filter(|id| {
-            session
-                .assistant_request_device_generation(id)
-                .is_some_and(|generation| {
-                    roster.as_ref().and_then(|roster| roster.members.get(*id)) == Some(&generation)
-                })
+        .filter_map(|target| {
+            let generation = target.member_generation?;
+            (roster
+                .as_ref()
+                .and_then(|roster| roster.members.get(&target.device_id))
+                == Some(&generation))
+            .then(|| target.device_id.clone())
         })
-        .cloned()
         .collect())
 }
 
