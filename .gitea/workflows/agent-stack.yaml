@@ -33,6 +33,8 @@ jobs:
         run: python scripts/agent-stack/run.py --package desk-signal-facade --output target/agent-stack/assistant-pages-debug.json
       - name: Enforce OSS debug frames
         run: python scripts/agent-stack/run.py --package desk-signal --output target/agent-stack/signal-debug.json
+      - name: Verify shared core builds without test-only features
+        run: cargo check --locked -p desk-diagnose-core --lib
       - name: Verify selected device tool registration and desktop routing
         run: |
           cargo test --locked -p desk-diagnose-core --lib --features stack-budget request_devices::tests::
@@ -45,6 +47,7 @@ jobs:
           cargo test --locked -p desk-signal --lib --features desk-diagnose-core/stack-budget selectable_ui_scope_
           cargo test --locked -p desk-signal --lib --features desk-diagnose-core/stack-budget selectable_background_
           cargo test --locked -p desk-signal --lib --features desk-diagnose-core/stack-budget selectable_goal_retains_its_device_across_signal_segments
+          cargo test --locked -p desk-signal --lib --features desk-diagnose-core/stack-budget selectable_timer_runs_on_original_device_after_owner_clears_selection
       - name: Shared behavior and unboxed phase layout
         run: |
           cargo test --locked -p desk-diagnose-core -p desk-assistant-data-store -p desk-signal --lib --features desk-diagnose-core/stack-budget -- --skip assistant_data_store::tests::retrieval_native::memory_mutation:: --skip ai_assistant_orchestrator::tests::desktop_permission:: --skip ai_assistant_orchestrator::tests::permission_object::

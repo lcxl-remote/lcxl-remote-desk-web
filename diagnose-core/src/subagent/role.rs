@@ -23,6 +23,11 @@ pub enum DelegationSource {
     Goal {
         goal_id: String,
     },
+    ConversationResume {
+        schedule_id: String,
+        run_id: String,
+        input_revision: u64,
+    },
     ScheduledOccurrence {
         schedule_id: String,
         occurrence_id: String,
@@ -42,6 +47,11 @@ impl DelegationSource {
                 schedule_id,
                 occurrence_id,
             } if valid_id(schedule_id) && valid_id(occurrence_id) => Ok(()),
+            Self::ConversationResume {
+                schedule_id,
+                run_id,
+                input_revision,
+            } if valid_id(schedule_id) && valid_id(run_id) && *input_revision > 0 => Ok(()),
             Self::IssueWork { source } => source.validate(),
             _ => Err("invalid delegation source"),
         }
@@ -76,9 +86,9 @@ impl DelegationSource {
 
     pub fn request_input_revision(&self) -> Option<u64> {
         match self {
-            Self::UserInput { input_revision } | Self::WorkbenchOwner { input_revision, .. } => {
-                Some(*input_revision)
-            }
+            Self::UserInput { input_revision }
+            | Self::WorkbenchOwner { input_revision, .. }
+            | Self::ConversationResume { input_revision, .. } => Some(*input_revision),
             Self::IssueWork { .. } => Some(1),
             _ => None,
         }

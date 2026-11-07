@@ -66,7 +66,9 @@ async fn lock_wait(
         || work.attempt != 1
         || session.actor_id != work.owner_user_id.to_string()
         || row.actor_id != session.actor_id
-        || session.device_id != task.target_device_id
+        || session.device_id
+            != super::ScheduleStore::continuation_subject(&task)
+                .map_err(|_| ScheduleStoreError::Invalid)?
         || row.device_id != session.device_id
         || session.conversation_id != work.conversation_id
         || session.surface != AgentSessionSurface::AiAssistant
@@ -175,6 +177,10 @@ impl ScheduleStore {
             &timestamp.to_rfc3339(),
         )
         .ok_or(ScheduleStoreError::Conflict)?;
+        desk_diagnose_core::ai_assistant::scheduled_retrieval::restore_owner_retrieval(
+            &mut session,
+        )
+        .map_err(|_| ScheduleStoreError::Invalid)?;
         let changed = agent_session::Entity::update_many()
             .set(agent_session::ActiveModel {
                 state_json: Set(session

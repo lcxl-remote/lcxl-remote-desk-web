@@ -307,7 +307,9 @@ impl ScheduleStore {
             || task.requirement_revision != i64::try_from(session.input_revision).ok()
             || session.actor_id != lease.owner.to_string()
             || row.actor_id != session.actor_id
-            || session.device_id != task.target_device_id
+            || session.device_id
+                != super::ScheduleStore::continuation_subject(&task)
+                    .map_err(|_| ScheduleStoreError::Invalid)?
             || row.device_id != session.device_id
             || session.conversation_id != work.conversation_id
             || session.surface != AgentSessionSurface::AiAssistant
@@ -458,9 +460,8 @@ impl ScheduleStore {
         if !settlement_lease.accepts(work.lease_deadline, now) {
             return Err(ScheduleStoreError::Conflict);
         }
+        let at = chrono::DateTime::from_timestamp_millis(now).ok_or(ScheduleStoreError::Invalid)?;
         if interrupted {
-            let at =
-                chrono::DateTime::from_timestamp_millis(now).ok_or(ScheduleStoreError::Invalid)?;
             if awaiting_result {
                 if session == before_recovery {
                     return Err(ScheduleStoreError::Conflict);
@@ -491,6 +492,14 @@ impl ScheduleStore {
                     error_code: None,
                 })
             };
+        }
+        let restored = !waiting
+            && !awaiting_result
+            && desk_diagnose_core::ai_assistant::scheduled_retrieval::restore_owner_retrieval(
+                &mut session,
+            )
+            .map_err(|_| ScheduleStoreError::Invalid)?;
+        if interrupted || restored {
             session.version = session
                 .version
                 .checked_add(1)

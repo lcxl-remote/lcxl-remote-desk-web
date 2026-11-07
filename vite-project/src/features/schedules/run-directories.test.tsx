@@ -33,7 +33,7 @@ describe.each(['C:\\用户资料\\季度 报告', '/Users/owner/季度 报告'])
         expect(screen.queryByText('pages.aiAssistant.directories.expired')).toBeNull();
         await act(async () => { fireEvent.click(approve()); });
         if (surface === 'scheduled') expect(input.client.request).toHaveBeenCalledWith(expect.objectContaining({ approve: true, expected_scope_revision: 7 }));
-        else expect(update).toHaveBeenCalledWith(expect.objectContaining({ approve: true, expected_revision: 7 }), expect.any(String));
+        else expect(update).toHaveBeenCalledWith(expect.objectContaining({ approve: true, expected_revision: 7 }), expect.any(String), undefined);
     });
 
     it('does not expire a directory after resuming a suspended page', () => {

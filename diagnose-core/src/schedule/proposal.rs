@@ -59,6 +59,7 @@ pub fn spec() -> ToolSpec {
                 "time_input":{"properties":{"rule":{"properties":{"kind":{"const":"once"}}}}}
             }},
             "properties":{
+                "target_ref":{"type":"string","description":"One device reference admitted with this request. May be omitted only when the request has one device."},
                 "kind":{"type":"string","enum":["conversation_resume","fresh_task"]},
                 "title":{"type":"string","minLength":1,"maxLength":240},
                 "prompt":{"type":"string","minLength":1,"maxLength":16384},
@@ -87,6 +88,7 @@ pub fn spec() -> ToolSpec {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Input {
+    target_ref: Option<String>,
     kind: ScheduledTaskKind,
     title: String,
     prompt: String,
@@ -111,7 +113,6 @@ pub fn draft(
         || !session.turn_state.is_active()
         || session.input_revision == 0
         || session.actor_id.is_empty()
-        || session.device_id.is_empty()
         || call.arguments_json.len() > 96 * 1024
     {
         if call.name != REQUEST_SCHEDULE {
@@ -124,7 +125,6 @@ pub fn draft(
             || !session.turn_state.is_active()
             || session.input_revision == 0
             || session.actor_id.is_empty()
-            || session.device_id.is_empty()
         {
             observation.permission(PermissionOutcome::PolicyRejected);
         } else {
@@ -136,6 +136,17 @@ pub fn draft(
         observation.reject(Stage::Preflight, InputIssue::Semantic);
         "invalid schedule proposal"
     })?;
+    let explicit = input
+        .target_ref
+        .as_deref()
+        .map(|reference| {
+            session
+                .assistant_request_device(reference)
+                .map(|target| target.device_id.as_str())
+                .ok_or("scheduled device is outside the original request")
+        })
+        .transpose()?;
+    let execution_target = session.resolve_assistant_action_device(explicit, None)?;
     if input.title.trim().is_empty()
         || input.title.chars().count() > 240
         || input.title.chars().any(char::is_control)
@@ -178,7 +189,7 @@ pub fn draft(
         time_confirmation,
         client_create_key: format!("ai-schedule-{:x}", Sha256::digest(identity)),
         kind: input.kind,
-        target_device_id: session.device_id.clone(),
+        target_device_id: execution_target.to_owned(),
         title: input.title,
         prompt: input.prompt,
         locale: session.response_locale.clone(),
@@ -263,6 +274,7 @@ mod tests {
         let mut session =
             crate::ai_assistant::test_support::personal_session("owner", "chat", "device");
         session.input_revision = 1;
+        session.bind_assistant_input_targets(&[]).unwrap();
         session.turn_state = crate::session::TurnState::Running;
         for timing in [
             json!({"rule":{"kind":"daily","utc_time":"00:30:00"}}),
@@ -340,6 +352,55 @@ mod tests {
             )
             .unwrap();
             assert!(resolve_time(None, Some(input)).is_err());
+        }
+    }
+    #[test]
+    fn selectable_schedule_proposals_choose_one_original_target() {
+        let mut session = crate::ai_assistant::test_support::personal_session("owner", "chat", "");
+        session.assistant_data = None;
+        session.input_revision = 1;
+        session.turn_state = crate::session::TurnState::Running;
+        session
+            .bind_assistant_input_targets(&[
+                crate::dynamic_run::AssistantInputTarget {
+                    reference: "ref-a".into(),
+                    device_id: "a".into(),
+                    member_generation: Some(1),
+                },
+                crate::dynamic_run::AssistantInputTarget {
+                    reference: "ref-b".into(),
+                    device_id: "b".into(),
+                    member_generation: Some(2),
+                },
+            ])
+            .unwrap();
+        for kind in ["conversation_resume", "fresh_task"] {
+            let input = json!({"kind":kind,"target_ref":"ref-b","title":"Later","prompt":"Check B","rule":{"kind":"once","at":"2099-01-01T00:00:00Z"}});
+            crate::model_input::validate_format_with_schema(
+                REQUEST_SCHEDULE,
+                &spec().parameters_schema,
+                &input,
+            )
+            .unwrap();
+            let mut call = ToolCall {
+                id: "proposal".into(),
+                name: REQUEST_SCHEDULE.into(),
+                arguments_json: input.to_string(),
+            };
+            assert_eq!(
+                draft(&session, &call, &Default::default())
+                    .unwrap()
+                    .target_device_id,
+                "b"
+            );
+            let mut invalid = input.clone();
+            invalid["target_ref"] = json!("ref-c");
+            call.arguments_json = invalid.to_string();
+            assert!(draft(&session, &call, &Default::default()).is_err());
+            let mut ambiguous = input;
+            ambiguous.as_object_mut().unwrap().remove("target_ref");
+            call.arguments_json = ambiguous.to_string();
+            assert!(draft(&session, &call, &Default::default()).is_err());
         }
     }
 }

@@ -553,7 +553,7 @@ impl AssistantInputTarget {
         targets: &[Self],
         session: &crate::session::PersistedAgentSession,
     ) -> bool {
-        session.assistant_request_targets() == Some(targets)
+        session.admitted_assistant_request_targets() == Some(targets)
     }
 }
 

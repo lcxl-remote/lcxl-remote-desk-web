@@ -47,7 +47,12 @@ impl ScheduleStore {
         {
             return Err(ScheduleStoreError::NotFound);
         }
-        Ok((work.conversation_id, frozen.target_device_id))
+        let subject = if frozen.kind == "conversation_resume" {
+            Self::continuation_subject(&frozen)?
+        } else {
+            frozen.target_device_id
+        };
+        Ok((work.conversation_id, subject))
     }
 
     pub async fn run_history(

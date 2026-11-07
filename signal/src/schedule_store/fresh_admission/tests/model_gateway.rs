@@ -32,9 +32,9 @@ async fn fresh_task_gateway_accounts_usage_and_rejects_invalid_authority() {
                             .body(format!("data: {delta}\n\n{usage}data: [DONE]\n\n"))
                     }
                 }))
-        }).workers(1).listen(listener).unwrap().run();
+        }).disable_signals().workers(1).listen(listener).unwrap().run();
         let handle = server.handle();
-        actix_web::rt::spawn(server);
+        let server_task = actix_web::rt::spawn(server);
         let db = crate::config::test_support::Database::connect("sqlite::memory:")
             .await
             .unwrap();
@@ -245,6 +245,19 @@ async fn fresh_task_gateway_accounts_usage_and_rejects_invalid_authority() {
                 .len(),
             1
         );
-        handle.stop(true).await;
+        tokio::time::timeout(
+            desk_diagnose_core::test_timing::MODEL_IO_TIMEOUT,
+            handle.stop(false),
+        )
+        .await
+        .unwrap();
+        tokio::time::timeout(
+            desk_diagnose_core::test_timing::MODEL_IO_TIMEOUT,
+            server_task,
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
     }
 }

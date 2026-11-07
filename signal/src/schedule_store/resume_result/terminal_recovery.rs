@@ -100,6 +100,10 @@ async fn ordinary_orphan_sweep_does_not_modify_scheduled_session_or_run() {
         let mut scanned = row.clone();
         if stale_origin {
             let mut snapshot = session.clone();
+            desk_diagnose_core::ai_assistant::scheduled_retrieval::restore_owner_retrieval(
+                &mut snapshot,
+            )
+            .unwrap();
             snapshot.trigger_origin = TriggerOrigin::User;
             scanned.state_json = snapshot.encode_json_for_storage().unwrap();
         }
@@ -190,10 +194,15 @@ async fn expired_terminal_results_are_recovered_once_without_another_attempt() {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(
-            PersistedAgentSession::decode_json(&row.state_json).unwrap(),
-            session
-        );
+        let settled = PersistedAgentSession::decode_json(&row.state_json).unwrap();
+        assert_eq!(settled.version, session.version + 1);
+        let mut expected = session.clone();
+        desk_diagnose_core::ai_assistant::scheduled_retrieval::restore_owner_retrieval(
+            &mut expected,
+        )
+        .unwrap();
+        expected.version = settled.version;
+        assert_eq!(settled, expected);
     }
 }
 

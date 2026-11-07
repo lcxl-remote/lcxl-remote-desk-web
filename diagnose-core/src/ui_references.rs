@@ -779,15 +779,12 @@ impl UiReferenceState {
     }
 
     pub(crate) fn argument_sources(&self, call: &ToolCall) -> Vec<BTreeSet<ReferenceSource>> {
-        let message = ChatMessage::assistant_tool_calls(
-            "argument-sources",
-            "",
-            vec![crate::chat::ToolCallRef {
-                id: call.id.clone(),
-                name: call.name.clone(),
-                arguments_json: call.arguments_json.clone(),
-            }],
-        );
+        let mut message = ChatMessage::text("argument-sources", ChatRole::Assistant, "");
+        message.tool_calls.push(crate::chat::ToolCallRef {
+            id: call.id.clone(),
+            name: call.name.clone(),
+            arguments_json: call.arguments_json.clone(),
+        });
         self.retained_call_aliases(&[message], &[])
             .into_iter()
             .filter_map(|id| self.entries.get(&id).map(|entry| entry.sources.clone()))
@@ -1242,6 +1239,11 @@ mod tests {
     }
     #[test]
     fn recorded_calls_restore_aliases_but_preserve_native_inputs_and_business_text() {
+        exercise_recorded_call_inputs();
+    }
+
+    #[test]
+    fn recorded_calls_restore_aliases_on_small_stacks() {
         for bytes in [1024 * 1024, 2 * 1024 * 1024] {
             std::thread::Builder::new()
                 .stack_size(bytes)
@@ -1255,12 +1257,15 @@ mod tests {
     fn exercise_recorded_call_inputs() {
         let mut session =
             crate::ai_assistant::test_support::personal_session("owner", "run", "device");
+        session.input_revision = 1;
+        session.bind_assistant_input_targets(&[]).unwrap();
         let native = reference("native-application", "recorded-snapshot");
         session.ui_references.register(&native, "source").unwrap();
         let original = ToolCall {
             id: "inspect".into(),
             name: "inspect_desktop_ui".into(),
-            arguments_json: r#"{ "root_id": "a1", "queries": ["a1"] }"#.into(),
+            arguments_json: r#"{ "target_ref": "device", "root_id": "a1", "queries": ["a1"] }"#
+                .into(),
         };
         let executed =
             crate::ui_model_ids::resolve_session_call_with_context(&original, &session, 0, None)
@@ -1300,9 +1305,16 @@ mod tests {
                 .to_string(),
             ),
         ]);
-        assert!(
-            crate::ui_model_ids::resolve_session_call_with_context(&original, &session, 0, None)
-                .is_err()
+        // An opaque alias retains its exact object; a newer observation with
+        // the same native token must not silently rebind historical calls.
+        assert_eq!(
+            canonical(
+                &crate::ui_model_ids::resolve_session_call_with_context(
+                    &original, &session, 0, None
+                )
+                .unwrap()
+            ),
+            canonical(&executed)
         );
         assert_eq!(
             canonical(&crate::ui_model_ids::resolve_recorded_call(&original, &session).unwrap()),
@@ -1321,7 +1333,7 @@ mod tests {
         assert!(crate::ui_model_ids::resolve_recorded_call(&wrong_kind, &session).is_err());
         assert_eq!(
             original.arguments_json,
-            r#"{ "root_id": "a1", "queries": ["a1"] }"#
+            r#"{ "target_ref": "device", "root_id": "a1", "queries": ["a1"] }"#
         );
     }
 

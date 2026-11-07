@@ -35,6 +35,7 @@ async fn fixture() -> (
     session.surface = AgentSessionSurface::AiAssistant;
     session.begin_focus_epoch(1, Vec::<String>::new()).unwrap();
     session.input_revision = 1;
+    session.bind_assistant_input_targets(&[]).unwrap();
     let row = session_row::ActiveModel {
         conversation_id: Set("source".into()),
         actor_id: Set("1".into()),
@@ -316,8 +317,33 @@ async fn orphan_draft_can_still_be_rejected() {
 
 #[tokio::test]
 async fn live_review_delivers_approval_or_rejection_to_the_same_turn() {
+    exercise_live_review(false).await;
+}
+
+#[tokio::test]
+async fn selectable_live_review_delivers_approval_or_rejection_to_the_original_root() {
+    exercise_live_review(true).await;
+}
+
+async fn exercise_live_review(selectable: bool) {
     for approve in [true, false] {
         let (store, _, row, mut session) = fixture().await;
+        if selectable {
+            session.input_revision += 1;
+            session
+                .begin_focus_epoch(session.input_revision, Vec::<String>::new())
+                .unwrap();
+            session.device_id.clear();
+            session
+                .bind_assistant_input_targets(&[
+                    desk_diagnose_core::dynamic_run::AssistantInputTarget {
+                        reference: "device-1".into(),
+                        device_id: "device-1".into(),
+                        member_generation: None,
+                    },
+                ])
+                .unwrap();
+        }
         session
             .begin_turn(
                 "review-turn",
@@ -363,6 +389,7 @@ async fn live_review_delivers_approval_or_rejection_to_the_same_turn() {
             });
         session.conversation.push(parent);
         let mut changed: session_row::ActiveModel = row.into();
+        changed.device_id = Set(session.device_id.clone());
         changed.state_json = Set(session.encode_json_for_storage().unwrap());
         changed.lease_token = Set(session.lease_token as i64);
         changed.lease_deadline = Set(Some(chrono::Utc::now() + chrono::Duration::minutes(5)));

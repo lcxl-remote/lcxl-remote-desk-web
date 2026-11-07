@@ -39,6 +39,9 @@ pub struct TaskRetrievalConsent {
     pub actor_id: String,
     /// Native device identity, never a reusable client id or a model argument.
     pub device_id: String,
+    pub source_session_device_id: String,
+    pub execution_target: crate::dynamic_run::AssistantInputTarget,
+    pub original_read_context: Option<crate::input_read_context::ReadContextSelection>,
     pub source_conversation_id: Option<String>,
     pub source_input_revision: Option<u64>,
     pub captured_at_unix_ms: u64,
@@ -48,6 +51,90 @@ pub struct TaskRetrievalConsent {
     pub history_scope: Option<Box<HistoryAccessScope>>,
     pub memory_scope: Option<Box<MemoryAccessScope>>,
     pub assistant_seed: Option<Box<TaskAssistantDataSeed>>,
+}
+
+/// Suspended owner metadata, without duplicating memories or retrieved content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OwnerRetrievalState {
+    pub limits: Box<desk_agent_protocol::ai_assistant::limits::AssistantDataLimits>,
+    pub budget: AssistantRetrievalBudget,
+    pub task_id: Option<String>,
+    pub history_scope: Option<Box<HistoryAccessScope>>,
+    pub memory_scope: Option<Box<MemoryAccessScope>>,
+}
+
+impl OwnerRetrievalState {
+    fn capture(data: &AssistantDataSession) -> Self {
+        Self {
+            limits: data.limits.clone(),
+            budget: data.retrieval_budget.clone(),
+            task_id: data.retrieval_task_id.clone(),
+            history_scope: data.history_access_scope.clone(),
+            memory_scope: data.memory_access_scope.clone(),
+        }
+    }
+
+    pub fn apply(&self, data: &mut AssistantDataSession) -> Result<(), &'static str> {
+        data.limits = self.limits.clone();
+        data.retrieval_budget = self.budget.clone();
+        data.retrieval_task_id = self.task_id.clone();
+        data.history_access_scope = self.history_scope.clone();
+        data.memory_access_scope = self.memory_scope.clone();
+        data.validate()
+    }
+}
+
+/// Restore the original owner ledger only after native task settlement, or
+/// before accepting a new owner input. A permission pause keeps the task ledger.
+pub fn restore_owner_retrieval(session: &mut PersistedAgentSession) -> Result<bool, &'static str> {
+    let mut changed = session.scheduled_request.take().is_some();
+    if changed {
+        session.delegation_group_id = session.scheduled_owner_group_id.take();
+    }
+    if let Some(owner) = session.scheduled_owner_retrieval.take() {
+        owner.apply(
+            session
+                .assistant_data
+                .as_mut()
+                .ok_or("scheduled owner data is missing")?,
+        )?;
+        changed = true;
+    }
+    Ok(changed)
+}
+
+/// Frozen by the native task claim, independently from later owner input targets.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScheduledRequestBinding {
+    pub schedule_id: String,
+    pub run_id: String,
+    pub execution_target: crate::dynamic_run::AssistantInputTarget,
+    pub original_read_context: Option<crate::input_read_context::ReadContextSelection>,
+    pub recorded_at_unix_ms: u64,
+}
+
+impl ScheduledRequestBinding {
+    pub fn validate(&self, session: &PersistedAgentSession) -> Result<(), &'static str> {
+        validate_source_id(&self.schedule_id)?;
+        validate_source_id(&self.run_id)?;
+        crate::dynamic_run::AssistantInputTarget::validate_all(std::slice::from_ref(
+            &self.execution_target,
+        ))
+        .map_err(|_| "invalid scheduled target")?;
+        if session.surface != AgentSessionSurface::AiAssistant
+            || !session.agent_role.is_main()
+            || session.trigger_origin != crate::session::TriggerOrigin::ScheduledContinuation
+            || session.current_request_id.as_deref() != Some(&self.run_id)
+            || (!session.device_id.is_empty()
+                && session.device_id != self.execution_target.device_id)
+            || self.recorded_at_unix_ms == 0
+        {
+            return Err("scheduled request lost its native claim");
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,11 +175,14 @@ impl TaskRetrievalConsent {
         now: u64,
     ) -> Result<Self, &'static str> {
         let value = Self {
-            schema_version: 1,
+            schema_version: 2,
             schedule_id: schedule_id.into(),
             task_revision,
             actor_id: actor.into(),
             device_id: device.into(),
+            source_session_device_id: device.into(),
+            execution_target: crate::dynamic_run::AssistantInputTarget::fixed(device.into()),
+            original_read_context: None,
             source_conversation_id: None,
             source_input_revision: None,
             captured_at_unix_ms: now,
@@ -123,6 +213,8 @@ impl TaskRetrievalConsent {
         schedule_id: &str,
         task_revision: u64,
         source: &PersistedAgentSession,
+        execution_target: crate::dynamic_run::AssistantInputTarget,
+        original_read_context: Option<crate::input_read_context::ReadContextSelection>,
         now: u64,
     ) -> Result<Self, &'static str> {
         if source.surface != AgentSessionSurface::AiAssistant
@@ -131,7 +223,21 @@ impl TaskRetrievalConsent {
         {
             return Err("task retrieval consent requires its original personal main conversation");
         }
-        let data = source.assistant_data.as_deref();
+        if !source
+            .admitted_assistant_request_targets()
+            .is_some_and(|targets| targets.contains(&execution_target))
+        {
+            return Err("scheduled target was not admitted with its original input");
+        }
+        let mut owner_data = source.assistant_data.clone();
+        if let Some(owner) = &source.scheduled_owner_retrieval {
+            owner.apply(
+                owner_data
+                    .as_mut()
+                    .ok_or("scheduled owner data is missing")?,
+            )?;
+        }
+        let data = owner_data.as_deref();
         if let Some(data) = data {
             data.validate()?;
             if data.current_input_recorded_at_unix_ms > now {
@@ -139,11 +245,14 @@ impl TaskRetrievalConsent {
             }
         }
         let value = Self {
-            schema_version: 1,
+            schema_version: 2,
             schedule_id: schedule_id.into(),
             task_revision,
             actor_id: source.actor_id.clone(),
-            device_id: source.device_id.clone(),
+            device_id: execution_target.device_id.clone(),
+            source_session_device_id: source.device_id.clone(),
+            execution_target,
+            original_read_context,
             source_conversation_id: Some(source.conversation_id.clone()),
             source_input_revision: Some(source.input_revision),
             captured_at_unix_ms: now,
@@ -171,17 +280,23 @@ impl TaskRetrievalConsent {
         for id in [&self.schedule_id, &self.actor_id, &self.device_id] {
             validate_source_id(id)?;
         }
-        for id in [
-            &self.source_conversation_id,
-            &self.source_device_ref,
-            &self.source_instance_id,
-        ]
-        .into_iter()
-        .flatten()
+        for id in [&self.source_conversation_id, &self.source_instance_id]
+            .into_iter()
+            .flatten()
         {
             validate_source_id(id)?;
         }
-        if self.schema_version != 1
+        crate::dynamic_run::AssistantInputTarget::validate_all(std::slice::from_ref(
+            &self.execution_target,
+        ))
+        .map_err(|_| "invalid task target")?;
+        if self.execution_target.device_id != self.device_id
+            || (!self.source_session_device_id.is_empty()
+                && self.source_session_device_id != self.device_id)
+        {
+            return Err("task target differs from its source subject");
+        }
+        if self.schema_version != 2
             || self.task_revision == 0
             || self.task_revision > i64::MAX as u64
             || self
@@ -198,6 +313,9 @@ impl TaskRetrievalConsent {
         {
             return Err("invalid frozen task retrieval consent");
         }
+        desk_agent_protocol::ai_assistant::source::validate_optional_device_ref(
+            self.source_device_ref.as_deref().unwrap_or(""),
+        )?;
         if let Some(seed) = &self.assistant_seed {
             if seed.input_recorded_at_unix_ms == 0
                 || seed.input_recorded_at_unix_ms > self.captured_at_unix_ms
@@ -326,7 +444,9 @@ impl TaskRetrievalConsent {
         )?;
         validate_source_id(occurrence.run_id)?;
         validate_source_id(occurrence.root_conversation_id)?;
-        validate_source_id(occurrence.source_device_ref)?;
+        desk_agent_protocol::ai_assistant::source::validate_optional_device_ref(
+            occurrence.source_device_ref,
+        )?;
         if !occurrence.run_id.starts_with("schedule-run-")
             || occurrence.started_at_unix_ms < self.captured_at_unix_ms
             || occurrence.original_deadline_unix_ms.is_some_and(|until| {
@@ -391,6 +511,21 @@ impl TaskRetrievalConsent {
         }))
     }
 
+    pub fn request_binding(&self, run_id: &str) -> ScheduledRequestBinding {
+        ScheduledRequestBinding {
+            schedule_id: self.schedule_id.clone(),
+            run_id: run_id.into(),
+            execution_target: self.execution_target.clone(),
+            original_read_context: self.original_read_context.clone(),
+            recorded_at_unix_ms: self
+                .assistant_seed
+                .as_ref()
+                .map_or(self.captured_at_unix_ms, |seed| {
+                    seed.input_recorded_at_unix_ms
+                }),
+        }
+    }
+
     /// The native host has already checked the first, unstarted continuation
     /// claim. This binds metadata only and grants no source or execution I/O.
     pub fn bind_conversation_resume(
@@ -417,6 +552,10 @@ impl TaskRetrievalConsent {
         candidate.history_access_scope = expected.scope;
         candidate.memory_access_scope = expected.memory_scope;
         candidate.validate()?;
+        if session.scheduled_owner_retrieval.is_some() {
+            return Err("previous task retrieval ledger is still suspended");
+        }
+        session.scheduled_owner_retrieval = Some(Box::new(OwnerRetrievalState::capture(data)));
         *data = candidate;
         Ok(())
     }
@@ -502,7 +641,12 @@ impl TaskRetrievalConsent {
         occurrence: &RetrievalOccurrence<'_>,
     ) -> Result<(), &'static str> {
         if session.actor_id != self.actor_id
-            || session.device_id != self.device_id
+            || session.device_id
+                != if occurrence.kind == ScheduledRetrievalKind::FreshTask {
+                    self.device_id.as_str()
+                } else {
+                    self.source_session_device_id.as_str()
+                }
             || session.conversation_id != occurrence.root_conversation_id
             || session.surface != AgentSessionSurface::AiAssistant
             || !session.agent_role.is_main()

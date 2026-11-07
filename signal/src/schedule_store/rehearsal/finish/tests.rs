@@ -67,6 +67,7 @@ async fn fixture_with_blocker(
     session.client_conversation_id = Some(started.client_conversation_id.clone());
     session.begin_focus_epoch(1, Vec::<String>::new()).unwrap();
     session.input_revision = 1;
+    session.bind_assistant_input_targets(&[]).unwrap();
     session.latest_input_seq = 1;
     session.handled_input_seq = 1;
     session

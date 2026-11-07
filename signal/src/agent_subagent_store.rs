@@ -82,7 +82,8 @@ pub(crate) use control::{
 };
 pub(crate) use creation::{first_dispatch_on, parent_planning_on};
 pub(crate) use initialization::{
-    decode_creation, initialize_goal_group_on, initialize_input_group_on,
+    decode_creation, initialize_continuation_group_on, initialize_goal_group_on,
+    initialize_input_group_on,
 };
 pub(crate) use presentation::presentation_on;
 pub(crate) use scheduled_control::close_scheduled_group_on;

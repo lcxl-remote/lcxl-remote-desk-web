@@ -23,11 +23,14 @@ fn scope(owner: i32, session: &PersistedAgentSession) -> Condition {
                 .add(entity::Column::ScheduleId.is_in(ids)),
         );
     }
-    Condition::all()
+    let mut subject = Condition::all()
         .add(entity::Column::Status.ne("pending_review"))
         .add(entity::Column::OwnerUserId.eq(owner))
-        .add(entity::Column::TargetDeviceId.eq(&session.device_id))
-        .add(origin)
+        .add(origin);
+    if !session.device_id.is_empty() {
+        subject = subject.add(entity::Column::TargetDeviceId.eq(&session.device_id));
+    }
+    subject
 }
 
 /// Acquire existing task before the conversation row, just like the dispatcher.

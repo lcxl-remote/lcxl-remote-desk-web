@@ -168,7 +168,7 @@ async fn exercise_process(reconnect: bool) {
                     .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             },
         },
-        source_conversation_id: Some(client_id.into()),
+        source_conversation_id: Some(conversation.clone()),
         requirement_revision: Some(1),
         creation_source: ScheduleCreationSource::Manual,
     };

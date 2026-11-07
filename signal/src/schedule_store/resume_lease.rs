@@ -183,11 +183,16 @@ impl ScheduleStore {
             )
             .await?;
         }
+        let subject = if fresh {
+            snapshot.target_device_id.clone()
+        } else {
+            Self::continuation_subject(&snapshot)?
+        };
         let actor = lease.owner.to_string();
         let Some(row) = session_row::Entity::find()
             .filter(session_row::Column::ConversationId.eq(&work.conversation_id))
             .filter(session_row::Column::ActorId.eq(&actor))
-            .filter(session_row::Column::DeviceId.eq(&snapshot.target_device_id))
+            .filter(session_row::Column::DeviceId.eq(&subject))
             .one(&txn)
             .await?
         else {
@@ -201,7 +206,7 @@ impl ScheduleStore {
             .filter(session_row::Column::Id.eq(row.id))
             .filter(session_row::Column::LeaseToken.eq(lease.session_token as i64))
             .filter(session_row::Column::ActorId.eq(&actor))
-            .filter(session_row::Column::DeviceId.eq(&snapshot.target_device_id))
+            .filter(session_row::Column::DeviceId.eq(&subject))
             .filter(session_row::Column::ConversationId.eq(&work.conversation_id))
             .exec(&txn)
             .await?;
@@ -218,9 +223,7 @@ impl ScheduleStore {
             || session.lease_token != lease.session_token
             || session.version != row.version
             || session.conversation_id != work.conversation_id
-            || session
-                .check_subject(&actor, &snapshot.target_device_id)
-                .is_err()
+            || session.check_subject(&actor, &subject).is_err()
             || session.surface != AgentSessionSurface::AiAssistant
             || session.trigger_origin
                 != if fresh {

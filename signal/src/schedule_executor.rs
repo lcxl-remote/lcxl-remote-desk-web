@@ -329,12 +329,14 @@ impl SignalScheduleExecutor {
             .await
             .ok()??;
         let session = PersistedAgentSession::decode_json(&row.state_json).ok()?;
+        let task: crate::entity::agent_schedule::Model =
+            serde_json::from_str(&candidate.task_snapshot_json).ok()?;
         let target = {
             let map = self.connections.read().await;
             let mut targets = map.values().filter(|target| {
                 target.auth_context.auth_kind == AuthKind::TokenAuth
                     && target.auth_context.remote_desk_type == RemoteDeskTypeEnum::Server
-                    && target.client_id.as_deref() == Some(session.device_id.as_str())
+                    && target.client_id.as_deref() == Some(task.target_device_id.as_str())
             });
             let first = targets
                 .next()

@@ -56,8 +56,7 @@ pub fn parse(
         || session.surface != AgentSessionSurface::AiAssistant
         || !session.turn_state.is_active()
         || session.input_revision == 0
-        || session.actor_id.is_empty()
-        || session.device_id.is_empty();
+        || session.actor_id.is_empty();
     if outside_scope
         || call.id.is_empty()
         || call.id.len() > 256

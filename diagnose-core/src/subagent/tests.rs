@@ -1800,3 +1800,44 @@ fn goal_source_outlives_group_creation_and_children_keep_fixed_deadlines() {
     assert!(creation::child_deadline_ms(later, later, 120).is_err());
     assert!(creation::child_deadline_ms(i64::MAX, i64::MAX - 1, 120).is_err());
 }
+
+#[test]
+fn timer_delegation_uses_its_frozen_target_and_preserves_owner_group_and_lineage() {
+    let target = crate::dynamic_run::AssistantInputTarget::fixed("a".into());
+    let latest = crate::dynamic_run::AssistantInputTarget::fixed("b".into());
+    let mut parent =
+        PersistedAgentSession::new("root", "owner", "", 1, scope(), "2026-11-07T00:00:00Z");
+    parent.surface = AgentSessionSurface::AiAssistant;
+    parent.input_revision = 2;
+    parent
+        .bind_assistant_input_targets(std::slice::from_ref(&latest))
+        .unwrap();
+    parent.trigger_origin = TriggerOrigin::ScheduledContinuation;
+    parent.current_request_id = Some("schedule-run-native".into());
+    parent.scheduled_request = Some(Box::new(
+        crate::ai_assistant::scheduled_retrieval::ScheduledRequestBinding {
+            schedule_id: "schedule-native".into(),
+            run_id: "schedule-run-native".into(),
+            execution_target: target.clone(),
+            original_read_context: None,
+            recorded_at_unix_ms: 1,
+        },
+    ));
+    parent.scheduled_owner_group_id = Some("owner-group".into());
+    parent.delegation_group_id = Some("timer-group".into());
+    let mut owner = completion_context().source;
+    owner.device_id.clear();
+    owner.parent_input_revision = 2;
+    owner.source = DelegationSource::UserInput { input_revision: 2 };
+    owner.targets = vec![latest.clone()];
+    let timer = owner.for_conversation_resume(&parent).unwrap();
+    assert_eq!(timer.targets, std::slice::from_ref(&target));
+    assert_eq!(timer.owner_requirement, owner.owner_requirement);
+    assert_eq!(timer.model_destination, owner.model_destination);
+    assert_ne!(timer.source_key().unwrap(), owner.source_key().unwrap());
+    assert_eq!(timer.select_targets(&["a".into()]).unwrap(), [target]);
+    assert!(timer.select_targets(&["b".into()]).is_err());
+    crate::ai_assistant::scheduled_retrieval::restore_owner_retrieval(&mut parent).unwrap();
+    assert_eq!(parent.delegation_group_id.as_deref(), Some("owner-group"));
+    assert_eq!(parent.assistant_request_targets().unwrap(), [latest]);
+}

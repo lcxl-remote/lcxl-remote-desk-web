@@ -410,11 +410,11 @@ mod tests {
     }
 }
 
-/// Owner-visible selection metadata, never a raw storage key or execution grant.
+/// Owner-visible original session identity, never an execution grant.
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaRead, SchemaWrite, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ResumeConversationSource {
-    pub client_conversation_id: String,
+    pub conversation_id: String,
     pub target_device_id: String,
     pub title: String,
     pub requirement_revision: u64,

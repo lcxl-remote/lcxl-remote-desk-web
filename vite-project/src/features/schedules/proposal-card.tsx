@@ -8,7 +8,7 @@ import { useDeskSignaling } from '@/features/desk/use-desk-signaling';
 import { ScheduleClient } from './client';
 import { ProposalReview } from './proposal-review';
 
-export function ScheduleProposalCards({ tools, running = false, deviceId, onPendingCountChange }: { tools: AiAssistantToolActivity[]; running?: boolean; deviceId: string; connectionId: string; onPendingCountChange?: (count: number) => void }) {
+export function ScheduleProposalCards({ tools, running = false, deviceId, onPendingCountChange }: { tools: AiAssistantToolActivity[]; running?: boolean; deviceId?: string; connectionId?: string; onPendingCountChange?: (count: number) => void }) {
     const { t } = useTranslation();
     const { isConnected, subscribe, sendTracked, cancelQueued } = useDeskSignaling();
     const client = useMemo(() => new ScheduleClient(sendTracked, cancelQueued), [sendTracked, cancelQueued]);
@@ -71,7 +71,7 @@ export function ScheduleProposalCards({ tools, running = false, deviceId, onPend
                     <DialogDescription>{t('schedules.proposal.reviewHint')}</DialogDescription></DialogHeader>
                 <div className="min-h-0 overflow-y-auto">
                     {review && <ProposalReview client={client} scheduleId={review} connected={isConnected} activationDisabled={running}
-                        zone={Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'} assistantPaths={{ [deviceId]: devicePath(deviceId, 'assistant') }} approvalCard onChanged={task => { setDecisions(previous => ({ ...previous, [task.schedule_id]: task.status })); setReview(null); }} />}
+                        zone={Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'} assistantPaths={deviceId ? { [deviceId]: devicePath(deviceId, 'assistant') } : {}} approvalCard onChanged={task => { setDecisions(previous => ({ ...previous, [task.schedule_id]: task.status })); setReview(null); }} />}
                 </div>
             </DialogContent>
         </Dialog>

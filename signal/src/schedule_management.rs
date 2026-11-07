@@ -886,38 +886,42 @@ async fn resolve_source(
     draft: &mut desk_agent_protocol::schedule::ScheduleDraft,
 ) -> Result<(), ScheduleStoreError> {
     use crate::entity::agent_session as session_row;
-    use desk_diagnose_core::{
-        conversation_key::{derive_conversation_key, is_valid_client_conversation_id},
-        session::{AgentSessionSurface, PersistedAgentSession},
-    };
+    use desk_diagnose_core::session::{AgentSessionSurface, PersistedAgentSession};
     use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
     let Some(source) = draft.source_conversation_id.as_deref() else {
         return Ok(());
     };
-    if !is_valid_client_conversation_id(source) {
+    if desk_agent_protocol::ai_assistant::source::validate_source_id(source).is_err() {
         return Err(ScheduleStoreError::Invalid);
     }
     let actor = owner.to_string();
-    let key = derive_conversation_key(&actor, &draft.target_device_id, Some(source), "");
+    let key = source.to_owned();
     let row = session_row::Entity::find()
         .filter(session_row::Column::ConversationId.eq(&key))
         .filter(session_row::Column::ActorId.eq(&actor))
-        .filter(session_row::Column::DeviceId.eq(&draft.target_device_id))
+        .filter(session_row::Column::DeviceId.is_in([draft.target_device_id.as_str(), ""]))
         .one(db)
         .await?
         .ok_or(ScheduleStoreError::NotFound)?;
     let session = PersistedAgentSession::decode_json(&row.state_json)
         .map_err(|_| ScheduleStoreError::Invalid)?;
     if session.conversation_id != key
-        || session.client_conversation_id.as_deref() != Some(source)
-        || session
-            .check_subject(&actor, &draft.target_device_id)
-            .is_err()
+        || session.check_subject(&actor, &row.device_id).is_err()
         || session
             .check_surface(AgentSessionSurface::AiAssistant)
             .is_err()
     {
         return Err(ScheduleStoreError::NotFound);
+    }
+    if !session
+        .admitted_assistant_request_targets()
+        .is_some_and(|targets| {
+            targets
+                .iter()
+                .any(|target| target.device_id == draft.target_device_id)
+        })
+    {
+        return Err(ScheduleStoreError::Invalid);
     }
     if draft
         .requirement_revision
@@ -934,6 +938,9 @@ async fn public_target(
     _: i32,
     id: &str,
 ) -> Result<Option<String>, ScheduleStoreError> {
+    if id.is_empty() {
+        return Ok(None);
+    }
     Ok(Some(id.into()))
 }
 
@@ -1077,6 +1084,7 @@ mod tests {
         session.client_conversation_id = Some("chat-1".into());
         session.begin_focus_epoch(1, Vec::<String>::new()).unwrap();
         session.input_revision = 1;
+        session.bind_assistant_input_targets(&[]).unwrap();
         let original = session.encode_json_for_storage().unwrap();
         PersistedAgentSession::decode_json(&original).unwrap();
         let row = session_row::ActiveModel {
@@ -1096,7 +1104,7 @@ mod tests {
         let mut request = draft();
         request.kind = ScheduledTaskKind::ConversationResume;
         request.spec.rule = ScheduleRule::AfterConfirmation { delay_seconds: 300 };
-        request.source_conversation_id = Some("chat-1".into());
+        request.source_conversation_id = Some(key.clone());
         request.creation_source = ScheduleCreationSource::AiProposal;
         request.requirement_revision = Some(1);
         // Model proposals must be readable before the owner decides; their delay
@@ -1228,7 +1236,7 @@ mod tests {
             Err(ScheduleStoreError::Conflict)
         ));
         let mut raw = request.clone();
-        raw.source_conversation_id = Some(key);
+        raw.source_conversation_id = Some("chat-1".into());
         assert!(matches!(
             manage(&db, 1, Request::CreateDraft { draft: raw }).await,
             Err(ScheduleStoreError::NotFound)

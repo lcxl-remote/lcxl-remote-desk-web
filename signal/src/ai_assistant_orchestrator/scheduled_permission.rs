@@ -60,7 +60,15 @@ pub async fn claim_scheduled_permission(
         let mut targets = map.values().filter(|target| {
             target.auth_context.auth_kind == AuthKind::TokenAuth
                 && target.auth_context.remote_desk_type == RemoteDeskTypeEnum::Server
-                && target.client_id.as_deref() == Some(session.device_id.as_str())
+                && target.client_id.as_deref()
+                    == Some(
+                        session
+                            .scheduled_request
+                            .as_ref()
+                            .map_or(session.device_id.as_str(), |binding| {
+                                binding.execution_target.device_id.as_str()
+                            }),
+                    )
         });
         let target = targets.next().ok_or_else(invalid)?;
         if targets.next().is_some() {

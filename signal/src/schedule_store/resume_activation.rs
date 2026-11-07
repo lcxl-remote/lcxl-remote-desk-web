@@ -199,6 +199,7 @@ pub(super) async fn lock_original_requirement(
     owner: i32,
     task: &entity::Model,
 ) -> Result<(), ScheduleStoreError> {
+    let subject = super::ScheduleStore::continuation_subject(task)?;
     let source = task
         .source_conversation_id
         .as_deref()
@@ -211,16 +212,14 @@ pub(super) async fn lock_original_requirement(
     let row = session_row::Entity::find()
         .filter(session_row::Column::ConversationId.eq(source))
         .filter(session_row::Column::ActorId.eq(&actor))
-        .filter(session_row::Column::DeviceId.eq(&task.target_device_id))
+        .filter(session_row::Column::DeviceId.eq(&subject))
         .one(txn)
         .await?
         .ok_or(ScheduleStoreError::NotFound)?;
     let session = PersistedAgentSession::decode_json(&row.state_json)
         .map_err(|_| ScheduleStoreError::Invalid)?;
     if session.conversation_id != source
-        || session
-            .check_subject(&actor, &task.target_device_id)
-            .is_err()
+        || session.check_subject(&actor, &subject).is_err()
         || session
             .check_surface(AgentSessionSurface::AiAssistant)
             .is_err()
@@ -246,7 +245,7 @@ pub(super) async fn lock_original_requirement(
         .filter(session_row::Column::Id.eq(row.id))
         .filter(session_row::Column::ConversationId.eq(source))
         .filter(session_row::Column::ActorId.eq(&actor))
-        .filter(session_row::Column::DeviceId.eq(&task.target_device_id))
+        .filter(session_row::Column::DeviceId.eq(&subject))
         .filter(session_row::Column::Version.eq(row.version))
         .filter(session_row::Column::StateJson.eq(&row.state_json))
         .exec(txn)

@@ -1260,8 +1260,7 @@ async fn prepare_composed_turn(
             || actor_user_id != crate::control_authorizer::SINGLE_ACCOUNT_USER_ID
             || resume_conversation_id.as_ref().is_some_and(|resume| {
                 resume.permission_request_id.is_none() && resume.work_event.is_none()
-            })
-            || scheduled.is_some())
+            }))
     {
         return Err(transport_error(
             "targetless assistant input cannot carry device context",

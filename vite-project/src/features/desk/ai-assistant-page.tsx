@@ -647,14 +647,15 @@ export function AiAssistantWorkspace({
                 disabled: !chat.sessionId, onSelect: () => setAttachmentsOpen(true) },
             ...(hasDevice || personalScope ? [{ label: t('pages.aiAssistant.directories.title'), icon: FolderKey,
                 onSelect: () => setDirectorySession(permissionHistoryKey) }] : []),
-            ...(hasDevice ? [
+            ...((hasDevice || personalScope) ? [
                 { label: t('pages.aiAssistant.schedules.title'), icon: CalendarClock,
                     onSelect: () => setSchedulesOpen(true) },
             ] : []),
-            ...(hasDevice && !rehearsal ? [{ label: t('schedules.createResume'), icon: CalendarClock,
-                disabled: !assistantEnabled || chat.running || chat.hydrating || !chat.conversationId || !chat.inputRevision,
-                onSelect: () => { if (chat.conversationId && chat.inputRevision) navigate(`/schedules?${new URLSearchParams({
-                    resume_conversation: chat.conversationId, resume_device: stableDeviceId,
+            ...((hasDevice || personalScope) && !rehearsal ? [{ label: t('schedules.createResume'), icon: CalendarClock,
+                disabled: !assistantEnabled || chat.running || chat.hydrating || !chat.sessionId || !chat.inputRevision || (!hasDevice && !requestDevices.selected.length),
+                onSelect: () => { if (chat.sessionId && chat.inputRevision) navigate(`/schedules?${new URLSearchParams({
+                    resume_conversation: chat.sessionId,
+                    ...(hasDevice ? {resume_device: stableDeviceId} : {resume_devices: requestDevices.selected.map(device => device.id).join(',')}),
                     resume_revision: String(chat.inputRevision),
                 })}`); } }] : []),
         ] },
@@ -932,8 +933,8 @@ export function AiAssistantWorkspace({
                         loading={chat.hydrating} hasMore={chat.hasMoreMessages} loadingOlder={chat.loadingOlderMessages}
                         onOlder={() => void chat.loadOlderMessages()}
                         before={<AssistantDocumentPreviews previews={chat.documentPreviews} requestPage={chat.requestDocumentPreviewPage} />}>
-                        {hasDevice && <ScheduleProposalCards key={`${deskId}:${chat.conversationId}`} tools={chat.tools} running={chat.running}
-                            deviceId={stableDeviceId} connectionId={deskId} onPendingCountChange={setPendingScheduleCount} />}
+                        <ScheduleProposalCards key={permissionHistoryKey} tools={chat.tools} running={chat.running}
+                            deviceId={stableDeviceId} connectionId={deskId} onPendingCountChange={setPendingScheduleCount} />
                         {chat.partial && (
                             <MarkdownContent disableLinks className="w-full max-w-full rounded-lg bg-muted px-3 py-2 text-sm sm:max-w-[90%]">
                                 {chat.partial}
@@ -1309,7 +1310,7 @@ export function AiAssistantWorkspace({
                             <p className="mt-2 text-sm text-muted-foreground">{t('pages.aiAssistant.workspace.deviceSettingsOwnerOnly')}</p>
                         </SheetContent>
                     </Sheet>
-                    {hasDevice && <AssistantSchedules key={permissionHistoryKey} sessionId={chat.sessionId ?? null} open={schedulesOpen} onOpenChange={setSchedulesOpen} deviceId={stableDeviceId} />}
+                    <AssistantSchedules key={permissionHistoryKey} sessionId={chat.sessionId ?? null} open={schedulesOpen} onOpenChange={setSchedulesOpen} deviceId={stableDeviceId} />
                 </CardContent>
             </Card>
         </>

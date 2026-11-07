@@ -33,6 +33,7 @@ async fn base_fixture() -> (
     session.surface = AgentSessionSurface::AiAssistant;
     session.begin_focus_epoch(1, Vec::<String>::new()).unwrap();
     session.input_revision = 1;
+    session.bind_assistant_input_targets(&[]).unwrap();
     let row = session_row::ActiveModel {
         conversation_id: Set("source".into()),
         actor_id: Set("1".into()),

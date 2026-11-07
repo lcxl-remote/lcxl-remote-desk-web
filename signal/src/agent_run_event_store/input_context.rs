@@ -392,6 +392,12 @@ async fn original_with_time_on(
     txn: &crate::config::connection::DatabaseTransaction,
     session: &PersistedAgentSession,
 ) -> Result<(Option<ReadContextSelection>, DateTime<Utc>), AgentError> {
+    if let Some(context) = crate::schedule_store::ScheduleStore::scheduled_context_on(txn, session)
+        .await
+        .map_err(|_| internal("scheduled input context changed"))?
+    {
+        return Ok(context);
+    }
     if let Some((creation, created_at)) = crate::agent_subagent_store::task_context_on(txn, session)
         .await
         .map_err(|_| internal("delegated input context changed"))?

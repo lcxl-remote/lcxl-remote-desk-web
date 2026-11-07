@@ -27,7 +27,7 @@ import { ContractReview } from './contract-review';
 import { AiAssistantHubLayout } from '@/features/desk/ai-assistant-hub-layout';
 
 export type ScheduleDevice = { id: string; name: string; connectionId?: string; assistantPath?: string };
-type ResumeSource = { conversation: string; device: string; revision: number };
+type ResumeSource = { conversation: string; device?: string; devices?: string[]; revision: number };
 type Editor = { resume?: ResumeSource; kind: 'create' | 'time' | 'rename' | 'delete' | 'revoke' | 'editPrompt' | 'failureThreshold'; task?: ScheduleView; key: string };
 const selectClass = 'h-10 w-full rounded-md border bg-background px-3 text-sm';
 
@@ -52,8 +52,9 @@ export default function SchedulePage({ devices, loadingDevices = false }: { devi
     const sourceConversation = search.get('resume_conversation');
     const sourceDevice = search.get('resume_device');
     const sourceRevision = Number(search.get('resume_revision'));
-    const resumeSource = sourceConversation && sourceConversation.length <= 256 && sourceDevice && sourceDevice.length <= 256 && Number.isSafeInteger(sourceRevision) && sourceRevision > 0
-        ? { conversation: sourceConversation, device: sourceDevice, revision: sourceRevision } : null;
+    const resumeDevices = search.get('resume_devices')?.split(',').filter(Boolean);
+    const resumeSource: ResumeSource | null = sourceConversation && sourceConversation.length <= 256 && (sourceDevice || resumeDevices?.length) && Number.isSafeInteger(sourceRevision) && sourceRevision > 0
+        ? { conversation: sourceConversation, device: sourceDevice || undefined, devices: resumeDevices, revision: sourceRevision } : null;
     const reviewSelector = search.get('review_task');
     const validReviewSelector = reviewSelector && /^[a-f0-9-]{36}$/.test(reviewSelector) ? reviewSelector : null;
     const taskSelector = search.get('scheduled_task');
@@ -121,7 +122,7 @@ export default function SchedulePage({ devices, loadingDevices = false }: { devi
             <div className="flex flex-wrap gap-2">
                 <Button variant="outline" disabled={!available} onClick={() => void load()}><RefreshCw className="mr-2 h-4 w-4" />{t('schedules.refresh')}</Button>
                 {tab === 'conversation_resume' && <Button disabled={!available || loadingDevices || !allDevices.length} onClick={() => setChoosingConversation(true)}>{t('schedules.chooseConversation')}</Button>}
-                {resumeSource && <Button disabled={!available || !devices.some(device => device.id === resumeSource.device)} onClick={() => { setTab('conversation_resume'); setEditor({ kind: 'create', resume: resumeSource, key: v4() }); }}>{t('schedules.createResume')}</Button>}
+                {resumeSource && <Button disabled={!available || !devices.some(device => resumeSource.device ? device.id === resumeSource.device : resumeSource.devices?.includes(device.id))} onClick={() => { setTab('conversation_resume'); setEditor({ kind: 'create', resume: resumeSource, key: v4() }); }}>{t('schedules.createResume')}</Button>}
                 {tab === 'fresh_task' && <Button disabled={!available || loadingDevices || !allDevices.length} onClick={() => { setTab('fresh_task'); setEditor({ kind: 'create', key: v4() }); }}><Plus className="mr-2 h-4 w-4" />{t('schedules.create')}</Button>}
             </div>
         </div>
@@ -230,7 +231,7 @@ export default function SchedulePage({ devices, loadingDevices = false }: { devi
             <DialogHeader><DialogTitle>{t('schedules.chooseConversation')}</DialogTitle></DialogHeader>
             {choosingConversation && <ResumeSourcePicker client={client} devices={allDevices} connected={available} onSelect={source => {
                 setChoosingConversation(false); setTab('conversation_resume');
-                setEditor({ kind: 'create', key: v4(), resume: { conversation: source.client_conversation_id, device: source.target_device_id, revision: source.requirement_revision } });
+                setEditor({ kind: 'create', key: v4(), resume: { conversation: source.conversation_id, device: source.target_device_id, revision: source.requirement_revision } });
             }} />}
         </DialogContent></Dialog>
         <Dialog open={!!editor} onOpenChange={open => { if (!open && !busy) setEditor(null); }}><DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto" aria-describedby={undefined}>
@@ -245,7 +246,8 @@ function ScheduleEditor({ editor, devices, zone, disabled, client, submit, repor
     const [title, setTitle] = useState(editor.task?.title ?? '');
     const [prompt, setPrompt] = useState(editor.task?.prompt ?? '');
     const [threshold, setThreshold] = useState(String(editor.task?.failure_threshold ?? 3));
-    const [device, setDevice] = useState(editor.resume?.device ?? devices[0]?.id ?? '');
+    const availableDevices = editor.resume?.devices ? devices.filter(device => editor.resume!.devices!.includes(device.id)) : devices;
+    const [device, setDevice] = useState(editor.resume?.device ?? availableDevices[0]?.id ?? '');
     const reference = useRef(new Date());
     const projection = useMemo(() => editor.kind === 'time' && editor.task && validTimezone(zone)
         ? projectRule(editor.task.spec, zone, reference.current) : null, [editor.kind, editor.task, zone]);
@@ -328,7 +330,7 @@ function ScheduleEditor({ editor, devices, zone, disabled, client, submit, repor
         {editor.kind === 'revoke' ? <p>{t('schedules.revokeConfirm', { title: editor.task?.title })}</p> : editor.kind === 'delete' ? <p>{t('schedules.deleteConfirm', { title: editor.task?.title })}</p> : <fieldset disabled={locked} className="space-y-3">
             {['create', 'rename'].includes(editor.kind) && <div><Label htmlFor="schedule-title">{t('schedules.name')}</Label><Input id="schedule-title" required value={title} onChange={e => setTitle(e.target.value)} /></div>}
             {editor.kind === 'create' && <>
-                <div><Label htmlFor="schedule-device">{t('schedules.device')}</Label><ScheduleSelect id="schedule-device" disabled={!!editor.resume} className={selectClass} value={device} onValueChange={value => setDevice(value)}>{devices.map(d => <SelectItem key={d.id} value={d.id}>{d.name}</SelectItem>)}</ScheduleSelect></div>
+                <div><Label htmlFor="schedule-device">{t('schedules.device')}</Label><ScheduleSelect id="schedule-device" disabled={!!editor.resume?.device} className={selectClass} value={device} onValueChange={value => setDevice(value)}>{availableDevices.map(d => <SelectItem key={d.id} value={d.id}>{d.name}</SelectItem>)}</ScheduleSelect></div>
                 <div><Label htmlFor="schedule-prompt">{t('schedules.prompt')}</Label><Textarea id="schedule-prompt" required className="min-h-24 w-full rounded-md border bg-background p-2" value={prompt} onChange={e => setPrompt(e.target.value)} /></div>
             </>}
             {editor.kind === 'failureThreshold' && <>

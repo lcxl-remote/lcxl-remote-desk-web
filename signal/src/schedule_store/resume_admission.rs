@@ -150,7 +150,12 @@ async fn validate_continuation_action_on(
         || task.active_run_id.as_deref() != Some(run_id)
         || task.owner_user_id != work.owner_user_id
         || task.owner_user_id.to_string() != session.actor_id
-        || task.target_device_id != session.device_id
+        || session
+            .scheduled_request
+            .as_ref()
+            .is_none_or(|binding| binding.execution_target.device_id != task.target_device_id)
+        || super::ScheduleStore::continuation_subject(&task).map_err(|_| invalid())?
+            != session.device_id
         || task.source_conversation_id.as_deref() != Some(conversation_id)
         || task.requirement_revision != i64::try_from(session.input_revision).ok()
         || failures
@@ -244,6 +249,56 @@ fn decode(row: &agent_session::Model) -> Result<Box<PersistedAgentSession>, DbEr
     Ok(session)
 }
 impl super::ScheduleStore {
+    /// Return only the immutable task input. Operation dispatch retains its
+    /// existing task, cancellation, lease and action checks.
+    pub(crate) async fn scheduled_context_on(
+        txn: &crate::config::connection::DatabaseTransaction,
+        session: &PersistedAgentSession,
+    ) -> Result<
+        Option<(
+            Option<desk_diagnose_core::input_read_context::ReadContextSelection>,
+            chrono::DateTime<chrono::Utc>,
+        )>,
+        DbErr,
+    > {
+        let Some(binding) = &session.scheduled_request else {
+            return Ok(None);
+        };
+        binding.validate(session).map_err(|_| invalid())?;
+        let work = run::Entity::find()
+            .filter(run::Column::RunId.eq(&binding.run_id))
+            .one(txn)
+            .await?
+            .ok_or_else(invalid)?;
+        let task = entity::Entity::find()
+            .filter(entity::Column::ScheduleId.eq(&work.schedule_id))
+            .one(txn)
+            .await?
+            .ok_or_else(invalid)?;
+        let snapshot: entity::Model =
+            serde_json::from_str(&work.task_snapshot_json).map_err(|_| invalid())?;
+        let consent = Self::retrieval_consent(&task)
+            .map_err(|_| invalid())?
+            .ok_or_else(invalid)?;
+        if work.owner_user_id.to_string() != session.actor_id
+            || work.conversation_id != session.conversation_id
+            || task.source_conversation_id.as_deref() != Some(&session.conversation_id)
+            || consent.source_session_device_id != session.device_id
+            || snapshot.retrieval_consent_json != task.retrieval_consent_json
+            || binding.as_ref() != &consent.request_binding(&work.run_id)
+        {
+            return Err(invalid());
+        }
+        let recorded = chrono::DateTime::from_timestamp_millis(
+            binding
+                .recorded_at_unix_ms
+                .try_into()
+                .map_err(|_| invalid())?,
+        )
+        .ok_or_else(invalid)?;
+        Ok(Some((binding.original_read_context.clone(), recorded)))
+    }
+
     /// Metadata consent never substitutes for the native task and both live
     /// leases. Call before operation/quota locks, and repeat before dispatch.
     pub(crate) async fn assistant_retrieval_deadline_on(
@@ -341,7 +396,7 @@ impl super::ScheduleStore {
             source_conversation_id: consent.source_conversation_id.as_deref(),
             root_conversation_id: &expected.conversation_id,
             actor_id: &expected.actor_id,
-            device_id: &expected.device_id,
+            device_id: &task.target_device_id,
             source_device_ref: &data.source_device_ref,
             source_instance_id: data.source_instance_id.as_deref(),
             started_at_unix_ms: work

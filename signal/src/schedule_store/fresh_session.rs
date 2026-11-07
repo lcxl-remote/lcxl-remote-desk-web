@@ -52,7 +52,7 @@ impl ScheduleStore {
             let Some(archive) = data::find_output_on(db, &session.conversation_id, label).await? else { return Ok(None); };
             if archive.proof.source_set.actor_id != session.actor_id
                 || session.assistant_data.as_ref().is_none_or(|state| archive.proof.source_set.source_device_ref != state.source_device_ref)
-                || task.owner_user_id.to_string() != session.actor_id || task.target_device_id != session.device_id {
+                || task.owner_user_id.to_string() != session.actor_id || !session.admits_assistant_device(&task.target_device_id) {
                 return Err(data::AssistantStoreError::Inaccessible);
             }
             archive.proof.bind_visible_message(parent).map_err(data::AssistantStoreError::Invalid)?;
@@ -63,12 +63,12 @@ impl ScheduleStore {
                 .map_err(data::AssistantStoreError::Invalid)?;
             let dependencies = Vec::new();
             let proof = desk_diagnose_core::schedule::published_input::TaskPromptRetention {
-                actor_id: session.actor_id.clone(), target_device_id: session.device_id.clone(),
+                actor_id: session.actor_id.clone(), target_device_id: task.target_device_id.clone(),
                 prompt_sha256: super::digest(&task.prompt), policy: source_policy, dependencies,
                 model_source: Some(desk_diagnose_core::ai_assistant::source_registry::NativeDerivedInputPolicy::from_archive(&archive.proof)
                     .map_err(data::AssistantStoreError::Invalid)?),
             };
-            proof.validate(&session.actor_id, &session.device_id, &super::digest(&task.prompt)).map_err(data::AssistantStoreError::Invalid)?;
+            proof.validate(&session.actor_id, &task.target_device_id, &super::digest(&task.prompt)).map_err(data::AssistantStoreError::Invalid)?;
             Ok(Some(serde_json::to_string(&proof).map_err(|_| data::AssistantStoreError::Invalid("invalid task prompt proof"))?))
         }.await;
         let proof = result.map_err(|error| match error {
@@ -142,7 +142,13 @@ impl ScheduleStore {
                 &(&config.metadata.instance, &task.target_device_id),
             )
         };
-        if expected_ref != device_ref {
+        let consent = Self::retrieval_consent(&task)?.ok_or(ScheduleStoreError::Invalid)?;
+        if consent
+            .source_device_ref
+            .as_deref()
+            .unwrap_or(&expected_ref)
+            != device_ref
+        {
             return Err(ScheduleStoreError::Conflict);
         }
         let device = task.target_device_id.as_str();
@@ -352,8 +358,12 @@ impl ScheduleStore {
             root_conversation_id: &authority.run().conversation_id,
             actor_id: &authority.run().owner_user_id.to_string(),
             device_id: &task.target_device_id,
-            source_device_ref: &device_ref,
-            source_instance_id: Some(&config.metadata.instance),
+            source_device_ref: consent.source_device_ref.as_deref().unwrap_or(&device_ref),
+            source_instance_id: if consent.source_device_ref.is_some() {
+                consent.source_instance_id.as_deref()
+            } else {
+                Some(&config.metadata.instance)
+            },
             started_at_unix_ms: authority
                 .run()
                 .started_at
@@ -387,7 +397,33 @@ pub(crate) mod tests {
         exercise_source_context(store, task, source, queued).await;
     }
 
+    #[tokio::test]
+    async fn selectable_fresh_occurrence_preserves_root_data_and_its_frozen_execution_device() {
+        let (store, task, source, queued) = source_fixture_for(true).await;
+        assert!(source.device_id.is_empty());
+        assert!(
+            source
+                .assistant_data
+                .as_ref()
+                .unwrap()
+                .source_device_ref
+                .is_empty()
+        );
+        exercise_source_context(store, task, source, queued).await;
+    }
+
     pub(crate) async fn source_fixture() -> (
+        ScheduleStore,
+        entity::Model,
+        PersistedAgentSession,
+        agent_schedule_run::Model,
+    ) {
+        source_fixture_for(false).await
+    }
+
+    async fn source_fixture_for(
+        selectable: bool,
+    ) -> (
         ScheduleStore,
         entity::Model,
         PersistedAgentSession,
@@ -400,6 +436,10 @@ pub(crate) mod tests {
         let store = ScheduleStore::new(db.clone());
         let mut source = super::super::tests::retrieval_source(&store, true).await;
         source.device_id = "device-1".into();
+        source.input_revision += 1;
+        source
+            .begin_focus_epoch(source.input_revision, Vec::<String>::new())
+            .unwrap();
         let device_ref = desk_diagnose_core::native_ids::stable(
             desk_diagnose_core::native_ids::Kind::AssistantDeviceBinding,
             &(
@@ -419,17 +459,43 @@ pub(crate) mod tests {
         .insert(&store.db)
         .await
         .unwrap();
+        if selectable {
+            source.device_id.clear();
+            source
+                .bind_assistant_input_targets(&[
+                    desk_diagnose_core::dynamic_run::AssistantInputTarget {
+                        reference: device_ref.clone(),
+                        device_id: "device-1".into(),
+                        member_generation: None,
+                    },
+                ])
+                .unwrap();
+        }
+        if !selectable {
+            source.bind_assistant_input_targets(&[]).unwrap();
+        }
         let data = source.assistant_data.as_mut().unwrap();
-        data.source_device_ref = device_ref.clone();
+        data.source_device_ref = if selectable {
+            String::new()
+        } else {
+            device_ref.clone()
+        };
         data.source_instance_id = Some(store.db.config_read().await.metadata.instance.clone());
         data.history_access_scope
             .as_mut()
             .unwrap()
-            .current_device_ref = device_ref.clone();
+            .current_device_ref = data.source_device_ref.clone();
         data.memory_access_scope
             .as_mut()
             .unwrap()
-            .current_device_ref = device_ref.clone();
+            .current_device_ref = data.source_device_ref.clone();
+        if selectable {
+            data.history_access_scope = None;
+            let memory = data.memory_access_scope.as_mut().unwrap();
+            memory.device_rule =
+                desk_agent_protocol::ai_assistant::history::AssistantDeviceScope::CurrentDevice;
+            memory.request_device_refs = vec![device_ref.clone()];
+        }
         data.instructions = desk_diagnose_core::ai_assistant::settings::freeze_instructions(
             &UserInstructions {
                 revision: 7,

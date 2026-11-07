@@ -4,7 +4,10 @@ use crate::entity::agent_session as session_row;
 use desk_agent_protocol::schedule::management::ResumeConversationSource;
 use desk_diagnose_core::{
     chat::ChatRole,
-    conversation_key::{derive_conversation_key, is_valid_client_conversation_id},
+    conversation_key::{
+        AssistantConversationScope, derive_assistant_conversation_key, derive_conversation_key,
+        is_valid_client_conversation_id,
+    },
     session::{AgentSessionSurface, PersistedAgentSession, TriggerOrigin},
 };
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
@@ -27,7 +30,7 @@ pub(super) async fn list(
     let actor = owner.to_string();
     let rows = session_row::Entity::find()
         .filter(session_row::Column::ActorId.eq(&actor))
-        .filter(session_row::Column::DeviceId.eq(&device))
+        .filter(session_row::Column::DeviceId.is_in([device.as_str(), ""]))
         .order_by_desc(session_row::Column::Id)
         .offset(u64::from(offset))
         .limit(u64::from(limit))
@@ -53,8 +56,19 @@ pub(super) async fn list(
         if !is_valid_client_conversation_id(client)
             || session.version != row.version
             || session.conversation_id != row.conversation_id
-            || derive_conversation_key(&actor, &device, Some(client), "") != row.conversation_id
-            || session.check_subject(&actor, &device).is_err()
+            || if session.device_id.is_empty() {
+                derive_assistant_conversation_key(
+                    &actor,
+                    AssistantConversationScope::Personal,
+                    client,
+                ) != row.conversation_id
+            } else {
+                derive_conversation_key(&actor, &device, Some(client), "") != row.conversation_id
+            }
+            || session.check_subject(&actor, &row.device_id).is_err()
+            || !session
+                .admitted_assistant_request_targets()
+                .is_some_and(|targets| targets.iter().any(|target| target.device_id == device))
             || session
                 .check_surface(AgentSessionSurface::AiAssistant)
                 .is_err()
@@ -72,7 +86,7 @@ pub(super) async fn list(
             .map(|message| message.text.chars().take(240).collect::<String>())
             .unwrap_or_else(|| client.into());
         sources.push(ResumeConversationSource {
-            client_conversation_id: client.into(),
+            conversation_id: row.conversation_id.clone(),
             target_device_id: public_device.into(),
             title,
             requirement_revision: session.input_revision,

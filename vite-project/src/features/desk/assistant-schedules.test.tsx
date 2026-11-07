@@ -49,3 +49,10 @@ it('binds schedule filtering to the canonical snapshot session instead of the cl
     expect(page).toContain('<AssistantSchedules key={permissionHistoryKey} sessionId={chat.sessionId ?? null}');
     expect(page).not.toContain('<AssistantSchedules key={permissionHistoryKey} conversationId={chat.conversationId}');
 });
+
+it('lists every timer of a selectable conversation independently from current device selection', async () => {
+    request.mockReset().mockResolvedValue({ result: 'search_results', tasks: [{schedule_id: 'frozen-a', title: 'Original device timer', status: 'active'}] });
+    render(<AssistantSchedules open onOpenChange={() => {}} sessionId="root-session" />);
+    await screen.findByText('Original device timer');
+    expect(request).toHaveBeenCalledWith(expect.objectContaining({source_conversation_id: 'root-session', target_device_id: null}));
+});

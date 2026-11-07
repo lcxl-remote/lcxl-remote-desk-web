@@ -1890,7 +1890,7 @@ async fn personal_input_roundtrip(target_refs: Vec<String>, temporary: bool) {
     );
 }
 
-async fn register_request_device(
+pub(super) async fn register_request_device(
     connections: &SharedConnectionMap,
     id: &str,
     name: &str,
@@ -2942,7 +2942,7 @@ async fn personal_input_reads_selected_devices_then_runs_the_queued_followup() {
     );
 }
 
-async fn respond_to_system_info(
+pub(super) async fn respond_to_system_info(
     connections: &SharedConnectionMap,
     target: &str,
     peer: actix_web::HttpResponse,

@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import SchedulePage from './page';
+import { selectOption } from '@/test-utils/select-option';
 import type { SendTrackedOptions, SignalingSubscriber } from '@/features/desk/use-desk-signaling';
 import { deskErrorCodeEnum } from '@/services/types';
 
@@ -60,7 +61,7 @@ describe('scheduled task management page', () => {
         expect(operations()).toEqual(kind === 'conversation_resume' ? ['search', 'search'] : ['search']);
     });
 
-    it.each(['unchanged', 'reordered', 'changed'])('creates an enabled conversation timer with %s preview', async (preview) => {
+    it.each([['unchanged', false], ['reordered', false], ['changed', false], ['unchanged', true]] as const)('creates an enabled conversation timer with %s preview and selectable=%s', async (preview, selectable) => {
         storedTasks = [];
         let conversions = 0;
         transport.send.mockImplementation((request: SendTrackedOptions) => {
@@ -76,10 +77,15 @@ describe('scheduled task management page', () => {
             if (request.data.operation === 'activate_conversation_resume') queueMicrotask(() => respond(request, { result: 'task', task: { ...task, kind: 'conversation_resume', title: 'Continue report', status: 'active', revision: 4 } }));
             return { requestId: request.requestId!, disposition: 'sent' };
         });
-        render(<MemoryRouter initialEntries={['/schedules?resume_conversation=chat-1&resume_device=device-1&resume_revision=7']}><SchedulePage devices={[{ id: 'device-1', name: 'Office PC' }]} /></MemoryRouter>);
+        render(<MemoryRouter initialEntries={[selectable ? '/schedules?resume_conversation=chat-1&resume_devices=device-1,device-2&resume_revision=7' : '/schedules?resume_conversation=chat-1&resume_device=device-1&resume_revision=7']}><SchedulePage devices={[{ id: 'device-1', name: 'Office PC' }, { id: 'device-2', name: 'Mac' }, { id: 'unselected', name: 'Other device' }]} /></MemoryRouter>);
         await waitFor(() => expect(screen.getByRole('button', { name: 'Schedule this conversation' })).toBeEnabled());
         fireEvent.click(screen.getByRole('button', { name: 'Schedule this conversation' }));
-        expect(within(screen.getByRole('dialog')).getByLabelText('Device')).toBeDisabled();
+        const deviceChoice = within(screen.getByRole('dialog')).getByLabelText('Device');
+        if (selectable) {
+            await waitFor(() => expect(deviceChoice).toBeEnabled());
+            await selectOption(deviceChoice, 'Mac');
+            expect(deviceChoice).toHaveTextContent('Mac');
+        } else expect(deviceChoice).toBeDisabled();
         fireEvent.change(within(screen.getByRole('dialog')).getByLabelText('Task name'), { target: { value: 'Continue report' } });
         fireEvent.change(screen.getByLabelText('What should this task do?'), { target: { value: 'Continue the report' } });
         fireEvent.change(screen.getByLabelText('Reference / start date'), { target: { value: '2027-01-01' } });
@@ -95,7 +101,7 @@ describe('scheduled task management page', () => {
         await waitFor(() => expect(operations()).toContain('create_draft'));
         expect(operations().filter(operation => operation !== 'search')).toEqual(preview === 'changed'
             ? ['convert_time', 'convert_time', 'convert_time', 'create_draft'] : ['convert_time', 'convert_time', 'create_draft']);
-        expect(transport.send.mock.calls.find(([request]) => request.data.operation === 'create_draft')![0].data.draft).toMatchObject({ kind: 'conversation_resume', target_device_id: 'device-1', source_conversation_id: 'chat-1', requirement_revision: 7, spec: { rule: { kind: 'once' } } });
+        expect(transport.send.mock.calls.find(([request]) => request.data.operation === 'create_draft')![0].data.draft).toMatchObject({ kind: 'conversation_resume', target_device_id: selectable ? 'device-2' : 'device-1', source_conversation_id: 'chat-1', requirement_revision: 7, spec: { rule: { kind: 'once' } } });
         await waitFor(() => expect(screen.queryByRole('button', { name: 'Enable scheduled continuation' })).not.toBeInTheDocument());
     });
 

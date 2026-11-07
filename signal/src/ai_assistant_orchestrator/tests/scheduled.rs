@@ -188,7 +188,7 @@ async fn exercise_with_restart(
                     .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             },
         },
-        source_conversation_id: Some(client_id.into()),
+        source_conversation_id: Some(conversation.clone()),
         requirement_revision: Some(1),
         creation_source: ScheduleCreationSource::Manual,
     };
@@ -1073,3 +1073,5 @@ async fn scheduled_executor_preserves_approved_timer_after_real_new_user_input()
 }
 
 mod process_restart;
+
+mod selectable;

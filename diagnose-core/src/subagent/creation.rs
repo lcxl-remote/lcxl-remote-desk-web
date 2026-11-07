@@ -554,6 +554,39 @@ impl CreationEnvelope {
         Ok(())
     }
 
+    /// Native task intake supplies a frozen target independently from later
+    /// owner selections. Retain the original owner and model lineage.
+    pub fn for_conversation_resume(
+        &self,
+        session: &PersistedAgentSession,
+    ) -> Result<Self, AgentError> {
+        let binding = session
+            .scheduled_request
+            .as_ref()
+            .ok_or_else(|| super::invalid("native timer input is missing"))?;
+        binding.validate(session).map_err(super::invalid)?;
+        if self.actor_id != session.actor_id
+            || self.device_id != session.device_id
+            || self.root_conversation_id != session.conversation_id
+            || self.parent_input_revision != session.input_revision
+            || self.parent_control_revision != session.control_revision
+        {
+            return Err(super::invalid(
+                "native timer source differs from its original owner",
+            ));
+        }
+        let mut creation = self.clone();
+        creation.source = DelegationSource::ConversationResume {
+            schedule_id: binding.schedule_id.clone(),
+            run_id: binding.run_id.clone(),
+            input_revision: session.input_revision,
+        };
+        creation.targets = vec![binding.execution_target.clone()];
+        creation.original_read_context = binding.original_read_context.clone();
+        creation.validate()?;
+        Ok(creation)
+    }
+
     pub fn select_targets(
         &self,
         refs: &[String],

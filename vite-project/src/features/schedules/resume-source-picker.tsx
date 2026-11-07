@@ -30,7 +30,7 @@ export function ResumeSourcePicker({ client, devices, connected, onSelect }: {
                 || !Number.isSafeInteger(source.requirement_revision) || source.requirement_revision < 1)) throw new Error('Invalid conversation choices');
             setSources(previous => {
                 const items = next ? [...previous, ...result.sources] : result.sources;
-                return [...new Map(items.map(source => [source.client_conversation_id, source])).values()];
+                return [...new Map(items.map(source => [source.conversation_id, source])).values()];
             });
             setOffset(result.next_offset ?? null);
         } catch { if (epoch === generation.current) setError(true); }
@@ -51,8 +51,8 @@ export function ResumeSourcePicker({ client, devices, connected, onSelect }: {
         </label>
         {error && <p role="alert">{t('schedules.requestFailed')}</p>}
         {!busy && !sources.length && <p>{t('schedules.noConversations')}</p>}
-        {sources.map(source => <Button key={source.client_conversation_id} variant="outline" className="h-auto w-full whitespace-pre-wrap text-left"
-            disabled={!connected || busy} onClick={() => onSelect(source)}>{source.title || source.client_conversation_id}</Button>)}
+        {sources.map(source => <Button key={source.conversation_id} variant="outline" className="h-auto w-full whitespace-pre-wrap text-left"
+            disabled={!connected || busy} onClick={() => onSelect(source)}>{source.title || source.conversation_id}</Button>)}
         <Button variant="outline" disabled={!connected || busy} onClick={() => void load()}>{t('schedules.policy.reload')}</Button>
         {offset !== null && <Button variant="outline" disabled={!connected || busy} onClick={() => void load(offset)}>{t('schedules.more')}</Button>}
     </div>;

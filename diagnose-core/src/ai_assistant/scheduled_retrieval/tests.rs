@@ -14,7 +14,7 @@ fn consent() -> TaskRetrievalConsent {
         until_unix_ms: 90,
     });
     history.expires_at_unix_ms = Some(8000);
-    TaskRetrievalConsent::capture("schedule", 2, &session, 1000).unwrap()
+    capture(&session).unwrap()
 }
 
 fn occurrence(run: &str) -> RetrievalOccurrence<'_> {
@@ -181,7 +181,7 @@ fn disabled_and_temporary_consent_cannot_be_enlarged_by_later_settings() {
         data.temporary = temporary;
         data.history_access_scope = None;
         data.memory_access_scope = None;
-        let consent = TaskRetrievalConsent::capture("schedule", 2, &session, 1000).unwrap();
+        let consent = capture(&session).unwrap();
         let frozen = consent
             .for_occurrence(&occurrence("schedule-run-disabled"), Default::default())
             .unwrap();
@@ -191,7 +191,7 @@ fn disabled_and_temporary_consent_cannot_be_enlarged_by_later_settings() {
     let mut session = personal_session("owner", "root", "device");
     session.input_revision = 1;
     session.assistant_data = None;
-    let consent = TaskRetrievalConsent::capture("schedule", 2, &session, 1000).unwrap();
+    let consent = capture(&session).unwrap();
     let frozen = consent
         .for_occurrence(&occurrence("schedule-run-absent"), Default::default())
         .unwrap();
@@ -261,7 +261,7 @@ fn malformed_oversized_or_mixed_original_scopes_do_not_decode_as_owner_consent()
 fn native_resume_binding_keeps_prior_context_and_rechecks_without_refilling_spent_calls() {
     let mut session = personal_session("owner", "root", "device");
     session.input_revision = 1;
-    let consent = TaskRetrievalConsent::capture("schedule", 2, &session, 1000).unwrap();
+    let consent = capture(&session).unwrap();
     let prior = session.clone();
     let run = occurrence("schedule-run-bound");
     consent
@@ -325,7 +325,7 @@ fn resume_binding_replaces_later_enabled_scopes_with_original_absent_consent() {
     session.input_revision = 1;
     let mut source = session.clone();
     source.assistant_data = None;
-    let consent = TaskRetrievalConsent::capture("schedule", 2, &source, 1000).unwrap();
+    let consent = capture(&source).unwrap();
     let run = occurrence("schedule-run-without-consent");
     consent
         .bind_conversation_resume(&mut session, &run, &Default::default())
@@ -385,7 +385,7 @@ fn fresh_context_inherits_original_personalization_and_scopes_without_old_transc
             100,
         )
         .unwrap();
-    let consent = TaskRetrievalConsent::capture("schedule", 2, &source, 1000).unwrap();
+    let consent = capture(&source).unwrap();
     let mut run = occurrence("schedule-run-fresh-bind");
     run.kind = ScheduledRetrievalKind::FreshTask;
     run.root_conversation_id = run.run_id;
@@ -500,7 +500,7 @@ fn configured_personalization_capacity_survives_task_definition_snapshot_encodin
 fn a_new_occurrence_uses_current_platform_limits_and_resume_preserves_its_allowance() {
     let mut source = personal_session("owner", "root", "device");
     source.input_revision = 1;
-    let consent = TaskRetrievalConsent::capture("schedule", 2, &source, 1000).unwrap();
+    let consent = capture(&source).unwrap();
     let mut run = occurrence("schedule-run-configured");
     run.kind = ScheduledRetrievalKind::ConversationResume;
     run.source_conversation_id = Some(&source.conversation_id);
@@ -548,4 +548,127 @@ fn a_new_occurrence_uses_current_platform_limits_and_resume_preserves_its_allowa
             .bind_conversation_resume(&mut resumed, &run, &limits)
             .is_err()
     );
+}
+
+fn capture(source: &PersistedAgentSession) -> Result<TaskRetrievalConsent, &'static str> {
+    let mut source = source.clone();
+    source.bind_assistant_input_targets(&[])?;
+    let target = source.single_assistant_request_target()?.clone();
+    TaskRetrievalConsent::capture("schedule", 2, &source, target, None, 1000)
+}
+
+#[test]
+fn selectable_timer_keeps_its_target_and_context_after_later_owner_selection() {
+    let mut source = personal_session("owner", "root", "");
+    source.input_revision = 1;
+    source.begin_focus_epoch(1, Vec::new()).unwrap();
+    source
+        .bind_assistant_request_targets(vec!["a".into(), "b".into()])
+        .unwrap();
+    let target = source.assistant_request_device("a").unwrap().clone();
+    let original = crate::input_read_context::ReadContextSelection::default();
+    let consent =
+        TaskRetrievalConsent::capture("schedule", 2, &source, target, Some(original.clone()), 1000)
+            .unwrap();
+    assert!(consent.source_session_device_id.is_empty());
+    assert_eq!(consent.device_id, "a");
+    let frozen = TaskRetrievalConsent::decode(&consent.encode().unwrap()).unwrap();
+    source.input_revision = 2;
+    source.begin_focus_epoch(2, Vec::new()).unwrap();
+    source
+        .bind_assistant_request_targets(vec!["b".into()])
+        .unwrap();
+    source.current_request_id = Some("schedule-run-one".into());
+    source.adopt_trigger(
+        crate::session::TriggerOrigin::ScheduledContinuation,
+        "timer-turn",
+    );
+    source.scheduled_request = Some(Box::new(frozen.request_binding("schedule-run-one")));
+    source
+        .scheduled_request
+        .as_ref()
+        .unwrap()
+        .validate(&source)
+        .unwrap();
+    assert_eq!(
+        source.single_assistant_request_target().unwrap().device_id,
+        "a"
+    );
+    assert_eq!(
+        source.admitted_assistant_request_targets().unwrap()[0].device_id,
+        "b"
+    );
+    assert_eq!(
+        source
+            .scheduled_request
+            .as_ref()
+            .unwrap()
+            .original_read_context
+            .as_ref(),
+        Some(&original)
+    );
+    let restored =
+        PersistedAgentSession::decode_json(&source.encode_json_for_storage().unwrap()).unwrap();
+    assert_eq!(
+        restored
+            .single_assistant_request_target()
+            .unwrap()
+            .device_id,
+        "a"
+    );
+    source.input_revision = 3;
+    source.begin_focus_epoch(3, Vec::new()).unwrap();
+    source
+        .bind_assistant_request_targets(vec!["b".into()])
+        .unwrap();
+    assert!(source.scheduled_request.is_none());
+    assert_eq!(
+        source.single_assistant_request_target().unwrap().device_id,
+        "b"
+    );
+}
+
+#[test]
+fn native_timer_restores_owner_scopes_and_spent_budget_without_copying_content() {
+    let mut source = personal_session("owner", "root", "device");
+    source.input_revision = 1;
+    source.bind_assistant_input_targets(&[]).unwrap();
+    let consent = capture(&source).unwrap();
+    let data = source.assistant_data.as_mut().unwrap();
+    // A later owner choice remains the source for any subsequently created task.
+    data.memory_access_scope = None;
+    data.history_access_scope = None;
+    data.retrieval_budget
+        .reserve(
+            "owner-spent",
+            &"c".repeat(64),
+            RetrievalCallKind::Relevance,
+            100,
+            2000,
+        )
+        .unwrap();
+    let owner = data.clone();
+    let run = occurrence("schedule-run-owner-restore");
+    consent
+        .bind_conversation_resume(&mut source, &run, &Default::default())
+        .unwrap();
+    source.scheduled_request = Some(Box::new(consent.request_binding(run.run_id)));
+    assert!(
+        source
+            .assistant_data
+            .as_ref()
+            .unwrap()
+            .memory_access_scope
+            .is_some()
+    );
+    let next = capture(&source).unwrap();
+    assert!(next.memory_scope.is_none());
+    assert!(next.history_scope.is_none());
+    assert!(restore_owner_retrieval(&mut source).unwrap());
+    let restored = source.assistant_data.as_ref().unwrap();
+    assert_eq!(restored.retrieval_budget, owner.retrieval_budget);
+    assert_eq!(restored.memory_access_scope, owner.memory_access_scope);
+    assert_eq!(restored.history_access_scope, owner.history_access_scope);
+    assert_eq!(restored.current_memories, owner.current_memories);
+    assert!(!restore_owner_retrieval(&mut source).unwrap());
 }

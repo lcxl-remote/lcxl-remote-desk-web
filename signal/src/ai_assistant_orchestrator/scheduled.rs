@@ -32,7 +32,15 @@ pub async fn resume_scheduled_turn(
         let mut targets = map.values().filter(|target| {
             target.auth_context.auth_kind == AuthKind::TokenAuth
                 && target.auth_context.remote_desk_type == RemoteDeskTypeEnum::Server
-                && target.client_id.as_deref() == Some(session.device_id.as_str())
+                && target.client_id.as_deref()
+                    == Some(
+                        session
+                            .scheduled_request
+                            .as_ref()
+                            .map_or(session.device_id.as_str(), |binding| {
+                                binding.execution_target.device_id.as_str()
+                            }),
+                    )
         });
         if targets
             .next()
@@ -61,7 +69,11 @@ pub async fn resume_scheduled_turn(
         db,
         prepared.claimed.run.run_id.clone(),
         String::new(),
-        target_connection_id,
+        if session.device_id.is_empty() {
+            String::new()
+        } else {
+            target_connection_id
+        },
         prepared.claimed.run.owner_user_id,
         session.device_id.clone(),
         ask,

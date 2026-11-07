@@ -34,7 +34,7 @@ use crate::context_attachment::{
 use crate::model_context::{ContextNotice, MAX_CONTEXT_NOTICES, ModelContextState};
 use crate::replay::{ReplayDisposition, ReplayUnavailableReason};
 
-pub const CONVERSATION_SCHEMA_VERSION: u16 = 33;
+pub const CONVERSATION_SCHEMA_VERSION: u16 = 34;
 /// Opaque replay is bounded independently from visible transcript text.
 pub const MAX_REPLAY_ENVELOPE_BYTES: usize = 256 * 1024;
 pub const MAX_SESSION_REPLAY_BYTES: usize = 2 * 1024 * 1024;
@@ -619,6 +619,11 @@ pub struct PersistedAgentSession {
     /// a ceiling on device selection, independent of the turn's policy scope.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     assistant_request_targets: Option<Box<AssistantRequestTargets>>,
+    pub scheduled_request:
+        Option<Box<crate::ai_assistant::scheduled_retrieval::ScheduledRequestBinding>>,
+    pub scheduled_owner_retrieval:
+        Option<Box<crate::ai_assistant::scheduled_retrieval::OwnerRetrievalState>>,
+    pub scheduled_owner_group_id: Option<String>,
     /// Authorization anchor. A change is detected at turn boundaries (recompute)
     /// and mid-turn (narrow-only intersection); see [`Self::begin_turn`].
     pub policy_revision: i64,
@@ -918,11 +923,41 @@ impl PersistedAgentSession {
                 ));
             }
         }
+        if let Some(binding) = &session.scheduled_request {
+            binding
+                .validate(&session)
+                .map_err(|error| SessionDecodeError::InvalidDynamicRun(error.into()))?;
+        }
+        if session
+            .scheduled_owner_group_id
+            .as_ref()
+            .is_some_and(|id| !crate::subagent::valid_id(id) || session.scheduled_request.is_none())
+        {
+            return Err(SessionDecodeError::InvalidDynamicRun(
+                "scheduled owner group lost its native claim".into(),
+            ));
+        }
+        if let Some(owner) = &session.scheduled_owner_retrieval {
+            if session.scheduled_request.is_none() {
+                return Err(SessionDecodeError::InvalidDynamicRun(
+                    "scheduled retrieval lost its claim".into(),
+                ));
+            }
+            let mut data = session.assistant_data.clone().ok_or_else(|| {
+                SessionDecodeError::InvalidDynamicRun("scheduled owner data is missing".into())
+            })?;
+            owner
+                .apply(&mut data)
+                .map_err(|error| SessionDecodeError::InvalidDynamicRun(error.into()))?;
+        }
         if let Some(data) = &session.assistant_data {
             if session.surface != AgentSessionSurface::AiAssistant
                 || session.agent_role.binding().is_some()
-                || data.source_device_ref.is_empty() != session.device_id.is_empty()
-                || (data.source_device_ref.is_empty() && !session.has_admitted_personal_input())
+                || (data.source_device_ref.is_empty() != session.device_id.is_empty()
+                    && session.trigger_origin != TriggerOrigin::ScheduledTask)
+                || (data.source_device_ref.is_empty()
+                    && !session.has_admitted_personal_input()
+                    && session.trigger_origin != TriggerOrigin::ScheduledTask)
                 || (data.instructions.accepted_input_seq == 0
                     && !session.conversation_id.starts_with("schedule-run-"))
                 || (data.current_actor_input_seq == 0
@@ -1473,6 +1508,9 @@ impl PersistedAgentSession {
             actor_id,
             device_id,
             assistant_request_targets: None,
+            scheduled_request: None,
+            scheduled_owner_retrieval: None,
+            scheduled_owner_group_id: None,
             policy_revision,
             turn_start_scope: clone_initial_scope(&scope),
             scope_snapshot: scope,
@@ -1599,7 +1637,9 @@ impl PersistedAgentSession {
             ) => revision == *input_revision,
             Some(DelegationSource::Goal { .. }) => true,
             Some(
-                DelegationSource::IssueWork { .. } | DelegationSource::ScheduledOccurrence { .. },
+                DelegationSource::IssueWork { .. }
+                | DelegationSource::ScheduledOccurrence { .. }
+                | DelegationSource::ConversationResume { .. },
             ) => false,
         }
     }
@@ -1764,6 +1804,15 @@ impl PersistedAgentSession {
     }
 
     pub fn assistant_request_targets(&self) -> Option<&[crate::dynamic_run::AssistantInputTarget]> {
+        if let Some(binding) = &self.scheduled_request {
+            return Some(std::slice::from_ref(&binding.execution_target));
+        }
+        self.admitted_assistant_request_targets()
+    }
+
+    pub fn admitted_assistant_request_targets(
+        &self,
+    ) -> Option<&[crate::dynamic_run::AssistantInputTarget]> {
         self.assistant_request_targets
             .as_ref()
             .filter(|targets| targets.input_revision == self.input_revision)
@@ -1899,6 +1948,9 @@ impl PersistedAgentSession {
             // focus. Compare the previous focus epoch so old parent waits and
             // observations cannot survive with a stale input fence.
             let input_changed = self.focus_epoch.input_revision != next_input_revision;
+            if input_changed {
+                crate::ai_assistant::scheduled_retrieval::restore_owner_retrieval(self)?;
+            }
             let selected_attachment_ids = selected_attachment_ids.into_iter().collect::<Vec<_>>();
             if selected_attachment_ids.iter().any(|id| {
                 !self.context_attachments.iter().any(|attachment| {
@@ -2446,6 +2498,7 @@ impl PersistedAgentSession {
         }
 
         if origin == TriggerOrigin::User {
+            self.scheduled_request = None;
             self.subagent_result_only = false;
         }
         match origin {

@@ -251,3 +251,31 @@ async fn persist_source_group_inner(
     session.delegation_group_id = Some(group.group_id);
     Ok(())
 }
+
+/// Allocate one source group for this native timer. Approval resumes retain it
+/// and its spent ledger; the owner input's group is restored on task settlement.
+pub(crate) async fn initialize_continuation_group_on(
+    txn: &DatabaseTransaction,
+    session: &mut PersistedAgentSession,
+    now_ms: i64,
+) -> Result<(), DbErr> {
+    let Some(id) = session.delegation_group_id.as_deref() else {
+        return if session.latest_input_seq == 0 {
+            Ok(())
+        } else {
+            Err(invalid())
+        };
+    };
+    let row = group_row::Entity::find()
+        .filter(group_row::Column::GroupId.eq(id))
+        .filter(group_row::Column::RootConversationId.eq(&session.conversation_id))
+        .filter(group_row::Column::ActorId.eq(&session.actor_id))
+        .filter(group_row::Column::DeviceId.eq(&session.device_id))
+        .one(txn)
+        .await?
+        .ok_or_else(|| invalid())?;
+    let creation = decode_creation(&row)?
+        .for_conversation_resume(session)
+        .map_err(|_| invalid())?;
+    persist_source_group_on(txn, session, &creation, None, now_ms).await
+}

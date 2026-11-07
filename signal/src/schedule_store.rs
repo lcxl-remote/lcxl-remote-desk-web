@@ -395,7 +395,7 @@ impl ScheduleStore {
         let row = agent_session::Entity::find()
             .filter(agent_session::Column::ConversationId.eq(source))
             .filter(agent_session::Column::ActorId.eq(owner.to_string()))
-            .filter(agent_session::Column::DeviceId.eq(&request.target_device_id))
+            .filter(agent_session::Column::DeviceId.is_in([request.target_device_id.as_str(), ""]))
             .one(db)
             .await?
             .ok_or(ScheduleStoreError::NotFound)?;
@@ -404,7 +404,7 @@ impl ScheduleStore {
                 .map_err(|_| ScheduleStoreError::Invalid)?,
         );
         if session.actor_id != owner.to_string()
-            || session.device_id != request.target_device_id
+            || session.device_id != row.device_id
             || session.conversation_id != source
             || session.version != row.version
             || i64::try_from(session.lease_token).ok() != Some(row.lease_token)
@@ -419,11 +419,47 @@ impl ScheduleStore {
         {
             return Err(ScheduleStoreError::Conflict);
         }
+        let target = session
+            .admitted_assistant_request_targets()
+            .and_then(|targets| {
+                targets
+                    .iter()
+                    .find(|target| target.device_id == request.target_device_id)
+            })
+            .cloned()
+            .ok_or(ScheduleStoreError::Invalid)?;
+        let mut owner_input = session.clone();
+        owner_input.scheduled_request = None;
+        // No accepted input means no inherited read selection; it grants no resources.
+        let mut original_context = if session.latest_input_seq == 0 {
+            None
+        } else {
+            crate::agent_run_event_store::input_context::original_on(db, &owner_input)
+                .await
+                .map_err(|_| ScheduleStoreError::Invalid)?
+        };
+        if let Some(context) = &mut original_context {
+            context
+                .object_attachments
+                .retain(|object| object.device_id == target.device_id);
+            context
+                .live_targets
+                .retain(|live| live.device_id == target.device_id);
+            if session.device_id.is_empty() {
+                let selected = context.clone();
+                context.tool_names.retain(|name| {
+                    desk_diagnose_core::web_research::is_web_tool(name)
+                        || selected.is_selected_object_tool(name)
+                });
+            }
+        }
         let captured_at = authority::authority_now(db).await?;
         let consent = TaskRetrievalConsent::capture(
             schedule_id,
             1,
             &session,
+            target,
+            original_context,
             captured_at
                 .try_into()
                 .map_err(|_| ScheduleStoreError::Invalid)?,
@@ -502,6 +538,12 @@ impl ScheduleStore {
         seed.memory_state_generation = data::unsigned(runtime.memory_state_generation)?;
         seed.control_generation = data::unsigned(runtime.control_generation)?;
         consent.encode().map_err(data::AssistantStoreError::Invalid)
+    }
+
+    pub(super) fn continuation_subject(task: &entity::Model) -> Result<String, ScheduleStoreError> {
+        Self::retrieval_consent(task)?
+            .map(|consent| consent.source_session_device_id)
+            .ok_or(ScheduleStoreError::Invalid)
     }
 
     pub(super) fn retrieval_consent(
@@ -701,6 +743,7 @@ pub(crate) mod tests {
         );
         session.surface = AgentSessionSurface::AiAssistant;
         session.input_revision = 1;
+        session.bind_assistant_input_targets(&[]).unwrap();
         session.begin_focus_epoch(1, Vec::<String>::new()).unwrap();
         let settings = AssistantDataSettings {
             automatic_memory_enabled: enabled,

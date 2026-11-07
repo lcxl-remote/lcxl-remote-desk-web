@@ -128,6 +128,7 @@ impl SubAgentRun {
             source: match &self.binding.source {
                 super::role::DelegationSource::UserInput { input_revision }
                 | super::role::DelegationSource::WorkbenchOwner { input_revision, .. } => desk_agent_protocol::ai_assistant::subagent::SubAgentSource::UserInput { input_revision: *input_revision },
+                super::role::DelegationSource::ConversationResume { schedule_id, run_id, .. } => desk_agent_protocol::ai_assistant::subagent::SubAgentSource::ScheduledOccurrence { schedule_id: schedule_id.clone(), occurrence_id: run_id.clone() },
                 super::role::DelegationSource::Goal { goal_id } => desk_agent_protocol::ai_assistant::subagent::SubAgentSource::Goal { goal_id: goal_id.clone() },
                 super::role::DelegationSource::ScheduledOccurrence { schedule_id, occurrence_id } => desk_agent_protocol::ai_assistant::subagent::SubAgentSource::ScheduledOccurrence { schedule_id: schedule_id.clone(), occurrence_id: occurrence_id.clone() },
                 super::role::DelegationSource::IssueWork { source } => desk_agent_protocol::ai_assistant::subagent::SubAgentSource::IssueSubscription {

@@ -7,7 +7,7 @@ import { useDeskSignaling } from './use-desk-signaling';
 import { ScheduleClient } from '@/features/schedules/client';
 
 export function AssistantSchedules({ open, onOpenChange, deviceId, sessionId }: {
-    open: boolean; onOpenChange: (open: boolean) => void; deviceId: string; sessionId: string | null;
+    open: boolean; onOpenChange: (open: boolean) => void; deviceId?: string; sessionId: string | null;
 }) {
     // Schedule sources use the server session ID, not the client conversation UUID.
     const { t } = useTranslation();
@@ -32,7 +32,7 @@ export function AssistantSchedules({ open, onOpenChange, deviceId, sessionId }: 
                 let after: string | null = null;
                 do {
                     const response = await client.request({ operation: 'search', kind: 'conversation_resume',
-                        target_device_id: deviceId, source_conversation_id: sessionId, attention_only: false, limit: 50, after });
+                        target_device_id: deviceId || null, source_conversation_id: sessionId, attention_only: false, limit: 50, after });
                     if (!active) return;
                     if (response.result !== 'search_results') throw new Error('invalid');
                     rows.push(...response.tasks);

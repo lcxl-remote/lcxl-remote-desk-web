@@ -16751,13 +16751,13 @@ export type RestResponseBool = {
 };
 
 /**
- * @description Owner-visible selection metadata, never a raw storage key or execution grant.
+ * @description Owner-visible original session identity, never an execution grant.
 */
 export type ResumeConversationSource = {
     /**
      * @type string
     */
-    client_conversation_id: string;
+    conversation_id: string;
     /**
      * @minLength 0
      * @type integer, int64

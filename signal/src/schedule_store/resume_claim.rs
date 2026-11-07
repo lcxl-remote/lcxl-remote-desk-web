@@ -128,7 +128,7 @@ impl ScheduleStore {
             work,
             task,
             snapshot,
-            ..
+            consent,
         } = task_claim.as_mut();
         let ContinuationSessionClaim { row, session, now } = source_claim.as_mut();
         let now = *now;
@@ -196,6 +196,12 @@ impl ScheduleStore {
             )
             .map_err(|_| ScheduleStoreError::Conflict)?;
         session.adopt_trigger(TriggerOrigin::ScheduledContinuation, &turn_id);
+        session.scheduled_request = Some(Box::new(consent.request_binding(&work.run_id)));
+        if permission.is_none() {
+            session.scheduled_owner_group_id = session.delegation_group_id.clone();
+            crate::agent_subagent_store::initialize_continuation_group_on(&txn, session, now)
+                .await?;
+        }
         session.version = row
             .version
             .checked_add(1)
@@ -396,6 +402,7 @@ impl ScheduleStore {
         let work = &claim.work;
         let task = &claim.task;
         let consent = &claim.consent;
+        let subject = &consent.source_session_device_id;
         let source = task
             .source_conversation_id
             .as_deref()
@@ -404,7 +411,7 @@ impl ScheduleStore {
         let row = session_row::Entity::find()
             .filter(session_row::Column::ConversationId.eq(source))
             .filter(session_row::Column::ActorId.eq(&actor))
-            .filter(session_row::Column::DeviceId.eq(&task.target_device_id))
+            .filter(session_row::Column::DeviceId.eq(subject))
             .one(txn)
             .await?
             .ok_or(ScheduleStoreError::NotFound)?;
@@ -413,9 +420,7 @@ impl ScheduleStore {
                 .map_err(|_| ScheduleStoreError::Invalid)?,
         );
         if session.conversation_id != source
-            || session
-                .check_subject(&actor, &task.target_device_id)
-                .is_err()
+            || session.check_subject(&actor, subject).is_err()
             || session
                 .check_surface(AgentSessionSurface::AiAssistant)
                 .is_err()
@@ -425,7 +430,7 @@ impl ScheduleStore {
         if goal_row::Entity::find()
             .filter(goal_row::Column::ConversationId.eq(source))
             .filter(goal_row::Column::ActorId.eq(input.owner.to_string()))
-            .filter(goal_row::Column::DeviceId.eq(&task.target_device_id))
+            .filter(goal_row::Column::DeviceId.eq(subject))
             .filter(goal_row::Column::Status.is_not_in(["completed", "failed", "cancelled"]))
             .one(txn)
             .await?
@@ -476,7 +481,7 @@ impl ScheduleStore {
             .filter(session_row::Column::StateJson.eq(&row.state_json))
             .filter(session_row::Column::LeaseToken.eq(row.lease_token))
             .filter(session_row::Column::ActorId.eq(&actor))
-            .filter(session_row::Column::DeviceId.eq(&task.target_device_id))
+            .filter(session_row::Column::DeviceId.eq(subject))
             .filter(session_row::Column::ConversationId.eq(source))
             .exec(txn)
             .await?;
