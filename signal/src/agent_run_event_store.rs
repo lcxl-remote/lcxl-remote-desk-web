@@ -337,6 +337,9 @@ impl SignalAgentRunEventStore {
                 return Err(internal("workbench targets require the coordinator roster"));
             }
             if let Some(selection) = &params.read_context {
+                if targetless {
+                    selection.validate_object_devices(&targets)?;
+                }
                 input_context::validate_selection(&session, selection, &params.message, now)?;
             }
             if !matches!(admission, OwnerAdmission::Enqueue { .. })
@@ -1078,7 +1081,7 @@ fn validate_append_params(params: &AppendUserFollowupParams) -> Result<(), Agent
             || params
                 .read_context
                 .as_ref()
-                .is_some_and(|selection| !selection.is_host_web_only())
+                .is_some_and(|selection| !selection.is_selectable_input())
         {
             return Err(internal(
                 "targetless input requires an owner without device context",
@@ -1107,10 +1110,11 @@ fn validate_append_params(params: &AppendUserFollowupParams) -> Result<(), Agent
             if selection.expires_at != params.current_scope.expires_at
                 || selection.tool_names.iter().any(|name| {
                     registry.capability_for_tool(name).is_none_or(|capability| {
-                        !params
-                            .current_scope
-                            .granted
-                            .contains(&capability.required_capability)
+                        !selection.is_selected_object_tool(name)
+                            && !params
+                                .current_scope
+                                .granted
+                                .contains(&capability.required_capability)
                     })
                 })
             {

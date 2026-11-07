@@ -2912,6 +2912,8 @@ export default {
   'pages.deskTerminal.shellPlaceholder': '请选择 shell...',
   'pages.deskTerminal.switchShell': '切换 Shell',
   'pages.deskTerminal.assistant.add': '添加输出到 AI',
+  'pages.deskTerminal.assistant.addPersonal': '添加到多设备对话',
+  'pages.deskTerminal.assistant.addPersonalHint': '把近期输出添加到当前多设备对话；请先在对话中选择此设备',
   'pages.deskTerminal.assistant.added': '已添加到 AI',
   'pages.deskTerminal.assistant.addHint': '把有界的近期终端输出添加到AI助手',
   'pages.deskTerminal.assistant.addFailed': '无法把终端输出添加到AI助手',

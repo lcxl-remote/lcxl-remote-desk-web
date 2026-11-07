@@ -132,6 +132,7 @@ fn live_read_authority_uses_original_targets_on_both_surfaces() {
             }],
         };
         let binding = ObjectReadBinding {
+            device_id: "42",
             original: &original,
             destination: &destination,
             now_unix_ms: now,
@@ -210,6 +211,7 @@ fn selected_device_read_is_bounded_and_mutations_or_unselected_calls_are_refused
         ProductSurface::ManagerPersonalOwner,
         &call,
         &ObjectReadBinding {
+            device_id: "42",
             original: &original,
             destination: &destination,
             now_unix_ms: 1000,
@@ -248,6 +250,7 @@ fn selected_device_read_is_bounded_and_mutations_or_unselected_calls_are_refused
                 ProductSurface::ManagerPersonalOwner,
                 &other,
                 &ObjectReadBinding {
+                    device_id: "42",
                     original: &original,
                     destination: &destination,
                     now_unix_ms: 1000
@@ -263,6 +266,7 @@ fn selected_device_read_is_bounded_and_mutations_or_unselected_calls_are_refused
             ProductSurface::ManagerPersonalOwner,
             &call,
             &ObjectReadBinding {
+                device_id: "42",
                 original: &original,
                 destination: &destination,
                 now_unix_ms: 1000
@@ -285,6 +289,7 @@ fn web_fetch_preflight_reuses_host_scope_on_both_surfaces_and_freezes_each_input
         live_targets: vec![],
     };
     let binding = ObjectReadBinding {
+        device_id: "42",
         original: &original,
         destination: &destination,
         now_unix_ms: 1_000,
@@ -384,6 +389,7 @@ fn central_web_authority_is_exact_and_fixes_the_search_destination() {
         live_targets: vec![],
     };
     let binding = ObjectReadBinding {
+        device_id: "42",
         original: &original,
         destination: &destination,
         now_unix_ms: 1_000,
@@ -466,6 +472,8 @@ fn terminal_authority_uses_only_original_attachment_refs() {
         };
         let ObjectContextMutation::Attach(attachment) = build_object_context_mutation(
             &AiAssistantObjectContextUpdate {
+                conversation_target:
+                    desk_agent_protocol::ai_assistant::AiAssistantConversationTarget::FixedDevice,
                 conversation_id: "client".into(),
                 client_request_id: "selection".into(),
                 operation,
@@ -501,6 +509,7 @@ fn terminal_authority_uses_only_original_attachment_refs() {
             .into(),
         };
         let binding = ObjectReadBinding {
+            device_id: "42",
             original: &original,
             destination: &destination,
             now_unix_ms: 1000,
@@ -525,6 +534,13 @@ fn terminal_authority_uses_only_original_attachment_refs() {
         ] {
             let preflight = ReadCallPreflight::build(&registry, surface, &call, &binding)
                 .unwrap_or_else(|e| panic!("{name}: {e:?}"));
+            let selected = ReadCallPreflight::build_selected_device(
+                &registry, surface, &call, &binding,
+            ).unwrap();
+            assert_eq!(selected.resource_scope(), preflight.resource_scope());
+            assert!(ReadCallPreflight::build_selected_device(
+                &registry, surface, &call, &ObjectReadBinding { device_id: "other", ..binding },
+            ).is_err());
             assert_eq!(
                 preflight.resource_scope(),
                 fresh_object_resource_scope(std::slice::from_ref(&reference))
@@ -582,6 +598,7 @@ fn unselected_desktop_preflight_requires_explicit_r1_authority_on_both_surfaces(
                 surface,
                 &call,
                 &ObjectReadBinding {
+                    device_id: "42",
                     original: &original,
                     destination: &destination,
                     now_unix_ms: 1000,
@@ -618,6 +635,7 @@ fn unselected_desktop_preflight_requires_explicit_r1_authority_on_both_surfaces(
                     surface,
                     &call,
                     &ObjectReadBinding {
+                        device_id: "42",
                         original: &original,
                         destination: &destination,
                         now_unix_ms: 1000

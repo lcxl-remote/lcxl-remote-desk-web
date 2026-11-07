@@ -74,6 +74,7 @@ export type AiAssistantToolActivity = {
 
 export type AiAssistantContextAttachment = {
     id: string;
+    deviceRef?: string | null;
     kind: string;
     providerId: string;
     capabilityId: string;
@@ -1473,6 +1474,8 @@ export function useAiAssistantChat({
     const detachAttachment = useCallback((attachmentId: string) => {
         if (rehearsal && (rehearsal.status === 'completed' || rehearsal.status === 'cancelled' || rehearsal.status === 'failed' || (!rehearsalSent.current && rehearsal.status !== 'running'))) return false;
         if (activeRequest.current || remoteActive || contextRequest.current) return false;
+        const attachmentDevice = deskId || attachments.find(item => item.id === attachmentId)?.deviceRef;
+        if (!attachmentDevice) return false;
         const currentConversationId = ensureConversation();
         const clientRequestId = v4();
         setContextUpdating(true);
@@ -1482,12 +1485,13 @@ export function useAiAssistantChat({
             {
                 conversation_id: currentConversationId,
                 client_request_id: clientRequestId,
+                conversation_target: deskId ? 'fixed_device' : 'selectable_devices',
                 operation: {
                     kind: 'detach',
                     attachment_id: attachmentId,
                 },
             },
-            deskId,
+            attachmentDevice,
         );
         contextTimer.current = window.setTimeout(() => {
             contextTimer.current = null;
@@ -1497,7 +1501,7 @@ export function useAiAssistantChat({
             if (conversationId.current) void loadSnapshot(conversationId.current);
         }, 10_000);
         return true;
-    }, [deskId, ensureConversation, loadSnapshot, remoteActive, sendMessage, rehearsal]);
+    }, [attachments, deskId, ensureConversation, loadSnapshot, remoteActive, sendMessage, rehearsal]);
 
     const updateDirectory = useCallback((operation: AssistantDirectoryOperation, timeoutMessage: string) => {
         if (rehearsal && (rehearsal.status === 'completed' || rehearsal.status === 'cancelled' || rehearsal.status === 'failed' || (!rehearsalSent.current && rehearsal.status !== 'running'))) return false;
@@ -1508,7 +1512,7 @@ export function useAiAssistantChat({
         setContextUpdating(true);
         setError(null);
         contextRequest.current = sendMessage(SIGNALING_TYPE_CODE_UPDATE_AI_ASSISTANT_OBJECT_CONTEXT, {
-            conversation_id: currentConversationId, client_request_id: clientRequestId, operation,
+            conversation_id: currentConversationId, conversation_target: 'fixed_device', client_request_id: clientRequestId, operation,
         }, deskId);
         contextTimer.current = window.setTimeout(() => {
             directorySelectors.current = null;
@@ -1532,6 +1536,7 @@ export function useAiAssistantChat({
             {
                 conversation_id: currentConversationId,
                 client_request_id: v4(),
+                conversation_target: 'fixed_device',
                 operation: {
                     kind: 'attach_window',
                     object_ref: objectRef,
@@ -1565,7 +1570,10 @@ export function useAiAssistantChat({
             || !sessionTargetReady || pendingDelivery.current || stopPending.current) return false;
         const nativeTurn = Boolean(rehearsal || (deskId && startGoal));
         if (nativeTurn && (activeRequest.current || remoteActive)) return false;
-        const selectedObjects = attachments.filter(attachment => attachment.state === 'active' && attachment.kind !== 'interactive_session');
+        const selectedObjects = attachments.filter(attachment =>
+            attachment.state === 'active' && attachment.kind !== 'interactive_session'
+            && (deskId || (attachment.deviceRef && requestTargetRefs?.includes(attachment.deviceRef)))
+        );
         if (selectedObjects.some(attachment => attachment.expiresAtUnixMs <= Date.now())) {
             deliveryFailure.current = 'selected_context_expired';
             setError(deliveryFailure.current);
@@ -1604,7 +1612,7 @@ export function useAiAssistantChat({
                 selected_capability_ids: deskId ? [...selectedCapabilityIds] : [],
                 start_goal: Boolean(deskId) && !rehearsal && startGoal,
                 previous_completed_goal_id: deskId && !rehearsal && startGoal ? previousCompletedGoalId : null,
-                selected_attachment_ids: rehearsal || !deskId ? [] : selectedObjects
+                selected_attachment_ids: rehearsal ? [] : selectedObjects
                     .map((attachment) => attachment.id),
                 ...(!rehearsal && selectedIssues.length ? { selected_issues: selectedIssues.map(issue => ({ ...issue })) } : {}),
             } satisfies AiAssistantAsk;

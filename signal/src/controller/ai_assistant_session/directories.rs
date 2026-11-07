@@ -51,6 +51,8 @@ pub async fn control_ai_assistant_directory(
         })?
     };
     let update = desk_agent_protocol::ai_assistant::AiAssistantObjectContextUpdate {
+        conversation_target:
+            desk_agent_protocol::ai_assistant::AiAssistantConversationTarget::FixedDevice,
         conversation_id: selector.clone(),
         client_request_id: body.client_request_id,
         operation: body.operation.into(),

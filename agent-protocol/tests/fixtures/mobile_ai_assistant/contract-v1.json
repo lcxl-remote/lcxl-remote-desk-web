@@ -225,6 +225,7 @@
   "object_context_update": {
     "conversation_id": "conversation-1",
     "client_request_id": "object-request-1",
+    "conversation_target": "selectable_devices",
     "operation": {
       "kind": "attach_terminal_output",
       "object_ref": {

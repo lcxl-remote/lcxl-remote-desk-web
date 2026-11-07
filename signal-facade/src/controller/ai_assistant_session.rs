@@ -784,6 +784,7 @@ impl From<desk_diagnose_core::model_context::ContextNotice> for ContextNoticeDto
 #[serde(rename_all = "camelCase")]
 pub struct ContextAttachmentDto {
     pub id: String,
+    pub device_ref: Option<String>,
     pub kind: String,
     pub provider_id: String,
     pub capability_id: String,
@@ -822,6 +823,7 @@ impl ContextAttachmentDto {
         };
         Self {
             id: attachment.attachment_id,
+            device_ref: Some(attachment.device_id),
             kind: attachment_kind_name(attachment.kind).to_string(),
             provider_id: attachment.object_ref.source_provider_id,
             capability_id: attachment.object_ref.source_capability_id,

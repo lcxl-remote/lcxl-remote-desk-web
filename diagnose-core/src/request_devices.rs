@@ -51,6 +51,7 @@ pub(crate) fn read_tools(
     devices: &[RequestDevice],
     registry: &ProviderRegistry,
     image_input: bool,
+    original: Option<&crate::input_read_context::ReadContextSelection>,
 ) -> Vec<(RegisteredTool, bool)> {
     registry
         .providers()
@@ -62,7 +63,7 @@ pub(crate) fn read_tools(
         .filter_map(|descriptor| {
             let ready = devices
                 .iter()
-                .filter(|device| device.ready_for(descriptor))
+                .filter(|device| device.ready_for_read(descriptor, original))
                 .collect::<Vec<_>>();
             if ready.is_empty() {
                 return None;
@@ -295,7 +296,8 @@ pub(crate) async fn plan_device_permission(
             {
                 let descriptor = registry.capability_for_tool(name).ok_or_else(invalid)?;
                 let target = devices.iter().find(|device| {
-                    device.target_ref == reference && device.ready_for(descriptor)
+                    device.target_ref == reference
+                        && device.ready_for_read(descriptor, tools.original_read_context())
                 }).and_then(|device| device.read_target.clone()).ok_or_else(invalid)?;
                 let exact = item.get("exact_input").ok_or_else(invalid)?;
                 require_observed_desktop_target(session, &target.device_id, name, exact)?;
@@ -543,6 +545,25 @@ pub struct SelectedReadTarget {
 }
 
 impl RequestDevice {
+    fn ready_for_read(
+        &self,
+        descriptor: &crate::provider_registry::CapabilityDescriptor,
+        original: Option<&crate::input_read_context::ReadContextSelection>,
+    ) -> bool {
+        self.ready_for(descriptor)
+            && (descriptor.exposure != crate::tool_exposure::ExposureRequirement::SelectedContext
+                || self
+                    .read_target
+                    .as_ref()
+                    .zip(original)
+                    .is_some_and(|(target, selection)| {
+                        selection.has_device_objects_for_tool(
+                            &descriptor.wire.tool_name,
+                            &target.device_id,
+                        )
+                    }))
+    }
+
     fn ready_for(&self, descriptor: &crate::provider_registry::CapabilityDescriptor) -> bool {
         self.online
             && self

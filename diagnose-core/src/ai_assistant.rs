@@ -3321,7 +3321,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
         send_slack_message_tool(),
     );
     let terminal = provider_for_tool(
-        TargetBinding::NativeContext,
+        TargetBinding::RequestDevice,
         crate::tool_exposure::ExposureRequirement::SelectedContext,
         TERMINAL_OUTPUT_PROVIDER_ID,
         TERMINAL_OUTPUT_CAPABILITY_ID,

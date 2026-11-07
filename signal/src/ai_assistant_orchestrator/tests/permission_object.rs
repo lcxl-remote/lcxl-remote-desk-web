@@ -384,6 +384,8 @@ async fn run_case_with_live_inner(change: Option<&str>, mode: ResumeMode, live: 
         1,
         "device".into(),
         &AiAssistantObjectContextUpdate {
+            conversation_target:
+                desk_agent_protocol::ai_assistant::AiAssistantConversationTarget::FixedDevice,
             conversation_id: client_id.into(),
             client_request_id: "attach-original".into(),
             operation: AiAssistantObjectContextOperation::AttachTerminalOutput {
@@ -464,6 +466,8 @@ async fn run_case_with_live_inner(change: Option<&str>, mode: ResumeMode, live: 
         1,
         "device".into(),
         &AiAssistantObjectContextUpdate {
+            conversation_target:
+                desk_agent_protocol::ai_assistant::AiAssistantConversationTarget::FixedDevice,
             conversation_id: client_id.into(),
             client_request_id: "attach-later".into(),
             operation: AiAssistantObjectContextOperation::AttachTerminalOutput {
@@ -929,6 +933,7 @@ async fn run_case_with_live_inner(change: Option<&str>, mode: ResumeMode, live: 
                     1,
                     "device".into(),
                     &AiAssistantObjectContextUpdate {
+                        conversation_target: desk_agent_protocol::ai_assistant::AiAssistantConversationTarget::FixedDevice,
                         conversation_id: client_id.into(),
                         client_request_id: "withdraw-original".into(),
                         operation: AiAssistantObjectContextOperation::Detach {

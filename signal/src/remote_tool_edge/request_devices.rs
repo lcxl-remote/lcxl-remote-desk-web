@@ -125,7 +125,7 @@ impl SignalAiAssistantTools {
         if !self
             .original_input
             .get()
-            .is_some_and(|input| input.selection.is_host_web_only())
+            .is_some_and(|input| input.selection.is_selectable_input())
         {
             return Err(unavailable());
         }

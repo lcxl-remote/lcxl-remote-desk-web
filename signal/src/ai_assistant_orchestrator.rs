@@ -577,12 +577,9 @@ pub(crate) async fn apply_object_context_update(
     update.validate().map_err(transport_error)?;
     let actor_id = actor_user_id.to_string();
     let mut params = crate::agent_session_store::UpdateObjectContext {
-        run_id: derive_conversation_key(
-            &actor_id,
-            &target_device_id,
-            Some(&update.conversation_id),
-            "",
-        ),
+        run_id: AssistantConversationScope::Personal
+            .object_context_key(&actor_id, &target_device_id, update)
+            .map_err(transport_error)?,
         actor_id,
         device_id: target_device_id,
         update: update.clone(),
@@ -648,7 +645,14 @@ pub async fn update_object_context(
     target_device_id: String,
     update: AiAssistantObjectContextUpdate,
 ) {
-    let result = if let desk_agent_protocol::ai_assistant::AiAssistantObjectContextOperation::SelectDirectory { path, .. } = &update.operation {
+    let result = if update.conversation_target.is_selectable()
+        && matches!(update.operation,
+            desk_agent_protocol::ai_assistant::AiAssistantObjectContextOperation::SelectDirectory { .. }
+            | desk_agent_protocol::ai_assistant::AiAssistantObjectContextOperation::DecideDirectory { .. }
+            | desk_agent_protocol::ai_assistant::AiAssistantObjectContextOperation::RevokeDirectory { .. })
+    {
+        Err(transport_error("Select a directory from the device assistant"))
+    } else if let desk_agent_protocol::ai_assistant::AiAssistantObjectContextOperation::SelectDirectory { path, .. } = &update.operation {
         async {
             use desk_diagnose_core::file_scope::{FileScopeSubject, transaction};
             update.validate().map_err(transport_error)?;
@@ -2544,6 +2548,9 @@ async fn prepare_composed_turn(
                                 ) {
                                     Ok(mut selection) => {
                                         selection.object_attachments = selected_objects;
+                                        if target_device_id.is_empty() {
+                                            selection.include_selectable_object_tools();
+                                        }
                                         selection.live_targets = live_targets;
                                         selection.external_issues =
                                             if let Some(original) = &original_read_context {

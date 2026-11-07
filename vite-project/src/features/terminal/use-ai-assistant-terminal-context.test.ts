@@ -40,6 +40,7 @@ describe('useAiAssistantTerminalContext', () => {
             {
                 conversation_id: 'conversation-1',
                 client_request_id: expect.any(String),
+                conversation_target: 'fixed_device',
                 operation: {
                     kind: 'attach_terminal_output',
                     object_ref: {
@@ -66,5 +67,30 @@ describe('useAiAssistantTerminalContext', () => {
         await waitFor(() => expect(result.current.pending).toBe(false));
         expect(result.current.added).toBe(true);
         expect(result.current.error).toBeNull();
+    });
+
+    it('sends the terminal reference from this device to the current multi-device chat', () => {
+        localStorage.setItem('ai-assistant-conversation:desk-1', 'fixed-chat');
+        localStorage.setItem('ai-assistant-conversation:personal:7', 'shared-chat');
+        const sendMessage = vi.fn(() => 'shared-context-request');
+        const { result } = renderHook(() => useAiAssistantTerminalContext({
+            deskId: 'desk-1', personalScope: 'personal:7',
+            subscribe: () => () => {}, sendMessage,
+        }));
+        const reference = {
+            token: 'opaque', snapshot_id: 'current', object_kind: 'terminal_output' as const,
+            expires_at: '2030-01-01T00:00:00Z',
+        };
+        expect(result.current.personalAvailable).toBe(true);
+        act(() => expect(result.current.attach(reference, 'selectable_devices')).toBe(true));
+        expect(sendMessage).toHaveBeenCalledWith(
+            SIGNALING_TYPE_CODE_UPDATE_AI_ASSISTANT_OBJECT_CONTEXT,
+            expect.objectContaining({
+                conversation_id: 'shared-chat',
+                conversation_target: 'selectable_devices',
+                operation: expect.objectContaining({ object_ref: reference }),
+            }),
+            'desk-1',
+        );
     });
 });

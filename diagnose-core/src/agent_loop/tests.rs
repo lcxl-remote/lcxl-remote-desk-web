@@ -338,6 +338,8 @@ fn selected_object_lineage_keeps_explicit_sources_without_later_context_expansio
     );
     for id in ["selected", "unselected"] {
         let update = AiAssistantObjectContextUpdate {
+            conversation_target:
+                desk_agent_protocol::ai_assistant::AiAssistantConversationTarget::FixedDevice,
             conversation_id: "client".into(),
             client_request_id: id.into(),
             operation: AiAssistantObjectContextOperation::AttachTerminalOutput {

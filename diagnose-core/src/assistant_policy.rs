@@ -67,7 +67,7 @@ pub fn validate_assistant_ask_scope(
         || ask.previous_completed_goal_id.is_some()
         || ask.temporary_conversation.is_some()
         || !ask.selected_capability_ids.is_empty()
-        || !ask.selected_attachment_ids.is_empty()
+        || (!ask.selected_attachment_ids.is_empty() && ask.target_refs.is_empty())
     {
         return Err("personal assistant input cannot carry device-bound context");
     }
@@ -320,7 +320,7 @@ mod tests {
     use desk_agent_protocol::{AgentScope, ExecutionMode};
 
     #[test]
-    fn targetless_ask_requires_a_personal_continuation_without_device_selectors() {
+    fn selectable_ask_requires_targets_when_it_selects_device_attachments() {
         let mut ask = AiAssistantAsk::default();
         assert!(validate_assistant_ask_scope(&ask, false).is_err());
         ask.conversation_id = Some("personal-thread".into());
@@ -330,6 +330,8 @@ mod tests {
         assert!(validate_assistant_ask_scope(&ask, true).is_err());
         ask.selected_attachment_ids
             .push("old-device-attachment".into());
+        assert!(validate_assistant_ask_scope(&ask, false).is_ok());
+        ask.target_refs.clear();
         assert!(validate_assistant_ask_scope(&ask, false).is_err());
         ask.selected_attachment_ids.clear();
         ask.selected_capability_ids

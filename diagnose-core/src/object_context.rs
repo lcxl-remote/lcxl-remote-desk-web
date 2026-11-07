@@ -172,16 +172,12 @@ pub fn build_read_attachment(
 pub fn apply_object_mutation(
     session: &mut PersistedAgentSession,
     mutation: &ObjectContextMutation,
+    device_id: &str,
 ) -> Result<bool, AgentError> {
     match mutation {
         ObjectContextMutation::Attach(attachment) => {
-            validate_attachment_subject(
-                attachment,
-                &session.actor_id,
-                &session.device_id,
-                session.surface,
-            )
-            .map_err(|_| invalid())?;
+            validate_attachment_subject(attachment, &session.actor_id, device_id, session.surface)
+                .map_err(|_| invalid())?;
             // Same-request replay must be exact; a duplicate object is not proof
             // that a contradictory request was accepted.
             if let Some(old) = session
@@ -197,6 +193,7 @@ pub fn apply_object_mutation(
             }
             if session.context_attachments.iter().any(|existing| {
                 matches!(existing.state, AttachmentState::Active)
+                    && existing.device_id == attachment.device_id
                     && existing.object_ref == attachment.object_ref
             }) {
                 return Ok(false);
@@ -210,6 +207,7 @@ pub fn apply_object_mutation(
                     .iter()
                     .find(|existing| {
                         existing.kind == ContextAttachmentKind::WindowSelection
+                            && existing.device_id == attachment.device_id
                             && matches!(existing.state, AttachmentState::Active)
                     })
                     .map(|existing| existing.attachment_id.clone())
@@ -227,11 +225,9 @@ pub fn apply_object_mutation(
                 .map_err(|_| invalid())
         }
         ObjectContextMutation::Detach { attachment_id } => {
-            if !session
-                .context_attachments
-                .iter()
-                .any(|attachment| attachment.attachment_id == *attachment_id)
-            {
+            if !session.context_attachments.iter().any(|attachment| {
+                attachment.attachment_id == *attachment_id && attachment.device_id == device_id
+            }) {
                 return Err(invalid());
             }
             Ok(session.detach_context(attachment_id))

@@ -18,6 +18,7 @@ use desk_agent_protocol::{
 /// around I/O; this value neither grants authority nor owns a transaction.
 pub struct ObjectReadBinding<'a> {
     pub original: &'a ReadContextSelection,
+    pub device_id: &'a str,
     pub destination: &'a DestinationIdentity,
     pub now_unix_ms: u64,
 }
@@ -58,33 +59,34 @@ pub fn requires_objects(name: &str) -> bool {
 /// Most object tools always require an owner selection. Current-screen capture
 /// additionally becomes object-bound when the owner attached one window; an
 /// ordinary display capture remains valid without a window attachment.
-pub fn uses_selected_objects(name: &str, objects: &[ContextAttachment]) -> bool {
+pub fn uses_selected_objects(name: &str, objects: &[ContextAttachment], device_id: &str) -> bool {
     requires_objects(name)
         || (name == "read_current_screen"
-            && objects
-                .iter()
-                .any(|object| object.kind == ContextAttachmentKind::WindowSelection))
+            && objects.iter().any(|object| {
+                object.device_id == device_id
+                    && object.kind == ContextAttachmentKind::WindowSelection
+            }))
 }
 
 /// Object selection enables only reads; live-document and batch tools still
 /// require their separate explicit capability selection.
 pub fn implicit_object_tool(name: &str, objects: &[ContextAttachment]) -> bool {
+    objects
+        .iter()
+        .any(|object| supports_implicit_object(name, object.kind))
+}
+
+pub(crate) fn supports_implicit_object(name: &str, kind: ContextAttachmentKind) -> bool {
     match name {
-        "read_terminal_output" => objects
-            .iter()
-            .any(|object| object.kind == ContextAttachmentKind::TerminalSessionRef),
+        "read_terminal_output" => kind == ContextAttachmentKind::TerminalSessionRef,
         "inspect_files"
         | "read_text_file"
         | "inspect_spreadsheets"
-        | "preview_spreadsheet_merge" => objects.iter().any(|object| {
-            matches!(
-                object.kind,
-                ContextAttachmentKind::File | ContextAttachmentKind::DirectorySelection
-            )
-        }),
-        "read_current_screen" => objects
-            .iter()
-            .any(|object| object.kind == ContextAttachmentKind::WindowSelection),
+        | "preview_spreadsheet_merge" => matches!(
+            kind,
+            ContextAttachmentKind::File | ContextAttachmentKind::DirectorySelection
+        ),
+        "read_current_screen" => kind == ContextAttachmentKind::WindowSelection,
         _ => false,
     }
 }
@@ -100,6 +102,7 @@ impl ObjectReadBinding<'_> {
             .original
             .object_attachments
             .iter()
+            .filter(|object| object.device_id == self.device_id)
             .filter(|object| {
                 if terminal {
                     object.kind == ContextAttachmentKind::TerminalSessionRef
@@ -328,7 +331,9 @@ impl ObjectReadBinding<'_> {
             return Err(denied());
         }
         let expiry = self.expiry(call)?;
-        envelope.provenance.source_object_id = None;
+        if call.name != "read_current_screen" {
+            envelope.provenance.source_object_id = None;
+        }
         envelope.provenance.source_envelope_ids = selected
             .iter()
             .map(|object| object.envelope.envelope_id.clone())

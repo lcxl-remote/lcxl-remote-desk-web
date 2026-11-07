@@ -129,6 +129,7 @@ async fn fixture_with_text(
     };
     let binding = ObjectReadBinding {
         original: &original,
+        device_id: &started.target_device_id,
         destination: &destination,
         now_unix_ms: now.timestamp_millis() as u64,
     };

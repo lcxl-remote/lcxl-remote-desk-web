@@ -16,6 +16,7 @@ export type AssistantTerminalObjectRef = {
 
 type Props = {
     deskId: string;
+    personalScope?: string;
     subscribe: (handler: SignalingSubscriber) => () => void;
     sendMessage: (
         type: number,
@@ -29,7 +30,7 @@ function storageKey(deskId: string) {
     return `ai-assistant-conversation:${deskId}`;
 }
 
-export function useAiAssistantTerminalContext({ deskId, subscribe, sendMessage }: Props) {
+export function useAiAssistantTerminalContext({ deskId, personalScope, subscribe, sendMessage }: Props) {
     const [pending, setPending] = useState(false);
     const [added, setAdded] = useState(false);
     const [error, setError] = useState<string | null>(null);
@@ -55,13 +56,21 @@ export function useAiAssistantTerminalContext({ deskId, subscribe, sendMessage }
         if (timer.current !== null) window.clearTimeout(timer.current);
     }, []);
 
-    const attach = useCallback((objectRef: AssistantTerminalObjectRef) => {
+    const attach = useCallback((
+        objectRef: AssistantTerminalObjectRef,
+        conversationTarget: 'fixed_device' | 'selectable_devices' = 'fixed_device',
+    ) => {
         if (requestId.current) return false;
+        const scope = conversationTarget === 'selectable_devices' ? personalScope : deskId;
+        if (!scope) return false;
         let conversationId: string;
         try {
-            conversationId = localStorage.getItem(storageKey(deskId)) ?? v4();
-            localStorage.setItem(storageKey(deskId), conversationId);
+            const previous = localStorage.getItem(storageKey(scope));
+            if (!previous && conversationTarget === 'selectable_devices') return false;
+            conversationId = previous ?? v4();
+            localStorage.setItem(storageKey(scope), conversationId);
         } catch {
+            if (conversationTarget === 'selectable_devices') return false;
             conversationId = v4();
         }
         setPending(true);
@@ -72,6 +81,7 @@ export function useAiAssistantTerminalContext({ deskId, subscribe, sendMessage }
             {
                 conversation_id: conversationId,
                 client_request_id: v4(),
+                conversation_target: conversationTarget,
                 operation: {
                     kind: 'attach_terminal_output',
                     object_ref: objectRef,
@@ -87,7 +97,13 @@ export function useAiAssistantTerminalContext({ deskId, subscribe, sendMessage }
             setError('timeout');
         }, 10_000);
         return true;
-    }, [deskId, sendMessage]);
+    }, [deskId, personalScope, sendMessage]);
 
-    return { attach, pending, added, error };
+    let personalAvailable = false;
+    try {
+        personalAvailable = !!personalScope && !!localStorage.getItem(storageKey(personalScope));
+    } catch {
+        // Access to local preferences may be disabled.
+    }
+    return { attach, pending, added, error, personalAvailable };
 }

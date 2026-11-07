@@ -1344,6 +1344,10 @@ export type ContextAttachmentDto = {
     */
     createdAtUnixMs: number;
     /**
+     * @type string,null
+    */
+    deviceRef?: string | null;
+    /**
      * @type string
     */
     displaySummary: string;

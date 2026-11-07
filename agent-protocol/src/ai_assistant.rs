@@ -190,8 +190,26 @@ pub struct AiAssistantContextUpdated {
 )]
 pub struct AiAssistantObjectContextUpdate {
     pub conversation_id: String,
+    pub conversation_target: AiAssistantConversationTarget,
     pub client_request_id: String,
     pub operation: AiAssistantObjectContextOperation,
+}
+
+/// Whether the assistant keeps one fixed device or accepts a selection.
+/// The authenticated signaling route supplies the physical device.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum AiAssistantConversationTarget {
+    FixedDevice,
+    SelectableDevices,
+}
+
+impl AiAssistantConversationTarget {
+    pub fn is_selectable(self) -> bool {
+        self == Self::SelectableDevices
+    }
 }
 
 #[derive(
@@ -554,6 +572,7 @@ mod tests {
             expires_at: "2026-08-25T20:00:00Z".into(),
         };
         let update = AiAssistantObjectContextUpdate {
+            conversation_target: crate::ai_assistant::AiAssistantConversationTarget::FixedDevice,
             conversation_id: "assistant-1".into(),
             client_request_id: "terminal-change-1".into(),
             operation: AiAssistantObjectContextOperation::AttachTerminalOutput {
@@ -587,6 +606,7 @@ mod tests {
             expires_at: "2026-08-25T20:00:00Z".into(),
         };
         let update = AiAssistantObjectContextUpdate {
+            conversation_target: crate::ai_assistant::AiAssistantConversationTarget::FixedDevice,
             conversation_id: "assistant-1".into(),
             client_request_id: "window-change-1".into(),
             operation: AiAssistantObjectContextOperation::AttachWindow {

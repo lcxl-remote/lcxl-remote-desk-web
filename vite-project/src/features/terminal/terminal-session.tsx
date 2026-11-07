@@ -28,6 +28,7 @@ import {
 } from "./use-terminal-complete"
 import { terminalWelcomeBanner } from "./terminal-welcome"
 import { useTerminalSessionGuard } from "./use-terminal-session-guard"
+import { useGetCurrentUser } from '@/services/hooks/userController/useGetCurrentUser';
 import type { OperationSystemEnum } from "@/services/types"
 import { terminalOs, terminalShell } from "./terminal-environment"
 import {
@@ -77,8 +78,12 @@ export function TerminalView({ connectionId, deviceId, command, operationSystem,
     // I/O WS above) plus a bounded ring buffer of recent output and the last
     // submitted command line, all fed to the assistant as non-authoritative hints.
     const { subscribe, sendMessage } = useDeskSignaling()
+    const account = useGetCurrentUser().data?.data;
+    const personalScope = orgId == null && account && account.target_connection_id == null
+        ? `personal:${account.user_id ?? 'owner'}` : undefined;
     const assistantContext = useAiAssistantTerminalContext({
         deskId: connectionId,
+        personalScope,
         subscribe,
         sendMessage,
     })
@@ -599,6 +604,15 @@ export function TerminalView({ connectionId, deviceId, command, operationSystem,
                             ? t('pages.deskTerminal.assistant.added')
                             : t('pages.deskTerminal.assistant.add')}
                     </Button>
+                    {assistantContext.personalAvailable && <Button
+                        variant="secondary"
+                        size="sm"
+                        disabled={!assistantObjectRef || assistantContext.pending}
+                        title={assistantContext.error ?? t('pages.deskTerminal.assistant.addPersonalHint')}
+                        onClick={() => assistantObjectRef && assistantContext.attach(assistantObjectRef, 'selectable_devices')}
+                    >
+                        {t('pages.deskTerminal.assistant.addPersonal')}
+                    </Button>}
                     <Button
                         variant="secondary"
                         size="sm"

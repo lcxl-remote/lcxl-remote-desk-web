@@ -592,6 +592,7 @@ fn contextual_file_permissions_preserve_business_fields_and_exact_source_cardina
         .unwrap()
         .allowed_destinations[0];
     let binding = crate::input_read_context::object_read::ObjectReadBinding {
+        device_id: &session.device_id,
         original: &mixed,
         destination,
         now_unix_ms: NOW,

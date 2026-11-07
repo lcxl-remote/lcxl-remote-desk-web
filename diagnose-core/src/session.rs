@@ -1172,13 +1172,9 @@ impl PersistedAgentSession {
         validate_attachment_set(&session.context_attachments)
             .map_err(|error| SessionDecodeError::InvalidContextAttachment(error.to_string()))?;
         for attachment in &session.context_attachments {
-            validate_attachment_subject(
-                attachment,
-                &session.actor_id,
-                &session.device_id,
-                session.surface,
-            )
-            .map_err(|error| SessionDecodeError::InvalidContextAttachment(error.to_string()))?;
+            session
+                .validate_context_subject(attachment)
+                .map_err(|error| SessionDecodeError::InvalidContextAttachment(error.to_string()))?;
         }
         crate::visual_evidence::validate_set(&session.visual_evidence)
             .map_err(|error| SessionDecodeError::InvalidDynamicRun(error.into()))?;
@@ -2043,7 +2039,7 @@ impl PersistedAgentSession {
         &mut self,
         attachment: ContextAttachment,
     ) -> Result<bool, ContextAttachmentError> {
-        validate_attachment_subject(&attachment, &self.actor_id, &self.device_id, self.surface)?;
+        self.validate_context_subject(&attachment)?;
         if let Some(existing) = self
             .context_attachments
             .iter()
@@ -2059,6 +2055,22 @@ impl PersistedAgentSession {
         validate_attachment_set(&projected)?;
         self.context_attachments = projected;
         Ok(true)
+    }
+
+    /// Storage checks the conversation owner and surface. A selectable
+    /// conversation stores resource provenance separately from its subject.
+    /// Its host must authorize the source device before inserting a resource.
+    pub fn validate_context_subject(
+        &self,
+        attachment: &ContextAttachment,
+    ) -> Result<(), ContextAttachmentError> {
+        let device_id =
+            if self.surface == AgentSessionSurface::AiAssistant && self.device_id.is_empty() {
+                &attachment.device_id
+            } else {
+                &self.device_id
+            };
+        validate_attachment_subject(attachment, &self.actor_id, device_id, self.surface)
     }
 
     pub fn detach_context(&mut self, attachment_id: &str) -> bool {
@@ -2090,7 +2102,7 @@ impl PersistedAgentSession {
         reason: AttachmentStaleReason,
         replacement: ContextAttachment,
     ) -> Result<bool, ContextAttachmentError> {
-        validate_attachment_subject(&replacement, &self.actor_id, &self.device_id, self.surface)?;
+        self.validate_context_subject(&replacement)?;
         let Some(stale_index) = self
             .context_attachments
             .iter()
@@ -2099,6 +2111,9 @@ impl PersistedAgentSession {
             return Err(ContextAttachmentError::AttachmentNotFound);
         };
         let stale = &self.context_attachments[stale_index];
+        if stale.device_id != replacement.device_id {
+            return Err(ContextAttachmentError::SubjectMismatch);
+        }
         if replacement.attachment_id == stale.attachment_id
             || replacement.client_request_id == stale.client_request_id
         {

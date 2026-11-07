@@ -282,7 +282,8 @@ pub fn build_permission_grants(
         };
         if device_id.is_empty()
             && !original_reads.is_some_and(|selection| {
-                selection.is_host_web_only() && selection.tool_names.contains(&requested.tool_name)
+                selection.is_selectable_input()
+                    && selection.tool_names.contains(&requested.tool_name)
             })
         {
             return Err(internal(
@@ -448,14 +449,16 @@ pub fn build_permission_grants(
                 .first()
                 .and_then(|object| object.envelope.allowed_destinations.first())
                 .ok_or_else(|| internal("original object destination is missing"))?;
-            crate::input_read_context::validate_current_objects(
+            crate::input_read_context::validate_current_device_objects(
                 session,
                 &original.object_attachments,
                 destination,
                 context.now_unix_ms,
+                device_id,
             )?;
             let binding = ObjectReadBinding {
                 original,
+                device_id,
                 destination,
                 now_unix_ms: context.now_unix_ms,
             };

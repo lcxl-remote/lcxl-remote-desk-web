@@ -453,11 +453,17 @@ impl SignalAgentRunEventStore {
     pub async fn validate_object_read(
         &self,
         subject: InputSubject<'_>,
+        target_device_id: &str,
         input_revision: u64,
         original: &ReadContextSelection,
         destination: &DestinationIdentity,
         now: u64,
     ) -> Result<(), AgentError> {
+        if !subject.device_id.is_empty() && subject.device_id != target_device_id {
+            return Err(internal(
+                "object read device differs from the fixed assistant target",
+            ));
+        }
         let txn = self
             .db
             .begin()
@@ -470,6 +476,21 @@ impl SignalAgentRunEventStore {
             .map_err(|_| internal("object read storage unavailable"))?
             .ok_or_else(|| internal("object read session missing"))?;
         let session = decode_session(&row, subject)?;
+        if subject.device_id.is_empty()
+            && !target_device_id.is_empty()
+            && (!session.admits_assistant_device(target_device_id)
+                || !desk_assistant_data_store::device_roster::permits_current_target(
+                    &txn,
+                    &session,
+                    target_device_id,
+                )
+                .await
+                .map_err(|error| error.into_agent_error())?)
+        {
+            return Err(internal(
+                "object read device is outside the original request",
+            ));
+        }
         let (stored, input_created_at) = original_with_time_on(&txn, &session).await?;
         if session.input_revision != input_revision
             || stored.as_ref() != Some(original)
@@ -484,7 +505,7 @@ impl SignalAgentRunEventStore {
         }
         if subject.device_id.is_empty()
             && (!session.has_admitted_personal_input()
-                || !original.is_host_web_only()
+                || !original.is_selectable_input()
                 || !matches!(destination, DestinationIdentity::Model { .. })
                 || session
                     .authorization_requirement()
@@ -517,7 +538,13 @@ impl SignalAgentRunEventStore {
                 now,
             )?;
         }
-        validate_current_objects(&session, &original.object_attachments, destination, now)?;
+        desk_diagnose_core::input_read_context::validate_current_device_objects(
+            &session,
+            &original.object_attachments,
+            destination,
+            now,
+            target_device_id,
+        )?;
         txn.commit()
             .await
             .map_err(|_| internal("object read storage unavailable"))

@@ -937,6 +937,7 @@ describe('useAiAssistantChat', () => {
         expect(sendMessage).toHaveBeenLastCalledWith(
             SIGNALING_TYPE_CODE_UPDATE_AI_ASSISTANT_OBJECT_CONTEXT,
             expect.objectContaining({
+                conversation_target: 'fixed_device',
                 operation: {
                     kind: 'attach_window',
                     object_ref: objectRef,

@@ -118,6 +118,7 @@ fn web_host_grants_reuse_urls_until_expiry_on_both_surfaces() {
         profile_revision: 1,
     };
     let binding = ObjectReadBinding {
+        device_id: &session.device_id,
         original: &original,
         destination: &destination,
         now_unix_ms: 1_000,
@@ -790,6 +791,7 @@ fn approved_ui_root_id_matches_resolved_read_on_both_surfaces() {
         profile_revision: 1,
     };
     let binding = ObjectReadBinding {
+        device_id: &session.device_id,
         original: &original,
         destination: &destination,
         now_unix_ms: 1000,

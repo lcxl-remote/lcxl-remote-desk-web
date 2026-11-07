@@ -423,6 +423,7 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
             deps.provider_registry
                 .unwrap_or_else(|| crate::ai_assistant::ai_assistant_provider_registry_ref()),
             deps.model.supports_image_input(),
+            deps.tools.original_read_context(),
         )
     } else {
         Vec::new()

@@ -15,6 +15,8 @@ fn destination() -> DestinationIdentity {
 
 fn params() -> UpdateObjectContext {
     let update = AiAssistantObjectContextUpdate {
+        conversation_target:
+            desk_agent_protocol::ai_assistant::AiAssistantConversationTarget::FixedDevice,
         conversation_id: "client-conversation".into(),
         client_request_id: "attach".into(),
         operation: AiAssistantObjectContextOperation::AttachTerminalOutput {
@@ -102,6 +104,8 @@ async fn first_object_receipts_survive_detach_expiry_and_missing_model_without_r
         actor_id: "7".into(),
         device_id: "device".into(),
         update: AiAssistantObjectContextUpdate {
+            conversation_target:
+                desk_agent_protocol::ai_assistant::AiAssistantConversationTarget::FixedDevice,
             conversation_id: original.update.conversation_id.clone(),
             client_request_id: "detach".into(),
             operation: AiAssistantObjectContextOperation::Detach {

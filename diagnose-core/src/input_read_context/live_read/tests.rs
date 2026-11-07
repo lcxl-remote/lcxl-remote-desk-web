@@ -251,6 +251,7 @@ fn actual_read_binding_ignores_model_targets_and_preserves_original_source_and_d
         profile_revision: 1,
     };
     let binding = ObjectReadBinding {
+        device_id: "device",
         original: &selection,
         destination: &destination,
         now_unix_ms: now(),
@@ -497,6 +498,7 @@ fn legacy_live_reads_cannot_bypass_the_original_object_fence() {
         profile_revision: 1,
     };
     let binding = ObjectReadBinding {
+        device_id: "device",
         original: &legacy,
         destination: &destination,
         now_unix_ms: now(),

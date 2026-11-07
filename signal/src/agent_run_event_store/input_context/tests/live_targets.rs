@@ -87,6 +87,7 @@ async fn original_live_target_receipt_is_immutable_even_after_expiry() {
         store
             .validate_object_read(
                 subject(),
+                subject().device_id,
                 first.input_revision,
                 params.read_context.as_ref().unwrap(),
                 &destination(),
@@ -106,6 +107,7 @@ async fn original_live_target_receipt_is_immutable_even_after_expiry() {
         store
             .validate_object_read(
                 subject(),
+                subject().device_id,
                 first.input_revision,
                 params.read_context.as_ref().unwrap(),
                 &changed_model,

@@ -100,7 +100,7 @@ impl ReadCallPreflight {
             .capability_for_tool(&call.name)
             .ok_or_else(unavailable)?;
         if !crate::request_devices::selected_read_descriptor(descriptor)
-            || !binding.original.is_host_web_only()
+            || !binding.original.is_selectable_input()
         {
             return Err(unavailable());
         }

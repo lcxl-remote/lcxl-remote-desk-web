@@ -32,10 +32,19 @@ fn update(kind: ObjectKind) -> AiAssistantObjectContextUpdate {
         },
     };
     AiAssistantObjectContextUpdate {
+        conversation_target:
+            desk_agent_protocol::ai_assistant::AiAssistantConversationTarget::FixedDevice,
         conversation_id: "client-conversation".into(),
         client_request_id: "client-request".into(),
         operation,
     }
+}
+
+fn apply_fixed_mutation(
+    session: &mut PersistedAgentSession,
+    mutation: &ObjectContextMutation,
+) -> Result<bool, AgentError> {
+    apply_object_mutation(session, mutation, "11")
 }
 
 fn build(
@@ -187,12 +196,12 @@ fn invalid_selection_never_builds_authority() {
 fn replay_preserves_original_identity_and_never_reactivates_detached_selection() {
     let mut session = session();
     let request = update(ObjectKind::TerminalOutput);
-    assert!(apply_object_mutation(&mut session, &build(&request, "first", 1).unwrap()).unwrap());
+    assert!(apply_fixed_mutation(&mut session, &build(&request, "first", 1).unwrap()).unwrap());
     let original = session.context_attachments.clone();
-    assert!(!apply_object_mutation(&mut session, &build(&request, "second", 2).unwrap()).unwrap());
+    assert!(!apply_fixed_mutation(&mut session, &build(&request, "second", 2).unwrap()).unwrap());
     assert_eq!(session.context_attachments, original);
     assert!(
-        apply_object_mutation(
+        apply_fixed_mutation(
             &mut session,
             &ObjectContextMutation::Detach {
                 attachment_id: "first".into()
@@ -201,7 +210,7 @@ fn replay_preserves_original_identity_and_never_reactivates_detached_selection()
         .unwrap()
     );
     let detached = session.context_attachments.clone();
-    assert!(!apply_object_mutation(&mut session, &build(&request, "third", 3).unwrap()).unwrap());
+    assert!(!apply_fixed_mutation(&mut session, &build(&request, "third", 3).unwrap()).unwrap());
     assert_eq!(session.context_attachments, detached);
 }
 
@@ -209,7 +218,7 @@ fn replay_preserves_original_identity_and_never_reactivates_detached_selection()
 fn duplicate_object_does_not_bypass_subject_or_request_conflict_checks() {
     let mut session = session();
     let original = attachment(ObjectKind::TerminalOutput);
-    apply_object_mutation(
+    apply_fixed_mutation(
         &mut session,
         &ObjectContextMutation::Attach(original.clone()),
     )
@@ -232,7 +241,7 @@ fn duplicate_object_does_not_bypass_subject_or_request_conflict_checks() {
             }
         }
         assert!(
-            apply_object_mutation(&mut session, &ObjectContextMutation::Attach(changed)).is_err()
+            apply_fixed_mutation(&mut session, &ObjectContextMutation::Attach(changed)).is_err()
         );
         assert_eq!(session.context_attachments, vec![original.clone()]);
     }
@@ -242,7 +251,7 @@ fn duplicate_object_does_not_bypass_subject_or_request_conflict_checks() {
 fn selecting_another_window_atomically_replaces_the_previous_focus() {
     let mut session = session();
     let first = attachment(ObjectKind::Window);
-    apply_object_mutation(&mut session, &ObjectContextMutation::Attach(first.clone())).unwrap();
+    apply_fixed_mutation(&mut session, &ObjectContextMutation::Attach(first.clone())).unwrap();
     session
         .begin_focus_epoch(1, [first.attachment_id.clone()])
         .unwrap();
@@ -260,8 +269,7 @@ fn selecting_another_window_atomically_replaces_the_previous_focus() {
     };
 
     assert!(
-        apply_object_mutation(&mut session, &ObjectContextMutation::Attach(second.clone()))
-            .unwrap()
+        apply_fixed_mutation(&mut session, &ObjectContextMutation::Attach(second.clone())).unwrap()
     );
     assert!(matches!(
         session.context_attachments[0].state,
@@ -277,4 +285,62 @@ fn selecting_another_window_atomically_replaces_the_previous_focus() {
         session.focus_epoch.selected_attachment_ids,
         vec![second.attachment_id]
     );
+}
+
+#[test]
+fn selectable_conversation_keeps_same_window_references_separate_by_device() {
+    let mut session = session();
+    session.device_id.clear();
+    let a = attachment(ObjectKind::Window);
+    let mut b = a.clone();
+    b.device_id = "12".into();
+    b.attachment_id = "window-b".into();
+    b.client_request_id = "choose-window-b".into();
+    b.envelope.envelope_id = "envelope-b".into();
+    apply_object_mutation(
+        &mut session,
+        &ObjectContextMutation::Attach(a.clone()),
+        "11",
+    )
+    .unwrap();
+    apply_object_mutation(
+        &mut session,
+        &ObjectContextMutation::Attach(b.clone()),
+        "12",
+    )
+    .unwrap();
+    assert_eq!(session.context_attachments, vec![a.clone(), b.clone()]);
+    let frozen = session.context_attachments.clone();
+    assert!(
+        session
+            .refresh_context(&a.attachment_id, AttachmentStaleReason::ObjectChanged, b)
+            .is_err()
+    );
+    let detach = ObjectContextMutation::Detach {
+        attachment_id: a.attachment_id,
+    };
+    assert!(apply_object_mutation(&mut session, &detach, "12").is_err());
+    assert!(apply_object_mutation(&mut session, &detach, "11").unwrap());
+    assert!(
+        crate::input_read_context::validate_current_device_objects(
+            &session,
+            &frozen,
+            &destination(),
+            2,
+            "11",
+        )
+        .is_err()
+    );
+    crate::input_read_context::validate_current_device_objects(
+        &session,
+        &frozen,
+        &destination(),
+        2,
+        "12",
+    )
+    .unwrap();
+    assert!(matches!(
+        session.context_attachments[1].state,
+        AttachmentState::Active
+    ));
 }

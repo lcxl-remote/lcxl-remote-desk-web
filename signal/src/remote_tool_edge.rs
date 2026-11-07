@@ -1235,7 +1235,8 @@ impl SignalAiAssistantTools {
                 ))
             }
             desk_agent_protocol::Capability::TerminalOutputRead
-                if self.selected_terminal_roots.is_empty() =>
+                if self.selected_device_fence.is_none()
+                    && self.selected_terminal_roots.is_empty() =>
             {
                 Err(error(
                     AgentErrorKind::PermissionDenied,
@@ -6154,7 +6155,9 @@ impl SignalAiAssistantTools {
                 }),
             });
         }
-        if capability == desk_agent_protocol::Capability::TerminalOutputRead {
+        if capability == desk_agent_protocol::Capability::TerminalOutputRead
+            && self.selected_device_fence.is_none()
+        {
             if self.selected_terminal_roots.is_empty() {
                 return Err(error(
                     AgentErrorKind::PermissionDenied,

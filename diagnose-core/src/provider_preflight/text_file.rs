@@ -566,6 +566,7 @@ pub fn validate_read_permission_input_with_context(
         .map_err(|_| invalid())?;
         let binding = crate::input_read_context::object_read::ObjectReadBinding {
             original,
+            device_id: &session.device_id,
             destination,
             now_unix_ms: now,
         };
@@ -2170,6 +2171,7 @@ mod tests {
                 live_targets: vec![],
             };
             let binding = crate::input_read_context::object_read::ObjectReadBinding {
+                device_id: &session.device_id,
                 original: &original,
                 destination,
                 now_unix_ms: 1000,

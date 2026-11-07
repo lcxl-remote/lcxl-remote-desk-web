@@ -36,6 +36,7 @@ impl SignalAiAssistantTools {
         let input = self.original_input.get().ok_or_else(denied)?;
         Ok(ObjectReadBinding {
             original: &input.selection,
+            device_id: &self.target_device_id,
             destination: &input.destination,
             now_unix_ms: u64::try_from(chrono::Utc::now().timestamp_millis())
                 .map_err(|_| denied())?,
@@ -51,6 +52,7 @@ impl SignalAiAssistantTools {
             desk_diagnose_core::input_read_context::object_read::uses_selected_objects(
                 &call.name,
                 &input.selection.object_attachments,
+                &self.target_device_id,
             ),
         )
     }
@@ -65,6 +67,7 @@ impl SignalAiAssistantTools {
                     device_id: self.session_device_id(),
                     client_conversation_id: input.client_conversation_id.as_deref(),
                 },
+                &self.target_device_id,
                 input.revision,
                 &input.selection,
                 &input.destination,

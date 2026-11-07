@@ -88,7 +88,10 @@ async fn every_request_device_read_projects_parses_and_keeps_its_exact_target() 
         .filter(|d| d.target_binding == TargetBinding::RequestDevice)
     {
         let name = descriptor.wire.tool_name.as_str();
-        if name == crate::command_confirmation::COMMAND_TOOL {
+        if matches!(
+            name,
+            crate::command_confirmation::COMMAND_TOOL | "read_terminal_output"
+        ) {
             continue;
         }
         let args = match name {
@@ -114,7 +117,7 @@ async fn every_request_device_read_projects_parses_and_keeps_its_exact_target() 
             device("a", vec![descriptor.wire.capability_id.clone()]),
             device("b", vec![]),
         ];
-        let reads = read_tools(&devices, registry, true);
+        let reads = read_tools(&devices, registry, true, None);
         let [(registered, callable)] = reads.as_slice() else {
             panic!("{name}: missing projected tool");
         };
@@ -145,11 +148,11 @@ async fn every_request_device_read_projects_parses_and_keeps_its_exact_target() 
             "{name}"
         );
         assert!(
-            read_tools(&devices[1..], registry, true).is_empty(),
+            read_tools(&devices[1..], registry, true, None).is_empty(),
             "{name}"
         );
         if name == "read_current_screen" {
-            assert!(read_tools(&devices, registry, false).is_empty());
+            assert!(read_tools(&devices, registry, false, None).is_empty());
         }
         let mut wrapped = args.clone();
         wrapped["target_ref"] = json!("a");
@@ -335,7 +338,7 @@ async fn desktop_object_approval_and_dispatch_keep_the_observed_device_and_incar
     let resolve = |call: &ToolCall, session: &PersistedAgentSession| {
         crate::ui_model_ids::resolve_session_call_with_context(call, session, 1, None).unwrap()
     };
-    let reads = read_tools(&devices, registry, true);
+    let reads = read_tools(&devices, registry, true, None);
     let input_a = json!({"window":window("snapshot-a")});
     let input_b = json!({"window":window("snapshot-b")});
     let propose_window = |alias: &str| {
@@ -474,7 +477,7 @@ async fn explicit_display_must_have_been_observed_on_the_selected_device() {
         ),
         device("b", vec![screen.wire.capability_id.clone()]),
     ];
-    let reads = read_tools(&devices, registry, true);
+    let reads = read_tools(&devices, registry, true, None);
     let content = json!({"ReadContext":{"DesktopSessionInspect":{"displays":[
         {"display":"opaque-one","name":"One"}, {"display":"opaque-two","name":"Two"}
     ]}}})

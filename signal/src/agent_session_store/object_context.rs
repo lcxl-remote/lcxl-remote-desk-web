@@ -25,6 +25,16 @@ pub struct UpdateObjectContext {
     pub created_at: String,
 }
 
+impl UpdateObjectContext {
+    fn session_device_id(&self) -> &str {
+        if self.update.conversation_target.is_selectable() {
+            ""
+        } else {
+            &self.device_id
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Receipt {
@@ -80,6 +90,8 @@ impl SignalAgentSessionStore {
             || params.run_id.len() > 128
             || params.actor_id.trim().is_empty()
             || params.device_id.trim().is_empty()
+            || (params.update.conversation_target.is_selectable()
+                && params.actor_id != crate::control_authorizer::SINGLE_ACCOUNT_USER_ID.to_string())
             || self.surface != AgentSessionSurface::AiAssistant
             || self.client_conversation_id.as_deref()
                 != Some(params.update.conversation_id.as_str())
@@ -98,7 +110,7 @@ impl SignalAgentSessionStore {
             PersistedAgentSession::decode_json(&row.state_json).map_err(|_| error())?;
         if row.conversation_id != params.run_id
             || row.actor_id != params.actor_id
-            || row.device_id != params.device_id
+            || row.device_id != params.session_device_id()
             || session.conversation_id != params.run_id
             || row.version < 0
             || session.client_conversation_id.as_deref()
@@ -107,7 +119,7 @@ impl SignalAgentSessionStore {
             return Err(error());
         }
         session
-            .check_subject(&params.actor_id, &params.device_id)
+            .check_subject(&params.actor_id, params.session_device_id())
             .map_err(|_| error())?;
         session.check_surface(self.surface).map_err(|_| error())?;
         // The SQLite row is the existing session store's CAS version authority.
@@ -185,7 +197,7 @@ impl SignalAgentSessionStore {
                     let mut session = PersistedAgentSession::new(
                         &params.run_id,
                         &params.actor_id,
-                        &params.device_id,
+                        params.session_device_id(),
                         0,
                         AgentScope {
                             granted: vec![],
@@ -217,6 +229,33 @@ impl SignalAgentSessionStore {
                     ..transport("AI Assistant context is busy")
                 });
             }
+            if params.update.conversation_target.is_selectable()
+                && !matches!(
+                    params.update.operation,
+                    AiAssistantObjectContextOperation::Detach { .. }
+                )
+            {
+                use desk_assistant_data_store::device_roster::{lock, personal_selection_key};
+                if crate::agent_run_event_store::eligible_request_device_ids(
+                    &txn,
+                    std::slice::from_ref(&params.device_id),
+                )
+                .await?
+                .is_empty()
+                    || lock(
+                        &txn,
+                        &params.actor_id,
+                        &personal_selection_key(&params.run_id),
+                    )
+                    .await
+                    .map_err(|error| error.into_agent_error())?
+                    .is_none_or(|roster| !roster.members.contains_key(&params.device_id))
+                {
+                    return Err(transport(
+                        "attachment device is not selected for this assistant",
+                    ));
+                }
+            }
             let mutation = match &params.update.operation {
                 AiAssistantObjectContextOperation::Detach { attachment_id } => {
                     ObjectContextMutation::Detach {
@@ -237,7 +276,7 @@ impl SignalAgentSessionStore {
                     },
                 )?,
             };
-            let changed = apply_object_mutation(&mut session, &mutation)?;
+            let changed = apply_object_mutation(&mut session, &mutation, &params.device_id)?;
             session.last_event_seq = session.last_event_seq.checked_add(1).ok_or_else(error)?;
             session.version = match row.as_ref() {
                 Some(row) => row.version.checked_add(1).ok_or_else(error)?,
@@ -283,7 +322,7 @@ impl SignalAgentSessionStore {
                 let inserted = agent_session::ActiveModel {
                     conversation_id: Set(params.run_id.clone()),
                     actor_id: Set(params.actor_id.clone()),
-                    device_id: Set(params.device_id.clone()),
+                    device_id: Set(params.session_device_id().into()),
                     conversation_schema_version: Set(Some(i32::from(
                         desk_diagnose_core::session::CONVERSATION_SCHEMA_VERSION,
                     ))),
@@ -314,7 +353,7 @@ impl SignalAgentSessionStore {
                 source_envelope_ids_json: Set("[]".into()),
                 result_envelope_ids_json: Set("[]".into()),
                 payload_json: Set(serde_json::to_string(&receipt).map_err(|_| error())?),
-                payload_schema_version: Set(1),
+                payload_schema_version: Set(2),
                 created_at: Set(time),
                 ..Default::default()
             }
@@ -336,7 +375,7 @@ fn replay(
     let receipt: Receipt = serde_json::from_str(&row.payload_json).map_err(|_| error())?;
     receipt.event.validate().map_err(|_| error())?;
     let event = &receipt.event;
-    if row.payload_schema_version != 1
+    if row.payload_schema_version != 2
         || row.event_id != event_id(params)
         || row.event_id != event.event_id
         || row.run_id != params.run_id

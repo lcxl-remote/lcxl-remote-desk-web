@@ -3002,15 +3002,20 @@ async fn respond_to_system_info(
 
 #[actix_web::test]
 async fn personal_selected_desktop_read_and_whole_screen_resume_on_signal() {
-    run_selected_desktop_and_screen(false).await;
+    run_selected_desktop_and_screen(false, false).await;
 }
 
 #[actix_web::test]
 async fn personal_selected_window_capture_resumes_on_the_observed_device() {
-    run_selected_desktop_and_screen(true).await;
+    run_selected_desktop_and_screen(true, false).await;
 }
 
-async fn run_selected_desktop_and_screen(window: bool) {
+#[actix_web::test]
+async fn personal_selected_terminal_snapshot_resumes_on_signal() {
+    run_selected_desktop_and_screen(false, true).await;
+}
+
+async fn run_selected_desktop_and_screen(window: bool, terminal: bool) {
     use super::desktop_permission::concrete_review_reply;
     use super::permission_object::tool_reply;
     use crate::config::ConfigConnection;
@@ -3051,15 +3056,18 @@ async fn run_selected_desktop_and_screen(window: bool) {
     .unwrap();
     let owner = crate::control_authorizer::SINGLE_ACCOUNT_USER_ID;
     let connections = web::Data::new(SharedConnectionMap::new_oss());
-    let devices = if window {
-        ["selected-window", "selected-window"]
+    let cases = if terminal {
+        vec![("selected-terminal-device", "read_terminal_output")]
+    } else if window {
+        vec![
+            ("selected-window", "inspect_desktop_ui"),
+            ("selected-window", "read_current_screen"),
+        ]
     } else {
-        ["selected-desktop-a", "selected-desktop-b"]
-    };
-    let first_read = if window {
-        "inspect_desktop_ui"
-    } else {
-        "inspect_desktop_session"
+        vec![
+            ("selected-desktop-a", "inspect_desktop_session"),
+            ("selected-desktop-b", "read_current_screen"),
+        ]
     };
     let second_answer = if window {
         "Selected window capture complete."
@@ -3068,8 +3076,9 @@ async fn run_selected_desktop_and_screen(window: bool) {
     };
     let now = chrono::Utc::now();
     let mut peers = std::collections::BTreeMap::new();
-    for device in devices
-        .into_iter()
+    for device in cases
+        .iter()
+        .map(|(device, _)| *device)
         .collect::<std::collections::BTreeSet<_>>()
     {
         crate::device_code_store::get_or_create(&db, device)
@@ -3081,36 +3090,40 @@ async fn run_selected_desktop_and_screen(window: bool) {
                 .await
                 .into_body(),
         );
-        let first_cap = if window {
-            Capability::DesktopUiInspect
-        } else {
-            Capability::DesktopSessionInspect
-        };
-        let capabilities = [
-            (
-                devices[0],
-                first_cap,
-                ComputerUseAdapterKind::MacosAccessibility,
-            ),
-            (
-                devices[1],
-                Capability::ScreenCaptureCurrent,
-                ComputerUseAdapterKind::ScreenCapture,
-            ),
-        ]
-        .into_iter()
-        .filter(|(id, _, _)| *id == device)
-        .map(|(_, capability, kind)| ComputerUseCapabilityReadiness {
-            capability,
-            adapter: ComputerUseAdapterRef {
-                kind,
-                version: "1".into(),
-            },
-            supported: true,
-            ready: true,
-            reason: None,
-        })
-        .collect();
+        let capabilities = cases
+            .iter()
+            .filter(|(id, _)| *id == device)
+            .map(|(_, name)| {
+                let (capability, kind) = match *name {
+                    "read_terminal_output" => (
+                        Capability::TerminalOutputRead,
+                        ComputerUseAdapterKind::Terminal,
+                    ),
+                    "read_current_screen" => (
+                        Capability::ScreenCaptureCurrent,
+                        ComputerUseAdapterKind::ScreenCapture,
+                    ),
+                    "inspect_desktop_ui" => (
+                        Capability::DesktopUiInspect,
+                        ComputerUseAdapterKind::MacosAccessibility,
+                    ),
+                    _ => (
+                        Capability::DesktopSessionInspect,
+                        ComputerUseAdapterKind::MacosAccessibility,
+                    ),
+                };
+                ComputerUseCapabilityReadiness {
+                    capability,
+                    adapter: ComputerUseAdapterRef {
+                        kind,
+                        version: "1".into(),
+                    },
+                    supported: true,
+                    ready: true,
+                    reason: None,
+                }
+            })
+            .collect();
         crate::computer_use_readiness::global_computer_use_readiness_cache()
             .update(
                 &format!("live-{device}"),
@@ -3132,11 +3145,9 @@ async fn run_selected_desktop_and_screen(window: bool) {
             )
             .unwrap();
     }
+    let model_cases = cases.clone();
     let gateway = actix_web::rt::spawn(async move {
-        for (target, name) in [
-            (devices[0], first_read),
-            (devices[1], "read_current_screen"),
-        ] {
+        for (target, name) in model_cases {
             let exact = match (window, name) {
                 (true, "read_current_screen") => json!({"window_id":"w1"}),
                 (true, "inspect_desktop_ui") => json!({"queries":["Calendar"]}),
@@ -3189,6 +3200,8 @@ async fn run_selected_desktop_and_screen(window: bool) {
                 let messages = request["messages"].to_string();
                 if name == "read_current_screen" {
                     assert!(messages.contains("data:image/png;base64,"), "{messages}");
+                } else if terminal {
+                    assert!(messages.contains("selected-terminal-marker"), "{messages}");
                 } else if window {
                     assert!(messages.contains("Fixture Calendar window"), "{messages}");
                 } else {
@@ -3217,7 +3230,7 @@ async fn run_selected_desktop_and_screen(window: bool) {
             }
         }
     });
-    for (index, target) in devices.into_iter().enumerate() {
+    for (index, (target, name)) in cases.into_iter().enumerate() {
         let intent = if window {
             "selected-window-run".into()
         } else {
@@ -3230,6 +3243,53 @@ async fn run_selected_desktop_and_screen(window: bool) {
             &intent,
         );
         let store = crate::agent_session_store::SignalAgentSessionStore::new(db.clone());
+        let attachment_ids = if terminal {
+            use desk_agent_protocol::ai_assistant::{
+                AiAssistantConversationTarget, AiAssistantObjectContextOperation,
+                AiAssistantObjectContextUpdate,
+            };
+            use desk_assistant_data_store::device_roster::{personal_selection_key, replace};
+            replace(
+                &db,
+                &actor,
+                &personal_selection_key(&run),
+                0,
+                vec![target.into()],
+            )
+            .await
+            .unwrap();
+            apply_object_context_update(
+                db.clone(),
+                owner,
+                target.into(),
+                &AiAssistantObjectContextUpdate {
+                    conversation_id: intent.clone(),
+                    conversation_target: AiAssistantConversationTarget::SelectableDevices,
+                    client_request_id: "terminal-selection".into(),
+                    operation: AiAssistantObjectContextOperation::AttachTerminalOutput {
+                        object_ref: ObjectRef {
+                            token: "selected-terminal-reference".into(),
+                            snapshot_id: "terminal-snapshot".into(),
+                            object_kind: ObjectKind::TerminalOutput,
+                            expires_at: (chrono::Utc::now() + chrono::Duration::minutes(5))
+                                .to_rfc3339(),
+                        },
+                        display_summary: "Selected terminal".into(),
+                    },
+                },
+            )
+            .await
+            .unwrap();
+            let snapshot = store
+                .read_snapshot_for_subject(&run, &actor, "")
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(snapshot.context_attachments[0].device_id, target);
+            vec![snapshot.context_attachments[0].attachment_id.clone()]
+        } else {
+            Vec::new()
+        };
         run_turn(
             connections.clone(),
             db.clone(),
@@ -3240,7 +3300,10 @@ async fn run_selected_desktop_and_screen(window: bool) {
             String::new(),
             AiAssistantAsk {
                 target_refs: vec![target.into()],
-                question: if index == 0 {
+                selected_attachment_ids: attachment_ids,
+                question: if terminal {
+                    "Read the selected terminal output"
+                } else if index == 0 {
                     "Read desktop information"
                 } else if window {
                     "Capture the Calendar window we just identified"
@@ -3345,7 +3408,7 @@ async fn run_selected_desktop_and_screen(window: bool) {
                 &connections,
                 target,
                 peers.get_mut(target).unwrap(),
-                index == 1,
+                name,
                 window,
             ),
         )
@@ -3422,7 +3485,7 @@ async fn respond_to_selected_desktop(
     connections: &SharedConnectionMap,
     target: &str,
     peer: &mut actix_web::body::BoxBody,
-    screen: bool,
+    name: &str,
     window: bool,
 ) {
     use desk_agent_protocol::{
@@ -3440,7 +3503,31 @@ async fn respond_to_selected_desktop(
         object_kind: ObjectKind::Window,
         expires_at: String::new(),
     };
-    let (value, image) = if screen {
+    let (value, image) = if name == "read_terminal_output" {
+        let ContextKind::TerminalOutputInspect(input) = read.envelope.operation.input.kind else {
+            panic!("expected original terminal snapshot");
+        };
+        let [root] = input.roots.as_slice() else {
+            panic!("expected one terminal snapshot")
+        };
+        assert_eq!(root.token, "selected-terminal-reference");
+        (
+            ReadContextOutput::TerminalOutputInspect(TerminalOutputInspectOutput {
+                entries: vec![TerminalOutputProjection {
+                    snapshot_id: root.snapshot_id.clone(),
+                    display_summary: "Selected terminal".into(),
+                    content: "selected-terminal-marker".into(),
+                    redaction_count: 0,
+                    recent_tail: true,
+                    source_truncated: false,
+                    read_truncated: false,
+                    truncated: false,
+                }],
+                truncated: false,
+            }),
+            None,
+        )
+    } else if name == "read_current_screen" {
         let expected = window.then(window_ref);
         assert!(
             matches!(read.envelope.operation.input.kind, ContextKind::ScreenCaptureCurrent(ref params) if params.window == expected)
@@ -4305,6 +4392,8 @@ async fn production_input_entry_freezes_objects_and_rejects_changed_retry_withou
     let client_id = "input-entry";
     let run_id = derive_conversation_key("1", "device", Some(client_id), "unused");
     let update = AiAssistantObjectContextUpdate {
+        conversation_target:
+            desk_agent_protocol::ai_assistant::AiAssistantConversationTarget::FixedDevice,
         conversation_id: client_id.into(),
         client_request_id: "original-object".into(),
         operation: AiAssistantObjectContextOperation::AttachTerminalOutput {
@@ -4396,6 +4485,7 @@ async fn production_input_entry_freezes_objects_and_rejects_changed_retry_withou
                 device_id: "device",
                 client_conversation_id: Some(client_id),
             },
+            "device",
             1,
             &frozen,
             &frozen.object_attachments[0].envelope.allowed_destinations[0],

@@ -18,6 +18,33 @@ pub enum AssistantConversationScope {
     Organization(i32),
 }
 
+impl AssistantConversationScope {
+    pub fn object_context_key(
+        self,
+        actor_id: &str,
+        device_id: &str,
+        update: &desk_agent_protocol::ai_assistant::AiAssistantObjectContextUpdate,
+    ) -> Result<String, &'static str> {
+        if !is_valid_client_conversation_id(&update.conversation_id) {
+            return Err("invalid AI Assistant conversation id");
+        }
+        if update.conversation_target.is_selectable() {
+            Ok(derive_assistant_conversation_key(
+                actor_id,
+                self,
+                &update.conversation_id,
+            ))
+        } else {
+            Ok(derive_conversation_key(
+                actor_id,
+                device_id,
+                Some(&update.conversation_id),
+                "",
+            ))
+        }
+    }
+}
+
 /// Derive an assistant conversation key from the authenticated actor, access
 /// context and validated client continuation intent. Device selection is per request.
 pub fn derive_assistant_conversation_key(

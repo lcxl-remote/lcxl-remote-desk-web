@@ -400,6 +400,8 @@ fn canonical_path_changes_require_confirmation_and_retries_bind_original_intent(
     };
     use desk_agent_protocol::computer_use::FileDirectoryResolveOutput;
     let wire = AiAssistantObjectContextUpdate {
+        conversation_target:
+            desk_agent_protocol::ai_assistant::AiAssistantConversationTarget::FixedDevice,
         conversation_id: "browser-intent".into(),
         client_request_id: "directory-request".into(),
         operation: AiAssistantObjectContextOperation::SelectDirectory {
@@ -463,6 +465,8 @@ fn windows_prefix_conversion_keeps_owner_selection_but_not_target_changes() {
     };
     use desk_agent_protocol::computer_use::FileDirectoryResolveOutput;
     let wire = AiAssistantObjectContextUpdate {
+        conversation_target:
+            desk_agent_protocol::ai_assistant::AiAssistantConversationTarget::FixedDevice,
         conversation_id: "browser-intent".into(),
         client_request_id: "directory-request".into(),
         operation: AiAssistantObjectContextOperation::SelectDirectory {

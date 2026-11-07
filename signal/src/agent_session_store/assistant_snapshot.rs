@@ -169,7 +169,9 @@ async fn load_snapshot_on(
         || session.actor_id != actor
         || session.device_id != device
         || session.conversation_id != run
-        || (device.is_empty() && !session.has_admitted_personal_input())
+        || (device.is_empty()
+            && !session.has_admitted_personal_input()
+            && session.context_attachments.is_empty())
     {
         return Ok(None);
     }

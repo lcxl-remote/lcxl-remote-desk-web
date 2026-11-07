@@ -2922,6 +2922,8 @@ export default {
   'pages.deskTerminal.shellPlaceholder': 'Select a shell...',
   'pages.deskTerminal.switchShell': 'Switch Shell',
   'pages.deskTerminal.assistant.add': 'Add output to AI',
+  'pages.deskTerminal.assistant.addPersonal': 'Add to multi-device chat',
+  'pages.deskTerminal.assistant.addPersonalHint': 'Attach recent output to the current multi-device chat. Select this device in the chat first.',
   'pages.deskTerminal.assistant.added': 'Added to AI',
   'pages.deskTerminal.assistant.addHint': 'Attach the bounded recent terminal output to AI Assistant',
   'pages.deskTerminal.assistant.addFailed': 'Could not attach terminal output to AI Assistant',

@@ -6,7 +6,6 @@ pub mod object_read;
 use crate::{
     context_attachment::{
         AttachmentState, ContextAttachment, ContextAttachmentKind, validate_attachment_set,
-        validate_attachment_subject,
     },
     registry::{RegisteredTool, ToolEffect},
     session::PersistedAgentSession,
@@ -37,13 +36,63 @@ pub struct ReadContextSelection {
 }
 
 impl ReadContextSelection {
-    pub fn is_host_web_only(&self) -> bool {
-        self.object_attachments.is_empty()
-            && self.live_targets.is_empty()
-            && self
-                .tool_names
+    /// Account-scoped inputs may include device resources without granting a
+    /// device capability to the conversation itself.
+    pub fn is_selectable_input(&self) -> bool {
+        self.live_targets.is_empty()
+            && self.tool_names.iter().all(|name| {
+                crate::web_research::is_web_tool(name) || self.is_selected_object_tool(name)
+            })
+    }
+
+    pub fn is_selected_object_tool(&self, name: &str) -> bool {
+        object_read::implicit_object_tool(name, &self.object_attachments)
+            && crate::ai_assistant::ai_assistant_provider_registry_ref()
+                .capability_for_tool(name)
+                .is_some_and(crate::request_devices::selected_read_descriptor)
+    }
+
+    pub fn include_selectable_object_tools(&mut self) {
+        if self.object_attachments.is_empty() {
+            return;
+        }
+        for descriptor in crate::ai_assistant::ai_assistant_provider_registry_ref()
+            .providers()
+            .flat_map(|provider| &provider.capabilities)
+            .filter(|descriptor| crate::request_devices::selected_read_descriptor(descriptor))
+        {
+            let name = descriptor.wire.tool_name.as_str();
+            if object_read::implicit_object_tool(name, &self.object_attachments)
+                && let Err(index) = self
+                    .tool_names
+                    .binary_search_by(|tool| tool.as_str().cmp(name))
+            {
+                self.tool_names.insert(index, name.into());
+            }
+        }
+    }
+
+    pub(crate) fn has_device_objects_for_tool(&self, name: &str, device_id: &str) -> bool {
+        self.object_attachments.iter().any(|object| {
+            object.device_id == device_id
+                && object_read::supports_implicit_object(name, object.kind)
+        })
+    }
+
+    pub fn validate_object_devices(
+        &self,
+        targets: &[crate::dynamic_run::AssistantInputTarget],
+    ) -> Result<(), AgentError> {
+        if self.object_attachments.iter().any(|attachment| {
+            !targets
                 .iter()
-                .all(|name| crate::web_research::is_web_tool(name))
+                .any(|target| target.device_id == attachment.device_id)
+        }) {
+            return Err(invalid(
+                "selected attachment is outside the original device targets",
+            ));
+        }
+        Ok(())
     }
 
     /// Capture the final model-compatible tools actually exposed to this turn.
@@ -186,15 +235,34 @@ pub fn validate_current_objects(
     destination: &DestinationIdentity,
     now: u64,
 ) -> Result<(), AgentError> {
+    validate_current_objects_on(session, objects, destination, now, None)
+}
+
+pub fn validate_current_device_objects(
+    session: &PersistedAgentSession,
+    objects: &[ContextAttachment],
+    destination: &DestinationIdentity,
+    now: u64,
+    device_id: &str,
+) -> Result<(), AgentError> {
+    validate_current_objects_on(session, objects, destination, now, Some(device_id))
+}
+
+fn validate_current_objects_on(
+    session: &PersistedAgentSession,
+    objects: &[ContextAttachment],
+    destination: &DestinationIdentity,
+    now: u64,
+    device_id: Option<&str>,
+) -> Result<(), AgentError> {
     validate_objects(objects)?;
-    for object in objects {
-        validate_attachment_subject(
-            object,
-            &session.actor_id,
-            &session.device_id,
-            session.surface,
-        )
-        .map_err(|_| invalid("object selection subject mismatch"))?;
+    for object in objects
+        .iter()
+        .filter(|object| device_id.is_none_or(|id| id == object.device_id))
+    {
+        session
+            .validate_context_subject(object)
+            .map_err(|_| invalid("object selection subject mismatch"))?;
         if !object.is_active_at(now)
             || object.envelope.allowed_destinations.as_slice() != [destination.clone()]
             || !session

@@ -64,6 +64,13 @@ fn canonical_mobile_contract_decodes_with_the_shared_protocol() {
     let object_update: AiAssistantObjectContextUpdate =
         serde_json::from_value(root["object_context_update"].clone()).expect("object update");
     object_update.validate().expect("object update is valid");
+    assert!(object_update.conversation_target.is_selectable());
+    let mut missing_target = root["object_context_update"].clone();
+    missing_target
+        .as_object_mut()
+        .unwrap()
+        .remove("conversation_target");
+    assert!(serde_json::from_value::<AiAssistantObjectContextUpdate>(missing_target).is_err());
 }
 
 #[test]

@@ -10,6 +10,8 @@ Web and Tauri save the device selection to the current conversation. It is resto
 
 In a multi-device conversation, ask the assistant to capture a display or an application window on a selected device. For example, ask it to capture the Calendar window on your Mac. The assistant looks up the window on that device before requesting capture. Independent window capture is available on Windows and macOS. Screenshots require a model that accepts images and appear as thumbnails in the conversation. To attach a file or application context yourself, open the assistant from that device.
 
+In Web or Tauri, select a device in the multi-device chat and open that device's terminal. Use **Add to multi-device chat** to attach the bounded recent output to the current chat. The assistant can read that snapshot for requests that still select the device.
+
 1. Sign in, open an online device you own and turn on **AI Assistant enabled** for that device.
 2. Open AI Assistant and create or restore a conversation.
 3. Select the context it may read and enter your request.
