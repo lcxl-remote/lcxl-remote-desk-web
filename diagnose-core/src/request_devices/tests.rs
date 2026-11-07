@@ -197,11 +197,9 @@ async fn every_request_device_read_projects_parses_and_keeps_its_exact_target() 
         let name = descriptor.wire.tool_name.as_str();
         if matches!(
             name,
-            crate::command_confirmation::COMMAND_TOOL
-                | "read_terminal_output"
-                | "inspect_files"
-                | "read_text_file"
-        ) {
+            crate::command_confirmation::COMMAND_TOOL | "read_terminal_output"
+        ) || crate::file_model_input::is_read(name)
+        {
             continue;
         }
         let args = match name {

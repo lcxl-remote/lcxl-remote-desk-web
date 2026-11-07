@@ -2044,6 +2044,7 @@ mod tests {
                 ResultFileRead::build_for_device(&selected, "device-b", &call, &destination, 1000)
                     .is_err()
             );
+            assert_selected_document_sources(&selected, &destination, &evidence.reference);
         }
         let missing_name = validate_read_permission_input(
             &session,
@@ -2203,6 +2204,91 @@ mod tests {
         assert!(ResultFileRead::build(&session, &call, &destination, 1000).is_err());
     }
 
+    fn assert_selected_document_sources(
+        session: &PersistedAgentSession,
+        destination: &desk_agent_protocol::data_lineage::DestinationIdentity,
+        file: &ObjectRef,
+    ) {
+        let registry = crate::ai_assistant::ai_assistant_provider_registry_ref();
+        let original = crate::input_read_context::ReadContextSelection::default();
+        for descriptor in registry
+            .providers()
+            .flat_map(|provider| &provider.capabilities)
+        {
+            let name = descriptor.wire.tool_name.as_str();
+            if !selection::supports(name) || matches!(name, "convert_document" | "preview_document")
+            {
+                continue;
+            }
+            assert!(
+                crate::request_devices::selected_read_descriptor(descriptor),
+                "{name}: missing device routing"
+            );
+            let args = document_read_arguments(name);
+            let call = ToolCall {
+                id: "selected-document-read".into(),
+                name: name.into(),
+                arguments_json: args.to_string(),
+            };
+            let (capability, mut input) = crate::read_tools::build_read_operation(&call).unwrap();
+            assert_eq!(capability, descriptor.required_capability, "{name}");
+            let read =
+                ResultFileRead::build_for_device(session, "device-a", &call, destination, 1000)
+                    .unwrap();
+            read.bind(&mut input).unwrap();
+            assert_eq!(read.files(), vec![file.clone()], "{name}");
+            let valid = crate::input_read_context::object_read::ObjectReadBinding {
+                device_id: "device-a",
+                original: &original,
+                destination,
+                now_unix_ms: 1000,
+            };
+            let other = crate::input_read_context::object_read::ObjectReadBinding {
+                device_id: "device-b",
+                ..valid
+            };
+            for surface in [
+                ProductSurface::OssPersonalOwner,
+                ProductSurface::ManagerPersonalOwner,
+            ] {
+                assert!(
+                    super::super::read::ReadCallPreflight::build_file_result(
+                        registry, surface, &call, &valid, session
+                    )
+                    .is_ok(),
+                    "{name}/{surface:?}"
+                );
+                assert!(
+                    super::super::read::ReadCallPreflight::build_file_result(
+                        registry, surface, &call, &other, session
+                    )
+                    .is_err(),
+                    "{name}/{surface:?}"
+                );
+            }
+        }
+    }
+
+    fn document_read_arguments(name: &str) -> serde_json::Value {
+        let mut args = serde_json::json!({"max_bytes":4096});
+        let selector = serde_json::json!({"kind":"directory_entry",
+            "file_result_call_id":"metadata", "entry_name":"notes.txt"});
+        if selection::multiple(name) {
+            args["sources"] = serde_json::json!([selector]);
+        } else {
+            args["source"] = selector;
+        }
+        if name == "inspect_excel_cell" {
+            args["sheet_name"] = "Sheet1".into();
+            args["address"] = "A1".into();
+        }
+        if name == "preview_spreadsheet_merge" {
+            args["columns"] =
+                serde_json::json!([{"output_header":"name", "source_headers":["name"]}]);
+        }
+        args
+    }
+
     fn assert_document_sources(
         session: &PersistedAgentSession,
         destination: &desk_agent_protocol::data_lineage::DestinationIdentity,
@@ -2218,22 +2304,9 @@ mod tests {
             "inspect_spreadsheets",
             "preview_spreadsheet_merge",
         ] {
-            let mut args = serde_json::json!({"max_bytes":4096});
+            let mut args = document_read_arguments(name);
             let selector = serde_json::json!({"kind":"directory_entry",
                 "file_result_call_id":"metadata", "entry_name":"notes.txt"});
-            if selection::multiple(name) {
-                args["sources"] = serde_json::json!([selector]);
-            } else {
-                args["source"] = selector.clone();
-            }
-            if name == "inspect_excel_cell" {
-                args["sheet_name"] = "Sheet1".into();
-                args["address"] = "A1".into();
-            }
-            if name == "preview_spreadsheet_merge" {
-                args["columns"] =
-                    serde_json::json!([{"output_header":"name", "source_headers":["name"]}]);
-            }
             let call = ToolCall {
                 id: "batch-read".into(),
                 name: name.into(),

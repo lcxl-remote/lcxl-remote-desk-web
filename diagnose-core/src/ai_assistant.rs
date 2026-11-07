@@ -2789,7 +2789,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
                     ),
                 ),
                 provider_for_tool(
-                    TargetBinding::NativeContext,
+                    TargetBinding::RequestDevice,
                     crate::tool_exposure::ExposureRequirement::NoAttachment,
                     SPREADSHEET_LIVE_PROVIDER_ID,
                     SPREADSHEET_BATCH_INSPECT_CAPABILITY_ID,
@@ -2865,7 +2865,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
                     ),
                 ),
                 provider_for_tool(
-                    TargetBinding::NativeContext,
+                    TargetBinding::RequestDevice,
                     crate::tool_exposure::ExposureRequirement::NoAttachment,
                     DOCUMENT_LIVE_PROVIDER_ID,
                     DOCUMENT_BATCH_INSPECT_CAPABILITY_ID,
@@ -2941,7 +2941,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
                     ),
                 ),
                 provider_for_tool(
-                    TargetBinding::NativeContext,
+                    TargetBinding::RequestDevice,
                     crate::tool_exposure::ExposureRequirement::NoAttachment,
                     PRESENTATION_LIVE_PROVIDER_ID,
                     PRESENTATION_BATCH_INSPECT_CAPABILITY_ID,
@@ -3028,7 +3028,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
             .expect("static selected text file tool exists"),
     );
     let spreadsheet_file = provider_for_tool(
-        TargetBinding::NativeContext,
+        TargetBinding::RequestDevice,
         crate::tool_exposure::ExposureRequirement::NoAttachment,
         SPREADSHEET_FILE_PROVIDER_ID,
         SPREADSHEET_FILE_CAPABILITY_ID,
@@ -3045,7 +3045,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
             .expect("static selected spreadsheet tool exists"),
     );
     let spreadsheet_merge = provider_for_tool(
-        TargetBinding::NativeContext,
+        TargetBinding::RequestDevice,
         crate::tool_exposure::ExposureRequirement::NoAttachment,
         SPREADSHEET_MERGE_PROVIDER_ID,
         SPREADSHEET_MERGE_CAPABILITY_ID,

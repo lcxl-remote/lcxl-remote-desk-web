@@ -74,7 +74,7 @@ pub(super) fn patch_tool() -> RegisteredTool {
 }
 pub(super) fn provider() -> ProviderDescriptor {
     let read = provider_for_tool(
-        TargetBinding::NativeContext,
+        TargetBinding::RequestDevice,
         crate::tool_exposure::ExposureRequirement::NoAttachment,
         PROVIDER_ID,
         INSPECT_CAPABILITY_ID,

@@ -14,6 +14,8 @@ In Web or Tauri, select a device in the multi-device chat and open that device's
 
 To list a directory or read a text file, open **Conversation directories**, choose a device selected for the chat, and add the directory. Approval applies only to that device; listing a directory and reading a file each require their own permission. Add the directory separately on another device, even when the paths match.
 
+On devices that support the file format, the assistant can also choose a document, presentation, or workbook from the directory result and inspect the file. Working with an open document or saving changes uses separate operations.
+
 1. Sign in, open an online device you own and turn on **AI Assistant enabled** for that device.
 2. Open AI Assistant and create or restore a conversation.
 3. Select the context it may read and enter your request.

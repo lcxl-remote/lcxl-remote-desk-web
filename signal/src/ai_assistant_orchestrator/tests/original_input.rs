@@ -3073,7 +3073,10 @@ async fn run_selected_device_reads(scenario: SelectedReadScenario) {
     let owner = crate::control_authorizer::SINGLE_ACCOUNT_USER_ID;
     let connections = web::Data::new(SharedConnectionMap::new_oss());
     let cases = if files {
-        vec![("selected-file-device", "inspect_files")]
+        vec![
+            ("selected-file-device", "inspect_files"),
+            ("selected-file-device", "inspect_spreadsheets"),
+        ]
     } else if terminal {
         vec![("selected-terminal-device", "read_terminal_output")]
     } else if window {
@@ -3087,7 +3090,9 @@ async fn run_selected_device_reads(scenario: SelectedReadScenario) {
             ("selected-desktop-b", "read_current_screen"),
         ]
     };
-    let second_answer = if window {
+    let second_answer = if files {
+        "Selected spreadsheet read complete."
+    } else if window {
         "Selected window capture complete."
     } else {
         "Selected device read complete."
@@ -3115,6 +3120,10 @@ async fn run_selected_device_reads(scenario: SelectedReadScenario) {
                 let (capability, kind) = match *name {
                     "inspect_files" => (
                         Capability::FileMetadataRead,
+                        ComputerUseAdapterKind::FileSystem,
+                    ),
+                    "inspect_spreadsheets" => (
+                        Capability::SpreadsheetFileInspect,
                         ComputerUseAdapterKind::FileSystem,
                     ),
                     "read_terminal_output" => (
@@ -3168,10 +3177,15 @@ async fn run_selected_device_reads(scenario: SelectedReadScenario) {
             .unwrap();
     }
     let model_cases = cases.clone();
+    let file_result = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+    let model_file_result = file_result.clone();
     let gateway = actix_web::rt::spawn(async move {
         for (target, name) in model_cases {
             let exact = match (window, name) {
                 (_, "inspect_files") => json!({"directory_request_id":"selected-directory"}),
+                (_, "inspect_spreadsheets") => {
+                    json!({"sources":[{"file_result_call_id":model_file_result.lock().unwrap().clone().expect("verified directory listing"), "entry_name":"selected.xlsx"}]})
+                }
                 (true, "read_current_screen") => json!({"window_id":"w1"}),
                 (true, "inspect_desktop_ui") => json!({"queries":["Calendar"]}),
                 _ => json!({}),
@@ -3223,6 +3237,8 @@ async fn run_selected_device_reads(scenario: SelectedReadScenario) {
                 let messages = request["messages"].to_string();
                 if name == "read_current_screen" {
                     assert!(messages.contains("data:image/png;base64,"), "{messages}");
+                } else if name == "inspect_spreadsheets" {
+                    assert!(messages.contains("selected-workbook-data"), "{messages}");
                 } else if files {
                     assert!(messages.contains("fixture-folder"), "{messages}");
                 } else if terminal {
@@ -3232,7 +3248,7 @@ async fn run_selected_device_reads(scenario: SelectedReadScenario) {
                 } else {
                     assert!(messages.contains("fixture-display"), "{messages}");
                 }
-                let answer = if name == "read_current_screen" {
+                let answer = if matches!(name, "read_current_screen" | "inspect_spreadsheets") {
                     second_answer
                 } else {
                     "Selected device read complete."
@@ -3240,7 +3256,12 @@ async fn run_selected_device_reads(scenario: SelectedReadScenario) {
                 memory_sse(json!({"content":answer}), "stop")
             })
             .await;
-            if !window || name != "read_current_screen" {
+            let needs_title = if files {
+                name == "inspect_files"
+            } else {
+                !window || name != "read_current_screen"
+            };
+            if needs_title {
                 capture_one_openai_request_with_reply(&listener, |body| {
                     let request: Value = serde_json::from_slice(body).unwrap();
                     assert!(
@@ -3256,7 +3277,9 @@ async fn run_selected_device_reads(scenario: SelectedReadScenario) {
         }
     });
     for (index, (target, name)) in cases.into_iter().enumerate() {
-        let intent = if window {
+        let intent = if files {
+            "selected-file-run".into()
+        } else if window {
             "selected-window-run".into()
         } else {
             format!("selected-desktop-run-{index}")
@@ -3268,7 +3291,7 @@ async fn run_selected_device_reads(scenario: SelectedReadScenario) {
             &intent,
         );
         let store = crate::agent_session_store::SignalAgentSessionStore::new(db.clone());
-        if files {
+        if files && index == 0 {
             use desk_assistant_data_store::device_roster::{personal_selection_key, replace};
             use desk_diagnose_core::file_scope::{transaction::*, *};
             replace(
@@ -3408,7 +3431,7 @@ async fn run_selected_device_reads(scenario: SelectedReadScenario) {
             );
         };
         assert_eq!(request.selected_device_id(), Some(target));
-        if index == 0 {
+        if index == 0 || files {
             let item = &request.items[0];
             let body: PermissionDecisionBody = serde_json::from_value(json!({
                 "conversation":intent, "requestId":request.request_id, "items":[{
@@ -3515,7 +3538,18 @@ async fn run_selected_device_reads(scenario: SelectedReadScenario) {
             "{:?}",
             snapshot.terminal_error
         );
-        if index == 1 {
+        if files && index == 0 {
+            let listing = snapshot
+                .messages
+                .iter()
+                .find(|message| {
+                    message.tool_call_id.as_deref() == Some("call-inspect_files")
+                        && message.tool_ok == Some(true)
+                })
+                .expect("verified directory listing");
+            *file_result.lock().unwrap() = Some(listing.message_id.clone());
+        }
+        if index == 1 && !files {
             use desk_diagnose_core::dynamic_run::PermissionDecisionActor;
             assert!(
                 snapshot
@@ -3594,11 +3628,44 @@ async fn respond_to_selected_desktop(
                     byte_len: None,
                     modified_at: None,
                 }],
-                directory_entries: vec![],
+                directory_entries: vec![DirectoryEntryProjection {
+                    object_ref: Some(selected_workbook_reference()),
+                    parent_snapshot_id: root.snapshot_id.clone(),
+                    display_name: "selected.xlsx".into(),
+                    is_directory: false,
+                    byte_len: Some(128),
+                    modified_at: None,
+                }],
                 truncated: false,
                 pagination_id: None,
                 pagination_consistency: None,
                 next_cursor: None,
+            }),
+            None,
+        )
+    } else if name == "inspect_spreadsheets" {
+        let ContextKind::SpreadsheetFileInspect(input) = read.envelope.operation.input.kind else {
+            panic!("expected file-based workbook read")
+        };
+        assert_eq!(input.files, vec![selected_workbook_reference()]);
+        (
+            ReadContextOutput::SpreadsheetFileInspect(SpreadsheetFileInspectOutput {
+                snapshot_id: "workbook-snapshot".into(),
+                truncated: false,
+                workbooks: vec![SpreadsheetWorkbookProjection {
+                    display_name: "selected.xlsx".into(),
+                    format: "xlsx".into(),
+                    byte_len: 128,
+                    sha256: "a".repeat(64),
+                    unsupported_features: vec![],
+                    sheets: vec![SpreadsheetSheetProjection {
+                        name: "selected-workbook-data".into(),
+                        observed_rows: 0,
+                        observed_columns: 0,
+                        cells: vec![],
+                        truncated: false,
+                    }],
+                }],
             }),
             None,
         )
@@ -3734,6 +3801,16 @@ async fn respond_to_selected_desktop(
             None,
         );
         observer.on_remote_tool_response(&source, &response).await;
+    }
+}
+
+fn selected_workbook_reference() -> desk_agent_protocol::computer_use::ObjectRef {
+    use desk_agent_protocol::computer_use::{ObjectKind, ObjectRef};
+    ObjectRef {
+        token: "workbook-on-selected-device".into(),
+        snapshot_id: "selected-workbook".into(),
+        object_kind: ObjectKind::File,
+        expires_at: "2099-01-01T00:00:00Z".into(),
     }
 }
 
