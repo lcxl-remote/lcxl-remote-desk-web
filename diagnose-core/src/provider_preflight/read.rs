@@ -150,10 +150,12 @@ impl ReadCallPreflight {
         if cap != capability.required_capability {
             return Err(unavailable());
         }
-        let canonical = canonical_tool_permission_input_json(
-            &call.name,
-            serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?,
-        )
+        let input = serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?;
+        let canonical = if selected_device {
+            crate::request_devices::canonical_selected_read_input(&call.name, input)
+        } else {
+            canonical_tool_permission_input_json(&call.name, input)
+        }
         .map_err(|_| unavailable())?;
         if canonical.len() > capability.wire.limits.max_input_bytes as usize {
             return Err(unavailable());

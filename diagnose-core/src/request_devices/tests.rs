@@ -255,13 +255,158 @@ fn process_arguments_cannot_escalate_an_unapproved_read() {
     );
     assert!(require_current_read_target(&session, &sensitive, &target).is_err());
     assert!(
-        selected_read(&tool(
+        require_observed_desktop_target(
+            &session,
+            "a",
             "read_current_screen",
-            json!({
-                "target_ref":"a", "window_id":"w1"
-            })
-        ))
+            &json!({"window_id":"w1"})
+        )
         .is_err()
+    );
+}
+
+#[tokio::test]
+async fn desktop_object_approval_and_dispatch_keep_the_observed_device_and_incarnation() {
+    use crate::chat::{ChatMessage, ChatRole};
+    use crate::model_message_labels::{ReadResultLabel, read_result_envelope};
+    use crate::seam::ToolOutputFormat;
+
+    let registry = crate::ai_assistant::ai_assistant_provider_registry_ref();
+    let screen = registry.capability_for_tool("read_current_screen").unwrap();
+    let mut session = session();
+    let devices = [
+        device("a", vec![screen.wire.capability_id.clone()]),
+        device("b", vec![screen.wire.capability_id.clone()]),
+    ];
+    let window = |snapshot: &str| {
+        json!({"token":"same-window-token","snapshot_id":snapshot,
+            "object_kind":"window","expires_at":""})
+    };
+    for (device, snapshot) in [("a", "snapshot-a"), ("b", "snapshot-b")] {
+        let mut call = tool("inspect_desktop_ui", json!({}));
+        call.id = format!("observe-{device}");
+        let content = json!({"ReadContext":{"DesktopUiInspect":{"owner_selectable_windows":[
+            {"title":"Identical title","object_ref":window(snapshot)}
+        ]}}})
+        .to_string();
+        let output = ToolRunOutput {
+            format: ToolOutputFormat::Json,
+            content: content.clone(),
+            image_data_url: None,
+            document_preview: None,
+        };
+        let mut observation =
+            ChatMessage::text(format!("result-{device}"), ChatRole::Tool, content);
+        observation.tool_call_id = Some(call.id.clone());
+        observation.tool_ok = Some(true);
+        observation.data_envelope = Some(
+            read_result_envelope(
+                registry,
+                &call,
+                &output,
+                ReadResultLabel {
+                    envelope_id: format!("envelope-{device}"),
+                    observation_id: format!("observation-{device}"),
+                    source_object_id: Some(format!("{device}:{}", call.id)),
+                    observed_at_unix_ms: 1,
+                },
+            )
+            .unwrap(),
+        );
+        let mut assistant = ChatMessage::text(format!("inspect-{device}"), ChatRole::Assistant, "");
+        assistant.tool_calls.push(call.to_ref());
+        session.conversation.extend([assistant, observation]);
+    }
+    session
+        .ui_references
+        .observe(&session.conversation)
+        .unwrap();
+    let resolve = |call: &ToolCall, session: &PersistedAgentSession| {
+        crate::ui_model_ids::resolve_session_call_with_context(call, session, 1, None).unwrap()
+    };
+    let reads = read_tools(&devices, registry, true);
+    let input_a = json!({"window":window("snapshot-a")});
+    let input_b = json!({"window":window("snapshot-b")});
+    let propose_window = |alias: &str| {
+        tool(
+            REQUEST_CAPABILITY_GRANTS_TOOL_NAME,
+            json!({
+                "target_ref":"a",
+                "items":[{"tool_name":"read_current_screen","exact_input":{"window_id":alias},
+                    "reason":"Capture the selected window"}]
+            }),
+        )
+    };
+    let proposal_a = resolve(&propose_window("w1"), &session);
+    let proposal_b = resolve(&propose_window("w2"), &session);
+    let mut request = plan_device_permission(
+        &NoDeviceCommands,
+        Some(registry),
+        &session,
+        &devices,
+        &reads,
+        &proposal_a,
+        "permission-a",
+        NOW,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        plan_device_permission(
+            &NoDeviceCommands,
+            Some(registry),
+            &session,
+            &devices,
+            &reads,
+            &proposal_b,
+            "permission-b",
+            NOW,
+        )
+        .await
+        .unwrap()
+        .is_err()
+    );
+    request.state = PermissionRequestState::Approved;
+    session.permission_requests.push(request);
+    let a = devices[0].read_target.as_ref().unwrap();
+    let b = devices[1].read_target.as_ref().unwrap();
+    let (reference, native) = selected_read(&resolve(
+        &tool(
+            "read_current_screen",
+            json!({"target_ref":"a","window_id":"w1"}),
+        ),
+        &session,
+    ))
+    .unwrap();
+    assert_eq!(reference, "a");
+    assert_eq!(
+        serde_json::from_str::<Value>(&native.arguments_json).unwrap(),
+        input_a
+    );
+    require_current_read_target(&session, &native, a).unwrap();
+    assert!(
+        require_current_read_target(&session, &tool("read_current_screen", input_b.clone()), a)
+            .is_err()
+    );
+    let mut reused_token = session.conversation.last().unwrap().clone();
+    reused_token
+        .data_envelope
+        .as_mut()
+        .unwrap()
+        .provenance
+        .source_object_id = Some("a:observe-b".into());
+    session.conversation.push(reused_token);
+    assert!(
+        require_observed_desktop_target(&session, "a", "read_current_screen", &input_b).is_ok()
+    );
+    assert!(
+        require_current_read_target(&session, &tool("read_current_screen", input_b.clone()), a)
+            .is_err(),
+        "a newly observed incarnation on the same device needs a new approval"
+    );
+    assert!(
+        require_current_read_target(&session, &tool("read_current_screen", input_b), b).is_err()
     );
 }
 

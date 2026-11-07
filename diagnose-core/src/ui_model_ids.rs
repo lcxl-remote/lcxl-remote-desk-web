@@ -37,7 +37,7 @@ pub fn needs_resolution(tool: &str) -> bool {
         || crate::document_model_ids::supports(tool)
 }
 
-fn references(value: &Value, result: &mut Vec<ObjectRef>) {
+pub(crate) fn references(value: &Value, result: &mut Vec<ObjectRef>) {
     match value {
         Value::Object(object) => {
             if object.contains_key("token") && object.contains_key("snapshot_id") {
@@ -68,7 +68,7 @@ fn references(value: &Value, result: &mut Vec<ObjectRef>) {
     }
 }
 
-fn observation_value(text: &str) -> Option<Value> {
+pub(crate) fn observation_value(text: &str) -> Option<Value> {
     let mut value: Value = serde_json::from_str(text).ok()?;
     if value.pointer("/ReadContext/DesktopUiInspect").is_none()
         && value
@@ -126,13 +126,17 @@ fn resolve_with_references(
     now_ms: u64,
     expected: &[Value],
 ) -> Result<ObjectRef, AgentError> {
-    resolve(history, id, now_ms).or_else(|error| {
-        expected
-            .iter()
-            .filter_map(|value| serde_json::from_value::<ObjectRef>(value.clone()).ok())
-            .find(|reference| reference.token == id)
-            .ok_or(error)
-    })
+    let mut references = expected
+        .iter()
+        .filter_map(|value| serde_json::from_value::<ObjectRef>(value.clone()).ok())
+        .filter(|reference| reference.token == id);
+    if let Some(reference) = references.next() {
+        if references.any(|other| other != reference) {
+            return Err(invalid("Select one unambiguous observed object."));
+        }
+        return Ok(reference);
+    }
+    resolve(history, id, now_ms)
 }
 
 /// Resolve model arguments before existing typed preflight and authorization.
@@ -511,7 +515,7 @@ pub(crate) fn resolve_single_call_with_references(
     })
 }
 
-fn project_arguments(
+pub(crate) fn project_arguments(
     tool: &str,
     value: &mut Value,
     locators: &[crate::result_model_ids::ResultLocator],

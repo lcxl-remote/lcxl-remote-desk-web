@@ -1098,6 +1098,13 @@ impl SignalAiAssistantTools {
     }
 
     fn canonical_call_input(call: &ToolCall) -> Result<(String, String), AgentError> {
+        Self::canonical_call_input_for(call, false)
+    }
+
+    fn canonical_call_input_for(
+        call: &ToolCall,
+        selected_read: bool,
+    ) -> Result<(String, String), AgentError> {
         let value = serde_json::from_str(&call.arguments_json).map_err(|decode_error| {
             error(
                 AgentErrorKind::InvalidInput,
@@ -1106,15 +1113,19 @@ impl SignalAiAssistantTools {
                 true,
             )
         })?;
-        let canonical =
-            canonical_tool_permission_input_json(&call.name, value).map_err(|encode_error| {
-                error(
-                    AgentErrorKind::Internal,
-                    format!("failed to canonicalize Provider tool input: {encode_error}"),
-                    false,
-                    false,
-                )
-            })?;
+        let canonical = if selected_read {
+            desk_diagnose_core::request_devices::canonical_selected_read_input(&call.name, value)
+        } else {
+            canonical_tool_permission_input_json(&call.name, value)
+        }
+        .map_err(|encode_error| {
+            error(
+                AgentErrorKind::Internal,
+                format!("failed to canonicalize Provider tool input: {encode_error}"),
+                false,
+                false,
+            )
+        })?;
         let digest = format!("{:x}", Sha256::digest(canonical.as_bytes()));
         Ok((canonical, digest))
     }
@@ -1511,7 +1522,7 @@ impl SignalAiAssistantTools {
             desk_diagnose_core::future::boxed(|| async { self.authoritative_session().await })
                 .await?;
         let (canonical_input_json, canonical_input_digest_sha256) =
-            Self::canonical_call_input(call)?;
+            Self::canonical_call_input_for(call, self.selected_device_fence.is_some())?;
         let server_call_id = desk_diagnose_core::native_ids::background_action(
             &self.run_id,
             &self.turn_id,

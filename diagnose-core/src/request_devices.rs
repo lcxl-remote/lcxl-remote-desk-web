@@ -1,7 +1,8 @@
 //! Model-facing routing metadata for the devices selected in the current input.
 
-use desk_agent_protocol::{AgentError, Capability};
+use desk_agent_protocol::{AgentError, Capability, computer_use::ObjectRef};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::chat::ToolCall;
 use crate::dynamic_run::PermissionRequest;
@@ -12,14 +13,7 @@ use crate::seam::ToolSeam;
 use crate::session::{PersistedAgentSession, TriggerOrigin};
 
 pub const SYSTEM_INFO_TOOL: &str = "read_system_info";
-const NATIVE_OBJECT_FIELDS: &[&str] = &[
-    "window",
-    "window_id",
-    "root",
-    "root_id",
-    "element_id",
-    "element_only",
-];
+const NATIVE_OBJECT_FIELDS: &[&str] = &["element_id", "element_only"];
 
 pub(crate) fn accepts_device_reads(session: &crate::session::PersistedAgentSession) -> bool {
     session.has_admitted_personal_input()
@@ -97,16 +91,15 @@ pub(crate) fn has_target_selector(spec: &crate::chat::ToolSpec) -> bool {
         .is_some()
 }
 
-/// Apply after model aliases have been projected so they cannot reintroduce
-/// native object parameters in a personal conversation.
+/// Describe how device-scoped desktop references can be reused by later reads.
 pub(crate) fn project_read_spec(spec: &mut crate::chat::ToolSpec) {
     if !has_target_selector(spec) {
         return;
     }
     spec.description = match spec.name.as_str() {
-        "read_current_screen" => "Capture one whole display on the selected device. If there is only one display, omit display. Otherwise call inspect_desktop_session on the same target_ref and copy one displays[].display into exact_input when requesting permission and then into the approved call. Do not use a display ID from another device or guess a native name. The image requires a model that supports images.".into(),
+        "read_current_screen" => "Capture one display or an observed window on the selected device. For a window, use window_id from a desktop observation on the same device. For a display, omit display if there is only one, or copy a display identifier from inspect_desktop_session on the same target_ref. Use the same target and input when requesting permission and making the approved call. The image requires a model that supports images.".into(),
         "inspect_desktop_session" => "Inspect the interactive desktop session and list displays on the selected device. Use a returned display ID only on that same device. display_list_error means enumeration failed.".into(),
-        "inspect_desktop_ui" => "Observe the foreground UI on the selected device. Use queries with localized and English search terms. Set allow_unfiltered only when a targeted search is insufficient. This tool cannot use references to specific UI objects.".into(),
+        "inspect_desktop_ui" => "Observe the UI on the selected device. Use root_id from a desktop observation on the same device, or omit it to observe the foreground UI. Use queries with localized and English search terms. Set allow_unfiltered only when a targeted search is insufficient.".into(),
         _ => return,
     };
     if let Some(properties) = spec.parameters_schema["properties"].as_object_mut() {
@@ -312,6 +305,7 @@ pub(crate) async fn plan_device_permission(
                 }).and_then(|device| device.read_target.clone()).ok_or_else(invalid)?;
                 let exact = item.get("exact_input").ok_or_else(invalid)?;
                 validate_native_read(descriptor, exact)?;
+                require_observed_desktop_target(session, &target.device_id, name, exact)?;
                 if descriptor.required_capability == Capability::ScreenCaptureCurrent
                     && let Some(display) = exact.get("display").and_then(serde_json::Value::as_str)
                     && !observed_display(session, &target.device_id, display)
@@ -330,7 +324,13 @@ pub(crate) async fn plan_device_permission(
                     &ToolCall { arguments_json: input.to_string(), ..call.clone() },
                     registry, request_id.into(), session.input_revision, created_at.into(),
                 )?;
-                request.items[0].selected_read_target = Some(target);
+                let item = &mut request.items[0];
+                let canonical = canonical_selected_read_input(name, exact.clone())
+                    .map_err(|_| invalid())?;
+                item.canonical_input_digest_sha256 =
+                    Some(format!("{:x}", Sha256::digest(canonical.as_bytes())));
+                item.canonical_input_json = Some(canonical);
+                item.selected_read_target = Some(target);
                 return if crate::assistant_policy::permits_permission_request(session, &request) {
                     Ok(request)
                 } else {
@@ -371,6 +371,16 @@ pub(crate) async fn plan_device_permission(
         }
         .await,
     )
+}
+
+/// The selected-read path resolves aliases before approval and dispatch, so
+/// its exact input can retain the entire native object incarnation.
+pub fn canonical_selected_read_input(
+    tool_name: &str,
+    mut input: serde_json::Value,
+) -> Result<String, serde_json::Error> {
+    crate::model_input::fill_canonical_arguments(tool_name, &mut input);
+    crate::permission_tools::canonical_permission_input_json(input)
 }
 
 fn observed_display(session: &PersistedAgentSession, device_id: &str, display: &str) -> bool {
@@ -430,16 +440,90 @@ pub(crate) fn validate_native_read(
     descriptor: &crate::provider_registry::CapabilityDescriptor,
     input: &serde_json::Value,
 ) -> Result<(), AgentError> {
-    if matches!(
-        descriptor.required_capability,
-        Capability::ScreenCaptureCurrent | Capability::DesktopUiInspect
-    ) && NATIVE_OBJECT_FIELDS
-        .iter()
-        .any(|field| input.get(*field).is_some())
+    if descriptor.required_capability == Capability::DesktopUiInspect
+        && (input
+            .get("element_id")
+            .is_some_and(|value| !value.is_null())
+            || input
+                .get("element_only")
+                .is_some_and(|value| value != &serde_json::Value::Bool(false)))
     {
         return Err(crate::subagent::invalid(
-            "This device read requires a whole display or a rootless observation",
+            "Element-only search is not available for this device read",
         ));
+    }
+    Ok(())
+}
+
+/// Device aliases and native object IDs are not proof of origin on their own.
+/// The host binds a resolved object to a successful read on this exact device.
+fn require_observed_desktop_target(
+    session: &PersistedAgentSession,
+    device_id: &str,
+    tool_name: &str,
+    input: &serde_json::Value,
+) -> Result<(), AgentError> {
+    let (field, alias) = match tool_name {
+        "read_current_screen" => ("window", "window_id"),
+        "inspect_desktop_ui" => ("root", "root_id"),
+        _ => return Ok(()),
+    };
+    let invalid =
+        || crate::subagent::invalid("Use an observed desktop object from the same target device");
+    if input.get(alias).is_some() {
+        return Err(invalid());
+    }
+    let Some(reference) = input.get(field) else {
+        return Ok(());
+    };
+    let reference: ObjectRef = serde_json::from_value(reference.clone()).map_err(|_| invalid())?;
+    use desk_agent_protocol::computer_use::ObjectKind;
+    if !match tool_name {
+        "read_current_screen" => {
+            reference.object_kind == ObjectKind::Window && input.get("display").is_none()
+        }
+        _ => matches!(
+            reference.object_kind,
+            ObjectKind::DesktopSession
+                | ObjectKind::Application
+                | ObjectKind::Window
+                | ObjectKind::UiElement
+        ),
+    } {
+        return Err(invalid());
+    }
+    session
+        .resolve_assistant_action_device(None, Some(device_id))
+        .map_err(|_| invalid())?;
+    let observed = session.conversation.iter().rev().any(|message| {
+        let result = message.trusted_tool_result();
+        let Some((call_id, source)) = result.tool_call_id.as_deref().zip(
+            result
+                .data_envelope
+                .as_ref()
+                .map(|envelope| &envelope.provenance),
+        ) else {
+            return false;
+        };
+        if message.role != crate::chat::ChatRole::Tool
+            || message.tool_ok != Some(true)
+            || !matches!(
+                source.source_tool_name.as_str(),
+                "inspect_desktop_session" | "inspect_desktop_ui"
+            )
+            || source.source_object_id.as_deref() != Some(&format!("{device_id}:{call_id}"))
+        {
+            return false;
+        }
+        let Some(value) = crate::ui_model_ids::observation_value(&result.text) else {
+            return false;
+        };
+        let mut references = Vec::new();
+        crate::ui_model_ids::references(&value, &mut references);
+        references.contains(&reference)
+    });
+    if !observed {
+        return Err(invalid());
     }
     Ok(())
 }
@@ -537,15 +621,14 @@ pub fn require_current_read_target(
         .capability_for_tool(&call.name)
         .filter(|descriptor| selected_read_descriptor(descriptor))
         .ok_or_else(invalid)?;
+    let input = serde_json::from_str(&call.arguments_json).map_err(|_| invalid())?;
+    require_observed_desktop_target(session, &target.device_id, &call.name, &input)?;
     if crate::provider_preflight::classify_provider_call(descriptor, call)?
         == desk_agent_protocol::capability_grant::CapabilityRiskTier::R0
     {
         return Ok(());
     }
-    let input = serde_json::from_str(&call.arguments_json).map_err(|_| invalid())?;
-    let canonical =
-        crate::permission_tools::canonical_tool_permission_input_json(&call.name, input)
-            .map_err(|_| invalid())?;
+    let canonical = canonical_selected_read_input(&call.name, input).map_err(|_| invalid())?;
     if session.permission_requests.iter().any(|request| {
         request.input_revision == session.input_revision
             && request.state == crate::dynamic_run::PermissionRequestState::Approved
@@ -614,8 +697,10 @@ pub(crate) fn append_catalogue(
                     {
                         return None;
                     }
-                    let exact: serde_json::Value =
+                    let mut exact: serde_json::Value =
                         serde_json::from_str(item.canonical_input_json.as_deref()?).ok()?;
+                    session.ui_references.alias_native_arguments(&mut exact);
+                    crate::ui_model_ids::project_arguments(&item.tool_name, &mut exact, &[]);
                     Some(serde_json::json!({
                         "tool_name": item.tool_name,
                         "target_ref": device.target_ref,

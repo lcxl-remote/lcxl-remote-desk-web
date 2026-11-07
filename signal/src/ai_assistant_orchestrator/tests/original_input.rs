@@ -3002,6 +3002,15 @@ async fn respond_to_system_info(
 
 #[actix_web::test]
 async fn personal_selected_desktop_read_and_whole_screen_resume_on_signal() {
+    run_selected_desktop_and_screen(false).await;
+}
+
+#[actix_web::test]
+async fn personal_selected_window_capture_resumes_on_the_observed_device() {
+    run_selected_desktop_and_screen(true).await;
+}
+
+async fn run_selected_desktop_and_screen(window: bool) {
     use super::desktop_permission::concrete_review_reply;
     use super::permission_object::tool_reply;
     use crate::config::ConfigConnection;
@@ -3042,27 +3051,66 @@ async fn personal_selected_desktop_read_and_whole_screen_resume_on_signal() {
     .unwrap();
     let owner = crate::control_authorizer::SINGLE_ACCOUNT_USER_ID;
     let connections = web::Data::new(SharedConnectionMap::new_oss());
-    let devices = ["selected-desktop-a", "selected-desktop-b"];
+    let devices = if window {
+        ["selected-window", "selected-window"]
+    } else {
+        ["selected-desktop-a", "selected-desktop-b"]
+    };
+    let first_read = if window {
+        "inspect_desktop_ui"
+    } else {
+        "inspect_desktop_session"
+    };
+    let second_answer = if window {
+        "Selected window capture complete."
+    } else {
+        "Selected device read complete."
+    };
     let now = chrono::Utc::now();
-    let mut peers = Vec::new();
-    for (device, capability, adapter) in [
-        (
-            devices[0],
-            Capability::DesktopSessionInspect,
-            ComputerUseAdapterKind::MacosAccessibility,
-        ),
-        (
-            devices[1],
-            Capability::ScreenCaptureCurrent,
-            ComputerUseAdapterKind::ScreenCapture,
-        ),
-    ] {
+    let mut peers = std::collections::BTreeMap::new();
+    for device in devices
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>()
+    {
         crate::device_code_store::get_or_create(&db, device)
             .await
             .unwrap();
-        peers.push(
-            register_request_device(&connections, device, device, OperationSystemEnum::Mac).await,
+        peers.insert(
+            device,
+            register_request_device(&connections, device, device, OperationSystemEnum::Mac)
+                .await
+                .into_body(),
         );
+        let first_cap = if window {
+            Capability::DesktopUiInspect
+        } else {
+            Capability::DesktopSessionInspect
+        };
+        let capabilities = [
+            (
+                devices[0],
+                first_cap,
+                ComputerUseAdapterKind::MacosAccessibility,
+            ),
+            (
+                devices[1],
+                Capability::ScreenCaptureCurrent,
+                ComputerUseAdapterKind::ScreenCapture,
+            ),
+        ]
+        .into_iter()
+        .filter(|(id, _, _)| *id == device)
+        .map(|(_, capability, kind)| ComputerUseCapabilityReadiness {
+            capability,
+            adapter: ComputerUseAdapterRef {
+                kind,
+                version: "1".into(),
+            },
+            supported: true,
+            ready: true,
+            reason: None,
+        })
+        .collect();
         crate::computer_use_readiness::global_computer_use_readiness_cache()
             .update(
                 &format!("live-{device}"),
@@ -3077,16 +3125,7 @@ async fn personal_selected_desktop_read_and_whole_screen_resume_on_signal() {
                     interactive_session_incarnation: "selected-desktop-worker".into(),
                     local_ceiling_revision: 1,
                     unattended_command_execution: false,
-                    capabilities: vec![ComputerUseCapabilityReadiness {
-                        capability,
-                        adapter: ComputerUseAdapterRef {
-                            kind: adapter,
-                            version: "1".into(),
-                        },
-                        supported: true,
-                        ready: true,
-                        reason: None,
-                    }],
+                    capabilities,
                     context_references: vec![],
                 },
                 now,
@@ -3095,9 +3134,14 @@ async fn personal_selected_desktop_read_and_whole_screen_resume_on_signal() {
     }
     let gateway = actix_web::rt::spawn(async move {
         for (target, name) in [
-            (devices[0], "inspect_desktop_session"),
+            (devices[0], first_read),
             (devices[1], "read_current_screen"),
         ] {
+            let exact = match (window, name) {
+                (true, "read_current_screen") => json!({"window_id":"w1"}),
+                (true, "inspect_desktop_ui") => json!({"queries":["Calendar"]}),
+                _ => json!({}),
+            };
             capture_one_openai_request_with_reply(&listener, |body| {
                 let request: Value = serde_json::from_slice(body).unwrap();
                 assert!(
@@ -3110,7 +3154,7 @@ async fn personal_selected_desktop_read_and_whole_screen_resume_on_signal() {
                 tool_reply(
                     "request_permissions",
                     json!({"target_ref":target, "items":[{
-                        "tool_name":name, "reason":"Read what the owner asked for", "exact_input":{}
+                        "tool_name":name, "reason":"Read what the owner asked for", "exact_input":exact
                     }]}),
                 )
             })
@@ -3129,13 +3173,15 @@ async fn personal_selected_desktop_read_and_whole_screen_resume_on_signal() {
                         .unwrap()
                         .contains(&json!("target_ref"))
                 );
-                assert!(
-                    !advertised["function"]["parameters"]["properties"]
-                        .as_object()
-                        .unwrap()
-                        .contains_key("window_id")
+                assert_eq!(
+                    advertised["function"]["parameters"]["properties"]
+                        .get("window_id")
+                        .is_some(),
+                    name == "read_current_screen",
                 );
-                tool_reply(name, json!({"target_ref":target}))
+                let mut arguments = exact.clone();
+                arguments["target_ref"] = json!(target);
+                tool_reply(name, arguments)
             })
             .await;
             capture_one_openai_request_with_reply(&listener, |body| {
@@ -3143,27 +3189,40 @@ async fn personal_selected_desktop_read_and_whole_screen_resume_on_signal() {
                 let messages = request["messages"].to_string();
                 if name == "read_current_screen" {
                     assert!(messages.contains("data:image/png;base64,"), "{messages}");
+                } else if window {
+                    assert!(messages.contains("Fixture Calendar window"), "{messages}");
                 } else {
                     assert!(messages.contains("fixture-display"), "{messages}");
                 }
-                memory_sse(json!({"content":"Selected device read complete."}), "stop")
+                let answer = if name == "read_current_screen" {
+                    second_answer
+                } else {
+                    "Selected device read complete."
+                };
+                memory_sse(json!({"content":answer}), "stop")
             })
             .await;
-            capture_one_openai_request_with_reply(&listener, |body| {
-                let request: Value = serde_json::from_slice(body).unwrap();
-                assert!(
-                    request["messages"][0]["content"]
-                        .as_str()
-                        .unwrap()
-                        .contains("Create a short conversation title")
-                );
-                memory_sse(json!({"content":r#"{"title":"Selected device"}"#}), "stop")
-            })
-            .await;
+            if !window || name != "read_current_screen" {
+                capture_one_openai_request_with_reply(&listener, |body| {
+                    let request: Value = serde_json::from_slice(body).unwrap();
+                    assert!(
+                        request["messages"][0]["content"]
+                            .as_str()
+                            .unwrap()
+                            .contains("Create a short conversation title")
+                    );
+                    memory_sse(json!({"content":r#"{"title":"Selected device"}"#}), "stop")
+                })
+                .await;
+            }
         }
     });
-    for (index, (target, peer)) in devices.into_iter().zip(peers).enumerate() {
-        let intent = format!("selected-desktop-run-{index}");
+    for (index, target) in devices.into_iter().enumerate() {
+        let intent = if window {
+            "selected-window-run".into()
+        } else {
+            format!("selected-desktop-run-{index}")
+        };
         let actor = owner.to_string();
         let run = derive_assistant_conversation_key(
             &actor,
@@ -3183,6 +3242,8 @@ async fn personal_selected_desktop_read_and_whole_screen_resume_on_signal() {
                 target_refs: vec![target.into()],
                 question: if index == 0 {
                     "Read desktop information"
+                } else if window {
+                    "Capture the Calendar window we just identified"
                 } else {
                     "Capture the whole display"
                 }
@@ -3199,7 +3260,12 @@ async fn personal_selected_desktop_read_and_whole_screen_resume_on_signal() {
             .await
             .unwrap()
             .unwrap();
-        let [request] = pending.permission_requests.as_slice() else {
+        let Some(request) = pending
+            .permission_requests
+            .iter()
+            .rev()
+            .find(|request| request.state.can_user_decide())
+        else {
             panic!(
                 "expected one permission request: {:?}",
                 pending.messages.last()
@@ -3275,10 +3341,21 @@ async fn personal_selected_desktop_read_and_whole_screen_resume_on_signal() {
         }
         tokio::time::timeout(
             SCENARIO_TIMEOUT,
-            respond_to_selected_desktop(&connections, target, peer, index == 1),
+            respond_to_selected_desktop(
+                &connections,
+                target,
+                peers.get_mut(target).unwrap(),
+                index == 1,
+                window,
+            ),
         )
         .await
         .unwrap();
+        let expected_answer = if index == 1 {
+            second_answer
+        } else {
+            "Selected device read complete."
+        };
         let snapshot = tokio::time::timeout(SCENARIO_TIMEOUT, async {
             loop {
                 let snapshot = store
@@ -3286,7 +3363,8 @@ async fn personal_selected_desktop_read_and_whole_screen_resume_on_signal() {
                     .await
                     .unwrap()
                     .unwrap();
-                if latest_committed_answer(&snapshot).is_some() || snapshot.terminal_error.is_some()
+                if latest_committed_answer(&snapshot).as_deref() == Some(expected_answer)
+                    || snapshot.terminal_error.is_some()
                 {
                     break snapshot;
                 }
@@ -3297,7 +3375,7 @@ async fn personal_selected_desktop_read_and_whole_screen_resume_on_signal() {
         .unwrap();
         assert_eq!(
             latest_committed_answer(&snapshot).as_deref(),
-            Some("Selected device read complete."),
+            Some(expected_answer),
             "{:?}",
             snapshot.terminal_error
         );
@@ -3343,21 +3421,29 @@ async fn personal_selected_desktop_read_and_whole_screen_resume_on_signal() {
 async fn respond_to_selected_desktop(
     connections: &SharedConnectionMap,
     target: &str,
-    peer: actix_web::HttpResponse,
+    peer: &mut actix_web::body::BoxBody,
     screen: bool,
+    window: bool,
 ) {
     use desk_agent_protocol::{
         AgentOutcome, ContextKind, ImageFormat, OperationOutput, ReadContextOutput,
         ScreenCaptureOutput, computer_use::*, remote_tool::*,
     };
     use desk_signal_facade::service::RemoteToolObserver;
-    let frame = receive_device_frame(peer).await;
+    let frame = receive_device_frame_from(peer).await;
     assert_eq!(frame.signaling_type, SignalingType::InvokeRemoteTool);
     let read: RemoteToolRequest = frame.get_data().unwrap();
     assert_eq!(read.envelope.target.device_id, target);
+    let window_ref = || ObjectRef {
+        token: "fixture-window".into(),
+        snapshot_id: "fixture-window-snapshot".into(),
+        object_kind: ObjectKind::Window,
+        expires_at: String::new(),
+    };
     let (value, image) = if screen {
+        let expected = window.then(window_ref);
         assert!(
-            matches!(read.envelope.operation.input.kind, ContextKind::ScreenCaptureCurrent(ref params) if params.window.is_none())
+            matches!(read.envelope.operation.input.kind, ContextKind::ScreenCaptureCurrent(ref params) if params.window == expected)
         );
         let base64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jOioAAAAASUVORK5CYII=";
         (
@@ -3369,7 +3455,7 @@ async fn respond_to_selected_desktop(
                 dpi_x: 96,
                 dpi_y: 96,
                 frame_observation: None,
-                window: None,
+                window: expected,
                 window_geometry: None,
                 image: vec![],
                 truncated: false,
@@ -3381,6 +3467,27 @@ async fn respond_to_selected_desktop(
                 height: 1,
                 decoded_bytes: 68,
             }),
+        )
+    } else if window {
+        assert!(matches!(
+            read.envelope.operation.input.kind,
+            ContextKind::DesktopUiInspect(_)
+        ));
+        (
+            ReadContextOutput::DesktopUiInspect(UiInspectOutput {
+                snapshot_id: "fixture-window-snapshot".into(),
+                adapter: ComputerUseAdapterRef {
+                    kind: ComputerUseAdapterKind::MacosAccessibility,
+                    version: "1".into(),
+                },
+                nodes: vec![],
+                owner_selectable_windows: vec![UiWindowProjection {
+                    object_ref: window_ref(),
+                    title: Some("Fixture Calendar window".into()),
+                }],
+                truncated: false,
+            }),
+            None,
         )
     } else {
         assert!(matches!(
@@ -3445,11 +3552,15 @@ async fn respond_to_selected_desktop(
 }
 
 async fn receive_device_frame(peer: actix_web::HttpResponse) -> SignalingModel {
+    receive_device_frame_from(&mut peer.into_body()).await
+}
+
+async fn receive_device_frame_from(peer: &mut actix_web::body::BoxBody) -> SignalingModel {
     use actix_http::ws::{Codec, Frame};
     use actix_web::body::MessageBody;
     use tokio_util::codec::Decoder;
 
-    let mut body = std::pin::pin!(peer.into_body());
+    let mut body = std::pin::pin!(peer);
     let mut codec = Codec::new().client_mode();
     let mut buffer = bytes::BytesMut::new();
     loop {
