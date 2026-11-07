@@ -954,6 +954,7 @@ mod tests {
             &child.child_conversation_id,
             "original-child-call",
             "original-host",
+            "device-1",
             chrono::Utc::now() + chrono::Duration::minutes(1),
         )
         .await

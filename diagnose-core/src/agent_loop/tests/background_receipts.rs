@@ -621,9 +621,9 @@ fn background_status_inherits_proposal_boundary_without_requesting_a_native_rece
     let reg = wait_reg();
     let clock = || "t".into();
     let deps = exec_deps(&sess, &model, &scripted, &reg, &clock);
-    let call = ToolCall {
+    let mut call = ToolCall {
         id: "wait".into(),
-        name: "wait_for_task".into(),
+        name: "create_text_file".into(),
         arguments_json: "{}".into(),
     };
     let mut session = PersistedAgentSession::new("conv", "actor", "device", 1, exec_scope(), "t");
@@ -647,6 +647,9 @@ fn background_status_inherits_proposal_boundary_without_requesting_a_native_rece
     );
     proposal.data_envelope = Some(parent.clone());
     session.conversation.push(proposal);
+    // Routing and directory defaults are added by the host after the original
+    // model proposal is stored. They are not a different owner instruction.
+    call.arguments_json = serde_json::json!({"target_ref":"a","directory_request_id":"approved-directory"}).to_string();
     for text in ["still running", "outcome unknown", "wait error"] {
         append_mutating_result(
             &deps,

@@ -308,6 +308,7 @@
     ],
     "backgroundTasks": [
       {
+        "deviceId": "device-1",
         "taskId": "task-1",
         "callId": "call-1",
         "providerId": "shell",

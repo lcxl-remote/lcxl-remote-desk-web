@@ -75,6 +75,7 @@ async fn expiry_deletes_original_results_with_run_or_rolls_back_every_related_re
         conversation_id: Set("run-1".into()),
         tool_call_id: Set("legacy-call".into()),
         target_connection_id: Set("host-original".into()),
+        target_device_id: Set("device-1".into()),
         status: Set("completed".into()),
         disposition_json: Set(None),
         result_text: Set(Some("synthetic legacy output".into())),

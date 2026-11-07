@@ -8,6 +8,8 @@ Open **AI Assistant → Multi-device conversation**. To compare devices, select 
 
 Web and Tauri save the device selection to the current conversation. It is restored when you refresh or open the same conversation on another client. To investigate CPU or disk usage, the assistant can read current system information and request a diagnostic command for process or directory details under the conversation's approval mode.
 
+The background task panel shows each task’s original device. After changing the chat’s device selection, you can still inspect its progress and receipt. Cancelling a supported task requests a stop for that original execution.
+
 In a multi-device conversation, ask the assistant to capture a display or an application window on a selected device. For example, ask it to capture the Calendar window on your Mac. The assistant looks up the window on that device before requesting capture. Independent window capture is available on Windows and macOS. Screenshots require a model that accepts images and appear as thumbnails in the conversation. To attach a file or application context yourself, open the assistant from that device.
 
 In Web or Tauri, select a device in the multi-device chat and open that device's terminal. Use **Add to multi-device chat** to attach the bounded recent output to the current chat. The assistant can read that snapshot for requests that still select the device.

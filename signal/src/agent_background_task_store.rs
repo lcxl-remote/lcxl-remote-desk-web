@@ -43,7 +43,6 @@ const MAX_CAS_ATTEMPTS: usize = 8;
 pub struct BackgroundTaskCreate {
     pub record: BackgroundTaskRecord,
     pub actor_id: String,
-    pub target_device_id: String,
     pub policy_revision: i64,
 }
 
@@ -145,10 +144,7 @@ impl SignalBackgroundTaskStore {
             .map_err(|error| DbErr::Custom(format!("invalid background task: {error}")))?;
         if let Some(existing) = self.row(&create.record.task.task_id).await? {
             let stored = decode_record(&existing)?;
-            if stored == create.record
-                && existing.actor_id == create.actor_id
-                && existing.target_device_id == create.target_device_id
-            {
+            if stored == create.record && existing.actor_id == create.actor_id {
                 return Ok(existing);
             }
             return Err(DbErr::Custom(
@@ -167,7 +163,7 @@ impl SignalBackgroundTaskStore {
             turn_id: Set(create.record.turn_id.clone()),
             tool_call_id: Set(create.record.task.call_id.clone()),
             actor_id: Set(create.actor_id),
-            target_device_id: Set(create.target_device_id),
+            target_device_id: Set(create.record.device_id),
             status: Set(BACKGROUND_STATUS_RUNNING.into()),
             attempt: Set(0),
             execution_id: Set(Some(format!(
@@ -408,7 +404,7 @@ impl SignalBackgroundTaskStore {
             .ok_or_else(|| DbErr::Custom("background task was not found".into()))?;
         if row.conversation_id != run_id
             || row.actor_id != actor_id
-            || row.target_device_id != target_device_id
+            || (!target_device_id.is_empty() && row.target_device_id != target_device_id)
         {
             return Err(DbErr::Custom(
                 "background task was not found or not accessible".into(),
@@ -1018,8 +1014,17 @@ async fn load_task_row<C: sea_orm::ConnectionTrait + crate::config::ConfigConnec
 }
 
 pub(crate) fn decode_record(row: &agent_action_item::Model) -> Result<BackgroundTaskRecord, DbErr> {
-    serde_json::from_str(&row.payload_json)
-        .map_err(|error| DbErr::Custom(format!("decode background task: {error}")))
+    let record: BackgroundTaskRecord = serde_json::from_str(&row.payload_json)
+        .map_err(|error| DbErr::Custom(format!("decode background task: {error}")))?;
+    record
+        .validate()
+        .map_err(|error| DbErr::Custom(format!("invalid background task: {error}")))?;
+    if record.device_id != row.target_device_id {
+        return Err(DbErr::Custom(
+            "background task device does not match its original work".into(),
+        ));
+    }
+    Ok(record)
 }
 
 async fn load_session<C: sea_orm::ConnectionTrait + crate::config::ConfigConnection>(
@@ -1244,6 +1249,7 @@ mod tests {
     fn record() -> BackgroundTaskRecord {
         BackgroundTaskRecord {
             schema_version: BACKGROUND_TASK_SCHEMA_VERSION,
+            device_id: "device-1".into(),
             task: CapabilityTaskRef {
                 task_id: "task-1".into(),
                 call_id: "call-1".into(),
@@ -1282,7 +1288,6 @@ mod tests {
             .create(BackgroundTaskCreate {
                 record: record(),
                 actor_id: "actor-1".into(),
-                target_device_id: "device-1".into(),
                 policy_revision: 1,
             })
             .await
@@ -1528,7 +1533,6 @@ mod tests {
             .create(BackgroundTaskCreate {
                 record: record(),
                 actor_id: "actor-1".into(),
-                target_device_id: "device-1".into(),
                 policy_revision: 1,
             })
             .await
@@ -1618,7 +1622,6 @@ mod tests {
             .create(BackgroundTaskCreate {
                 record: record(),
                 actor_id: "actor-1".into(),
-                target_device_id: "device-1".into(),
                 policy_revision: 1,
             })
             .await
@@ -1800,6 +1803,7 @@ mod tests {
             .create(BackgroundTaskCreate {
                 record: BackgroundTaskRecord {
                     schema_version: BACKGROUND_TASK_SCHEMA_VERSION,
+                    device_id: "device-1".into(),
                     task: task.clone(),
                     turn_id: "turn-file-batch-1".into(),
                     tool_name: model_call.name.clone(),
@@ -1816,7 +1820,6 @@ mod tests {
                     result_envelope_ids: Vec::new(),
                 },
                 actor_id: "actor-1".into(),
-                target_device_id: "device-1".into(),
                 policy_revision: 1,
             })
             .await

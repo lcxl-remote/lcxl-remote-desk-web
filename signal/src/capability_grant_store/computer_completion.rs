@@ -340,7 +340,7 @@ impl SignalCapabilityGrantStore {
             let (outbox, work, payload) = computer_original.as_ref();
             if work.conversation_id != run_id
                 || work.actor_id != actor_id
-                || work.target_device_id != device_id
+                || (!device_id.is_empty() && work.target_device_id != device_id)
                 || work.action_request_id != action
             {
                 return Err(invalid());
@@ -619,7 +619,7 @@ impl SignalCapabilityGrantStore {
             let (outbox, work, payload) = computer_original.as_ref();
             if work.conversation_id != run_id
                 || work.actor_id != actor_id
-                || work.target_device_id != device_id
+                || (!device_id.is_empty() && work.target_device_id != device_id)
             {
                 return Err(invalid());
             }
@@ -658,7 +658,7 @@ impl SignalCapabilityGrantStore {
             let (outbox, work, payload) = computer_original.as_ref();
             if work.conversation_id != run_id
                 || work.actor_id != actor_id
-                || work.target_device_id != device_id
+                || (!device_id.is_empty() && work.target_device_id != device_id)
             {
                 return Err(invalid());
             }

@@ -1579,6 +1579,7 @@ pub enum BackgroundTaskStateDto {
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CommandTaskDto {
+    pub device_id: String,
     pub task_id: String,
     pub call_id: String,
     pub execution_generation: String,
@@ -1590,6 +1591,7 @@ pub struct CommandTaskDto {
 
 impl CommandTaskDto {
     pub fn project(
+        device_id: String,
         task_id: String,
         call_id: String,
         execution_generation: String,
@@ -1640,6 +1642,7 @@ impl CommandTaskDto {
             }
         }
         Self {
+            device_id,
             task_id,
             call_id,
             execution_generation,
@@ -1654,6 +1657,7 @@ impl CommandTaskDto {
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct BackgroundTaskDto {
+    pub device_id: String,
     pub task_id: String,
     pub call_id: String,
     pub provider_id: String,
@@ -1694,6 +1698,7 @@ impl From<desk_diagnose_core::dynamic_run::BackgroundTaskRecord> for BackgroundT
     fn from(record: desk_diagnose_core::dynamic_run::BackgroundTaskRecord) -> Self {
         use desk_diagnose_core::dynamic_run::BackgroundTaskState;
         Self {
+            device_id: record.device_id,
             task_id: record.task.task_id,
             call_id: record.task.call_id,
             provider_id: record.task.provider_id,
@@ -2981,6 +2986,7 @@ mod command_task_projection_tests {
     #[test]
     fn command_projection_preserves_terminal_failure_and_bounds_unicode_output() {
         let task = CommandTaskDto::project(
+            "device".into(),
             "task".into(),
             "call".into(),
             "generation".into(),
@@ -3029,6 +3035,7 @@ mod command_task_projection_tests {
                 redactions: vec![],
             };
             let task = CommandTaskDto::project(
+                "device".into(),
                 "task".into(),
                 "call".into(),
                 "generation".into(),
@@ -3048,6 +3055,7 @@ mod command_task_projection_tests {
     #[test]
     fn missing_or_invalid_result_is_unknown_not_success() {
         let task = CommandTaskDto::project(
+            "device".into(),
             "task".into(),
             "call".into(),
             "generation".into(),

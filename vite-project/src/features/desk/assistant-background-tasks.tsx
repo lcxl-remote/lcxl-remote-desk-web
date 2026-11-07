@@ -27,10 +27,10 @@ export function AssistantBackgroundTasks({ open, onOpenChange, commands, provide
     const [error, setError] = useState<string | null>(null);
     const tasks = [
         ...commands.map(task => ({ kind: 'command' as const, id: task.taskId, name: t('pages.aiAssistant.tasks.command'),
-            state: task.state, updatedAt: task.updatedAt, reference: task.taskId,
+            deviceId: task.deviceId, state: task.state, updatedAt: task.updatedAt, reference: task.taskId,
             result: task.result, truncated: task.resultTruncated, supportsCancel: connected })),
         ...providers.map(task => ({ kind: 'provider' as const, id: task.taskId, name: task.toolName,
-            state: task.state, updatedAt: task.updatedAt, reference: task.taskId,
+            deviceId: task.deviceId, state: task.state, updatedAt: task.updatedAt, reference: task.taskId,
             result: tools.find(tool => tool.callId === task.callId)?.output ?? null,
             truncated: false, supportsCancel: canCancelProvider && task.supportsCancel })),
     ].sort((a, b) => {
@@ -62,6 +62,7 @@ export function AssistantBackgroundTasks({ open, onOpenChange, commands, provide
                         <p className="text-sm font-medium">{task.name}</p>
                         <Badge variant="outline">{t(`pages.aiAssistant.backgroundState.${task.state}`)}</Badge>
                     </div>
+                    {task.deviceId && <p className="break-all text-xs text-muted-foreground">{task.deviceId}</p>}
                     <p className="break-all text-xs text-muted-foreground">{task.reference}</p>
                     <p className="text-xs text-muted-foreground">{t('pages.aiAssistant.backgroundUpdated', { time: formatLocalTime(task.updatedAt) })}</p>
                     {task.result != null ? <Disclosure title={<>{t('pages.aiAssistant.tasks.result')}</>} summaryClassName="cursor-pointer text-sm">

@@ -1208,6 +1208,10 @@ export type BackgroundTaskDto = {
     /**
      * @type string
     */
+    deviceId: string;
+    /**
+     * @type string
+    */
     effect: CapabilityEffect;
     /**
      * @minLength 0
@@ -1304,6 +1308,10 @@ export type CommandTaskDto = {
      * @type string
     */
     callId: string;
+    /**
+     * @type string
+    */
+    deviceId: string;
     /**
      * @type string
     */
@@ -13136,6 +13144,10 @@ export type RestResponseBackgroundTaskDto = {
          * @type string
         */
         capabilityId: string;
+        /**
+         * @type string
+        */
+        deviceId: string;
         /**
          * @type string
         */

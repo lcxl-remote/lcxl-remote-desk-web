@@ -154,7 +154,9 @@ impl SignalCapabilityGrantStore {
         else {
             return Ok(None);
         };
-        if work.conversation_id != run || work.actor_id != actor || work.target_device_id != device
+        if work.conversation_id != run
+            || work.actor_id != actor
+            || (!device.is_empty() && work.target_device_id != device)
         {
             return Err(invalid());
         }

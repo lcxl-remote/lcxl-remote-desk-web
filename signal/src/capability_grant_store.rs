@@ -1209,6 +1209,7 @@ impl SignalCapabilityGrantStore {
                     conversation_id: Set(conversation.into()),
                     tool_call_id: Set(call.into()),
                     target_connection_id: Set(target.into()),
+                    target_device_id: Set(work.target_device_id.clone()),
                     status: Set(crate::agent_exec_store::STATUS_DISPATCHING.into()),
                     event_id: Set(format!("signal-exec:{}:done", payload.call_id)),
                     delivery_state: Set(crate::agent_exec_store::DELIVERY_PENDING.into()),

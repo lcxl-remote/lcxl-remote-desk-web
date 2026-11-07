@@ -483,6 +483,20 @@ enum SignalDispatch {
 }
 
 impl SignalAgentTools {
+    pub(crate) fn for_task_target(&self, connection_id: &str) -> Self {
+        Self::new(
+            self.db.clone(),
+            self.connections.clone(),
+            self.pending.clone(),
+            connection_id.into(),
+            self.snapshot.clone(),
+            self.admission_policy,
+            self.max_risk,
+            self.available_exec_shells.clone(),
+            self.max_command_runtime_ms,
+        )
+    }
+
     fn observed(
         &self,
         call: &ToolCall,
@@ -623,6 +637,11 @@ impl SignalAgentTools {
                     &ctx.conversation_id,
                     &ctx.tool_call_id,
                     &self.target_connection_id,
+                    ctx.assistant_turn_fence
+                        .as_ref()
+                        .map(|held| held.device_id.as_str())
+                        .or(target.client_id.as_deref())
+                        .ok_or_else(|| internal("command target identity is unavailable"))?,
                     deadline,
                 )
                 .await?

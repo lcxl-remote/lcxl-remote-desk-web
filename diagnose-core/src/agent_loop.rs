@@ -3373,17 +3373,11 @@ fn append_mutating_result(
         .iter()
         .rev()
         .find(|message| {
+            // Host normalization may add routing and native defaults. A control
+            // status refers to the original call; it never attests native output.
             message.role == ChatRole::Assistant
                 && message.tool_calls.iter().any(|candidate| {
-                    candidate.id == call.id
-                        && candidate.name == call.name
-                        && crate::ui_model_ids::same_call_input_with_references(
-                            &call.name,
-                            &candidate.arguments_json,
-                            &call.arguments_json,
-                            Some(&session.ui_references),
-                            &crate::result_model_ids::locators(&session.conversation),
-                        )
+                    candidate.id == call.id && candidate.name == call.name
                 })
         })
         .and_then(|message| message.data_envelope.as_ref());

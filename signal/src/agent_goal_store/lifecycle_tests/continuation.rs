@@ -418,10 +418,10 @@ async fn add_work(
     let row = SignalBackgroundTaskStore::new(db.clone())
         .create(BackgroundTaskCreate {
             actor_id: session.actor_id.clone(),
-            target_device_id: session.device_id.clone(),
             policy_revision: 1,
             record: BackgroundTaskRecord {
                 schema_version: BACKGROUND_TASK_SCHEMA_VERSION,
+                device_id: session.device_id.clone(),
                 task: CapabilityTaskRef {
                     task_id: task.into(),
                     call_id: format!("call-{task}"),

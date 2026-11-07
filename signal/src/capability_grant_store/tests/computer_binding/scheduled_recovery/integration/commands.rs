@@ -70,6 +70,7 @@ async fn fixture(db: DatabaseConnection) -> (ScheduleStore, String, String) {
         "run-1",
         "old-call",
         "old-host",
+        "device-1",
         Utc::now(),
     )
     .await

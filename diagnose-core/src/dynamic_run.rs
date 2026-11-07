@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 pub const AGENT_RUN_EVENT_SCHEMA_VERSION: u16 = 1;
 pub const TASK_STATUS_PROJECTION_SCHEMA_VERSION: u16 = 1;
 pub const PERMISSION_REQUEST_SCHEMA_VERSION: u16 = 3;
-pub const BACKGROUND_TASK_SCHEMA_VERSION: u16 = 1;
+pub const BACKGROUND_TASK_SCHEMA_VERSION: u16 = 2;
 pub const MAX_TASK_STATUS_ITEMS: usize = 128;
 /// Owner/model projections retain a bounded task window even when one
 /// conversation is reused indefinitely. Durable work/audit rows are unchanged.
@@ -239,6 +239,7 @@ impl BackgroundTaskState {
 pub struct BackgroundTaskRecord {
     pub schema_version: u16,
     pub task: CapabilityTaskRef,
+    pub device_id: String,
     pub turn_id: String,
     pub tool_name: String,
     pub canonical_input_digest_sha256: String,
@@ -267,6 +268,9 @@ impl BackgroundTaskRecord {
         self.task
             .validate()
             .map_err(|error| DynamicRunContractError::InvalidBackgroundTask(error.to_string()))?;
+        if !self.device_id.is_empty() {
+            validate_id("device_id", &self.device_id)?;
+        }
         validate_id("tool_name", &self.tool_name)?;
         validate_id("turn_id", &self.turn_id)?;
         if self.canonical_input_digest_sha256.len() != 64
@@ -1777,6 +1781,7 @@ mod tests {
         };
         let mut record = BackgroundTaskRecord {
             schema_version: BACKGROUND_TASK_SCHEMA_VERSION,
+            device_id: "device".into(),
             task: task.clone(),
             turn_id: "turn-1".into(),
             tool_name: "create_report".into(),
@@ -1833,6 +1838,7 @@ mod tests {
                 let running = index < 2;
                 BackgroundTaskRecord {
                     schema_version: BACKGROUND_TASK_SCHEMA_VERSION,
+                    device_id: "device".into(),
                     task: CapabilityTaskRef {
                         task_id: format!("task-{index:03}"),
                         call_id: format!("call-{index:03}"),

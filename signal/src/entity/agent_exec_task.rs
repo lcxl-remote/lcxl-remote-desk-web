@@ -14,6 +14,7 @@ pub struct Model {
     pub conversation_id: String,
     pub tool_call_id: String,
     pub target_connection_id: String,
+    pub target_device_id: String,
     pub status: String,
     pub disposition_json: Option<String>,
     pub result_text: Option<String>,

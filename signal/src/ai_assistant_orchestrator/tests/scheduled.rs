@@ -699,6 +699,7 @@ async fn exercise_with_restart(
         conversation_id: Set(conversation.clone()),
         tool_call_id: Set("call".into()),
         target_connection_id: Set("offline-host".into()),
+        target_device_id: Set("device-1".into()),
         status: Set("running".into()),
         disposition_json: Set(None),
         result_text: Set(None),

@@ -71,6 +71,30 @@ impl Fixture {
         custom_call: Option<ToolCall>,
         original_input: Option<ChatMessage>,
     ) -> Self {
+        Self::new_for_input_target(
+            db,
+            actor,
+            scheduled,
+            prepared_only,
+            intent_only,
+            custom_call,
+            original_input,
+            false,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn new_for_input_target(
+        db: DatabaseConnection,
+        actor: &str,
+        scheduled: bool,
+        prepared_only: bool,
+        intent_only: bool,
+        custom_call: Option<ToolCall>,
+        original_input: Option<ChatMessage>,
+        selectable: bool,
+    ) -> Self {
         let call = custom_call.unwrap_or_else(|| ToolCall {
             id: "model-call-original".into(),
             name: "browser_open_page".into(),
@@ -129,6 +153,17 @@ impl Fixture {
             .unwrap()
             .unwrap();
         row.actor_id = actor.into();
+        if selectable {
+            session.device_id.clear();
+            session
+                .bind_assistant_request_targets(vec!["device-1".into()])
+                .unwrap();
+            row.device_id.clear();
+            row.lease_deadline = Some(Utc::now() + chrono::Duration::minutes(5));
+            crate::device_code_store::get_or_create(&db, "device-1")
+                .await
+                .unwrap();
+        }
         let mut proposal = ChatMessage::assistant_tool_calls(
             "proposal-1",
             "open approved page",
@@ -223,7 +258,22 @@ impl Fixture {
         let dispatch_id = if prepared_only {
             stable_id("capability-dispatch", &format!("{call_id}:1"))
         } else {
-            match store.record_dispatch_intent(request()).await.unwrap() {
+            match store
+                .record_dispatch_intent_for_target(
+                    request(),
+                    if selectable {
+                        desk_diagnose_core::action_turn_fence::AssistantTurnFence::for_device(
+                            &session, "device-1",
+                        )
+                        .unwrap()
+                    } else {
+                        None
+                    }
+                    .as_ref(),
+                )
+                .await
+                .unwrap()
+            {
                 DispatchIntentResult::Recorded { dispatch_id, .. } => dispatch_id,
                 other => panic!("unexpected intent: {other:?}"),
             }

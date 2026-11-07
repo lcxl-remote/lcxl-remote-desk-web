@@ -49,6 +49,152 @@ async fn prepare_delivery(f: &Fixture) {
 }
 
 #[tokio::test]
+async fn selectable_background_stays_in_the_root_snapshot_and_cancels_the_original_device() {
+    use sea_orm::TransactionTrait;
+    let dir = tempfile::tempdir().unwrap();
+    let f = Fixture::new_for_input_target(
+        file_db(&dir.path().join("selectable-background.db")).await,
+        "actor-1",
+        false,
+        false,
+        false,
+        None,
+        None,
+        true,
+    )
+    .await;
+    assert!(f.session.device_id.is_empty());
+    f.bind().await;
+    f.accept().await.unwrap();
+    age(&f, 9).await;
+    assert!(
+        f.store
+            .promote_computer_background(
+                &f.plan.execution_generation,
+                &f.session.conversation_id,
+                &f.session.actor_id,
+                "device-1"
+            )
+            .await
+            .unwrap()
+    );
+    let sessions = SignalAgentSessionStore::new(f.store.db.clone());
+    let snapshot = sessions
+        .read_assistant_snapshot_for_subject("run-1", "actor-1", "")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(snapshot.background_tasks.len(), 1);
+    let task = &snapshot.background_tasks[0];
+    assert_eq!(task.device_id, "device-1");
+    assert_eq!(task.task.call_id, f.call.id);
+    assert_eq!(task.state, BackgroundTaskState::Running);
+    assert!(matches!(
+        f.store
+            .wait_computer_result(
+                &f.plan.action_request_id,
+                &f.plan.execution_generation,
+                "run-1",
+                "actor-1",
+                ""
+            )
+            .await
+            .unwrap(),
+        Some(WaitOutcome::StillRunning)
+    ));
+
+    let stopped = f
+        .store
+        .request_computer_background_cancel(
+            &f.plan.action_request_id,
+            "run-1",
+            "actor-1",
+            "",
+            "owner-stop",
+            "Stop the original action",
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stopped.device_id, "device-1");
+    assert_eq!(stopped.state, BackgroundTaskState::CancelRequested);
+    f.store
+        .accept_computer_completion(
+            "host-original",
+            "device-1",
+            &f.plan.execution_generation,
+            &completion::failed(&f.plan),
+        )
+        .await
+        .unwrap();
+    let outcome = f
+        .store
+        .wait_computer_result(
+            &f.plan.action_request_id,
+            &f.plan.execution_generation,
+            "run-1",
+            "actor-1",
+            "",
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let WaitOutcome::FailedWithReceipt {
+        event_id,
+        data_envelope,
+        ..
+    } = outcome
+    else {
+        panic!("original receipt was not returned")
+    };
+    assert_eq!(
+        data_envelope.provenance.source_object_id.as_deref(),
+        Some(format!("device-1:{}", f.call.id).as_str())
+    );
+    assert!(
+        f.store
+            .consume_computer_result(&event_id, "run-1", "actor-1", "")
+            .await
+            .unwrap()
+    );
+
+    let txn = f.store.db.begin().await.unwrap();
+    assert!(
+        crate::capability_grant_store::computer_background::list_on(
+            &txn,
+            "run-1",
+            "other-owner",
+            "",
+            Utc::now().timestamp_millis() as u64
+        )
+        .await
+        .unwrap()
+        .is_empty()
+    );
+    txn.rollback().await.unwrap();
+    assert!(
+        f.store
+            .request_computer_background_cancel(
+                &f.plan.action_request_id,
+                "other-run",
+                "actor-1",
+                "",
+                "other-stop",
+                "Redirect"
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        agent_action_item::Entity::find()
+            .count(&f.store.db)
+            .await
+            .unwrap(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn original_background_requires_acceptance_and_budget_without_another_work_or_grant_use() {
     let dir = tempfile::tempdir().unwrap();
     let f = Fixture::new(file_db(&dir.path().join("background.db")).await).await;

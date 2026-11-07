@@ -167,6 +167,7 @@ async fn fixture() -> (DatabaseConnection, i64) {
             "child",
             "model-call",
             "original-host",
+            "original-device",
             now + chrono::Duration::minutes(1),
         )
         .await

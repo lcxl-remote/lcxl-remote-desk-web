@@ -5,7 +5,7 @@ import { AssistantComposerTools } from './assistant-composer-tools';
 import type { CommandTaskDto } from '@/services/types';
 
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
-const command: CommandTaskDto = { taskId: 'command-1', callId: 'call-1', executionGeneration: 'generation-1',
+const command: CommandTaskDto = { deviceId: 'original-device', taskId: 'command-1', callId: 'call-1', executionGeneration: 'generation-1',
     state: 'running', updatedAt: '2026-09-08T10:00:00Z', result: null, resultTruncated: false };
 const base = { open: true, onOpenChange: vi.fn(), commands: [], providers: [], tools: [],
     connected: true, canCancelProvider: true, cancelling: null, onCancel: vi.fn().mockResolvedValue(undefined) };
@@ -41,5 +41,20 @@ describe('assistant background tasks', () => {
         render(<AssistantBackgroundTasks {...base} commands={[command]} connected={false} />);
         expect(screen.queryByRole('button', { name: 'pages.aiAssistant.tasks.cancel' })).toBeNull();
         expect(within(screen.getByRole('dialog')).getByText('pages.aiAssistant.tasks.offline')).toBeTruthy();
+    });
+});
+
+describe('background task devices', () => {
+    it('keeps each original device visible and cancels the selected original task', async () => {
+        const onCancel = vi.fn().mockResolvedValue(undefined);
+        render(<AssistantBackgroundTasks open onOpenChange={vi.fn()} commands={[
+            {deviceId:'linux-a', taskId:'command-a',callId:'call-a',executionGeneration:'generation-a',state:'running',updatedAt:'2026-11-06T00:00:00Z',result:null,resultTruncated:false},
+        ]} providers={[
+            {deviceId:'mac-b',taskId:'task-b',callId:'call-b',providerId:'browser',capabilityId:'browser.wait',toolName:'browser_wait_for',effect:'read_external',state:'running',progressSequence:0,supportsCancel:true,updatedAt:'2026-11-06T00:00:00Z',terminalAt:null},
+        ]} tools={[]} connected canCancelProvider cancelling={null} onCancel={onCancel}/>);
+        expect(screen.getByText('linux-a')).toBeInTheDocument();
+        const original = screen.getByText('mac-b').closest('section')!;
+        fireEvent.click(within(original).getByRole('button',{name:'pages.aiAssistant.tasks.cancel'}));
+        await waitFor(() => expect(onCancel).toHaveBeenCalledWith('provider','task-b'));
     });
 });

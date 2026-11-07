@@ -6969,9 +6969,22 @@ impl ToolSeam for SignalAiAssistantTools {
         {
             return Ok(outcome);
         }
+        let original = crate::agent_exec_store::SignalAgentExecStore::new(self.db.clone())
+            .find(action_request_id, execution_id)
+            .await?
+            .ok_or_else(completion::invalid)?;
+        if original.conversation_id != self.run_id
+            || (!self.target_device_id.is_empty()
+                && original.target_device_id != self.target_device_id)
+        {
+            return Err(completion::invalid());
+        }
+        let original_tools = self
+            .exec_tools
+            .for_task_target(&original.target_connection_id);
         let outcome = desk_diagnose_core::future::boxed(|| async {
             <crate::agent_exec::SignalAgentTools as ToolSeam>::wait_for_task(
-                &self.exec_tools,
+                &original_tools,
                 action_request_id,
                 execution_id,
             )

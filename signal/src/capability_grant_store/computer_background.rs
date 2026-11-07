@@ -150,6 +150,7 @@ pub(crate) async fn task_on<C: sea_orm::ConnectionTrait + crate::config::ConfigC
         .to_rfc3339();
     let mut record = BackgroundTaskRecord {
         schema_version: BACKGROUND_TASK_SCHEMA_VERSION,
+        device_id: work.target_device_id.clone(),
         task: CapabilityTaskRef {
             task_id: payload.call_id.clone(),
             call_id: binding.origin.tool_call_id.clone(),
@@ -212,14 +213,15 @@ pub(crate) async fn list_on(
     device: &str,
     now_ms: u64,
 ) -> Result<Vec<BackgroundTaskRecord>, DbErr> {
-    let rows = agent_action_item::Entity::find()
+    let mut query = agent_action_item::Entity::find()
         .filter(agent_action_item::Column::Kind.eq(CAPABILITY_WORK_KIND))
         .filter(agent_action_item::Column::ConversationId.eq(run))
         .filter(agent_action_item::Column::ActorId.eq(actor))
-        .filter(agent_action_item::Column::TargetDeviceId.eq(device))
-        .order_by_asc(agent_action_item::Column::Id)
-        .all(txn)
-        .await?;
+        .order_by_asc(agent_action_item::Column::Id);
+    if !device.is_empty() {
+        query = query.filter(agent_action_item::Column::TargetDeviceId.eq(device));
+    }
+    let rows = query.all(txn).await?;
     let mut tasks = vec![];
     for row in rows {
         if let Some(task) = task_on(txn, &row, now_ms).await? {

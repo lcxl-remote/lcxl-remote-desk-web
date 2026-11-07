@@ -138,6 +138,7 @@ impl SignalAgentExecStore {
             || original.conversation_id != task.conversation_id
             || original.tool_call_id != task.tool_call_id
             || original.target_connection_id != task.target_connection_id
+            || original.target_device_id != task.target_device_id
             || original.status != task.status
             || original.disposition_json != task.disposition_json
             || original.result_text != task.result_text
@@ -233,6 +234,7 @@ impl SignalAgentExecStore {
         Self { db }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn create(
         &self,
         exec_request_id: &str,
@@ -240,6 +242,7 @@ impl SignalAgentExecStore {
         conversation_id: &str,
         tool_call_id: &str,
         target_connection_id: &str,
+        target_device_id: &str,
         deadline: DateTime<Utc>,
     ) -> Result<agent_exec_task::Model, AgentError> {
         let now = Utc::now();
@@ -250,6 +253,7 @@ impl SignalAgentExecStore {
             conversation_id: Set(conversation_id.to_string()),
             tool_call_id: Set(tool_call_id.to_string()),
             target_connection_id: Set(target_connection_id.to_string()),
+            target_device_id: Set(target_device_id.to_string()),
             status: Set(STATUS_DISPATCHING.to_string()),
             disposition_json: Set(None),
             result_text: Set(None),
@@ -763,6 +767,7 @@ mod tests {
                 "conversation-1",
                 "call-1",
                 "edge-a",
+                "device-1",
                 Utc::now() + chrono::Duration::minutes(1),
             )
             .await
@@ -809,6 +814,7 @@ mod tests {
                 "conversation-2",
                 "call-2",
                 "edge-a",
+                "device-1",
                 Utc::now() + chrono::Duration::minutes(1),
             )
             .await
@@ -860,6 +866,7 @@ mod tests {
                 "conversation-expired",
                 "call-expired",
                 "edge-a",
+                "device-1",
                 Utc::now() + chrono::Duration::minutes(1),
             )
             .await

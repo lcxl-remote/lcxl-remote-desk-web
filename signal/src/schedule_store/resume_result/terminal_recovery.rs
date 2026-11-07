@@ -290,6 +290,7 @@ async fn uncertain_action_blocks_terminal_recovery_even_with_a_committed_answer(
         conversation_id: Set(work.conversation_id.clone()),
         tool_call_id: Set("call".into()),
         target_connection_id: Set("edge".into()),
+        target_device_id: Set("device-1".into()),
         status: Set("unknown".into()),
         disposition_json: Set(None),
         result_text: Set(None),

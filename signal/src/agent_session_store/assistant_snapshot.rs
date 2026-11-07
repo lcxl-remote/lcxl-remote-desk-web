@@ -179,16 +179,17 @@ async fn load_snapshot_on(
     let now = u64::try_from(Utc::now().timestamp_millis())
         .map_err(|_| sea_orm::DbErr::Custom("invalid snapshot clock".into()))?;
     let mut tasks = computer_background::list_on(txn, run, actor, device, now).await?;
-    let legacy = agent_action_item::Entity::find()
+    let mut query = agent_action_item::Entity::find()
         .filter(
             agent_action_item::Column::Kind.eq(agent_background_task_store::BACKGROUND_ACTION_KIND),
         )
         .filter(agent_action_item::Column::ConversationId.eq(run))
         .filter(agent_action_item::Column::ActorId.eq(actor))
-        .filter(agent_action_item::Column::TargetDeviceId.eq(device))
-        .order_by_asc(agent_action_item::Column::Id)
-        .all(txn)
-        .await?;
+        .order_by_asc(agent_action_item::Column::Id);
+    if !device.is_empty() {
+        query = query.filter(agent_action_item::Column::TargetDeviceId.eq(device));
+    }
+    let legacy = query.all(txn).await?;
     for task in legacy {
         tasks.push(agent_background_task_store::decode_record(&task)?);
     }

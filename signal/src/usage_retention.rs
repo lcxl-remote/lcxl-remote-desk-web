@@ -1165,6 +1165,7 @@ mod tests {
             conversation_id: Set("work-held".into()),
             tool_call_id: Set("call-1".into()),
             target_connection_id: Set("host".into()),
+            target_device_id: Set("device-1".into()),
             status: Set(crate::agent_exec_store::STATUS_UNKNOWN.into()),
             disposition_json: Set(None),
             result_text: Set(None),

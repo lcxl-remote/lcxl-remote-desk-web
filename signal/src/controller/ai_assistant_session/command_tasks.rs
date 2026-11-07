@@ -38,6 +38,7 @@ pub(super) async fn list(
                 _ => None,
             };
             result.push(CommandTaskDto::project(
+                row.target_device_id.clone(),
                 row.exec_request_id,
                 row.tool_call_id,
                 row.execution_generation,
@@ -76,6 +77,7 @@ mod tests {
                 "run-a",
                 "call-a",
                 "device",
+                "device-1",
                 chrono::Utc::now(),
             )
             .await
@@ -87,6 +89,7 @@ mod tests {
                 "run-b",
                 "call-b",
                 "device",
+                "device-1",
                 chrono::Utc::now(),
             )
             .await
@@ -94,6 +97,7 @@ mod tests {
         let tasks = list(&db, "run-a").await.unwrap();
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].execution_generation, "generation-a");
+        assert_eq!(tasks[0].device_id, "device-1");
         assert!(list(&db, "unrelated-run").await.unwrap().is_empty());
     }
 }
