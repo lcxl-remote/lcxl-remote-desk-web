@@ -434,6 +434,7 @@ pub fn build_permission_grants(
             )?;
             let target = crate::input_read_context::live_read::target(
                 original,
+                device_id,
                 &requested.tool_name,
                 context.now_unix_ms,
             )?;

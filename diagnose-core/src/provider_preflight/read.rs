@@ -186,6 +186,7 @@ impl ReadCallPreflight {
                 vec![
                     crate::input_read_context::live_read::target(
                         binding.original,
+                        binding.device_id,
                         &call.name,
                         binding.now_unix_ms,
                     )?

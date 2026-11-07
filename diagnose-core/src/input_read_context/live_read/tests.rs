@@ -68,14 +68,14 @@ fn selection(names: &[&str]) -> ReadContextSelection {
 
 fn captured() -> ReadContextSelection {
     let mut selection = selection(&TOOLS);
-    selection.live_targets = capture(&selection, Some(&readiness()), now()).unwrap();
+    selection.live_targets = capture(&selection, "device", Some(&readiness()), now()).unwrap();
     selection
 }
 
 #[test]
 fn captures_only_exposed_live_reads_and_never_batch_file_targets() {
     let mut input = selection(&["inspect_live_document", "inspect_pages_file"]);
-    input.live_targets = capture(&input, Some(&readiness()), now()).unwrap();
+    input.live_targets = capture(&input, "device", Some(&readiness()), now()).unwrap();
     assert_eq!(input.live_targets.len(), 1);
     assert_eq!(input.live_targets[0].tool_name, "inspect_live_document");
     assert_eq!(
@@ -83,12 +83,53 @@ fn captures_only_exposed_live_reads_and_never_batch_file_targets() {
         readiness().context_references[0].object_ref
     );
     assert!(
-        capture(&selection(&["read_system_info"]), None, now())
+        capture(&selection(&["read_system_info"]), "device", None, now())
             .unwrap()
             .is_empty()
     );
-    assert!(capture(&selection(&["inspect_live_document"]), None, now()).is_err());
+    assert!(
+        capture(
+            &selection(&["inspect_live_document"]),
+            "device",
+            None,
+            now()
+        )
+        .is_err()
+    );
     assert_eq!(captured().live_targets.len(), 4);
+}
+
+#[test]
+fn the_same_live_tool_keeps_separate_device_targets_and_readiness() {
+    let mut original = selection(&["inspect_live_document"]);
+    let first = readiness();
+    let mut second = first.clone();
+    second.interactive_session_incarnation = "worker-b".into();
+    for reference in &mut second.context_references {
+        reference.object_ref.token = "device-b-object".into();
+    }
+    let a = capture(&original, "device-a", Some(&first), now()).unwrap();
+    let b = capture(&original, "device-b", Some(&second), now()).unwrap();
+    original.live_targets.extend(a.clone());
+    original.live_targets.extend(b.clone());
+    assert_eq!(
+        target(&original, "device-a", "inspect_live_document", now()).unwrap(),
+        &a[0]
+    );
+    assert_eq!(
+        target(&original, "device-b", "inspect_live_document", now()).unwrap(),
+        &b[0]
+    );
+    assert!(target(&original, "device-c", "inspect_live_document", now()).is_err());
+    assert!(validate_current(&original, "device-a", Some(&first), now()).is_ok());
+    assert!(validate_current(&original, "device-b", Some(&first), now()).is_err());
+    assert!(validate_current(&original, "device-b", Some(&second), now()).is_ok());
+    let mut json = serde_json::to_value(&original).unwrap();
+    json["live_targets"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("device_id");
+    assert!(serde_json::from_value::<ReadContextSelection>(json).is_err());
 }
 
 #[test]
@@ -98,16 +139,24 @@ fn fresh_readiness_does_not_extend_the_original_deadline() {
     let mut current = readiness();
     current.revision += 1;
     current.expires_at = "2026-08-31T00:03:00Z".into();
-    validate_current(&selection, Some(&current), now()).unwrap();
+    validate_current(&selection, "device", Some(&current), now()).unwrap();
     let deadline = millis("2026-08-31T00:02:00Z").unwrap();
     assert_eq!(
         expiry(&selection, &selection.live_targets[0]).unwrap(),
         deadline
     );
-    assert!(validate_current(&selection, Some(&current), deadline).is_err());
+    assert!(validate_current(&selection, "device", Some(&current), deadline).is_err());
     let mut shorter = selection.clone();
     shorter.expires_at = Some("2026-08-31T00:00:30Z".into());
-    assert!(target(&shorter, TOOLS[0], millis("2026-08-31T00:00:30Z").unwrap()).is_err());
+    assert!(
+        target(
+            &shorter,
+            "device",
+            TOOLS[0],
+            millis("2026-08-31T00:00:30Z").unwrap()
+        )
+        .is_err()
+    );
     assert_eq!(selection, before);
 }
 
@@ -126,6 +175,7 @@ fn capture_uses_object_reference_deadline_not_short_heartbeat_lease() {
     assert!(
         target(
             &selection,
+            "device",
             TOOLS[0],
             millis("2026-08-31T00:01:30Z").unwrap()
         )
@@ -149,11 +199,11 @@ fn changed_worker_kind_and_unready_reports_are_rejected() {
             _ => unreachable!(),
         }
         assert!(
-            validate_current(&selection, Some(&current), now()).is_err(),
+            validate_current(&selection, "device", Some(&current), now()).is_err(),
             "variant {variant}"
         );
     }
-    assert!(validate_current(&selection, None, now()).is_err());
+    assert!(validate_current(&selection, "device", None, now()).is_err());
 }
 
 #[test]
@@ -164,9 +214,11 @@ fn rotated_current_reference_is_accepted_with_same_incarnation_kind_and_ready_ca
     current.context_references[0].object_ref.token = "rotated-token".into();
     current.context_references[0].object_ref.snapshot_id = "rotated-snapshot".into();
     current.context_references[0].object_ref.expires_at = "2026-08-31T00:03:00Z".into();
-    validate_current(&selection, Some(&current), now()).unwrap();
+    validate_current(&selection, "device", Some(&current), now()).unwrap();
     assert_eq!(
-        target(&selection, TOOLS[0], now()).unwrap().object_ref,
+        target(&selection, "device", TOOLS[0], now())
+            .unwrap()
+            .object_ref,
         readiness().context_references[0].object_ref
     );
 }
@@ -195,12 +247,12 @@ fn invalid_duplicate_unknown_or_unselected_targets_never_validate() {
 }
 
 #[test]
-fn legacy_json_round_trips_but_cannot_supply_a_missing_original_target() {
+fn an_input_without_live_targets_cannot_authorize_a_live_tool() {
     let old = serde_json::json!({"tool_names":["inspect_live_document"], "expires_at":null});
     let selection: ReadContextSelection = serde_json::from_value(old.clone()).unwrap();
     selection.validate().unwrap();
     assert_eq!(serde_json::to_value(&selection).unwrap(), old);
-    assert!(target(&selection, "inspect_live_document", now()).is_err());
+    assert!(target(&selection, "device", "inspect_live_document", now()).is_err());
     let current = captured();
     assert_eq!(
         serde_json::from_str::<ReadContextSelection>(&serde_json::to_string(&current).unwrap())
@@ -217,10 +269,10 @@ fn object_deadline_is_independent_of_readiness_deadline() {
     let mut current = readiness();
     current.context_references[0].object_ref.expires_at = "2026-08-31T00:00:20Z".into();
     let mut selection = selection(&[TOOLS[0]]);
-    selection.live_targets = capture(&selection, Some(&current), now()).unwrap();
+    selection.live_targets = capture(&selection, "device", Some(&current), now()).unwrap();
     let deadline = millis("2026-08-31T00:00:20Z").unwrap();
-    validate_current(&selection, Some(&current), deadline - 1).unwrap();
-    assert!(validate_current(&selection, Some(&current), deadline).is_err());
+    validate_current(&selection, "device", Some(&current), deadline - 1).unwrap();
+    assert!(validate_current(&selection, "device", Some(&current), deadline).is_err());
 }
 
 #[test]
@@ -228,9 +280,9 @@ fn accepted_clock_skew_is_preserved_but_original_targets_cannot_be_recaptured() 
     let mut current = readiness();
     current.observed_at = "2026-08-31T00:00:31Z".into();
     let mut selection = selection(&[TOOLS[0]]);
-    selection.live_targets = capture(&selection, Some(&current), now()).unwrap();
-    validate_current(&selection, Some(&current), now()).unwrap();
-    assert!(capture(&selection, Some(&current), now()).is_err());
+    selection.live_targets = capture(&selection, "device", Some(&current), now()).unwrap();
+    validate_current(&selection, "device", Some(&current), now()).unwrap();
+    assert!(capture(&selection, "device", Some(&current), now()).is_err());
 }
 
 #[test]
@@ -258,7 +310,10 @@ fn actual_read_binding_ignores_model_targets_and_preserves_original_source_and_d
     };
     for name in TOOLS {
         assert!(requires_objects(name));
-        let mut forged = target(&selection, name, now()).unwrap().object_ref.clone();
+        let mut forged = target(&selection, "device", name, now())
+            .unwrap()
+            .object_ref
+            .clone();
         forged.token = "model-supplied-other-target".into();
         let mut arguments = serde_json::json!({"max_bytes":1024});
         arguments[if name == "inspect_office_selection" {
@@ -295,7 +350,9 @@ fn actual_read_binding_ignores_model_targets_and_preserves_original_source_and_d
         };
         assert_eq!(
             reference,
-            target(&selection, name, now()).unwrap().object_ref
+            target(&selection, "device", name, now())
+                .unwrap()
+                .object_ref
         );
         let output = ToolRunOutput {
             format: crate::seam::ToolOutputFormat::Text,
@@ -445,7 +502,7 @@ fn durable_selection_withdrawal_and_later_reselection_cannot_revive_old_input() 
     let selected = claim("select", &ids, now());
     reconcile_live_context(&mut session, &selected).unwrap();
     let mut original = selection(&["inspect_live_document"]);
-    original.live_targets = capture(&original, Some(&readiness()), now()).unwrap();
+    original.live_targets = capture(&original, "device", Some(&readiness()), now()).unwrap();
     let input_time = now() + 1;
     validate_durable_selection(
         &original,
@@ -587,7 +644,10 @@ fn all_live_read_grants_survive_readiness_ref_rotation_on_both_servers() {
             ready: true,
             reason: None,
         }];
-        let reference = target(&original, name, now()).unwrap().object_ref.clone();
+        let reference = target(&original, "device", name, now())
+            .unwrap()
+            .object_ref
+            .clone();
         let mut ambient = reference.clone();
         ambient.token = "later-unselected-document".into();
         let refs = [reference.clone(), ambient.clone()];

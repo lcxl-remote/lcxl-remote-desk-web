@@ -159,7 +159,13 @@ impl ObjectReadBinding<'_> {
 
     pub fn bind(&self, call: &ToolCall, input: &mut OperationInput) -> Result<(), AgentError> {
         if super::live_read::target_kind(&call.name).is_some() {
-            return super::live_read::bind(self.original, call, input, self.now_unix_ms);
+            return super::live_read::bind(
+                self.original,
+                self.device_id,
+                call,
+                input,
+                self.now_unix_ms,
+            );
         }
         let selected = self.selected(call)?;
         let refs = selected
@@ -258,7 +264,12 @@ impl ObjectReadBinding<'_> {
         if super::live_read::target_kind(&call.name).is_some() {
             return super::live_read::expiry(
                 self.original,
-                super::live_read::target(self.original, &call.name, self.now_unix_ms)?,
+                super::live_read::target(
+                    self.original,
+                    self.device_id,
+                    &call.name,
+                    self.now_unix_ms,
+                )?,
             );
         }
         let expiry = self

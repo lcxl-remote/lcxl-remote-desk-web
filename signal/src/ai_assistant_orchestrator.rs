@@ -196,6 +196,7 @@ pub(crate) async fn current_capability_projection<
 
 fn prepare_live_targets(
     registry: &desk_diagnose_core::provider_registry::ProviderRegistry,
+    device_id: &str,
     selected_ids: &[String],
     original: Option<&crate::agent_run_event_store::ReadContextSelection>,
     readiness: Option<&ComputerUseReadiness>,
@@ -203,10 +204,10 @@ fn prepare_live_targets(
 ) -> Result<Vec<desk_diagnose_core::input_read_context::live_read::LiveReadTarget>, AgentError> {
     use desk_diagnose_core::input_read_context::{ReadContextSelection, live_read};
     if let Some(original) = original {
-        live_read::validate_current(original, readiness, now)?;
+        live_read::validate_current(original, device_id, readiness, now)?;
         for name in &original.tool_names {
             if live_read::target_kind(name).is_some() {
-                live_read::target(original, name, now)?;
+                live_read::target(original, device_id, name, now)?;
             }
         }
         return Ok(original.live_targets.clone());
@@ -228,6 +229,7 @@ fn prepare_live_targets(
             object_attachments: vec![],
             live_targets: vec![],
         },
+        device_id,
         readiness,
         now,
     )
@@ -1723,6 +1725,7 @@ async fn prepare_composed_turn(
                     });
                     let live_targets = match prepare_live_targets(
                         &provider_registry,
+                        &target_device_id,
                         &ask.selected_capability_ids,
                         original_read_context.as_ref(),
                         readiness.as_ref(),

@@ -64,7 +64,9 @@ struct StoredInput {
 
 pub(super) fn payload_version(selection: Option<&ReadContextSelection>) -> i32 {
     match selection {
-        Some(selection) if !selection.live_targets.is_empty() => 4,
+        Some(selection) if !selection.live_targets.is_empty() => {
+            desk_diagnose_core::input_read_context::live_read::INPUT_PAYLOAD_VERSION
+        }
         Some(selection) if !selection.object_attachments.is_empty() => 3,
         Some(_) => 2,
         None => i32::from(AGENT_RUN_EVENT_SCHEMA_VERSION),

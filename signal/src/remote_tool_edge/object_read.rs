@@ -80,6 +80,7 @@ impl SignalAiAssistantTools {
                 .ok_or_else(denied)?;
             desk_diagnose_core::input_read_context::live_read::validate_current(
                 &input.selection,
+                &self.target_device_id,
                 Some(&readiness.readiness),
                 u64::try_from(chrono::Utc::now().timestamp_millis()).map_err(|_| denied())?,
             )?;

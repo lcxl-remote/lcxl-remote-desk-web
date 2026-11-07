@@ -472,7 +472,7 @@ impl IworkCallPreflight {
             "patch_live_spreadsheet_cell" => {
                 let args: SpreadsheetActionArgs =
                     serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?;
-                let frozen = live_read::bound_target(original, "inspect_live_spreadsheet")?;
+                let frozen = live_read::unique_target(original, "inspect_live_spreadsheet")?;
                 let expiry = live_mutation_expiry(
                     original,
                     frozen,
@@ -491,7 +491,7 @@ impl IworkCallPreflight {
             "replace_live_document_body" => {
                 let args: DocumentActionArgs =
                     serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?;
-                let frozen = live_read::bound_target(original, "inspect_live_document")?;
+                let frozen = live_read::unique_target(original, "inspect_live_document")?;
                 let expiry = live_mutation_expiry(
                     original,
                     frozen,
@@ -512,7 +512,7 @@ impl IworkCallPreflight {
             "patch_live_presentation_slide" => {
                 let args: PresentationActionArgs =
                     serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?;
-                let frozen = live_read::bound_target(original, "inspect_live_presentation")?;
+                let frozen = live_read::unique_target(original, "inspect_live_presentation")?;
                 let expiry = live_mutation_expiry(
                     original,
                     frozen,

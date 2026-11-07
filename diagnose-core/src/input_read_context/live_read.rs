@@ -13,16 +13,17 @@ use crate::{
     session::PersistedAgentSession,
 };
 
+pub const INPUT_PAYLOAD_VERSION: i32 = 5;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LiveReadTarget {
+    pub device_id: String,
     pub tool_name: String,
     pub object_ref: ObjectRef,
     pub interactive_session_incarnation: String,
-    /// Frozen selection deadline. New captures bind this to the edge-issued
-    /// object reference rather than the short heartbeat lease; the field name
-    /// is retained for wire compatibility. Current readiness and incarnation
-    /// are still revalidated before every permission use and dispatch.
+    /// Frozen object deadline. Current readiness and incarnation are checked
+    /// independently before every permission use and dispatch.
     pub readiness_expires_at_unix_ms: u64,
 }
 
@@ -51,18 +52,17 @@ fn bounded(value: &str) -> bool {
 }
 
 pub fn validate_targets(selection: &ReadContextSelection) -> Result<(), AgentError> {
-    if selection.live_targets.len() > 4
-        || selection
-            .live_targets
-            .windows(2)
-            .any(|pair| pair[0].tool_name >= pair[1].tool_name)
-    {
+    if selection.live_targets.windows(2).any(|pair| {
+        (&pair[0].device_id, &pair[0].tool_name) >= (&pair[1].device_id, &pair[1].tool_name)
+    }) {
         return Err(invalid("original live targets are not canonical"));
     }
     for target in &selection.live_targets {
         let (_, kind) =
             target_kind(&target.tool_name).ok_or_else(|| invalid("invalid original live tool"))?;
-        if !selection.tool_names.contains(&target.tool_name)
+        if desk_agent_protocol::ai_assistant::validate_target_refs([target.device_id.as_str()])
+            .is_err()
+            || !selection.tool_names.contains(&target.tool_name)
             || target.object_ref.object_kind != kind
             || !bounded(&target.object_ref.token)
             || !bounded(&target.object_ref.snapshot_id)
@@ -80,6 +80,7 @@ pub fn validate_targets(selection: &ReadContextSelection) -> Result<(), AgentErr
 /// The caller must obtain readiness from its authenticated target connection.
 pub fn capture(
     selection: &ReadContextSelection,
+    device_id: &str,
     readiness: Option<&ComputerUseReadiness>,
     now: u64,
 ) -> Result<Vec<LiveReadTarget>, AgentError> {
@@ -102,6 +103,7 @@ pub fn capture(
             .find(|reference| reference.capability == capability)
             .ok_or_else(|| invalid("selected live target is unavailable"))?;
         targets.push(LiveReadTarget {
+            device_id: device_id.into(),
             tool_name: name.clone(),
             object_ref: reference.object_ref.clone(),
             interactive_session_incarnation: readiness.interactive_session_incarnation.clone(),
@@ -110,16 +112,17 @@ pub fn capture(
     }
     let mut captured = selection.clone();
     captured.live_targets = targets;
-    validate_current(&captured, readiness, now)?;
+    validate_current(&captured, device_id, readiness, now)?;
     Ok(captured.live_targets)
 }
 
 pub fn target<'a>(
     selection: &'a ReadContextSelection,
+    device_id: &str,
     name: &str,
     now: u64,
 ) -> Result<&'a LiveReadTarget, AgentError> {
-    let target = bound_target(selection, name)?;
+    let target = bound_target(selection, device_id, name)?;
     if expiry(selection, target)? <= now {
         return Err(invalid("original live target expired"));
     }
@@ -132,14 +135,33 @@ pub fn target<'a>(
 /// derived object reference and current authenticated readiness before use.
 pub fn bound_target<'a>(
     selection: &'a ReadContextSelection,
+    device_id: &str,
     name: &str,
 ) -> Result<&'a LiveReadTarget, AgentError> {
     validate_targets(selection)?;
     selection
         .live_targets
         .iter()
-        .find(|target| target.tool_name == name)
+        .find(|target| target.device_id == device_id && target.tool_name == name)
         .ok_or_else(|| invalid("original live target is missing; submit a new input"))
+}
+
+pub(crate) fn unique_target<'a>(
+    selection: &'a ReadContextSelection,
+    name: &str,
+) -> Result<&'a LiveReadTarget, AgentError> {
+    validate_targets(selection)?;
+    let mut targets = selection
+        .live_targets
+        .iter()
+        .filter(|target| target.tool_name == name);
+    let target = targets
+        .next()
+        .ok_or_else(|| invalid("original live target is missing"))?;
+    if targets.next().is_some() {
+        return Err(invalid("original live target requires a device"));
+    }
+    Ok(target)
 }
 
 pub fn expiry(
@@ -158,16 +180,21 @@ pub fn expiry(
 /// Heartbeats may rotate their short-lived token/snapshot while preserving the
 /// same interactive-session incarnation and semantic object kind. The edge
 /// still receives the frozen original reference and must resolve/revalidate it
-/// immediately before the read. Empty legacy targets remain decodable;
-/// attempting a live read still requires `target`, which refuses to reconstruct
-/// a missing original reference.
+/// immediately before the read. A read still requires `target`, which refuses
+/// to reconstruct a missing original reference.
 pub fn validate_current(
     selection: &ReadContextSelection,
+    device_id: &str,
     readiness: Option<&ComputerUseReadiness>,
     now: u64,
 ) -> Result<(), AgentError> {
     validate_targets(selection)?;
-    if selection.live_targets.is_empty() {
+    let mut targets = selection
+        .live_targets
+        .iter()
+        .filter(|target| target.device_id == device_id)
+        .peekable();
+    if targets.peek().is_none() {
         return Ok(());
     }
     let readiness = readiness.ok_or_else(|| invalid("live target readiness unavailable"))?;
@@ -182,8 +209,10 @@ pub fn validate_current(
     {
         return Err(invalid("live target readiness is not current"));
     }
-    for original in &selection.live_targets {
-        target(selection, &original.tool_name, now)?;
+    for original in targets {
+        if expiry(selection, original)? <= now {
+            return Err(invalid("original live target expired"));
+        }
         let (capability, _) = target_kind(&original.tool_name).expect("validated live tool");
         if original.interactive_session_incarnation != readiness.interactive_session_incarnation
             || !readiness
@@ -225,7 +254,9 @@ pub fn validate_input(
         return Err(invalid("original live input model destination changed"));
     }
     for original in &selection.live_targets {
-        target(selection, &original.tool_name, now)?;
+        if expiry(selection, original)? <= now {
+            return Err(invalid("original live target expired"));
+        }
     }
     Ok(())
 }
@@ -257,6 +288,7 @@ pub fn validate_durable_selection(
             .iter()
             .filter(|attachment| {
                 attachment.kind == ContextAttachmentKind::InteractiveSession
+                    && attachment.device_id == target.device_id
                     && attachment.created_at_unix_ms <= input_created_at_unix_ms
                     && attachment.object_ref.source_provider_id == provider.wire.provider_id
                     && attachment.object_ref.source_capability_id == capability.wire.capability_id
@@ -288,12 +320,13 @@ mod tests;
 
 pub fn bind(
     selection: &ReadContextSelection,
+    device_id: &str,
     call: &crate::chat::ToolCall,
     input: &mut desk_agent_protocol::OperationInput,
     now: u64,
 ) -> Result<(), AgentError> {
     use desk_agent_protocol::{ContextKind, OperationInput, ReadContextInput};
-    let original = target(selection, &call.name, now)?;
+    let original = target(selection, device_id, &call.name, now)?;
     let OperationInput::ReadContext(ReadContextInput { kind }) = input else {
         return Err(invalid("live read operation mismatch"));
     };
@@ -327,9 +360,20 @@ pub(super) fn label(
         data_lineage::{ContentRef, RetentionBoundary},
     };
     use sha2::{Digest, Sha256};
-    let original = target(binding.original, &call.name, binding.now_unix_ms)?;
+    let original = target(
+        binding.original,
+        binding.device_id,
+        &call.name,
+        binding.now_unix_ms,
+    )?;
     let (_, mut input) = crate::read_tools::build_read_operation(call)?;
-    bind(binding.original, call, &mut input, binding.now_unix_ms)?;
+    bind(
+        binding.original,
+        binding.device_id,
+        call,
+        &mut input,
+        binding.now_unix_ms,
+    )?;
     let bytes = match input {
         OperationInput::ReadContext(ReadContextInput {
             kind: ContextKind::OfficeDocumentInspect(p),

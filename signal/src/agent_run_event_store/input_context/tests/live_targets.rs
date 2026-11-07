@@ -8,6 +8,7 @@ fn live_input() -> AppendUserFollowupParams {
     let selection = params.read_context.as_mut().unwrap();
     selection.tool_names = vec!["inspect_live_document".into()];
     selection.live_targets = vec![LiveReadTarget {
+        device_id: params.device_id.clone(),
         tool_name: "inspect_live_document".into(),
         object_ref: ObjectRef {
             token: "original-document".into(),
@@ -54,7 +55,7 @@ async fn original_live_target_receipt_is_immutable_even_after_expiry() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(row.payload_schema_version, 4);
+    assert_eq!(row.payload_schema_version, 5);
     assert_eq!(
         store
             .original_read_context(subject(), first.input_revision)

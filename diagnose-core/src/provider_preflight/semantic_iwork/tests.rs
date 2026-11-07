@@ -101,6 +101,7 @@ fn original(read_tool: &str, object_ref: ObjectRef) -> ReadContextSelection {
         expires_at: None,
         object_attachments: vec![],
         live_targets: vec![LiveReadTarget {
+            device_id: "device".into(),
             tool_name: read_tool.into(),
             object_ref,
             interactive_session_incarnation: "501:worker-1:7".into(),

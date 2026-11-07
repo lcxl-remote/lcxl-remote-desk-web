@@ -125,6 +125,7 @@ fn live_read_authority_uses_original_targets_on_both_surfaces() {
             expires_at: None,
             object_attachments: vec![],
             live_targets: vec![LiveReadTarget {
+                device_id: "42".into(),
                 tool_name: name.into(),
                 object_ref: reference.clone(),
                 interactive_session_incarnation: "worker".into(),
@@ -534,13 +535,22 @@ fn terminal_authority_uses_only_original_attachment_refs() {
         ] {
             let preflight = ReadCallPreflight::build(&registry, surface, &call, &binding)
                 .unwrap_or_else(|e| panic!("{name}: {e:?}"));
-            let selected = ReadCallPreflight::build_selected_device(
-                &registry, surface, &call, &binding,
-            ).unwrap();
+            let selected =
+                ReadCallPreflight::build_selected_device(&registry, surface, &call, &binding)
+                    .unwrap();
             assert_eq!(selected.resource_scope(), preflight.resource_scope());
-            assert!(ReadCallPreflight::build_selected_device(
-                &registry, surface, &call, &ObjectReadBinding { device_id: "other", ..binding },
-            ).is_err());
+            assert!(
+                ReadCallPreflight::build_selected_device(
+                    &registry,
+                    surface,
+                    &call,
+                    &ObjectReadBinding {
+                        device_id: "other",
+                        ..binding
+                    },
+                )
+                .is_err()
+            );
             assert_eq!(
                 preflight.resource_scope(),
                 fresh_object_resource_scope(std::slice::from_ref(&reference))

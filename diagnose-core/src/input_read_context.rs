@@ -87,9 +87,13 @@ impl ReadContextSelection {
             !targets
                 .iter()
                 .any(|target| target.device_id == attachment.device_id)
+        }) || self.live_targets.iter().any(|live| {
+            !targets
+                .iter()
+                .any(|target| target.device_id == live.device_id)
         }) {
             return Err(invalid(
-                "selected attachment is outside the original device targets",
+                "selected resource is outside the original device targets",
             ));
         }
         Ok(())
