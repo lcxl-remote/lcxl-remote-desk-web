@@ -4142,6 +4142,8 @@ fn assert_targetless_web_tools(request: &serde_json::Value, approved: bool) {
                 | "read_memory_history"
                 | "read_memory_source"
                 | "manage_memories"
+                | "request_goal"
+                | "control_goal"
         ) || tools::effect(name).is_some()),
         "{names:?}"
     );
@@ -5509,4 +5511,136 @@ async fn selected_browser_on_signal(automatic: bool, artifact: bool) {
     } else {
         "snapshot_captured"
     }));
+}
+
+#[actix_web::test]
+async fn selectable_goal_retains_its_device_across_signal_segments() {
+    use desk_diagnose_core::goal::GoalState;
+    use desk_signal_facade::model::os::OperationSystemEnum;
+    use serde_json::json;
+    let listener = std::sync::Arc::new(TcpListener::bind("127.0.0.1:0").await.unwrap());
+    let db = crate::config::test_support::Database::connect("sqlite::memory:")
+        .await
+        .unwrap();
+    crate::db::initialize_schema(&db).await.unwrap();
+    crate::ai_assistant_gate::enable_test_host();
+    crate::model_provider::save(
+        &db,
+        crate::model_provider::ModelProviderConfig {
+            wire_protocol: Some(
+                desk_diagnose_core::model_profile::WireProtocol::OpenAiChatCompletions,
+            ),
+            model: Some("goal-fixture".into()),
+            base_url: Some(format!("http://{}", listener.local_addr().unwrap())),
+            api_key: Some("test-only-key".into()),
+            max_context_bytes: Some(131_072),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let connections = web::Data::new(SharedConnectionMap::new_oss());
+    let _peer = register_request_device(
+        &connections,
+        "goal-mac",
+        "Original Mac",
+        OperationSystemEnum::Mac,
+    )
+    .await;
+    crate::device_code_store::get_or_create(&db, "goal-mac")
+        .await
+        .unwrap();
+    let actor = crate::control_authorizer::SINGLE_ACCOUNT_USER_ID;
+    let ask = AiAssistantAsk {
+        start_goal: true,
+        target_refs: vec!["goal-mac".into()],
+        question: "Investigate the selected Mac".into(),
+        client_message_id: "goal-input".into(),
+        conversation_id: Some("goal-conversation".into()),
+        client_timezone: "UTC".into(),
+        ..Default::default()
+    };
+    let first = memory_sse(
+        json!({"tool_calls":[report_test_call("continue-goal", "control_goal",
+        json!({"decision":"continue","message":"Continue on the original device"}))]}),
+        "tool_calls",
+    );
+    let gateway_listener = listener.clone();
+    let gateway = actix_web::rt::spawn(async move {
+        capture_one_openai_request_with_sse(gateway_listener.as_ref(), &first).await
+    });
+    tokio::time::timeout(
+        MODEL_IO_TIMEOUT,
+        run_turn(
+            connections.clone(),
+            db.clone(),
+            "goal-frame".into(),
+            "goal-browser".into(),
+            String::new(),
+            actor,
+            String::new(),
+            ask,
+        ),
+    )
+    .await
+    .expect("the native goal entry must settle its first segment");
+    let rows = crate::entity::agent_session::Entity::find()
+        .all(&db)
+        .await
+        .unwrap();
+    let states = rows.iter().map(|row| {
+        let value: serde_json::Value=serde_json::from_str(&row.state_json).unwrap();
+        json!({"input_revision":value["input_revision"],"turn_state":value["turn_state"],"terminal_error":value["terminal_error"]})
+    }).collect::<Vec<_>>();
+    let owner = actor.to_string();
+    let run = derive_assistant_conversation_key(
+        &owner,
+        AssistantConversationScope::Personal,
+        "goal-conversation",
+    );
+    let original = crate::agent_goal_store::load_latest_for_subject(&db, &run, &owner, "")
+        .await
+        .unwrap()
+        .unwrap_or_else(|| panic!("goal admission missing; states={states:?}"));
+    assert_eq!(original.execution_target.device_id, "goal-mac");
+    assert!(original.device_id.is_empty());
+    assert_eq!(original.state, GoalState::Queued, "states={states:?}");
+    assert_eq!(original.slice_seq, 1, "states={states:?}");
+    tokio::time::timeout(MODEL_IO_TIMEOUT, gateway)
+        .await
+        .unwrap()
+        .unwrap();
+    let gate = crate::ai_assistant_gate::AiAssistantGate::new(
+        desk_agent_protocol::ai_assistant::AiAssistantSettings {
+            revision: 1,
+            enabled: true,
+        },
+    );
+    let gateway_listener = listener.clone();
+    let response = actix_web::rt::spawn(async move {
+        capture_one_openai_request_with_reply(gateway_listener.as_ref(), |body| {
+            let text=String::from_utf8_lossy(body);
+            assert!(text.contains("goal-mac"));
+            memory_sse(json!({"tool_calls":[report_test_call("finish-goal","control_goal",
+                json!({"decision":"blocked","message":"Waiting for the owner after checking the original target"}))]}),"tool_calls")
+        }).await
+    });
+    let outcome = tokio::time::timeout(
+        MODEL_IO_TIMEOUT,
+        resume_queued_goal(connections, db.clone(), &gate, original.clone()),
+    )
+    .await
+    .unwrap();
+    assert!(outcome.is_ok(), "{outcome:?}");
+    let resumed = crate::agent_goal_store::load_latest_for_subject(&db, &run, &owner, "")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(resumed.execution_target, original.execution_target);
+    assert_eq!(resumed.slice_seq, 2);
+    assert_eq!(resumed.state, GoalState::Blocked);
+    tokio::time::timeout(MODEL_IO_TIMEOUT, response)
+        .await
+        .unwrap()
+        .unwrap();
 }

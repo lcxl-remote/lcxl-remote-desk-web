@@ -21,6 +21,7 @@ async fn fixture(label: &str) -> (TestStore, Box<PersistedAgentSession>, GoalRun
         "goal".into(),
         session.conversation_id.clone(),
         session.actor_id.clone(),
+        desk_diagnose_core::dynamic_run::AssistantInputTarget::fixed(session.device_id.clone()),
         session.device_id.clone(),
         "Find the report".into(),
         "owner-message".into(),

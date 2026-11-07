@@ -15,6 +15,7 @@ fn fixture() -> (PersistedAgentSession, GoalRun) {
         "goal".into(),
         "root".into(),
         "owner".into(),
+        crate::dynamic_run::AssistantInputTarget::fixed("device".into()),
         "device".into(),
         "Find the original report".into(),
         "owner-message".into(),

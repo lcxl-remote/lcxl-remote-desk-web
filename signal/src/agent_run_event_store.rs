@@ -119,11 +119,6 @@ impl SignalAgentRunEventStore {
             return Err(internal("Goal input requires its native admission"));
         }
         let targetless = params.device_id.is_empty();
-        if targetless && goal_start.is_some() {
-            return Err(internal(
-                "targetless input requires the personal input path",
-            ));
-        }
         for _ in 0..APPEND_ATTEMPTS {
             let txn = crate::db::begin_write(&self.db, crate::entity::agent_session::Entity)
                 .await
@@ -797,6 +792,10 @@ async fn prepare_input_goals_on(
             start.goal_id.clone(),
             params.run_id.clone(),
             params.actor_id.clone(),
+            session
+                .single_assistant_request_target()
+                .map_err(internal)?
+                .clone(),
             params.device_id.clone(),
             params.message.text.clone(),
             params.message.message_id.clone(),
@@ -3497,6 +3496,7 @@ mod tests {
             "old-goal".into(),
             "run-1".into(),
             owner_actor(),
+            desk_diagnose_core::dynamic_run::AssistantInputTarget::fixed("device-1".into()),
             "device-1".into(),
             "Original goal".into(),
             "message-1".into(),
@@ -3746,6 +3746,7 @@ mod tests {
             "proposal".into(),
             "run-1".into(),
             owner_actor(),
+            desk_diagnose_core::dynamic_run::AssistantInputTarget::fixed("device-1".into()),
             "device-1".into(),
             "first-message".into(),
             1,

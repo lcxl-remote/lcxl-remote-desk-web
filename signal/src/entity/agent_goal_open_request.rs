@@ -12,6 +12,7 @@ pub struct Model {
     pub conversation_id: String,
     pub actor_id: String,
     pub device_id: String,
+    pub execution_target_json: String,
     pub source_message_id: String,
     pub input_revision: i64,
     pub goal_text: String,

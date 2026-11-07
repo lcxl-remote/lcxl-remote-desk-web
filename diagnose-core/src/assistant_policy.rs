@@ -29,6 +29,8 @@ pub fn is_targetless_web_tool(tool: &crate::registry::RegisteredTool) -> bool {
             crate::registry::ToolEffect::PermissionPlanning
                 | crate::registry::ToolEffect::CapabilityDiscovery
                 | crate::registry::ToolEffect::SkillLoading
+                | crate::registry::ToolEffect::GoalControl
+                | crate::registry::ToolEffect::GoalOpenPlanning
         )
 }
 
@@ -36,6 +38,8 @@ pub fn targetless_web_internal_tools() -> Vec<crate::registry::RegisteredTool> {
     let mut tools = crate::permission_tools::permission_planning_tool_registry();
     tools.extend(crate::capability_disclosure::capability_discovery_tool_registry());
     tools.extend(crate::subagent::tools::registry());
+    tools.extend(crate::goal_tools::registry());
+    tools.extend(crate::goal_tools::open_registry());
     tools.extend(
         crate::conversation_history::conversation_history_tool_registry()
             .into_iter()
@@ -63,8 +67,7 @@ pub fn validate_assistant_ask_scope(
     {
         return Err("personal input requires a valid continuation id");
     }
-    if ask.start_goal
-        || ask.previous_completed_goal_id.is_some()
+    if ((ask.start_goal || ask.previous_completed_goal_id.is_some()) && ask.target_refs.len() != 1)
         || !ask.selected_capability_ids.is_empty()
         || (!ask.selected_attachment_ids.is_empty() && ask.target_refs.is_empty())
     {
@@ -226,6 +229,39 @@ pub fn validate_claim(
     }
     if params.trigger_origin != TriggerOrigin::User {
         require_current_policy(previous_revision.unwrap_or(0))?;
+    }
+    Ok(())
+}
+
+/// A goal claim keeps the original conversation subject and its one frozen target.
+pub fn validate_goal_claim(
+    session: &PersistedAgentSession,
+    goal: &crate::goal::GoalRun,
+    params: &ClaimTurnParams,
+) -> Result<(), AgentError> {
+    require_current_policy(params.policy_revision)?;
+    require_current_policy(session.policy_revision)?;
+    if params.trigger_origin != TriggerOrigin::GoalContinuation
+        || goal.owner_id != session.actor_id
+        || goal.owner_id != params.actor_id
+        || goal.conversation_id != session.conversation_id
+        || goal.conversation_id != params.conversation_id
+        || goal.device_id != session.device_id
+        || goal.device_id != params.device_id
+        || goal.input_revision != session.input_revision
+        || session.single_assistant_request_target().ok() != Some(&goal.execution_target)
+        || (params.device_id.is_empty() && !is_targetless_scope(&params.current_pdp_scope))
+    {
+        return Err(AgentError {
+            kind: AgentErrorKind::SessionUnavailable,
+            message: "Goal claim no longer matches its original request and device".into(),
+            retryable: false,
+            safe_for_model: false,
+            error_code: None,
+        });
+    }
+    if !params.device_id.is_empty() {
+        validate_claim(session.surface, Some(session.policy_revision), params)?;
     }
     Ok(())
 }

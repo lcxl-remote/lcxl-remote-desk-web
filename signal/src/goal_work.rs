@@ -239,7 +239,8 @@ pub(crate) async fn original_on<C: ConnectionTrait + crate::config::ConfigConnec
         origin.turn_fence.validate().map_err(|_| invalid())?;
         if origin.turn_fence.conversation_id != session.conversation_id
             || origin.turn_fence.actor_id != session.actor_id
-            || origin.turn_fence.device_id != session.device_id
+            || origin.turn_fence.device_id != row.target_device_id
+            || (!session.device_id.is_empty() && origin.turn_fence.device_id != session.device_id)
             || origin.tool_call_id != row.tool_call_id
         {
             return Err(invalid());
@@ -260,7 +261,7 @@ pub(crate) async fn original_on<C: ConnectionTrait + crate::config::ConfigConnec
     };
     if row.conversation_id != session.conversation_id
         || row.actor_id != session.actor_id
-        || row.target_device_id != session.device_id
+        || (!session.device_id.is_empty() && row.target_device_id != session.device_id)
         || row.action_request_id != action.action_request_id
     {
         return Err(invalid());

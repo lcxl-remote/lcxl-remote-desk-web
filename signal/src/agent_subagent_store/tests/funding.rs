@@ -11,6 +11,7 @@ pub(super) async fn funded_parent(db: &DatabaseConnection) -> (PersistedAgentSes
         "funding-goal".into(),
         "root".into(),
         "1".into(),
+        desk_diagnose_core::dynamic_run::AssistantInputTarget::fixed("1".into()),
         "1".into(),
         "Investigate these independent symptoms".into(),
         "source-message".into(),

@@ -386,6 +386,9 @@ export function AiAssistantWorkspace({
         : chat.attachments.filter(item => item.state === 'active'
             && requestDevices.selected.some(device => device.id === item.deviceRef)).length) + selectedIssues.length;
     const [startGoal, setStartGoal] = useState(false);
+    const [goalTargetRef, setGoalTargetRef] = useState<string | null>(null);
+    const goalDevice = requestDevices.selected.length === 1 ? requestDevices.selected[0]
+        : requestDevices.selected.find(device => device.id === goalTargetRef);
     const [goalBudgetPolicy, setGoalBudgetPolicy] = useState<GoalBudgetPolicy | null>(null);
     useEffect(() => {
         if (!startGoal && !chat.pendingGoalOpenRequest && !chat.goal) return;
@@ -474,6 +477,7 @@ export function AiAssistantWorkspace({
         if (!accepted) return;
         setQuestion(current => current.trim() === accepted.question ? '' : current);
         setStartGoal(false);
+        setGoalTargetRef(null);
         setPreviousCompletedGoalId(null);
         setSelectedCapabilityIds(current => current.filter(id => id !== CURRENT_SCREEN_CAPABILITY_ID));
     }, [chat.acceptedInput]);
@@ -482,13 +486,13 @@ export function AiAssistantWorkspace({
     const sendDisabled = (!canQueueInput && chat.turnRunning) || chat.stopping || !!chat.deliveryState || !rehearsalCanStart
         || !assistantEnabled || !question.trim() || !isConnected || chat.hydrating || chat.historyRestoreFailed || !chat.sessionTargetReady
         || chat.sessionTargetResolving || chat.contextUpdating || !providerConfig?.api_key_set
-        || !providerConfig?.model || !requestDevices.ready || (startGoal && !goalBudgetPolicy);
+        || !providerConfig?.model || !requestDevices.ready || (startGoal && (!goalBudgetPolicy || (!hasDevice && !goalDevice)));
     const submit = (event: FormEvent) => {
         event.preventDefault();
         if (sendDisabled) return;
         const selectedContext = featureProfile.object_context ? selectedCapabilityIds : [];
         chat.start(question, i18n.language, selectedContext, startGoal, previousCompletedGoalId, selectedIssues,
-            requestDevices.selected.map(device => device.id));
+            startGoal && goalDevice ? [goalDevice.id] : requestDevices.selected.map(device => device.id));
     };
 
     const resetConversation = (temporary = false) => {
@@ -1151,11 +1155,20 @@ export function AiAssistantWorkspace({
                         />
                         <div className="flex min-w-0 items-center gap-1">
                             <AssistantComposerMenu key={`${permissionHistoryKey}:${subagents.selected?.task_id ?? 'main'}`} sections={menuSections} onContext={hasDevice || issueSources ? () => setPanel('context') : undefined}
-                                goal={hasDevice && !rehearsal ? {
+                                goal={(hasDevice || personalScope) && !rehearsal ? {
                                     checked: startGoal, disabled: !assistantEnabled || chat.turnRunning || !!chat.deliveryState,
                                     onCheckedChange: checked => { setStartGoal(checked); setPreviousCompletedGoalId(null); },
                                     summary: startGoal && goalBudgetPolicy ? <GoalLimitsSummary policy={goalBudgetPolicy} /> : undefined,
                                 } : undefined} />
+                            {startGoal && personalScope && <DropdownMenu>
+                                <DropdownMenuTrigger asChild><Button type="button" variant="outline" size="sm">
+                                    {goalDevice?.name || t('pages.aiAssistant.goalSelectDevice')}
+                                </Button></DropdownMenuTrigger>
+                                <DropdownMenuContent>
+                                    {requestDevices.selected.map(device => <DropdownMenuItem key={device.id}
+                                        onSelect={() => setGoalTargetRef(device.id)}>{device.name}</DropdownMenuItem>)}
+                                </DropdownMenuContent>
+                            </DropdownMenu>}
                             {personalScope && <AssistantRequestDevices selected={requestDevices.selected}
                                 disabled={!requestDevices.ready || chat.hydrating} onChange={requestDevices.update} />}
                             {personalScope && requestDevices.error && <Button type="button" variant="ghost" size="sm"

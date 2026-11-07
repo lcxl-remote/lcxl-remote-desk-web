@@ -29,6 +29,7 @@ fn fixture(background: bool) -> (MemSession, PersistedAgentSession) {
         "goal".into(),
         "conv".into(),
         "actor".into(),
+        crate::dynamic_run::AssistantInputTarget::fixed("device".into()),
         "device".into(),
         "Finish the verified report".into(),
         "user".into(),

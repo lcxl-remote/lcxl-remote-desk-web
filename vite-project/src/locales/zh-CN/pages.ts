@@ -2063,6 +2063,7 @@ export default {
   'pages.aiAssistant.sendShortcut.enter': '{{enter}} 发送，{{shiftEnter}} 换行',
   'pages.aiAssistant.sendShortcut.shiftEnter': '{{shiftEnter}} 发送，{{enter}} 换行',
   'pages.aiAssistant.sendShortcut.ctrlEnter': '{{primaryEnter}} 发送，{{enter}} 换行',
+  'pages.aiAssistant.goalSelectDevice': '为持续工作选择一台设备',
   'pages.aiAssistant.goalStart': '持续工作',
   'pages.aiAssistant.goalStillIncomplete': '目标尚未完成',
   'pages.aiAssistant.goalStillIncompletePrompt': '上一个目标尚未完成：{{goal}}。请根据已有结果继续完成，并核实剩余工作。',

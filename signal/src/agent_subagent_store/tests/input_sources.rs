@@ -423,6 +423,7 @@ async fn promoting_the_same_input_to_a_goal_does_not_adopt_an_existing_ordinary_
         "new-goal".into(),
         "root".into(),
         "1".into(),
+        desk_diagnose_core::dynamic_run::AssistantInputTarget::fixed("1".into()),
         "1".into(),
         "Investigate these independent symptoms".into(),
         "source-message".into(),

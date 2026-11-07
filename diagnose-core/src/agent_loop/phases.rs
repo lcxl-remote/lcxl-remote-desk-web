@@ -3795,8 +3795,12 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                                                             .clone()
                                                             .unwrap_or_default(),
                                                     );
-                                                    message.data_envelope =
-                                                        turn.provider_meta.data_envelope.clone();
+                                                    message.data_envelope = derive_internal_tool_result_envelope(
+                                                        turn.provider_meta.data_envelope.as_ref(),
+                                                        &message.message_id,
+                                                        &message.text,
+                                                        crate::goal_tools::CONTROL_GOAL_TOOL_NAME,
+                                                    )?;
                                                     session.conversation.push(message);
                                                     if matches!(
                                                         control,
@@ -4059,6 +4063,7 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                                         request_id,
                                         session.conversation_id.clone(),
                                         session.actor_id.clone(),
+                                        session.single_assistant_request_target().map_err(crate::goal_tools::invalid)?.clone(),
                                         session.device_id.clone(),
                                         user.message_id.clone(),
                                         session.input_revision,

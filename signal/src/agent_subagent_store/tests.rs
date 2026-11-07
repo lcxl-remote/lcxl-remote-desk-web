@@ -581,6 +581,7 @@ async fn seed_task(db: &DatabaseConnection, group_id: &str, goal_id: &str) -> Su
         goal_id.into(),
         "root".into(),
         "1".into(),
+        desk_diagnose_core::dynamic_run::AssistantInputTarget::fixed("1".into()),
         "1".into(),
         "Investigate".into(),
         format!("owner-{group_id}"),

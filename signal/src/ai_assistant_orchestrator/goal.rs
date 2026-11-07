@@ -23,7 +23,7 @@ pub async fn resume_queued_goal(
         let mut targets = map.values().filter(|target| {
             target.auth_context.auth_kind == AuthKind::TokenAuth
                 && target.auth_context.remote_desk_type == RemoteDeskTypeEnum::Server
-                && target.client_id.as_deref() == Some(goal.device_id.as_str())
+                && target.client_id.as_deref() == Some(goal.execution_target.device_id.as_str())
         });
         let first = targets
             .next()
@@ -42,6 +42,11 @@ pub async fn resume_queued_goal(
     );
     let ask = AiAssistantAsk {
         temporary_conversation: None,
+        conversation_id: crate::agent_session_store::SignalAgentSessionStore::new(db.clone())
+            .read_snapshot_for_subject(&goal.conversation_id, &goal.owner_id, &goal.device_id)
+            .await?
+            .ok_or_else(|| transport_error("goal conversation is unavailable"))?
+            .client_conversation_id,
         question: goal.goal_text.clone(),
         client_message_id: goal.source_message_id.clone(),
         ..Default::default()
@@ -51,7 +56,11 @@ pub async fn resume_queued_goal(
         db,
         request_id,
         String::new(),
-        target,
+        if goal.device_id.is_empty() {
+            String::new()
+        } else {
+            target
+        },
         crate::control_authorizer::SINGLE_ACCOUNT_USER_ID,
         goal.device_id.clone(),
         ask,

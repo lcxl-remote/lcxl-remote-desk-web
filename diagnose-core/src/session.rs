@@ -1747,6 +1747,15 @@ impl PersistedAgentSession {
             .map(|targets| targets.targets.as_slice())
     }
 
+    pub fn single_assistant_request_target(
+        &self,
+    ) -> Result<&crate::dynamic_run::AssistantInputTarget, &'static str> {
+        match self.assistant_request_targets() {
+            Some([target]) => Ok(target),
+            _ => Err("Select exactly one device for this task"),
+        }
+    }
+
     pub fn assistant_request_device(
         &self,
         reference: &str,

@@ -71,6 +71,7 @@ fn fixture() -> (
         "request-private-id".into(),
         "run".into(),
         "owner".into(),
+        crate::dynamic_run::AssistantInputTarget::fixed("device".into()),
         "device".into(),
         "user".into(),
         1,

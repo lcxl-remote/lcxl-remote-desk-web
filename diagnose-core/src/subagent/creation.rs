@@ -440,7 +440,7 @@ impl CreationEnvelope {
                         ) != self.root_conversation_id
                     })
             })
-            || (self.device_id.is_empty() && self.source.request_input_revision().is_none())
+            || (self.device_id.is_empty() && !self.source.uses_request_targets())
             || self.parent_input_revision == 0
             || self.parent_control_revision == 0
             || self.parent_input_revision > i64::MAX as u64
@@ -604,6 +604,9 @@ impl CreationEnvelope {
                     && goal.conversation_id == self.root_conversation_id
                     && goal.owner_id == self.actor_id
                     && goal.device_id == self.device_id
+                    && (!self.device_id.is_empty()
+                        || self.targets.as_slice()
+                            == std::slice::from_ref(&goal.execution_target))
                     && goal.input_revision == self.parent_input_revision =>
             {
                 goal.validate()

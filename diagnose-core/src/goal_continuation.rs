@@ -224,6 +224,7 @@ mod tests {
             "goal".into(),
             "run".into(),
             "owner".into(),
+            crate::dynamic_run::AssistantInputTarget::fixed("device".into()),
             "device".into(),
             "Complete work".into(),
             "input".into(),

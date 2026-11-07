@@ -128,6 +128,7 @@ mod tests {
             "goal".into(),
             "run".into(),
             "owner".into(),
+            crate::dynamic_run::AssistantInputTarget::fixed("device".into()),
             "device".into(),
             "Calculate 6+8".into(),
             "input".into(),

@@ -106,7 +106,10 @@ async fn initialize_goal_group_inner(
                 creation.original_read_context,
                 Some(goal),
                 now_ms,
-                Default::default(),
+                desk_diagnose_core::subagent::creation::AcceptedOwnerSource {
+                    targets: &creation.targets,
+                    main_request_id: creation.main_request_id.as_deref(),
+                },
             )
             .await
         }

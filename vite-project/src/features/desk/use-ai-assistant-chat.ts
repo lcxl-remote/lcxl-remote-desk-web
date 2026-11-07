@@ -1575,7 +1575,11 @@ export function useAiAssistantChat({
         const trimmed = rehearsal ? rehearsal.prompt : question.trim();
         if (!trimmed || hydrating || historyRestoreFailed || approvalInitializing || contextRequest.current
             || !sessionTargetReady || pendingDelivery.current || stopPending.current) return false;
-        const nativeTurn = Boolean(rehearsal || (deskId && startGoal));
+        if (startGoal && !deskId && requestTargetRefs?.length !== 1) {
+            setError('pages.aiAssistant.goalSelectDevice');
+            return false;
+        }
+        const nativeTurn = Boolean(rehearsal || startGoal);
         if (nativeTurn && (activeRequest.current || remoteActive)) return false;
         const selectedObjects = attachments.filter(attachment =>
             attachment.state === 'active'
@@ -1618,8 +1622,8 @@ export function useAiAssistantChat({
                 locale: rehearsal ? rehearsal.locale ?? undefined : locale,
                 ...(!deskId && requestTargetRefs?.length ? { target_refs: [...requestTargetRefs] } : {}),
                 selected_capability_ids: deskId ? [...selectedCapabilityIds] : [],
-                start_goal: Boolean(deskId) && !rehearsal && startGoal,
-                previous_completed_goal_id: deskId && !rehearsal && startGoal ? previousCompletedGoalId : null,
+                start_goal: !rehearsal && startGoal,
+                previous_completed_goal_id: !rehearsal && startGoal ? previousCompletedGoalId : null,
                 selected_attachment_ids: rehearsal ? [] : selectedObjects
                     .map((attachment) => attachment.id),
                 ...(!rehearsal && selectedIssues.length ? { selected_issues: selectedIssues.map(issue => ({ ...issue })) } : {}),

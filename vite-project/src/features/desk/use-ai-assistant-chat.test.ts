@@ -403,17 +403,26 @@ describe('useAiAssistantChat', () => {
         expect(result.current.goal?.stateVersion).toBe(2);
         unmount();
     });
-    it('sends explicit goal intent with the completed goal being continued', async () => {
+    it.each(['goal-intent', ''])('sends explicit goal intent from entry %s with the completed goal being continued', async (deskId) => {
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: null }) }));
         const sendMessage = vi.fn((_type: number, _data: unknown, _to?: string, id?: string) => id!);
         const { result, unmount } = renderHook(() => useAiAssistantChat({
-            deskId: 'goal-intent', subscribe: () => () => undefined, sendMessage,
+            deskId, targetRefs: ['chosen-device'], subscribe: () => () => undefined, sendMessage,
         }));
         act(() => { expect(result.current.start('Finish the report', 'zh', [], true, 'completed-goal')).toBe(true); });
         expect(sendMessage.mock.calls.at(-1)?.[1]).toMatchObject({
             start_goal: true,
             previous_completed_goal_id: 'completed-goal',
         });
+        unmount();
+    });
+    it.each([[], ['mac', 'linux']])('requires one original device for a personal goal: %j', async (...targets) => {
+        const sendMessage = vi.fn();
+        const { result, unmount } = renderHook(() => useAiAssistantChat({
+            deskId: '', subscribe: () => () => undefined, sendMessage, targetRefs: targets as string[],
+        }));
+        act(() => { expect(result.current.start('Continue investigating', 'en', [], true)).toBe(false); });
+        expect(sendMessage).not.toHaveBeenCalled();
         unmount();
     });
     it('ignores host turn frames even with the pending controller request id', async () => {

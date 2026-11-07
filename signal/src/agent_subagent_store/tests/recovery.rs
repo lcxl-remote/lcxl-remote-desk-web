@@ -16,6 +16,7 @@ async fn child_source(db: &DatabaseConnection, goal_source: bool) -> (SubAgentSt
             "recovery-goal".into(),
             "root".into(),
             "1".into(),
+            desk_diagnose_core::dynamic_run::AssistantInputTarget::fixed("1".into()),
             "1".into(),
             "Investigate these independent symptoms".into(),
             "source-message".into(),

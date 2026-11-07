@@ -7,7 +7,23 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const GOAL_SCHEMA_VERSION: u16 = 4;
+pub const GOAL_SCHEMA_VERSION: u16 = 5;
+
+fn validate_execution_target(
+    device: &str,
+    target: &crate::dynamic_run::AssistantInputTarget,
+) -> Result<(), GoalError> {
+    crate::dynamic_run::AssistantInputTarget::validate_all(std::slice::from_ref(target))
+        .map_err(|_| GoalError::InvalidIdentity)?;
+    if !device.is_empty() {
+        valid_id(device)?;
+        if device != target.device_id {
+            return Err(GoalError::InvalidIdentity);
+        }
+    }
+    Ok(())
+}
+
 pub const DEFAULT_MODEL_TOKENS: u64 = 10_000_000;
 pub const DEFAULT_MODEL_CALLS: u32 = 160;
 pub const DEFAULT_TOOL_CALLS: u32 = 200;
@@ -124,6 +140,7 @@ pub struct GoalOpenRequest {
     pub conversation_id: String,
     pub owner_id: String,
     pub device_id: String,
+    pub execution_target: crate::dynamic_run::AssistantInputTarget,
     pub source_message_id: String,
     pub input_revision: u64,
     pub goal_text: String,
@@ -266,6 +283,7 @@ impl GoalOpenRequest {
         request_id: String,
         conversation_id: String,
         owner_id: String,
+        execution_target: crate::dynamic_run::AssistantInputTarget,
         device_id: String,
         source_message_id: String,
         input_revision: u64,
@@ -274,6 +292,7 @@ impl GoalOpenRequest {
         model_binding: GoalModelBinding,
         created_at_unix_ms: u64,
     ) -> Result<Self, GoalError> {
+        validate_execution_target(&device_id, &execution_target)?;
         let expires_at_unix_ms = created_at_unix_ms
             .checked_add(GOAL_OPEN_REQUEST_TTL_MS)
             .ok_or(GoalError::ArithmeticOverflow)?;
@@ -283,6 +302,7 @@ impl GoalOpenRequest {
             conversation_id,
             owner_id,
             device_id,
+            execution_target,
             source_message_id,
             input_revision,
             goal_text,
@@ -303,6 +323,7 @@ impl GoalOpenRequest {
     }
 
     pub fn validate(&self) -> Result<(), GoalError> {
+        validate_execution_target(&self.device_id, &self.execution_target)?;
         if self.schema_version != GOAL_SCHEMA_VERSION
             || self.input_revision == 0
             || self.created_at_unix_ms == 0
@@ -320,7 +341,6 @@ impl GoalOpenRequest {
             &self.request_id,
             &self.conversation_id,
             &self.owner_id,
-            &self.device_id,
             &self.source_message_id,
         ] {
             valid_id(id)?;
@@ -394,6 +414,7 @@ impl GoalOpenRequest {
             goal_id.clone(),
             self.conversation_id.clone(),
             self.owner_id.clone(),
+            self.execution_target.clone(),
             self.device_id.clone(),
             self.goal_text.clone(),
             self.source_message_id.clone(),
@@ -433,6 +454,7 @@ impl GoalOpenRequest {
             || self.conversation_id != goal.conversation_id
             || self.owner_id != goal.owner_id
             || self.device_id != goal.device_id
+            || self.execution_target != goal.execution_target
             || &goal.model_binding != current_model_binding
         {
             return Err(GoalError::StaleRevision);
@@ -469,6 +491,7 @@ impl GoalOpenRequest {
             request_id,
             goal.conversation_id.clone(),
             goal.owner_id.clone(),
+            goal.execution_target.clone(),
             goal.device_id.clone(),
             source_message_id,
             input_revision,
@@ -997,6 +1020,7 @@ pub struct GoalRun {
     pub conversation_id: String,
     pub owner_id: String,
     pub device_id: String,
+    pub execution_target: crate::dynamic_run::AssistantInputTarget,
     pub goal_text: String,
     pub source_message_id: String,
     /// Immutable owner-approved opening text and its original evidence.
@@ -1114,6 +1138,7 @@ impl GoalCompletionReference {
 
 impl GoalRun {
     pub fn validate(&self) -> Result<(), GoalError> {
+        validate_execution_target(&self.device_id, &self.execution_target)?;
         if let Some(wait) = &self.work_wait {
             wait.validate()?;
             if wait.goal_id != self.goal_id
@@ -1216,7 +1241,6 @@ impl GoalRun {
             &self.goal_id,
             &self.conversation_id,
             &self.owner_id,
-            &self.device_id,
             &self.source_message_id,
             &self.original_source_message_id,
         ] {
@@ -1269,6 +1293,7 @@ impl GoalRun {
         goal_id: String,
         conversation_id: String,
         owner_id: String,
+        execution_target: crate::dynamic_run::AssistantInputTarget,
         device_id: String,
         goal_text: String,
         source_message_id: String,
@@ -1279,13 +1304,8 @@ impl GoalRun {
         limits: GoalLimits,
     ) -> Result<Self, GoalError> {
         limits.validate()?;
-        for id in [
-            &goal_id,
-            &conversation_id,
-            &owner_id,
-            &device_id,
-            &source_message_id,
-        ] {
+        validate_execution_target(&device_id, &execution_target)?;
+        for id in [&goal_id, &conversation_id, &owner_id, &source_message_id] {
             valid_id(id)?;
         }
         model_binding.validate()?;
@@ -1304,6 +1324,7 @@ impl GoalRun {
             conversation_id,
             owner_id,
             device_id,
+            execution_target,
             original_goal_text: goal_text.clone(),
             original_source_message_id: source_message_id.clone(),
             goal_text,
@@ -2692,11 +2713,83 @@ mod tests {
         );
     }
 
+    #[test]
+    fn personal_goal_approval_and_storage_keep_the_exact_execution_target() {
+        let mut request = open_request();
+        request.device_id.clear();
+        request.execution_target = crate::dynamic_run::AssistantInputTarget {
+            reference: "public-mac".into(),
+            device_id: "physical-mac".into(),
+            member_generation: Some(7),
+        };
+        let target = request.execution_target.clone();
+        let goal = request
+            .approve(
+                1,
+                &model_binding(),
+                "goal".into(),
+                "decision".into(),
+                1001,
+                None,
+            )
+            .unwrap();
+        assert!(goal.device_id.is_empty());
+        assert_eq!(goal.execution_target, target);
+        let scope = desk_agent_protocol::AgentScope {
+            granted: vec![],
+            mode: desk_agent_protocol::ExecutionMode::ReadOnly,
+            expires_at: None,
+            policy_name: None,
+        };
+        let mut session =
+            crate::session::PersistedAgentSession::new("run", "owner", "", 1, scope.clone(), "now");
+        session.surface = crate::session::AgentSessionSurface::AiAssistant;
+        session.input_revision = 1;
+        session
+            .bind_assistant_input_targets(std::slice::from_ref(&target))
+            .unwrap();
+        let claim = crate::seam::ClaimTurnParams {
+            conversation_id: "run".into(),
+            actor_id: "owner".into(),
+            device_id: String::new(),
+            policy_revision: 1,
+            current_pdp_scope: scope,
+            turn_id: "segment".into(),
+            request_id: None,
+            connection_id: None,
+            trigger_origin: crate::session::TriggerOrigin::GoalContinuation,
+            now: "now".into(),
+        };
+        crate::assistant_policy::validate_goal_claim(&session, &goal, &claim).unwrap();
+        let mut changed = goal.clone();
+        changed.execution_target.member_generation = Some(8);
+        assert!(crate::assistant_policy::validate_goal_claim(&session, &changed, &claim).is_err());
+        let stored = serde_json::to_value(&goal).unwrap();
+        let restored: GoalRun = serde_json::from_value(stored.clone()).unwrap();
+        restored.validate().unwrap();
+        assert_eq!(restored.execution_target, target);
+        let mut missing = stored.clone();
+        missing.as_object_mut().unwrap().remove("execution_target");
+        assert!(serde_json::from_value::<GoalRun>(missing).is_err());
+        let mut mismatched = restored;
+        mismatched.device_id = "other-device".into();
+        assert!(mismatched.validate().is_err());
+        let mut old = stored;
+        old["schema_version"] = serde_json::json!(GOAL_SCHEMA_VERSION - 1);
+        assert!(
+            serde_json::from_value::<GoalRun>(old)
+                .unwrap()
+                .validate()
+                .is_err()
+        );
+    }
+
     fn open_request() -> GoalOpenRequest {
         GoalOpenRequest::new(
             "request".into(),
             "run".into(),
             "owner".into(),
+            crate::dynamic_run::AssistantInputTarget::fixed("device".into()),
             "device".into(),
             "message".into(),
             1,
@@ -2877,6 +2970,7 @@ mod tests {
             "goal".into(),
             "run".into(),
             "owner".into(),
+            crate::dynamic_run::AssistantInputTarget::fixed("device".into()),
             "device".into(),
             "Finish the report".into(),
             "message".into(),

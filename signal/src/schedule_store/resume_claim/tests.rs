@@ -347,6 +347,7 @@ async fn active_goal_prevents_a_scheduled_continuation_from_claiming_its_convers
         "goal-1".into(),
         "source".into(),
         "1".into(),
+        desk_diagnose_core::dynamic_run::AssistantInputTarget::fixed("device-1".into()),
         "device-1".into(),
         "Finish the report".into(),
         "owner-input".into(),

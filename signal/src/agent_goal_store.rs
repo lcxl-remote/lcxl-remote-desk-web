@@ -1594,12 +1594,6 @@ async fn claim_slice_source_on(
     {
         return Ok(None);
     }
-    desk_diagnose_core::assistant_policy::validate_claim(
-        session.surface,
-        Some(session.policy_revision),
-        params,
-    )
-    .map_err(|_| invalid())?;
     let Some(row) = goal_row::Entity::find()
         .filter(goal_row::Column::GoalId.eq(expected_goal_id))
         .filter(goal_row::Column::ConversationId.eq(&params.conversation_id))
@@ -1610,6 +1604,8 @@ async fn claim_slice_source_on(
         return Ok(None);
     };
     let goal = decode(&row)?;
+    desk_diagnose_core::assistant_policy::validate_goal_claim(&session, &goal, params)
+        .map_err(|_| invalid())?;
     if expected_state_version.is_some_and(|version| goal.state_version != version) {
         return Ok(None);
     }
@@ -2106,6 +2102,7 @@ mod lifecycle_tests {
             format!("goal-{conversation_id}"),
             conversation_id.into(),
             "1".into(),
+            desk_diagnose_core::dynamic_run::AssistantInputTarget::fixed("device-1".into()),
             "device-1".into(),
             "Finish the report".into(),
             "message-1".into(),
@@ -2148,6 +2145,9 @@ mod lifecycle_tests {
         session.surface = AgentSessionSurface::AiAssistant;
         session.begin_focus_epoch(1, Vec::<String>::new()).unwrap();
         session.input_revision = 1;
+        session
+            .bind_assistant_request_targets(vec![session.device_id.clone()])
+            .unwrap();
         agent_session::ActiveModel {
             conversation_id: Set(conversation_id.into()),
             actor_id: Set("1".into()),

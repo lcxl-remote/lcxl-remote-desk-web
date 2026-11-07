@@ -525,6 +525,14 @@ pub struct AssistantInputTarget {
 }
 
 impl AssistantInputTarget {
+    pub fn fixed(device_id: String) -> Self {
+        Self {
+            reference: device_id.clone(),
+            device_id,
+            member_generation: None,
+        }
+    }
+
     pub(crate) fn validate_all(targets: &[Self]) -> Result<(), &'static str> {
         use desk_agent_protocol::ai_assistant::validate_target_refs;
         validate_target_refs(targets.iter().map(|target| target.reference.as_str()))?;

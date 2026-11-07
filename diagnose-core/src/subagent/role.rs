@@ -47,6 +47,10 @@ impl DelegationSource {
         }
     }
 
+    pub fn uses_request_targets(&self) -> bool {
+        self.request_input_revision().is_some() || self.goal_id().is_some()
+    }
+
     pub fn allows_delegated_review(&self) -> bool {
         if let Self::IssueWork { source } = self {
             return source.work_kind == crate::issue_authority::IssueWorkKind::DeviceInvestigation;

@@ -100,6 +100,8 @@ pub fn pending(
         || request.conversation_id != session.conversation_id
         || request.owner_id != session.actor_id
         || request.device_id != session.device_id
+        || (session.device_id.is_empty()
+            && session.single_assistant_request_target().ok() != Some(&request.execution_target))
         || request.input_revision != session.input_revision
         || session
             .authorization_requirement()

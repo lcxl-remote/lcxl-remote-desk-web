@@ -575,6 +575,7 @@ mod tests {
             "approved-goal".into(),
             session.conversation_id.clone(),
             session.actor_id.clone(),
+            crate::dynamic_run::AssistantInputTarget::fixed(session.device_id.clone()),
             session.device_id.clone(),
             "Complete the report in the approved workspace".into(),
             "user".into(),

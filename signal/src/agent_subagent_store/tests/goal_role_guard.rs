@@ -17,6 +17,7 @@ pub(super) fn proposal(session: &mut PersistedAgentSession) -> GoalOpenRequestEv
         format!("goal-open-{}", session.conversation_id),
         session.conversation_id.clone(),
         session.actor_id.clone(),
+        desk_diagnose_core::dynamic_run::AssistantInputTarget::fixed(session.device_id.clone()),
         session.device_id.clone(),
         source,
         session.input_revision,

@@ -2065,6 +2065,7 @@ export default {
   'pages.aiAssistant.sendShortcut.enter': '{{enter}} to send · {{shiftEnter}} for a new line',
   'pages.aiAssistant.sendShortcut.shiftEnter': '{{shiftEnter}} to send · {{enter}} for a new line',
   'pages.aiAssistant.sendShortcut.ctrlEnter': '{{primaryEnter}} to send · {{enter}} for a new line',
+  'pages.aiAssistant.goalSelectDevice': 'Choose a device for this goal',
   'pages.aiAssistant.goalStart': 'Continue working',
   'pages.aiAssistant.goalStillIncomplete': 'Goal is still incomplete',
   'pages.aiAssistant.goalStillIncompletePrompt': 'The previous goal is still incomplete: {{goal}}. Continue from its recorded result and verify the remaining work.',

@@ -573,6 +573,7 @@ mod tests {
                 "server-request".into(),
                 "server-run".into(),
                 "private-owner".into(),
+                crate::dynamic_run::AssistantInputTarget::fixed("private-device".into()),
                 "private-device".into(),
                 "private-source-message".into(),
                 1,

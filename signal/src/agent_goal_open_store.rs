@@ -54,6 +54,7 @@ pub async fn save_model_request(
         || event.event.run_id != session.conversation_id
         || event.request.owner_id != session.actor_id
         || event.request.device_id != session.device_id
+        || session.single_assistant_request_target().ok() != Some(&event.request.execution_target)
         || event.event.event_seq != session.last_event_seq
         || event.request.input_revision != session.input_revision
     {
@@ -212,6 +213,9 @@ fn project(request: &GoalOpenRequest) -> Result<request_row::ActiveModel, DbErr>
         conversation_id: Set(request.conversation_id.clone()),
         actor_id: Set(request.owner_id.clone()),
         device_id: Set(request.device_id.clone()),
+        execution_target_json: Set(
+            serde_json::to_string(&request.execution_target).map_err(|_| invalid())?
+        ),
         source_message_id: Set(request.source_message_id.clone()),
         input_revision: Set(as_i64(request.input_revision)?),
         goal_text: Set(request.goal_text.clone()),
@@ -239,6 +243,8 @@ pub(crate) fn decode(row: &request_row::Model) -> Result<GoalOpenRequest, DbErr>
         conversation_id: row.conversation_id.clone(),
         owner_id: row.actor_id.clone(),
         device_id: row.device_id.clone(),
+        execution_target: serde_json::from_str(&row.execution_target_json)
+            .map_err(|_| invalid())?,
         source_message_id: row.source_message_id.clone(),
         input_revision: row.input_revision.try_into().map_err(|_| invalid())?,
         goal_text: row.goal_text.clone(),
@@ -411,6 +417,7 @@ pub(crate) async fn decide_on(
     };
     if request.state != GoalOpenRequestState::Pending
         || request.input_revision != session.input_revision
+        || session.single_assistant_request_target().ok() != Some(&request.execution_target)
         || !target_matches
     {
         return Ok(None);

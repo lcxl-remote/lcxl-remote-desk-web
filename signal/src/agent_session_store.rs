@@ -3538,6 +3538,7 @@ mod tests {
                 id.into(),
                 "conversation-1".into(),
                 "1".into(),
+                desk_diagnose_core::dynamic_run::AssistantInputTarget::fixed("device-1".into()),
                 "device-1".into(),
                 "Finish the report".into(),
                 "message-1".into(),

@@ -1866,6 +1866,7 @@ async fn completed_goal_hint_exposes_identity_without_laundering_prior_result() 
         "prior-goal".into(),
         "conv".into(),
         "actor".into(),
+        crate::dynamic_run::AssistantInputTarget::fixed("device".into()),
         "device".into(),
         "Private previous request".into(),
         "old-input".into(),

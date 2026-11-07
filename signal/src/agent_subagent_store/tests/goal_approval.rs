@@ -123,6 +123,7 @@ async fn fixture() -> (
         "goal-request".into(),
         session.conversation_id.clone(),
         session.actor_id.clone(),
+        desk_diagnose_core::dynamic_run::AssistantInputTarget::fixed(session.device_id.clone()),
         session.device_id.clone(),
         "goal-user".into(),
         session.input_revision,

@@ -649,7 +649,7 @@ async fn goal_and_directory_receipts_resolve_production_sized_aliases_after_late
         let mut received=Vec::new();
         let (expected,key)=if is_goal {
             let binding=GoalModelBinding { connection_id:"connection".into(),connection_revision:1,profile_revision:1,model_id:"model-1".into() };
-            let mut request=GoalOpenRequest::new(request_id.clone(),run.clone(),"owner".into(),"device".into(),
+            let mut request=GoalOpenRequest::new(request_id.clone(),run.clone(),"owner".into(),desk_diagnose_core::dynamic_run::AssistantInputTarget::fixed("device".into()),"device".into(),
                 "private-source-message".into(),1,"private-goal-text".into(),GoalLimits::default(),binding.clone(),NOW as u64).unwrap();
             let (outcome,key)=match case {
                 "goal_approved"=>{

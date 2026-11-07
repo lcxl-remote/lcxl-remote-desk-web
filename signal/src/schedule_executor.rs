@@ -226,7 +226,12 @@ impl SignalScheduleExecutor {
             let mut targets = map.values().filter(|target| {
                 target.auth_context.auth_kind == AuthKind::TokenAuth
                     && target.auth_context.remote_desk_type == RemoteDeskTypeEnum::Server
-                    && target.client_id.as_deref() == Some(goal.device_id.as_str())
+                    && target.client_id.as_deref() == Some(goal.execution_target.device_id.as_str())
+                    && target
+                        .model
+                        .ai_assistant_settings
+                        .as_ref()
+                        .is_some_and(|settings| settings.enabled)
             });
             let first = targets
                 .next()
