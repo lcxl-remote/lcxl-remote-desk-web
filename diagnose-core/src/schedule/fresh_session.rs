@@ -58,6 +58,7 @@ pub fn initial_session(
     session.begin_focus_epoch(1, Vec::<String>::new())?;
     session.input_revision = 1;
     session.latest_input_seq = 1;
+    session.bind_assistant_input_targets(&[])?;
     session
         .begin_turn(
             &turn_id,

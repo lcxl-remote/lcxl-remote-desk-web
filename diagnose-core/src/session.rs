@@ -765,6 +765,11 @@ struct AssistantRequestTargets {
 }
 
 impl AssistantRequestTargets {
+    fn matches_fixed_target(&self, device_id: &str) -> bool {
+        device_id.is_empty()
+            || (self.device_ids == [device_id] && self.member_generations.is_empty())
+    }
+
     fn valid_membership(&self) -> bool {
         self.member_generations.is_empty()
             || (self.member_generations.len() == self.device_ids.len()
@@ -897,7 +902,9 @@ impl PersistedAgentSession {
         if session
             .assistant_request_targets
             .as_ref()
-            .is_some_and(|targets| !targets.valid_membership())
+            .is_some_and(|targets| {
+                !targets.valid_membership() || !targets.matches_fixed_target(&session.device_id)
+            })
         {
             return Err(SessionDecodeError::InvalidDynamicRun(
                 "invalid assistant device membership snapshot".into(),
@@ -1540,11 +1547,7 @@ impl PersistedAgentSession {
         session.latest_input_seq = 1;
         session.input_revision = binding.input_revision;
         session.control_revision = binding.control_revision;
-        if session.device_id.is_empty() {
-            session.bind_personal_assistant_request_targets(&binding.targets)?;
-        } else if !binding.targets.is_empty() {
-            return Err("device-bound delegated task cannot select personal targets");
-        }
+        session.bind_assistant_input_targets(&binding.targets)?;
         session.delegation_group_id = Some(binding.group_id.clone());
         session.agent_role = crate::subagent::AgentRole::SubAgent {
             binding: Box::new(binding),
@@ -1683,13 +1686,17 @@ impl PersistedAgentSession {
         self.bind_request_targets(device_ids, BTreeMap::new())
     }
 
-    pub fn bind_personal_assistant_request_targets(
+    pub fn bind_assistant_input_targets(
         &mut self,
         targets: &[crate::dynamic_run::AssistantInputTarget],
     ) -> Result<(), &'static str> {
         if !self.device_id.is_empty() {
-            return Err("personal assistant targets require an account-scoped conversation");
+            if !targets.is_empty() {
+                return Err("a fixed assistant request cannot select other targets");
+            }
+            return self.bind_request_targets(vec![self.device_id.clone()], BTreeMap::new());
         }
+        crate::dynamic_run::AssistantInputTarget::validate_all(targets)?;
         self.bind_request_targets(
             targets
                 .iter()
@@ -1718,7 +1725,7 @@ impl PersistedAgentSession {
         desk_agent_protocol::ai_assistant::validate_target_refs(
             targets.device_ids.iter().map(String::as_str),
         )?;
-        if !targets.valid_membership() {
+        if !targets.valid_membership() || !targets.matches_fixed_target(&self.device_id) {
             return Err("invalid assistant device membership snapshot");
         }
         if let Some(current) = &self.assistant_request_targets
@@ -1732,16 +1739,6 @@ impl PersistedAgentSession {
         }
         self.assistant_request_targets = Some(Box::new(targets));
         Ok(())
-    }
-
-    /// Native input admission still carries at most one selected device.
-    pub fn bind_native_assistant_input_target(&mut self) -> Result<(), &'static str> {
-        let targets = if self.device_id.is_empty() {
-            Vec::new()
-        } else {
-            vec![self.device_id.clone()]
-        };
-        self.bind_assistant_request_targets(targets)
     }
 
     /// A personal input retains the account subject even when it selects devices.
@@ -1775,17 +1772,43 @@ impl PersistedAgentSession {
             .copied()
     }
 
+    /// Resolve one action from the held input. Selectors must already be mapped
+    /// to device identities; resource provenance must come from the host.
+    pub fn resolve_assistant_action_device(
+        &self,
+        explicit: Option<&str>,
+        resource_device: Option<&str>,
+    ) -> Result<&str, &'static str> {
+        if matches!((explicit, resource_device), (Some(a), Some(b)) if a != b) {
+            return Err("assistant device differs from the resource device");
+        }
+        let devices = self
+            .assistant_request_devices()
+            .ok_or("assistant request targets are no longer current")?;
+        match explicit.or(resource_device) {
+            Some(device) => devices
+                .iter()
+                .find(|target| target.as_str() == device)
+                .map(String::as_str)
+                .ok_or("assistant device is outside the original request"),
+            None => match devices {
+                [device] => Ok(device),
+                [] => Err("the assistant request has no device"),
+                _ => Err("select a device for this assistant action"),
+            },
+        }
+    }
+
     /// Check the admitted target ceiling. Native device-bound entry points
     /// without independent target selection still use their fixed binding.
     pub fn admits_assistant_device(&self, device_id: &str) -> bool {
         !device_id.is_empty()
-            && self.assistant_request_targets.as_ref().map_or_else(
-                || self.device_id == device_id,
-                |targets| {
-                    targets.input_revision == self.input_revision
-                        && targets.device_ids.iter().any(|target| target == device_id)
-                },
-            )
+            && if self.assistant_request_targets.is_some() {
+                self.resolve_assistant_action_device(Some(device_id), None)
+                    .is_ok()
+            } else {
+                self.device_id == device_id
+            }
     }
 
     pub fn bind_delegated_owner_requirement(

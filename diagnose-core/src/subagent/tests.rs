@@ -114,9 +114,7 @@ fn personal_worker_targets_are_a_frozen_subset_across_adjustment() {
     let mut parent = PersistedAgentSession::new("root", "owner", "", 1, scope(), now);
     parent.surface = AgentSessionSurface::AiAssistant;
     parent.input_revision = 1;
-    parent
-        .bind_personal_assistant_request_targets(&devices)
-        .unwrap();
+    parent.bind_assistant_input_targets(&devices).unwrap();
     let owner = crate::model_message_labels::model_bound_user_message(
         "personal-input".into(),
         "Reproduce on macOS and compare Linux".into(),

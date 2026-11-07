@@ -1342,7 +1342,7 @@ async fn targetless_assistant_answers_without_advertising_device_tools() {
     session.surface = AgentSessionSurface::AiAssistant;
     session.input_revision = 1;
     session.latest_input_seq = 1;
-    session.bind_native_assistant_input_target().unwrap();
+    session.bind_assistant_input_targets(&[]).unwrap();
     let sess = MemSession {
         inner: RefCell::new(Some(session)),
         ..MemSession::default()

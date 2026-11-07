@@ -368,9 +368,7 @@ mod tests {
         .unwrap();
         parent.bind_issue_work_source(&admitted).unwrap();
         parent.input_revision = 1;
-        parent
-            .bind_personal_assistant_request_targets(&[target])
-            .unwrap();
+        parent.bind_assistant_input_targets(&[target]).unwrap();
         assert!(!permits_permission_request(&parent, &request));
 
         request.state = PermissionRequestState::Approved;
@@ -447,7 +445,7 @@ mod tests {
         parent.bind_issue_work_source(&admitted).unwrap();
         parent.input_revision = 1;
         parent.latest_input_seq = 1;
-        parent.bind_personal_assistant_request_targets(&[]).unwrap();
+        parent.bind_assistant_input_targets(&[]).unwrap();
         let selection = crate::input_read_context::ReadContextSelection {
             external_issues: vec![admitted.issue.clone()],
             external_issue_sources: vec![source.reference.clone()],

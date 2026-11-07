@@ -446,12 +446,9 @@ impl SignalAgentRunEventStore {
                 .input_revision
                 .checked_add(1)
                 .ok_or_else(|| internal("user input revision exhausted"))?;
-            if targetless {
-                session.bind_personal_assistant_request_targets(&targets)
-            } else {
-                session.bind_native_assistant_input_target()
-            }
-            .map_err(internal)?;
+            session
+                .bind_assistant_input_targets(&targets)
+                .map_err(internal)?;
             if targetless {
                 crate::assistant_data_store::bind_input_memory_devices(&mut session, &targets)
                     .map_err(internal)?;

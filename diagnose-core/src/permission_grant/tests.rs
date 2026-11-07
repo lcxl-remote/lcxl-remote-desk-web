@@ -145,7 +145,7 @@ fn web_host_grants_reuse_urls_until_expiry_on_both_surfaces() {
         let mut targetless = session.clone();
         targetless.device_id.clear();
         targetless.surface = AgentSessionSurface::AiAssistant;
-        targetless.bind_native_assistant_input_target().unwrap();
+        targetless.bind_assistant_input_targets(&[]).unwrap();
         let targetless_grant =
             build_permission_grants(&targetless, &request, &decisions, &context, Some(&original))
                 .unwrap()

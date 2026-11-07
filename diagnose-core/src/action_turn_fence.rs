@@ -69,10 +69,7 @@ impl AssistantTurnFence {
         if session.surface != AgentSessionSurface::AiAssistant {
             return Ok(None);
         }
-        if !session.turn_state.is_active()
-            || (!session.device_id.is_empty() && session.device_id != device_id)
-            || !session.admits_assistant_device(device_id)
-        {
+        if !session.turn_state.is_active() || !session.admits_assistant_device(device_id) {
             return Err(invalid());
         }
         let fence = Self {
@@ -273,9 +270,11 @@ mod tests {
                 .bind_assistant_request_targets(vec!["device".into(), "device".into()])
                 .is_err()
         );
-        session.bind_assistant_request_targets(vec![]).unwrap();
+        assert!(session.bind_assistant_request_targets(vec![]).is_err());
         assert!(!session.admits_assistant_device("device"));
         assert!(AssistantTurnFence::from_session(&session).is_err());
+        session.bind_assistant_input_targets(&[]).unwrap();
+        assert!(AssistantTurnFence::from_session(&session).is_ok());
     }
 
     #[test]
@@ -319,5 +318,80 @@ mod tests {
             AssistantTurnFence::for_device(&session, &linux.device_id).unwrap(),
             Some(linux)
         );
+    }
+
+    #[test]
+    fn fixed_and_selectable_inputs_share_the_same_action_target_contract() {
+        use crate::dynamic_run::AssistantInputTarget;
+
+        for (fixed, selection, implicit) in [
+            ("a", &[][..], Some("a")),
+            ("", &["a"][..], Some("a")),
+            ("", &["a", "b"][..], None),
+            ("", &[][..], None),
+        ] {
+            let mut session =
+                crate::ai_assistant::test_support::personal_session("actor", "run", fixed);
+            session.input_revision = 1;
+            session.latest_input_seq = 1;
+            let targets = selection
+                .iter()
+                .map(|&device_id| AssistantInputTarget {
+                    reference: format!("public-{device_id}"),
+                    device_id: device_id.into(),
+                    member_generation: None,
+                })
+                .collect::<Vec<_>>();
+            if !fixed.is_empty() {
+                assert!(
+                    session
+                        .bind_assistant_input_targets(&[AssistantInputTarget {
+                            reference: "public-b".into(),
+                            device_id: "b".into(),
+                            member_generation: None,
+                        }])
+                        .is_err()
+                );
+            }
+            session.bind_assistant_input_targets(&targets).unwrap();
+            session.begin_focus_epoch(1, []).unwrap();
+            session
+                .begin_turn("turn", None, None, 1, session.scope_snapshot.clone(), "now")
+                .unwrap();
+            let mut restored =
+                PersistedAgentSession::decode_json(&session.encode_json_for_storage().unwrap())
+                    .unwrap();
+            assert_eq!(
+                restored.resolve_assistant_action_device(None, None).ok(),
+                implicit
+            );
+            let admits_a = fixed == "a" || selection.contains(&"a");
+            assert_eq!(
+                restored
+                    .resolve_assistant_action_device(None, Some("a"))
+                    .ok(),
+                admits_a.then_some("a")
+            );
+            assert_eq!(
+                AssistantTurnFence::for_device(&restored, "a").is_ok(),
+                admits_a
+            );
+            assert_eq!(
+                AssistantTurnFence::for_device(&restored, "b").is_ok(),
+                selection.contains(&"b")
+            );
+            assert!(
+                restored
+                    .resolve_assistant_action_device(Some("a"), Some("b"))
+                    .is_err()
+            );
+            assert!(
+                restored
+                    .resolve_assistant_action_device(Some("public-a"), None)
+                    .is_err()
+            );
+            restored.input_revision += 1;
+            assert!(AssistantTurnFence::for_device(&restored, "a").is_err());
+        }
     }
 }

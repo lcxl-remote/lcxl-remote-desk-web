@@ -129,9 +129,7 @@ pub fn synchronize_session(
             .checked_add(1)
             .ok_or("child input sequence exhausted")?;
         updated.input_revision = run.binding.input_revision;
-        if updated.device_id.is_empty() {
-            updated.bind_personal_assistant_request_targets(&run.binding.targets)?;
-        }
+        updated.bind_assistant_input_targets(&run.binding.targets)?;
     }
     updated.control_revision = run.binding.control_revision;
     updated.subagent_report_corrections_used = run.report_corrections_used;
