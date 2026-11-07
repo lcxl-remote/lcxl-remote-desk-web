@@ -39,6 +39,7 @@ jobs:
           cargo test --locked -p desk-signal --lib --features desk-diagnose-core/stack-budget personal_selected_desktop_read_and_whole_screen_resume_on_signal
           cargo test --locked -p desk-signal --lib --features desk-diagnose-core/stack-budget personal_selected_live_document_resumes_on_signal
           cargo test --locked -p desk-signal --lib --features desk-diagnose-core/stack-budget selectable_browser_
+          cargo test --locked -p desk-signal --lib --features desk-diagnose-core/stack-budget fixed_browser_uses_the_same_signal_device_action_route
           cargo test --locked -p desk-signal --lib --features desk-diagnose-core/stack-budget selectable_artifact_
           cargo test --locked -p desk-signal --lib --features desk-diagnose-core/stack-budget selectable_ui_scope_
           cargo test --locked -p desk-signal --lib --features desk-diagnose-core/stack-budget selectable_background_

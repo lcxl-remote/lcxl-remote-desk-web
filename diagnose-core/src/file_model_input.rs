@@ -311,9 +311,9 @@ pub(crate) fn complete_device_input(
     if session.surface != crate::session::AgentSessionSurface::AiAssistant {
         return Ok(());
     }
-    // The selected-device planner validates these selectors after resolving
-    // target_ref. The account root itself has no directory authority.
-    if session.device_id.is_empty()
+    // The request-device planner resolves the target before completing its
+    // device-specific directory choices.
+    if session.has_admitted_assistant_input()
         && value.get("target_ref").is_some()
         && (tool == "request_permissions" || is_read(tool))
     {

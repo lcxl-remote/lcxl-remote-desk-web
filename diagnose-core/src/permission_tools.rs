@@ -1492,7 +1492,7 @@ pub fn include_desktop_action_reads(
             "desktop actions need space for two included read permissions; request at most 14 actions per batch",
         ));
     }
-    let reads = build_permission_request(
+    let mut reads = build_permission_request(
         &ToolCall {
             id: "included-desktop-reads".into(),
             name: REQUEST_CAPABILITY_GRANTS_TOOL_NAME.into(),
@@ -1503,6 +1503,9 @@ pub fn include_desktop_action_reads(
         request.input_revision,
         request.created_at.clone(),
     )?;
+    for item in &mut reads.items {
+        item.selected_device_target = request.selected_device_target().cloned();
+    }
     request.items.extend(reads.items);
     request.validate().map_err(invalid)?;
     Ok(())

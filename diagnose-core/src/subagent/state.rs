@@ -158,8 +158,12 @@ impl SubAgentRun {
         if !valid_id(&self.worker_id)
             || !valid_id(&self.child_conversation_id)
             || self.actor_id.is_empty()
-            || (self.device_id.is_empty() && self.binding.source.request_input_revision().is_none())
-            || (!self.device_id.is_empty() && !self.binding.targets.is_empty())
+            || (self.device_id.is_empty() && !self.binding.source.uses_request_targets())
+            || (!self.device_id.is_empty()
+                && self.binding.targets.as_slice()
+                    != [crate::dynamic_run::AssistantInputTarget::fixed(
+                        self.device_id.clone(),
+                    )])
             || self.name.trim().is_empty()
             || self.name.chars().count() > super::MAX_SUBAGENT_NAME_CHARS
             || self.state_revision == 0

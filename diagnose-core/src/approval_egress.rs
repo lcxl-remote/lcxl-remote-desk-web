@@ -396,7 +396,7 @@ pub fn validate_source_review_current(
         || candidate.device_id != binding.device_id
         || (binding.device_id != session.device_id
             && (!matches!(binding.source, ApprovalSource::ConcreteCall { .. })
-                || !session.has_admitted_personal_input()
+                || !session.has_admitted_assistant_input()
                 || !session.admits_assistant_device(binding.device_id)))
         || candidate.delegation_id != delegation.delegation_id
         || candidate.delegation_revision != delegation.revision
@@ -884,7 +884,9 @@ mod tests {
         session.delegated_owner_requirement = Some(Box::new(owner.clone()));
         session.agent_role = AgentRole::SubAgent {
             binding: Box::new(DelegatedTaskBinding {
-                targets: Vec::new(),
+                targets: vec![crate::dynamic_run::AssistantInputTarget::fixed(
+                    session.device_id.clone(),
+                )],
                 root_conversation_id: "conversation".into(),
                 group_id: "group".into(),
                 task_id: "task".into(),

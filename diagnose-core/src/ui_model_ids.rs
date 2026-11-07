@@ -227,7 +227,7 @@ pub fn resolve_session_call_with_context(
     }
     let mut prepared = call.clone();
     let route = if call.name != "request_permissions"
-        && session.has_admitted_personal_input()
+        && session.uses_request_device_tools()
         && crate::ai_assistant::ai_assistant_provider_registry_ref()
             .capability_for_tool(&call.name)
             .is_some_and(|descriptor| {

@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 pub const RUN_CONTROL_PROVIDER_ID: &str = "assistant.run_control";
 use serde::{Deserialize, Serialize};
 
-pub const AGENT_RUN_EVENT_SCHEMA_VERSION: u16 = 1;
+pub const AGENT_RUN_EVENT_SCHEMA_VERSION: u16 = 2;
 pub const TASK_STATUS_PROJECTION_SCHEMA_VERSION: u16 = 1;
 pub const PERMISSION_REQUEST_SCHEMA_VERSION: u16 = 3;
 pub const BACKGROUND_TASK_SCHEMA_VERSION: u16 = 2;
@@ -586,23 +586,25 @@ impl UserFollowupEvent {
         requested: &[String],
         session: &crate::session::PersistedAgentSession,
     ) -> bool {
-        self.targets
-            .iter()
-            .map(|target| &target.reference)
-            .eq(requested)
-            && if session.device_id.is_empty() {
-                self.event.input_revision != session.input_revision
-                    || self.is_current_personal_target_snapshot(session)
-            } else {
-                self.targets.is_empty()
-            }
+        let selectors_match = if session.device_id.is_empty() {
+            self.targets
+                .iter()
+                .map(|target| &target.reference)
+                .eq(requested)
+        } else {
+            requested.is_empty()
+                && self.targets == [AssistantInputTarget::fixed(session.device_id.clone())]
+        };
+        selectors_match
+            && (self.event.input_revision != session.input_revision
+                || self.is_current_target_snapshot(session))
     }
 
-    pub fn is_current_personal_target_snapshot(
+    pub fn is_current_target_snapshot(
         &self,
         session: &crate::session::PersistedAgentSession,
     ) -> bool {
-        session.has_admitted_personal_input()
+        session.has_admitted_assistant_input()
             && self.event.run_id == session.conversation_id
             && self.actor_id == session.actor_id
             && self.event.input_revision == session.input_revision

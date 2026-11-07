@@ -67,8 +67,8 @@ impl SignalAiAssistantTools {
         session: &PersistedAgentSession,
         reference: &str,
     ) -> Result<(AssistantTurnFence, String), AgentError> {
-        if !self.target_device_id.is_empty()
-            || !session.has_admitted_personal_input()
+        if (!self.target_device_id.is_empty() && self.target_device_id != session.device_id)
+            || !session.has_admitted_assistant_input()
             || session.actor_id != self.actor_id
             || session.conversation_id != self.run_id
             || session.current_turn_id.as_deref() != Some(self.turn_id.as_str())
@@ -161,11 +161,9 @@ impl SignalAiAssistantTools {
         call: &ToolCall,
     ) -> Result<ReadOutcome, AgentError> {
         let (reference, native_call) = selected_read(call)?;
-        if !self
-            .original_input
-            .get()
-            .is_some_and(|input| input.selection.is_selectable_input())
-        {
+        if !self.original_input.get().is_some_and(|input| {
+            !session.device_id.is_empty() || input.selection.is_selectable_input()
+        }) {
             return Err(unavailable());
         }
         let (held, connection_id) = self.selected_connection(session, &reference).await?;
@@ -307,6 +305,7 @@ impl SignalAiAssistantTools {
         )
         .with_model_egress_policy(self.model_egress_policy.clone());
         let state = Arc::get_mut(&mut scoped.0).expect("configure selected device before sharing");
+        state.storage_device_id = self.storage_device_id.clone();
         state.selected_device_fence = Some(held);
         if let Some(original) = self.original_input.get() {
             state.original_input = OnceLock::from(original.clone());
@@ -319,7 +318,7 @@ impl SignalAiAssistantTools {
         &self,
         session: &PersistedAgentSession,
     ) -> Result<Vec<RequestDevice>, AgentError> {
-        if !session.has_admitted_personal_input()
+        if !session.has_admitted_assistant_input()
             || session.actor_id != self.actor_id
             || session.actor_id != crate::control_authorizer::SINGLE_ACCOUNT_USER_ID.to_string()
             || session.conversation_id != self.run_id
@@ -350,7 +349,7 @@ impl SignalAiAssistantTools {
                 && session
                     .permission_requests
                     .iter()
-                    .any(|request| request.selected_device_target() == Some(target))
+                    .any(|request| request.selected_device_id() == Some(target.device_id.as_str()))
             {
                 let grants = desk_diagnose_core::future::boxed(|| {
                     store.list_for_subject(&self.run_id, &self.actor_id, &target.device_id)

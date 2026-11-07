@@ -3376,9 +3376,10 @@ fn append_mutating_result(
             // Host normalization may add routing and native defaults. A control
             // status refers to the original call; it never attests native output.
             message.role == ChatRole::Assistant
-                && message.tool_calls.iter().any(|candidate| {
-                    candidate.id == call.id && candidate.name == call.name
-                })
+                && message
+                    .tool_calls
+                    .iter()
+                    .any(|candidate| candidate.id == call.id && candidate.name == call.name)
         })
         .and_then(|message| message.data_envelope.as_ref());
     message.data_envelope = if parent.is_some() {
@@ -3861,8 +3862,17 @@ async fn run_mutating<F: FnMut() -> String>(
                 .await
         }
         None => {
+            let native;
+            let execution_call = if call.name == crate::command_confirmation::COMMAND_TOOL
+                && crate::request_devices::has_device_selector(call)
+            {
+                (_, native) = crate::request_devices::split_device_call(call)?;
+                &native
+            } else {
+                call
+            };
             deps.tools
-                .confirm_and_exec_versioned(call, &ctx, version.as_ref())
+                .confirm_and_exec_versioned(execution_call, &ctx, version.as_ref())
                 .await
         }
     };

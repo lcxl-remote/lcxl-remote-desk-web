@@ -386,11 +386,9 @@ async fn run_desktop_history_case(
         .unwrap();
     let connections = web::Data::from(map.clone());
     let client_id = "desktop-permission";
-    if selectable {
-        crate::device_code_store::get_or_create(&db, "device")
-            .await
-            .unwrap();
-    }
+    crate::device_code_store::get_or_create(&db, "device")
+        .await
+        .unwrap();
     let run_id = if selectable {
         derive_assistant_conversation_key("1", AssistantConversationScope::Personal, client_id)
     } else {

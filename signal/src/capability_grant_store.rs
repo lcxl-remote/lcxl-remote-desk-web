@@ -794,7 +794,11 @@ impl SignalCapabilityGrantStore {
             PersistedAgentSession::decode_json(&session_row.state_json).map_err(|error| {
                 DbErr::Custom(format!("invalid authoritative agent session: {error}"))
             })?;
-        let session_device_id = selected.map_or(request.call.target_device_id, |_| "");
+        let session_device_id = if selected.is_some() {
+            session.device_id.as_str()
+        } else {
+            request.call.target_device_id
+        };
         if session.actor_id != request.call.actor_id
             || session.device_id != session_device_id
             || session_row.actor_id != request.call.actor_id
@@ -1329,7 +1333,11 @@ impl SignalCapabilityGrantStore {
                 .ok_or_else(|| DbErr::Custom("claimed dispatch session is missing".into()))?;
             let session = PersistedAgentSession::decode_json(&session_row.state_json)
                 .map_err(|error| DbErr::Custom(format!("invalid claimed session: {error}")))?;
-            let session_device_id = selected.map_or(request.call.target_device_id, |_| "");
+            let session_device_id = if selected.is_some() {
+                session.device_id.as_str()
+            } else {
+                request.call.target_device_id
+            };
             if session.actor_id != request.call.actor_id
                 || session.device_id != session_device_id
                 || session.input_revision != request.input_revision
@@ -1789,19 +1797,19 @@ async fn validate_selected_dispatch(
             },
         desk_diagnose_core::command_confirmation::COMMAND_TOOL => {
             request.call.risk_tier == CapabilityRiskTier::R3
-                && session.trigger_origin == desk_diagnose_core::session::TriggerOrigin::PermissionDecision
+                && session.allows_new_mutation()
                 && desk_diagnose_core::command_confirmation::CommandConfirmation::approved_request_for_call(
                     session, request.call.target_device_id, request.canonical_input_json,
                 ).is_ok()
         }
         _ => false,
     };
-    if !session.has_admitted_personal_input()
+    if !session.has_admitted_assistant_input()
         || !supported
         || request.turn_id != held.turn_id
         || request.input_revision != held.input_revision
         || row.actor_id != held.actor_id
-        || !row.device_id.is_empty()
+        || row.device_id != session.device_id
         || row.lease_token != held.lease_token as i64
         || row.lease_deadline.is_none_or(|expiry| expiry <= Utc::now())
         || AssistantTurnFence::for_device(session, request.call.target_device_id)

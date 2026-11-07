@@ -374,13 +374,19 @@ async fn every_request_device_read_projects_parses_and_keeps_its_exact_target() 
         session.permission_requests.push(approved);
         require_current_read_target(&session, &native, target)
             .unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        let mut later = session.clone();
+        let targets = later.assistant_request_targets().unwrap().to_vec();
+        later.input_revision += 1;
+        later
+            .begin_focus_epoch(later.input_revision, Vec::new())
+            .unwrap();
+        later.bind_assistant_input_targets(&targets).unwrap();
+        require_current_read_target(&later, &native, target).unwrap_or_else(|error| {
+            panic!("{name}: original approval lost on follow-up: {error:?}")
+        });
         assert!(
-            require_current_read_target(
-                &session,
-                &native,
-                devices[1].read_target.as_ref().unwrap()
-            )
-            .is_err(),
+            require_current_read_target(&later, &native, devices[1].read_target.as_ref().unwrap())
+                .is_err(),
             "{name}: A approval authorized B"
         );
         assert!(
@@ -1073,5 +1079,151 @@ async fn selected_ui_scope_bundles_observation_and_keeps_each_grant_on_the_same_
             .unwrap()
             .is_err()
         );
+    }
+}
+
+#[test]
+fn fixed_and_selectable_single_device_share_the_projected_tool_contract() {
+    let registry = crate::ai_assistant::ai_assistant_provider_registry_ref();
+    let mut selectable = session();
+    selectable.input_revision += 1;
+    selectable
+        .begin_focus_epoch(selectable.input_revision, Vec::new())
+        .unwrap();
+    selectable
+        .bind_assistant_request_targets(vec!["a".into()])
+        .unwrap();
+    let mut fixed = selectable.clone();
+    fixed.device_id = "a".into();
+    assert!(fixed.has_admitted_assistant_input());
+    assert!(!fixed.has_admitted_personal_input());
+    let capabilities = registry
+        .providers()
+        .flat_map(|provider| &provider.capabilities)
+        .map(|descriptor| descriptor.wire.capability_id.clone())
+        .collect();
+    let devices = [device("a", capabilities)];
+    let selected_tools = read_tools(&devices, &selectable, registry, true, None);
+    let fixed_tools = read_tools(&devices, &fixed, registry, true, None);
+    assert!(!selected_tools.is_empty());
+    assert_eq!(selected_tools.len(), fixed_tools.len());
+    for ((selected, selected_callable), (fixed_tool, fixed_callable)) in
+        selected_tools.iter().zip(&fixed_tools)
+    {
+        assert_eq!(selected.spec, fixed_tool.spec, "{}", selected.name());
+        assert_eq!(selected.effect, fixed_tool.effect);
+        assert_eq!(selected_callable, fixed_callable);
+    }
+    let call = tool("read_system_info", json!({}));
+    let fixed_call = infer_single_target(&call, &fixed).unwrap().unwrap();
+    let selected_call = infer_single_target(&call, &selectable).unwrap().unwrap();
+    assert_eq!(fixed_call, selected_call);
+    assert_eq!(selected_read(&fixed_call).unwrap().0, "a");
+    fixed
+        .resolve_assistant_action_device(Some("b"), None)
+        .unwrap_err();
+    let restored =
+        PersistedAgentSession::decode_json(&fixed.encode_json_for_storage().unwrap()).unwrap();
+    assert_eq!(
+        restored.assistant_request_targets(),
+        fixed.assistant_request_targets()
+    );
+}
+
+#[test]
+fn approved_command_visibility_uses_live_device_authority_across_continuations() {
+    use crate::dynamic_run::{PermissionDecisionItem, PermissionItemDecision};
+    use crate::permission_grant::{PermissionGrantIssuanceContext, build_permission_grants};
+    use desk_agent_protocol::capability_provider::ProductSurface;
+    let mut session = session();
+    let mut policy = crate::command_confirmation::test_policy();
+    policy.actor_id = session.actor_id.clone();
+    policy.target_device_id = "a".into();
+    policy.target_session_id = "connection-a:session-1".into();
+    let registry =
+        crate::ai_assistant::ai_assistant_provider_registry().with_command_policy(policy);
+    let descriptor = registry.capability_for_tool("exec_command").unwrap();
+    let request = build_permission_request(
+        &tool(
+            REQUEST_CAPABILITY_GRANTS_TOOL_NAME,
+            json!({"items":[{
+                "item_id":"command", "tool_name":"exec_command", "reason":"Check the owner task",
+                "exact_input":{"shell":"bash","command":"echo fixture","timeout_ms":1000}
+            }]}),
+        ),
+        &registry,
+        "command-approval".into(),
+        session.input_revision,
+        NOW.into(),
+    )
+    .unwrap();
+    let decisions = [PermissionDecisionItem {
+        item_id: "command".into(),
+        decision: PermissionItemDecision::Approve {
+            resource_scope: request.items[0].resource_scope.clone(),
+            operation_scope: request.items[0].operation_scope.clone(),
+            export_destinations: vec![],
+            ttl_seconds: 60,
+            max_uses: 1,
+        },
+    }];
+    let inventory = [crate::capability_availability::CapabilityAvailability {
+        provider_id: registry
+            .provider_for_capability(&descriptor.wire.capability_id)
+            .unwrap()
+            .wire
+            .provider_id
+            .clone(),
+        capability_id: descriptor.wire.capability_id.clone(),
+        tool_name: "exec_command".into(),
+        compiled: true,
+        enabled: true,
+        connected: true,
+        ready: true,
+        reason: None,
+    }];
+    let now = chrono::DateTime::parse_from_rfc3339(NOW)
+        .unwrap()
+        .timestamp_millis() as u64;
+    let grants = build_permission_grants(
+        &session,
+        &request,
+        &decisions,
+        &PermissionGrantIssuanceContext {
+            surface: ProductSurface::OssPersonalOwner,
+            registry: &registry,
+            inventory: &inventory,
+            readiness_revision: 1,
+            now_unix_ms: now,
+            implicit_fresh_object_refs: &[],
+        },
+        None,
+    )
+    .unwrap();
+    let mut approved = request;
+    approved.state = PermissionRequestState::Approved;
+    session.permission_requests.push(approved);
+    let mut device = device("a", vec![descriptor.wire.capability_id.clone()]);
+    device
+        .ready_capabilities
+        .push(Capability::ShellExecConfirmed);
+    for origin in [
+        TriggerOrigin::PermissionDecision,
+        TriggerOrigin::GoalContinuation,
+        TriggerOrigin::ScheduledContinuation,
+    ] {
+        session.trigger_origin = origin;
+        device.approved_read_tools =
+            approved_read_tools(&session, device.read_target.as_ref().unwrap(), &grants, now);
+        assert_eq!(device.approved_read_tools, ["exec_command"], "{origin:?}");
+        assert!(
+            command_tool(&session, std::slice::from_ref(&device), &registry).is_some(),
+            "{origin:?}"
+        );
+        let mut spent = grants.clone();
+        spent[0].remaining_uses = 0;
+        device.approved_read_tools =
+            approved_read_tools(&session, device.read_target.as_ref().unwrap(), &spent, now);
+        assert!(command_tool(&session, std::slice::from_ref(&device), &registry).is_none());
     }
 }

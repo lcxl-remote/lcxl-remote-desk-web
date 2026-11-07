@@ -382,6 +382,21 @@ pub(crate) fn resolve_directories(
     session: &PersistedAgentSession,
     now: u64,
 ) -> Result<(), AgentError> {
+    let needs_directory = copy_tool(tool)
+        || (tool == "request_permissions"
+            && value
+                .get("items")
+                .and_then(Value::as_array)
+                .is_some_and(|items| {
+                    items.iter().any(|item| {
+                        item.get("tool_name")
+                            .and_then(Value::as_str)
+                            .is_some_and(copy_tool)
+                    })
+                }));
+    if !needs_directory {
+        return Ok(());
+    }
     let device = value
         .get("target_ref")
         .and_then(Value::as_str)

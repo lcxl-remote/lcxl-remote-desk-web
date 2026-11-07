@@ -34,7 +34,7 @@ use crate::context_attachment::{
 use crate::model_context::{ContextNotice, MAX_CONTEXT_NOTICES, ModelContextState};
 use crate::replay::{ReplayDisposition, ReplayUnavailableReason};
 
-pub const CONVERSATION_SCHEMA_VERSION: u16 = 32;
+pub const CONVERSATION_SCHEMA_VERSION: u16 = 33;
 /// Opaque replay is bounded independently from visible transcript text.
 pub const MAX_REPLAY_ENVELOPE_BYTES: usize = 256 * 1024;
 pub const MAX_SESSION_REPLAY_BYTES: usize = 2 * 1024 * 1024;
@@ -1022,12 +1022,10 @@ impl PersistedAgentSession {
             if session.surface != AgentSessionSurface::AiAssistant
                 || session.input_revision != binding.input_revision
                 || session.control_revision != binding.control_revision
-                || (session.device_id.is_empty()
-                    && !crate::dynamic_run::AssistantInputTarget::matches_request(
-                        &binding.targets,
-                        &session,
-                    ))
-                || (!session.device_id.is_empty() && !binding.targets.is_empty())
+                || !crate::dynamic_run::AssistantInputTarget::matches_request(
+                    &binding.targets,
+                    &session,
+                )
                 || session.client_conversation_id.is_some()
                 || session.delegation_group_id.as_ref() != Some(&binding.group_id)
                 || session.subagent_wait.is_some()
@@ -1690,7 +1688,12 @@ impl PersistedAgentSession {
         targets: &[crate::dynamic_run::AssistantInputTarget],
     ) -> Result<(), &'static str> {
         if !self.device_id.is_empty() {
-            if !targets.is_empty() {
+            if !targets.is_empty()
+                && targets
+                    != [crate::dynamic_run::AssistantInputTarget::fixed(
+                        self.device_id.clone(),
+                    )]
+            {
                 return Err("a fixed assistant request cannot select other targets");
             }
             return self.bind_assistant_request_targets(vec![self.device_id.clone()]);
@@ -1723,6 +1726,26 @@ impl PersistedAgentSession {
         }
         self.assistant_request_targets = Some(Box::new(targets));
         Ok(())
+    }
+
+    /// Both assistant entries freeze their device ceiling at input admission.
+    pub fn has_admitted_assistant_input(&self) -> bool {
+        self.surface == AgentSessionSurface::AiAssistant
+            && self.input_revision > 0
+            && self.assistant_request_targets().is_some()
+    }
+
+    /// Published automations retain their sealed task-contract executor.
+    /// Owner inputs and their continuations share per-request device tools.
+    pub fn uses_request_device_tools(&self) -> bool {
+        self.has_admitted_assistant_input()
+            && self.trigger_origin != TriggerOrigin::ScheduledTask
+            && !self.agent_role.binding().is_some_and(|binding| {
+                matches!(
+                    binding.source,
+                    crate::subagent::DelegationSource::ScheduledOccurrence { .. }
+                )
+            })
     }
 
     /// A personal input retains the account subject even when it selects devices.

@@ -45,11 +45,10 @@ impl RuntimeTurn {
     pub fn read_context(&self) -> Option<ReadContextSelection> {
         match self {
             Self::Child { .. } => self.source().child_read_context(),
-            Self::ParentCompletion { source, session } if session.device_id.is_empty() => source
+            Self::ParentCompletion { source, .. } => source
                 .original_read_context
                 .clone()
                 .or_else(|| source.child_read_context()),
-            Self::ParentCompletion { .. } => None,
         }
     }
     /// Bind only the child's own revision and narrowed immutable read selection.

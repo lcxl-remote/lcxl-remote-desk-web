@@ -44,7 +44,7 @@ impl ReadCallPreflight {
             || call.id.is_empty()
             || call.id.len() > 512
             || !(binding.original.tool_names.contains(&call.name)
-                || (session.device_id.is_empty()
+                || (session.has_admitted_assistant_input()
                     && crate::request_devices::selected_read_descriptor(capability)))
             || call.arguments_json.len() > capability.wire.limits.max_input_bytes as usize
         {
@@ -102,9 +102,7 @@ impl ReadCallPreflight {
         let descriptor = registry
             .capability_for_tool(&call.name)
             .ok_or_else(unavailable)?;
-        if !crate::request_devices::selected_read_descriptor(descriptor)
-            || !binding.original.is_selectable_input()
-        {
+        if !crate::request_devices::selected_read_descriptor(descriptor) {
             return Err(unavailable());
         }
         Self::build_edge(registry, surface, call, binding, true)

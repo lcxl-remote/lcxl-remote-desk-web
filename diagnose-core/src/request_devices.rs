@@ -15,8 +15,14 @@ use crate::session::{PersistedAgentSession, TriggerOrigin};
 pub const SYSTEM_INFO_TOOL: &str = "read_system_info";
 mod action;
 
+/// Routing is removed before native schema validation and execution.
+pub fn has_device_selector(call: &ToolCall) -> bool {
+    serde_json::from_str::<serde_json::Value>(&call.arguments_json)
+        .is_ok_and(|input| input.get("target_ref").is_some())
+}
+
 pub(crate) fn accepts_device_reads(session: &crate::session::PersistedAgentSession) -> bool {
-    session.has_admitted_personal_input()
+    session.uses_request_device_tools()
         && !session.has_admitted_targetless_input()
         && session.agent_role.allows_effect(ToolEffect::ReadOnly)
         && !session.is_subagent_result_turn()
@@ -143,7 +149,7 @@ pub(crate) fn infer_single_target(
     let Some([target]) = session.assistant_request_targets() else {
         return Ok(None);
     };
-    if !session.has_admitted_personal_input() {
+    if !session.uses_request_device_tools() {
         return Ok(None);
     }
     let registry = crate::ai_assistant::ai_assistant_provider_registry_ref();
@@ -270,7 +276,7 @@ pub(crate) fn device_permission_tool(
 }
 
 fn accepts_command_permissions(session: &PersistedAgentSession) -> bool {
-    session.has_admitted_personal_input()
+    session.uses_request_device_tools()
         && !session.has_admitted_targetless_input()
         && session.agent_role.allows_effect(ToolEffect::Mutating)
         && session.allows_new_mutation()
@@ -290,8 +296,7 @@ pub(crate) fn can_request_command(
 }
 
 pub(crate) fn selected_command_turn(session: &PersistedAgentSession) -> bool {
-    accepts_command_permissions(session)
-        && session.trigger_origin == TriggerOrigin::PermissionDecision
+    accepts_command_permissions(session) && session.trigger_origin != TriggerOrigin::ScheduledTask
 }
 
 pub(crate) async fn resolve_approved_command(
@@ -324,6 +329,10 @@ pub(crate) fn command_tool(
                 && device
                     .ready_capabilities
                     .contains(&Capability::ShellExecConfirmed)
+                && device
+                    .approved_read_tools
+                    .iter()
+                    .any(|name| name == crate::command_confirmation::COMMAND_TOOL)
         })
     {
         return None;
@@ -524,7 +533,7 @@ pub(crate) fn selected_action_device(
     call: &ToolCall,
 ) -> Result<Option<String>, AgentError> {
     let registry = crate::ai_assistant::ai_assistant_provider_registry_ref();
-    if !session.has_admitted_personal_input()
+    if !session.uses_request_device_tools()
         || !registry
             .capability_for_tool(&call.name)
             .is_some_and(selected_action_descriptor)
@@ -747,13 +756,18 @@ pub fn approved_read_tools(
                 .items
                 .iter()
                 .filter(move |item| {
-                    request.input_revision == session.input_revision
+                    request.input_revision <= session.input_revision
                         && matches!(
                             request.state,
                             crate::dynamic_run::PermissionRequestState::Approved
                                 | crate::dynamic_run::PermissionRequestState::PartiallyApproved
                         )
-                        && request.selected_device_target() == Some(target)
+                        && (request.selected_device_target() == Some(target)
+                            || request.exact_command().is_some_and(|command| {
+                                request.input_revision == session.input_revision
+                                    && command.target_device_id == target.device_id
+                                    && command.target_connection_id() == target.connection_id
+                            }))
                         && grants.iter().any(|grant| {
                             grant.grant_id
                                 == crate::permission_grant::permission_item_grant_id(
@@ -801,7 +815,7 @@ pub fn require_current_read_target(
     }
     let canonical = canonical_selected_read_input(&call.name, input).map_err(|_| invalid())?;
     if session.permission_requests.iter().any(|request| {
-        request.input_revision == session.input_revision
+        request.input_revision <= session.input_revision
             && matches!(
                 request.state,
                 crate::dynamic_run::PermissionRequestState::Approved

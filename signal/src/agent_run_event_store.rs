@@ -495,7 +495,10 @@ impl SignalAgentRunEventStore {
                 input_seq: session.latest_input_seq,
                 message_id: params.message.message_id.clone(),
                 message_envelope: envelope.clone(),
-                targets,
+                targets: session
+                    .assistant_request_targets()
+                    .expect("admitted input targets")
+                    .to_vec(),
             };
             followup
                 .validate()

@@ -5002,20 +5002,25 @@ mod schedule_input;
 
 #[actix_web::test]
 async fn selectable_browser_opens_and_observes_the_same_signal_device() {
-    selected_browser_on_signal(false, false).await;
+    selected_browser_on_signal(false, false, false).await;
 }
 
 #[actix_web::test]
 async fn selectable_browser_uses_ai_review_on_the_original_signal_device() {
-    selected_browser_on_signal(true, false).await;
+    selected_browser_on_signal(true, false, false).await;
 }
 
 #[actix_web::test]
 async fn selectable_artifact_is_created_with_ai_review_on_the_original_signal_device() {
-    selected_browser_on_signal(true, true).await;
+    selected_browser_on_signal(true, true, false).await;
 }
 
-async fn selected_browser_on_signal(automatic: bool, artifact: bool) {
+#[actix_web::test]
+async fn fixed_browser_uses_the_same_signal_device_action_route() {
+    selected_browser_on_signal(false, false, true).await;
+}
+
+async fn selected_browser_on_signal(automatic: bool, artifact: bool, fixed: bool) {
     use super::permission_object::tool_reply;
     use crate::controller::ai_assistant_session::{PermissionDecisionBody, decide_permission_on};
     use desk_agent_protocol::{Capability, browser_control::*, computer_use::*};
@@ -5120,8 +5125,12 @@ async fn selected_browser_on_signal(automatic: bool, artifact: bool) {
     let owner = crate::control_authorizer::SINGLE_ACCOUNT_USER_ID;
     let actor = owner.to_string();
     let client = "selected-browser-test";
-    let run =
-        derive_assistant_conversation_key(&actor, AssistantConversationScope::Personal, client);
+    let storage = if fixed { target } else { "" };
+    let run = if fixed {
+        derive_conversation_key(&actor, target, Some(client), "selected-browser-input")
+    } else {
+        derive_assistant_conversation_key(&actor, AssistantConversationScope::Personal, client)
+    };
     if artifact {
         use desk_assistant_data_store::device_roster::{personal_selection_key, replace};
         use desk_diagnose_core::file_scope::{transaction::*, *};
@@ -5249,9 +5258,13 @@ async fn selected_browser_on_signal(automatic: bool, artifact: bool) {
         db.clone(),
         "selected-browser-input".into(),
         "owner-browser".into(),
-        String::new(),
+        if fixed {
+            connection_id.clone()
+        } else {
+            String::new()
+        },
         owner,
-        String::new(),
+        storage.into(),
         AiAssistantAsk {
             question: if artifact {
                 "Create selected.txt with owner content in the approved directory"
@@ -5262,14 +5275,14 @@ async fn selected_browser_on_signal(automatic: bool, artifact: bool) {
             client_message_id: "browser-input".into(),
             conversation_id: Some(client.into()),
             client_timezone: "UTC".into(),
-            target_refs: vec![target.into()],
+            target_refs: if fixed { vec![] } else { vec![target.into()] },
             ..Default::default()
         },
     )
     .await;
     let store = crate::agent_session_store::SignalAgentSessionStore::new(db.clone());
     let session = store
-        .read_snapshot_for_subject(&run, &actor, "")
+        .read_snapshot_for_subject(&run, &actor, storage)
         .await
         .unwrap()
         .unwrap();
@@ -5280,7 +5293,7 @@ async fn selected_browser_on_signal(automatic: bool, artifact: bool) {
     assert_eq!(request.selected_device_id(), Some(target));
     let item = &request.items[0];
     let decision: PermissionDecisionBody = serde_json::from_value(json!({
-        "conversation":client, "requestId":request.request_id, "items":[{
+        "conversation":client, "connection":if fixed { Some(&connection_id) } else { None }, "requestId":request.request_id, "items":[{
             "itemId":item.item_id, "decision":"approve","resource_scope":item.resource_scope,
             "operation_scope":item.operation_scope,"ttl_seconds":60,"max_uses":1
         }]
@@ -5367,7 +5380,7 @@ async fn selected_browser_on_signal(automatic: bool, artifact: bool) {
             Ok(frame) => frame,
             Err(error) => {
                 let state = store
-                    .read_snapshot_for_subject(&run, &actor, "")
+                    .read_snapshot_for_subject(&run, &actor, storage)
                     .await
                     .unwrap()
                     .unwrap();

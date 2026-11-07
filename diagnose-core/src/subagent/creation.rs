@@ -318,7 +318,9 @@ impl CreationEnvelope {
             root_conversation_id: session.conversation_id.clone(),
             actor_id: session.actor_id.clone(),
             device_id: session.device_id.clone(),
-            targets: Vec::new(),
+            targets: vec![crate::dynamic_run::AssistantInputTarget::fixed(
+                session.device_id.clone(),
+            )],
             main_request_id: None,
             source: DelegationSource::ScheduledOccurrence {
                 schedule_id: source.provenance.schedule_id.clone(),
@@ -339,7 +341,7 @@ impl CreationEnvelope {
     /// attachment authority stay in the original conversation.
     pub fn child_read_context(&self) -> Option<ReadContextSelection> {
         let mut selection = self.original_read_context.clone().or_else(|| {
-            self.device_id.is_empty().then(|| ReadContextSelection {
+            Some(ReadContextSelection {
                 external_issues: Vec::new(),
                 external_issue_sources: Vec::new(),
                 tool_names: Vec::new(),
@@ -390,7 +392,13 @@ impl CreationEnvelope {
             root_conversation_id: session.conversation_id.clone(),
             actor_id: session.actor_id.clone(),
             device_id: session.device_id.clone(),
-            targets: admitted.targets.to_vec(),
+            targets: if session.device_id.is_empty() {
+                admitted.targets.to_vec()
+            } else {
+                vec![crate::dynamic_run::AssistantInputTarget::fixed(
+                    session.device_id.clone(),
+                )]
+            },
             main_request_id: admitted.main_request_id.map(str::to_owned),
             source,
             parent_input_revision: session.input_revision,
@@ -421,7 +429,11 @@ impl CreationEnvelope {
             .map_err(|_| super::invalid("invalid owner input label"))?;
         if !super::valid_id(&self.root_conversation_id)
             || self.actor_id.is_empty()
-            || (!self.device_id.is_empty() && !self.targets.is_empty())
+            || (!self.device_id.is_empty()
+                && self.targets.as_slice()
+                    != [crate::dynamic_run::AssistantInputTarget::fixed(
+                        self.device_id.clone(),
+                    )])
             || self.main_request_id.as_ref().is_some_and(|id| {
                 self.source.request_input_revision().is_none()
                     || !crate::native_ids::is(crate::native_ids::Kind::AssistantMainRequest, id)
@@ -546,6 +558,9 @@ impl CreationEnvelope {
         &self,
         refs: &[String],
     ) -> Result<Vec<crate::dynamic_run::AssistantInputTarget>, AgentError> {
+        if !self.device_id.is_empty() && refs.is_empty() {
+            return Ok(self.targets.clone());
+        }
         refs.iter()
             .map(|reference| {
                 self.targets

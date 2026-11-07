@@ -101,7 +101,9 @@ impl ChildSessions {
     fn prepared() -> (Self, PersistedAgentSession) {
         let now = "2026-06-20T00:00:00Z";
         let binding = DelegatedTaskBinding {
-            targets: Vec::new(),
+            targets: vec![crate::dynamic_run::AssistantInputTarget::fixed(
+                "device".into(),
+            )],
             root_conversation_id: "root".into(),
             group_id: "group".into(),
             task_id: "task".into(),

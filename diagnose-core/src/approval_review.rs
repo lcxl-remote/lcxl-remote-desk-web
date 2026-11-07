@@ -1548,7 +1548,7 @@ pub fn source_review_candidate_for_device(
     if session.surface != AgentSessionSurface::AiAssistant
         || (device_id != session.device_id
             && (!matches!(source, ApprovalSource::ConcreteCall { .. })
-                || !session.has_admitted_personal_input()
+                || !session.has_admitted_assistant_input()
                 || !session.admits_assistant_device(device_id)))
         || matches!(source, ApprovalSource::PermissionItem { .. })
         || expires_at_unix_ms <= now_unix_ms

@@ -649,7 +649,9 @@ fn background_status_inherits_proposal_boundary_without_requesting_a_native_rece
     session.conversation.push(proposal);
     // Routing and directory defaults are added by the host after the original
     // model proposal is stored. They are not a different owner instruction.
-    call.arguments_json = serde_json::json!({"target_ref":"a","directory_request_id":"approved-directory"}).to_string();
+    call.arguments_json =
+        serde_json::json!({"target_ref":"a","directory_request_id":"approved-directory"})
+            .to_string();
     for text in ["still running", "outcome unknown", "wait error"] {
         append_mutating_result(
             &deps,

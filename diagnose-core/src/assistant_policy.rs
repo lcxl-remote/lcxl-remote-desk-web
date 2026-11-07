@@ -127,9 +127,6 @@ pub fn permits_permission_request(
     session: &PersistedAgentSession,
     request: &crate::dynamic_run::PermissionRequest,
 ) -> bool {
-    if !session.device_id.is_empty() {
-        return request.selected_device_target().is_none();
-    }
     let registry = crate::ai_assistant::ai_assistant_provider_registry_ref();
     if let Some(target) = request.selected_device_target() {
         return crate::request_devices::accepts_device_reads(session)
@@ -150,7 +147,7 @@ pub fn permits_permission_request(
                     })
             });
     }
-    session.has_admitted_personal_input()
+    session.has_admitted_assistant_input()
         && (request.exact_command().is_some_and(|command| {
             session
                 .agent_role

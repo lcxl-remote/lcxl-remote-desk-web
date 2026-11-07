@@ -532,6 +532,9 @@ async fn database_at(url: &str) -> DatabaseConnection {
         .await
         .unwrap();
     crate::db::initialize_schema(&db).await.unwrap();
+    crate::device_code_store::get_or_create(&db, "1")
+        .await
+        .unwrap();
     db
 }
 
@@ -572,6 +575,9 @@ async fn seed_parent(db: &DatabaseConnection) {
     session.surface = AgentSessionSurface::AiAssistant;
     session.begin_focus_epoch(1, Vec::new()).unwrap();
     session.input_revision = 1;
+    session
+        .bind_assistant_request_targets(vec![session.device_id.clone()])
+        .unwrap();
     insert_session(db, &session).await;
 }
 
@@ -604,7 +610,7 @@ async fn seed_task(db: &DatabaseConnection, group_id: &str, goal_id: &str) -> Su
     txn.commit().await.unwrap();
     let task_id = format!("task-{group_id}");
     let binding = DelegatedTaskBinding {
-        targets: Vec::new(),
+        targets: vec![desk_diagnose_core::dynamic_run::AssistantInputTarget::fixed("1".into())],
         root_conversation_id: "root".into(),
         group_id: group_id.into(),
         task_id: task_id.clone(),
@@ -632,7 +638,7 @@ async fn seed_task(db: &DatabaseConnection, group_id: &str, goal_id: &str) -> Su
     .unwrap();
     let source = desk_diagnose_core::subagent::creation::CreationEnvelope {
         main_request_id: None,
-        targets: Vec::new(),
+        targets: vec![desk_diagnose_core::dynamic_run::AssistantInputTarget::fixed("1".into())],
         root_conversation_id: "root".into(),
         actor_id: "1".into(),
         device_id: "1".into(),

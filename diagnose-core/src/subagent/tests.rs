@@ -76,7 +76,9 @@ fn scope() -> AgentScope {
 
 fn binding() -> DelegatedTaskBinding {
     DelegatedTaskBinding {
-        targets: Vec::new(),
+        targets: vec![crate::dynamic_run::AssistantInputTarget::fixed(
+            "device".into(),
+        )],
         root_conversation_id: "root".into(),
         group_id: "group".into(),
         task_id: "child-task".into(),
@@ -892,7 +894,9 @@ fn adjusted_task_projection_retains_source_labels_locale_and_current_objective()
     owner.data_envelope.as_mut().unwrap().sensitivity = Sensitivity::Secret;
     let source = creation::CreationEnvelope {
         main_request_id: None,
-        targets: Vec::new(),
+        targets: vec![crate::dynamic_run::AssistantInputTarget::fixed(
+            "device".into(),
+        )],
         root_conversation_id: "root".into(),
         actor_id: "owner".into(),
         device_id: "device".into(),
@@ -1011,7 +1015,9 @@ fn completion_context() -> creation::TaskCreationEnvelope {
     creation::TaskCreationEnvelope {
         source: creation::CreationEnvelope {
             main_request_id: None,
-            targets: Vec::new(),
+            targets: vec![crate::dynamic_run::AssistantInputTarget::fixed(
+                "device".into(),
+            )],
             root_conversation_id: "root".into(),
             actor_id: "owner".into(),
             device_id: "device".into(),

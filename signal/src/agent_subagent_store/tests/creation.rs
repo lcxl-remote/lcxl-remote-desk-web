@@ -814,7 +814,7 @@ async fn child_locale_is_frozen_when_spawned_and_is_not_a_new_main_preference() 
 }
 
 #[tokio::test]
-async fn child_read_binding_is_narrowed_and_parent_completion_has_no_binding() {
+async fn child_read_binding_is_narrowed_and_parent_completion_keeps_its_original_binding() {
     let db = database().await;
     let (parent, calls) = runnable_parent(&db).await;
     let store = SubAgentStore::new(db.clone());
@@ -854,10 +854,14 @@ async fn child_read_binding_is_narrowed_and_parent_completion_has_no_binding() {
         session: parent,
         source,
     };
-    assert!(completion.read_context_binding().is_none());
+    let (parent_revision, original) = completion.read_context_binding().unwrap();
+    assert_eq!(parent_revision, 1);
+    assert_eq!(original.tool_names, vec!["read_system_info"]);
     if let desk_diagnose_core::subagent::runtime::RuntimeTurn::Child { creation, .. } = &mut runtime
     {
         creation.source.original_read_context = None;
     }
-    assert!(runtime.read_context_binding().is_none());
+    let (_, absent) = runtime.read_context_binding().unwrap();
+    assert!(absent.tool_names.is_empty());
+    assert!(absent.object_attachments.is_empty() && absent.live_targets.is_empty());
 }

@@ -51,7 +51,7 @@ impl ActionResultOrigin {
             return Err(invalid());
         }
         let (_, canonical) =
-            crate::request_devices::command_input(call, session.has_admitted_personal_input())?;
+            crate::request_devices::command_input(call, session.has_admitted_assistant_input())?;
         let (_, confirmation) =
             crate::command_confirmation::CommandConfirmation::approved_request_for_call(
                 session,
@@ -119,7 +119,7 @@ impl ActionResultOrigin {
         let provider = registry
             .provider_for_capability(&capability.wire.capability_id)
             .ok_or_else(invalid)?;
-        let selected = session.has_admitted_personal_input()
+        let selected = session.has_admitted_assistant_input()
             && crate::request_devices::selected_action_descriptor(capability);
         let recorded_native = |raw: &str| {
             let mut arguments: serde_json::Value = serde_json::from_str(raw).ok()?;

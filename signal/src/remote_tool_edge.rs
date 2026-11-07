@@ -797,6 +797,7 @@ pub struct SignalAiAssistantToolState {
     pending: Arc<SignalRemoteToolPendingStore>,
     target_connection_id: String,
     target_device_id: String,
+    storage_device_id: String,
     selected_device_fence: Option<desk_diagnose_core::action_turn_fence::AssistantTurnFence>,
     actor_id: String,
     model_provider: Option<String>,
@@ -1009,6 +1010,7 @@ impl SignalAiAssistantTools {
             connections,
             pending,
             target_connection_id,
+            storage_device_id: target_device_id.clone(),
             target_device_id,
             selected_device_fence: None,
             actor_id,
@@ -1263,9 +1265,7 @@ impl SignalAiAssistantTools {
     }
 
     fn session_device_id(&self) -> &str {
-        self.selected_device_fence
-            .as_ref()
-            .map_or(self.target_device_id.as_str(), |_| "")
+        &self.storage_device_id
     }
 
     async fn authoritative_session(
@@ -6816,7 +6816,8 @@ impl ToolSeam for SignalAiAssistantTools {
         ctx: &ExecContext,
         version: Option<&desk_diagnose_core::action_version::ActionVersion>,
     ) -> ReadCompletion {
-        if self.target_device_id.is_empty()
+        if self.selected_device_fence.is_none()
+            && desk_diagnose_core::request_devices::has_device_selector(call)
             && self
                 .provider_registry
                 .capability_for_tool(&call.name)
@@ -6865,7 +6866,8 @@ impl ToolSeam for SignalAiAssistantTools {
         call: &ToolCall,
         ctx: &ExecContext,
     ) -> Result<ExecOutcome, AgentError> {
-        if self.target_device_id.is_empty()
+        if self.selected_device_fence.is_none()
+            && desk_diagnose_core::request_devices::has_device_selector(call)
             && self
                 .provider_registry
                 .capability_for_tool(&call.name)

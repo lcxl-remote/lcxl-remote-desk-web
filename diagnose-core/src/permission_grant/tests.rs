@@ -33,7 +33,12 @@ fn decision_fixture() -> (
         },
         "2026-08-30T00:00:00Z",
     );
+    session.surface = AgentSessionSurface::AiAssistant;
     session.input_revision = 1;
+    session.begin_focus_epoch(1, Vec::new()).unwrap();
+    session
+        .bind_assistant_request_targets(vec![session.device_id.clone()])
+        .unwrap();
     let request = PermissionRequest {
         schema_version: PERMISSION_REQUEST_SCHEMA_VERSION,
         request_id: "permission-1".into(),
@@ -41,7 +46,12 @@ fn decision_fixture() -> (
         state: PermissionRequestState::Pending,
         items: vec![GrantRequestItem {
             command_confirmation: None,
-            selected_device_target: None,
+            selected_device_target: Some(crate::request_devices::SelectedDeviceTarget {
+                device_id: "device-1".into(),
+                target_ref: "device-1".into(),
+                connection_id: "host".into(),
+                readiness_revision: 7,
+            }),
             launch_confirmation: None,
             item_id: "inspect".into(),
             provider_id: "desktop.session".into(),
@@ -71,11 +81,58 @@ fn decision_fixture() -> (
     (session, request, decisions)
 }
 
+fn fixture_session(device: &str) -> PersistedAgentSession {
+    let mut session = PersistedAgentSession::new(
+        "run-1",
+        "owner-1",
+        device,
+        1,
+        AgentScope {
+            granted: vec![],
+            mode: ExecutionMode::ReadOnly,
+            expires_at: None,
+            policy_name: None,
+        },
+        "2026-08-30T00:00:00Z",
+    );
+    session.surface = AgentSessionSurface::AiAssistant;
+    session.input_revision = 1;
+    session.begin_focus_epoch(1, Vec::new()).unwrap();
+    session
+}
+
+fn fixture_request(
+    call: &crate::chat::ToolCall,
+    registry: &ProviderRegistry,
+    id: String,
+    revision: u64,
+    now: String,
+) -> Result<PermissionRequest, AgentError> {
+    let mut request =
+        crate::permission_tools::build_permission_request(call, registry, id, revision, now)?;
+    bind_fixture_device(&mut request, 7);
+    Ok(request)
+}
+
+fn bind_fixture_device(request: &mut PermissionRequest, readiness_revision: u64) {
+    for item in &mut request.items {
+        if !crate::web_research::is_web_tool(&item.tool_name) && item.command_confirmation.is_none()
+        {
+            item.selected_device_target = Some(crate::request_devices::SelectedDeviceTarget {
+                device_id: "device-1".into(),
+                target_ref: "device-1".into(),
+                connection_id: "host".into(),
+                readiness_revision,
+            });
+        }
+    }
+}
+
 #[test]
 fn web_host_grants_reuse_urls_until_expiry_on_both_surfaces() {
     let (session, _, _) = decision_fixture();
     let registry = crate::ai_assistant::ai_assistant_provider_registry();
-    let request = crate::permission_tools::build_permission_request(
+    let request = fixture_request(
         &crate::chat::ToolCall {
             id: "permission".into(), name: crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME.into(),
             arguments_json: serde_json::json!({"items":[{"item_id":"web", "tool_name":"fetch_public_web_page", "exact_input":{"url":"https://EXAMPLE.com./docs"}, "reason":"Read official documentation", "suggested_ttl_seconds":300}]}).to_string(),
@@ -143,9 +200,9 @@ fn web_host_grants_reuse_urls_until_expiry_on_both_surfaces() {
         assert_eq!(grant.canonical_input_digest_sha256, None);
         assert_eq!(grant.resource_scope, ["external_web_host:example.com"]);
 
-        let mut targetless = session.clone();
-        targetless.device_id.clear();
+        let mut targetless = fixture_session("");
         targetless.surface = AgentSessionSurface::AiAssistant;
+        targetless.begin_focus_epoch(2, Vec::new()).unwrap();
         targetless.bind_assistant_input_targets(&[]).unwrap();
         let targetless_grant =
             build_permission_grants(&targetless, &request, &decisions, &context, Some(&original))
@@ -307,7 +364,9 @@ fn check_ai_permission_grant(child: bool) {
         session.conversation_id = "child".into();
         session.agent_role = crate::subagent::AgentRole::SubAgent {
             binding: Box::new(crate::subagent::DelegatedTaskBinding {
-                targets: Vec::new(),
+                targets: vec![crate::dynamic_run::AssistantInputTarget::fixed(
+                    session.device_id.clone(),
+                )],
                 root_conversation_id: root_conversation_id.clone(),
                 group_id: "group".into(),
                 task_id: "task".into(),
@@ -342,7 +401,7 @@ fn check_ai_permission_grant(child: bool) {
         surface: ProductSurface::OssPersonalOwner,
         registry: &registry,
         inventory: &inventory,
-        readiness_revision: 1,
+        readiness_revision: 7,
         now_unix_ms: 2_000,
         implicit_fresh_object_refs: &[],
     };
@@ -437,7 +496,7 @@ fn desktop_action_bundle_issues_only_owner_selected_bounded_reads_on_both_surfac
                 "actions":["invoke"]
             }
         }]}).to_string() };
-    let mut request = crate::permission_tools::build_permission_request(
+    let mut request = fixture_request(
         &call,
         &registry,
         "click-permission".into(),
@@ -446,6 +505,7 @@ fn desktop_action_bundle_issues_only_owner_selected_bounded_reads_on_both_surfac
     )
     .unwrap();
     crate::permission_tools::include_desktop_action_reads(&mut request, &registry).unwrap();
+    bind_fixture_device(&mut request, 7);
     let inventory = request
         .items
         .iter()
@@ -570,6 +630,7 @@ fn owner_freeform_approval_is_exact_one_shot_and_rechecks_the_frozen_policy() {
     item.canonical_input_json = Some(canonical);
     item.canonical_input_digest_sha256 = Some(snapshot.canonical_input_digest_sha256.clone());
     item.command_confirmation = Some(snapshot);
+    item.selected_device_target = None;
     item.suggested_max_uses = 1;
     decisions[0].decision = PermissionItemDecision::Approve {
         resource_scope: item.resource_scope.clone(),
@@ -618,10 +679,11 @@ fn owner_freeform_approval_is_exact_one_shot_and_rechecks_the_frozen_policy() {
         assert_eq!(grants[0].remaining_uses, 1);
         assert_eq!(grants[0].risk_tier, CapabilityRiskTier::R3);
         assert_eq!(grants[0].resource_scope, request.items[0].resource_scope);
-        let mut personal = session.clone();
+        let mut personal = fixture_session("");
+        personal.actor_id = session.actor_id.clone();
         personal.surface = AgentSessionSurface::AiAssistant;
-        personal.device_id.clear();
         personal.scope_snapshot.mode = ExecutionMode::ReadOnly;
+        personal.begin_focus_epoch(2, Vec::new()).unwrap();
         personal
             .bind_assistant_request_targets(vec![policy.target_device_id.clone(), "other".into()])
             .unwrap();
@@ -638,6 +700,7 @@ fn owner_freeform_approval_is_exact_one_shot_and_rechecks_the_frozen_policy() {
             .is_err()
         );
         personal.input_revision += 1;
+        personal.begin_focus_epoch(2, Vec::new()).unwrap();
         personal
             .bind_assistant_request_targets(vec!["other".into()])
             .unwrap();
@@ -747,7 +810,7 @@ fn approved_ui_root_id_matches_resolved_read_on_both_surfaces() {
     let (session, _, _) = decision_fixture();
     let registry = crate::ai_assistant::ai_assistant_provider_registry();
     let input = serde_json::json!({"root_id":"session-id","queries":["计算器","Calculator"]});
-    let request = crate::permission_tools::build_permission_request(
+    let request = fixture_request(
         &ToolCall { id: "request".into(), name: "request_permissions".into(), arguments_json: serde_json::json!({"items":[{"item_id":"inspect","tool_name":"inspect_desktop_ui","exact_input":input,"reason":"Find Calculator"}]}).to_string() },
         &registry, "permission-1".into(), 1, "2026-08-30T00:00:00Z".into(),
     ).unwrap();
@@ -958,6 +1021,7 @@ fn exact_external_grant_never_restores_removed_scopes_or_destinations() {
     let canonical = r#"{"query":"test","max_results":1}"#.to_string();
     let digest = format!("{:x}", Sha256::digest(canonical.as_bytes()));
     let item = &mut request.items[0];
+    item.selected_device_target = None;
     item.provider_id = "web.search".into();
     item.tool_name = "search_public_web".into();
     item.expected_effect = CapabilityEffect::ExportData;
@@ -1187,7 +1251,7 @@ fn application_scope_is_reusable_but_cannot_cross_actions_apps_or_expiry() {
     let registry = crate::ai_assistant::ai_assistant_provider_registry();
     let app = serde_json::json!({"token":"calendar","snapshot_id":"apps","object_kind":"application","expires_at":"2026-09-11T03:10:00Z"});
     let planning = crate::chat::ToolCall { id:"request".into(), name:crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME.into(), arguments_json:serde_json::json!({"items":[{"item_id":"calendar", "tool_name":"execute_ui_actions", "application_scope":{"application":app,"actions":["invoke","set_value"]}, "suggested_ttl_seconds":900,"suggested_max_uses":12,"reason":"Create the meeting"}]}).to_string() };
-    let request = crate::permission_tools::build_permission_request(
+    let request = fixture_request(
         &planning,
         &registry,
         "permission-app".into(),
@@ -1333,7 +1397,7 @@ fn scroll_approval_keeps_semantic_and_background_authority_separate() {
     ] {
         for tool in ["execute_ui_actions", "send_background_input"] {
             let planning = crate::chat::ToolCall {id:"request".into(),name:crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME.into(),arguments_json:serde_json::json!({"items":[{"item_id":"scroll","tool_name":tool,"application_scope":{"application":app,"actions":["scroll"]},"suggested_ttl_seconds":60,"suggested_max_uses":2,"reason":"Scroll requested content"}]}).to_string()};
-            let request = crate::permission_tools::build_permission_request(
+            let request = fixture_request(
                 &planning,
                 &registry,
                 "request".into(),
@@ -1425,7 +1489,7 @@ fn background_scope_is_reusable_but_cannot_cross_actions_apps_or_expiry() {
     let registry = crate::ai_assistant::ai_assistant_provider_registry();
     let app = serde_json::json!({"token":"calendar","snapshot_id":"apps","object_kind":"application","expires_at":"2026-09-11T03:10:00Z"});
     let planning = crate::chat::ToolCall { id:"request".into(), name:crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME.into(), arguments_json:serde_json::json!({"items":[{"item_id":"calendar", "tool_name":"send_background_input", "application_scope":{"application":app,"actions":["key_press","type_text"]}, "suggested_ttl_seconds":900,"suggested_max_uses":12,"reason":"Create the meeting"}]}).to_string() };
-    let request = crate::permission_tools::build_permission_request(
+    let request = fixture_request(
         &planning,
         &registry,
         "permission-app".into(),
@@ -1691,7 +1755,7 @@ fn conversion_permission_freezes_source_and_directory_for_manual_and_ai_on_both_
         };
         let planning = ToolCall { id: "permission-call".into(), name: crate::permission_tools::REQUEST_CAPABILITY_GRANTS_TOOL_NAME.into(),
             arguments_json: serde_json::json!({"items":[{"item_id":"convert", "tool_name":"convert_document", "exact_input":arguments, "reason":"Convert the requested file", "suggested_ttl_seconds":60, "suggested_max_uses":1}]}).to_string() };
-        let mut request = crate::permission_tools::build_permission_request(
+        let mut request = fixture_request(
             &planning,
             &registry,
             "permission-convert".into(),
@@ -1699,6 +1763,7 @@ fn conversion_permission_freezes_source_and_directory_for_manual_and_ai_on_both_
             expires(NOW),
         )
         .unwrap();
+        bind_fixture_device(&mut request, 1);
         crate::permission_tools::bind_artifact_request(
             &mut request,
             &session,

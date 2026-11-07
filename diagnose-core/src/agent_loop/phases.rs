@@ -186,11 +186,10 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                 })
         });
     }
-    if session.has_admitted_personal_input()
+    if session.uses_request_device_tools()
         && let Some((inventory, providers)) = step_inventory.as_mut().zip(deps.provider_registry)
     {
-        // The fixed-device inventory has no edge binding in a personal turn.
-        // Selected-device reads and command approval use their own projection below.
+        // Device capabilities are projected from each admitted target below.
         inventory.retain(|item| {
             providers
                 .capability_for_tool(&item.tool_name)
@@ -404,9 +403,20 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
             });
         }
     }
+    if session.uses_request_device_tools() {
+        exposed.retain(|tool| {
+            !deps
+                .provider_registry
+                .and_then(|registry| registry.capability_for_tool(tool.name()))
+                .is_some_and(|descriptor| {
+                    descriptor.target_binding
+                        == crate::provider_registry::TargetBinding::RequestDevice
+                })
+        });
+    }
     // The model can consume the preceding screenshot in this request.
     // Only targeting in the screenshot-producing batch is fenced below.
-    let request_devices = if session.has_admitted_personal_input()
+    let request_devices = if session.uses_request_device_tools()
         && !session.has_admitted_targetless_input()
         && deps.model.command_completion_event_id().is_none()
     {
@@ -461,7 +471,7 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
     let selected_directory = (!goal_control_only && planning_goal.is_none())
         .then(|| crate::directory_tools::selected_tool(session, &request_devices))
         .flatten();
-    if session.device_id.is_empty() {
+    if session.uses_request_device_tools() {
         exposed.retain(|candidate| candidate.name() != crate::directory_tools::REQUEST_DIRECTORY);
     }
     if let Some(tool) = &selected_directory {
@@ -472,7 +482,7 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
         .filter(|tool| {
             deps.provider_registry
                 .is_some_and(|registry| registry.capability_for_tool(tool.name()).is_some())
-                && (!session.has_admitted_personal_input()
+                && (!session.uses_request_device_tools()
                     || step_inventory.as_ref().is_none_or(|inventory| {
                         inventory.iter().any(|item| item.tool_name == tool.name())
                     }))
@@ -556,7 +566,7 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                 continue;
             }
             if let Some(capability) = providers.capability_for_tool(name)
-                && !(session.has_admitted_personal_input()
+                && !(session.uses_request_device_tools()
                     && (crate::request_devices::selected_read_descriptor(capability)
                         || crate::request_devices::selected_action_descriptor(capability)))
             {
@@ -642,14 +652,7 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
     }
     let can_request_selected_command = selected_permission_tool.is_some()
         && crate::request_devices::can_request_command(session, &request_devices);
-    let selected_command_tool = if !goal_control_only
-        && planning_goal.is_none()
-        && state.permission_continuation_pending
-        && deps
-            .permission_continuation_exact_tools
-            .iter()
-            .any(|name| name == crate::command_confirmation::COMMAND_TOOL)
-    {
+    let selected_command_tool = if !goal_control_only && planning_goal.is_none() {
         deps.provider_registry.and_then(|registry| {
             crate::request_devices::command_tool(session, &request_devices, registry)
         })
@@ -837,7 +840,7 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                 continuation_tools
                     .iter()
                     .filter(|name| {
-                        !session.has_admitted_personal_input()
+                        !session.uses_request_device_tools()
                             || inventory.iter().any(|item| item.tool_name == **name)
                     })
                     .cloned()
@@ -3392,7 +3395,7 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                                                         // Central web reads use the host's original input and lease
                                                         // checks. A device action fence always needs a real device.
                                                         assistant_turn_fence: if session
-                                                            .has_admitted_personal_input()
+                                                            .uses_request_device_tools()
                                                             && crate::web_research::is_web_tool(
                                                                 &call.name,
                                                             ) {
@@ -4272,7 +4275,7 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                                                 let resolved =
                                                     match crate::directory_tools::parse_for_request(
                                                         call,
-                                                        session.device_id.is_empty(),
+                                                        session.uses_request_device_tools(),
                                                     ) {
                                                         Ok((Some(reference), input)) => deps
                                                             .tools

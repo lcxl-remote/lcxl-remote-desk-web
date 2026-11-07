@@ -433,11 +433,15 @@ async fn original_with_time_on(
         client_conversation_id: subject.client_conversation_id.map(str::to_string),
         actor_id: subject.actor_id.into(),
         device_id: subject.device_id.into(),
-        target_refs: event
-            .targets
-            .into_iter()
-            .map(|target| target.reference)
-            .collect(),
+        target_refs: if session.device_id.is_empty() {
+            event
+                .targets
+                .into_iter()
+                .map(|target| target.reference)
+                .collect()
+        } else {
+            Vec::new()
+        },
         surface: AgentSessionSurface::AiAssistant,
         policy_revision: session.policy_revision,
         current_scope: session.scope_snapshot.clone(),
