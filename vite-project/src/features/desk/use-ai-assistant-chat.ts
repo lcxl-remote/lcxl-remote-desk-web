@@ -1411,7 +1411,9 @@ export function useAiAssistantChat({
         return conversationId.current!;
     }, [conversationStorageScope]);
 
-    const updateContext = useCallback((selectedCapabilityIds: string[]) => {
+    const updateContext = useCallback((selectedCapabilityIds: string[], sourceConnection?: string) => {
+        const connection = deskId || sourceConnection;
+        if (!connection) return false;
         if (rehearsal && (rehearsal.status === 'completed' || rehearsal.status === 'cancelled' || rehearsal.status === 'failed' || (!rehearsalSent.current && rehearsal.status !== 'running'))) return false;
         if (activeRequest.current || remoteActive || contextRequest.current) return false;
         const currentConversationId = ensureConversation();
@@ -1424,8 +1426,9 @@ export function useAiAssistantChat({
                 conversation_id: currentConversationId,
                 client_request_id: clientRequestId,
                 selected_capability_ids: [...selectedCapabilityIds],
+                conversation_target: deskId ? 'fixed_device' : 'selectable_devices',
             },
-            deskId,
+            connection,
         );
         contextTimer.current = window.setTimeout(() => {
             contextTimer.current = null;

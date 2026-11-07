@@ -146,10 +146,11 @@ pub struct AiAssistantAsk {
 /// request id provides transport correlation; `client_request_id` provides
 /// persistence idempotency across reconnect/retry.
 #[derive(
-    Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
 )]
 pub struct AiAssistantContextUpdate {
     pub conversation_id: String,
+    pub conversation_target: AiAssistantConversationTarget,
     pub client_request_id: String,
     #[serde(default)]
     pub selected_capability_ids: Vec<String>,
@@ -535,6 +536,7 @@ mod tests {
     #[test]
     fn context_update_is_bounded_and_ack_contains_no_attachment_secret() {
         let update = AiAssistantContextUpdate {
+            conversation_target: crate::ai_assistant::AiAssistantConversationTarget::FixedDevice,
             conversation_id: "assistant-1".into(),
             client_request_id: "context-change-1".into(),
             selected_capability_ids: vec!["desktop.session.inspect".into()],
@@ -543,6 +545,12 @@ mod tests {
         let back: AiAssistantContextUpdate =
             serde_json::from_value(serde_json::to_value(&update).unwrap()).unwrap();
         assert_eq!(back, update);
+        let mut missing_target = serde_json::to_value(&update).unwrap();
+        missing_target
+            .as_object_mut()
+            .unwrap()
+            .remove("conversation_target");
+        assert!(serde_json::from_value::<AiAssistantContextUpdate>(missing_target).is_err());
 
         let ack = serde_json::to_value(AiAssistantContextUpdated {
             conversation_id: "assistant-1".into(),

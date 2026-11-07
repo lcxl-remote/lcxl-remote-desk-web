@@ -465,7 +465,9 @@ pub async fn update_context(
         let store = crate::agent_session_store::SignalAgentSessionStore::new(db.clone())
             .with_client_metadata(Some(update.conversation_id.clone()), AgentSessionSurface::AiAssistant);
         let mut params = crate::agent_session_store::UpdateLiveContext {
-            run_id: derive_conversation_key(&actor_id, &target_device_id, Some(&update.conversation_id), &request_id),
+            run_id: AssistantConversationScope::Personal
+                .context_key(&actor_id, &target_device_id, &update.conversation_id, update.conversation_target)
+                .map_err(transport_error)?,
             actor_id: actor_id.clone(), device_id: target_device_id.clone(), update: update.clone(),
             selection: None, created_at: chrono::Utc::now().to_rfc3339(),
         };

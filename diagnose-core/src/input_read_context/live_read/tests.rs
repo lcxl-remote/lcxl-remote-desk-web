@@ -500,7 +500,7 @@ fn durable_selection_withdrawal_and_later_reselection_cannot_revive_old_input() 
     session.adopt_client_metadata(Some("client"), AgentSessionSurface::AiAssistant);
     let ids = vec![capability.wire.capability_id.clone()];
     let selected = claim("select", &ids, now());
-    reconcile_live_context(&mut session, &selected).unwrap();
+    reconcile_live_context(&mut session, "device", &selected).unwrap();
     let mut original = selection(&["inspect_live_document"]);
     original.live_targets = capture(&original, "device", Some(&readiness()), now()).unwrap();
     let input_time = now() + 1;
@@ -515,7 +515,7 @@ fn durable_selection_withdrawal_and_later_reselection_cannot_revive_old_input() 
     .unwrap();
 
     let cleared = claim("clear", &[], input_time + 1);
-    reconcile_live_context(&mut session, &cleared).unwrap();
+    reconcile_live_context(&mut session, "device", &cleared).unwrap();
     assert!(
         validate_durable_selection(
             &original,
@@ -529,7 +529,7 @@ fn durable_selection_withdrawal_and_later_reselection_cannot_revive_old_input() 
     );
 
     let reselected = claim("reselect", &ids, input_time + 2);
-    reconcile_live_context(&mut session, &reselected).unwrap();
+    reconcile_live_context(&mut session, "device", &reselected).unwrap();
     assert!(
         validate_durable_selection(
             &original,

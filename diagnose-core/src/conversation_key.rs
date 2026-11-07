@@ -25,20 +25,35 @@ impl AssistantConversationScope {
         device_id: &str,
         update: &desk_agent_protocol::ai_assistant::AiAssistantObjectContextUpdate,
     ) -> Result<String, &'static str> {
-        if !is_valid_client_conversation_id(&update.conversation_id) {
+        self.context_key(
+            actor_id,
+            device_id,
+            &update.conversation_id,
+            update.conversation_target,
+        )
+    }
+
+    pub fn context_key(
+        self,
+        actor_id: &str,
+        device_id: &str,
+        conversation_id: &str,
+        target: desk_agent_protocol::ai_assistant::AiAssistantConversationTarget,
+    ) -> Result<String, &'static str> {
+        if !is_valid_client_conversation_id(conversation_id) {
             return Err("invalid AI Assistant conversation id");
         }
-        if update.conversation_target.is_selectable() {
+        if target.is_selectable() {
             Ok(derive_assistant_conversation_key(
                 actor_id,
                 self,
-                &update.conversation_id,
+                conversation_id,
             ))
         } else {
             Ok(derive_conversation_key(
                 actor_id,
                 device_id,
-                Some(&update.conversation_id),
+                Some(conversation_id),
                 "",
             ))
         }

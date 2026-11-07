@@ -272,24 +272,31 @@ pub fn build_live_context(
 /// Validate every candidate before touching the session, including duplicates.
 pub fn reconcile_live_context(
     session: &mut PersistedAgentSession,
+    device_id: &str,
     selection: &ContextSelectionClaim,
 ) -> Result<bool, AgentError> {
     let mut next = session.clone();
-    let changed = reconcile(&mut next, selection)?;
+    let changed = reconcile(&mut next, device_id, selection)?;
     *session = next;
     Ok(changed)
 }
 
 fn reconcile(
     session: &mut PersistedAgentSession,
+    device_id: &str,
     selection: &ContextSelectionClaim,
 ) -> Result<bool, AgentError> {
+    if device_id.is_empty() || (!session.device_id.is_empty() && session.device_id != device_id) {
+        return Err(invalid(
+            "Live context device does not match the selected subject",
+        ));
+    }
     for candidate in &selection.candidates {
         candidate
             .validate()
             .map_err(|_| invalid("Invalid live context candidate"))?;
         if candidate.actor_id != session.actor_id
-            || candidate.device_id != session.device_id
+            || candidate.device_id != device_id
             || candidate.surface != session.surface
             || candidate.kind != ContextAttachmentKind::InteractiveSession
             || !candidate.is_active_at(selection.now_unix_ms)
@@ -303,16 +310,9 @@ fn reconcile(
         }
     }
     let mut changed = false;
-    // CurrentScreen is deliberately ephemeral. Older builds briefly wrote
-    // attachment metadata for it; remove that metadata on the next claim as
-    // well as preventing new entries in the orchestrator.
-    let attachment_count = session.context_attachments.len();
-    session
-        .context_attachments
-        .retain(|attachment| attachment.kind != ContextAttachmentKind::CurrentScreen);
-    changed |= session.context_attachments.len() != attachment_count;
     for attachment in session.context_attachments.iter_mut().filter(|attachment| {
         attachment.kind == ContextAttachmentKind::InteractiveSession
+            && attachment.device_id == device_id
             && matches!(attachment.state, AttachmentState::Active)
             && selection
                 .selected_capability_ids
@@ -353,6 +353,7 @@ fn reconcile(
         .filter(|attachment| {
             matches!(attachment.state, AttachmentState::Active)
                 && attachment.kind == ContextAttachmentKind::InteractiveSession
+                && attachment.device_id == device_id
                 && !selected.contains(attachment.object_ref.source_capability_id.as_str())
         })
         .map(|attachment| attachment.attachment_id.clone())
@@ -364,6 +365,8 @@ fn reconcile(
     for candidate in &selection.candidates {
         let already_active = session.context_attachments.iter().any(|attachment| {
             matches!(attachment.state, AttachmentState::Active)
+                && attachment.kind == ContextAttachmentKind::InteractiveSession
+                && attachment.device_id == device_id
                 && attachment.object_ref.source_provider_id
                     == candidate.object_ref.source_provider_id
                 && attachment.object_ref.source_capability_id

@@ -133,7 +133,10 @@ impl SignalAgentSessionStore {
     ) -> Result<bool, AgentError> {
         match &self.context_selection {
             Some(selection) => {
-                desk_diagnose_core::live_context::reconcile_live_context(session, selection)
+                let device_id = session.device_id.clone();
+                desk_diagnose_core::live_context::reconcile_live_context(
+                    session, &device_id, selection,
+                )
             }
             None => Ok(false),
         }
@@ -158,6 +161,8 @@ impl SignalAgentSessionStore {
             actor_id: actor_id.into(),
             device_id: device_id.into(),
             update: desk_agent_protocol::ai_assistant::AiAssistantContextUpdate {
+                conversation_target:
+                    desk_agent_protocol::ai_assistant::AiAssistantConversationTarget::FixedDevice,
                 conversation_id: self
                     .client_conversation_id
                     .clone()

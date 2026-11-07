@@ -366,6 +366,8 @@ async fn run_case_with_live_inner(change: Option<&str>, mode: ResumeMode, live: 
             1,
             "device".into(),
             AiAssistantContextUpdate {
+                conversation_target:
+                    desk_agent_protocol::ai_assistant::AiAssistantConversationTarget::FixedDevice,
                 conversation_id: client_id.into(),
                 client_request_id: "select-live".into(),
                 selected_capability_ids: vec![capability.wire.capability_id.clone()],
@@ -920,6 +922,7 @@ async fn run_case_with_live_inner(change: Option<&str>, mode: ResumeMode, live: 
                     1,
                     "device".into(),
                     AiAssistantContextUpdate {
+                        conversation_target: desk_agent_protocol::ai_assistant::AiAssistantConversationTarget::FixedDevice,
                         conversation_id: client_id.into(),
                         client_request_id: "withdraw-live".into(),
                         selected_capability_ids: vec![],

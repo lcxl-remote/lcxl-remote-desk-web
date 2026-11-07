@@ -42,6 +42,16 @@ fn build(
     readiness: Option<&ComputerUseReadiness>,
     ready: bool,
 ) -> Result<ContextSelectionClaim, AgentError> {
+    build_for_device(ids, readiness, ready, "device-1", "request-1")
+}
+
+fn build_for_device(
+    ids: &[String],
+    readiness: Option<&ComputerUseReadiness>,
+    ready: bool,
+    device_id: &str,
+    request_id: &str,
+) -> Result<ContextSelectionClaim, AgentError> {
     let registry = crate::ai_assistant::ai_assistant_provider_registry();
     let inventory = ids
         .iter()
@@ -66,15 +76,15 @@ fn build(
             inventory: &inventory,
             readiness,
             selected_capability_ids: ids,
-            request_id: "request-1",
+            request_id,
             actor_id: "owner-1",
-            device_id: "device-1",
+            device_id,
             destination: &destination(),
             now_unix_ms: now(),
         },
         || {
             nonce += 1;
-            format!("opaque-{nonce}")
+            format!("opaque-{request_id}-{nonce}")
         },
     )
 }
@@ -116,7 +126,7 @@ fn desktop_selection_has_no_reference_deadline_and_grants_no_authority() {
     let selection = build(&["desktop.ui.inspect".into()], Some(&readiness), true).unwrap();
     assert_eq!(selection.candidates[0].expires_at_unix_ms, u64::MAX);
     let mut session = session();
-    reconcile_live_context(&mut session, &selection).unwrap();
+    reconcile_live_context(&mut session, "device-1", &selection).unwrap();
     assert!(session.scope_snapshot.granted.is_empty());
 }
 
@@ -124,9 +134,9 @@ fn desktop_selection_has_no_reference_deadline_and_grants_no_authority() {
 fn live_metadata_keeps_original_destination_expiry_and_does_not_grant_tools() {
     let selection = selection();
     let mut session = session();
-    assert!(reconcile_live_context(&mut session, &selection).unwrap());
+    assert!(reconcile_live_context(&mut session, "device-1", &selection).unwrap());
     let original = session.clone();
-    assert!(!reconcile_live_context(&mut session, &selection).unwrap());
+    assert!(!reconcile_live_context(&mut session, "device-1", &selection).unwrap());
     assert_eq!(session, original);
     assert_eq!(session.context_attachments.len(), 1);
     let attachment = &session.context_attachments[0];
@@ -185,7 +195,7 @@ fn live_metadata_uses_matching_edge_reference_expiry_beyond_readiness_heartbeat(
 fn duplicate_candidate_cannot_bypass_subject_surface_kind_or_expiry_validation() {
     let mut session = session();
     let selection = selection();
-    reconcile_live_context(&mut session, &selection).unwrap();
+    reconcile_live_context(&mut session, "device-1", &selection).unwrap();
     let original = session.clone();
     for change in ["actor", "device", "surface", "kind", "expiry", "selection"] {
         let mut changed = selection.clone();
@@ -199,7 +209,7 @@ fn duplicate_candidate_cannot_bypass_subject_surface_kind_or_expiry_validation()
             _ => unreachable!(),
         }
         assert!(
-            reconcile_live_context(&mut session, &changed).is_err(),
+            reconcile_live_context(&mut session, "device-1", &changed).is_err(),
             "{change}"
         );
         assert_eq!(session, original, "{change}");
@@ -210,13 +220,13 @@ fn duplicate_candidate_cannot_bypass_subject_surface_kind_or_expiry_validation()
 fn empty_selection_removes_live_context_without_touching_object_attachments() {
     let mut session = session();
     let selection = selection();
-    reconcile_live_context(&mut session, &selection).unwrap();
+    reconcile_live_context(&mut session, "device-1", &selection).unwrap();
     let mut file = session.context_attachments[0].clone();
     file.attachment_id = "file-1".into();
     file.kind = ContextAttachmentKind::File;
     session.context_attachments.push(file.clone());
     let cleared = build(&[], None, false).unwrap();
-    assert!(reconcile_live_context(&mut session, &cleared).unwrap());
+    assert!(reconcile_live_context(&mut session, "device-1", &cleared).unwrap());
     assert!(matches!(
         session.context_attachments[0].state,
         AttachmentState::Stale { .. }
@@ -227,14 +237,14 @@ fn empty_selection_removes_live_context_without_touching_object_attachments() {
 #[test]
 fn worker_change_replaces_live_metadata_without_rebinding_the_old_reference() {
     let mut session = session();
-    reconcile_live_context(&mut session, &selection()).unwrap();
+    reconcile_live_context(&mut session, "device-1", &selection()).unwrap();
     let original = session.context_attachments[0].clone();
     let mut current = readiness();
     current.interactive_session_incarnation = "worker-2".into();
     let mut next = build(&["desktop.ui.inspect".into()], Some(&current), true).unwrap();
     next.candidates[0].attachment_id = "replacement".into();
     next.candidates[0].client_request_id = "replacement-request".into();
-    reconcile_live_context(&mut session, &next).unwrap();
+    reconcile_live_context(&mut session, "device-1", &next).unwrap();
     assert_eq!(
         session.context_attachments[0].object_ref,
         original.object_ref
@@ -273,6 +283,8 @@ fn screen_is_ephemeral_and_invalid_or_unready_context_is_rejected() {
 fn durable_selection_validation_rejects_screen_unknown_and_duplicate_ids() {
     use desk_agent_protocol::ai_assistant::AiAssistantContextUpdate;
     let mut update = AiAssistantContextUpdate {
+        conversation_target:
+            desk_agent_protocol::ai_assistant::AiAssistantConversationTarget::FixedDevice,
         conversation_id: "client-1".into(),
         client_request_id: "request-1".into(),
         selected_capability_ids: vec![],
@@ -292,7 +304,7 @@ fn durable_selection_validation_rejects_screen_unknown_and_duplicate_ids() {
 fn explicit_selection_for_a_changed_model_keeps_old_metadata_immutable() {
     let mut session = session();
     let mut next = selection();
-    reconcile_live_context(&mut session, &next).unwrap();
+    reconcile_live_context(&mut session, "device-1", &next).unwrap();
     let original = session.context_attachments[0].clone();
     next.candidates[0].attachment_id = "changed-model-context".into();
     next.candidates[0].client_request_id = "changed-model-request".into();
@@ -302,7 +314,7 @@ fn explicit_selection_for_a_changed_model_keeps_old_metadata_immutable() {
         model_id: "model-2".into(),
         profile_revision: 1,
     }];
-    assert!(reconcile_live_context(&mut session, &next).unwrap());
+    assert!(reconcile_live_context(&mut session, "device-1", &next).unwrap());
     assert_eq!(session.context_attachments.len(), 2);
     assert_eq!(
         session.context_attachments[0].object_ref,
@@ -359,4 +371,29 @@ fn desktop_selection_without_context_references_survives_readiness_deadline() {
             .contains("selected_capability_ids")
         );
     }
+}
+
+#[test]
+fn selectable_live_context_reconciles_only_the_source_device() {
+    let mut conversation = session();
+    conversation.device_id.clear();
+    let first = selection();
+    let second = build_for_device(
+        &first.selected_capability_ids,
+        Some(&readiness()),
+        true,
+        "device-2",
+        "request-2",
+    )
+    .unwrap();
+    assert!(reconcile_live_context(&mut conversation, "device-2", &first).is_err());
+    assert!(conversation.context_attachments.is_empty());
+    assert!(reconcile_live_context(&mut conversation, "device-1", &first).unwrap());
+    assert!(reconcile_live_context(&mut conversation, "device-2", &second).unwrap());
+    let clear = build_for_device(&[], None, false, "device-1", "request-3").unwrap();
+    assert!(reconcile_live_context(&mut conversation, "device-1", &clear).unwrap());
+    assert!(!conversation.context_attachments[0].is_active_at(now()));
+    assert_eq!(conversation.context_attachments[1], second.candidates[0]);
+    assert!(conversation.context_attachments[1].is_active_at(now()));
+    assert!(conversation.scope_snapshot.granted.is_empty());
 }

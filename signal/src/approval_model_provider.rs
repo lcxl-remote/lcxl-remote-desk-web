@@ -440,6 +440,7 @@ mod tests {
                 actor_id: "1".into(),
                 device_id: "device".into(),
                 update: AiAssistantContextUpdate {
+                    conversation_target: desk_agent_protocol::ai_assistant::AiAssistantConversationTarget::FixedDevice,
                     conversation_id: "empty-client-conversation".into(),
                     client_request_id: "initialize-empty".into(),
                     selected_capability_ids: vec![],

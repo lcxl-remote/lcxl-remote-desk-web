@@ -207,6 +207,8 @@ async fn live_wire_replays_first_receipts_and_returns_correlated_rejections() {
         )
         .unwrap();
     let original = AiAssistantContextUpdate {
+        conversation_target:
+            desk_agent_protocol::ai_assistant::AiAssistantConversationTarget::FixedDevice,
         conversation_id: "client-conversation".into(),
         client_request_id: "live-selection".into(),
         selected_capability_ids: vec!["desktop.ui.inspect".into()],

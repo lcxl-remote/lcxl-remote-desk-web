@@ -16,6 +16,8 @@ fn params() -> UpdateLiveContext {
         actor_id: "1".into(),
         device_id: "device-1".into(),
         update: AiAssistantContextUpdate {
+            conversation_target:
+                desk_agent_protocol::ai_assistant::AiAssistantConversationTarget::FixedDevice,
             conversation_id: "client-conversation".into(),
             client_request_id: "request-1".into(),
             selected_capability_ids: selection.selected_capability_ids.clone(),
@@ -200,4 +202,60 @@ async fn active_turn_even_with_expired_lease_and_stale_preparation_cannot_be_ove
         Some(true)
     );
     assert_eq!(rows(&store).await, saved);
+}
+
+#[tokio::test]
+async fn selectable_live_context_requires_roster_and_keeps_the_physical_source() {
+    use desk_agent_protocol::ai_assistant::AiAssistantConversationTarget::SelectableDevices;
+    use desk_assistant_data_store::device_roster::{personal_selection_key, replace};
+
+    let store = store("sqlite::memory:").await;
+    let mut original = params();
+    original.update.conversation_target = SelectableDevices;
+    original.run_id = desk_diagnose_core::conversation_key::AssistantConversationScope::Personal
+        .context_key(
+            &original.actor_id,
+            &original.device_id,
+            &original.update.conversation_id,
+            SelectableDevices,
+        )
+        .unwrap();
+    let roster_key = personal_selection_key(&original.run_id);
+    crate::device_code_store::get_or_create(&store.db, &original.device_id)
+        .await
+        .unwrap();
+    assert!(store.update_live_context(&original).await.is_err());
+    assert_eq!(rows(&store).await, (vec![], vec![]));
+    replace(
+        &store.db,
+        &original.actor_id,
+        &roster_key,
+        0,
+        vec![original.device_id.clone()],
+    )
+    .await
+    .unwrap();
+    assert!(store.update_live_context(&original).await.unwrap());
+    let saved = rows(&store).await;
+    assert!(saved.0[0].device_id.is_empty());
+    let conversation = PersistedAgentSession::decode_json(&saved.0[0].state_json).unwrap();
+    assert_eq!(
+        conversation.context_attachments[0].device_id,
+        original.device_id
+    );
+    assert_eq!(conversation.input_revision, 0);
+
+    replace(&store.db, &original.actor_id, &roster_key, 1, vec![])
+        .await
+        .unwrap();
+    assert!(store.update_live_context(&clear(&original)).await.unwrap());
+    let cleared = rows(&store).await;
+    original.selection = None;
+    assert_eq!(
+        store.replay_live_context(&original).await.unwrap(),
+        Some(true)
+    );
+    assert_eq!(rows(&store).await, cleared);
+    original.device_id = "other-device".into();
+    assert!(store.replay_live_context(&original).await.is_err());
 }
