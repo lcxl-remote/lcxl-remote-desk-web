@@ -2,6 +2,8 @@
 
 Device owners can open [Model call metrics](/features/model-metrics) from **Usage** to inspect call errors, tool parameter checks and Token usage. Statistics may be incomplete in exceptional situations and are for reference. The page does not store conversation content or recalculate earlier calls.
 
+Fixed-device and multi-device conversations both support temporary chats. Follow-ups and retries retain the original temporary mode. Temporary chats neither read nor write long-term memory and are excluded from cross-conversation search.
+
 ## Get started
 
 Open **AI Assistant → Multi-device conversation**. To compare devices, select them in **Devices** in the composer and send your question. For example, select two devices and ask for their OS versions. Each command approval shows the device and exact command, and its result returns to the original conversation. Changes to the selection apply to your next message.

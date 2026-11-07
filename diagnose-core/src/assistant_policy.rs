@@ -65,7 +65,6 @@ pub fn validate_assistant_ask_scope(
     }
     if ask.start_goal
         || ask.previous_completed_goal_id.is_some()
-        || ask.temporary_conversation.is_some()
         || !ask.selected_capability_ids.is_empty()
         || (!ask.selected_attachment_ids.is_empty() && ask.target_refs.is_empty())
     {

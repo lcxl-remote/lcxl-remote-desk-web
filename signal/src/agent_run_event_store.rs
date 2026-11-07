@@ -119,7 +119,7 @@ impl SignalAgentRunEventStore {
             return Err(internal("Goal input requires its native admission"));
         }
         let targetless = params.device_id.is_empty();
-        if targetless && (goal_start.is_some() || params.temporary_conversation.is_some()) {
+        if targetless && goal_start.is_some() {
             return Err(internal(
                 "targetless input requires the personal input path",
             ));
@@ -2154,6 +2154,15 @@ mod tests {
 
     #[tokio::test]
     async fn targetless_input_requires_its_personal_key_and_claim_revision() {
+        personal_input_lifecycle(false).await;
+    }
+
+    #[tokio::test]
+    async fn selectable_temporary_input_preserves_its_original_lifecycle() {
+        personal_input_lifecycle(true).await;
+    }
+
+    async fn personal_input_lifecycle(temporary: bool) {
         use desk_diagnose_core::{
             conversation_key::{AssistantConversationScope, derive_assistant_conversation_key},
             seam::{ClaimTurnParams, SessionSeam},
@@ -2166,6 +2175,7 @@ mod tests {
         crate::db::initialize_schema(&db).await.unwrap();
         let store = SignalAgentRunEventStore::new(db.clone());
         let mut input = params("targetless-event", "targetless-input", "No device required");
+        input.temporary_conversation = Some(temporary);
         input.device_id.clear();
         input.policy_revision =
             desk_diagnose_core::assistant_policy::PERSONAL_ASSISTANT_POLICY_REVISION;
@@ -2220,6 +2230,13 @@ mod tests {
         let mut session = sessions.claim_turn(claim).await.unwrap();
         assert!(session.turn_state.is_active());
         assert!(session.has_admitted_targetless_input());
+        assert_eq!(
+            session.assistant_data.as_ref().unwrap().temporary,
+            temporary
+        );
+        input.temporary_conversation = Some(!temporary);
+        assert!(store.append_user_followup(&input).await.is_err());
+        input.temporary_conversation = Some(temporary);
         assert!(!session.admits_assistant_device("device-1"));
 
         let snapshot = sessions

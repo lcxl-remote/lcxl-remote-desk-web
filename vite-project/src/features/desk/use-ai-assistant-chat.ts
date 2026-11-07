@@ -1611,7 +1611,7 @@ export function useAiAssistantChat({
         const requestId = v4();
         const payload = {
                 question: trimmed,
-                temporary_conversation: rehearsal || !deskId ? undefined : temporaryConversationRef.current,
+                temporary_conversation: rehearsal ? undefined : temporaryConversationRef.current,
                 client_message_id: clientMessageId,
                 client_timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
                 conversation_id: conversationId.current,

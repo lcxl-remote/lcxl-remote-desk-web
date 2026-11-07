@@ -73,7 +73,7 @@ describe('useAiAssistantChat', () => {
         expect(sendMessage.mock.calls[1]).toEqual(sendMessage.mock.calls[0]);
     });
 
-    it('retries a personal request with its original device selection', async () => {
+    it.each([false, true])('retries a personal request with its original device selection and temporary mode %s', async (temporary) => {
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: null }) }));
         const sendMessage = vi.fn((_type: number, _payload: unknown, _to?: string, request?: string) => request!)
             .mockImplementationOnce(() => { throw new Error('offline'); });
@@ -81,10 +81,11 @@ describe('useAiAssistantChat', () => {
         const { result, rerender } = renderHook(({ targets }) => useAiAssistantChat({
             deskId: '', conversationStorageScope: 'personal:7', targetRefs: targets, subscribe, sendMessage,
         }), { initialProps: { targets: ['mac', 'linux'] } });
+        act(() => { result.current.reset(temporary); });
         act(() => { expect(result.current.start('Compare these devices')).toBe(true); });
         rerender({ targets: ['linux'] });
         await act(async () => { await result.current.retryDelivery(); });
-        expect(sendMessage.mock.calls[0][1]).toMatchObject({ target_refs: ['mac', 'linux'] });
+        expect(sendMessage.mock.calls[0][1]).toMatchObject({ target_refs: ['mac', 'linux'], temporary_conversation: temporary });
         expect(sendMessage.mock.calls[1]).toEqual(sendMessage.mock.calls[0]);
     });
 

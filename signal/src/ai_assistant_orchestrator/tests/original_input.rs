@@ -7,12 +7,17 @@ use desk_agent_protocol::computer_use::{ObjectKind, ObjectRef};
 
 #[actix_web::test]
 async fn targetless_owner_turn_uses_audited_provider_and_keeps_its_answer() {
-    personal_input_roundtrip(Vec::new()).await;
+    personal_input_roundtrip(Vec::new(), false).await;
 }
 
 #[actix_web::test]
 async fn personal_input_with_selected_targets_runs_under_the_same_account() {
-    personal_input_roundtrip(vec!["selected-mac".into(), "selected-linux".into()]).await;
+    personal_input_roundtrip(vec!["selected-mac".into(), "selected-linux".into()], false).await;
+}
+
+#[actix_web::test]
+async fn selectable_temporary_owner_turn_keeps_its_mode_across_followups() {
+    personal_input_roundtrip(vec!["selected-mac".into(), "selected-linux".into()], true).await;
 }
 
 #[actix_web::test]
@@ -1700,7 +1705,7 @@ async fn exercise_workbench_report_wake(
     );
 }
 
-async fn personal_input_roundtrip(target_refs: Vec<String>) {
+async fn personal_input_roundtrip(target_refs: Vec<String>, temporary: bool) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let db = crate::config::test_support::Database::connect("sqlite::memory:")
@@ -1764,6 +1769,7 @@ async fn personal_input_roundtrip(target_refs: Vec<String>) {
     });
     let owner = crate::control_authorizer::SINGLE_ACCOUNT_USER_ID;
     let ask = AiAssistantAsk {
+        temporary_conversation: Some(temporary),
         target_refs: target_refs.clone(),
         question: "Help me draft a test case".into(),
         client_message_id: "targetless-owner-input".into(),
@@ -1862,6 +1868,7 @@ async fn personal_input_roundtrip(target_refs: Vec<String>) {
         desk_diagnose_core::session::PersistedAgentSession::decode_json(&stored.state_json)
             .unwrap();
     assert!(stored.device_id.is_empty());
+    assert_eq!(stored.assistant_data.as_ref().unwrap().temporary, temporary);
     assert_eq!(
         stored
             .assistant_request_targets()

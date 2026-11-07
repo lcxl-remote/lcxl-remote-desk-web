@@ -24,7 +24,16 @@ pub(crate) async fn delete_retained_root_on(
         .one(db)
         .await?
     else {
-        return Ok(false);
+        // Temporary conversations intentionally have no searchable history row.
+        // An owner-scoped deletion marker makes their repeated deletion idempotent.
+        return Ok(marker
+            .history_deleted_at_unix_ms
+            .is_some_and(|deleted| deleted > 0)
+            && session::Entity::find()
+                .filter(session::Column::ConversationId.eq(conversation))
+                .one(db)
+                .await?
+                .is_none());
     };
     if root.actor_id != actor
         || root.root_conversation_id != conversation
