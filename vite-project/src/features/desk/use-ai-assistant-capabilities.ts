@@ -43,6 +43,7 @@ export type CapabilityInventoryEntry = {
         };
     };
     context_selectable: boolean;
+    selectable_device_context: boolean;
     compiled: boolean;
     enabled: boolean;
     connected: boolean;

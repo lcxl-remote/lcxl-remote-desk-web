@@ -132,13 +132,13 @@ impl SignalAgentSessionStore {
         session: &mut PersistedAgentSession,
     ) -> Result<bool, AgentError> {
         match &self.context_selection {
-            Some(selection) => {
+            Some(selection) if !session.device_id.is_empty() => {
                 let device_id = session.device_id.clone();
                 desk_diagnose_core::live_context::reconcile_live_context(
                     session, &device_id, selection,
                 )
             }
-            None => Ok(false),
+            _ => Ok(false),
         }
     }
 

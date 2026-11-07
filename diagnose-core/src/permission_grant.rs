@@ -426,11 +426,12 @@ pub fn build_permission_grants(
                 .as_ref()
                 .and_then(|envelope| envelope.allowed_destinations.first())
                 .ok_or_else(|| internal("original live destination is missing"))?;
-            crate::input_read_context::live_read::validate_input(
+            crate::input_read_context::live_read::validate_input_on(
                 original,
                 message,
                 destination,
                 context.now_unix_ms,
+                Some(device_id),
             )?;
             let target = crate::input_read_context::live_read::target(
                 original,

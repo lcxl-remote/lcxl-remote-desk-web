@@ -614,6 +614,35 @@ describe('useAiAssistantChat', () => {
             expect.objectContaining({ conversation_target: 'selectable_devices', operation: revoke }), 'device-a');
         unmount();
     });
+    it('selects live resources on the requested device and freezes only admitted attachments', async () => {
+        const liveAttachment = (deviceRef: string) => ({
+            id: `live-${deviceRef}`, deviceRef, kind: 'interactive_session', providerId: 'office.document',
+            capabilityId: 'office.document.inspect', displaySummary: 'live document', state: 'active',
+            createdAtUnixMs: 1, expiresAtUnixMs: Date.now() + 60_000,
+        });
+        stubSnapshotFetch(async () => ({ ok: true, json: async () => ({ data: {
+            ...snapshotFields, sessionId: 'account-session', seq: 10, active: false, messages: [],
+            contextAttachments: ['device-a', 'device-b'].map(liveAttachment),
+        } }) }));
+        const sendMessage = vi.fn((_type: number, _payload?: unknown, _to?: string, id?: string) => id ?? 'context-wire');
+        let subscriber: SignalingSubscriber | null = null;
+        const { result, unmount } = renderHook(() => useAiAssistantChat({ deskId: '', conversationStorageScope: 'personal:live',
+            initialConversationId: 'account-conversation', targetRefs: ['device-b'], connected: true,
+            subscribe: handler => { subscriber = handler; return () => undefined; }, sendMessage }));
+        await waitFor(() => expect(result.current.attachments).toHaveLength(2));
+        act(() => { expect(result.current.updateContext(['office.document.inspect'], 'device-b')).toBe(true); });
+        const payload = sendMessage.mock.calls.find(call => call[0] === SIGNALING_TYPE_CODE_UPDATE_AI_ASSISTANT_CONTEXT)?.[1] as
+            { conversation_id: string; client_request_id: string };
+        expect(sendMessage).toHaveBeenCalledWith(SIGNALING_TYPE_CODE_UPDATE_AI_ASSISTANT_CONTEXT,
+            expect.objectContaining({ conversation_target: 'selectable_devices', selected_capability_ids: ['office.document.inspect'] }), 'device-b');
+        act(() => subscriber?.({ signaling_type: SIGNALING_TYPE_CODE_AI_ASSISTANT_CONTEXT_UPDATED, request_id: 'context-wire',
+            signaling_data: { ...payload, changed: true } }));
+        act(() => { expect(result.current.start('Read the open document')).toBe(true); });
+        expect(sendMessage).toHaveBeenCalledWith(SIGNALING_TYPE_CODE_ASK_AI_ASSISTANT,
+            expect.objectContaining({ target_refs: ['device-b'], selected_capability_ids: [], selected_attachment_ids: ['live-device-b'] }),
+            undefined, expect.any(String));
+        unmount();
+    });
     it('pages each selectable preview on its original device even when preview IDs match', async () => {
         let subscriber: SignalingSubscriber | null = null;
         stubSnapshotFetch(async () => ({ ok: true, json: async () => ({ data: {

@@ -17,6 +17,19 @@ impl ToolSeam for NoDeviceCommands {
     }
 }
 
+struct OriginalReads(Option<crate::input_read_context::ReadContextSelection>);
+
+#[async_trait::async_trait(?Send)]
+impl ToolSeam for OriginalReads {
+    fn original_read_context(&self) -> Option<&crate::input_read_context::ReadContextSelection> {
+        self.0.as_ref()
+    }
+
+    async fn run_read(&self, _: &ToolCall) -> Result<ToolRunOutput, AgentError> {
+        unreachable!("planning a permission cannot run a tool")
+    }
+}
+
 fn session() -> PersistedAgentSession {
     let mut session = PersistedAgentSession::new(
         "run",
@@ -208,6 +221,10 @@ async fn every_request_device_read_projects_parses_and_keeps_its_exact_target() 
             | "read_recent_logs"
             | "read_container_list"
             | "inspect_desktop_session"
+            | "inspect_office_selection"
+            | "inspect_live_document"
+            | "inspect_live_spreadsheet"
+            | "inspect_live_presentation"
             | "read_current_screen" => json!({}),
             "read_process_list" | "read_service_status" | "list_applications" => {
                 json!({"allow_unfiltered":true})
@@ -225,7 +242,37 @@ async fn every_request_device_read_projects_parses_and_keeps_its_exact_target() 
             device("a", vec![descriptor.wire.capability_id.clone()]),
             device("b", vec![]),
         ];
-        let reads = read_tools(&devices, &session, registry, true, None);
+        let original = crate::input_read_context::live_read::target_kind(name).map(|(_, kind)| {
+            use crate::input_read_context::{ReadContextSelection, live_read::LiveReadTarget};
+            let expires_at = "2026-11-06T00:02:00Z";
+            ReadContextSelection {
+                tool_names: vec![name.into()],
+                live_targets: vec![LiveReadTarget {
+                    device_id: "a".into(),
+                    tool_name: name.into(),
+                    object_ref: ObjectRef {
+                        token: "observed-live-resource".into(),
+                        snapshot_id: "snapshot".into(),
+                        object_kind: kind,
+                        expires_at: expires_at.into(),
+                    },
+                    interactive_session_incarnation: "worker".into(),
+                    readiness_expires_at_unix_ms: chrono::DateTime::parse_from_rfc3339(expires_at)
+                        .unwrap()
+                        .timestamp_millis()
+                        as u64,
+                }],
+                ..ReadContextSelection::default()
+            }
+        });
+        if original.is_some() {
+            assert!(
+                read_tools(&devices, &session, registry, true, None).is_empty(),
+                "{name}"
+            );
+        }
+        let reads = read_tools(&devices, &session, registry, true, original.as_ref());
+        let seam = OriginalReads(original);
         let [(registered, callable)] = reads.as_slice() else {
             panic!("{name}: missing projected tool");
         };
@@ -286,7 +333,7 @@ async fn every_request_device_read_projects_parses_and_keeps_its_exact_target() 
             "{name}: sensitive read was advertised before approval"
         );
         let denied = plan_device_permission(
-            &NoDeviceCommands,
+            &seam,
             Some(registry),
             &session,
             &devices,
@@ -301,7 +348,7 @@ async fn every_request_device_read_projects_parses_and_keeps_its_exact_target() 
             "{name}: device B does not report readiness"
         );
         let mut approved = plan_device_permission(
-            &NoDeviceCommands,
+            &seam,
             Some(registry),
             &session,
             &devices,

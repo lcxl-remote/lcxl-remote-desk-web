@@ -3020,11 +3020,17 @@ async fn personal_selected_directory_snapshot_resumes_on_signal() {
     run_selected_device_reads(SelectedReadScenario::Directory).await;
 }
 
+#[actix_web::test]
+async fn personal_selected_live_document_resumes_on_signal() {
+    run_selected_device_reads(SelectedReadScenario::LiveDocument).await;
+}
+
 enum SelectedReadScenario {
     Desktop,
     Window,
     Terminal,
     Directory,
+    LiveDocument,
 }
 
 async fn run_selected_device_reads(scenario: SelectedReadScenario) {
@@ -3040,6 +3046,7 @@ async fn run_selected_device_reads(scenario: SelectedReadScenario) {
     let window = matches!(scenario, SelectedReadScenario::Window);
     let terminal = matches!(scenario, SelectedReadScenario::Terminal);
     let files = matches!(scenario, SelectedReadScenario::Directory);
+    let live = matches!(scenario, SelectedReadScenario::LiveDocument);
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let reviewer = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -3078,6 +3085,8 @@ async fn run_selected_device_reads(scenario: SelectedReadScenario) {
             ("selected-file-device", "inspect_spreadsheets"),
             ("selected-file-device", "preview_document"),
         ]
+    } else if live {
+        vec![("selected-live-device", "inspect_live_document")]
     } else if terminal {
         vec![("selected-terminal-device", "read_terminal_output")]
     } else if window {
@@ -3123,6 +3132,10 @@ async fn run_selected_device_reads(scenario: SelectedReadScenario) {
                         Capability::FileMetadataRead,
                         ComputerUseAdapterKind::FileSystem,
                     ),
+                    "inspect_live_document" => (
+                        Capability::DocumentLiveInspect,
+                        ComputerUseAdapterKind::IworkPages,
+                    ),
                     "inspect_spreadsheets" => (
                         Capability::SpreadsheetFileInspect,
                         ComputerUseAdapterKind::FileSystem,
@@ -3152,7 +3165,12 @@ async fn run_selected_device_reads(scenario: SelectedReadScenario) {
                     capability,
                     adapter: ComputerUseAdapterRef {
                         kind,
-                        version: "1".into(),
+                        version: if capability == Capability::DocumentLiveInspect {
+                            desk_diagnose_core::ai_assistant::IWORK_ADAPTER_VERSION
+                        } else {
+                            "1"
+                        }
+                        .into(),
                     },
                     supported: true,
                     ready: true,
@@ -3175,19 +3193,46 @@ async fn run_selected_device_reads(scenario: SelectedReadScenario) {
                     local_ceiling_revision: 1,
                     unattended_command_execution: false,
                     capabilities,
-                    context_references: vec![],
+                    context_references: live
+                        .then(|| ComputerUseContextReference {
+                            capability: Capability::DocumentLiveInspect,
+                            object_ref: ObjectRef {
+                                token: "selected-live-pages".into(),
+                                snapshot_id: "selected-live-snapshot".into(),
+                                object_kind: ObjectKind::Document,
+                                expires_at: (now + chrono::Duration::minutes(5)).to_rfc3339(),
+                            },
+                        })
+                        .into_iter()
+                        .collect(),
                 },
                 now,
             )
             .unwrap();
     }
+    let needs_title = move |name: &str| {
+        if files {
+            name == "inspect_files"
+        } else {
+            !window || name != "read_current_screen"
+        }
+    };
+    let (title_sent, mut titles) = tokio::sync::mpsc::unbounded_channel();
     let model_cases = cases.clone();
-    let file_result = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
-    let model_file_result = file_result.clone();
+    let (file_result, mut model_file_results) = tokio::sync::mpsc::unbounded_channel::<String>();
     let directory_request = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
     let model_directory_request = directory_request.clone();
     let gateway = actix_web::rt::spawn(async move {
+        let mut model_file_result = None;
         for (target, name) in model_cases {
+            if name == "inspect_spreadsheets" {
+                model_file_result = Some(
+                    model_file_results
+                        .recv()
+                        .await
+                        .expect("verified directory listing"),
+                );
+            }
             if name == "inspect_files" {
                 capture_one_openai_request_with_reply(&listener, |body| {
                     let request: Value = serde_json::from_slice(body).unwrap();
@@ -3201,10 +3246,10 @@ async fn run_selected_device_reads(scenario: SelectedReadScenario) {
             let exact = match (window, name) {
                 (_, "inspect_files") => json!({}),
                 (_, "inspect_spreadsheets") => {
-                    json!({"sources":[{"file_result_call_id":model_file_result.lock().unwrap().clone().expect("verified directory listing"), "entry_name":"selected.xlsx"}]})
+                    json!({"sources":[{"file_result_call_id":model_file_result.as_deref().expect("verified directory listing"), "entry_name":"selected.xlsx"}]})
                 }
                 (_, "preview_document") => {
-                    json!({"source":{"file_result_call_id":model_file_result.lock().unwrap().clone().expect("verified directory listing"), "entry_name":"notes.txt"}})
+                    json!({"source":{"file_result_call_id":model_file_result.as_deref().expect("verified directory listing"), "entry_name":"notes.txt"}})
                 }
                 (true, "read_current_screen") => json!({"window_id":"w1"}),
                 (true, "inspect_desktop_ui") => json!({"queries":["Calendar"]}),
@@ -3272,6 +3317,11 @@ async fn run_selected_device_reads(scenario: SelectedReadScenario) {
                     assert!(!messages.contains("data:image/png;base64,"), "{messages}");
                 } else if files {
                     assert!(messages.contains("fixture-folder"), "{messages}");
+                } else if live {
+                    assert!(
+                        messages.contains("selected-live-document-content"),
+                        "{messages}"
+                    );
                 } else if terminal {
                     assert!(messages.contains("selected-terminal-marker"), "{messages}");
                 } else if window {
@@ -3289,12 +3339,7 @@ async fn run_selected_device_reads(scenario: SelectedReadScenario) {
                 memory_sse(json!({"content":answer}), "stop")
             })
             .await;
-            let needs_title = if files {
-                name == "inspect_files"
-            } else {
-                !window || name != "read_current_screen"
-            };
-            if needs_title {
+            if needs_title(name) {
                 capture_one_openai_request_with_reply(&listener, |body| {
                     let request: Value = serde_json::from_slice(body).unwrap();
                     assert!(
@@ -3306,6 +3351,7 @@ async fn run_selected_device_reads(scenario: SelectedReadScenario) {
                     memory_sse(json!({"content":r#"{"title":"Selected device"}"#}), "stop")
                 })
                 .await;
+                title_sent.send(name).unwrap();
             }
         }
     });
@@ -3380,6 +3426,46 @@ async fn run_selected_device_reads(scenario: SelectedReadScenario) {
                 .unwrap();
             assert_eq!(snapshot.context_attachments[0].device_id, target);
             vec![snapshot.context_attachments[0].attachment_id.clone()]
+        } else if live {
+            use desk_agent_protocol::ai_assistant::{
+                AiAssistantContextUpdate, AiAssistantConversationTarget,
+            };
+            use desk_assistant_data_store::device_roster::{personal_selection_key, replace};
+            replace(
+                &db,
+                &actor,
+                &personal_selection_key(&run),
+                0,
+                vec![target.into()],
+            )
+            .await
+            .unwrap();
+            update_context(
+                connections.clone(),
+                db.clone(),
+                "select-pages-request".into(),
+                "owner-browser".into(),
+                format!("live-{target}"),
+                owner,
+                target.into(),
+                AiAssistantContextUpdate {
+                    conversation_id: intent.clone(),
+                    conversation_target: AiAssistantConversationTarget::SelectableDevices,
+                    client_request_id: "select-pages".into(),
+                    selected_capability_ids: vec!["document.live.inspect".into()],
+                },
+            )
+            .await;
+            let snapshot = store
+                .read_snapshot_for_subject(&run, &actor, "")
+                .await
+                .unwrap()
+                .expect("live selection created the account conversation");
+            let [attachment] = snapshot.context_attachments.as_slice() else {
+                panic!("expected one Pages selection");
+            };
+            assert_eq!(attachment.device_id, target);
+            vec![attachment.attachment_id.clone()]
         } else {
             Vec::new()
         };
@@ -3396,6 +3482,8 @@ async fn run_selected_device_reads(scenario: SelectedReadScenario) {
                 selected_attachment_ids: attachment_ids,
                 question: if terminal {
                     "Read the selected terminal output"
+                } else if live {
+                    "Read the selected Pages document"
                 } else if files {
                     "List the selected directory"
                 } else if index == 0 {
@@ -3599,6 +3687,15 @@ async fn run_selected_device_reads(scenario: SelectedReadScenario) {
             "{:?}",
             snapshot.terminal_error
         );
+        if needs_title(name) {
+            assert_eq!(
+                tokio::time::timeout(MODEL_IO_TIMEOUT, titles.recv())
+                    .await
+                    .unwrap(),
+                Some(name),
+                "the synthetic title request must finish before sending the next input",
+            );
+        }
         if files && index == 0 {
             let listing = snapshot
                 .messages
@@ -3608,7 +3705,7 @@ async fn run_selected_device_reads(scenario: SelectedReadScenario) {
                         && message.tool_ok == Some(true)
                 })
                 .expect("verified directory listing");
-            *file_result.lock().unwrap() = Some(listing.message_id.clone());
+            file_result.send(listing.message_id.clone()).unwrap();
         }
         if name == "preview_document" {
             let now = chrono::Utc::now().timestamp_millis() as u64;
@@ -3793,6 +3890,30 @@ async fn respond_to_selected_desktop(
             preview_data_url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jOioAAAAASUVORK5CYII=".into(),
         });
         (ReadContextOutput::DocumentPreview(descriptor), None)
+    } else if name == "inspect_live_document" {
+        let ContextKind::DocumentLiveInspect(input) = read.envelope.operation.input.kind else {
+            panic!("expected the selected Pages document");
+        };
+        let original = input.target.expect("exact Pages reference");
+        assert_eq!(original.token, "selected-live-pages");
+        assert_eq!(original.snapshot_id, "selected-live-snapshot");
+        assert!(input.batch_file.is_none());
+        (
+            ReadContextOutput::DocumentLiveInspect(LiveDocumentInspectOutput {
+                snapshot_id: original.snapshot_id.clone(),
+                adapter: ComputerUseAdapterRef {
+                    kind: ComputerUseAdapterKind::IworkPages,
+                    version: desk_diagnose_core::ai_assistant::IWORK_ADAPTER_VERSION.into(),
+                },
+                projection: LiveDocumentProjection::Document {
+                    document: original,
+                    body_text: "selected-live-document-content".into(),
+                    body_sha256: "a".repeat(64),
+                },
+                batch_source: None,
+            }),
+            None,
+        )
     } else if name == "read_terminal_output" {
         let ContextKind::TerminalOutputInspect(input) = read.envelope.operation.input.kind else {
             panic!("expected original terminal snapshot");

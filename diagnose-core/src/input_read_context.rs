@@ -39,14 +39,23 @@ impl ReadContextSelection {
     /// Account-scoped inputs may include device resources without granting a
     /// device capability to the conversation itself.
     pub fn is_selectable_input(&self) -> bool {
-        self.live_targets.is_empty()
-            && self.tool_names.iter().all(|name| {
-                crate::web_research::is_web_tool(name) || self.is_selected_object_tool(name)
+        self.tool_names.iter().all(|name| {
+            crate::web_research::is_web_tool(name) || self.is_selected_object_tool(name)
+        }) && self.live_targets.iter().all(|target| {
+            self.object_attachments.iter().any(|attachment| {
+                selectable_live_metadata(attachment)
+                    && attachment.device_id == target.device_id
+                    && attachment.envelope.provenance.source_tool_name == target.tool_name
             })
+        })
     }
 
     pub fn is_selected_object_tool(&self, name: &str) -> bool {
-        object_read::implicit_object_tool(name, &self.object_attachments)
+        (object_read::implicit_object_tool(name, &self.object_attachments)
+            || self
+                .live_targets
+                .iter()
+                .any(|target| target.tool_name == name))
             && crate::ai_assistant::ai_assistant_provider_registry_ref()
                 .capability_for_tool(name)
                 .is_some_and(crate::request_devices::selected_read_descriptor)
@@ -73,10 +82,13 @@ impl ReadContextSelection {
     }
 
     pub(crate) fn has_device_objects_for_tool(&self, name: &str, device_id: &str) -> bool {
-        self.object_attachments.iter().any(|object| {
-            object.device_id == device_id
-                && object_read::supports_implicit_object(name, object.kind)
-        })
+        self.live_targets
+            .iter()
+            .any(|target| target.device_id == device_id && target.tool_name == name)
+            || self.object_attachments.iter().any(|object| {
+                object.device_id == device_id
+                    && object_read::supports_implicit_object(name, object.kind)
+            })
     }
 
     pub fn validate_object_devices(
@@ -162,7 +174,25 @@ impl ReadContextSelection {
     }
 }
 
-/// Resolve explicit object selections; live capability selections use a separate input field.
+fn selectable_live_metadata(object: &ContextAttachment) -> bool {
+    let provenance = &object.envelope.provenance;
+    object.kind == ContextAttachmentKind::InteractiveSession
+        && live_read::target_kind(&provenance.source_tool_name).is_some()
+        && crate::ai_assistant::ai_assistant_provider_registry_ref()
+            .capability_for_tool(&provenance.source_tool_name)
+            .is_some_and(|descriptor| {
+                descriptor.wire.capability_id == object.object_ref.source_capability_id
+                    && provenance.source_provider_id == object.object_ref.source_provider_id
+                    && provenance.source_object_id.as_deref()
+                        == Some(&object.object_ref.opaque_token)
+            })
+        && matches!(
+            object.envelope.allowed_destinations.as_slice(),
+            [DestinationIdentity::Model { .. }]
+        )
+}
+
+/// Resolve explicit object selections, including live read metadata.
 pub fn selected_object_attachment<'a>(
     objects: &'a [ContextAttachment],
     id: &str,
@@ -170,7 +200,8 @@ pub fn selected_object_attachment<'a>(
 ) -> Result<&'a ContextAttachment, AgentError> {
     let object = objects.iter().find(|object| object.attachment_id == id)
         .ok_or_else(|| invalid(&format!("Selected context attachment {id} was removed or is unavailable. Refresh the conversation and select the intended object again. The message was not accepted.")))?;
-    if object.kind == ContextAttachmentKind::InteractiveSession {
+    if object.kind == ContextAttachmentKind::InteractiveSession && !selectable_live_metadata(object)
+    {
         return Err(invalid(
             "Desktop capability selections must use selected_capability_ids, not selected_attachment_ids. The message was not accepted.",
         ));
@@ -193,6 +224,9 @@ pub fn validate_objects(objects: &[ContextAttachment]) -> Result<(), AgentError>
         return Err(invalid("object selection is not canonical"));
     }
     for object in objects {
+        if selectable_live_metadata(object) && matches!(object.state, AttachmentState::Active) {
+            continue;
+        }
         let reference: ObjectRef = serde_json::from_str(&object.object_ref.opaque_token)
             .map_err(|_| invalid("invalid original object reference"))?;
         let kind_matches = matches!(

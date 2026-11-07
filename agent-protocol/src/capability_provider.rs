@@ -555,6 +555,8 @@ pub struct CapabilityInventoryEntry {
     /// is metadata, not a grant or readiness claim.
     #[serde(default)]
     pub context_selectable: bool,
+    /// Whether this resource can be explicitly selected on a request device.
+    pub selectable_device_context: bool,
     pub compiled: bool,
     pub enabled: bool,
     pub connected: bool,
@@ -1016,6 +1018,7 @@ mod tests {
             provider_version: 1,
             capability: capability(ExecutionPolicy::InlineOnly),
             context_selectable: true,
+            selectable_device_context: false,
             compiled: true,
             enabled: true,
             connected: false,

@@ -67,6 +67,17 @@ pub fn validate_durable_update(
             "CurrentScreen is a one-turn selection and cannot be saved as durable context",
         ));
     }
+    if update.conversation_target.is_selectable()
+        && update.selected_capability_ids.iter().any(|id| {
+            !crate::ai_assistant::ai_assistant_provider_registry_ref()
+                .capability(id)
+                .is_some_and(crate::input_read_context::live_read::selectable_descriptor)
+        })
+    {
+        return Err(invalid(
+            "This resource cannot be selected on a request device",
+        ));
+    }
     Ok(())
 }
 
@@ -309,7 +320,11 @@ fn reconcile(
             ));
         }
     }
-    let mut changed = false;
+    let attachment_count = session.context_attachments.len();
+    session.context_attachments.retain(|attachment| {
+        attachment.device_id != device_id || attachment.kind != ContextAttachmentKind::CurrentScreen
+    });
+    let mut changed = attachment_count != session.context_attachments.len();
     for attachment in session.context_attachments.iter_mut().filter(|attachment| {
         attachment.kind == ContextAttachmentKind::InteractiveSession
             && attachment.device_id == device_id

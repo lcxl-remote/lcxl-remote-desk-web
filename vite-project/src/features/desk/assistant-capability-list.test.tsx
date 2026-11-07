@@ -12,7 +12,7 @@ const entry = (id: string, ready: boolean, reason: CapabilityInventoryEntry['rea
     capability: { capability_id: id, tool_name: `tool_${id}`, display_name_key: `capability.${id}`,
         effect: 'read_device', execution_locality: 'edge', execution_policy: 'inline_only',
         limits: { max_input_bytes: 1, max_output_bytes: 2, max_objects: 3, hard_timeout_ms: 4 } },
-    context_selectable: true, compiled: true, enabled: true, connected: true, ready, reason,
+    context_selectable: true, selectable_device_context: false, compiled: true, enabled: true, connected: true, ready, reason,
 });
 
 describe('complete device capability inventory', () => {

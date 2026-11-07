@@ -50,6 +50,7 @@ describe('useAiAssistantCapabilities', () => {
                         provider_id: 'office.document',
                         capability: { capability_id: 'office.document.inspect' },
                         context_selectable: true,
+                        selectable_device_context: false,
                         compiled: true,
                         enabled: true,
                         connected: true,

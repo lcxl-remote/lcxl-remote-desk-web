@@ -212,6 +212,37 @@ async fn selectable_live_context_requires_roster_and_keeps_the_physical_source()
     let store = store("sqlite::memory:").await;
     let mut original = params();
     original.update.conversation_target = SelectableDevices;
+    let tool = "inspect_office_selection";
+    let registry = desk_diagnose_core::ai_assistant::ai_assistant_provider_registry_ref();
+    let capability = registry.capability_for_tool(tool).unwrap();
+    let provider = registry
+        .provider_for_capability(&capability.wire.capability_id)
+        .unwrap();
+    let selection = original.selection.as_mut().unwrap();
+    let candidate = &mut selection.candidates[0];
+    candidate
+        .object_ref
+        .source_capability_id
+        .clone_from(&capability.wire.capability_id);
+    candidate
+        .object_ref
+        .source_provider_id
+        .clone_from(&provider.wire.provider_id);
+    candidate.envelope.provenance.source_tool_name = tool.into();
+    candidate
+        .envelope
+        .provenance
+        .source_provider_id
+        .clone_from(&provider.wire.provider_id);
+    candidate.client_request_id = desk_diagnose_core::live_context::selection_request_id(
+        &original.update.client_request_id,
+        &capability.wire.capability_id,
+    );
+    selection.selected_capability_ids = vec![capability.wire.capability_id.clone()];
+    original
+        .update
+        .selected_capability_ids
+        .clone_from(&selection.selected_capability_ids);
     original.run_id = desk_diagnose_core::conversation_key::AssistantConversationScope::Personal
         .context_key(
             &original.actor_id,

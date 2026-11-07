@@ -28,6 +28,7 @@ function entry(
             },
         },
         context_selectable: false,
+        selectable_device_context: false,
         compiled: true,
         enabled: true,
         connected: ready,

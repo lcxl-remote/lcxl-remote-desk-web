@@ -518,10 +518,13 @@ impl SignalAgentRunEventStore {
         {
             return Err(internal("targetless read input or destination changed"));
         }
-        if !original.live_targets.is_empty() {
+        if desk_diagnose_core::input_read_context::live_read::has_device_targets(
+            original,
+            target_device_id,
+        ) {
             let input_created_at_unix_ms = u64::try_from(input_created_at.timestamp_millis())
                 .map_err(|_| internal("original live input time is invalid"))?;
-            desk_diagnose_core::input_read_context::live_read::validate_input(
+            desk_diagnose_core::input_read_context::live_read::validate_input_on(
                 original,
                 desk_diagnose_core::permission_resume::latest_user_requirement(
                     &session.conversation,
@@ -529,15 +532,17 @@ impl SignalAgentRunEventStore {
                 .ok_or_else(|| internal("original live input missing"))?,
                 destination,
                 now,
+                Some(target_device_id),
             )?;
             let registry = desk_diagnose_core::ai_assistant::ai_assistant_provider_registry();
-            desk_diagnose_core::input_read_context::live_read::validate_durable_selection(
+            desk_diagnose_core::input_read_context::live_read::validate_durable_selection_on(
                 original,
                 &session,
                 &registry,
                 destination,
                 input_created_at_unix_ms,
                 now,
+                Some(target_device_id),
             )?;
         }
         desk_diagnose_core::input_read_context::validate_current_device_objects(

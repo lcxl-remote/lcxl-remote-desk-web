@@ -74,7 +74,10 @@ impl SignalAiAssistantTools {
                 u64::try_from(chrono::Utc::now().timestamp_millis()).map_err(|_| denied())?,
             )
             .await?;
-        if !input.selection.live_targets.is_empty() {
+        if desk_diagnose_core::input_read_context::live_read::has_device_targets(
+            &input.selection,
+            &self.target_device_id,
+        ) {
             let readiness = crate::computer_use_readiness::global_computer_use_readiness_cache()
                 .get_fresh(&self.target_connection_id, chrono::Utc::now())
                 .ok_or_else(denied)?;

@@ -204,10 +204,12 @@ fn prepare_live_targets(
 ) -> Result<Vec<desk_diagnose_core::input_read_context::live_read::LiveReadTarget>, AgentError> {
     use desk_diagnose_core::input_read_context::{ReadContextSelection, live_read};
     if let Some(original) = original {
-        live_read::validate_current(original, device_id, readiness, now)?;
-        for name in &original.tool_names {
-            if live_read::target_kind(name).is_some() {
-                live_read::target(original, device_id, name, now)?;
+        if !device_id.is_empty() {
+            live_read::validate_current(original, device_id, readiness, now)?;
+            for name in &original.tool_names {
+                if live_read::target_kind(name).is_some() {
+                    live_read::target(original, device_id, name, now)?;
+                }
             }
         }
         return Ok(original.live_targets.clone());
@@ -233,6 +235,54 @@ fn prepare_live_targets(
         readiness,
         now,
     )
+}
+
+async fn capture_selectable_live_targets(
+    connections: &SharedConnectionMap,
+    device_ids: &[String],
+    attachments: &[desk_diagnose_core::context_attachment::ContextAttachment],
+    destination: &DestinationIdentity,
+) -> Result<Vec<desk_diagnose_core::input_read_context::live_read::LiveReadTarget>, AgentError> {
+    use desk_diagnose_core::{
+        context_attachment::ContextAttachmentKind,
+        input_read_context::{ReadContextSelection, live_read},
+    };
+    let now = chrono::Utc::now();
+    let mut selection = ReadContextSelection::default();
+    for device_id in device_ids.iter().filter(|id| {
+        attachments.iter().any(|item| {
+            item.device_id.as_str() == id.as_str()
+                && item.kind == ContextAttachmentKind::InteractiveSession
+        })
+    }) {
+        let connection_id = connections
+            .read()
+            .await
+            .current_oss_server(device_id)
+            .filter(|state| {
+                !state.lifecycle.is_retired()
+                    && state
+                        .model
+                        .ai_assistant_settings
+                        .as_ref()
+                        .is_some_and(|settings| settings.enabled)
+            })
+            .map(|state| state.model.connection_id.clone());
+        if let Some(readiness) = connection_id.and_then(|connection| {
+            crate::computer_use_readiness::global_computer_use_readiness_cache()
+                .get_fresh(&connection, now)
+        }) {
+            live_read::capture_selected(
+                &mut selection,
+                device_id,
+                attachments,
+                &readiness.readiness,
+                destination,
+                now.timestamp_millis().max(0) as u64,
+            )?;
+        }
+    }
+    Ok(selection.live_targets)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1626,6 +1676,7 @@ async fn prepare_composed_turn(
                 let providers = ai_assistant_provider_registry();
                 ask.selected_capability_ids = original_read_context
                     .as_ref()
+                    .filter(|_| !target_device_id.is_empty())
                     .map(|selection| {
                         selection
                     .tool_names
@@ -1650,6 +1701,9 @@ async fn prepare_composed_turn(
             let mut selected_terminal_roots = Vec::new();
             let mut selected_window_roots = Vec::new();
             for attachment in &selected_objects {
+                if attachment.kind == ContextAttachmentKind::InteractiveSession {
+                    continue;
+                }
                 let reference = match serde_json::from_str::<
                     desk_agent_protocol::computer_use::ObjectRef,
                 >(&attachment.object_ref.opaque_token)
@@ -1750,7 +1804,9 @@ async fn prepare_composed_turn(
                     let live_ref = |name: &str| {
                         live_targets
                             .iter()
-                            .find(|target| target.tool_name == name)
+                            .find(|target| {
+                                target.device_id == target_device_id && target.tool_name == name
+                            })
                             .map(|target| target.object_ref.clone())
                     };
                     let selected_office_document = live_ref("inspect_office_selection");
@@ -2570,15 +2626,39 @@ async fn prepare_composed_turn(
                                         if target_device_id.is_empty() {
                                             selection.include_selectable_object_tools();
                                         }
-                                        selection.live_targets = live_targets;
+                                        let frozen = if original_read_context.is_none() {
+                                            desk_assistant_data_store::main_request::frozen_read_selection(
+                                                &db, owner_queue.as_deref(), &actor_id, &conversation_id, &target_device_id, &ask,
+                                            ).await.map_err(|error| error.into_agent_error())?
+                                        } else {
+                                            None
+                                        };
+                                        let targets = if target_device_id.is_empty() {
+                                            if original_read_context.is_some() {
+                                                live_targets
+                                            } else if let Some(frozen) = &frozen {
+                                                frozen.live_targets.clone()
+                                            } else {
+                                                capture_selectable_live_targets(
+                                                    connections.as_ref(),
+                                                    &ask.target_refs,
+                                                    &selection.object_attachments,
+                                                    &destination,
+                                                )
+                                                .await?
+                                            }
+                                        } else {
+                                            live_targets
+                                        };
+                                        desk_diagnose_core::input_read_context::live_read::install_targets(&mut selection, targets)?;
                                         selection.external_issues =
                                             if let Some(original) = &original_read_context {
-                                                selection.external_issue_sources = original.external_issue_sources.clone();
+                                                selection.external_issue_sources =
+                                                    original.external_issue_sources.clone();
                                                 original.external_issues.clone()
-                                            } else if let Some(frozen)=desk_assistant_data_store::main_request::frozen_read_selection(
-                                                &db,owner_queue.as_deref(),&actor_id,&conversation_id,&target_device_id,&ask,
-                                            ).await.map_err(|error| error.into_agent_error())? {
-                                                selection.external_issue_sources = frozen.external_issue_sources;
+                                            } else if let Some(frozen) = frozen {
+                                                selection.external_issue_sources =
+                                                    frozen.external_issue_sources;
                                                 frozen.external_issues
                                             } else {
                                                 crate::issue_connections::select_issues(

@@ -40,6 +40,11 @@ pub fn target_kind(name: &str) -> Option<(Capability, ObjectKind)> {
     })
 }
 
+pub fn selectable_descriptor(descriptor: &crate::provider_registry::CapabilityDescriptor) -> bool {
+    crate::request_devices::selected_read_descriptor(descriptor)
+        && target_kind(&descriptor.wire.tool_name).is_some()
+}
+
 fn millis(value: &str) -> Result<u64, AgentError> {
     chrono::DateTime::parse_from_rfc3339(value)
         .ok()
@@ -114,6 +119,80 @@ pub fn capture(
     captured.live_targets = targets;
     validate_current(&captured, device_id, readiness, now)?;
     Ok(captured.live_targets)
+}
+
+/// Freeze the active capability selections for this request device using its
+/// authenticated readiness. An unavailable selection does not grant any tool.
+pub fn capture_selected(
+    selection: &mut ReadContextSelection,
+    device_id: &str,
+    attachments: &[crate::context_attachment::ContextAttachment],
+    readiness: &ComputerUseReadiness,
+    destination: &desk_agent_protocol::data_lineage::DestinationIdentity,
+    now: u64,
+) -> Result<(), AgentError> {
+    let mut names = attachments
+        .iter()
+        .filter(|attachment| {
+            attachment.kind == ContextAttachmentKind::InteractiveSession
+                && attachment.device_id == device_id
+                && attachment.is_active_at(now)
+                && attachment.object_ref.object_incarnation
+                    == readiness.interactive_session_incarnation
+                && attachment.envelope.allowed_destinations.as_slice() == [destination.clone()]
+        })
+        .filter_map(|attachment| {
+            let name = attachment.envelope.provenance.source_tool_name.as_str();
+            let (capability, kind) = target_kind(name)?;
+            (readiness
+                .capabilities
+                .iter()
+                .any(|entry| entry.capability == capability && entry.supported && entry.ready)
+                && readiness.context_references.iter().any(|entry| {
+                    entry.capability == capability && entry.object_ref.object_kind == kind
+                }))
+            .then(|| name.to_owned())
+        })
+        .collect::<Vec<_>>();
+    names.sort_unstable();
+    names.dedup();
+    if names.is_empty() {
+        return Ok(());
+    }
+    let targets = capture(
+        &ReadContextSelection {
+            tool_names: names,
+            expires_at: selection.expires_at.clone(),
+            ..ReadContextSelection::default()
+        },
+        device_id,
+        Some(readiness),
+        now,
+    )?;
+    install_targets(selection, targets)
+}
+
+pub fn install_targets(
+    selection: &mut ReadContextSelection,
+    targets: Vec<LiveReadTarget>,
+) -> Result<(), AgentError> {
+    for target in &targets {
+        if let Err(index) = selection.tool_names.binary_search(&target.tool_name) {
+            selection.tool_names.insert(index, target.tool_name.clone());
+        }
+    }
+    selection.live_targets.extend(targets);
+    selection.live_targets.sort_unstable_by(|left, right| {
+        (&left.device_id, &left.tool_name).cmp(&(&right.device_id, &right.tool_name))
+    });
+    validate_targets(selection)
+}
+
+pub fn has_device_targets(selection: &ReadContextSelection, device_id: &str) -> bool {
+    selection
+        .live_targets
+        .iter()
+        .any(|target| target.device_id == device_id)
 }
 
 pub fn target<'a>(
@@ -238,8 +317,23 @@ pub fn validate_input(
     destination: &desk_agent_protocol::data_lineage::DestinationIdentity,
     now: u64,
 ) -> Result<(), AgentError> {
+    validate_input_on(selection, message, destination, now, None)
+}
+
+pub fn validate_input_on(
+    selection: &ReadContextSelection,
+    message: &crate::chat::ChatMessage,
+    destination: &desk_agent_protocol::data_lineage::DestinationIdentity,
+    now: u64,
+    device_id: Option<&str>,
+) -> Result<(), AgentError> {
     validate_targets(selection)?;
-    if selection.live_targets.is_empty() {
+    let mut targets = selection
+        .live_targets
+        .iter()
+        .filter(|target| device_id.is_none_or(|device| target.device_id == device))
+        .peekable();
+    if targets.peek().is_none() {
         return Ok(());
     }
     let envelope = message
@@ -253,7 +347,7 @@ pub fn validate_input(
     {
         return Err(invalid("original live input model destination changed"));
     }
-    for original in &selection.live_targets {
+    for original in targets {
         if expiry(selection, original)? <= now {
             return Err(invalid("original live target expired"));
         }
@@ -275,8 +369,32 @@ pub fn validate_durable_selection(
     input_created_at_unix_ms: u64,
     now_unix_ms: u64,
 ) -> Result<(), AgentError> {
+    validate_durable_selection_on(
+        selection,
+        session,
+        registry,
+        destination,
+        input_created_at_unix_ms,
+        now_unix_ms,
+        None,
+    )
+}
+
+pub fn validate_durable_selection_on(
+    selection: &ReadContextSelection,
+    session: &PersistedAgentSession,
+    registry: &ProviderRegistry,
+    destination: &desk_agent_protocol::data_lineage::DestinationIdentity,
+    input_created_at_unix_ms: u64,
+    now_unix_ms: u64,
+    device_id: Option<&str>,
+) -> Result<(), AgentError> {
     validate_targets(selection)?;
-    for target in &selection.live_targets {
+    for target in selection
+        .live_targets
+        .iter()
+        .filter(|target| device_id.is_none_or(|device| target.device_id == device))
+    {
         let capability = registry
             .capability_for_tool(&target.tool_name)
             .ok_or_else(|| invalid("original live capability is unavailable"))?;

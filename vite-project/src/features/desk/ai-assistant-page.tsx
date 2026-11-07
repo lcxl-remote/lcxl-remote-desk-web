@@ -46,6 +46,7 @@ import { Bot, Check, AlertTriangle, ArrowDown, ArrowLeft, CalendarClock, Eye, Fo
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
 import { MarkdownContent } from '@/components/markdown-content';
@@ -283,8 +284,13 @@ export function AiAssistantWorkspace({
     const requestDevices = useConversationRequestDevices(personalScope, chat.conversationId, chat.ensureConversation);
     const subagents = useAiAssistantSubagents({ connection: deskId, conversation: chat.conversationId,
         session: chat.sessionId, snapshot: chat.subagents, connected: isConnected, onChanged: chat.refreshSnapshot });
+    const [contextDeviceChoice, setContextDeviceChoice] = useState<string>();
+    const contextDevice = requestDevices.selected.find(device => device.id === contextDeviceChoice)
+        ?? (requestDevices.selected.length === 1 ? requestDevices.selected[0] : undefined);
+    const contextConnection = deskId || contextDevice?.id;
     const capabilities = useAiAssistantCapabilities({
-        deskId, subscribe, sendMessage, enabled: hasDevice && assistantEnabled && isConnected,
+        deskId: contextConnection ?? null, subscribe, sendMessage,
+        enabled: !!contextConnection && assistantEnabled && isConnected,
     });
     const target = useOptionalDeviceTarget();
     const recoveryConnection = target?.connection;
@@ -374,8 +380,11 @@ export function AiAssistantWorkspace({
     useEffect(() => { setPendingScheduleCount(0); }, [permissionHistoryKey]);
     const [selectedCapabilityIds, setSelectedCapabilityIds] = useState<string[]>([]);
     const [selectedIssues, setSelectedIssues] = useState<IssueSelection[]>([]);
-    const selectedContextCount = new Set([...selectedCapabilityIds,
-        ...chat.attachments.filter(item => item.state === 'active').map(item => item.capabilityId)]).size + selectedIssues.length;
+    const selectedContextCount = (hasDevice
+        ? new Set([...selectedCapabilityIds,
+            ...chat.attachments.filter(item => item.state === 'active').map(item => item.capabilityId)]).size
+        : chat.attachments.filter(item => item.state === 'active'
+            && requestDevices.selected.some(device => device.id === item.deviceRef)).length) + selectedIssues.length;
     const [startGoal, setStartGoal] = useState(false);
     const [goalBudgetPolicy, setGoalBudgetPolicy] = useState<GoalBudgetPolicy | null>(null);
     useEffect(() => {
@@ -407,8 +416,9 @@ export function AiAssistantWorkspace({
         return () => abort.abort();
     }, []);
 
-    const contextCapabilities = hasDevice && featureProfile.object_context
-        ? (capabilities.snapshot?.entries ?? []).filter((entry) => entry.context_selectable)
+    const contextCapabilities = contextConnection && featureProfile.object_context
+        ? (capabilities.snapshot?.entries ?? []).filter((entry) =>
+            hasDevice ? entry.context_selectable : entry.selectable_device_context)
         : [];
 
     const browserTakeoverRequired = hasDevice && requiresBrowserRemoteTakeover(
@@ -421,27 +431,29 @@ export function AiAssistantWorkspace({
     });
 
     useEffect(() => {
+        if (!hasDevice) return;
         const ready = new Set(
             contextCapabilities
                 .filter((entry) => entry.ready)
                 .map((entry) => entry.capability.capability_id),
         );
         setSelectedCapabilityIds((current) => current.filter((id) => ready.has(id)));
-    }, [capabilities.snapshot]);
+    }, [capabilities.snapshot, hasDevice]);
 
     useEffect(() => {
         const restored = featureProfile.object_context
             ? chat.attachments
             .filter((attachment) =>
-                attachment.state === 'active' && attachment.kind === 'interactive_session',
+                attachment.state === 'active' && attachment.kind === 'interactive_session'
+                    && (hasDevice || attachment.deviceRef === contextDevice?.id),
             )
             .map((attachment) => attachment.capabilityId)
             : [];
         setSelectedCapabilityIds([...new Set(restored)]);
-    }, [chat.attachments, featureProfile.object_context]);
+    }, [chat.attachments, contextDevice?.id, featureProfile.object_context, hasDevice]);
 
     const toggleContext = (capabilityId: string) => {
-        if (!hasDevice || !assistantEnabled || !featureProfile.object_context) return;
+        if (!contextConnection || !assistantEnabled || !featureProfile.object_context) return;
         const next = selectedCapabilityIds.includes(capabilityId)
             ? selectedCapabilityIds.filter((id) => id !== capabilityId)
             : [...selectedCapabilityIds, capabilityId];
@@ -452,7 +464,9 @@ export function AiAssistantWorkspace({
             setSelectedCapabilityIds(next);
             return;
         }
-        if (chat.updateContext(next)) setSelectedCapabilityIds(next);
+        if (chat.updateContext(next.filter(id => id !== CURRENT_SCREEN_CAPABILITY_ID), contextConnection)) {
+            setSelectedCapabilityIds(next);
+        }
     };
 
     useEffect(() => {
@@ -660,21 +674,25 @@ export function AiAssistantWorkspace({
     const issueSources = !rehearsal ? <AssistantIssueSources value={selectedIssues} onChange={setSelectedIssues}
         disabled={!assistantEnabled || chat.hydrating || !!chat.deliveryState || chat.historyRestoreFailed} /> : null;
 
-    return (
-        <>
-            <AssistantDetailsSheet panel={panel} onPanelChange={setPanel} sections={{
-                details: detailsContent,
-                ...(hasDevice ? {
-                capabilities: <AssistantCapabilityList entries={capabilities.snapshot?.entries ?? []}
-                    loading={capabilities.loading} error={Boolean(capabilities.error)}
-                    refreshDisabled={!assistantEnabled || !isConnected} onRefresh={capabilities.refresh} />,
-                context: <>            {featureProfile.object_context && (
+    const contextSection = <>
+        {featureProfile.object_context && (hasDevice || personalScope) && (
             <Card data-testid="ai-assistant-context-selector">
                 <CardHeader>
                     <CardTitle className="text-base">{t('pages.aiAssistant.contextTitle')}</CardTitle>
                     <CardDescription>{t('pages.aiAssistant.contextDescription')}</CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-2">
+                    {!hasDevice && requestDevices.selected.length > 1 && <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                            <Button type="button" variant="outline" disabled={chat.contextUpdating}>
+                                {contextDevice?.name ?? t('pages.aiAssistant.requestDevices')}
+                            </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent>
+                            {requestDevices.selected.map(device => <DropdownMenuItem key={device.id}
+                                onSelect={() => setContextDeviceChoice(device.id)}>{device.name}</DropdownMenuItem>)}
+                        </DropdownMenuContent>
+                    </DropdownMenu>}
                     {contextCapabilities.length === 0 && (
                         <p className="text-sm text-muted-foreground">
                             {t('pages.aiAssistant.contextEmpty')}
@@ -687,7 +705,8 @@ export function AiAssistantWorkspace({
                             <Button variant="unstyled"
                                 key={id}
                                 type="button"
-                                disabled={!assistantEnabled || !entry.ready || chat.running}
+                                disabled={!assistantEnabled || (!entry.ready && (hasDevice || !selected))
+                                    || chat.running || chat.contextUpdating}
                                 onClick={() => toggleContext(id)}
                                 className="flex w-full items-center justify-between gap-3 rounded-md border px-3 py-2 text-left disabled:cursor-not-allowed disabled:opacity-50"
                             >
@@ -730,6 +749,9 @@ export function AiAssistantWorkspace({
                                         </span>
                                         <span className="block text-xs text-muted-foreground">
                                             {attachment.providerId} · {attachment.kind}
+                                            {!hasDevice && attachment.deviceRef
+                                                ? ` · ${requestDevices.selected.find(device => device.id === attachment.deviceRef)?.name ?? attachment.deviceRef}`
+                                                : ''}
                                         </span>
                                     </span>
                                     <span className="flex shrink-0 items-center gap-1">
@@ -761,9 +783,19 @@ export function AiAssistantWorkspace({
                     )}
                 </CardContent>
             </Card>
-            )}
-                {issueSources}
-</>,
+        )}
+        {issueSources}
+    </>;
+
+    return (
+        <>
+            <AssistantDetailsSheet panel={panel} onPanelChange={setPanel} sections={{
+                details: detailsContent,
+                context: contextSection,
+                ...(hasDevice ? {
+                capabilities: <AssistantCapabilityList entries={capabilities.snapshot?.entries ?? []}
+                    loading={capabilities.loading} error={Boolean(capabilities.error)}
+                    refreshDisabled={!assistantEnabled || !isConnected} onRefresh={capabilities.refresh} />,
                 connection: <>
             {(recoveryConnection?.connection_id === deskId) && <FileRecoverySettings
                 key={deskId} target={{ connection: deskId, device_id: recoveryConnection?.device_id }} />}
@@ -797,7 +829,7 @@ export function AiAssistantWorkspace({
                 />
             </div>
 </>,
-                } : (issueSources ? { context: issueSources } : {})),
+                } : {}),
             }} />
             {hasDevice && <SessionTargetDialog
                 targets={chat.sessionTargets}
@@ -1135,7 +1167,7 @@ export function AiAssistantWorkspace({
                             </Button>}
                             {(hasDevice || noReview || automaticApproval) && <AssistantComposerStatus automaticApproval={automaticApproval} noReview={noReview}
                                 onApprovalSettings={() => setApprovalSettingsOpen(true)}
-                                contextCount={hasDevice ? selectedContextCount : 0} onContext={() => setPanel('context')} startGoal={startGoal}
+                                contextCount={selectedContextCount} onContext={() => setPanel('context')} startGoal={startGoal}
                                 onClearGoal={() => { setStartGoal(false); setPreviousCompletedGoalId(null); }} />}
                             <div className="ml-auto flex shrink-0 items-center gap-1">
                                 <AssistantContextMeter usage={chat.contextUsage} draft={question} />

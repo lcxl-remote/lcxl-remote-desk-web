@@ -1148,6 +1148,18 @@ impl SignalAiAssistantTools {
             return Ok(());
         }
         build_read_operation(call)?;
+        if self.selected_device_fence.is_some()
+            && desk_diagnose_core::input_read_context::live_read::target_kind(&call.name).is_some()
+        {
+            let binding = self.object_binding()?;
+            desk_diagnose_core::input_read_context::live_read::target(
+                binding.original,
+                binding.device_id,
+                &call.name,
+                binding.now_unix_ms,
+            )?;
+            return Ok(());
+        }
         if desk_diagnose_core::provider_preflight::text_file::uses_session_file_read(call)? {
             return Ok(());
         }
@@ -5924,7 +5936,9 @@ impl SignalAiAssistantTools {
             .map_err(Into::into);
         }
         let (capability, mut input) = build_read_operation(call)?;
-        if capability == desk_agent_protocol::Capability::OfficeDocumentInspect {
+        if capability == desk_agent_protocol::Capability::OfficeDocumentInspect
+            && self.selected_device_fence.is_none()
+        {
             let document = self.selected_office_document.clone().ok_or_else(|| {
                 error(
                     AgentErrorKind::PermissionDenied,
@@ -5993,14 +6007,17 @@ impl SignalAiAssistantTools {
             }
             _ => None,
         };
-        if matches!(
-            capability,
-            desk_agent_protocol::Capability::SpreadsheetLiveInspect
-                | desk_agent_protocol::Capability::DocumentLiveInspect
-                | desk_agent_protocol::Capability::PresentationLiveInspect
-        ) && !desk_diagnose_core::input_read_context::object_read::is_batch_document_read(
-            &call.name,
-        ) {
+        if self.selected_device_fence.is_none()
+            && matches!(
+                capability,
+                desk_agent_protocol::Capability::SpreadsheetLiveInspect
+                    | desk_agent_protocol::Capability::DocumentLiveInspect
+                    | desk_agent_protocol::Capability::PresentationLiveInspect
+            )
+            && !desk_diagnose_core::input_read_context::object_read::is_batch_document_read(
+                &call.name,
+            )
+        {
             let target = live_target.ok_or_else(|| {
                 error(
                     AgentErrorKind::PermissionDenied,

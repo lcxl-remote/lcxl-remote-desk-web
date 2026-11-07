@@ -305,6 +305,9 @@ pub fn inventory_snapshot(
             context_selectable: crate::ai_assistant::is_selectable_context_capability_id(
                 &item.capability_id,
             ),
+            selectable_device_context: crate::input_read_context::live_read::selectable_descriptor(
+                capability,
+            ),
             compiled: item.compiled,
             enabled: item.enabled,
             connected: item.connected,

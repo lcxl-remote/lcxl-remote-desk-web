@@ -1578,8 +1578,9 @@ export function useAiAssistantChat({
         const nativeTurn = Boolean(rehearsal || (deskId && startGoal));
         if (nativeTurn && (activeRequest.current || remoteActive)) return false;
         const selectedObjects = attachments.filter(attachment =>
-            attachment.state === 'active' && attachment.kind !== 'interactive_session'
-            && (deskId || (attachment.deviceRef && requestTargetRefs?.includes(attachment.deviceRef)))
+            attachment.state === 'active'
+            && (deskId ? attachment.kind !== 'interactive_session'
+                : attachment.deviceRef && requestTargetRefs?.includes(attachment.deviceRef))
         );
         if (selectedObjects.some(attachment => attachment.expiresAtUnixMs <= Date.now())) {
             deliveryFailure.current = 'selected_context_expired';

@@ -694,3 +694,84 @@ fn all_live_read_grants_survive_readiness_ref_rotation_on_both_servers() {
         }
     }
 }
+
+#[test]
+fn selected_live_reads_freeze_only_explicit_device_objects() {
+    use crate::{
+        capability_availability::CapabilityAvailability,
+        live_context::{LiveContextBuild, build_live_context},
+    };
+    use desk_agent_protocol::data_lineage::DestinationIdentity;
+    let registry = crate::ai_assistant::ai_assistant_provider_registry();
+    let name = "inspect_live_document";
+    let capability = registry.capability_for_tool(name).unwrap();
+    let id = &capability.wire.capability_id;
+    let provider = registry.provider_for_capability(id).unwrap();
+    let ids = vec![id.clone()];
+    let inventory = [CapabilityAvailability {
+        provider_id: provider.wire.provider_id.clone(),
+        capability_id: id.clone(),
+        tool_name: name.into(),
+        compiled: true,
+        enabled: true,
+        connected: true,
+        ready: true,
+        reason: None,
+    }];
+    let destination = DestinationIdentity::Model {
+        connection_id: "model".into(),
+        connection_revision: 1,
+        model_id: "test".into(),
+        profile_revision: 1,
+    };
+    let first = readiness();
+    let mut second = readiness();
+    second.context_references[0].object_ref.token = "second-device-document".into();
+    let mut input = ReadContextSelection::default();
+    for (device, readiness) in [("device-a", &first), ("device-b", &second)] {
+        let mut nonce = 0;
+        let metadata = build_live_context(
+            LiveContextBuild {
+                registry: &registry,
+                inventory: &inventory,
+                readiness: Some(readiness),
+                selected_capability_ids: &ids,
+                request_id: device,
+                actor_id: "owner",
+                device_id: device,
+                destination: &destination,
+                now_unix_ms: now(),
+            },
+            || {
+                nonce += 1;
+                format!("{device}-{nonce}")
+            },
+        )
+        .unwrap();
+        capture_selected(
+            &mut input,
+            device,
+            &metadata.candidates,
+            readiness,
+            &destination,
+            now(),
+        )
+        .unwrap();
+        input.object_attachments.extend(metadata.candidates);
+    }
+    capture_selected(&mut input, "not-selected", &[], &first, &destination, now()).unwrap();
+    input.validate().unwrap();
+    assert!(input.is_selectable_input());
+    assert_eq!(input.tool_names, [name]);
+    assert_eq!(
+        target(&input, "device-a", name, now()).unwrap().object_ref,
+        first.context_references[0].object_ref
+    );
+    assert_eq!(
+        target(&input, "device-b", name, now()).unwrap().object_ref,
+        second.context_references[0].object_ref
+    );
+    assert!(target(&input, "not-selected", name, now()).is_err());
+    input.object_attachments.pop();
+    assert!(!input.is_selectable_input());
+}

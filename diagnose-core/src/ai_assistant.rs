@@ -2749,7 +2749,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
     raw_input.wire.capabilities[0].prerequisites.platforms = vec![CapabilityPlatform::Windows];
     raw_input.capabilities[0].wire.prerequisites.platforms = vec![CapabilityPlatform::Windows];
     let office = provider_for_tool(
-        TargetBinding::NativeContext,
+        TargetBinding::RequestDevice,
         crate::tool_exposure::ExposureRequirement::SelectedContext,
         OFFICE_DOCUMENT_PROVIDER_ID,
         OFFICE_DOCUMENT_CAPABILITY_ID,
@@ -2769,7 +2769,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
         merge_provider_capabilities(
             merge_provider_capabilities(
                 provider_for_tool(
-                    TargetBinding::NativeContext,
+                    TargetBinding::RequestDevice,
                     crate::tool_exposure::ExposureRequirement::SelectedContext,
                     SPREADSHEET_LIVE_PROVIDER_ID,
                     SPREADSHEET_LIVE_INSPECT_CAPABILITY_ID,
@@ -2845,7 +2845,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
         merge_provider_capabilities(
             merge_provider_capabilities(
                 provider_for_tool(
-                    TargetBinding::NativeContext,
+                    TargetBinding::RequestDevice,
                     crate::tool_exposure::ExposureRequirement::SelectedContext,
                     DOCUMENT_LIVE_PROVIDER_ID,
                     DOCUMENT_LIVE_INSPECT_CAPABILITY_ID,
@@ -2921,7 +2921,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
         merge_provider_capabilities(
             merge_provider_capabilities(
                 provider_for_tool(
-                    TargetBinding::NativeContext,
+                    TargetBinding::RequestDevice,
                     crate::tool_exposure::ExposureRequirement::SelectedContext,
                     PRESENTATION_LIVE_PROVIDER_ID,
                     PRESENTATION_LIVE_INSPECT_CAPABILITY_ID,

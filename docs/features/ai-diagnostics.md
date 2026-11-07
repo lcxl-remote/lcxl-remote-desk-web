@@ -17,6 +17,8 @@ You can also ask the assistant to propose a directory on one of the request's de
 
 On devices that support the file format, the assistant can also choose a document, presentation, or workbook from the directory result and inspect the file. Working with an open document or saving changes uses separate operations.
 
+To read a live document, open **Context**, choose the device if the conversation has more than one, and select the available Excel, Numbers, Pages, or Keynote context. The device must have the corresponding adapter ready. Selecting context does not approve a read. Once the request is accepted, later permission approval still reads the original device and document; if that document closes, select the intended context again before sending a new request.
+
 Markdown and plain-text previews are generated on the source device. While a preview is available, page through it in its card. Changing the chat's device selection does not change the card's source.
 
 1. Sign in, open an online device you own and turn on **AI Assistant enabled** for that device.

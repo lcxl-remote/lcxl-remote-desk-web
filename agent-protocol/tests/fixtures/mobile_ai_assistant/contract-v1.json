@@ -202,6 +202,7 @@
           ]
         },
         "context_selectable": true,
+        "selectable_device_context": false,
         "compiled": true,
         "enabled": true,
         "connected": true,
@@ -211,6 +212,7 @@
     ]
   },
   "context_update": {
+    "conversation_target": "fixed_device",
     "conversation_id": "conversation-1",
     "client_request_id": "context-request-1",
     "selected_capability_ids": [
