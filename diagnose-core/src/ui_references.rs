@@ -1152,7 +1152,12 @@ impl UiReferenceState {
                 ("body_field_id", &["b"][..]),
             ] {
                 if let Some(id) = value.get_mut(field) {
+                    let previous = expected.len();
                     self.expand_id(id, prefixes, expected)?;
+                    if tool == "inspect_desktop_ui" && field == "element_id" {
+                        // Search uses a stable element ID, not a snapshot reference.
+                        expected.truncate(previous);
+                    }
                 }
             }
             if let Some(steps) = value.get_mut("steps").and_then(Value::as_array_mut) {

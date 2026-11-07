@@ -128,16 +128,22 @@ async fn every_request_device_read_projects_parses_and_keeps_its_exact_target() 
                 .contains(&json!("target_ref")),
             "{name}"
         );
-        if matches!(name, "read_current_screen" | "inspect_desktop_ui") {
-            for field in NATIVE_OBJECT_FIELDS {
-                assert!(
-                    model_spec.parameters_schema["properties"]
-                        .get(field)
-                        .is_none(),
-                    "{name}: leaked {field}"
-                );
-            }
-        }
+        let mut fixed_spec = descriptor.tool_spec.clone();
+        crate::ui_model_ids::project_tool(&mut fixed_spec);
+        let mut selected_schema = model_spec.parameters_schema["properties"].clone();
+        selected_schema
+            .as_object_mut()
+            .unwrap()
+            .remove("target_ref");
+        assert_eq!(
+            selected_schema,
+            fixed_spec
+                .parameters_schema
+                .get("properties")
+                .cloned()
+                .unwrap_or_else(|| json!({})),
+            "{name}"
+        );
         assert!(
             read_tools(&devices[1..], registry, true).is_empty(),
             "{name}"
@@ -273,11 +279,13 @@ async fn desktop_object_approval_and_dispatch_keep_the_observed_device_and_incar
 
     let registry = crate::ai_assistant::ai_assistant_provider_registry_ref();
     let screen = registry.capability_for_tool("read_current_screen").unwrap();
+    let ui = registry.capability_for_tool("inspect_desktop_ui").unwrap();
     let mut session = session();
-    let devices = [
-        device("a", vec![screen.wire.capability_id.clone()]),
-        device("b", vec![screen.wire.capability_id.clone()]),
+    let ready = vec![
+        screen.wire.capability_id.clone(),
+        ui.wire.capability_id.clone(),
     ];
+    let devices = [device("a", ready.clone()), device("b", ready)];
     let window = |snapshot: &str| {
         json!({"token":"same-window-token","snapshot_id":snapshot,
             "object_kind":"window","expires_at":""})
@@ -285,9 +293,12 @@ async fn desktop_object_approval_and_dispatch_keep_the_observed_device_and_incar
     for (device, snapshot) in [("a", "snapshot-a"), ("b", "snapshot-b")] {
         let mut call = tool("inspect_desktop_ui", json!({}));
         call.id = format!("observe-{device}");
-        let content = json!({"ReadContext":{"DesktopUiInspect":{"owner_selectable_windows":[
-            {"title":"Identical title","object_ref":window(snapshot)}
-        ]}}})
+        let element = format!("native-element-{device}");
+        let content = json!({"ReadContext":{"DesktopUiInspect":{
+            "owner_selectable_windows":[{"title":"Identical title","object_ref":window(snapshot)}],
+            "nodes":[{"element_id":element,"object_ref":{"token":element,"snapshot_id":snapshot,
+                "object_kind":"ui_element","expires_at":""}}]
+        }}})
         .to_string();
         let output = ToolRunOutput {
             format: ToolOutputFormat::Json,
@@ -408,6 +419,37 @@ async fn desktop_object_approval_and_dispatch_keep_the_observed_device_and_incar
     assert!(
         require_current_read_target(&session, &tool("read_current_screen", input_b), b).is_err()
     );
+    for (target, element, allowed) in [("a", "e1", true), ("b", "e1", false), ("b", "e2", true)] {
+        let call = resolve(
+            &tool(
+                REQUEST_CAPABILITY_GRANTS_TOOL_NAME,
+                json!({
+                    "target_ref":target,
+                    "items":[{"tool_name":"inspect_desktop_ui",
+                        "exact_input":{"element_id":element,"element_only":true},
+                        "reason":"Read a specific control"}]
+                }),
+            ),
+            &session,
+        );
+        let permission = plan_device_permission(
+            &NoDeviceCommands,
+            Some(registry),
+            &session,
+            &devices,
+            &reads,
+            &call,
+            "control",
+            NOW,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            permission.is_ok(),
+            allowed,
+            "{target}/{element}: {permission:?}"
+        );
+    }
 }
 
 #[tokio::test]

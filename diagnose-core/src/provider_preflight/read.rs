@@ -104,8 +104,6 @@ impl ReadCallPreflight {
         {
             return Err(unavailable());
         }
-        let input = serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?;
-        crate::request_devices::validate_native_read(descriptor, &input)?;
         Self::build_edge(registry, surface, call, binding, true)
     }
 
