@@ -274,7 +274,8 @@ impl SignalCapabilityGrantStore {
                 return Err(invalid());
             }
             let origin =
-                ActionResultOrigin::capture(&registry, session, call).map_err(|_| invalid())?;
+                ActionResultOrigin::capture_for_device(&registry, session, &plan.device_id, call)
+                    .map_err(|_| invalid())?;
             let binding = ComputerBinding {
                 schema_version: 1,
                 connection_id: connection_id.into(),

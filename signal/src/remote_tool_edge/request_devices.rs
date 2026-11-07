@@ -246,6 +246,30 @@ impl SignalAiAssistantTools {
         scoped.authorize_and_execute_command(call, ctx).await
     }
 
+    pub(super) async fn execute_selected_action(
+        &self,
+        call: &ToolCall,
+        ctx: &ExecContext,
+    ) -> Result<ExecOutcome, AgentError> {
+        let (reference, native) = desk_diagnose_core::request_devices::split_device_call(call)?;
+        let session = self.authoritative_session().await?;
+        let (held, connection) = self.selected_connection(&session, &reference).await?;
+        if ctx.assistant_turn_fence.as_ref() != Some(&held) {
+            return Err(unavailable());
+        }
+        let current = crate::computer_use_readiness::global_computer_use_readiness_cache()
+            .get_fresh(&connection, chrono::Utc::now())
+            .ok_or_else(unavailable)?;
+        let browser =
+            desk_diagnose_core::ai_assistant::browser_surface_context(Some(&current.readiness));
+        let mut scoped =
+            self.scoped_request_device(held, connection, current.readiness.revision, Vec::new(), 0);
+        let state = Arc::get_mut(&mut scoped.0).expect("configure selected browser before sharing");
+        state.selected_browser_surface = browser;
+        scoped.observe_tool_input(&native, self.observed(call));
+        scoped.confirm_and_exec(&native, ctx).await
+    }
+
     fn scoped_request_device(
         &self,
         held: AssistantTurnFence,

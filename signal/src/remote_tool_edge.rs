@@ -5062,7 +5062,7 @@ impl SignalAiAssistantTools {
                     }
                 };
                 let dispatch_id = match desk_diagnose_core::future::boxed(|| async {
-                    store.record_dispatch_intent(prepare()).await
+                    store.record_dispatch_intent_for_target(prepare(), self.selected_device_fence.as_ref()).await
                 })
                 .await
                 .map_err(|db_error| {
@@ -5109,8 +5109,8 @@ impl SignalAiAssistantTools {
                 return Ok(ExecOutcome::Unknown(
                     desk_diagnose_core::session::ActionIdentity::new(
                         prepared.work_id,
-                        server_call_id,
-                        dispatch_id,
+                        &server_call_id,
+                        &dispatch_id,
                         desk_diagnose_core::session::WorkKind::ComputerAction,
                     ),
                 ));
@@ -5150,7 +5150,9 @@ impl SignalAiAssistantTools {
         );
         let generation = dispatch_id.clone();
         let plan = SealedComputerActionPlan {
-            turn_scope: None,
+            turn_scope: self.selected_device_fence.as_ref()
+                .map(desk_diagnose_core::action_turn_fence::AssistantTurnFence::computer_action_scope)
+                .transpose()?,
             schema_version: COMPUTER_USE_SCHEMA_VERSION,
             work_id: claimed.work_id.to_string(),
             action_request_id: server_call_id.clone(),
@@ -5198,7 +5200,14 @@ impl SignalAiAssistantTools {
         }));
         let target = browser_pre_send!({
             let map = self.connections.read().await;
-            map.get(&self.target_connection_id).cloned().ok_or_else(|| {
+            let target = if self.selected_device_fence.is_some() {
+                map.current_oss_server(&self.target_device_id)
+                    .filter(|state| state.model.connection_id == self.target_connection_id
+                        && request_devices::selected_read_connection(state))
+            } else {
+                map.get(&self.target_connection_id)
+            };
+            target.cloned().ok_or_else(|| {
                 error(
                     AgentErrorKind::TargetOffline,
                     "target host is not connected",
@@ -5348,6 +5357,16 @@ impl SignalAiAssistantTools {
             })
             .await?;
             return Err(dispatch_error);
+        }
+        if self.selected_device_fence.is_some() {
+            browser_pre_send!(
+                store.validate_claimed_dispatch_for_target(
+                    &dispatch_id, prepare(), self.selected_device_fence.as_ref(),
+                ).await.map_err(|_| error(
+                    AgentErrorKind::PermissionDenied, "Selected browser action no longer has authority",
+                    false, true,
+                ))
+            );
         }
         let sent = desk_diagnose_core::future::boxed(|| async { target.session.write().await })
             .await
@@ -6729,6 +6748,20 @@ impl ToolSeam for SignalAiAssistantTools {
         ctx: &ExecContext,
         version: Option<&desk_diagnose_core::action_version::ActionVersion>,
     ) -> ReadCompletion {
+        if self.target_device_id.is_empty()
+            && self
+                .provider_registry
+                .capability_for_tool(&call.name)
+                .is_some_and(desk_diagnose_core::request_devices::selected_action_descriptor)
+        {
+            return ReadCompletion {
+                outcome: self
+                    .execute_selected_action(call, ctx)
+                    .await
+                    .and_then(browser_read_outcome),
+                version_advance: None,
+            };
+        }
         if call.name != "browser_wait_for" {
             return ReadCompletion {
                 outcome: self.read_outcome(call).await,
@@ -6764,6 +6797,14 @@ impl ToolSeam for SignalAiAssistantTools {
         call: &ToolCall,
         ctx: &ExecContext,
     ) -> Result<ExecOutcome, AgentError> {
+        if self.target_device_id.is_empty()
+            && self
+                .provider_registry
+                .capability_for_tool(&call.name)
+                .is_some_and(desk_diagnose_core::request_devices::selected_action_descriptor)
+        {
+            return self.execute_selected_action(call, ctx).await;
+        }
         if call.name == "exec_command" {
             return self.authorize_and_execute_command(call, ctx).await;
         }

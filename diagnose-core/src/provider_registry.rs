@@ -66,13 +66,7 @@ impl CapabilityDescriptor {
                     .tool_spec
                     .parameters_schema
                     .pointer("/properties/target_ref")
-                    .is_some()
-                || (!matches!(
-                    self.wire.effect,
-                    desk_agent_protocol::capability_provider::CapabilityEffect::ReadDevice
-                        | desk_agent_protocol::capability_provider::CapabilityEffect::ReadFile
-                        | desk_agent_protocol::capability_provider::CapabilityEffect::CaptureScreen
-                ) && self.tool_spec.name != crate::command_confirmation::COMMAND_TOOL))
+                    .is_some())
         {
             return Err(RegistryError::InvalidToolSchema(
                 self.tool_spec.name.clone(),

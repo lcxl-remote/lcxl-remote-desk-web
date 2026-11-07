@@ -19,6 +19,8 @@ On devices that support the file format, the assistant can also choose a documen
 
 To read a live document, open **Context**, choose the device if the conversation has more than one, and select the available Excel, Numbers, Pages, or Keynote context. The device must have the corresponding adapter ready. Selecting context does not approve a read. Once the request is accepted, later permission approval still reads the original device and document; if that document closes, select the intended context again before sending a new request.
 
+For a web page on a controlled device, pair the supported browser extension on that device first. The assistant can request permission to open the URL on a selected device and then inspect that page. Page and profile references remain tied to the device that returned them.
+
 Markdown and plain-text previews are generated on the source device. While a preview is available, page through it in its card. Changing the chat's device selection does not change the card's source.
 
 1. Sign in, open an online device you own and turn on **AI Assistant enabled** for that device.

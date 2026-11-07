@@ -1764,6 +1764,16 @@ async fn validate_selected_dispatch(
     let supported = match request.call.tool_name {
         name if desk_diagnose_core::ai_assistant::ai_assistant_provider_registry_ref()
             .capability_for_tool(name)
+            .is_some_and(desk_diagnose_core::request_devices::selected_action_descriptor) => {
+                desk_diagnose_core::ai_assistant::ai_assistant_provider_registry_ref()
+                    .capability_for_tool(name)
+                    .is_some_and(|descriptor| {
+                        descriptor.wire.effect == request.call.effect
+                            && desk_diagnose_core::request_devices::permits_selected_action(session, descriptor)
+                    })
+            },
+        name if desk_diagnose_core::ai_assistant::ai_assistant_provider_registry_ref()
+            .capability_for_tool(name)
             .is_some_and(desk_diagnose_core::request_devices::selected_read_descriptor) => {
                 matches!(request.call.risk_tier, CapabilityRiskTier::R0 | CapabilityRiskTier::R1)
             },

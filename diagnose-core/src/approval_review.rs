@@ -961,32 +961,35 @@ impl ApprovalReviewCandidate {
                 return Err(ApprovalReviewError::InvalidCandidate);
             }
         } else if self.device_id.is_empty() {
-            let (target, selected_read) = if let Some(target) = action.get("selected_device_target")
-            {
-                let target: crate::request_devices::SelectedDeviceTarget =
-                    serde_json::from_value(target.clone())
-                        .map_err(|_| ApprovalReviewError::InvalidCandidate)?;
-                valid_id(&target.connection_id)?;
-                if target.readiness_revision == 0 {
-                    return Err(ApprovalReviewError::InvalidCandidate);
-                }
-                (target.device_id, true)
-            } else {
-                (
-                    action
-                        .get("command_confirmation")
-                        .and_then(|confirmation| confirmation.get("target_device_id"))
-                        .and_then(serde_json::Value::as_str)
-                        .ok_or(ApprovalReviewError::InvalidCandidate)?
-                        .to_owned(),
-                    false,
-                )
-            };
+            let (target, selected_device) =
+                if let Some(target) = action.get("selected_device_target") {
+                    let target: crate::request_devices::SelectedDeviceTarget =
+                        serde_json::from_value(target.clone())
+                            .map_err(|_| ApprovalReviewError::InvalidCandidate)?;
+                    valid_id(&target.connection_id)?;
+                    if target.readiness_revision == 0 {
+                        return Err(ApprovalReviewError::InvalidCandidate);
+                    }
+                    (target.device_id, true)
+                } else {
+                    (
+                        action
+                            .get("command_confirmation")
+                            .and_then(|confirmation| confirmation.get("target_device_id"))
+                            .and_then(serde_json::Value::as_str)
+                            .ok_or(ApprovalReviewError::InvalidCandidate)?
+                            .to_owned(),
+                        false,
+                    )
+                };
             valid_id(&target)?;
-            let valid_tool = if selected_read {
+            let valid_tool = if selected_device {
                 crate::ai_assistant::ai_assistant_provider_registry_ref()
                     .capability_for_tool(&self.tool_name)
-                    .is_some_and(crate::request_devices::selected_read_descriptor)
+                    .is_some_and(|descriptor| {
+                        crate::request_devices::selected_read_descriptor(descriptor)
+                            || crate::request_devices::selected_action_descriptor(descriptor)
+                    })
             } else {
                 self.tool_name == crate::command_confirmation::COMMAND_TOOL
             };

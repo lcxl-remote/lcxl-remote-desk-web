@@ -557,7 +557,8 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
             }
             if let Some(capability) = providers.capability_for_tool(name)
                 && !(session.has_admitted_personal_input()
-                    && crate::request_devices::selected_read_descriptor(capability))
+                    && (crate::request_devices::selected_read_descriptor(capability)
+                        || crate::request_devices::selected_action_descriptor(capability)))
             {
                 definition_registry.push(capability.registered_tool());
             }
@@ -2981,11 +2982,16 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                                             tool, session,
                                         );
 
+                                    let selected_browser =
+                                        crate::request_devices::is_selected_action_tool(
+                                            tool, session,
+                                        );
                                     let selected_device_command = call.name
                                         == crate::command_confirmation::COMMAND_TOOL
                                         && crate::request_devices::selected_command_turn(session);
                                     if disclosure_enabled
                                         && !selected_device_read
+                                        && !selected_browser
                                         && !selected_device_command
                                         && let Some(providers) = deps.provider_registry
                                         && let Some(capability) =
@@ -3338,16 +3344,26 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                                                 );
                                                 let external_read =
                                                     tool.effect == ToolEffect::ExternalRead;
-                                                let read_requires_version = !external_read
-                                                    && !selected_device_read
-                                                    && deps.tools.read_requires_version(call);
+                                                let browser_device = if selected_browser {
+                                                    crate::request_devices::selected_action_device(
+                                                        session, call,
+                                                    )?
+                                                } else {
+                                                    None
+                                                };
+                                                let read_requires_version = browser_device
+                                                    .is_some()
+                                                    || (!external_read
+                                                        && !selected_device_read
+                                                        && deps.tools.read_requires_version(call));
                                                 let version = if read_requires_version {
                                                     // Durable Provider work compares this persisted action boundary.
                                                     session.turn_state =
                                                         TurnState::AwaitingApproval;
                                                     deps.session_seam.save(session).await?;
-                                                    crate::action_version::ActionVersion::capture(
+                                                    crate::action_version::ActionVersion::capture_for_device(
                                                         session, &call.id,
+                                                        browser_device.as_deref().unwrap_or(&session.device_id),
                                                     )?
                                                 } else {
                                                     None
@@ -3360,7 +3376,8 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                                                             .await,
                                                         version_advance: None,
                                                     }
-                                                } else if selected_device_read {
+                                                } else if selected_device_read && !selected_browser
+                                                {
                                                     crate::seam::ReadCompletion {
                                                         outcome: crate::future::boxed(|| {
                                                             deps.tools.run_request_device_read(
@@ -3381,7 +3398,9 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                                                             ) {
                                                             None
                                                         } else {
-                                                            crate::action_turn_fence::AssistantTurnFence::from_session(session)?
+                                                            crate::action_turn_fence::AssistantTurnFence::for_device(
+                                                                session, browser_device.as_deref().unwrap_or(&session.device_id),
+                                                            )?
                                                         },
                                                         conversation_id: session
                                                             .conversation_id

@@ -137,7 +137,8 @@ pub fn permits_permission_request(
             && registry
                 .capability_for_tool(&item.tool_name)
                 .is_some_and(|capability| {
-                    crate::request_devices::selected_read_descriptor(capability)
+                    (crate::request_devices::selected_read_descriptor(capability)
+                        || crate::request_devices::permits_selected_action(session, capability))
                         && capability.wire.effect == item.expected_effect
                         && registry
                             .provider_for_capability(&capability.wire.capability_id)

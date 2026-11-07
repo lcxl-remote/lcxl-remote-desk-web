@@ -1958,20 +1958,22 @@ async fn prepare_composed_turn(
                     if let Some(request) = selected_permission
                         && let Some(target) = request.selected_device_target()
                         && grant_readiness_revision == target.readiness_revision
-                    {
-                        if request.state == desk_diagnose_core::dynamic_run::PermissionRequestState::Approved
-                            && capability_grants.iter().any(|grant| {
-                                grant.grant_id == desk_diagnose_core::permission_grant::permission_item_grant_id(
-                                    &conversation_id, request, &request.items[0].item_id,
+                        && request.state
+                            == desk_diagnose_core::dynamic_run::PermissionRequestState::Approved
+                        && capability_grants.iter().any(|grant| {
+                            grant.grant_id
+                                == desk_diagnose_core::permission_grant::permission_item_grant_id(
+                                    &conversation_id,
+                                    request,
+                                    &request.items[0].item_id,
                                 )
-                                    && grant.readiness_revision == target.readiness_revision
-                                    && grant.revoked_at_unix_ms.is_none()
-                                    && grant.remaining_uses > 0
-                                    && grant.expires_at_unix_ms > now_unix_ms
-                            })
-                        {
-                            selected_source_tools.insert(request.items[0].tool_name.clone());
-                        }
+                                && grant.readiness_revision == target.readiness_revision
+                                && grant.revoked_at_unix_ms.is_none()
+                                && grant.remaining_uses > 0
+                                && grant.expires_at_unix_ms > now_unix_ms
+                        })
+                    {
+                        selected_source_tools.insert(request.items[0].tool_name.clone());
                     }
                     if !selected_file_roots.is_empty() {
                         selected_source_tools.insert("inspect_files".into());

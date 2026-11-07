@@ -100,16 +100,37 @@ impl SignalAiAssistantTools {
                     image_data_url: None,
                     document_preview: None,
                 };
+                let data_envelope = if self.selected_device_fence.is_some()
+                    && matches!(plan.actions[0].action, ComputerActionKind::Browser(_))
+                {
+                    let session = self.authoritative_session().await?;
+                    let origin =
+                        desk_diagnose_core::action_result::ActionResultOrigin::capture_for_device(
+                            &self.provider_registry,
+                            &session,
+                            &self.target_device_id,
+                            call,
+                        )?;
+                    let action = desk_diagnose_core::session::ActionIdentity::new(
+                        plan.work_id.parse().map_err(|_| invalid())?,
+                        &plan.action_request_id,
+                        &plan.execution_generation,
+                        desk_diagnose_core::session::WorkKind::ComputerAction,
+                    );
+                    Some(origin.receipt(action, 1, now_ms, &output)?.envelope)
+                } else {
+                    None
+                };
                 return Ok(match projection.outcome {
                     CapabilityDispatchOutcome::Succeeded => ExecOutcome::Executed {
                         output,
                         event_id: None,
-                        data_envelope: None,
+                        data_envelope,
                     },
                     CapabilityDispatchOutcome::Failed => ExecOutcome::Failed {
                         output,
                         event_id: None,
-                        data_envelope: None,
+                        data_envelope,
                     },
                 });
             }

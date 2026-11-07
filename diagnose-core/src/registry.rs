@@ -336,6 +336,7 @@ pub fn lookup_for_session<'a>(
         .find(|tool| {
             tool.name() == name
                 && (crate::request_devices::is_selected_read_tool(tool, session)
+                    || crate::request_devices::is_selected_action_tool(tool, session)
                     || (selected_command
                         && tool.effect == ToolEffect::Mutating
                         && tool

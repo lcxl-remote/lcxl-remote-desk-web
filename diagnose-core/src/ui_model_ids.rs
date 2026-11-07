@@ -219,6 +219,7 @@ pub fn resolve_session_call_with_context(
     }
     let inferred = crate::request_devices::infer_single_target(call, session)?;
     let call = inferred.as_ref().unwrap_or(call);
+    crate::request_devices::selected_action_device(session, call)?;
     if call.name == crate::command_confirmation::COMMAND_TOOL
         && crate::request_devices::selected_command_turn(session)
     {

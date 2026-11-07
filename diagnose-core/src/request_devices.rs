@@ -21,6 +21,41 @@ pub(crate) fn accepts_device_reads(session: &crate::session::PersistedAgentSessi
         && !session.is_subagent_result_turn()
 }
 
+pub fn selected_action_descriptor(
+    descriptor: &crate::provider_registry::CapabilityDescriptor,
+) -> bool {
+    use desk_agent_protocol::capability_provider::CapabilityEffect;
+    descriptor.target_binding == crate::provider_registry::TargetBinding::RequestDevice
+        && descriptor.wire.tool_name != crate::command_confirmation::COMMAND_TOOL
+        && !matches!(
+            descriptor.wire.effect,
+            CapabilityEffect::ReadDevice
+                | CapabilityEffect::ReadFile
+                | CapabilityEffect::CaptureScreen
+        )
+}
+
+pub fn permits_selected_action(
+    session: &PersistedAgentSession,
+    descriptor: &crate::provider_registry::CapabilityDescriptor,
+) -> bool {
+    accepts_device_reads(session)
+        && selected_action_descriptor(descriptor)
+        && (!descriptor.wire.effect.is_side_effecting()
+            || (session.agent_role.allows_effect(ToolEffect::Mutating)
+                && session.allows_new_mutation()))
+}
+
+pub(crate) fn is_selected_action_tool(
+    tool: &RegisteredTool,
+    session: &PersistedAgentSession,
+) -> bool {
+    has_target_selector(&tool.spec)
+        && crate::ai_assistant::ai_assistant_provider_registry_ref()
+            .capability_for_tool(tool.name())
+            .is_some_and(|descriptor| permits_selected_action(session, descriptor))
+}
+
 pub fn selected_read_descriptor(
     descriptor: &crate::provider_registry::CapabilityDescriptor,
 ) -> bool {
@@ -32,6 +67,8 @@ pub fn selected_read_descriptor(
                 | CapabilityEffect::ReadFile
                 | CapabilityEffect::CaptureScreen
         )
+        || (selected_action_descriptor(descriptor)
+            && descriptor.wire.effect == CapabilityEffect::ReadExternal)
 }
 
 pub fn default_read_source_tools(registry: &ProviderRegistry) -> impl Iterator<Item = &str> {
@@ -59,7 +96,9 @@ pub(crate) fn read_tools(
     registry
         .providers()
         .flat_map(|provider| &provider.capabilities)
-        .filter(|descriptor| selected_read_descriptor(descriptor))
+        .filter(|descriptor| {
+            selected_read_descriptor(descriptor) || permits_selected_action(session, descriptor)
+        })
         .filter(|descriptor| {
             image_input || descriptor.required_capability != Capability::ScreenCaptureCurrent
         })
@@ -75,7 +114,11 @@ pub(crate) fn read_tools(
                 descriptor.wire.effect,
                 &descriptor.wire.data_policy,
             );
-            let callable = floor == desk_agent_protocol::capability_grant::CapabilityRiskTier::R0
+            use desk_agent_protocol::capability_grant::CapabilityRiskTier;
+            let callable = floor == CapabilityRiskTier::R0
+                || (selected_action_descriptor(descriptor)
+                    && !descriptor.wire.effect.is_side_effecting()
+                    && floor == CapabilityRiskTier::R1)
                 || ready.iter().any(|device| {
                     device
                         .approved_read_tools
@@ -375,7 +418,17 @@ pub(crate) async fn plan_device_permission(
                     arguments_json: exact.to_string(),
                     ..call.clone()
                 };
-                crate::read_tools::build_read_operation(&native_call)?;
+                if selected_action_descriptor(descriptor) {
+                    let action = crate::provider_preflight::browser_action_from_call(&native_call, "permission-preflight")?;
+                    let now = chrono::DateTime::parse_from_rfc3339(created_at)
+                        .ok().and_then(|time| u64::try_from(time.timestamp_millis()).ok())
+                        .ok_or_else(invalid)?;
+                    crate::provider_preflight::require_browser_device_page(
+                        &action, session, &target.device_id, now,
+                    )?;
+                } else {
+                    crate::read_tools::build_read_operation(&native_call)?;
+                }
                 if crate::file_model_input::is_read(name) {
                     let now = chrono::DateTime::parse_from_rfc3339(created_at)
                         .ok().and_then(|time| u64::try_from(time.timestamp_millis()).ok())
@@ -474,13 +527,8 @@ fn observed_display(session: &PersistedAgentSession, device_id: &str, display: &
 }
 
 /// Split the model-facing selector from the native read arguments.
-pub fn selected_read(call: &ToolCall) -> Result<(String, ToolCall), AgentError> {
-    let invalid = || crate::subagent::invalid("Select an admitted target_ref for the device read");
-    let registry = crate::ai_assistant::ai_assistant_provider_registry_ref();
-    registry
-        .capability_for_tool(&call.name)
-        .filter(|descriptor| selected_read_descriptor(descriptor))
-        .ok_or_else(invalid)?;
+pub fn split_device_call(call: &ToolCall) -> Result<(String, ToolCall), AgentError> {
+    let invalid = || crate::subagent::invalid("Select an admitted target_ref for this device tool");
     let mut input: serde_json::Value =
         serde_json::from_str(&call.arguments_json).map_err(|_| invalid())?;
     let reference = input
@@ -498,6 +546,43 @@ pub fn selected_read(call: &ToolCall) -> Result<(String, ToolCall), AgentError> 
             ..call.clone()
         },
     ))
+}
+
+pub(crate) fn selected_action_device(
+    session: &PersistedAgentSession,
+    call: &ToolCall,
+) -> Result<Option<String>, AgentError> {
+    let registry = crate::ai_assistant::ai_assistant_provider_registry_ref();
+    if !session.has_admitted_personal_input()
+        || !registry
+            .capability_for_tool(&call.name)
+            .is_some_and(selected_action_descriptor)
+    {
+        return Ok(None);
+    }
+    if !registry
+        .capability_for_tool(&call.name)
+        .is_some_and(|descriptor| permits_selected_action(session, descriptor))
+    {
+        return Err(crate::subagent::invalid(
+            "This assistant cannot perform the selected device operation",
+        ));
+    }
+    let (reference, _) = split_device_call(call)?;
+    session
+        .assistant_request_device(&reference)
+        .map(|target| Some(target.device_id.clone()))
+        .ok_or_else(|| crate::subagent::invalid("The device is outside the original request"))
+}
+
+pub fn selected_read(call: &ToolCall) -> Result<(String, ToolCall), AgentError> {
+    let invalid = || crate::subagent::invalid("Select an admitted target_ref for the device read");
+    let registry = crate::ai_assistant::ai_assistant_provider_registry_ref();
+    registry
+        .capability_for_tool(&call.name)
+        .filter(|descriptor| selected_read_descriptor(descriptor))
+        .ok_or_else(invalid)?;
+    split_device_call(call)
 }
 
 /// Device aliases and native object IDs are not proof of origin on their own.
@@ -625,6 +710,9 @@ impl RequestDevice {
         if !self.ready_for(descriptor) {
             return false;
         }
+        if selected_action_descriptor(descriptor) {
+            return permits_selected_action(session, descriptor);
+        }
         if crate::file_model_input::is_read(name) {
             return self.read_target.as_ref().is_some_and(|target| {
                 session.file_scope.records().iter().any(|record| {
@@ -635,7 +723,7 @@ impl RequestDevice {
                 })
             });
         }
-        true && (descriptor.exposure != crate::tool_exposure::ExposureRequirement::SelectedContext
+        descriptor.exposure != crate::tool_exposure::ExposureRequirement::SelectedContext
             || self
                 .read_target
                 .as_ref()
@@ -643,7 +731,7 @@ impl RequestDevice {
                 .is_some_and(|(target, selection)| {
                     selection
                         .has_device_objects_for_tool(&descriptor.wire.tool_name, &target.device_id)
-                }))
+                })
     }
 
     fn ready_for(&self, descriptor: &crate::provider_registry::CapabilityDescriptor) -> bool {

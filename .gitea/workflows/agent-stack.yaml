@@ -38,6 +38,7 @@ jobs:
           cargo test --locked -p desk-diagnose-core --lib --features stack-budget request_devices::tests::
           cargo test --locked -p desk-signal --lib --features desk-diagnose-core/stack-budget personal_selected_desktop_read_and_whole_screen_resume_on_signal
           cargo test --locked -p desk-signal --lib --features desk-diagnose-core/stack-budget personal_selected_live_document_resumes_on_signal
+          cargo test --locked -p desk-signal --lib --features desk-diagnose-core/stack-budget selectable_browser_
       - name: Shared behavior and unboxed phase layout
         run: |
           cargo test --locked -p desk-diagnose-core -p desk-assistant-data-store -p desk-signal --lib --features desk-diagnose-core/stack-budget -- --skip assistant_data_store::tests::retrieval_native::memory_mutation:: --skip ai_assistant_orchestrator::tests::desktop_permission:: --skip ai_assistant_orchestrator::tests::permission_object::

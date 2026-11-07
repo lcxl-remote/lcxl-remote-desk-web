@@ -184,24 +184,7 @@ impl BrowserCallPreflight {
         device_id: &str,
         now_unix_ms: u64,
     ) -> Result<(), AgentError> {
-        use desk_agent_protocol::browser_control::BrowserAction;
-
-        let page = match &self.request.action {
-            BrowserAction::OpenPage { .. } => return Ok(()),
-            BrowserAction::NavigatePage { page, .. }
-            | BrowserAction::TakeSnapshot { page, .. }
-            | BrowserAction::WaitFor { page, .. }
-            | BrowserAction::FillForm { page, .. }
-            | BrowserAction::FillFormAndUpload { page, .. }
-            | BrowserAction::UploadFile { page, .. }
-            | BrowserAction::ActivateElement { page, .. } => page,
-        };
-        crate::browser_model_ids::require_device_page(
-            &session.conversation,
-            device_id,
-            page,
-            now_unix_ms,
-        )
+        require_browser_device_page(&self.request, session, device_id, now_unix_ms)
     }
 
     pub fn canonical_input_json(&self) -> &str {
@@ -256,6 +239,32 @@ impl BrowserCallPreflight {
             now_unix_ms: subject.now_unix_ms,
         })
     }
+}
+
+pub(crate) fn require_browser_device_page(
+    request: &BrowserActionRequest,
+    session: &crate::session::PersistedAgentSession,
+    device_id: &str,
+    now_unix_ms: u64,
+) -> Result<(), AgentError> {
+    use desk_agent_protocol::browser_control::BrowserAction;
+
+    let page = match &request.action {
+        BrowserAction::OpenPage { .. } => return Ok(()),
+        BrowserAction::NavigatePage { page, .. }
+        | BrowserAction::TakeSnapshot { page, .. }
+        | BrowserAction::WaitFor { page, .. }
+        | BrowserAction::FillForm { page, .. }
+        | BrowserAction::FillFormAndUpload { page, .. }
+        | BrowserAction::UploadFile { page, .. }
+        | BrowserAction::ActivateElement { page, .. } => page,
+    };
+    crate::browser_model_ids::require_device_page(
+        &session.conversation,
+        device_id,
+        page,
+        now_unix_ms,
+    )
 }
 
 pub fn classify_provider_call(

@@ -749,12 +749,13 @@ impl GrantRequestItem {
                 .is_err()
                 || target.readiness_revision == 0
                 || self.canonical_input_json.is_none()
-                || !matches!(
-                    self.expected_effect,
-                    CapabilityEffect::ReadDevice
-                        | CapabilityEffect::ReadFile
-                        | CapabilityEffect::CaptureScreen
-                )
+                || !crate::ai_assistant::ai_assistant_provider_registry_ref()
+                    .capability_for_tool(&self.tool_name)
+                    .is_some_and(|descriptor| {
+                        descriptor.wire.effect == self.expected_effect
+                            && (crate::request_devices::selected_read_descriptor(descriptor)
+                                || crate::request_devices::selected_action_descriptor(descriptor))
+                    })
                 || self.command_confirmation.is_some()
                 || self.launch_confirmation.is_some()
             {

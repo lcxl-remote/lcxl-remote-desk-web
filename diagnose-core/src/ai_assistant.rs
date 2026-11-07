@@ -3357,7 +3357,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
     current_screen.wire.capabilities[0].limits.max_output_bytes = CURRENT_SCREEN_MAX_OUTPUT_BYTES;
     current_screen.capabilities[0].wire.limits.max_output_bytes = CURRENT_SCREEN_MAX_OUTPUT_BYTES;
     let browser_open = provider_for_tool(
-        TargetBinding::NativeContext,
+        TargetBinding::RequestDevice,
         crate::tool_exposure::ExposureRequirement::SelectedContext,
         BROWSER_OPEN_PROVIDER_ID,
         BROWSER_OPEN_CAPABILITY_ID,
@@ -3387,7 +3387,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
         browser_navigate_tool(),
     );
     let browser_snapshot = provider_for_tool(
-        TargetBinding::NativeContext,
+        TargetBinding::RequestDevice,
         crate::tool_exposure::ExposureRequirement::SelectedContext,
         BROWSER_SNAPSHOT_PROVIDER_ID,
         BROWSER_SNAPSHOT_CAPABILITY_ID,

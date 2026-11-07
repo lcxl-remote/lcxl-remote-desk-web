@@ -107,7 +107,7 @@ impl ActionResultOrigin {
         Self::capture_for_device(registry, session, &session.device_id, call)
     }
 
-    fn capture_for_device(
+    pub fn capture_for_device(
         registry: &ProviderRegistry,
         session: &PersistedAgentSession,
         target_device_id: &str,
@@ -119,6 +119,24 @@ impl ActionResultOrigin {
         let provider = registry
             .provider_for_capability(&capability.wire.capability_id)
             .ok_or_else(invalid)?;
+        let selected = session.has_admitted_personal_input()
+            && crate::request_devices::selected_action_descriptor(capability);
+        let recorded_native = |raw: &str| {
+            let mut arguments: serde_json::Value = serde_json::from_str(raw).ok()?;
+            let explicit = match arguments.as_object_mut()?.remove("target_ref") {
+                Some(value) => Some(
+                    session
+                        .assistant_request_device(value.as_str()?)?
+                        .device_id
+                        .as_str(),
+                ),
+                None => None,
+            };
+            let actual = session
+                .resolve_assistant_action_device(explicit, None)
+                .ok()?;
+            (actual == target_device_id).then(|| arguments.to_string())
+        };
         let parent = session
             .conversation
             .iter()
@@ -126,15 +144,26 @@ impl ActionResultOrigin {
             .find(|message| {
                 message.role == ChatRole::Assistant
                     && message.tool_calls.iter().any(|candidate| {
-                        candidate.id == call.id
-                            && candidate.name == call.name
-                            && crate::ui_model_ids::same_call_input_with_references(
-                                &call.name,
-                                &candidate.arguments_json,
-                                &call.arguments_json,
-                                Some(&session.ui_references),
-                                &crate::result_model_ids::locators(&session.conversation),
-                            )
+                        if candidate.id != call.id || candidate.name != call.name {
+                            return false;
+                        }
+                        let projected;
+                        let arguments = if selected {
+                            projected = recorded_native(&candidate.arguments_json);
+                            let Some(arguments) = projected.as_deref() else {
+                                return false;
+                            };
+                            arguments
+                        } else {
+                            &candidate.arguments_json
+                        };
+                        crate::ui_model_ids::same_call_input_with_references(
+                            &call.name,
+                            arguments,
+                            &call.arguments_json,
+                            Some(&session.ui_references),
+                            &crate::result_model_ids::locators(&session.conversation),
+                        )
                     })
             })
             .and_then(|message| message.data_envelope.as_ref())
@@ -450,6 +479,46 @@ mod tests {
         proposal.turn_id = Some("turn".into());
         session.conversation.extend([user, proposal]);
         (session, call)
+    }
+
+    #[test]
+    fn selected_action_origin_preserves_the_model_calls_exact_device() {
+        use crate::dynamic_run::AssistantInputTarget;
+        let (mut session, mut native) = prepared();
+        session.device_id.clear();
+        session
+            .bind_assistant_input_targets(&[
+                AssistantInputTarget {
+                    reference: "public-mac".into(),
+                    device_id: "42".into(),
+                    member_generation: None,
+                },
+                AssistantInputTarget {
+                    reference: "other-mac".into(),
+                    device_id: "43".into(),
+                    member_generation: None,
+                },
+            ])
+            .unwrap();
+        let arguments = serde_json::json!({"target":{"url":"https://example.com/"}});
+        native.arguments_json = arguments.to_string();
+        let mut original = arguments.clone();
+        original["target_ref"] = serde_json::json!("public-mac");
+        session.conversation.last_mut().unwrap().tool_calls[0].arguments_json =
+            original.to_string();
+        let registry = crate::ai_assistant::ai_assistant_provider_registry();
+        let origin =
+            ActionResultOrigin::capture_for_device(&registry, &session, "42", &native).unwrap();
+        assert_eq!(origin.turn_fence.device_id, "42");
+        assert_eq!(origin.source_object_id, "42:call");
+        assert!(
+            ActionResultOrigin::capture_for_device(&registry, &session, "43", &native).is_err()
+        );
+        session.conversation.last_mut().unwrap().tool_calls[0].arguments_json =
+            arguments.to_string();
+        assert!(
+            ActionResultOrigin::capture_for_device(&registry, &session, "42", &native).is_err()
+        );
     }
 
     fn action() -> ActionIdentity {

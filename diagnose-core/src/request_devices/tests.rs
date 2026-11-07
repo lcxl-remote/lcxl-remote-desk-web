@@ -212,6 +212,7 @@ async fn every_request_device_read_projects_parses_and_keeps_its_exact_target() 
             name,
             crate::command_confirmation::COMMAND_TOOL | "read_terminal_output"
         ) || crate::file_model_input::is_read(name)
+            || selected_action_descriptor(descriptor)
         {
             continue;
         }
@@ -739,4 +740,93 @@ fn sole_target_uses_its_frozen_public_reference_after_reopen() {
         json!({"items":[{"tool_name":"fetch_public_web_page","exact_input":{"url":"https://example.com/"}}]}),
     );
     assert!(infer_single_target(&web, &restored).unwrap().is_none());
+}
+
+#[tokio::test]
+async fn browser_open_permission_is_exact_and_bound_to_the_original_device() {
+    let mut session = session();
+    let registry = crate::ai_assistant::ai_assistant_provider_registry_ref();
+    let name = "browser_open_page";
+    let descriptor = registry.capability_for_tool(name).unwrap();
+    assert!(selected_action_descriptor(descriptor));
+    let mut devices = [
+        device("a", vec![descriptor.wire.capability_id.clone()]),
+        device("b", vec![]),
+    ];
+    devices[0].ready_capabilities = vec![Capability::BrowserPageObserve];
+    let reads = read_tools(&devices, &session, registry, true, None);
+    let [(registered, callable)] = reads.as_slice() else {
+        panic!("expected the browser operation")
+    };
+    assert_eq!(registered.name(), name);
+    assert!(!callable);
+    let exact = json!({"target":{"url":"https://example.com/","origin":{"kind":"https","host_ascii":"example.com","port":443}}});
+    let propose = |target| proposal(name, target, exact.clone());
+    let plan = plan_device_permission(
+        &NoDeviceCommands,
+        Some(registry),
+        &session,
+        &devices,
+        &reads,
+        &propose("a"),
+        "browser-permission",
+        NOW,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(plan.selected_device_id(), Some("a"));
+    assert_eq!(
+        plan.items[0].canonical_input_json.as_deref(),
+        Some(
+            canonical_selected_read_input(name, exact.clone())
+                .unwrap()
+                .as_str()
+        )
+    );
+    assert!(
+        plan_device_permission(
+            &NoDeviceCommands,
+            Some(registry),
+            &session,
+            &devices,
+            &reads,
+            &propose("b"),
+            "wrong-device",
+            NOW
+        )
+        .await
+        .unwrap()
+        .is_err()
+    );
+    session.permission_requests.push(plan);
+    let native = selected_action_device(
+        &session,
+        &tool(name, json!({"target_ref":"a","target":exact["target"]})),
+    )
+    .unwrap();
+    assert_eq!(native.as_deref(), Some("a"));
+    assert!(
+        selected_action_device(
+            &session,
+            &tool(
+                name,
+                json!({"target_ref":"elsewhere","target":exact["target"]})
+            )
+        )
+        .is_err()
+    );
+    session.agent_role = crate::subagent::AgentRole::Coordinator {
+        workbench_id: "workbench".into(),
+        request_id: None,
+        issue_source: None,
+    };
+    assert!(read_tools(&devices, &session, registry, true, None).is_empty());
+    assert!(
+        selected_action_device(
+            &session,
+            &tool(name, json!({"target_ref":"a","target":exact["target"]}))
+        )
+        .is_err()
+    );
 }

@@ -3829,12 +3829,11 @@ async fn run_mutating<F: FnMut() -> String>(
     } else {
         None
     };
-    let device = selected
-        .as_ref()
-        .map_or(session.device_id.as_str(), |policy| {
-            policy.target_device_id.as_str()
-        })
-        .to_owned();
+    let device = match selected.as_ref() {
+        Some(policy) => policy.target_device_id.clone(),
+        None => crate::request_devices::selected_action_device(session, call)?
+            .unwrap_or_else(|| session.device_id.clone()),
+    };
     let mut scope = session.scope_snapshot.clone();
     if selected.is_some() {
         scope.mode = desk_agent_protocol::ExecutionMode::ConfirmEachAction;

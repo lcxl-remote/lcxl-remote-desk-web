@@ -4990,3 +4990,373 @@ async fn production_input_entry_freezes_objects_and_rejects_changed_retry_withou
 mod retention;
 
 mod schedule_input;
+
+#[actix_web::test]
+async fn selectable_browser_opens_and_observes_the_same_signal_device() {
+    selected_browser_on_signal(false).await;
+}
+
+#[actix_web::test]
+async fn selectable_browser_uses_ai_review_on_the_original_signal_device() {
+    selected_browser_on_signal(true).await;
+}
+
+async fn selected_browser_on_signal(automatic: bool) {
+    use super::permission_object::tool_reply;
+    use crate::controller::ai_assistant_session::{PermissionDecisionBody, decide_permission_on};
+    use desk_agent_protocol::{Capability, browser_control::*, computer_use::*};
+    use desk_signal_facade::{model::os::OperationSystemEnum, service::ComputerActionObserver};
+    use serde_json::{Value, json};
+    use sha2::{Digest, Sha256};
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let db = crate::config::test_support::Database::connect("sqlite::memory:")
+        .await
+        .unwrap();
+    crate::db::initialize_schema(&db).await.unwrap();
+    crate::ai_assistant_gate::enable_test_host();
+    crate::model_provider::save(
+        &db,
+        crate::model_provider::ModelProviderConfig {
+            wire_protocol: Some(
+                desk_diagnose_core::model_profile::WireProtocol::OpenAiChatCompletions,
+            ),
+            model: Some("selected-browser-model".into()),
+            base_url: Some(format!("http://{}", listener.local_addr().unwrap())),
+            api_key: Some("test-only-key".into()),
+            max_context_bytes: Some(131_072),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let target_id = format!("selected-browser-{}", uuid::Uuid::new_v4());
+    let target = target_id.as_str();
+    let connection_id = format!("live-{target}");
+    let connections = web::Data::new(SharedConnectionMap::new_oss());
+    crate::device_code_store::get_or_create(&db, target)
+        .await
+        .unwrap();
+    let mut edge = register_request_device(
+        &connections,
+        target,
+        "Browser device",
+        OperationSystemEnum::Mac,
+    )
+    .await
+    .into_body();
+    let now = chrono::Utc::now();
+    let expires_at = (now + chrono::Duration::minutes(3)).to_rfc3339();
+    let surface = ObjectRef {
+        token: "paired-browser-surface".into(),
+        snapshot_id: "paired-browser-snapshot".into(),
+        object_kind: ObjectKind::BrowserSurface,
+        expires_at: expires_at.clone(),
+    };
+    crate::computer_use_readiness::global_computer_use_readiness_cache()
+        .update(
+            &connection_id,
+            ComputerUseReadiness {
+                schema_version: COMPUTER_USE_SCHEMA_VERSION,
+                revision: 1,
+                observed_at: now.to_rfc3339(),
+                expires_at,
+                server_api_version: 1,
+                os: "macos".into(),
+                interactive_user_home: None,
+                interactive_session_incarnation: "browser-worker".into(),
+                local_ceiling_revision: 1,
+                unattended_command_execution: false,
+                capabilities: [
+                    Capability::BrowserPageObserve,
+                    Capability::BrowserPageNavigateConfirmed,
+                ]
+                .into_iter()
+                .map(|capability| ComputerUseCapabilityReadiness {
+                    capability,
+                    adapter: ComputerUseAdapterRef {
+                        kind: ComputerUseAdapterKind::BrowserExtension,
+                        version: "1.7.0".into(),
+                    },
+                    supported: true,
+                    ready: true,
+                    reason: None,
+                })
+                .collect(),
+                context_references: vec![ComputerUseContextReference {
+                    capability: Capability::BrowserPageObserve,
+                    object_ref: surface.clone(),
+                }],
+            },
+            now,
+        )
+        .unwrap();
+
+    let gateway = actix_web::rt::spawn(async move {
+        capture_one_openai_request_with_reply(&listener, |body| {
+            let request: Value = serde_json::from_slice(body).unwrap();
+            assert!(
+                request["tools"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|tool| tool["function"]["name"] != "browser_open_page")
+            );
+            tool_reply(
+                "request_permissions",
+                json!({"items":[{
+                    "tool_name":"browser_open_page",
+                    "exact_input":{"target":{"url":"https://example.com/"}},
+                    "reason":"Open the page requested by the owner"
+                }]}),
+            )
+        })
+        .await;
+        capture_one_openai_request_with_reply(&listener, |body| {
+            let request: Value = serde_json::from_slice(body).unwrap();
+            assert!(
+                request["tools"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|tool| tool["function"]["name"] == "browser_open_page")
+            );
+            tool_reply(
+                "browser_open_page",
+                json!({"target":{"url":"https://example.com/"}}),
+            )
+        })
+        .await;
+        capture_one_openai_request_with_reply(&listener, |body| {
+            let request: Value = serde_json::from_slice(body).unwrap();
+            let result = request["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .rev()
+                .find(|message| {
+                    message["role"] == "tool" && message["tool_call_id"] == "call-browser_open_page"
+                })
+                .expect("the model received the selected device's browser receipt");
+            let text = result["content"].as_str().unwrap();
+            let result: Value =
+                serde_json::from_str(text).unwrap_or_else(|error| panic!("{error}: {text}"));
+            let page_id = result
+                .pointer("/page/page_id")
+                .or_else(|| result.pointer("/output/value/page/page_id"))
+                .expect("the opened browser page has a model-visible reference");
+            tool_reply(
+                "browser_take_snapshot",
+                json!({"page_id":page_id,"max_elements":8}),
+            )
+        })
+        .await;
+        let reply = memory_sse(json!({"content":"Selected browser page observed"}), "stop");
+        capture_openai_answer_with_title(&listener, &reply).await
+    });
+    let owner = crate::control_authorizer::SINGLE_ACCOUNT_USER_ID;
+    let actor = owner.to_string();
+    let client = "selected-browser-test";
+    let run =
+        derive_assistant_conversation_key(&actor, AssistantConversationScope::Personal, client);
+    run_turn(
+        connections.clone(),
+        db.clone(),
+        "selected-browser-input".into(),
+        "owner-browser".into(),
+        String::new(),
+        owner,
+        String::new(),
+        AiAssistantAsk {
+            question: "Open example.com and inspect the page".into(),
+            client_message_id: "browser-input".into(),
+            conversation_id: Some(client.into()),
+            client_timezone: "UTC".into(),
+            target_refs: vec![target.into()],
+            ..Default::default()
+        },
+    )
+    .await;
+    let store = crate::agent_session_store::SignalAgentSessionStore::new(db.clone());
+    let session = store
+        .read_snapshot_for_subject(&run, &actor, "")
+        .await
+        .unwrap()
+        .unwrap();
+    let request = session
+        .permission_requests
+        .last()
+        .expect("selected browser permission was saved");
+    assert_eq!(request.selected_device_id(), Some(target));
+    let item = &request.items[0];
+    let decision: PermissionDecisionBody = serde_json::from_value(json!({
+        "conversation":client, "requestId":request.request_id, "items":[{
+            "itemId":item.item_id, "decision":"approve","resource_scope":item.resource_scope,
+            "operation_scope":item.operation_scope,"ttl_seconds":60,"max_uses":1
+        }]
+    }))
+    .unwrap();
+    if automatic {
+        use crate::config::ConfigConnection;
+        let reviewer = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = reviewer.local_addr().unwrap();
+        let mut config = crate::approval_model_provider::ApprovalModelConfig {
+            enabled: true,
+            ..Default::default()
+        };
+        config.gateway.wire_protocol =
+            Some(desk_diagnose_core::model_profile::WireProtocol::OpenAiChatCompletions);
+        config.gateway.model = Some("browser-reviewer".into());
+        config.gateway.base_url = Some(format!("http://{address}"));
+        config.gateway.api_key = Some("test-only-key".into());
+        db.config_context()
+            .update::<_, sea_orm::DbErr, _>(|file| {
+                file.approval_gateway = config;
+                Ok(Some(()))
+            })
+            .await
+            .unwrap();
+        let now = chrono::Utc::now().timestamp_millis() as u64;
+        crate::agent_approval_store::discover_default_review_roots(&db, 0, 64, now)
+            .await
+            .unwrap();
+        let (pending, _) = crate::agent_approval_store::pending_permission_reviews(&db, 0, 64, now)
+            .await
+            .unwrap();
+        let review = pending
+            .into_iter()
+            .find(|review| review.request_id == request.request_id)
+            .expect("the original device browser permission is eligible for AI review");
+        assert_eq!(review.target_device_id, target);
+        let (_, applied) = tokio::time::timeout(MODEL_IO_TIMEOUT, async {
+            tokio::join!(
+                capture_one_openai_request_with_reply(&reviewer, |body| {
+                    super::desktop_permission::concrete_review_reply(body, true)
+                }),
+                crate::approval_dispatch::process_pending_permission_review(
+                    db.clone(),
+                    connections.clone(),
+                    review
+                ),
+            )
+        })
+        .await
+        .unwrap();
+        assert!(applied);
+    } else {
+        let response = decide_permission_on(&db, connections.clone(), web::Json(decision))
+            .await
+            .unwrap();
+        let payload: Value = serde_json::from_slice(
+            &actix_web::body::to_bytes(response.into_body())
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(payload["data"]["state"], "approved", "{payload}");
+    }
+    let source = connections
+        .read()
+        .await
+        .get(&connection_id)
+        .unwrap()
+        .clone();
+    let observer = crate::remote_tool_edge::SignalComputerActionObserver::new(
+        crate::remote_tool_edge::global_computer_action_pending(),
+        db.clone(),
+    );
+
+    let mut opened = None;
+    for step in 0..2 {
+        let frame = tokio::time::timeout(MODEL_IO_TIMEOUT, receive_device_frame_from(&mut edge))
+            .await
+            .expect("selected browser dispatch");
+        assert_eq!(frame.signaling_type, SignalingType::DispatchComputerAction);
+        let wrapper: desk_agent_protocol::authz::AuthorizedControlPayload<serde_json::Value> =
+            frame.get_data().unwrap();
+        let plan: SealedComputerActionPlan = serde_json::from_value(wrapper.inner).unwrap();
+        assert_eq!(plan.device_id, target);
+        assert_eq!(plan.actions[0].target, surface);
+        let ComputerActionKind::Browser(action) = &plan.actions[0].action else {
+            panic!("expected browser action")
+        };
+        let now = chrono::Utc::now().timestamp_millis() as u64;
+        let (outcome, page, snapshot) = match (&action.action, step) {
+            (BrowserAction::OpenPage { target: navigation }, 0) => {
+                assert_eq!(navigation.url, "https://example.com/");
+                let page: BrowserPageRef = serde_json::from_value(json!({
+                    "schema_version":BROWSER_CONTROL_SCHEMA_VERSION,
+                    "adapter":{"engine":"chrome_extension","device_id":target,
+                        "os_session_id":"session","browser_major_version":144,"browser_version":"144.0.0.0",
+                        "adapter_id":"fixture","adapter_version":"1.7.0","profile_incarnation":"profile","connection_revision":1},
+                    "page_id":"fixture-tab","page_incarnation":"fixture-page",
+                    "origin":navigation.origin,"document_revision":1,
+                    "url_sha256":format!("{:x}", Sha256::digest(navigation.url.as_bytes())),
+                    "observed_at_unix_ms":now,"account_id":null
+                })).unwrap();
+                opened = Some(page.clone());
+                (BrowserActionOutcome::PageOpened, page, None)
+            }
+            (
+                BrowserAction::TakeSnapshot {
+                    page,
+                    max_elements: 8,
+                },
+                1,
+            ) => {
+                assert_eq!(Some(page), opened.as_ref());
+                let snapshot: BrowserSemanticSnapshot = serde_json::from_value(json!({
+                    "schema_version": BROWSER_CONTROL_SCHEMA_VERSION,
+                    "page":page,"elements":[],"truncated":false,"captured_at_unix_ms":now
+                }))
+                .unwrap();
+                (
+                    BrowserActionOutcome::SnapshotCaptured,
+                    page.clone(),
+                    Some(snapshot),
+                )
+            }
+            _ => panic!("wrong browser step: {:?}", action.action),
+        };
+        let completed = ComputerActionCompleted {
+            work_id: plan.work_id,
+            action_request_id: plan.action_request_id,
+            execution_generation: plan.execution_generation.clone(),
+            result: ComputerActionResultClass::Verified,
+            facts: vec![ComputerActionStepFact {
+                index: 0,
+                changed: step == 0,
+                verified: true,
+                summary: "Browser fixture".into(),
+            }],
+            message: None,
+            output: Some(ComputerActionOutput::Browser(BrowserActionResult {
+                schema_version: BROWSER_CONTROL_SCHEMA_VERSION,
+                call_id: action.call_id.clone(),
+                outcome,
+                page,
+                snapshot,
+                form_readback: vec![],
+                send_receipt: None,
+                completed_at_unix_ms: now,
+            })),
+        };
+        let response = SignalingModel::new(
+            &plan.execution_generation,
+            SignalingType::ComputerActionCompleted,
+            None,
+            None,
+            Some(serde_json::to_value(completed).unwrap()),
+            None,
+        );
+        observer
+            .on_computer_action_lifecycle(&source, &response)
+            .await;
+    }
+    let (last, _) = tokio::time::timeout(MODEL_IO_TIMEOUT, gateway)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&last).contains("snapshot_captured"));
+}
