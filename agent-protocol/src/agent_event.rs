@@ -133,6 +133,9 @@ pub struct AgentEvent {
     pub visual_evidence: Option<VisualEvidenceFrame>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub document_preview: Option<DocumentPreviewFrame>,
+    /// Public selector of the device that produced an account-scoped preview.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document_preview_target_ref: Option<String>,
     /// `kind = PermissionRequired`: stable id of the durable request projection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_request_id: Option<String>,
@@ -177,6 +180,7 @@ impl AgentEvent {
             background_task_id: None,
             visual_evidence: None,
             document_preview: None,
+            document_preview_target_ref: None,
             permission_request_id: None,
             permission_item_count: None,
             answer: None,
@@ -361,9 +365,11 @@ impl AgentEvent {
         request_id: impl Into<String>,
         seq: u32,
         document_preview: DocumentPreviewFrame,
+        target_ref: Option<String>,
     ) -> Self {
         Self {
             document_preview: Some(document_preview),
+            document_preview_target_ref: target_ref,
             ..Self::base(request_id, seq, AgentEventKind::DocumentPreview)
         }
     }

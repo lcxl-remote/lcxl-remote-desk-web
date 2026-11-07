@@ -467,8 +467,9 @@ impl TurnSink for ObservedTurnSink<'_> {
     fn on_document_preview(
         &mut self,
         preview: &desk_agent_protocol::document_conversion::DocumentPreviewFrame,
+        target_ref: Option<&str>,
     ) {
-        self.inner.on_document_preview(preview);
+        self.inner.on_document_preview(preview, target_ref);
     }
     fn on_permission_requested(&mut self, id: &str, count: usize) {
         self.inner.on_permission_requested(id, count);

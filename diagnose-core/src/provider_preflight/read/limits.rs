@@ -166,6 +166,11 @@ pub fn validate_output(
         (ContextKind::SpreadsheetFileInspect(_), ReadContextOutput::SpreadsheetFileInspect(p)) => {
             p.workbooks.len()
         }
+        (ContextKind::DocumentPreview(_), ReadContextOutput::DocumentPreview(p))
+            if p.first_page.is_none() && p.page_count > 0 =>
+        {
+            1
+        }
         (
             ContextKind::SpreadsheetMergePreview(_),
             ReadContextOutput::SpreadsheetMergePreview(p),

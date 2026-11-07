@@ -204,6 +204,7 @@ pub struct DocumentPreviewPageFrame {
 )]
 #[serde(deny_unknown_fields)]
 pub struct DocumentPreviewPageRequest {
+    pub conversation_target: crate::ai_assistant::AiAssistantConversationTarget,
     pub conversation_id: String,
     pub preview_id: String,
     pub page: u32,
@@ -376,12 +377,20 @@ mod tests {
     #[test]
     fn preview_page_request_is_versioned_and_bounded() {
         let valid = DocumentPreviewPageRequest {
+            conversation_target: crate::ai_assistant::AiAssistantConversationTarget::FixedDevice,
             conversation_id: "conversation".into(),
             preview_id: "preview".into(),
             page: 1,
             spec_version: DOCUMENT_PREVIEW_SPEC_VERSION,
         };
         assert_eq!(valid.validate(), Ok(()));
+
+        let mut missing_target = serde_json::to_value(&valid).unwrap();
+        missing_target
+            .as_object_mut()
+            .unwrap()
+            .remove("conversation_target");
+        assert!(serde_json::from_value::<DocumentPreviewPageRequest>(missing_target).is_err());
 
         let mut invalid = valid;
         invalid.page = 0;

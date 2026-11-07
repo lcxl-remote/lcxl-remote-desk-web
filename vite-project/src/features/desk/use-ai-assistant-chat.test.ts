@@ -13,6 +13,8 @@ import {
     SIGNALING_TYPE_CODE_UPDATE_AI_ASSISTANT_OBJECT_CONTEXT,
     SIGNALING_TYPE_CODE_QUERY_COMPUTER_ACTION_TURN,
     SIGNALING_TYPE_CODE_COMPUTER_ACTION_TURN_STATUS,
+    SIGNALING_TYPE_CODE_REQUEST_DOCUMENT_PREVIEW_PAGE,
+    SIGNALING_TYPE_CODE_DOCUMENT_PREVIEW_PAGE_UPDATED,
 } from './constants';
 import type { SignalingSubscriber } from './use-desk-signaling';
 import { useAiAssistantChat } from './use-ai-assistant-chat';
@@ -610,6 +612,36 @@ describe('useAiAssistantChat', () => {
         act(() => { expect(result.current.updateDirectory(revoke, 'timeout', 'device-b')).toBe(true); });
         expect(sendMessage).toHaveBeenCalledWith(SIGNALING_TYPE_CODE_UPDATE_AI_ASSISTANT_OBJECT_CONTEXT,
             expect.objectContaining({ conversation_target: 'selectable_devices', operation: revoke }), 'device-a');
+        unmount();
+    });
+    it('pages each selectable preview on its original device even when preview IDs match', async () => {
+        let subscriber: SignalingSubscriber | null = null;
+        stubSnapshotFetch(async () => ({ ok: true, json: async () => ({ data: {
+            ...snapshotFields, sessionId: 'account-session', seq: 10, active: false, messages: [],
+        } }) }));
+        const sendMessage = vi.fn((_type: number, _payload?: unknown, _to?: string, id?: string) => id ?? 'page-wire');
+        const { result, unmount } = renderHook(() => useAiAssistantChat({ deskId: '', conversationStorageScope: 'personal:preview',
+            initialConversationId: 'account-conversation', targetRefs: ['device-a', 'device-b'], connected: true,
+            subscribe: handler => { subscriber = handler; return () => undefined; }, sendMessage }));
+        await waitFor(() => expect(result.current.sessionId).toBe('account-session'));
+        act(() => { expect(result.current.start('Preview the two documents')).toBe(true); });
+        const requestId = sendMessage.mock.calls.find(([type]) => type === SIGNALING_TYPE_CODE_ASK_AI_ASSISTANT)?.[3];
+        const frame = { descriptor: { preview_id: 'preview', page_count: 3 }, page: { page: 1 }, preview_data_url: 'data:image/png;base64,AAAA' };
+        act(() => {
+            ['device-a', 'device-b'].forEach((device, seq) => subscriber?.({ request_id: requestId,
+                signaling_type: SIGNALING_TYPE_CODE_AI_ASSISTANT_UPDATED, signaling_data: {
+                    request_id: requestId, seq: seq + 1, kind: 'document_preview', document_preview: frame, document_preview_target_ref: device,
+                } }));
+        });
+        expect(result.current.documentPreviews.map(preview => preview.deviceRef)).toEqual(['device-a', 'device-b']);
+        act(() => { expect(result.current.requestDocumentPreviewPage('preview', 2, 'device-b')).toBe(true); });
+        expect(sendMessage).toHaveBeenLastCalledWith(SIGNALING_TYPE_CODE_REQUEST_DOCUMENT_PREVIEW_PAGE,
+            { conversation_id: 'account-session', conversation_target: 'selectable_devices', preview_id: 'preview', page: 2, spec_version: 1 }, 'device-b');
+        act(() => subscriber?.({ request_id: 'page-wire', signaling_type: SIGNALING_TYPE_CODE_DOCUMENT_PREVIEW_PAGE_UPDATED,
+            signaling_data: { conversation_id: 'account-session', preview_id: 'preview', page: 2,
+                frame: { page: { page: 2 }, preview_data_url: 'data:image/png;base64,BBBB' } },
+        }));
+        expect(result.current.documentPreviews.map(preview => preview.page.page)).toEqual([1, 2]);
         unmount();
     });
     it.each([

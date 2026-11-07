@@ -19,7 +19,7 @@ function PreviewImage({ preview, scale }: { preview: AiAssistantDocumentPreview;
 
 function PreviewCard({ preview, requestPage }: {
     preview: AiAssistantDocumentPreview;
-    requestPage: (previewId: string, page: number) => boolean;
+    requestPage: (previewId: string, page: number, deviceRef?: string) => boolean;
 }) {
     const { t } = useTranslation();
     const [scale, setScale] = useState<number | null>(null);
@@ -27,7 +27,8 @@ function PreviewCard({ preview, requestPage }: {
     const [pageText, setPageText] = useState(String(preview.page.page));
     useEffect(() => setPageText(String(preview.page.page)), [preview.page.page]);
     const navigate = (page: number) => {
-        if (requestPage(preview.descriptor.preview_id, page)) setPageText(String(page));
+        const id = preview.descriptor.preview_id;
+        if (preview.deviceRef ? requestPage(id, page, preview.deviceRef) : requestPage(id, page)) setPageText(String(page));
     };
     const submitPage = () => {
         const page = Number(pageText);
@@ -120,11 +121,11 @@ function PreviewCard({ preview, requestPage }: {
 
 export function AssistantDocumentPreviews({ previews, requestPage }: {
     previews: AiAssistantDocumentPreview[];
-    requestPage: (previewId: string, page: number) => boolean;
+    requestPage: (previewId: string, page: number, deviceRef?: string) => boolean;
 }) {
     if (previews.length === 0) return null;
     return <div className="space-y-3" data-testid="assistant-document-previews">
-        {previews.map(preview => <PreviewCard key={preview.descriptor.preview_id}
+        {previews.map(preview => <PreviewCard key={`${preview.deviceRef ?? ''}:${preview.descriptor.preview_id}`}
             preview={preview} requestPage={requestPage} />)}
     </div>;
 }

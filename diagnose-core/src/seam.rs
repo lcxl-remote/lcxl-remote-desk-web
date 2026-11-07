@@ -265,8 +265,9 @@ pub trait TurnSink {
     fn on_document_preview(
         &mut self,
         preview: &desk_agent_protocol::document_conversion::DocumentPreviewFrame,
+        target_ref: Option<&str>,
     ) {
-        let _ = preview;
+        let _ = (preview, target_ref);
     }
 
     /// The planning turn durably created a permission request and paused before

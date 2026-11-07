@@ -3566,7 +3566,18 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                                                 // assistant batch as an unknown execution.
                                                 deps.session_seam.save(session).await?;
                                                 if let Some(preview) = document_preview.as_ref() {
-                                                    sink.on_document_preview(preview);
+                                                    let target_ref = selected_device_read
+                                                        .then(|| {
+                                                            crate::request_devices::selected_read(
+                                                                call,
+                                                            )
+                                                            .map(|(reference, _)| reference)
+                                                        })
+                                                        .transpose()?;
+                                                    sink.on_document_preview(
+                                                        preview,
+                                                        target_ref.as_deref(),
+                                                    );
                                                 }
                                                 finish_tool(session, &call.id, ok, sink);
                                                 if let Some(event_id) = event_id {

@@ -525,7 +525,7 @@ export function useAiAssistantChat({
     const [loadingOlderMessages, setLoadingOlderMessages] = useState(false);
     const [visualEvidence, setVisualEvidence] = useState<AiAssistantVisualEvidence[]>([]);
     const [documentPreviews, setDocumentPreviews] = useState<AiAssistantDocumentPreview[]>([]);
-    const documentPreviewPageRequests = useRef(new Map<string, { previewId: string; page: number }>());
+    const documentPreviewPageRequests = useRef(new Map<string, { previewId: string; deviceRef?: string; sessionId: string; page: number }>());
     const [sessionTarget, setSessionTarget] = useState<SessionTargetDescriptor | null>(null);
     const [sessionTargets, setSessionTargets] = useState<SessionTargetDescriptor[]>([]);
     const [sessionTargetReady, setSessionTargetReady] = useState(!targetSelectionEnabled);
@@ -658,19 +658,20 @@ export function useAiAssistantChat({
         return true;
     }, [connected, deskId, sendMessage, targetSelectionEnabled]);
 
-    const requestDocumentPreviewPage = useCallback((previewId: string, page: number) => {
+    const requestDocumentPreviewPage = useCallback((previewId: string, page: number, deviceRef?: string) => {
         const sessionId = snapshotWatermark.current?.conversationId === conversationId.current
             ? snapshotWatermark.current.sessionId : undefined;
-        const preview = documentPreviews.find(item => item.descriptor.preview_id === previewId);
-        if (!deskId || connected === false || !sessionId || !preview || preview.loading
+        const preview = documentPreviews.find(item => item.descriptor.preview_id === previewId && item.deviceRef === deviceRef);
+        const device = deskId || preview?.deviceRef;
+        if (!device || connected === false || !sessionId || !preview || preview.loading
             || !Number.isInteger(page) || page < 1 || page > preview.descriptor.page_count) return false;
         const requestId = sendMessage(
             SIGNALING_TYPE_CODE_REQUEST_DOCUMENT_PREVIEW_PAGE,
-            { conversation_id: sessionId, preview_id: previewId, page, spec_version: 1 },
-            deskId,
+            { conversation_id: sessionId, conversation_target: deskId ? 'fixed_device' : 'selectable_devices', preview_id: previewId, page, spec_version: 1 },
+            device,
         );
-        documentPreviewPageRequests.current.set(requestId, { previewId, page });
-        setDocumentPreviews(current => current.map(item => item.descriptor.preview_id === previewId
+        documentPreviewPageRequests.current.set(requestId, { previewId, deviceRef, sessionId, page });
+        setDocumentPreviews(current => current.map(item => item.descriptor.preview_id === previewId && item.deviceRef === deviceRef
             ? { ...item, loading: true, error: null } : item));
         return true;
     }, [connected, deskId, documentPreviews, sendMessage]);
@@ -1193,8 +1194,8 @@ export function useAiAssistantChat({
             documentPreviewPageRequests.current.delete(message.request_id);
             const response = message.signaling_data as AiAssistantDocumentPreviewPageResponse | null;
             setDocumentPreviews(current => current.map(item => {
-                if (item.descriptor.preview_id !== pending.previewId) return item;
-                if (!response || response.preview_id !== pending.previewId
+                if (item.descriptor.preview_id !== pending.previewId || item.deviceRef !== pending.deviceRef) return item;
+                if (!response || response.conversation_id !== pending.sessionId || response.preview_id !== pending.previewId
                     || response.page !== pending.page || !response.frame) {
                     return { ...item, loading: false,
                         error: response?.error ?? translate.current('pages.aiAssistant.documentPreview.loadFailed') };
@@ -1357,9 +1358,9 @@ export function useAiAssistantChat({
             case 'document_preview':
                 if (event.document_preview) {
                     setDocumentPreviews(current => [
-                        ...current.filter(preview => preview.descriptor.preview_id
-                            !== event.document_preview!.descriptor.preview_id),
-                        event.document_preview!,
+                        ...current.filter(preview => preview.descriptor.preview_id !== event.document_preview!.descriptor.preview_id
+                            || preview.deviceRef !== (event.document_preview_target_ref ?? undefined)),
+                        { ...event.document_preview!, deviceRef: event.document_preview_target_ref ?? undefined },
                     ]);
                 }
                 break;

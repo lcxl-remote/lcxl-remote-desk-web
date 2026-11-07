@@ -3076,6 +3076,7 @@ async fn run_selected_device_reads(scenario: SelectedReadScenario) {
         vec![
             ("selected-file-device", "inspect_files"),
             ("selected-file-device", "inspect_spreadsheets"),
+            ("selected-file-device", "preview_document"),
         ]
     } else if terminal {
         vec![("selected-terminal-device", "read_terminal_output")]
@@ -3125,6 +3126,10 @@ async fn run_selected_device_reads(scenario: SelectedReadScenario) {
                     "inspect_spreadsheets" => (
                         Capability::SpreadsheetFileInspect,
                         ComputerUseAdapterKind::FileSystem,
+                    ),
+                    "preview_document" => (
+                        Capability::DocumentPreview,
+                        ComputerUseAdapterKind::DocumentConversion,
                     ),
                     "read_terminal_output" => (
                         Capability::TerminalOutputRead,
@@ -3186,6 +3191,9 @@ async fn run_selected_device_reads(scenario: SelectedReadScenario) {
                 (_, "inspect_spreadsheets") => {
                     json!({"sources":[{"file_result_call_id":model_file_result.lock().unwrap().clone().expect("verified directory listing"), "entry_name":"selected.xlsx"}]})
                 }
+                (_, "preview_document") => {
+                    json!({"source":{"file_result_call_id":model_file_result.lock().unwrap().clone().expect("verified directory listing"), "entry_name":"notes.txt"}})
+                }
                 (true, "read_current_screen") => json!({"window_id":"w1"}),
                 (true, "inspect_desktop_ui") => json!({"queries":["Calendar"]}),
                 _ => json!({}),
@@ -3239,6 +3247,12 @@ async fn run_selected_device_reads(scenario: SelectedReadScenario) {
                     assert!(messages.contains("data:image/png;base64,"), "{messages}");
                 } else if name == "inspect_spreadsheets" {
                     assert!(messages.contains("selected-workbook-data"), "{messages}");
+                } else if name == "preview_document" {
+                    assert!(
+                        messages.contains("preview-on-selected-device"),
+                        "{messages}"
+                    );
+                    assert!(!messages.contains("data:image/png;base64,"), "{messages}");
                 } else if files {
                     assert!(messages.contains("fixture-folder"), "{messages}");
                 } else if terminal {
@@ -3248,7 +3262,9 @@ async fn run_selected_device_reads(scenario: SelectedReadScenario) {
                 } else {
                     assert!(messages.contains("fixture-display"), "{messages}");
                 }
-                let answer = if matches!(name, "read_current_screen" | "inspect_spreadsheets") {
+                let answer = if name == "preview_document" {
+                    "Selected preview complete."
+                } else if matches!(name, "read_current_screen" | "inspect_spreadsheets") {
                     second_answer
                 } else {
                     "Selected device read complete."
@@ -3510,7 +3526,9 @@ async fn run_selected_device_reads(scenario: SelectedReadScenario) {
         )
         .await
         .unwrap();
-        let expected_answer = if index == 1 {
+        let expected_answer = if name == "preview_document" {
+            "Selected preview complete."
+        } else if index == 1 {
             second_answer
         } else {
             "Selected device read complete."
@@ -3548,6 +3566,23 @@ async fn run_selected_device_reads(scenario: SelectedReadScenario) {
                 })
                 .expect("verified directory listing");
             *file_result.lock().unwrap() = Some(listing.message_id.clone());
+        }
+        if name == "preview_document" {
+            let now = chrono::Utc::now().timestamp_millis() as u64;
+            assert!(desk_diagnose_core::document_preview::has_device_receipt(
+                &snapshot.messages,
+                target,
+                "preview-on-selected-device",
+                2,
+                now
+            ));
+            assert!(!desk_diagnose_core::document_preview::has_device_receipt(
+                &snapshot.messages,
+                "another-device",
+                "preview-on-selected-device",
+                2,
+                now
+            ));
         }
         if index == 1 && !files {
             use desk_diagnose_core::dynamic_run::PermissionDecisionActor;
@@ -3610,6 +3645,7 @@ async fn respond_to_selected_desktop(
         object_kind: ObjectKind::Window,
         expires_at: String::new(),
     };
+    let mut document_preview = None;
     let (value, image) = if name == "inspect_files" {
         let ContextKind::FileMetadataInspect(input) = read.envelope.operation.input.kind else {
             panic!("expected directory metadata request")
@@ -3628,14 +3664,20 @@ async fn respond_to_selected_desktop(
                     byte_len: None,
                     modified_at: None,
                 }],
-                directory_entries: vec![DirectoryEntryProjection {
-                    object_ref: Some(selected_workbook_reference()),
+                directory_entries: [
+                    ("selected.xlsx", selected_workbook_reference()),
+                    ("notes.txt", selected_preview_file_reference()),
+                ]
+                .into_iter()
+                .map(|(name, file)| DirectoryEntryProjection {
+                    object_ref: Some(file),
                     parent_snapshot_id: root.snapshot_id.clone(),
-                    display_name: "selected.xlsx".into(),
+                    display_name: name.into(),
                     is_directory: false,
                     byte_len: Some(128),
                     modified_at: None,
-                }],
+                })
+                .collect(),
                 truncated: false,
                 pagination_id: None,
                 pagination_consistency: None,
@@ -3669,6 +3711,28 @@ async fn respond_to_selected_desktop(
             }),
             None,
         )
+    } else if name == "preview_document" {
+        use desk_agent_protocol::document_conversion::*;
+        let ContextKind::DocumentPreview(input) = read.envelope.operation.input.kind else {
+            panic!("expected exact preview source")
+        };
+        assert_eq!(input.file, selected_preview_file_reference());
+        assert_ne!(input.conversation_id, "selected:server_resolved");
+        let descriptor = DocumentPreviewOutput {
+            preview_id: "preview-on-selected-device".into(),
+            source_digest_sha256: "a".repeat(64),
+            page_count: 2,
+            template_version: "test".into(),
+            font_set_sha256: "b".repeat(64),
+            engine: "typst".into(),
+            warnings: vec![],
+            first_page: None,
+        };
+        document_preview = Some(DocumentPreviewFrame {
+            descriptor: descriptor.clone(), page: DocumentPreviewPageDescriptor { preview_id: descriptor.preview_id.clone(), page: 1, page_count: 2, width: 1, height: 1, pixels_per_point_milli: 1000 },
+            preview_data_url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jOioAAAAASUVORK5CYII=".into(),
+        });
+        (ReadContextOutput::DocumentPreview(descriptor), None)
     } else if name == "read_terminal_output" {
         let ContextKind::TerminalOutputInspect(input) = read.envelope.operation.input.kind else {
             panic!("expected original terminal snapshot");
@@ -3775,7 +3839,7 @@ async fn respond_to_selected_desktop(
     let result = RemoteToolOutput {
         outcome: AgentOutcome::Ok(OperationOutput::ReadContext(value)),
         image,
-        document_preview: None,
+        document_preview,
         document_preview_page: None,
     };
     let source = connections
@@ -3811,6 +3875,14 @@ fn selected_workbook_reference() -> desk_agent_protocol::computer_use::ObjectRef
         snapshot_id: "selected-workbook".into(),
         object_kind: ObjectKind::File,
         expires_at: "2099-01-01T00:00:00Z".into(),
+    }
+}
+
+fn selected_preview_file_reference() -> desk_agent_protocol::computer_use::ObjectRef {
+    desk_agent_protocol::computer_use::ObjectRef {
+        token: "notes-on-selected-device".into(),
+        snapshot_id: "selected-preview-source".into(),
+        ..selected_workbook_reference()
     }
 }
 

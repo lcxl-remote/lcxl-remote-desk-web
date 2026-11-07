@@ -275,6 +275,7 @@ impl<S: AgentFrameSink> TurnSink for StreamingTurnSink<S> {
     fn on_document_preview(
         &mut self,
         preview: &desk_agent_protocol::document_conversion::DocumentPreviewFrame,
+        target_ref: Option<&str>,
     ) {
         if self.terminated {
             return;
@@ -284,6 +285,7 @@ impl<S: AgentFrameSink> TurnSink for StreamingTurnSink<S> {
             &self.request_id,
             seq,
             preview.clone(),
+            target_ref.map(str::to_owned),
         ));
     }
 

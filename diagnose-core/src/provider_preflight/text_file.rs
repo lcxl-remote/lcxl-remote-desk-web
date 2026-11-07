@@ -2216,8 +2216,7 @@ mod tests {
             .flat_map(|provider| &provider.capabilities)
         {
             let name = descriptor.wire.tool_name.as_str();
-            if !selection::supports(name) || matches!(name, "convert_document" | "preview_document")
-            {
+            if !selection::supports(name) || name == "convert_document" {
                 continue;
             }
             assert!(
@@ -2270,7 +2269,11 @@ mod tests {
     }
 
     fn document_read_arguments(name: &str) -> serde_json::Value {
-        let mut args = serde_json::json!({"max_bytes":4096});
+        let mut args = if name == "preview_document" {
+            serde_json::json!({})
+        } else {
+            serde_json::json!({"max_bytes":4096})
+        };
         let selector = serde_json::json!({"kind":"directory_entry",
             "file_result_call_id":"metadata", "entry_name":"notes.txt"});
         if selection::multiple(name) {

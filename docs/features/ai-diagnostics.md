@@ -16,6 +16,8 @@ To list a directory or read a text file, open **Conversation directories**, choo
 
 On devices that support the file format, the assistant can also choose a document, presentation, or workbook from the directory result and inspect the file. Working with an open document or saving changes uses separate operations.
 
+Markdown and plain-text previews are generated on the source device. While a preview is available, page through it in its card. Changing the chat's device selection does not change the card's source.
+
 1. Sign in, open an online device you own and turn on **AI Assistant enabled** for that device.
 2. Open AI Assistant and create or restore a conversation.
 3. Select the context it may read and enter your request.

@@ -33,6 +33,7 @@ export type AiAssistantEvent = {
     tool_output?: string | null;
     visual_evidence?: AiAssistantVisualEvidence | null;
     document_preview?: AiAssistantDocumentPreview | null;
+    document_preview_target_ref?: string | null;
     answer?: string | null;
     provenance?: AiProvenance | null;
 };
@@ -44,6 +45,7 @@ export type AiAssistantDocumentWarning = {
 };
 
 export type AiAssistantDocumentPreview = {
+    deviceRef?: string;
     loading?: boolean;
     error?: string | null;
     descriptor: {

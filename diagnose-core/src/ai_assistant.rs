@@ -3451,7 +3451,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
         browser_activate_tool(),
     );
     let mut document_preview = provider_for_tool(
-        TargetBinding::NativeContext,
+        TargetBinding::RequestDevice,
         crate::tool_exposure::ExposureRequirement::NoAttachment,
         DOCUMENT_PREVIEW_PROVIDER_ID,
         DOCUMENT_PREVIEW_CAPABILITY_ID,

@@ -383,17 +383,28 @@ pub async fn render_document_preview_page(
     use desk_agent_protocol::document_conversion::DocumentPreviewPageResponse;
     let actor_id = actor_user_id.to_string();
     let store = crate::agent_session_store::SignalAgentSessionStore::new(db);
+    let selectable = request.conversation_target.is_selectable();
+    let session_device = if selectable { "" } else { &target_device_id };
     let accessible = desk_diagnose_core::future::boxed(|| {
         store.read_assistant_snapshot_for_subject(
             &request.conversation_id,
             &actor_id,
-            &target_device_id,
+            session_device,
         )
     })
     .await
     .ok()
     .flatten()
-    .is_some();
+    .is_some_and(|snapshot| {
+        !selectable
+            || desk_diagnose_core::document_preview::has_device_receipt(
+                &snapshot.session.messages,
+                &target_device_id,
+                &request.preview_id,
+                request.page,
+                u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(u64::MAX),
+            )
+    });
     let result = if accessible {
         desk_diagnose_core::future::boxed(|| {
             crate::remote_tool_edge::document_preview::render_page(

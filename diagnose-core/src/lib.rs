@@ -66,6 +66,7 @@ pub mod data_policy;
 pub mod directory_review;
 pub mod directory_tools;
 mod document_model_ids;
+pub mod document_preview;
 pub mod durable_action;
 pub mod dynamic_run;
 pub mod edge_registry;
