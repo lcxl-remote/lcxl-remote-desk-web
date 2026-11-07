@@ -40,6 +40,7 @@ pub struct DirectoryDecision {
 
 pub fn preflight_capacity(
     session: &PersistedAgentSession,
+    device_id: &str,
     proposal: DirectoryProposal,
     delegation: &ApprovalDelegation,
     goal: Option<&GoalRun>,
@@ -49,16 +50,12 @@ pub fn preflight_capacity(
     let request_id = proposal.request_id.clone();
     let update = crate::file_scope::transaction::FileScopeUpdate {
         subject: session
-            .file_scope_subject(
-                &session.actor_id,
-                &session.device_id,
-                &session.conversation_id,
-            )
+            .file_scope_subject(&session.actor_id, device_id, &session.conversation_id)
             .map_err(|_| ApprovalReviewError::InvalidContext)?,
         client_conversation_id: session
-            .client_conversation_id
-            .clone()
-            .ok_or(ApprovalReviewError::InvalidContext)?,
+            .file_scope_selector()
+            .ok_or(ApprovalReviewError::InvalidContext)?
+            .into(),
         client_request_id: request_id.clone(),
         expected_revision: session.file_scope.revision(),
         mutation: crate::file_scope::transaction::FileScopeMutation::Propose { proposal },
@@ -184,6 +181,7 @@ pub fn pending<'a>(
         || session.control_revision != context.control_revision
         || session.latest_input_seq != context.input_watermark
         || session.lease_token != context.lease_token
+        || (session.device_id.is_empty() && !session.admits_assistant_device(&record.device_id))
         || session
             .conversation
             .iter()
@@ -449,6 +447,82 @@ mod tests {
         )
         .unwrap();
         (session, delegation, destination, now, id)
+    }
+
+    #[test]
+    fn selectable_directory_review_binds_the_device_inside_the_account_session() {
+        use crate::conversation_key::{
+            AssistantConversationScope, derive_assistant_conversation_key,
+        };
+        let (mut session, _, destination, now, _) = fixture();
+        let mut proposal = session.file_scope.records()[0].proposal.clone();
+        session.device_id.clear();
+        session.file_scope = Default::default();
+        session.conversation_id = derive_assistant_conversation_key(
+            "owner",
+            AssistantConversationScope::Personal,
+            "client",
+        );
+        session
+            .bind_assistant_request_targets(vec!["device-a".into()])
+            .unwrap();
+        let id = crate::native_ids::stable(
+            crate::native_ids::Kind::DirectoryRequest,
+            &(
+                "directory-proposal",
+                &(&session.conversation_id, session.input_revision, "call"),
+            ),
+        );
+        proposal.request_id = id.clone();
+        let mut update = FileScopeUpdate {
+            subject: session
+                .file_scope_subject("owner", "device-b", &session.conversation_id)
+                .unwrap(),
+            client_conversation_id: "client".into(),
+            client_request_id: id.clone(),
+            expected_revision: 0,
+            mutation: FileScopeMutation::Propose { proposal },
+        };
+        assert!(transaction::prepare(&session, &update, now).is_err());
+        update.subject.device_id = "device-a".into();
+        let (pending_session, _) = transaction::prepare(&session, &update, now).unwrap();
+        let delegation = ApprovalDelegation::new_default(
+            "delegation".into(),
+            session.conversation_id.clone(),
+            "owner".into(),
+            String::new(),
+            now,
+            true,
+        )
+        .unwrap();
+        let review = candidate(&pending_session, &id, &delegation, None, now).unwrap();
+        assert!(
+            authorize(
+                &review,
+                &pending_session,
+                None,
+                &delegation,
+                &destination,
+                now
+            )
+            .is_ok()
+        );
+        let decision = DirectoryDecision {
+            source: crate::dynamic_run::PermissionDecisionSource::SystemDecision {
+                reason_code: "test".into(),
+                reason: "approved".into(),
+            },
+            reason: "approved".into(),
+            candidate_id: None,
+        };
+        let (settled, receipt) =
+            transaction::prepare_ai_decision(&pending_session, &id, true, decision, now).unwrap();
+        assert_eq!(receipt.update.subject.device_id, "device-a");
+        assert_eq!(
+            settled.file_scope.records()[0].state,
+            DirectoryConsentState::Approved
+        );
+        assert!(settled.scope_snapshot.granted.is_empty());
     }
 
     #[test]

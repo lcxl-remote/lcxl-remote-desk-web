@@ -910,6 +910,20 @@ pub trait ToolSeam {
     ) -> Result<desk_agent_protocol::computer_use::FileDirectoryResolveOutput, AgentError> {
         Err(crate::directory_tools::unavailable())
     }
+    async fn resolve_request_device_directory(
+        &self,
+        _session: &PersistedAgentSession,
+        _target_ref: &str,
+        _path: &str,
+    ) -> Result<
+        (
+            String,
+            desk_agent_protocol::computer_use::FileDirectoryResolveOutput,
+        ),
+        AgentError,
+    > {
+        Err(crate::directory_tools::unavailable())
+    }
     /// Internal metadata-only preflight for an exact application approval.
     /// This does not grant launch authority or start an application.
     async fn resolve_application_candidate(
@@ -1327,6 +1341,7 @@ pub trait SessionSeam {
     async fn propose_directory(
         &self,
         _session: &mut PersistedAgentSession,
+        _device_id: &str,
         _proposal: crate::file_scope::DirectoryProposal,
         _now_unix_ms: u64,
     ) -> Result<(), AgentError> {

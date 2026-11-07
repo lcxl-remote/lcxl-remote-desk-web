@@ -53,7 +53,7 @@ impl SignalAgentSessionStore {
             || receipt.update.client_conversation_id != client_conversation_id
             || receipt.update.client_request_id != client_request_id
             || row.actor_id != subject.actor_id
-            || row.device_id != transaction::storage_device_id(subject, client_conversation_id)
+            || row.device_id != session.device_id
             || stored.kind != FILE_SCOPE_EVENT_KIND
             || stored.payload_schema_version != 1
             || stored.run_id != subject.conversation_id
@@ -83,6 +83,7 @@ impl SignalAgentSessionStore {
     pub(crate) async fn propose_file_scope_for_turn(
         &self,
         session: &mut PersistedAgentSession,
+        device_id: &str,
         proposal: desk_diagnose_core::file_scope::DirectoryProposal,
         now: DateTime<Utc>,
     ) -> Result<(), AgentError> {
@@ -94,11 +95,7 @@ impl SignalAgentSessionStore {
         }
         let update = FileScopeUpdate {
             subject: session
-                .file_scope_subject(
-                    &session.actor_id,
-                    &session.device_id,
-                    &session.conversation_id,
-                )
+                .file_scope_subject(&session.actor_id, device_id, &session.conversation_id)
                 .map_err(|_| failure())?,
             client_conversation_id: session
                 .file_scope_selector()
@@ -186,7 +183,7 @@ impl SignalAgentSessionStore {
                 let session =
                     PersistedAgentSession::decode_json(&row.state_json).map_err(|_| failure())?;
                 if row.actor_id != update.subject.actor_id
-                    || row.device_id != update.storage_device_id()
+                    || row.device_id != session.device_id
                     || row.version < 0
                     || session.version != row.version
                     || session.lease_token > i64::MAX as u64
@@ -314,7 +311,7 @@ impl SignalAgentSessionStore {
                 txn.commit().await.map_err(storage)?;
                 return Ok(receipt);
             }
-            if update.storage_device_id().is_empty() && update.grants_directory() {
+            if session.device_id.is_empty() && update.grants_directory() {
                 use desk_assistant_data_store::device_roster::{lock, personal_selection_key};
                 if crate::agent_run_event_store::eligible_request_device_ids(
                     &txn,
@@ -322,14 +319,26 @@ impl SignalAgentSessionStore {
                 )
                 .await?
                 .is_empty()
-                    || lock(
-                        &txn,
-                        &update.subject.actor_id,
-                        &personal_selection_key(&update.subject.conversation_id),
-                    )
-                    .await
-                    .map_err(|error| error.into_agent_error())?
-                    .is_none_or(|roster| !roster.members.contains_key(&update.subject.device_id))
+                    || if held.is_some() || session.agent_role.binding().is_some() {
+                        !desk_assistant_data_store::device_roster::permits_current_target(
+                            &txn,
+                            &session,
+                            &update.subject.device_id,
+                        )
+                        .await
+                        .map_err(|error| error.into_agent_error())?
+                    } else {
+                        lock(
+                            &txn,
+                            &update.subject.actor_id,
+                            &personal_selection_key(&update.subject.conversation_id),
+                        )
+                        .await
+                        .map_err(|error| error.into_agent_error())?
+                        .is_none_or(|roster| {
+                            !roster.members.contains_key(&update.subject.device_id)
+                        })
+                    }
                 {
                     return Err(failure());
                 }

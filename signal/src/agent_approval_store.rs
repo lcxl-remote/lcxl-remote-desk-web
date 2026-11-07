@@ -218,7 +218,7 @@ pub async fn pending_permission_reviews(
                         conversation_id: session.conversation_id.clone(),
                         owner_id: row.actor_id.clone(),
                         device_id: row.device_id.clone(),
-                        target_device_id: row.device_id.clone(),
+                        target_device_id: record.device_id.clone(),
                         request_id: record.proposal.request_id.clone(),
                         kind: PendingRequestKind::Directory,
                     });
@@ -2516,6 +2516,7 @@ pub async fn validate_permission_capacity(
 pub async fn validate_directory_capacity(
     db: &DatabaseConnection,
     session: &PersistedAgentSession,
+    device_id: &str,
     proposal: desk_diagnose_core::file_scope::DirectoryProposal,
     now_unix_ms: u64,
 ) -> Result<(), desk_agent_protocol::AgentError> {
@@ -2524,6 +2525,7 @@ pub async fn validate_directory_capacity(
     };
     desk_diagnose_core::directory_review::preflight_capacity(
         session,
+        device_id,
         proposal,
         &context.delegation,
         context.goal.as_ref(),

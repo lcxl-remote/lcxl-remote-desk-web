@@ -26,6 +26,42 @@ pub(super) fn selected_read_connection(state: &ConnectionState) -> bool {
 }
 
 impl SignalAiAssistantTools {
+    pub(super) async fn directory_for_request_device(
+        &self,
+        session: &PersistedAgentSession,
+        target_ref: &str,
+        path: &str,
+    ) -> Result<
+        (
+            String,
+            desk_agent_protocol::computer_use::FileDirectoryResolveOutput,
+        ),
+        AgentError,
+    > {
+        let (held, connection) = self.selected_connection(session, target_ref).await?;
+        if !crate::computer_use_readiness::global_computer_use_readiness_cache()
+            .get_fresh(&connection, chrono::Utc::now())
+            .is_some_and(|current| {
+                current.readiness.capabilities.iter().any(|item| {
+                    item.capability == desk_agent_protocol::Capability::FileMetadataRead
+                        && item.supported
+                        && item.ready
+                })
+            })
+        {
+            return Err(unavailable());
+        }
+        let resolved = super::directory::resolve_candidate(
+            &self.connections,
+            &connection,
+            &self.actor_id,
+            &held.device_id,
+            path,
+        )
+        .await?;
+        Ok((held.device_id, resolved))
+    }
+
     async fn selected_connection(
         &self,
         session: &PersistedAgentSession,

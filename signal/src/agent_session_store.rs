@@ -2548,12 +2548,14 @@ impl SessionSeam for SignalAgentSessionStore {
     async fn propose_directory(
         &self,
         session: &mut PersistedAgentSession,
+        device_id: &str,
         proposal: desk_diagnose_core::file_scope::DirectoryProposal,
         now_unix_ms: u64,
     ) -> Result<(), AgentError> {
         crate::agent_approval_store::validate_directory_capacity(
             &self.db,
             session,
+            device_id,
             proposal.clone(),
             now_unix_ms,
         )
@@ -2562,7 +2564,7 @@ impl SessionSeam for SignalAgentSessionStore {
             i64::try_from(now_unix_ms).map_err(|_| internal("invalid directory clock"))?,
         )
         .ok_or_else(|| internal("invalid directory clock"))?;
-        self.propose_file_scope_for_turn(session, proposal, now)
+        self.propose_file_scope_for_turn(session, device_id, proposal, now)
             .await
     }
 

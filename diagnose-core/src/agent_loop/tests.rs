@@ -567,16 +567,13 @@ impl SessionSeam for MemSession {
     async fn propose_directory(
         &self,
         session: &mut PersistedAgentSession,
+        device_id: &str,
         proposal: crate::file_scope::DirectoryProposal,
         now_unix_ms: u64,
     ) -> Result<(), AgentError> {
         let update = crate::file_scope::transaction::FileScopeUpdate {
             subject: session
-                .file_scope_subject(
-                    &session.actor_id,
-                    &session.device_id,
-                    &session.conversation_id,
-                )
+                .file_scope_subject(&session.actor_id, device_id, &session.conversation_id)
                 .unwrap(),
             client_conversation_id: session.client_conversation_id.clone().unwrap(),
             client_request_id: proposal.request_id.clone(),

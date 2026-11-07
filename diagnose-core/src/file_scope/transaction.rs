@@ -277,6 +277,12 @@ pub fn prepare(
     now_unix_ms: u64,
 ) -> Result<(PersistedAgentSession, FileScopeReceipt), FileScopeError> {
     update.validate_session(session)?;
+    if session.device_id.is_empty()
+        && matches!(&update.mutation, FileScopeMutation::Propose { proposal } if proposal.source == DirectoryConsentSource::ModelProposal)
+        && !session.admits_assistant_device(&update.subject.device_id)
+    {
+        return Err(FileScopeError::WrongSubject);
+    }
     if matches!(&update.mutation, FileScopeMutation::Select { proposal }
         if proposal.source == DirectoryConsentSource::TaskContract)
         && (session.trigger_origin != crate::session::TriggerOrigin::ScheduledTask

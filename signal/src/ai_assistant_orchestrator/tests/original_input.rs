@@ -3184,10 +3184,22 @@ async fn run_selected_device_reads(scenario: SelectedReadScenario) {
     let model_cases = cases.clone();
     let file_result = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
     let model_file_result = file_result.clone();
+    let directory_request = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+    let model_directory_request = directory_request.clone();
     let gateway = actix_web::rt::spawn(async move {
         for (target, name) in model_cases {
+            if name == "inspect_files" {
+                capture_one_openai_request_with_reply(&listener, |body| {
+                    let request: Value = serde_json::from_slice(body).unwrap();
+                    let tool = request["tools"].as_array().unwrap().iter().find(|tool| tool["function"]["name"] == "request_directory").expect("directory proposal tool is callable");
+                    assert!(tool["function"]["parameters"]["required"].as_array().unwrap().contains(&json!("target_ref")));
+                    tool_reply("request_directory", json!({"target_ref":target,"path":"/fixture-folder","purpose":"List the chosen directory"}))
+                }).await;
+            }
+            // Read the proposed ID after the owner decision has reached the loop.
+            let mut directory_exact = None;
             let exact = match (window, name) {
-                (_, "inspect_files") => json!({"directory_request_id":"selected-directory"}),
+                (_, "inspect_files") => json!({}),
                 (_, "inspect_spreadsheets") => {
                     json!({"sources":[{"file_result_call_id":model_file_result.lock().unwrap().clone().expect("verified directory listing"), "entry_name":"selected.xlsx"}]})
                 }
@@ -3200,6 +3212,11 @@ async fn run_selected_device_reads(scenario: SelectedReadScenario) {
             };
             capture_one_openai_request_with_reply(&listener, |body| {
                 let request: Value = serde_json::from_slice(body).unwrap();
+                if name == "inspect_files" {
+                    let id = model_directory_request.lock().unwrap().clone().expect("confirmed directory proposal");
+                    directory_exact = Some(json!({"directory_request_id":id}));
+                    assert!(request["messages"].to_string().contains(&id));
+                }
                 assert!(
                     !request["tools"]
                         .as_array()
@@ -3210,7 +3227,7 @@ async fn run_selected_device_reads(scenario: SelectedReadScenario) {
                 tool_reply(
                     "request_permissions",
                     json!({"target_ref":target, "items":[{
-                        "tool_name":name, "reason":"Read what the owner asked for", "exact_input":exact
+                        "tool_name":name, "reason":"Read what the owner asked for", "exact_input":directory_exact.as_ref().unwrap_or(&exact)
                     }]}),
                 )
             })
@@ -3235,7 +3252,7 @@ async fn run_selected_device_reads(scenario: SelectedReadScenario) {
                         .is_some(),
                     name == "read_current_screen",
                 );
-                let mut arguments = exact.clone();
+                let mut arguments = directory_exact.clone().unwrap_or_else(|| exact.clone());
                 arguments["target_ref"] = json!(target);
                 tool_reply(name, arguments)
             })
@@ -3309,7 +3326,6 @@ async fn run_selected_device_reads(scenario: SelectedReadScenario) {
         let store = crate::agent_session_store::SignalAgentSessionStore::new(db.clone());
         if files && index == 0 {
             use desk_assistant_data_store::device_roster::{personal_selection_key, replace};
-            use desk_diagnose_core::file_scope::{transaction::*, *};
             replace(
                 &db,
                 &actor,
@@ -3319,39 +3335,6 @@ async fn run_selected_device_reads(scenario: SelectedReadScenario) {
             )
             .await
             .unwrap();
-            let store = crate::agent_session_store::SignalAgentSessionStore::new(db.clone())
-                .with_client_metadata(Some(intent.clone()), AgentSessionSurface::AiAssistant);
-            store
-                .update_file_scope(
-                    &FileScopeUpdate {
-                        subject: FileScopeSubject {
-                            actor_id: actor.clone(),
-                            device_id: target.into(),
-                            conversation_id: run.clone(),
-                        },
-                        client_conversation_id: intent.clone(),
-                        client_request_id: "selected-directory".into(),
-                        expected_revision: 0,
-                        mutation: FileScopeMutation::Select {
-                            proposal: DirectoryProposal {
-                                request_id: "selected-directory".into(),
-                                requested_path: "/fixture-folder".into(),
-                                canonical_path: "/fixture-folder".into(),
-                                directory: ObjectRef {
-                                    token: "fixture-directory-token".into(),
-                                    snapshot_id: "fixture-directory-snapshot".into(),
-                                    object_kind: ObjectKind::Directory,
-                                    expires_at: String::new(),
-                                },
-                                purpose: "List the selected directory".into(),
-                                source: DirectoryConsentSource::OwnerSelection,
-                            },
-                        },
-                    },
-                    now,
-                )
-                .await
-                .unwrap();
         }
         let attachment_ids = if terminal {
             use desk_agent_protocol::ai_assistant::{
@@ -3400,7 +3383,7 @@ async fn run_selected_device_reads(scenario: SelectedReadScenario) {
         } else {
             Vec::new()
         };
-        run_turn(
+        let turn = run_turn(
             connections.clone(),
             db.clone(),
             format!("desktop-{index}"),
@@ -3428,8 +3411,68 @@ async fn run_selected_device_reads(scenario: SelectedReadScenario) {
                 client_timezone: "UTC".into(),
                 ..Default::default()
             },
-        )
-        .await;
+        );
+        if files && index == 0 {
+            let decide_directory = async {
+                use desk_agent_protocol::ai_assistant::{
+                    AiAssistantConversationTarget, AiAssistantObjectContextUpdate,
+                };
+                respond_to_selected_desktop(
+                    &connections,
+                    target,
+                    peers.get_mut(target).unwrap(),
+                    "resolve_directory",
+                    false,
+                )
+                .await;
+                let (id, revision) = loop {
+                    let snapshot = store
+                        .read_snapshot_for_subject(&run, &actor, "")
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    if let Some(record) = snapshot.file_scope.records().first() {
+                        assert_eq!(record.device_id, target);
+                        assert_eq!(
+                            record.proposal.source,
+                            desk_diagnose_core::file_scope::DirectoryConsentSource::ModelProposal
+                        );
+                        break (
+                            record.proposal.request_id.clone(),
+                            snapshot.file_scope.revision(),
+                        );
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                };
+                *directory_request.lock().unwrap() = Some(id.clone());
+                assert!(
+                    apply_object_context_update(
+                        db.clone(),
+                        owner,
+                        target.into(),
+                        &AiAssistantObjectContextUpdate {
+                            conversation_id: intent.clone(),
+                            client_request_id: "confirm-selected-directory".into(),
+                            conversation_target: AiAssistantConversationTarget::SelectableDevices,
+                            operation: AiAssistantObjectContextOperation::DecideDirectory {
+                                directory_request_id: id,
+                                expected_revision: revision,
+                                approve: true
+                            },
+                        }
+                    )
+                    .await
+                    .unwrap()
+                );
+            };
+            tokio::time::timeout(SCENARIO_TIMEOUT, async {
+                tokio::join!(turn, decide_directory);
+            })
+            .await
+            .unwrap();
+        } else {
+            turn.await;
+        }
         let pending = store
             .read_snapshot_for_subject(&run, &actor, "")
             .await
@@ -3646,7 +3689,24 @@ async fn respond_to_selected_desktop(
         expires_at: String::new(),
     };
     let mut document_preview = None;
-    let (value, image) = if name == "inspect_files" {
+    let (value, image) = if name == "resolve_directory" {
+        let ContextKind::FileDirectoryResolve(input) = read.envelope.operation.input.kind else {
+            panic!("expected metadata-only directory resolution")
+        };
+        assert_eq!(input.path, "/fixture-folder");
+        (
+            ReadContextOutput::FileDirectoryResolve(FileDirectoryResolveOutput {
+                canonical_path: input.path,
+                directory: ObjectRef {
+                    token: "fixture-directory-token".into(),
+                    snapshot_id: "fixture-directory-snapshot".into(),
+                    object_kind: ObjectKind::Directory,
+                    expires_at: String::new(),
+                },
+            }),
+            None,
+        )
+    } else if name == "inspect_files" {
         let ContextKind::FileMetadataInspect(input) = read.envelope.operation.input.kind else {
             panic!("expected directory metadata request")
         };

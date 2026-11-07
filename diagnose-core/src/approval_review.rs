@@ -946,7 +946,21 @@ impl ApprovalReviewCandidate {
         if action.is_null() {
             return Err(ApprovalReviewError::InvalidCandidate);
         }
-        if self.device_id.is_empty() {
+        if self.device_id.is_empty()
+            && matches!(self.source, ApprovalSource::DirectoryProposal { .. })
+        {
+            let device = action
+                .get("device_id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or(ApprovalReviewError::InvalidCandidate)?;
+            valid_id(device)?;
+            if self.tool_name != crate::directory_tools::REQUEST_DIRECTORY
+                || self.input_kind != ApprovalInputKind::ExactCall
+                || self.risk != CapabilityRiskTier::R1
+            {
+                return Err(ApprovalReviewError::InvalidCandidate);
+            }
+        } else if self.device_id.is_empty() {
             let (target, selected_read) = if let Some(target) = action.get("selected_read_target") {
                 let target: crate::request_devices::SelectedReadTarget =
                     serde_json::from_value(target.clone())

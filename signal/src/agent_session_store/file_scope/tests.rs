@@ -305,7 +305,7 @@ async fn model_proposal_advances_only_its_held_version_and_never_approves() {
     proposal.source = DirectoryConsentSource::ModelProposal;
     let stale = held.clone();
     store
-        .propose_file_scope_for_turn(&mut held, proposal.clone(), now())
+        .propose_file_scope_for_turn(&mut held, "device", proposal.clone(), now())
         .await
         .unwrap();
     assert_eq!(held.version, stale.version + 1);
@@ -318,7 +318,7 @@ async fn model_proposal_advances_only_its_held_version_and_never_approves() {
     proposal.request_id = "another-model-request".into();
     assert!(
         store
-            .propose_file_scope_for_turn(&mut stale, proposal, now())
+            .propose_file_scope_for_turn(&mut stale, "device", proposal, now())
             .await
             .is_err()
     );
@@ -446,7 +446,7 @@ async fn directory_review_observes_owner_decision_once_and_rejects_changed_turn(
         proposal.request_id = request_id.clone();
         proposal.source = DirectoryConsentSource::ModelProposal;
         store
-            .propose_file_scope_for_turn(&mut held, proposal, now)
+            .propose_file_scope_for_turn(&mut held, "device", proposal, now)
             .await
             .unwrap();
         let before = held.clone();

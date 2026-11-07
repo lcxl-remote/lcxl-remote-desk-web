@@ -448,7 +448,11 @@ impl PersistedAgentSession {
             .client_conversation_id
             .as_deref()
             .map_or(device_id, |id| transaction::storage_device_id(&subject, id));
-        if self.device_id != storage_device {
+        if self.device_id != storage_device
+            && !(self.device_id.is_empty()
+                && self.agent_role.binding().is_some()
+                && self.admits_assistant_device(device_id))
+        {
             return Err(FileScopeError::WrongSubject);
         }
         self.file_scope.check_subject(&subject)?;

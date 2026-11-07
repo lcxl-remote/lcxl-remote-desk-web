@@ -89,6 +89,52 @@ pub fn parse(call: &ToolCall) -> Result<DirectoryInput, AgentError> {
     Ok(input)
 }
 
+pub(crate) fn selected_tool(
+    session: &crate::session::PersistedAgentSession,
+    devices: &[crate::request_devices::RequestDevice],
+) -> Option<RegisteredTool> {
+    if !crate::request_devices::accepts_device_reads(session)
+        || !session
+            .agent_role
+            .allows_effect(ToolEffect::DirectoryPlanning)
+        || !session.trigger_origin.allows_new_mutation()
+        || !devices.iter().any(|device| {
+            device.online
+                && device
+                    .ready_capabilities
+                    .contains(&desk_agent_protocol::Capability::FileMetadataRead)
+        })
+    {
+        return None;
+    }
+    let mut tool = registry().into_iter().next()?;
+    crate::request_devices::add_target_selector(&mut tool, true);
+    Some(tool)
+}
+
+pub(crate) fn parse_for_request(
+    call: &ToolCall,
+    selectable: bool,
+) -> Result<(Option<String>, DirectoryInput), AgentError> {
+    if !selectable {
+        return Ok((None, parse(call)?));
+    }
+    let mut value: serde_json::Value =
+        serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?;
+    let reference = value
+        .as_object_mut()
+        .and_then(|input| input.remove("target_ref"))
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .ok_or_else(unavailable)?;
+    desk_agent_protocol::ai_assistant::validate_target_refs([reference.as_str()])
+        .map_err(|_| unavailable())?;
+    let input = parse(&ToolCall {
+        arguments_json: value.to_string(),
+        ..call.clone()
+    })?;
+    Ok((Some(reference), input))
+}
+
 pub fn proposal(
     id: String,
     input: DirectoryInput,

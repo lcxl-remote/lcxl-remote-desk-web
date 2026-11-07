@@ -107,7 +107,7 @@ pub(crate) fn project_read_spec(spec: &mut crate::chat::ToolSpec) {
     };
 }
 
-fn add_target_selector(tool: &mut RegisteredTool, required: bool) {
+pub(crate) fn add_target_selector(tool: &mut RegisteredTool, required: bool) {
     let schema = &mut tool.spec.parameters_schema;
     if schema.get("properties").is_none() {
         schema["properties"] = serde_json::json!({});

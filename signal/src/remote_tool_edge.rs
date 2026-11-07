@@ -6672,6 +6672,21 @@ impl ToolSeam for SignalAiAssistantTools {
         )
         .await
     }
+    async fn resolve_request_device_directory(
+        &self,
+        session: &desk_diagnose_core::session::PersistedAgentSession,
+        target_ref: &str,
+        path: &str,
+    ) -> Result<
+        (
+            String,
+            desk_agent_protocol::computer_use::FileDirectoryResolveOutput,
+        ),
+        AgentError,
+    > {
+        self.directory_for_request_device(session, target_ref, path)
+            .await
+    }
     async fn run_read(&self, call: &ToolCall) -> Result<ToolRunOutput, AgentError> {
         match self.read_outcome(call).await? {
             ReadOutcome::Completed { output, .. } => Ok(output),

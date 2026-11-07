@@ -458,6 +458,15 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
             exposed.push(tool);
         }
     }
+    let selected_directory = (!goal_control_only && planning_goal.is_none())
+        .then(|| crate::directory_tools::selected_tool(session, &request_devices))
+        .flatten();
+    if session.device_id.is_empty() {
+        exposed.retain(|candidate| candidate.name() != crate::directory_tools::REQUEST_DIRECTORY);
+    }
+    if let Some(tool) = &selected_directory {
+        exposed.push(tool);
+    }
     let raw_provider_exposed = exposed
         .iter()
         .filter(|tool| {
@@ -4237,18 +4246,38 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                                                     &call.arguments_json,
                                                 );
                                                 let resolved =
-                                                    match crate::directory_tools::parse(call) {
-                                                        Ok(input) => deps
+                                                    match crate::directory_tools::parse_for_request(
+                                                        call,
+                                                        session.device_id.is_empty(),
+                                                    ) {
+                                                        Ok((Some(reference), input)) => deps
+                                                            .tools
+                                                            .resolve_request_device_directory(
+                                                                session,
+                                                                &reference,
+                                                                &input.path,
+                                                            )
+                                                            .await
+                                                            .map(|(device, resolved)| {
+                                                                (device, input, resolved)
+                                                            }),
+                                                        Ok((None, input)) => deps
                                                             .tools
                                                             .resolve_directory_candidate(
                                                                 &input.path,
                                                             )
                                                             .await
-                                                            .map(|resolved| (input, resolved)),
+                                                            .map(|resolved| {
+                                                                (
+                                                                    session.device_id.clone(),
+                                                                    input,
+                                                                    resolved,
+                                                                )
+                                                            }),
                                                         Err(error) => Err(error),
                                                     };
                                                 tool_observation.preflight_result(&resolved);
-                                                let (input, resolved) = match resolved {
+                                                let (device, input, resolved) = match resolved {
                                                     Ok(value) => value,
                                                     Err(error) => {
                                                         append_internal_tool_result(
@@ -4284,6 +4313,7 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                                                     .session_seam
                                                     .propose_directory(
                                                         session,
+                                                        &device,
                                                         crate::directory_tools::proposal(
                                                             request_id.clone(),
                                                             input,
