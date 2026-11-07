@@ -379,7 +379,7 @@ mod tests {
             )),
             canonical_input_json: Some(canonical),
             command_confirmation: None,
-            selected_read_target: None,
+            selected_device_target: None,
             launch_confirmation: Some(binding),
             suggested_ttl_seconds: 120,
             suggested_max_uses: 1,

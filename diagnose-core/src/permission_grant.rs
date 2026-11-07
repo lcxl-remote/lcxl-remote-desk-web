@@ -259,7 +259,7 @@ pub fn build_permission_grants(
     if context.readiness_revision == 0
         || context.now_unix_ms == 0
         || request
-            .selected_read_target()
+            .selected_device_target()
             .is_some_and(|target| target.readiness_revision != context.readiness_revision)
     {
         return Err(internal("invalid grant issuance readiness or clock"));
@@ -723,7 +723,7 @@ pub fn build_permission_grants(
         } else {
             resource_scope.clone()
         };
-        let risk_tier = if requested.selected_read_target.is_some() {
+        let risk_tier = if requested.selected_device_target.is_some() {
             crate::provider_preflight::classify_provider_call(
                 capability,
                 &crate::chat::ToolCall {

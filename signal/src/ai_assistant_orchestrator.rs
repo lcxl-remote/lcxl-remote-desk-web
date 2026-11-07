@@ -1859,7 +1859,7 @@ async fn prepare_composed_turn(
                         .and_then(|request| {
                             let device = request.selected_device_id()?;
                             let connection = request
-                                .selected_read_target()
+                                .selected_device_target()
                                 .map(|target| target.connection_id.as_str())
                                 .or_else(|| {
                                     request
@@ -1956,7 +1956,7 @@ async fn prepare_composed_turn(
                     selected_source_tools
                         .extend(resumed_desktop_reads.iter().map(|name| (*name).to_string()));
                     if let Some(request) = selected_permission
-                        && let Some(target) = request.selected_read_target()
+                        && let Some(target) = request.selected_device_target()
                         && grant_readiness_revision == target.readiness_revision
                     {
                         if request.state == desk_diagnose_core::dynamic_run::PermissionRequestState::Approved

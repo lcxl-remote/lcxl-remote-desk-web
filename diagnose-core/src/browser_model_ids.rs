@@ -128,6 +128,38 @@ fn observed_browser_results(history: &[ChatMessage], now_ms: u64) -> Vec<Browser
         .collect()
 }
 
+/// An observed browser ID is local to a single physical device and profile.
+pub(crate) fn require_device_page(
+    history: &[ChatMessage],
+    device_id: &str,
+    page: &BrowserPageRef,
+    now_ms: u64,
+) -> Result<(), AgentError> {
+    let latest = history.iter().rev().find_map(|message| {
+        let source = message.trusted_tool_result();
+        let call_id = source.tool_call_id.as_deref()?;
+        let envelope = source.data_envelope.as_ref()?;
+        if envelope.provenance.source_object_id.as_deref()
+            != Some(&format!("{device_id}:{call_id}"))
+            || envelope
+                .retention
+                .expires_at_unix_ms
+                .is_some_and(|expiry| expiry <= now_ms)
+        {
+            return None;
+        }
+        let result = crate::agent_loop::verified_browser_result(message)?;
+        (result.page.page_id == page.page_id && result.page.adapter == page.adapter)
+            .then_some(result.page)
+    });
+    if latest.as_ref() != Some(page) {
+        return Err(invalid(
+            "Use a current browser page observed on the same target device and browser profile",
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn resolve_with_references(
     call: &ToolCall,
     value: &mut Value,
@@ -560,6 +592,75 @@ mod tests {
                 serde_json::to_string(&projected.messages).unwrap(),
             );
         }
+    }
+
+    #[test]
+    fn selected_browser_pages_require_current_receipts_from_the_physical_device() {
+        use crate::model_message_labels::{
+            internal_tool_result_envelope, model_bound_user_message,
+        };
+        use desk_agent_protocol::data_lineage::DestinationIdentity;
+
+        let page: BrowserPageRef = serde_json::from_value(json!({
+            "schema_version": desk_agent_protocol::browser_control::BROWSER_CONTROL_SCHEMA_VERSION,
+            "adapter": {"engine":"chrome_extension","device_id":"native-browser",
+                "os_session_id":"session","browser_major_version":144,
+                "browser_version":"144.0.0.0","adapter_id":"extension","adapter_version":"1.0",
+                "profile_incarnation":"profile","connection_revision":1},
+            "page_id":"shared-tab","page_incarnation":"incarnation",
+            "origin":{"kind":"https","host_ascii":"example.com","port":443},
+            "document_revision":1,"url_sha256":"a".repeat(64),"observed_at_unix_ms":1,
+            "account_id":null
+        }))
+        .unwrap();
+        let owner = model_bound_user_message(
+            "owner".into(),
+            "Inspect the selected device".into(),
+            DestinationIdentity::Model {
+                connection_id: "connection".into(),
+                connection_revision: 1,
+                model_id: "model".into(),
+                profile_revision: 1,
+            },
+        )
+        .unwrap();
+        let receipt = |device: &str, page: &BrowserPageRef, call_id: &str| {
+            let body = json!({
+                "schema_version": desk_agent_protocol::browser_control::BROWSER_CONTROL_SCHEMA_VERSION,
+                "call_id":call_id,"outcome":"page_opened","page":page,"snapshot":null,
+                "form_readback":[],"send_receipt":null,"completed_at_unix_ms":2
+            }).to_string();
+            let mut message = ChatMessage::tool_result(call_id, call_id, &body);
+            let mut envelope = internal_tool_result_envelope(
+                owner.data_envelope.as_ref(),
+                call_id,
+                &body,
+                "browser_open_page",
+            )
+            .unwrap()
+            .unwrap();
+            envelope.provenance.source_object_id = Some(format!("{device}:{call_id}"));
+            envelope.retention.expires_at_unix_ms = Some(100);
+            message.data_envelope = Some(envelope);
+            message
+        };
+        let newer = BrowserPageRef {
+            document_revision: 2,
+            ..page.clone()
+        };
+        let history = [
+            receipt("device:a", &page, "open-a"),
+            receipt("device-b", &newer, "open-b"),
+        ];
+        require_device_page(&history, "device:a", &page, 3).unwrap();
+        require_device_page(&history, "device-b", &newer, 3).unwrap();
+        assert!(require_device_page(&history, "device-b", &page, 3).is_err());
+        assert!(require_device_page(&history, "device:a", &newer, 3).is_err());
+        assert!(require_device_page(&history, "device:a", &page, 100).is_err());
+
+        let refreshed = [history[0].clone(), receipt("device:a", &newer, "refresh-a")];
+        assert!(require_device_page(&refreshed, "device:a", &page, 3).is_err());
+        require_device_page(&refreshed, "device:a", &newer, 3).unwrap();
     }
 
     #[test]

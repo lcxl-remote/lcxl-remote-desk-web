@@ -54,7 +54,7 @@ fn session() -> PersistedAgentSession {
 
 fn device(reference: &str, ready_provider_ids: Vec<String>) -> RequestDevice {
     RequestDevice {
-        read_target: Some(SelectedReadTarget {
+        read_target: Some(SelectedDeviceTarget {
             device_id: reference.into(),
             target_ref: reference.into(),
             connection_id: format!("connection-{reference}"),
@@ -192,7 +192,7 @@ async fn selected_file_reads_project_and_plan_only_on_the_directory_device() {
         if let Ok(request) = request {
             request.validate().unwrap();
             assert_eq!(
-                request.selected_read_target(),
+                request.selected_device_target(),
                 devices[0].read_target.as_ref()
             );
         }
@@ -360,7 +360,7 @@ async fn every_request_device_read_projects_parses_and_keeps_its_exact_target() 
         .await
         .unwrap()
         .unwrap_or_else(|e| panic!("{name}: {e:?}"));
-        assert_eq!(approved.selected_read_target(), Some(target), "{name}");
+        assert_eq!(approved.selected_device_target(), Some(target), "{name}");
         assert!(
             require_current_read_target(&session, &native, target).is_err(),
             "{name}"
@@ -382,7 +382,7 @@ async fn every_request_device_read_projects_parses_and_keeps_its_exact_target() 
             require_current_read_target(
                 &session,
                 &native,
-                &SelectedReadTarget {
+                &SelectedDeviceTarget {
                     connection_id: "reconnected".into(),
                     ..target.clone()
                 }
@@ -394,7 +394,7 @@ async fn every_request_device_read_projects_parses_and_keeps_its_exact_target() 
             require_current_read_target(
                 &session,
                 &native,
-                &SelectedReadTarget {
+                &SelectedDeviceTarget {
                     readiness_revision: 2,
                     ..target.clone()
                 }

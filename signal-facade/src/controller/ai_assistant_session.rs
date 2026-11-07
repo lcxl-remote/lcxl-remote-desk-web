@@ -2161,7 +2161,7 @@ impl From<desk_diagnose_core::dynamic_run::PermissionRequest> for PermissionRequ
                         suggested_ttl_seconds: item.suggested_ttl_seconds,
                         suggested_max_uses: item.suggested_max_uses,
                         selected_read_device_ref: item
-                            .selected_read_target
+                            .selected_device_target
                             .map(|target| target.target_ref),
                         reason: item.reason,
                         external_send_confirmation,

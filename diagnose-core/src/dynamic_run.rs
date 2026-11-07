@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 
 pub const AGENT_RUN_EVENT_SCHEMA_VERSION: u16 = 1;
 pub const TASK_STATUS_PROJECTION_SCHEMA_VERSION: u16 = 1;
-pub const PERMISSION_REQUEST_SCHEMA_VERSION: u16 = 1;
+pub const PERMISSION_REQUEST_SCHEMA_VERSION: u16 = 2;
 pub const BACKGROUND_TASK_SCHEMA_VERSION: u16 = 1;
 pub const MAX_TASK_STATUS_ITEMS: usize = 128;
 /// Owner/model projections retain a bounded task window even when one
@@ -694,7 +694,7 @@ pub struct GrantRequestItem {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command_confirmation: Option<crate::command_confirmation::CommandConfirmation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub selected_read_target: Option<crate::request_devices::SelectedReadTarget>,
+    pub selected_device_target: Option<crate::request_devices::SelectedDeviceTarget>,
     /// Host-resolved identity and exact arguments frozen before owner approval.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_confirmation: Option<crate::application_launch::LaunchApprovalBinding>,
@@ -748,9 +748,9 @@ impl GrantRequestItem {
         {
             return Err(DynamicRunContractError::InvalidCanonicalPermissionInput);
         }
-        if let Some(target) = &self.selected_read_target {
-            validate_id("selected_read_device", &target.device_id)?;
-            validate_id("selected_read_connection", &target.connection_id)?;
+        if let Some(target) = &self.selected_device_target {
+            validate_id("selected_device", &target.device_id)?;
+            validate_id("selected_device_connection", &target.connection_id)?;
             if desk_agent_protocol::ai_assistant::validate_target_refs([target.target_ref.as_str()])
                 .is_err()
                 || target.readiness_revision == 0
@@ -817,18 +817,18 @@ impl PermissionRequest {
             .flatten()
     }
 
-    pub fn selected_read_target(&self) -> Option<&crate::request_devices::SelectedReadTarget> {
+    pub fn selected_device_target(&self) -> Option<&crate::request_devices::SelectedDeviceTarget> {
         let [item] = self.items.as_slice() else {
             return None;
         };
-        item.selected_read_target.as_ref()
+        item.selected_device_target.as_ref()
     }
 
     pub fn selected_device_id(&self) -> Option<&str> {
         self.exact_command()
             .map(|command| command.target_device_id.as_str())
             .or_else(|| {
-                self.selected_read_target()
+                self.selected_device_target()
                     .map(|target| target.device_id.as_str())
             })
     }
@@ -850,8 +850,8 @@ impl PermissionRequest {
         if self
             .items
             .iter()
-            .any(|item| item.selected_read_target.is_some())
-            && (self.selected_read_target().is_none() || self.exact_command().is_some())
+            .any(|item| item.selected_device_target.is_some())
+            && (self.selected_device_target().is_none() || self.exact_command().is_some())
         {
             return Err(DynamicRunContractError::InvalidCanonicalPermissionInput);
         }
@@ -1549,7 +1549,7 @@ mod tests {
             state: PermissionRequestState::Pending,
             items: vec![GrantRequestItem {
                 command_confirmation: None,
-                selected_read_target: None,
+                selected_device_target: None,
                 launch_confirmation: None,
                 item_id: "write-report".into(),
                 provider_id: "file.workspace".into(),

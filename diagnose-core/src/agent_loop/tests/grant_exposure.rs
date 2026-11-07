@@ -327,7 +327,7 @@ async fn permission_resume_keeps_scoped_prerequisites_and_validates_exact_grants
             state: PermissionRequestState::Approved,
             items: vec![GrantRequestItem {
                 command_confirmation: None,
-                selected_read_target: None,
+                selected_device_target: None,
                 launch_confirmation: None,
                 item_id: "launch".into(),
                 provider_id: grant.provider_id.clone(),

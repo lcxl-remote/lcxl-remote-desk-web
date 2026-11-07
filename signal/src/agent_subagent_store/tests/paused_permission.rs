@@ -17,7 +17,7 @@ pub(super) fn request(session: &mut PersistedAgentSession) -> PermissionRequeste
         state: PermissionRequestState::Pending,
         items: vec![GrantRequestItem {
             command_confirmation: None,
-            selected_read_target: None,
+            selected_device_target: None,
             launch_confirmation: None,
             item_id: "inspect".into(),
             provider_id: "desktop.session".into(),

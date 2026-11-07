@@ -4025,7 +4025,7 @@ mod tests {
             state: PermissionRequestState::Pending,
             items: vec![GrantRequestItem {
                 command_confirmation: None,
-                selected_read_target: None,
+                selected_device_target: None,
                 launch_confirmation: None,
                 item_id: "matrix-read".into(),
                 provider_id: "file.read".into(),
@@ -4344,7 +4344,7 @@ mod tests {
             state: PermissionRequestState::Pending,
             items: vec![GrantRequestItem {
                 command_confirmation: None,
-                selected_read_target: None,
+                selected_device_target: None,
                 launch_confirmation: None,
                 item_id: "inspect".into(),
                 provider_id: "desktop.session".into(),
@@ -4431,7 +4431,7 @@ mod tests {
             state: PermissionRequestState::Pending,
             items: vec![GrantRequestItem {
                 command_confirmation: None,
-                selected_read_target: None,
+                selected_device_target: None,
                 launch_confirmation: None,
                 item_id: "inspect".into(),
                 provider_id: "desktop.session".into(),
@@ -4591,7 +4591,7 @@ mod tests {
             state: PermissionRequestState::Pending,
             items: vec![GrantRequestItem {
                 command_confirmation: None,
-                selected_read_target: None,
+                selected_device_target: None,
                 launch_confirmation: None,
                 item_id: "ui-action".into(),
                 provider_id: desk_diagnose_core::ai_assistant::DESKTOP_UI_ACTION_PROVIDER_ID.into(),

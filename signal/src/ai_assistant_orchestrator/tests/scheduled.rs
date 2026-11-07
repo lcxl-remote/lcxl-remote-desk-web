@@ -936,7 +936,7 @@ async fn owner_decision(
             claimed.session.surface,
         );
     let request: PermissionRequest = serde_json::from_value(serde_json::json!({
-        "schema_version":1, "request_id":"scheduled-permission", "input_revision":1,
+        "schema_version":desk_diagnose_core::dynamic_run::PERMISSION_REQUEST_SCHEMA_VERSION, "request_id":"scheduled-permission", "input_revision":1,
         "state":"pending", "created_at":chrono::Utc::now().to_rfc3339(), "items":[{
             "item_id":"read", "provider_id":"desktop.session", "tool_name":"inspect_desktop_session",
             "expected_effect":"read_device", "resource_scope":["target:current_device"],

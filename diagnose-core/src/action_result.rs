@@ -494,14 +494,14 @@ mod tests {
             .is_err()
         );
         session.permission_requests.push(PermissionRequest {
-            schema_version: 1,
+            schema_version: crate::dynamic_run::PERMISSION_REQUEST_SCHEMA_VERSION,
             request_id: "approval".into(),
             input_revision: 1,
             state: PermissionRequestState::Approved,
             created_at: "now".into(),
             items: vec![GrantRequestItem {
                 command_confirmation: Some(confirmation.clone()),
-                selected_read_target: None,
+                selected_device_target: None,
                 launch_confirmation: None,
                 item_id: "command".into(),
                 provider_id: "file.workspace".into(),

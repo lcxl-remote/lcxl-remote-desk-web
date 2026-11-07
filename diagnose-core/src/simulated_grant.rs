@@ -125,7 +125,7 @@ mod tests {
             items: vec![
                 GrantRequestItem {
                     command_confirmation: None,
-                    selected_read_target: None,
+                    selected_device_target: None,
                     launch_confirmation: None,
                     item_id: "session".into(),
                     provider_id: "desktop.session".into(),
@@ -142,7 +142,7 @@ mod tests {
                 },
                 GrantRequestItem {
                     command_confirmation: None,
-                    selected_read_target: None,
+                    selected_device_target: None,
                     launch_confirmation: None,
                     item_id: "ui".into(),
                     provider_id: "desktop.ui".into(),

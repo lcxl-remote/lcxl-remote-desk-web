@@ -4147,7 +4147,7 @@ mod tests {
                 canonical_input_json: None,
                 canonical_input_digest_sha256: None,
                 command_confirmation: None,
-                selected_read_target: None,
+                selected_device_target: None,
                 launch_confirmation: None,
                 suggested_ttl_seconds: 300,
                 suggested_max_uses: 1,

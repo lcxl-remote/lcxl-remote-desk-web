@@ -176,6 +176,34 @@ impl BrowserCallPreflight {
         &self.request
     }
 
+    /// Check the provenance stamped by the host, independently of the native
+    /// browser IDs and adapter identity contained in an action.
+    pub fn require_device_page(
+        &self,
+        session: &crate::session::PersistedAgentSession,
+        device_id: &str,
+        now_unix_ms: u64,
+    ) -> Result<(), AgentError> {
+        use desk_agent_protocol::browser_control::BrowserAction;
+
+        let page = match &self.request.action {
+            BrowserAction::OpenPage { .. } => return Ok(()),
+            BrowserAction::NavigatePage { page, .. }
+            | BrowserAction::TakeSnapshot { page, .. }
+            | BrowserAction::WaitFor { page, .. }
+            | BrowserAction::FillForm { page, .. }
+            | BrowserAction::FillFormAndUpload { page, .. }
+            | BrowserAction::UploadFile { page, .. }
+            | BrowserAction::ActivateElement { page, .. } => page,
+        };
+        crate::browser_model_ids::require_device_page(
+            &session.conversation,
+            device_id,
+            page,
+            now_unix_ms,
+        )
+    }
+
     pub fn canonical_input_json(&self) -> &str {
         &self.canonical_input_json
     }

@@ -4470,7 +4470,7 @@ async fn projection_metrics_preserve_history_and_keep_capability_catalog_bounded
                 state: crate::dynamic_run::PermissionRequestState::Pending,
                 items: vec![crate::dynamic_run::GrantRequestItem {
                     command_confirmation: None,
-                    selected_read_target: None,
+                    selected_device_target: None,
                     launch_confirmation: None,
                     item_id: "read-file".into(),
                     provider_id: "file.read".into(),
@@ -8986,7 +8986,7 @@ fn browser_permission_references_must_match_unexpired_verified_edge_evidence() {
         state: PermissionRequestState::Pending,
         items: vec![GrantRequestItem {
             command_confirmation: None,
-            selected_read_target: None,
+            selected_device_target: None,
             launch_confirmation: None,
             item_id: "activate-compose".into(),
             provider_id: "browser.element.activate".into(),
@@ -9420,7 +9420,7 @@ async fn exercise_scheduled_permission_pause() {
             canonical_input_json: Some("{}".into()),
             canonical_input_digest_sha256: Some(format!("{:x}", Sha256::digest(b"{}"))),
             command_confirmation: None,
-            selected_read_target: None,
+            selected_device_target: None,
             launch_confirmation: None,
             suggested_ttl_seconds: 60,
             suggested_max_uses: 1,

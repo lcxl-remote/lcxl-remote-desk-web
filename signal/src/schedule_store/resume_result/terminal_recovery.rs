@@ -328,7 +328,7 @@ async fn permission_fixture() -> (ScheduleStore, run::Model, PersistedAgentSessi
         .conversation
         .retain(|message| message.role != ChatRole::Assistant);
     session.permission_requests.push(serde_json::from_value(serde_json::json!({
-        "schema_version":1, "request_id":"crash-permission", "input_revision":session.input_revision,
+        "schema_version":desk_diagnose_core::dynamic_run::PERMISSION_REQUEST_SCHEMA_VERSION, "request_id":"crash-permission", "input_revision":session.input_revision,
         "state":"pending", "created_at":"2026-09-06T00:00:00Z", "items":[{
             "item_id":"read", "provider_id":"desktop.session", "tool_name":"inspect_desktop_session",
             "expected_effect":"read_device", "resource_scope":["target:current_device"],

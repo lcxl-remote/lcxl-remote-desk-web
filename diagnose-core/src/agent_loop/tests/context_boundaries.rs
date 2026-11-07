@@ -442,7 +442,7 @@ async fn run_permission_compaction_case(mutation: u8) {
         state: PermissionRequestState::Approved,
         items: vec![GrantRequestItem {
             command_confirmation: None,
-            selected_read_target: None,
+            selected_device_target: None,
             launch_confirmation: None,
             item_id: "launch".into(),
             provider_id: grant.provider_id.clone(),

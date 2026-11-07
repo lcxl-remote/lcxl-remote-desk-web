@@ -4819,6 +4819,9 @@ impl SignalAiAssistantTools {
         .inspect_err(|error| {
             self.observed(call).input_error(error);
         })?;
+        if self.selected_device_fence.is_some() {
+            evaluated.require_device_page(&session, &self.target_device_id, now_unix_ms)?;
+        }
         let subject = desk_diagnose_core::provider_preflight::ProviderCallSubject {
             actor_id: &self.actor_id,
             run_id: &self.run_id,

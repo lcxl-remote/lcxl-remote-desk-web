@@ -775,7 +775,7 @@ pub(crate) async fn decide_permission_on(
     };
     let selected_device = personal_request.as_ref().and_then(|request| {
         let device = request.selected_device_id()?;
-        let connection = if let Some(read) = request.selected_read_target() {
+        let connection = if let Some(read) = request.selected_device_target() {
             read.connection_id.as_str()
         } else {
             request.exact_command()?.target_connection_id()

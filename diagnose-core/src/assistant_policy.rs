@@ -126,10 +126,10 @@ pub fn permits_permission_request(
     request: &crate::dynamic_run::PermissionRequest,
 ) -> bool {
     if !session.device_id.is_empty() {
-        return request.selected_read_target().is_none();
+        return request.selected_device_target().is_none();
     }
     let registry = crate::ai_assistant::ai_assistant_provider_registry_ref();
-    if let Some(target) = request.selected_read_target() {
+    if let Some(target) = request.selected_device_target() {
         let item = &request.items[0];
         return crate::request_devices::accepts_device_reads(session)
             && session.admits_assistant_device(&target.device_id)

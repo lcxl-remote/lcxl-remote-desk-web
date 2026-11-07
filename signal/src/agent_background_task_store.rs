@@ -1740,7 +1740,7 @@ mod tests {
             state: PermissionRequestState::Pending,
             items: vec![GrantRequestItem {
                 command_confirmation: None,
-                selected_read_target: None,
+                selected_device_target: None,
                 launch_confirmation: None,
                 item_id: "inspect-directory".into(),
                 provider_id: "file.workspace".into(),

@@ -337,7 +337,7 @@ pub(crate) async fn plan_device_permission(
                 item.canonical_input_digest_sha256 =
                     Some(format!("{:x}", Sha256::digest(canonical.as_bytes())));
                 item.canonical_input_json = Some(canonical);
-                item.selected_read_target = Some(target);
+                item.selected_device_target = Some(target);
                 return if crate::assistant_policy::permits_permission_request(session, &request) {
                     Ok(request)
                 } else {
@@ -536,7 +536,7 @@ fn require_observed_desktop_target(
 #[derive(Debug, Serialize)]
 pub struct RequestDevice {
     #[serde(skip)]
-    pub read_target: Option<SelectedReadTarget>,
+    pub read_target: Option<SelectedDeviceTarget>,
     #[serde(skip)]
     pub ready_provider_ids: Vec<String>,
     #[serde(skip)]
@@ -549,7 +549,7 @@ pub struct RequestDevice {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SelectedReadTarget {
+pub struct SelectedDeviceTarget {
     pub device_id: String,
     pub target_ref: String,
     pub connection_id: String,
@@ -608,7 +608,7 @@ pub fn ready_provider_ids(
 
 pub fn approved_read_tools(
     session: &PersistedAgentSession,
-    target: &SelectedReadTarget,
+    target: &SelectedDeviceTarget,
     grants: &[desk_agent_protocol::capability_grant::CapabilityGrant],
     now: u64,
 ) -> Vec<String> {
@@ -619,7 +619,7 @@ pub fn approved_read_tools(
             let item = request.items.first()?;
             (request.input_revision == session.input_revision
                 && request.state == crate::dynamic_run::PermissionRequestState::Approved
-                && request.selected_read_target() == Some(target)
+                && request.selected_device_target() == Some(target)
                 && grants.iter().any(|grant| {
                     grant.grant_id
                         == crate::permission_grant::permission_item_grant_id(
@@ -645,7 +645,7 @@ pub fn approved_read_tools(
 pub fn require_current_read_target(
     session: &PersistedAgentSession,
     call: &ToolCall,
-    target: &SelectedReadTarget,
+    target: &SelectedDeviceTarget,
 ) -> Result<(), AgentError> {
     let registry = crate::ai_assistant::ai_assistant_provider_registry_ref();
     let invalid = || {
@@ -668,7 +668,7 @@ pub fn require_current_read_target(
     if session.permission_requests.iter().any(|request| {
         request.input_revision == session.input_revision
             && request.state == crate::dynamic_run::PermissionRequestState::Approved
-            && request.selected_read_target() == Some(target)
+            && request.selected_device_target() == Some(target)
             && request.items[0].tool_name == call.name
             && request.items[0].canonical_input_json.as_deref() == Some(canonical.as_str())
     }) {
@@ -735,7 +735,7 @@ pub(crate) fn append_catalogue(
                 .permission_requests
                 .iter()
                 .filter_map(move |request| {
-                    let target = request.selected_read_target()?;
+                    let target = request.selected_device_target()?;
                     let item = request.items.first()?;
                     if device.read_target.as_ref() != Some(target)
                         || !device.approved_read_tools.contains(&item.tool_name)

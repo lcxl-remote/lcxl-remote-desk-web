@@ -1354,7 +1354,7 @@ pub fn build_permission_request(
             canonical_input_json,
             canonical_input_digest_sha256,
             command_confirmation,
-            selected_read_target: None,
+            selected_device_target: None,
             launch_confirmation: None,
             suggested_ttl_seconds: item
                 .suggested_ttl_seconds
@@ -3152,7 +3152,7 @@ mod tests {
             state: PermissionRequestState::Approved,
             items: vec![GrantRequestItem {
                 command_confirmation: None,
-                selected_read_target: None,
+                selected_device_target: None,
                 launch_confirmation: None,
                 item_id: "activate".into(),
                 provider_id: grant.provider_id.clone(),

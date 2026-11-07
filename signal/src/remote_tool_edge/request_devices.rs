@@ -174,7 +174,7 @@ impl SignalAiAssistantTools {
         desk_diagnose_core::request_devices::require_current_read_target(
             session,
             &native_call,
-            &desk_diagnose_core::request_devices::SelectedReadTarget {
+            &desk_diagnose_core::request_devices::SelectedDeviceTarget {
                 device_id: held.device_id.clone(),
                 target_ref: reference,
                 connection_id: connection_id.clone(),
@@ -323,7 +323,7 @@ impl SignalAiAssistantTools {
                 && session
                     .permission_requests
                     .iter()
-                    .any(|request| request.selected_read_target() == Some(target))
+                    .any(|request| request.selected_device_target() == Some(target))
             {
                 let grants = desk_diagnose_core::future::boxed(|| {
                     store.list_for_subject(&self.run_id, &self.actor_id, &target.device_id)
@@ -376,7 +376,7 @@ pub(crate) async fn request_device_catalogue(
                 .collect();
             Some(RequestDevice {
                 read_target: connection.zip(current.as_ref()).map(|(state, current)| {
-                    desk_diagnose_core::request_devices::SelectedReadTarget {
+                    desk_diagnose_core::request_devices::SelectedDeviceTarget {
                         device_id: id.clone(),
                         target_ref: id.clone(),
                         connection_id: state.model.connection_id.clone(),

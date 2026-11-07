@@ -961,8 +961,9 @@ impl ApprovalReviewCandidate {
                 return Err(ApprovalReviewError::InvalidCandidate);
             }
         } else if self.device_id.is_empty() {
-            let (target, selected_read) = if let Some(target) = action.get("selected_read_target") {
-                let target: crate::request_devices::SelectedReadTarget =
+            let (target, selected_read) = if let Some(target) = action.get("selected_device_target")
+            {
+                let target: crate::request_devices::SelectedDeviceTarget =
                     serde_json::from_value(target.clone())
                         .map_err(|_| ApprovalReviewError::InvalidCandidate)?;
                 valid_id(&target.connection_id)?;
@@ -1619,8 +1620,8 @@ pub fn permission_item_action_json(
                 "operation_scope": &item.operation_scope,
                 "export_destinations": &item.export_destinations,
             });
-            if let Some(target) = &item.selected_read_target {
-                action["selected_read_target"] = serde_json::json!(target);
+            if let Some(target) = &item.selected_device_target {
+                action["selected_device_target"] = serde_json::json!(target);
             }
             action.to_string()
         }
@@ -2509,7 +2510,7 @@ mod tests {
                     canonical_input_json: None,
                     canonical_input_digest_sha256: None,
                     command_confirmation: None,
-                    selected_read_target: None,
+                    selected_device_target: None,
                     launch_confirmation: None,
                     suggested_ttl_seconds: 300,
                     suggested_max_uses: 1,

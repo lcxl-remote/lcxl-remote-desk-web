@@ -178,7 +178,7 @@ async fn approved_child_with_source_on(
         state: PermissionRequestState::Pending,
         items: vec![GrantRequestItem {
             command_confirmation: Some(confirmation),
-            selected_read_target: None,
+            selected_device_target: None,
             launch_confirmation: None,
             item_id: "command".into(),
             provider_id: provider.wire.provider_id.clone(),
