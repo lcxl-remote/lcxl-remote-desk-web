@@ -3414,6 +3414,13 @@ pub(crate) fn bind_tool_input_envelopes(
     let Some(envelope) = envelope.as_mut() else {
         return Ok(());
     };
+    let native;
+    let call = if session.device_id.is_empty() && crate::file_model_input::is_read(&call.name) {
+        (_, native) = crate::request_devices::selected_read(call)?;
+        &native
+    } else {
+        call
+    };
     let Ok(arguments) = serde_json::from_str::<serde_json::Value>(&call.arguments_json) else {
         return Ok(());
     };
@@ -3457,6 +3464,23 @@ pub(crate) fn bind_tool_input_envelopes(
         )?);
     }
     let has_explicit_input_lineage = !source_ids.is_empty();
+    let file_source_device = || {
+        if !session.device_id.is_empty() {
+            return Ok(session.device_id.as_str());
+        }
+        // The executed result is stamped by the host, not by the model's
+        // selector. Keep file-source resolution on that admitted device.
+        let suffix = format!(":{}", call.id);
+        let device = envelope
+            .provenance
+            .source_object_id
+            .as_deref()
+            .and_then(|source| source.strip_suffix(&suffix))
+            .ok_or_else(crate::directory_tools::unavailable)?;
+        session
+            .resolve_assistant_action_device(None, Some(device))
+            .map_err(|_| crate::directory_tools::unavailable())
+    };
 
     if crate::provider_preflight::text_file::TextMutationPreflight::supports(&call.name)
         || crate::provider_preflight::text_file::read_result_id(call)?.is_some()
@@ -3468,7 +3492,11 @@ pub(crate) fn bind_tool_input_envelopes(
         // Freeze authenticated source identity here. Current expiry and consent
         // are independently revalidated by preflight and dispatch.
         let source_id = if call.name == "read_text_file" {
-            crate::provider_preflight::text_file::read_source_envelope_id(session, call)?
+            crate::provider_preflight::text_file::read_source_envelope_id(
+                session,
+                file_source_device()?,
+                call,
+            )?
         } else {
             crate::provider_preflight::text_file::resolve_file_result(session, id, 1)?
                 .source_envelope_id()
@@ -3481,7 +3509,11 @@ pub(crate) fn bind_tool_input_envelopes(
     if crate::provider_preflight::text_file::selection::supports(&call.name) {
         for selector in crate::provider_preflight::text_file::selection::selectors(call)? {
             source_ids.push(
-                crate::provider_preflight::text_file::read_source_envelope_id(session, &selector)?,
+                crate::provider_preflight::text_file::read_source_envelope_id(
+                    session,
+                    file_source_device()?,
+                    &selector,
+                )?,
             );
         }
     }

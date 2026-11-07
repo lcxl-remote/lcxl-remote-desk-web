@@ -799,9 +799,10 @@ fn read_evidence_on_device(
 
 pub(crate) fn read_source_envelope_id(
     session: &crate::session::PersistedAgentSession,
+    device_id: &str,
     call: &ToolCall,
 ) -> Result<String, AgentError> {
-    read_evidence(session, call, 1)?
+    read_evidence_on_device(session, device_id, call, 1)?
         .source_envelope_id
         .ok_or_else(unavailable)
 }
