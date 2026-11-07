@@ -23,7 +23,7 @@ pub const MAX_TOOL_SCHEMA_BYTES: usize = 64 * 1024;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TargetBinding {
     Host,
-    NativeContext,
+    HostPure,
     RequestDevice,
 }
 
@@ -80,6 +80,15 @@ impl CapabilityDescriptor {
                 self.tool_spec.name.clone(),
             ));
         }
+        if self.target_binding == TargetBinding::HostPure
+            && (self.wire.execution_locality
+                != desk_agent_protocol::capability_provider::ExecutionLocality::Central
+                || self.wire.effect.is_side_effecting())
+        {
+            return Err(RegistryError::InvalidToolSchema(
+                self.tool_spec.name.clone(),
+            ));
+        }
         if self.wire.execution_locality
             != desk_agent_protocol::capability_provider::ExecutionLocality::Central
             && self.adapter_ids.is_empty()
@@ -108,8 +117,13 @@ impl CapabilityDescriptor {
     pub fn registered_tool(&self) -> RegisteredTool {
         RegisteredTool {
             spec: self.tool_spec.clone(),
-            required_device_capability: Some(self.required_capability),
-            effect: self.legacy_effect(),
+            required_device_capability: (self.target_binding != TargetBinding::HostPure)
+                .then_some(self.required_capability),
+            effect: if self.target_binding == TargetBinding::HostPure {
+                ToolEffect::ActionPreview
+            } else {
+                self.legacy_effect()
+            },
         }
     }
 }
@@ -533,7 +547,7 @@ mod tests {
 
     #[test]
     fn every_edge_capability_requires_the_shared_request_device_contract() {
-        for target in [TargetBinding::Host, TargetBinding::NativeContext] {
+        for target in [TargetBinding::Host, TargetBinding::HostPure] {
             let mut invalid = provider("edge", "edge.read", "edge_read");
             invalid.capabilities[0].target_binding = target;
             assert!(

@@ -36,6 +36,7 @@ jobs:
       - name: Verify selected device tool registration and desktop routing
         run: |
           cargo test --locked -p desk-diagnose-core --lib --features stack-budget request_devices::tests::
+          cargo test --locked -p desk-diagnose-core --lib --features stack-budget pure_action_preview_completes_without_a_device_executor_on_both_entries
           cargo test --locked -p desk-signal --lib --features desk-diagnose-core/stack-budget personal_selected_desktop_read_and_whole_screen_resume_on_signal
           cargo test --locked -p desk-signal --lib --features desk-diagnose-core/stack-budget personal_selected_live_document_resumes_on_signal
           cargo test --locked -p desk-signal --lib --features desk-diagnose-core/stack-budget selectable_browser_

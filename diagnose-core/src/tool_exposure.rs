@@ -131,7 +131,9 @@ mod tests {
                     };
                     assert_eq!(
                         tool.has_device_capability(&candidates),
-                        expected,
+                        expected
+                            && descriptor.target_binding
+                                != crate::provider_registry::TargetBinding::HostPure,
                         "{} selected={selected} authorized={authorized}",
                         tool.name()
                     );
@@ -150,7 +152,7 @@ mod tests {
                     TriggerOrigin::PermissionDecision,
                 );
                 assert_eq!(exposed.len(), tools.len(), "{}", tool.name());
-                assert!(
+                assert_eq!(
                     exposed_tools(
                         &tools,
                         &AgentScope {
@@ -160,7 +162,10 @@ mod tests {
                         &ExecutionState::None,
                         TriggerOrigin::PermissionDecision
                     )
-                    .is_empty()
+                    .is_empty(),
+                    tools.is_empty()
+                        || descriptor.target_binding
+                            != crate::provider_registry::TargetBinding::HostPure
                 );
             }
         }

@@ -778,6 +778,22 @@ impl UiReferenceState {
         ids
     }
 
+    pub(crate) fn argument_sources(&self, call: &ToolCall) -> Vec<BTreeSet<ReferenceSource>> {
+        let message = ChatMessage::assistant_tool_calls(
+            "argument-sources",
+            "",
+            vec![crate::chat::ToolCallRef {
+                id: call.id.clone(),
+                name: call.name.clone(),
+                arguments_json: call.arguments_json.clone(),
+            }],
+        );
+        self.retained_call_aliases(&[message], &[])
+            .into_iter()
+            .filter_map(|id| self.entries.get(&id).map(|entry| entry.sources.clone()))
+            .collect()
+    }
+
     fn alias(&self, prefix: &str, native_id: &str, source: Option<&str>) -> Option<&str> {
         let aliases = self.native_index.get(&(prefix.into(), native_id.into()))?;
         let mut matches = aliases.iter().filter_map(|id| {

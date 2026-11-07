@@ -3336,7 +3336,9 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                                                 Ok(None)
                                             })
                                         }
-                                        ToolEffect::ReadOnly | ToolEffect::ExternalRead => {
+                                        ToolEffect::ReadOnly
+                                        | ToolEffect::ExternalRead
+                                        | ToolEffect::ActionPreview => {
                                             crate::future::phase(|| async {
                                                 // A read tool error is reported back as a tool result;
                                                 // the backend transport itself does not fail the turn.
@@ -3354,11 +3356,15 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                                                 } else {
                                                     None
                                                 };
-                                                let read_requires_version = browser_device
-                                                    .is_some()
-                                                    || (!external_read
-                                                        && !selected_device_read
-                                                        && deps.tools.read_requires_version(call));
+                                                let pure_preview =
+                                                    tool.effect == ToolEffect::ActionPreview;
+                                                let read_requires_version = !pure_preview
+                                                    && (browser_device.is_some()
+                                                        || (!external_read
+                                                            && !selected_device_read
+                                                            && deps
+                                                                .tools
+                                                                .read_requires_version(call)));
                                                 let version = if read_requires_version {
                                                     // Durable Provider work compares this persisted action boundary.
                                                     session.turn_state =
@@ -3371,7 +3377,18 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                                                 } else {
                                                     None
                                                 };
-                                                let completion = if external_read {
+                                                let completion = if pure_preview {
+                                                    crate::seam::ReadCompletion {
+                                                        outcome: crate::ai_assistant::validate_preview_call(call).and_then(|content| {
+                                                            let data_envelope = derive_internal_tool_result_envelope(turn.provider_meta.data_envelope.as_ref(), &call.id, &content, &call.name)?;
+                                                            Ok(crate::seam::ReadOutcome::Completed {
+                                                                output: crate::seam::ToolRunOutput {format: crate::seam::ToolOutputFormat::Json, content, image_data_url: None, document_preview: None},
+                                                                ok: true, event_id: None, data_envelope, background_task: None,
+                                                            })
+                                                        }),
+                                                        version_advance: None,
+                                                    }
+                                                } else if external_read {
                                                     crate::seam::ReadCompletion {
                                                         outcome: deps
                                                             .tools

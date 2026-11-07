@@ -1022,7 +1022,7 @@ export function AiAssistantWorkspace({
                         disabled={!assistantEnabled || !isConnected || chat.hydrating || chat.contextUpdating} onUpdate={chat.updateDirectory}
                         showPendingActions={false} onPendingJump={id => jumpToPending(`assistant-directory-${id}`)} />}
                     <div data-assistant-pending={pendingPermissionCount > 0 ? '' : undefined} tabIndex={-1}>
-                    <AssistantPermissionRecords approvalRecords={hasDevice && !rehearsal && featureProfile.approval_delegation ? <ApprovalReviews onLocate={record => {
+                    <AssistantPermissionRecords approvalRecords={!rehearsal && featureProfile.approval_delegation ? <ApprovalReviews onLocate={record => {
                             if (record.task) {
                                 subagents.openDetail(record.task);
                                 if (record.source_kind === 'directory_proposal') setChildPanel({ taskId: record.task.task_id, panel: 'directories' });
@@ -1039,7 +1039,7 @@ export function AiAssistantWorkspace({
                                     request={request} canDecide={featureProfile.permission_decision && request.inputRevision === chat.inputRevision}
                                     disabled={!assistantEnabled || !isConnected || chat.hydrating || chat.turnRunning}
                                     busy={chat.permissionUpdating} waitingForTurn={chat.turnRunning}
-                                    interactive={hasDevice && featureProfile.exec_pty ? {
+                                    interactive={featureProfile.exec_pty ? {
                                         runId: chat.runId,
                                         browserConnectionId: chat.browserConnectionId,
                                         deviceId: stableDeviceId,
@@ -1209,7 +1209,7 @@ export function AiAssistantWorkspace({
                         mainStopped={chat.mainStopped}
                         exportBackup={exportSessionBackup}
                         canDecide={assistantEnabled && featureProfile.permission_decision}
-                        interactive={hasDevice && featureProfile.exec_pty ? { browserConnectionId: chat.browserConnectionId, deviceId: stableDeviceId } : undefined} />
+                        interactive={featureProfile.exec_pty ? { browserConnectionId: chat.browserConnectionId, deviceId: stableDeviceId } : undefined} />
                     </div>
                     <AssistantConversationTabs agents={subagents} attentionTasks={chat.subagents.attention_tasks}
                         mainNeedsApproval={pendingCount > 0 || Object.values(exec.entries).some(entry => entry.phase === 'awaiting')} />

@@ -146,7 +146,7 @@ pub(crate) fn infer_single_target(
     call: &ToolCall,
     session: &PersistedAgentSession,
 ) -> Result<Option<ToolCall>, AgentError> {
-    let Some([target]) = session.assistant_request_targets() else {
+    let Some(targets) = session.assistant_request_targets() else {
         return Ok(None);
     };
     if !session.uses_request_device_tools() {
@@ -184,14 +184,152 @@ pub(crate) fn infer_single_target(
     let input = value
         .as_object_mut()
         .ok_or_else(|| crate::subagent::invalid("Tool arguments must be a JSON object"))?;
-    if input.contains_key("target_ref") {
+    let resources = resource_devices(call, session);
+    let mut candidates = targets.iter().collect::<Vec<_>>();
+    for devices in &resources {
+        candidates.retain(|target| devices.contains(&target.device_id));
+    }
+    if let Some(reference) = input.get("target_ref") {
+        if !resources.is_empty()
+            && !candidates
+                .iter()
+                .any(|target| reference.as_str() == Some(target.reference.as_str()))
+        {
+            return Err(crate::subagent::invalid(
+                "The selected device conflicts with the observed resources",
+            ));
+        }
         return Ok(None);
     }
+    let [target] = candidates.as_slice() else {
+        if !resources.is_empty() && candidates.is_empty() {
+            return Err(crate::subagent::invalid(
+                "Resources do not share an admitted device",
+            ));
+        }
+        return Ok(None);
+    };
     input.insert("target_ref".into(), serde_json::json!(target.reference));
     Ok(Some(ToolCall {
         arguments_json: value.to_string(),
         ..call.clone()
     }))
+}
+
+/// Resolve only registered reference fields and authenticated receipt origins.
+fn resource_devices(
+    call: &ToolCall,
+    session: &PersistedAgentSession,
+) -> Vec<std::collections::BTreeSet<String>> {
+    use crate::ui_references::ReferenceSource;
+    use std::collections::BTreeSet;
+    let receipt_device = |message: &crate::chat::ChatMessage| -> Option<String> {
+        if message.role != crate::chat::ChatRole::Tool || message.tool_ok != Some(true) {
+            return None;
+        }
+        let receipt = message.trusted_tool_result();
+        let call = receipt.tool_call_id.as_deref()?;
+        let provenance = &receipt.data_envelope.as_ref()?.provenance;
+        let descriptor = crate::ai_assistant::ai_assistant_provider_registry_ref()
+            .capability_for_tool(&provenance.source_tool_name)?;
+        if descriptor.target_binding != crate::provider_registry::TargetBinding::RequestDevice {
+            return None;
+        }
+        let suffix = format!(":{call}");
+        provenance
+            .source_object_id
+            .as_deref()?
+            .strip_suffix(&suffix)
+            .filter(|device| !device.is_empty())
+            .map(str::to_owned)
+    };
+    let mut result = session
+        .ui_references
+        .argument_sources(call)
+        .into_iter()
+        .filter_map(|sources| {
+            let devices: BTreeSet<_> = sources
+                .into_iter()
+                .filter_map(|source| match source {
+                    ReferenceSource::Message(id) => session
+                        .conversation
+                        .iter()
+                        .find(|message| message.message_id == id)
+                        .and_then(&receipt_device),
+                    ReferenceSource::Attachment { id, .. } => session
+                        .context_attachments
+                        .iter()
+                        .find(|attachment| attachment.attachment_id == id)
+                        .map(|attachment| attachment.device_id.clone()),
+                    ReferenceSource::Business(id) => session
+                        .file_scope
+                        .records()
+                        .iter()
+                        .find(|record| record.proposal.request_id == id)
+                        .map(|record| record.device_id.clone()),
+                })
+                .collect();
+            (!devices.is_empty()).then_some(devices)
+        })
+        .collect::<Vec<_>>();
+    fn collect(value: &serde_json::Value, directories: &mut Vec<String>, calls: &mut Vec<String>) {
+        for path in ["/directory_request_id", "/output/directory_request_id"] {
+            if let Some(id) = value.pointer(path).and_then(serde_json::Value::as_str) {
+                directories.push(id.into());
+            }
+        }
+        for path in [
+            "/file_result_call_id",
+            "/source/file_result_call_id",
+            "/file_version_id",
+            "/attachment/artifact_result_id",
+            "/handoff_result_id",
+        ] {
+            if let Some(id) = value.pointer(path).and_then(serde_json::Value::as_str) {
+                calls.push(id.into());
+            }
+        }
+        for field in ["sources", "file_sources"] {
+            if let Some(sources) = value.get(field).and_then(serde_json::Value::as_array) {
+                for source in sources {
+                    collect(source, directories, calls);
+                }
+            }
+        }
+        if let Some(items) = value.get("items").and_then(serde_json::Value::as_array) {
+            for item in items {
+                collect(&item["exact_input"], directories, calls);
+            }
+        }
+    }
+    if let Ok(value) = serde_json::from_str(&call.arguments_json) {
+        let (mut directories, mut calls) = (Vec::new(), Vec::new());
+        collect(&value, &mut directories, &mut calls);
+        for id in directories {
+            if let Some(record) = session
+                .file_scope
+                .records()
+                .iter()
+                .find(|record| record.proposal.request_id == id)
+            {
+                result.push(BTreeSet::from([record.device_id.clone()]));
+            }
+        }
+        for id in calls {
+            let devices = session
+                .conversation
+                .iter()
+                .filter(|message| {
+                    message.tool_call_id.as_deref() == Some(&id) || message.message_id == id
+                })
+                .filter_map(&receipt_device)
+                .collect::<BTreeSet<_>>();
+            if !devices.is_empty() {
+                result.push(devices);
+            }
+        }
+    }
+    result
 }
 
 pub(crate) fn has_target_selector(spec: &crate::chat::ToolSpec) -> bool {

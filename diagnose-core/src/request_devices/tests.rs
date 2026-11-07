@@ -164,6 +164,26 @@ async fn selected_file_reads_project_and_plan_only_on_the_directory_device() {
         .file_scope
         .decide(&subject, 1, "root", true, 1)
         .unwrap();
+    let inferred = infer_single_target(
+        &tool("inspect_files", json!({"directory_request_id":"root"})),
+        &session,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&inferred.arguments_json).unwrap()["target_ref"],
+        "a"
+    );
+    assert!(
+        infer_single_target(
+            &tool(
+                "inspect_files",
+                json!({"target_ref":"b","directory_request_id":"root"})
+            ),
+            &session
+        )
+        .is_err()
+    );
     let reads = read_tools(&devices, &session, registry, true, None);
     assert_eq!(reads.len(), 2);
     assert!(
@@ -504,6 +524,29 @@ async fn desktop_object_approval_and_dispatch_keep_the_observed_device_and_incar
     let resolve = |call: &ToolCall, session: &PersistedAgentSession| {
         crate::ui_model_ids::resolve_session_call_with_context(call, session, 1, None).unwrap()
     };
+    for (alias, target) in [("w1", "a"), ("w2", "b")] {
+        let implicit = tool("read_current_screen", json!({"window_id":alias}));
+        let routed = infer_single_target(&implicit, &session).unwrap().unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&routed.arguments_json).unwrap()["target_ref"],
+            target
+        );
+        let wrong = tool(
+            "read_current_screen",
+            json!({"window_id":alias,"target_ref":if target == "a" {"b"} else {"a"}}),
+        );
+        assert!(infer_single_target(&wrong, &session).is_err());
+    }
+    let conflict = tool(
+        "request_permissions",
+        json!({"items":[
+            {"tool_name":"read_current_screen","exact_input":{"window_id":"w1"}},
+            {"tool_name":"read_current_screen","exact_input":{"window_id":"w2"}}
+        ]}),
+    );
+    assert!(infer_single_target(&conflict, &session).is_err());
+    let unknown = tool("read_current_screen", json!({"window_id":"invented"}));
+    assert!(infer_single_target(&unknown, &session).unwrap().is_none());
     let reads = read_tools(&devices, &session, registry, true, None);
     let input_a = json!({"window":window("snapshot-a")});
     let input_b = json!({"window":window("snapshot-b")});
@@ -518,7 +561,19 @@ async fn desktop_object_approval_and_dispatch_keep_the_observed_device_and_incar
         )
     };
     let proposal_a = resolve(&propose_window("w1"), &session);
-    let proposal_b = resolve(&propose_window("w2"), &session);
+    assert!(
+        crate::ui_model_ids::resolve_session_call_with_context(
+            &propose_window("w2"),
+            &session,
+            1,
+            None
+        )
+        .is_err()
+    );
+    let proposal_b = tool(
+        REQUEST_CAPABILITY_GRANTS_TOOL_NAME,
+        json!({"target_ref":"a","items":[{"tool_name":"read_current_screen","exact_input":{"window":window("snapshot-b")},"reason":"Capture"}]}),
+    );
     let mut request = plan_device_permission(
         &NoDeviceCommands,
         Some(registry),
@@ -591,6 +646,17 @@ async fn desktop_object_approval_and_dispatch_keep_the_observed_device_and_incar
         require_current_read_target(&session, &tool("read_current_screen", input_b), b).is_err()
     );
     for (target, element, allowed) in [("a", "e1", true), ("b", "e1", false), ("b", "e2", true)] {
+        let raw = tool(
+            REQUEST_CAPABILITY_GRANTS_TOOL_NAME,
+            json!({"target_ref":target,"items":[{"tool_name":"inspect_desktop_ui","exact_input":{"element_id":element,"element_only":true},"reason":"Read a specific control"}]}),
+        );
+        if !allowed {
+            assert!(
+                crate::ui_model_ids::resolve_session_call_with_context(&raw, &session, 1, None)
+                    .is_err()
+            );
+            continue;
+        }
         let call = resolve(
             &tool(
                 REQUEST_CAPABILITY_GRANTS_TOOL_NAME,

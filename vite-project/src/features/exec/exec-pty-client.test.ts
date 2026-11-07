@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { encodeFrame, decodeFrame } from './exec-pty-client';
+import { encodeFrame, decodeFrame, websocketUrl } from './exec-pty-client';
 
 describe('exec PTY wire', () => {
     it('keeps opaque input outside metadata and round-trips arbitrary bytes', () => {
@@ -32,5 +32,16 @@ describe('exec PTY wire', () => {
         const corrupt = frame.slice(0);
         new DataView(corrupt).setUint32(12, 1, true);
         expect(decodeFrame(corrupt)).toBeNull();
+    });
+});
+
+
+describe('exec PTY device routing', () => {
+    it('routes assistant carriers by their original permission instead of a page device', () => {
+        const url = new URL(websocketUrl({ deviceId: 'current-device-b', permission: { runId: 'original-run', requestId: 'original-request' } }));
+        expect(url.searchParams.get('device_id')).toBeNull();
+        expect(url.searchParams.get('permission_run_id')).toBe('original-run');
+        expect(url.searchParams.get('permission_request_id')).toBe('original-request');
+        expect(new URL(websocketUrl({ deviceId: 'terminal-device' })).searchParams.get('device_id')).toBe('terminal-device');
     });
 });

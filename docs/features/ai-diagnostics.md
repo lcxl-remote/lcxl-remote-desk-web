@@ -8,6 +8,8 @@ Fixed-device and multi-device conversations both support temporary chats. Follow
 
 A conversation opened from a device page is fixed to that device. Personal conversations let you select devices. For the same selected device, both entries use the same device tools, approvals, execution and receipts.
 
+An observed window, file or approved directory can identify the device for an operation. Resources from different devices cannot be combined in one device operation. **Open terminal and approve** connects to the device on the approval card. Action previews display proposals without executing them.
+
 Open **AI Assistant → Multi-device conversation**. To compare devices, select them in **Devices** in the composer and send your question. For example, select two devices and ask for their OS versions. Each command approval shows the device and exact command, and its result returns to the original conversation. Changes to the selection apply to your next message.
 
 Web and Tauri save the device selection to the current conversation. It is restored when you refresh or open the same conversation on another client. To investigate CPU or disk usage, the assistant can read current system information and request a diagnostic command for process or directory details under the conversation's approval mode.

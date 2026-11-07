@@ -21,7 +21,8 @@ use desk_agent_protocol::{
 pub const PERSONAL_ASSISTANT_POLICY_REVISION: i64 = 1;
 
 pub fn is_targetless_web_tool(tool: &crate::registry::RegisteredTool) -> bool {
-    crate::web_research::is_web_tool(tool.name())
+    tool.name() == crate::ai_assistant::PREVIEW_COMPUTER_ACTION_TOOL
+        || crate::web_research::is_web_tool(tool.name())
         || tool.name() == crate::conversation_attachment::READ_ATTACHMENT_TOOL
         || crate::subagent::tools::effect(tool.name()).is_some()
         || matches!(
@@ -44,6 +45,12 @@ pub fn targetless_web_internal_tools() -> Vec<crate::registry::RegisteredTool> {
         crate::conversation_history::conversation_history_tool_registry()
             .into_iter()
             .filter(|tool| tool.name() == crate::conversation_attachment::READ_ATTACHMENT_TOOL),
+    );
+    tools.push(
+        crate::ai_assistant::ai_assistant_provider_registry_ref()
+            .capability_for_tool(crate::ai_assistant::PREVIEW_COMPUTER_ACTION_TOOL)
+            .expect("registered pure preview")
+            .registered_tool(),
     );
     tools
 }

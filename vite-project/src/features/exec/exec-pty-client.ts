@@ -64,10 +64,15 @@ export type ExecPtyPrepare = {
     permission?: { runId: string; requestId: string };
 };
 
-function websocketUrl(deviceId?: string): string {
+export function websocketUrl(request: Pick<ExecPtyPrepare, 'deviceId' | 'permission'>): string {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const url = new URL(`${protocol}//${window.location.host}/api/desk/exec-pty`);
-    if (deviceId) url.searchParams.set('device_id', deviceId);
+    if (request.permission) {
+        url.searchParams.set('permission_run_id', request.permission.runId);
+        url.searchParams.set('permission_request_id', request.permission.requestId);
+    } else if (request.deviceId) {
+        url.searchParams.set('device_id', request.deviceId);
+    }
     return url.toString();
 }
 
@@ -186,7 +191,7 @@ export class ExecPtyClient {
         }
         this.events.onPhase('connecting');
         return new Promise<string>((resolve, reject) => {
-            const socket = new WebSocket(websocketUrl(request.deviceId));
+            const socket = new WebSocket(websocketUrl(request));
             this.socket = socket;
             socket.binaryType = 'arraybuffer';
             let settled = false;

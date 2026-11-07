@@ -135,3 +135,84 @@ async fn native_skill_load_persists_first_party_text_and_only_projects_requested
         2
     );
 }
+
+#[tokio::test]
+async fn pure_action_preview_completes_without_a_device_executor_on_both_entries() {
+    for device in ["", "device"] {
+        let sessions = MemSession::default();
+        let mut seed =
+            PersistedAgentSession::new("conv", "actor", device, 1, scope(), "2026-11-05T00:00:00Z");
+        seed.adopt_client_metadata(
+            Some("client-conversation"),
+            crate::session::AgentSessionSurface::AiAssistant,
+        );
+        seed.input_revision = 1;
+        seed.begin_focus_epoch(1, Vec::new()).unwrap();
+        seed.bind_assistant_input_targets(&[]).unwrap();
+        let app = serde_json::json!({"token":"app","snapshot_id":"ui","object_kind":"application","expires_at":""});
+        let target = serde_json::json!({"token":"button","snapshot_id":"ui","object_kind":"ui_element","expires_at":""});
+        let node = |reference: serde_json::Value, role: &str| serde_json::json!({"object_ref":reference,"parent_index":null,"role":role,"name":"Calendar","value":null,"is_protected":false,"enabled":true,"supported_actions":["invoke"],"location":{"status":"unavailable"}});
+        seed.conversation = crate::result_model_ids::tests::evidence(
+            "inspect_desktop_ui",
+            "ui-read",
+            serde_json::json!({"queries":["Calendar"]}),
+            serde_json::json!({"ReadContext":{"DesktopUiInspect":{"snapshot_id":"ui","adapter":{"kind":"macos_accessibility","version":crate::ai_assistant::MACOS_ACCESSIBILITY_ADAPTER_VERSION},"nodes":[node(app,"application"),node(target,"button")],"truncated":false}}}),
+        );
+        for message in &mut seed.conversation {
+            if message.role == ChatRole::Assistant {
+                message.replay_disposition = tool_meta().replay;
+            }
+            if let Some(label) = message.data_envelope.as_mut() {
+                label.allowed_destinations = vec![
+                    desk_agent_protocol::data_lineage::DestinationIdentity::Model {
+                        connection_id: "gateway".into(),
+                        connection_revision: 1,
+                        model_id: "model".into(),
+                        profile_revision: 1,
+                    },
+                ];
+            }
+        }
+        seed.ui_references.observe(&seed.conversation).unwrap();
+        *sessions.inner.borrow_mut() = Some(seed);
+        let mut preview = tool_use("preview", crate::ai_assistant::PREVIEW_COMPUTER_ACTION_TOOL);
+        preview.tool_calls[0].arguments_json = serde_json::json!({"risk":"low","reversible":true,"data_egress":false,"actions":[{"target_id":"e1","action":{"adapter":"ui_in_application","action":{"application_id":"a1","action":{"kind":"invoke"}}},"before_summary":"Button observed","after_intent":"requested change","verification":"Read panel state"}]}).to_string();
+        let model = SkillModel(ScriptModel {
+            turns: RefCell::new([preview, answer("done")].into()),
+            requests: Rc::new(RefCell::new(vec![])),
+        });
+        let tools = RecordingTools {
+            calls: Rc::new(RefCell::new(vec![])),
+            reply: "unused".into(),
+        };
+        let registry = crate::assistant_policy::targetless_web_internal_tools();
+        let clock = || "2026-11-05T00:00:00Z".to_string();
+        let mut params = claim();
+        params.device_id = device.into();
+        assert_eq!(
+            run_agent_turn(
+                &deps(&sessions, &model, &tools, &registry, &clock),
+                params,
+                ChatMessage::text("user", ChatRole::User, "Preview the requested change"),
+                &mut NullTurnSink
+            )
+            .await
+            .unwrap(),
+            LoopOutcome::Answered("done".into())
+        );
+        assert!(tools.calls.borrow().is_empty());
+        let saved = sessions.inner.borrow();
+        let saved = saved.as_ref().unwrap();
+        let result = saved
+            .conversation
+            .iter()
+            .find(|message| message.tool_call_id.as_deref() == Some("preview"))
+            .unwrap();
+        assert_eq!(result.tool_ok, Some(true), "{}", result.text);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&result.text).unwrap()["actions"][0]["after_intent"],
+            "requested change"
+        );
+        assert!(saved.permission_requests.is_empty());
+    }
+}

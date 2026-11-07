@@ -25,6 +25,8 @@ use crate::session::{ExecutionState, TriggerOrigin};
 pub enum ToolEffect {
     /// Reads device state; runs immediately, no approval.
     ReadOnly,
+    /// Produces a typed proposal locally without performing device or external I/O.
+    ActionPreview,
     /// Reads only the external issue targets selected in the accepted input.
     ExternalRead,
     /// Registers delivery to an original external issue under host publication authority.
@@ -124,6 +126,7 @@ fn mode_allows_effect(mode: ExecutionMode, effect: ToolEffect) -> bool {
         // These tools do not use the device execution mode. Their own source,
         // lifecycle and host authority gates still apply.
         ToolEffect::ReadOnly
+        | ToolEffect::ActionPreview
         | ToolEffect::ExternalRead
         | ToolEffect::ExternalWrite
         | ToolEffect::WaitTask
@@ -200,7 +203,10 @@ pub fn exposure_block_reason(
             .is_empty()
             .then_some("no_pending_task");
     }
-    if tool.effect == ToolEffect::RunProjection {
+    if matches!(
+        tool.effect,
+        ToolEffect::RunProjection | ToolEffect::ActionPreview
+    ) {
         return None;
     }
     if matches!(

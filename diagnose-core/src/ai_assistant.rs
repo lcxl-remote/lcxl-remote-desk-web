@@ -3495,7 +3495,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
     }
     assert!(reads.is_empty(), "unmapped AI Assistant read tool");
     let preview = provider_for_tool(
-        TargetBinding::NativeContext,
+        TargetBinding::HostPure,
         crate::tool_exposure::ExposureRequirement::NoAttachment,
         ACTION_PREVIEW_PROVIDER_ID,
         ACTION_PREVIEW_CAPABILITY_ID,
@@ -4619,7 +4619,10 @@ mod tests {
                 .into_iter()
                 .filter(|tool| tool.name() != "read_current_screen"),
         );
-        legacy.push(preview_tool());
+        let mut preview = preview_tool();
+        preview.required_device_capability = None;
+        preview.effect = ToolEffect::ActionPreview;
+        legacy.push(preview);
         legacy.push(create_text_artifact_tool());
         legacy.extend(crate::provider_preflight::text_file::registered_tools());
         legacy.push(create_local_message_draft_tool());
