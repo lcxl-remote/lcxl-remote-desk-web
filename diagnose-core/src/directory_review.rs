@@ -195,7 +195,7 @@ pub fn pending<'a>(
 }
 
 pub fn action(session: &PersistedAgentSession, record: &DirectoryConsent) -> String {
-    json!({"directory_proposal":record.proposal,"review_context":record.review_context,
+    json!({"device_id":record.device_id,"directory_proposal":record.proposal,"review_context":record.review_context,
         "file_scope_revision":session.file_scope.revision(),"file_operation_authorized":false})
     .to_string()
 }

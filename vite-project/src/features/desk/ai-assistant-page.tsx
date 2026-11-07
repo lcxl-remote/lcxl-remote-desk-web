@@ -627,9 +627,9 @@ export function AiAssistantWorkspace({
         { label: t('pages.aiAssistant.workspace.resources'), actions: [
             { label: t('pages.aiAssistant.attachments.title'), icon: Paperclip,
                 disabled: !chat.sessionId, onSelect: () => setAttachmentsOpen(true) },
+            ...(hasDevice || personalScope ? [{ label: t('pages.aiAssistant.directories.title'), icon: FolderKey,
+                onSelect: () => setDirectorySession(permissionHistoryKey) }] : []),
             ...(hasDevice ? [
-                { label: t('pages.aiAssistant.directories.title'), icon: FolderKey,
-                    onSelect: () => setDirectorySession(permissionHistoryKey) },
                 { label: t('pages.aiAssistant.schedules.title'), icon: CalendarClock,
                     onSelect: () => setSchedulesOpen(true) },
             ] : []),
@@ -969,6 +969,7 @@ export function AiAssistantWorkspace({
                     </div>
                     {pendingDirectories.map(directory => <div key={directory.requestId} data-assistant-pending tabIndex={-1}>
                         <AssistantDirectoryApproval directory={directory} revision={chat.fileScope.revision}
+                            deviceLabel={hasDevice ? undefined : requestDevices.selected.find(device => device.id === directory.deviceRef)?.name || directory.deviceRef || undefined}
                             disabled={!assistantEnabled || !isConnected || chat.hydrating}
                             busy={chat.contextUpdating} onUpdate={chat.updateDirectory} />
                     </div>)}
@@ -978,8 +979,9 @@ export function AiAssistantWorkspace({
                         commands={chat.commandTasks} providers={chat.backgroundTasks} tools={chat.tools}
                         connected={isConnected} canCancelProvider={featureProfile.background_task_cancel}
                         cancelling={chat.taskCancelling} onCancel={chat.cancelTask} />
-                    {hasDevice && <AssistantFileScope key={`directories:${permissionHistoryKey}`} scope={chat.fileScope} automaticApproval={automaticApproval}
-                        deskId={deskId} sessionTargetId={chat.sessionTargetReady ? (chat.sessionTarget?.target_id ?? null) : undefined}
+                    {(hasDevice || personalScope) && <AssistantFileScope key={`directories:${permissionHistoryKey}`} scope={chat.fileScope} automaticApproval={automaticApproval}
+                        deskId={deskId} sessionTargetId={hasDevice && chat.sessionTargetReady ? (chat.sessionTarget?.target_id ?? null) : undefined}
+                        devices={hasDevice ? undefined : requestDevices.selected}
                         open={directorySession === permissionHistoryKey} onOpenChange={open => setDirectorySession(open ? permissionHistoryKey : null)}
                         disabled={!assistantEnabled || !isConnected || chat.hydrating || chat.contextUpdating} onUpdate={chat.updateDirectory}
                         showPendingActions={false} onPendingJump={id => jumpToPending(`assistant-directory-${id}`)} />}

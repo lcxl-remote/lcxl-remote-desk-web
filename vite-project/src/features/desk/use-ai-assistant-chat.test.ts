@@ -596,6 +596,22 @@ describe('useAiAssistantChat', () => {
         expect(result.current.fileScope.revision).toBe(1);
         unmount();
     });
+    it('routes a selectable directory decision to the device recorded in the snapshot', async () => {
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: {
+            ...snapshotFields, sessionId: 'account-session', seq: 10, active: false, messages: [],
+            fileScope: { revision: 2, directories: [{ requestId: 'original-directory', deviceRef: 'device-a',
+                canonicalPath: '/work', purpose: 'report', state: 'approved', source: 'owner_selection', referenceExpiresAt: '' }] },
+        } }) }));
+        const sendMessage = vi.fn((_type: number, _payload?: unknown, _to?: string) => 'directory-wire');
+        const { result, unmount } = renderHook(() => useAiAssistantChat({ deskId: '', conversationStorageScope: 'personal:directory',
+            initialConversationId: 'account-conversation', connected: true, subscribe: () => () => undefined, sendMessage }));
+        await waitFor(() => expect(result.current.fileScope.revision).toBe(2));
+        const revoke = { kind: 'revoke_directory' as const, directory_request_id: 'original-directory', expected_revision: 2 };
+        act(() => { expect(result.current.updateDirectory(revoke, 'timeout', 'device-b')).toBe(true); });
+        expect(sendMessage).toHaveBeenCalledWith(SIGNALING_TYPE_CODE_UPDATE_AI_ASSISTANT_OBJECT_CONTEXT,
+            expect.objectContaining({ conversation_target: 'selectable_devices', operation: revoke }), 'device-a');
+        unmount();
+    });
     it.each([
         [undefined, 'model context compression failed: stale_context'],
         [deskErrorCodeEnum.SCHEDULE_MODEL_BUDGET_EXCEEDED,

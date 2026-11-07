@@ -2994,7 +2994,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
     );
     configure_macos_only(&mut presentation_live);
     let files = provider_for_tool(
-        TargetBinding::NativeContext,
+        TargetBinding::RequestDevice,
         crate::tool_exposure::ExposureRequirement::NoAttachment,
         FILE_WORKSPACE_PROVIDER_ID,
         FILE_METADATA_CAPABILITY_ID,
@@ -3011,7 +3011,7 @@ fn build_ai_assistant_provider_registry() -> ProviderRegistry {
             .expect("static selected file metadata tool exists"),
     );
     let file_content = provider_for_tool(
-        TargetBinding::NativeContext,
+        TargetBinding::RequestDevice,
         crate::tool_exposure::ExposureRequirement::NoAttachment,
         FILE_CONTENT_PROVIDER_ID,
         FILE_CONTENT_CAPABILITY_ID,

@@ -405,8 +405,9 @@ pub fn build_permission_grants(
                 .as_ref()
                 .and_then(|e| e.allowed_destinations.first())
                 .ok_or_else(|| internal("original file read destination missing"))?;
-            let read = crate::provider_preflight::text_file::ResultFileRead::build(
+            let read = crate::provider_preflight::text_file::ResultFileRead::build_for_device(
                 session,
+                device_id,
                 &result_read_call,
                 destination,
                 context.now_unix_ms,

@@ -77,6 +77,10 @@ fn canonical_mobile_contract_decodes_with_the_shared_protocol() {
 fn canonical_feature_profile_and_mutations_keep_fail_closed_fields_explicit() {
     let root = contract();
     assert_eq!(root["snapshot"]["sessionId"], "session-1");
+    assert_eq!(
+        root["snapshot"]["fileScope"]["directories"][0]["deviceRef"],
+        "device-1"
+    );
     assert_eq!(root["snapshot"]["controlRevision"], 1);
     assert_eq!(root["snapshot"]["mainStopped"], false);
     assert_eq!(root["snapshot"]["subagents"]["attention_count"], 0);

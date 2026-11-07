@@ -1707,6 +1707,10 @@ export type DirectoryConsentDto = {
     */
     decisionReason?: string | null;
     /**
+     * @type string,null
+    */
+    deviceRef?: string | null;
+    /**
      * @type string
     */
     purpose: string;

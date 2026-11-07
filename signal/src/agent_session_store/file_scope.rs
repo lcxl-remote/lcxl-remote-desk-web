@@ -53,7 +53,7 @@ impl SignalAgentSessionStore {
             || receipt.update.client_conversation_id != client_conversation_id
             || receipt.update.client_request_id != client_request_id
             || row.actor_id != subject.actor_id
-            || row.device_id != subject.device_id
+            || row.device_id != transaction::storage_device_id(subject, client_conversation_id)
             || stored.kind != FILE_SCOPE_EVENT_KIND
             || stored.payload_schema_version != 1
             || stored.run_id != subject.conversation_id
@@ -186,7 +186,7 @@ impl SignalAgentSessionStore {
                 let session =
                     PersistedAgentSession::decode_json(&row.state_json).map_err(|_| failure())?;
                 if row.actor_id != update.subject.actor_id
-                    || row.device_id != update.subject.device_id
+                    || row.device_id != update.storage_device_id()
                     || row.version < 0
                     || session.version != row.version
                     || session.lease_token > i64::MAX as u64
@@ -205,7 +205,7 @@ impl SignalAgentSessionStore {
                 let mut session = PersistedAgentSession::new(
                     &update.subject.conversation_id,
                     &update.subject.actor_id,
-                    &update.subject.device_id,
+                    update.storage_device_id(),
                     0,
                     AgentScope {
                         granted: vec![],
@@ -314,6 +314,26 @@ impl SignalAgentSessionStore {
                 txn.commit().await.map_err(storage)?;
                 return Ok(receipt);
             }
+            if update.storage_device_id().is_empty() && update.grants_directory() {
+                use desk_assistant_data_store::device_roster::{lock, personal_selection_key};
+                if crate::agent_run_event_store::eligible_request_device_ids(
+                    &txn,
+                    std::slice::from_ref(&update.subject.device_id),
+                )
+                .await?
+                .is_empty()
+                    || lock(
+                        &txn,
+                        &update.subject.actor_id,
+                        &personal_selection_key(&update.subject.conversation_id),
+                    )
+                    .await
+                    .map_err(|error| error.into_agent_error())?
+                    .is_none_or(|roster| !roster.members.contains_key(&update.subject.device_id))
+                {
+                    return Err(failure());
+                }
+            }
             crate::schedule_store::validate_task_directory_on(&txn, &session, &update.mutation)
                 .await
                 .map_err(|_| failure())?;
@@ -342,7 +362,7 @@ impl SignalAgentSessionStore {
                 let inserted = agent_session::ActiveModel {
                     conversation_id: Set(update.subject.conversation_id.clone()),
                     actor_id: Set(update.subject.actor_id.clone()),
-                    device_id: Set(update.subject.device_id.clone()),
+                    device_id: Set(session.device_id.clone()),
                     conversation_schema_version: Set(Some(i32::from(
                         desk_diagnose_core::session::CONVERSATION_SCHEMA_VERSION,
                     ))),

@@ -221,6 +221,75 @@ fn cross_actor_device_and_conversation_cannot_read_or_mutate_scope() {
 }
 
 #[test]
+fn selectable_scope_round_trips_same_path_with_independent_device_authority() {
+    use crate::conversation_key::{AssistantConversationScope, derive_assistant_conversation_key};
+    let client_id = "selectable";
+    let run =
+        derive_assistant_conversation_key("owner", AssistantConversationScope::Personal, client_id);
+    let mut session = PersistedAgentSession::new(
+        &run,
+        "owner",
+        "",
+        1,
+        AgentScope {
+            granted: vec![],
+            expires_at: None,
+            mode: ExecutionMode::ReadOnly,
+            policy_name: None,
+        },
+        "2026-09-05T00:00:00Z",
+    );
+    session.adopt_client_metadata(Some(client_id), AgentSessionSurface::AiAssistant);
+    let a = session
+        .file_scope_subject("owner", "device-a", &run)
+        .unwrap();
+    let b = session
+        .file_scope_subject("owner", "device-b", &run)
+        .unwrap();
+    for (index, device) in [&a, &b].into_iter().enumerate() {
+        let mut proposal = proposal();
+        proposal.request_id = format!("directory-{index}");
+        proposal.source = DirectoryConsentSource::OwnerSelection;
+        let update = transaction::FileScopeUpdate {
+            subject: device.clone(),
+            client_conversation_id: client_id.into(),
+            client_request_id: proposal.request_id.clone(),
+            expected_revision: session.file_scope.revision(),
+            mutation: transaction::FileScopeMutation::Select { proposal },
+        };
+        (session, _) = transaction::prepare(&session, &update, 1).unwrap();
+    }
+    let json = session.encode_json_for_storage().unwrap();
+    let mut session = PersistedAgentSession::decode_json(&json).unwrap();
+    let scope = &mut session.file_scope;
+    let revision = scope.revision();
+    assert!(
+        scope
+            .approved_directory(&a, revision, "directory-0", 1)
+            .is_ok()
+    );
+    assert!(
+        scope
+            .approved_directory(&b, revision, "directory-1", 1)
+            .is_ok()
+    );
+    assert_eq!(
+        scope.approved_directory(&b, revision, "directory-0", 1),
+        Err(FileScopeError::WrongSubject)
+    );
+    assert_eq!(
+        scope.revoke(&a, revision, "directory-1"),
+        Err(FileScopeError::WrongSubject)
+    );
+    assert_eq!(scope.revoke(&a, revision, "directory-0"), Ok(true));
+    assert!(
+        scope
+            .approved_directory(&b, scope.revision(), "directory-1", 1)
+            .is_ok()
+    );
+}
+
+#[test]
 fn retries_are_idempotent_but_changed_paths_and_refs_conflict() {
     let mut scope = approved();
     let before = scope.clone();

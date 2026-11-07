@@ -645,26 +645,29 @@ pub async fn update_object_context(
     target_device_id: String,
     update: AiAssistantObjectContextUpdate,
 ) {
-    let result = if update.conversation_target.is_selectable()
-        && matches!(update.operation,
-            desk_agent_protocol::ai_assistant::AiAssistantObjectContextOperation::SelectDirectory { .. }
-            | desk_agent_protocol::ai_assistant::AiAssistantObjectContextOperation::DecideDirectory { .. }
-            | desk_agent_protocol::ai_assistant::AiAssistantObjectContextOperation::RevokeDirectory { .. })
-    {
-        Err(transport_error("Select a directory from the device assistant"))
-    } else if let desk_agent_protocol::ai_assistant::AiAssistantObjectContextOperation::SelectDirectory { path, .. } = &update.operation {
+    let result = if let desk_agent_protocol::ai_assistant::AiAssistantObjectContextOperation::SelectDirectory { path, .. } = &update.operation {
         async {
             use desk_diagnose_core::file_scope::{FileScopeSubject, transaction};
             update.validate().map_err(transport_error)?;
-            let subject = FileScopeSubject {
-                actor_id: actor_user_id.to_string(), device_id: target_device_id.clone(),
-                conversation_id: derive_conversation_key(&actor_user_id.to_string(), &target_device_id, Some(&update.conversation_id), ""),
-            };
+            let actor_id = actor_user_id.to_string();
+            let conversation_id = AssistantConversationScope::Personal
+                .object_context_key(&actor_id, &target_device_id, &update)
+                .map_err(transport_error)?;
+            let subject = FileScopeSubject { actor_id, device_id: target_device_id.clone(), conversation_id };
             let store = crate::agent_session_store::SignalAgentSessionStore::new(db.clone())
                 .with_client_metadata(Some(update.conversation_id.clone()), AgentSessionSurface::AiAssistant);
             if let Some(receipt) = desk_diagnose_core::future::boxed(|| async { store.read_file_scope_receipt(&subject, &update.conversation_id, &update.client_request_id).await }).await? {
                 transaction::match_owner_selection(&receipt, &update, &subject).map_err(|_| transport_error("Directory selection conflicts with its original request"))?;
                 return Ok(receipt.changed);
+            }
+            if update.conversation_target.is_selectable() {
+                use desk_assistant_data_store::device_roster::{load, personal_selection_key};
+                if load(&db, &subject.actor_id, &personal_selection_key(&subject.conversation_id)).await
+                    .map_err(|error| error.into_agent_error())?
+                    .is_none_or(|roster| !roster.members.contains_key(&subject.device_id))
+                {
+                    return Err(transport_error("Select the directory's device in this assistant first"));
+                }
             }
             let resolved = desk_diagnose_core::future::boxed(|| async { crate::remote_tool_edge::directory::resolve_candidate(&connections, &target_connection_id, &subject.actor_id, &subject.device_id, path).await }).await?;
             let selection = transaction::owner_selection(&update, subject, resolved).map_err(|_| transport_error("Invalid directory selection"))?;

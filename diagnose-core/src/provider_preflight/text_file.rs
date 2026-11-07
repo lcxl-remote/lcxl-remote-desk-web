@@ -515,6 +515,24 @@ pub fn validate_read_permission_input_with_context(
     now: u64,
     original: Option<&crate::input_read_context::ReadContextSelection>,
 ) -> Result<(), AgentError> {
+    validate_read_permission_on_device(
+        session,
+        &session.device_id,
+        tool_name,
+        exact_input,
+        now,
+        original,
+    )
+}
+
+pub fn validate_read_permission_on_device(
+    session: &crate::session::PersistedAgentSession,
+    device_id: &str,
+    tool_name: &str,
+    exact_input: Option<&str>,
+    now: u64,
+    original: Option<&crate::input_read_context::ReadContextSelection>,
+) -> Result<(), AgentError> {
     if !matches!(tool_name, "inspect_files" | "read_text_file") && !selection::supports(tool_name) {
         return Ok(());
     }
@@ -545,7 +563,7 @@ pub fn validate_read_permission_input_with_context(
         let [destination] = destinations else {
             return Err(invalid());
         };
-        ResultFileRead::build(session, &call, destination, now)?;
+        ResultFileRead::build_for_device(session, device_id, &call, destination, now)?;
     } else {
         let original = original.ok_or_else(invalid)?;
         original.validate().map_err(|_| invalid())?;
@@ -557,16 +575,17 @@ pub fn validate_read_permission_input_with_context(
         let [destination] = destinations else {
             return Err(invalid());
         };
-        crate::input_read_context::validate_current_objects(
+        crate::input_read_context::validate_current_device_objects(
             session,
             &original.object_attachments,
             destination,
             now,
+            device_id,
         )
         .map_err(|_| invalid())?;
         let binding = crate::input_read_context::object_read::ObjectReadBinding {
             original,
-            device_id: &session.device_id,
+            device_id,
             destination,
             now_unix_ms: now,
         };
@@ -653,12 +672,41 @@ fn read_evidence(
     call: &ToolCall,
     now: u64,
 ) -> Result<VerifiedTextFile, AgentError> {
+    read_evidence_on_device(session, &session.device_id, call, now)
+}
+
+fn read_evidence_on_device(
+    session: &crate::session::PersistedAgentSession,
+    device_id: &str,
+    call: &ToolCall,
+    now: u64,
+) -> Result<VerifiedTextFile, AgentError> {
     validate_read_selector(session, call)?;
     let id = read_result_id(call)?.ok_or_else(unavailable)?;
     let args: serde_json::Value =
         serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?;
+    let device_source = session
+        .device_id
+        .is_empty()
+        .then(|| format!("{device_id}:{id}"));
     let Some(name) = args.get("entry_name").and_then(|v| v.as_str()) else {
-        return resolve_file_result(session, &id, now);
+        let evidence = resolve_file_result(session, &id, now)?;
+        if let Some(source) = &device_source
+            && !session.conversation.iter().any(|message| {
+                message.tool_call_id.as_deref() == Some(id.as_str())
+                    && message
+                        .trusted_tool_result()
+                        .data_envelope
+                        .as_ref()
+                        .is_some_and(|envelope| {
+                            Some(envelope.envelope_id.as_str()) == evidence.source_envelope_id()
+                                && envelope.provenance.source_object_id.as_ref() == Some(source)
+                        })
+            })
+        {
+            return Err(unavailable());
+        }
+        return Ok(evidence);
     };
     let mut calls = session
         .conversation
@@ -688,6 +736,9 @@ fn read_evidence(
             continue;
         };
         if envelope.validate().is_err()
+            || device_source
+                .as_ref()
+                .is_some_and(|source| envelope.provenance.source_object_id.as_ref() != Some(source))
             || crate::model_egress::envelope_expires_by(envelope, now)
             || envelope.provenance.source_tool_name != source_call.name
             || envelope.provenance.source_provider_id
@@ -713,11 +764,11 @@ fn read_evidence(
         if !root.is_directory || directory.object_kind != ObjectKind::Directory {
             return Err(unavailable());
         }
-        crate::file_model_input::directory_id(session, directory, now)?;
+        crate::file_model_input::device_directory_id(session, device_id, directory, now)?;
         let original: serde_json::Value =
             serde_json::from_str(&source_call.arguments_json).map_err(|_| unavailable())?;
         if original.get("directory_request_id").is_some()
-            && crate::file_scope::select_output_directory(session, &source_call, now)
+            && crate::file_scope::select_device_directory(session, device_id, &source_call, now)
                 .map_err(|_| unavailable())?
                 != *directory
         {
@@ -964,11 +1015,30 @@ impl ResultFileRead {
         destination: &desk_agent_protocol::data_lineage::DestinationIdentity,
         now: u64,
     ) -> Result<Self, AgentError> {
+        Self::build_for_device(session, &session.device_id, call, destination, now)
+    }
+
+    pub fn build_for_device(
+        session: &crate::session::PersistedAgentSession,
+        device_id: &str,
+        call: &ToolCall,
+        destination: &desk_agent_protocol::data_lineage::DestinationIdentity,
+        now: u64,
+    ) -> Result<Self, AgentError> {
+        if session.device_id.is_empty() {
+            session
+                .resolve_assistant_action_device(Some(device_id), None)
+                .map_err(|_| unavailable())?;
+        } else if session.device_id != device_id {
+            return Err(unavailable());
+        }
         if selection::supports(&call.name) {
             let selectors = selection::selectors(call)?;
             let mut files = selectors
                 .iter()
-                .map(|selector| Self::build(session, selector, destination, now))
+                .map(|selector| {
+                    Self::build_for_device(session, device_id, selector, destination, now)
+                })
                 .collect::<Result<Vec<_>, _>>()?;
             for (index, file) in files.iter().enumerate() {
                 if files[..index]
@@ -1015,7 +1085,7 @@ impl ResultFileRead {
             {
                 return Err(unavailable());
             }
-            let file = crate::file_scope::select_output_directory(session, call, now)
+            let file = crate::file_scope::select_device_directory(session, device_id, call, now)
                 .map_err(|_| unavailable())?;
             return Ok(Self {
                 file,
@@ -1027,7 +1097,7 @@ impl ResultFileRead {
                 valid_until_unix_ms: now.saturating_add(120_000),
             });
         }
-        let evidence = read_evidence(session, call, now)?;
+        let evidence = read_evidence_on_device(session, device_id, call, now)?;
         let source_id = evidence.source_envelope_id().ok_or_else(unavailable)?;
         let source = session
             .conversation
@@ -1921,6 +1991,59 @@ mod tests {
                 serde_json::json!({"file_result_call_id":"metadata","entry_name":"notes.txt"})
                     .to_string(),
         };
+        {
+            use crate::conversation_key::{
+                AssistantConversationScope, derive_assistant_conversation_key,
+            };
+            let mut selected = session.clone();
+            selected.device_id.clear();
+            selected.conversation_id = derive_assistant_conversation_key(
+                "owner",
+                AssistantConversationScope::Personal,
+                "selected-files",
+            );
+            selected.client_conversation_id = Some("selected-files".into());
+            selected
+                .bind_assistant_request_targets(vec!["device-a".into(), "device-b".into()])
+                .unwrap();
+            selected.file_scope = Default::default();
+            for (device, request_id) in [("device-a", "directory"), ("device-b", "other-directory")]
+            {
+                let mut proposal = session.file_scope.records()[0].proposal.clone();
+                proposal.request_id = request_id.into();
+                let subject = selected
+                    .file_scope_subject("owner", device, &selected.conversation_id)
+                    .unwrap();
+                selected
+                    .file_scope
+                    .propose(&subject, selected.file_scope.revision(), proposal, 1000)
+                    .unwrap();
+                selected
+                    .file_scope
+                    .decide(
+                        &subject,
+                        selected.file_scope.revision(),
+                        request_id,
+                        true,
+                        1000,
+                    )
+                    .unwrap();
+            }
+            selected.conversation[2]
+                .data_envelope
+                .as_mut()
+                .unwrap()
+                .provenance
+                .source_object_id = Some("device-a:metadata".into());
+            let file =
+                ResultFileRead::build_for_device(&selected, "device-a", &call, &destination, 1000)
+                    .unwrap();
+            assert_eq!(file.files(), vec![evidence.reference.clone()]);
+            assert!(
+                ResultFileRead::build_for_device(&selected, "device-b", &call, &destination, 1000)
+                    .is_err()
+            );
+        }
         let missing_name = validate_read_permission_input(
             &session,
             &call.name,

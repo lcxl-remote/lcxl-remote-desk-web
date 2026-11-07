@@ -757,7 +757,9 @@ impl GrantRequestItem {
                 || self.canonical_input_json.is_none()
                 || !matches!(
                     self.expected_effect,
-                    CapabilityEffect::ReadDevice | CapabilityEffect::CaptureScreen
+                    CapabilityEffect::ReadDevice
+                        | CapabilityEffect::ReadFile
+                        | CapabilityEffect::CaptureScreen
                 )
                 || self.command_confirmation.is_some()
                 || self.launch_confirmation.is_some()

@@ -1146,6 +1146,7 @@ pub struct FileScopeDto {
 #[serde(rename_all = "camelCase")]
 pub struct DirectoryConsentDto {
     pub request_id: String,
+    pub device_ref: Option<String>,
     pub canonical_path: String,
     pub purpose: String,
     pub state: String,
@@ -1156,8 +1157,11 @@ pub struct DirectoryConsentDto {
     pub review_id: Option<String>,
 }
 
-impl From<desk_diagnose_core::file_scope::SessionFileScope> for FileScopeDto {
-    fn from(scope: desk_diagnose_core::file_scope::SessionFileScope) -> Self {
+impl FileScopeDto {
+    pub fn with_device_refs(
+        scope: &desk_diagnose_core::file_scope::SessionFileScope,
+        device_ref: impl Fn(&str) -> Option<String>,
+    ) -> Self {
         use desk_diagnose_core::file_scope::{DirectoryConsentSource, DirectoryConsentState};
         Self {
             revision: scope.revision(),
@@ -1166,6 +1170,7 @@ impl From<desk_diagnose_core::file_scope::SessionFileScope> for FileScopeDto {
                 .iter()
                 .map(|record| DirectoryConsentDto {
                     request_id: record.proposal.request_id.clone(),
+                    device_ref: device_ref(&record.device_id),
                     canonical_path: record.proposal.canonical_path.clone(),
                     purpose: record.proposal.purpose.clone(),
                     state: match record.state {

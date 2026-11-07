@@ -13,9 +13,29 @@ use crate::session::PersistedAgentSession;
 
 pub const FILE_SCOPE_EVENT_KIND: &str = "file_scope_updated";
 
+/// The conversation can be account-scoped while the consent is device-scoped.
+pub fn storage_device_id<'a>(subject: &'a FileScopeSubject, client_id: &str) -> &'a str {
+    use crate::conversation_key::{AssistantConversationScope, derive_assistant_conversation_key};
+    if subject.conversation_id
+        == derive_assistant_conversation_key(
+            &subject.actor_id,
+            AssistantConversationScope::Personal,
+            client_id,
+        )
+    {
+        ""
+    } else {
+        &subject.device_id
+    }
+}
+
 pub fn receipt_event_id(subject: &FileScopeSubject, client_request_id: &str) -> String {
-    let bytes = serde_json::to_vec(&(subject, client_request_id))
-        .expect("directory update identity is serializable");
+    let bytes = serde_json::to_vec(&(
+        &subject.actor_id,
+        &subject.conversation_id,
+        client_request_id,
+    ))
+    .expect("directory update identity is serializable");
     format!("file-scope-{:x}", Sha256::digest(bytes))
 }
 
@@ -177,6 +197,19 @@ pub struct FileScopeReceipt {
 }
 
 impl FileScopeUpdate {
+    pub fn storage_device_id(&self) -> &str {
+        storage_device_id(&self.subject, &self.client_conversation_id)
+    }
+
+    pub fn grants_directory(&self) -> bool {
+        matches!(
+            self.mutation,
+            FileScopeMutation::Propose { .. }
+                | FileScopeMutation::Select { .. }
+                | FileScopeMutation::Decide { approve: true, .. }
+        )
+    }
+
     pub fn validate(&self) -> Result<(), FileScopeError> {
         if !valid_id(&self.client_conversation_id) || !valid_id(&self.client_request_id) {
             return Err(FileScopeError::InvalidProposal);
@@ -270,6 +303,7 @@ pub fn prepare(
             if proposal.source == DirectoryConsentSource::ModelProposal
                 && next.file_scope.records.iter().any(|record| {
                     record.state == DirectoryConsentState::Rejected
+                        && record.device_id == update.subject.device_id
                         && record.proposal.canonical_path == proposal.canonical_path
                         && record
                             .review_context
@@ -451,12 +485,12 @@ pub fn prepare_ai_decision(
     decision: crate::directory_review::DirectoryDecision,
     now: u64,
 ) -> Result<(PersistedAgentSession, FileScopeReceipt), FileScopeError> {
-    crate::directory_review::pending(session, request_id)
+    let record = crate::directory_review::pending(session, request_id)
         .map_err(|_| FileScopeError::InvalidTransition)?;
     let update = FileScopeUpdate {
         subject: session.file_scope_subject(
             &session.actor_id,
-            &session.device_id,
+            &record.device_id,
             &session.conversation_id,
         )?,
         client_conversation_id: session

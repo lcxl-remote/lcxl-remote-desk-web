@@ -1199,7 +1199,7 @@ impl SignalAiAssistantTools {
                 ))
             }
             desk_agent_protocol::Capability::FileMetadataRead
-                if self.selected_file_roots.is_empty() =>
+                if self.selected_device_fence.is_none() && self.selected_file_roots.is_empty() =>
             {
                 Err(error(
                     AgentErrorKind::PermissionDenied,
@@ -1209,12 +1209,13 @@ impl SignalAiAssistantTools {
                 ))
             }
             desk_agent_protocol::Capability::FileContentRead
-                if self
-                    .selected_file_roots
-                    .iter()
-                    .filter(|object_ref| object_ref.object_kind == ObjectKind::File)
-                    .count()
-                    != 1 =>
+                if self.selected_device_fence.is_none()
+                    && self
+                        .selected_file_roots
+                        .iter()
+                        .filter(|object_ref| object_ref.object_kind == ObjectKind::File)
+                        .count()
+                        != 1 =>
             {
                 Err(error(
                     AgentErrorKind::PermissionDenied,
@@ -1552,7 +1553,9 @@ impl SignalAiAssistantTools {
                     &original_requirement.text,
                 )?,
             )
-        } else if self.selected_device_fence.is_some() {
+        } else if self.selected_device_fence.is_some()
+            && !desk_diagnose_core::provider_preflight::text_file::uses_session_file_read(call)?
+        {
             desk_diagnose_core::future::boxed(|| self.validate_original_objects()).await?;
             Some(desk_diagnose_core::provider_preflight::read::ReadCallPreflight::build_selected_device(
                 &self.provider_registry, ProductSurface::OssPersonalOwner, call, &self.object_binding()?,
@@ -1964,11 +1967,12 @@ impl SignalAiAssistantTools {
                         call,
                     )? {
                         let binding = self.object_binding()?;
-                        desk_diagnose_core::provider_preflight::text_file::ResultFileRead::build(
+                        desk_diagnose_core::provider_preflight::text_file::ResultFileRead::build_for_device(
                             &desk_diagnose_core::future::boxed(|| async {
                                 self.authoritative_session().await
                             })
                             .await?,
+                            binding.device_id,
                             call,
                             binding.destination,
                             post_now,
@@ -6033,6 +6037,7 @@ impl SignalAiAssistantTools {
             });
         }
         if capability == desk_agent_protocol::Capability::FileMetadataRead
+            && self.selected_device_fence.is_none()
             && !desk_diagnose_core::provider_preflight::text_file::uses_session_file_read(call)?
         {
             if self.selected_file_roots.is_empty() {
@@ -6076,6 +6081,7 @@ impl SignalAiAssistantTools {
             });
         }
         if capability == desk_agent_protocol::Capability::FileContentRead
+            && self.selected_device_fence.is_none()
             && desk_diagnose_core::provider_preflight::text_file::read_result_id(call)?.is_none()
         {
             let files = self
@@ -6184,11 +6190,12 @@ impl SignalAiAssistantTools {
                 .await?;
                 let binding = self.object_binding()?;
                 let result =
-                    desk_diagnose_core::provider_preflight::text_file::ResultFileRead::build(
+                    desk_diagnose_core::provider_preflight::text_file::ResultFileRead::build_for_device(
                         &desk_diagnose_core::future::boxed(|| async {
                             self.authoritative_session().await
                         })
                         .await?,
+                        binding.device_id,
                         call,
                         binding.destination,
                         binding.now_unix_ms,

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Folder } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { SessionTargetDialog } from '@/features/desk/session-target-selection';
 import { useFileTransfer } from './use-file-transfer';
 
 type Directory = { name: string; path: string; err_msg?: string | null };
@@ -9,13 +10,13 @@ const pageSize = 100;
 
 export function RemoteDirectoryPicker({ deskId, sessionTargetId, disabled, onSelect, onCancel }: {
     deskId: string;
-    sessionTargetId: string | null;
+    sessionTargetId?: string | null;
     disabled: boolean;
     onSelect: (path: string) => boolean;
     onCancel: () => void;
 }) {
     const { t } = useTranslation();
-    const { listFiles, querySystemInfo, closeConnection } = useFileTransfer(deskId, undefined, sessionTargetId);
+    const { listFiles, querySystemInfo, closeConnection, sessionTargets, selectSessionTarget } = useFileTransfer(deskId, undefined, sessionTargetId);
     const [paths, setPaths] = useState<string[] | null>(null);
     const [page, setPage] = useState(1);
     const [reload, setReload] = useState(0);
@@ -49,6 +50,7 @@ export function RemoteDirectoryPicker({ deskId, sessionTargetId, disabled, onSel
     const navigate = (next: string[]) => { setLoading(true); setData(null); setPaths(next); setPage(1); };
     const changePage = (next: number) => { setLoading(true); setData(null); setPage(next); };
     return <div className="space-y-2 rounded-md border p-3" aria-busy={loading}>
+        {!!sessionTargets?.length && <SessionTargetDialog targets={sessionTargets} onSelect={selectSessionTarget} />}
         <p className="break-all text-sm font-mono">{path || t('pages.aiAssistant.directories.root')}</p>
         <div className="flex flex-wrap gap-2">
             <Button type="button" size="sm" variant="outline" disabled={busy || !paths || paths.length < 2}

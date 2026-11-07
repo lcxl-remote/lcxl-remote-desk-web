@@ -70,6 +70,7 @@ impl CapabilityDescriptor {
                 || (!matches!(
                     self.wire.effect,
                     desk_agent_protocol::capability_provider::CapabilityEffect::ReadDevice
+                        | desk_agent_protocol::capability_provider::CapabilityEffect::ReadFile
                         | desk_agent_protocol::capability_provider::CapabilityEffect::CaptureScreen
                 ) && self.tool_spec.name != crate::command_confirmation::COMMAND_TOOL))
         {

@@ -567,7 +567,9 @@ pub async fn get_ai_assistant_session(
                     main_stopped: snapshot.main_stopped,
                     subagents: snapshot.subagents,
                     action_permission_reasons,
-                    file_scope: snapshot.file_scope.into(),
+                    file_scope: FileScopeDto::with_device_refs(&snapshot.file_scope, |id| {
+                        Some(id.into())
+                    }),
                     terminal_error: snapshot.terminal_error,
                     goal: goal.as_ref().map(AiAssistantGoalDto::from),
                     pending_goal_open_request: pending_goal_open_request

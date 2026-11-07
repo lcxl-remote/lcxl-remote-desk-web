@@ -171,7 +171,8 @@ async fn load_snapshot_on(
         || session.conversation_id != run
         || (device.is_empty()
             && !session.has_admitted_personal_input()
-            && session.context_attachments.is_empty())
+            && session.context_attachments.is_empty()
+            && session.file_scope.revision() == 0)
     {
         return Ok(None);
     }

@@ -80,6 +80,113 @@ fn proposal(name: &str, reference: &str, input: Value) -> ToolCall {
 }
 
 #[tokio::test]
+async fn selected_file_reads_project_and_plan_only_on_the_directory_device() {
+    use crate::{
+        conversation_key::{AssistantConversationScope, derive_assistant_conversation_key},
+        file_scope::*,
+    };
+    use desk_agent_protocol::computer_use::{ObjectKind, ObjectRef};
+    let registry = crate::ai_assistant::ai_assistant_provider_registry_ref();
+    let mut session = session();
+    session.conversation_id = derive_assistant_conversation_key(
+        "owner",
+        AssistantConversationScope::Personal,
+        "file-input",
+    );
+    session.adopt_client_metadata(
+        Some("file-input"),
+        crate::session::AgentSessionSurface::AiAssistant,
+    );
+    let subject = session
+        .file_scope_subject("owner", "a", &session.conversation_id)
+        .unwrap();
+    let input = crate::model_message_labels::model_bound_user_message(
+        "owner-input".into(),
+        "Read the chosen directory".into(),
+        desk_agent_protocol::data_lineage::DestinationIdentity::Model {
+            connection_id: "connection".into(),
+            connection_revision: 1,
+            model_id: "model".into(),
+            profile_revision: 1,
+        },
+    )
+    .unwrap();
+    session.conversation.push(input);
+    let roots = vec!["inspect_files", "read_text_file"]
+        .into_iter()
+        .map(|name| {
+            registry
+                .capability_for_tool(name)
+                .unwrap()
+                .wire
+                .capability_id
+                .clone()
+        })
+        .collect::<Vec<_>>();
+    let devices = [device("a", roots.clone()), device("b", roots)];
+    assert!(read_tools(&devices, &session, registry, true, None).is_empty());
+    session
+        .file_scope
+        .propose(
+            &subject,
+            0,
+            DirectoryProposal {
+                request_id: "root".into(),
+                requested_path: "/work".into(),
+                canonical_path: "/work".into(),
+                purpose: "Read the chosen directory".into(),
+                source: DirectoryConsentSource::OwnerSelection,
+                directory: ObjectRef {
+                    token: "dir-token".into(),
+                    snapshot_id: "dir-snapshot".into(),
+                    object_kind: ObjectKind::Directory,
+                    expires_at: String::new(),
+                },
+            },
+            1,
+        )
+        .unwrap();
+    session
+        .file_scope
+        .decide(&subject, 1, "root", true, 1)
+        .unwrap();
+    let reads = read_tools(&devices, &session, registry, true, None);
+    assert_eq!(reads.len(), 2);
+    assert!(
+        reads
+            .iter()
+            .all(|(tool, callable)| has_target_selector(&tool.spec) && !callable)
+    );
+    assert!(read_tools(&devices[1..], &session, registry, true, None).is_empty());
+    for (target_ref, allowed) in [("a", true), ("b", false)] {
+        let request = plan_device_permission(
+            &NoDeviceCommands,
+            Some(registry),
+            &session,
+            &devices,
+            &reads,
+            &proposal(
+                "inspect_files",
+                target_ref,
+                json!({"directory_request_id":"root"}),
+            ),
+            "file-read",
+            NOW,
+        )
+        .await
+        .unwrap();
+        assert_eq!(request.is_ok(), allowed, "{request:?}");
+        if let Ok(request) = request {
+            request.validate().unwrap();
+            assert_eq!(
+                request.selected_read_target(),
+                devices[0].read_target.as_ref()
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn every_request_device_read_projects_parses_and_keeps_its_exact_target() {
     let registry = crate::ai_assistant::ai_assistant_provider_registry_ref();
     for descriptor in registry
@@ -90,7 +197,10 @@ async fn every_request_device_read_projects_parses_and_keeps_its_exact_target() 
         let name = descriptor.wire.tool_name.as_str();
         if matches!(
             name,
-            crate::command_confirmation::COMMAND_TOOL | "read_terminal_output"
+            crate::command_confirmation::COMMAND_TOOL
+                | "read_terminal_output"
+                | "inspect_files"
+                | "read_text_file"
         ) {
             continue;
         }
@@ -117,7 +227,7 @@ async fn every_request_device_read_projects_parses_and_keeps_its_exact_target() 
             device("a", vec![descriptor.wire.capability_id.clone()]),
             device("b", vec![]),
         ];
-        let reads = read_tools(&devices, registry, true, None);
+        let reads = read_tools(&devices, &session, registry, true, None);
         let [(registered, callable)] = reads.as_slice() else {
             panic!("{name}: missing projected tool");
         };
@@ -148,11 +258,11 @@ async fn every_request_device_read_projects_parses_and_keeps_its_exact_target() 
             "{name}"
         );
         assert!(
-            read_tools(&devices[1..], registry, true, None).is_empty(),
+            read_tools(&devices[1..], &session, registry, true, None).is_empty(),
             "{name}"
         );
         if name == "read_current_screen" {
-            assert!(read_tools(&devices, registry, false, None).is_empty());
+            assert!(read_tools(&devices, &session, registry, false, None).is_empty());
         }
         let mut wrapped = args.clone();
         wrapped["target_ref"] = json!("a");
@@ -338,7 +448,7 @@ async fn desktop_object_approval_and_dispatch_keep_the_observed_device_and_incar
     let resolve = |call: &ToolCall, session: &PersistedAgentSession| {
         crate::ui_model_ids::resolve_session_call_with_context(call, session, 1, None).unwrap()
     };
-    let reads = read_tools(&devices, registry, true, None);
+    let reads = read_tools(&devices, &session, registry, true, None);
     let input_a = json!({"window":window("snapshot-a")});
     let input_b = json!({"window":window("snapshot-b")});
     let propose_window = |alias: &str| {
@@ -477,7 +587,7 @@ async fn explicit_display_must_have_been_observed_on_the_selected_device() {
         ),
         device("b", vec![screen.wire.capability_id.clone()]),
     ];
-    let reads = read_tools(&devices, registry, true, None);
+    let reads = read_tools(&devices, &session, registry, true, None);
     let content = json!({"ReadContext":{"DesktopSessionInspect":{"displays":[
         {"display":"opaque-one","name":"One"}, {"display":"opaque-two","name":"Two"}
     ]}}})

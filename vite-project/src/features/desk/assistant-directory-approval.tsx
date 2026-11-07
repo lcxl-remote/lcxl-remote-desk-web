@@ -6,8 +6,9 @@ import type { AssistantDirectoryOperation, AssistantFileScopeView } from './assi
 
 type Directory = AssistantFileScopeView['directories'][number];
 
-export function AssistantDirectoryApproval({ directory, revision, disabled, busy, onUpdate }: {
+export function AssistantDirectoryApproval({ directory, deviceLabel, revision, disabled, busy, onUpdate }: {
     directory: Directory;
+    deviceLabel?: string;
     revision: number;
     disabled: boolean;
     busy: boolean;
@@ -28,6 +29,7 @@ export function AssistantDirectoryApproval({ directory, revision, disabled, busy
             <p className="font-medium">{t('pages.aiAssistant.directories.requestTitle')}</p>
             <p className="mt-1 text-sm text-muted-foreground">{t('pages.aiAssistant.directories.currentSession')}</p>
         </div>
+        {deviceLabel && <p className="text-xs text-muted-foreground">{deviceLabel}</p>}
         <p className="break-all font-mono text-sm">{directory.canonicalPath}</p>
         <p className="whitespace-pre-wrap text-sm">{directory.purpose}</p>
         <Disclosure title={t('pages.aiAssistant.directories.requestDetails')} summaryClassName="cursor-pointer text-xs">

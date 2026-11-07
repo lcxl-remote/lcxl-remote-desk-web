@@ -19,6 +19,7 @@ export function useConversationRequestDevices(
     ensureConversation: () => string,
 ) {
     const client = useQueryClient();
+    const connections = useListConnections({ query: { enabled: !!scope } });
     const key = (id: string | null) => ['ai-assistant-request-devices', scope, id] as const;
     const save = useMutation({
         mutationFn: async (input: { conversation: string; expectedRevision: number; targetRefs: string[] }) => {
@@ -41,7 +42,10 @@ export function useConversationRequestDevices(
     const ready = !scope || (!saving && (!conversation || !!roster.data));
     return {
         ready,
-        selected: roster.data?.targetRefs.map(id => ({ id, name: id, platform: '' })) ?? [],
+        selected: roster.data?.targetRefs.map(id => {
+            const peer = connections.data?.data?.find(item => item.device_id === id)?.peer;
+            return { id, name: peer?.display_name || id, platform: peer?.operation_system ?? '' };
+        }) ?? [],
         update(devices: AssistantRequestDevice[]) {
             if (!ready) return;
             save.mutate({

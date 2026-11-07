@@ -62,11 +62,17 @@ pub fn select_output_directory(
     call: &crate::chat::ToolCall,
     now_unix_ms: u64,
 ) -> Result<ObjectRef, FileScopeError> {
-    let subject = session.file_scope_subject(
-        &session.actor_id,
-        &session.device_id,
-        &session.conversation_id,
-    )?;
+    select_device_directory(session, &session.device_id, call, now_unix_ms)
+}
+
+pub fn select_device_directory(
+    session: &PersistedAgentSession,
+    device_id: &str,
+    call: &crate::chat::ToolCall,
+    now_unix_ms: u64,
+) -> Result<ObjectRef, FileScopeError> {
+    let subject =
+        session.file_scope_subject(&session.actor_id, device_id, &session.conversation_id)?;
     let value: serde_json::Value =
         serde_json::from_str(&call.arguments_json).map_err(|_| FileScopeError::InvalidProposal)?;
     if let Some(id) = value.get("directory_request_id") {
@@ -204,16 +210,24 @@ pub enum DirectoryConsentState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DirectoryConsent {
+    pub device_id: String,
     pub proposal: DirectoryProposal,
     pub state: DirectoryConsentState,
     pub review_context: Option<crate::directory_review::DirectoryReviewContext>,
     pub decision: Option<crate::directory_review::DirectoryDecision>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileScopeOwner {
+    actor_id: String,
+    conversation_id: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionFileScope {
-    subject: Option<FileScopeSubject>,
+    owner: Option<FileScopeOwner>,
     revision: u64,
     records: Vec<DirectoryConsent>,
 }
@@ -259,7 +273,10 @@ impl SessionFileScope {
         ]
         .iter()
         .any(|value| !valid_id(value))
-            || self.subject.as_ref().is_some_and(|bound| bound != subject)
+            || self.owner.as_ref().is_some_and(|bound| {
+                bound.actor_id != subject.actor_id
+                    || bound.conversation_id != subject.conversation_id
+            })
         {
             return Err(FileScopeError::WrongSubject);
         }
@@ -290,6 +307,9 @@ impl SessionFileScope {
             .iter()
             .find(|record| record.proposal.request_id == proposal.request_id)
         {
+            if existing.device_id != subject.device_id {
+                return Err(FileScopeError::WrongSubject);
+            }
             return if existing.proposal == proposal {
                 Ok(false)
             } else {
@@ -301,12 +321,16 @@ impl SessionFileScope {
             return Err(FileScopeError::CapacityExceeded);
         }
         self.records.push(DirectoryConsent {
+            device_id: subject.device_id.clone(),
             proposal,
             state: DirectoryConsentState::Pending,
             review_context: None,
             decision: None,
         });
-        self.subject = Some(subject.clone());
+        self.owner = Some(FileScopeOwner {
+            actor_id: subject.actor_id.clone(),
+            conversation_id: subject.conversation_id.clone(),
+        });
         self.revision = revision;
         Ok(true)
     }
@@ -322,7 +346,7 @@ impl SessionFileScope {
         now_unix_ms: u64,
     ) -> Result<bool, FileScopeError> {
         self.check_subject(subject)?;
-        let index = self.index(request_id)?;
+        let index = self.index(subject, request_id)?;
         let desired = if approve {
             DirectoryConsentState::Approved
         } else {
@@ -352,7 +376,7 @@ impl SessionFileScope {
         request_id: &str,
     ) -> Result<bool, FileScopeError> {
         self.check_subject(subject)?;
-        let index = self.index(request_id)?;
+        let index = self.index(subject, request_id)?;
         let state = self.records[index].state;
         if state == DirectoryConsentState::Revoked {
             return Ok(false);
@@ -380,7 +404,7 @@ impl SessionFileScope {
         if self.revision != expected_revision {
             return Err(FileScopeError::StaleRevision);
         }
-        let record = &self.records[self.index(request_id)?];
+        let record = &self.records[self.index(subject, request_id)?];
         if record.state != DirectoryConsentState::Approved {
             return Err(FileScopeError::NotApproved);
         }
@@ -388,11 +412,16 @@ impl SessionFileScope {
         Ok(&record.proposal.directory)
     }
 
-    fn index(&self, request_id: &str) -> Result<usize, FileScopeError> {
-        self.records
+    fn index(&self, subject: &FileScopeSubject, request_id: &str) -> Result<usize, FileScopeError> {
+        let index = self
+            .records
             .iter()
             .position(|record| record.proposal.request_id == request_id)
-            .ok_or(FileScopeError::NotApproved)
+            .ok_or(FileScopeError::NotApproved)?;
+        if self.records[index].device_id != subject.device_id {
+            return Err(FileScopeError::WrongSubject);
+        }
+        Ok(index)
     }
 }
 
@@ -406,7 +435,6 @@ impl PersistedAgentSession {
     ) -> Result<FileScopeSubject, FileScopeError> {
         if self.surface != AgentSessionSurface::AiAssistant
             || self.actor_id != actor_id
-            || self.device_id != device_id
             || self.conversation_id != conversation_id
         {
             return Err(FileScopeError::WrongSubject);
@@ -416,6 +444,13 @@ impl PersistedAgentSession {
             device_id: device_id.into(),
             conversation_id: conversation_id.into(),
         };
+        let storage_device = self
+            .client_conversation_id
+            .as_deref()
+            .map_or(device_id, |id| transaction::storage_device_id(&subject, id));
+        if self.device_id != storage_device {
+            return Err(FileScopeError::WrongSubject);
+        }
         self.file_scope.check_subject(&subject)?;
         Ok(subject)
     }

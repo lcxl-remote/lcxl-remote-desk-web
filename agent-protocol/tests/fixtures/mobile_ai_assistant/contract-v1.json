@@ -367,12 +367,23 @@
       }
     ],
     "fileScope": {
-      "revision": 0,
-      "directories": []
+      "revision": 2,
+      "directories": [
+        {
+          "requestId": "directory-1",
+          "deviceRef": "device-1",
+          "canonicalPath": "/work",
+          "purpose": "Read report",
+          "state": "approved",
+          "source": "owner_selection",
+          "referenceExpiresAt": ""
+        }
+      ]
     },
     "contextAttachments": [
       {
         "id": "attachment-1",
+        "deviceRef": "device-1",
         "kind": "file",
         "providerId": "filesystem",
         "capabilityId": "file.inspect",

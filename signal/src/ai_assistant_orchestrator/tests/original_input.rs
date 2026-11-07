@@ -3002,20 +3002,32 @@ async fn respond_to_system_info(
 
 #[actix_web::test]
 async fn personal_selected_desktop_read_and_whole_screen_resume_on_signal() {
-    run_selected_desktop_and_screen(false, false).await;
+    run_selected_device_reads(SelectedReadScenario::Desktop).await;
 }
 
 #[actix_web::test]
 async fn personal_selected_window_capture_resumes_on_the_observed_device() {
-    run_selected_desktop_and_screen(true, false).await;
+    run_selected_device_reads(SelectedReadScenario::Window).await;
 }
 
 #[actix_web::test]
 async fn personal_selected_terminal_snapshot_resumes_on_signal() {
-    run_selected_desktop_and_screen(false, true).await;
+    run_selected_device_reads(SelectedReadScenario::Terminal).await;
 }
 
-async fn run_selected_desktop_and_screen(window: bool, terminal: bool) {
+#[actix_web::test]
+async fn personal_selected_directory_snapshot_resumes_on_signal() {
+    run_selected_device_reads(SelectedReadScenario::Directory).await;
+}
+
+enum SelectedReadScenario {
+    Desktop,
+    Window,
+    Terminal,
+    Directory,
+}
+
+async fn run_selected_device_reads(scenario: SelectedReadScenario) {
     use super::desktop_permission::concrete_review_reply;
     use super::permission_object::tool_reply;
     use crate::config::ConfigConnection;
@@ -3024,6 +3036,10 @@ async fn run_selected_desktop_and_screen(window: bool, terminal: bool) {
     use desk_signal_facade::model::os::OperationSystemEnum;
     use sea_orm::{ColumnTrait, QueryFilter};
     use serde_json::{Value, json};
+
+    let window = matches!(scenario, SelectedReadScenario::Window);
+    let terminal = matches!(scenario, SelectedReadScenario::Terminal);
+    let files = matches!(scenario, SelectedReadScenario::Directory);
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let reviewer = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -3056,7 +3072,9 @@ async fn run_selected_desktop_and_screen(window: bool, terminal: bool) {
     .unwrap();
     let owner = crate::control_authorizer::SINGLE_ACCOUNT_USER_ID;
     let connections = web::Data::new(SharedConnectionMap::new_oss());
-    let cases = if terminal {
+    let cases = if files {
+        vec![("selected-file-device", "inspect_files")]
+    } else if terminal {
         vec![("selected-terminal-device", "read_terminal_output")]
     } else if window {
         vec![
@@ -3095,6 +3113,10 @@ async fn run_selected_desktop_and_screen(window: bool, terminal: bool) {
             .filter(|(id, _)| *id == device)
             .map(|(_, name)| {
                 let (capability, kind) = match *name {
+                    "inspect_files" => (
+                        Capability::FileMetadataRead,
+                        ComputerUseAdapterKind::FileSystem,
+                    ),
                     "read_terminal_output" => (
                         Capability::TerminalOutputRead,
                         ComputerUseAdapterKind::Terminal,
@@ -3149,6 +3171,7 @@ async fn run_selected_desktop_and_screen(window: bool, terminal: bool) {
     let gateway = actix_web::rt::spawn(async move {
         for (target, name) in model_cases {
             let exact = match (window, name) {
+                (_, "inspect_files") => json!({"directory_request_id":"selected-directory"}),
                 (true, "read_current_screen") => json!({"window_id":"w1"}),
                 (true, "inspect_desktop_ui") => json!({"queries":["Calendar"]}),
                 _ => json!({}),
@@ -3200,6 +3223,8 @@ async fn run_selected_desktop_and_screen(window: bool, terminal: bool) {
                 let messages = request["messages"].to_string();
                 if name == "read_current_screen" {
                     assert!(messages.contains("data:image/png;base64,"), "{messages}");
+                } else if files {
+                    assert!(messages.contains("fixture-folder"), "{messages}");
                 } else if terminal {
                     assert!(messages.contains("selected-terminal-marker"), "{messages}");
                 } else if window {
@@ -3243,6 +3268,52 @@ async fn run_selected_desktop_and_screen(window: bool, terminal: bool) {
             &intent,
         );
         let store = crate::agent_session_store::SignalAgentSessionStore::new(db.clone());
+        if files {
+            use desk_assistant_data_store::device_roster::{personal_selection_key, replace};
+            use desk_diagnose_core::file_scope::{transaction::*, *};
+            replace(
+                &db,
+                &actor,
+                &personal_selection_key(&run),
+                0,
+                vec![target.into()],
+            )
+            .await
+            .unwrap();
+            let store = crate::agent_session_store::SignalAgentSessionStore::new(db.clone())
+                .with_client_metadata(Some(intent.clone()), AgentSessionSurface::AiAssistant);
+            store
+                .update_file_scope(
+                    &FileScopeUpdate {
+                        subject: FileScopeSubject {
+                            actor_id: actor.clone(),
+                            device_id: target.into(),
+                            conversation_id: run.clone(),
+                        },
+                        client_conversation_id: intent.clone(),
+                        client_request_id: "selected-directory".into(),
+                        expected_revision: 0,
+                        mutation: FileScopeMutation::Select {
+                            proposal: DirectoryProposal {
+                                request_id: "selected-directory".into(),
+                                requested_path: "/fixture-folder".into(),
+                                canonical_path: "/fixture-folder".into(),
+                                directory: ObjectRef {
+                                    token: "fixture-directory-token".into(),
+                                    snapshot_id: "fixture-directory-snapshot".into(),
+                                    object_kind: ObjectKind::Directory,
+                                    expires_at: String::new(),
+                                },
+                                purpose: "List the selected directory".into(),
+                                source: DirectoryConsentSource::OwnerSelection,
+                            },
+                        },
+                    },
+                    now,
+                )
+                .await
+                .unwrap();
+        }
         let attachment_ids = if terminal {
             use desk_agent_protocol::ai_assistant::{
                 AiAssistantConversationTarget, AiAssistantObjectContextOperation,
@@ -3303,6 +3374,8 @@ async fn run_selected_desktop_and_screen(window: bool, terminal: bool) {
                 selected_attachment_ids: attachment_ids,
                 question: if terminal {
                     "Read the selected terminal output"
+                } else if files {
+                    "List the selected directory"
                 } else if index == 0 {
                     "Read desktop information"
                 } else if window {
@@ -3503,7 +3576,33 @@ async fn respond_to_selected_desktop(
         object_kind: ObjectKind::Window,
         expires_at: String::new(),
     };
-    let (value, image) = if name == "read_terminal_output" {
+    let (value, image) = if name == "inspect_files" {
+        let ContextKind::FileMetadataInspect(input) = read.envelope.operation.input.kind else {
+            panic!("expected directory metadata request")
+        };
+        let [root] = input.roots.as_slice() else {
+            panic!("expected exact directory root")
+        };
+        assert_eq!(root.token, "fixture-directory-token");
+        (
+            ReadContextOutput::FileMetadataInspect(FileMetadataInspectOutput {
+                snapshot_id: root.snapshot_id.clone(),
+                entries: vec![FileMetadataProjection {
+                    object_ref: root.clone(),
+                    display_name: "fixture-folder".into(),
+                    is_directory: true,
+                    byte_len: None,
+                    modified_at: None,
+                }],
+                directory_entries: vec![],
+                truncated: false,
+                pagination_id: None,
+                pagination_consistency: None,
+                next_cursor: None,
+            }),
+            None,
+        )
+    } else if name == "read_terminal_output" {
         let ContextKind::TerminalOutputInspect(input) = read.envelope.operation.input.kind else {
             panic!("expected original terminal snapshot");
         };

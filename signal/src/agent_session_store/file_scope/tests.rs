@@ -65,6 +65,79 @@ async fn state(store: &SignalAgentSessionStore) -> PersistedAgentSession {
 }
 
 #[tokio::test]
+async fn selectable_directory_scope_survives_snapshot_and_device_removal() {
+    use desk_assistant_data_store::device_roster::{personal_selection_key, replace};
+    use desk_diagnose_core::conversation_key::{
+        AssistantConversationScope, derive_assistant_conversation_key,
+    };
+    let db = crate::config::test_support::Database::connect("sqlite::memory:")
+        .await
+        .unwrap();
+    crate::db::initialize_schema(&db).await.unwrap();
+    let store = scoped(db.clone());
+    let mut a = update();
+    a.subject.conversation_id =
+        derive_assistant_conversation_key("7", AssistantConversationScope::Personal, "client");
+    let run = &a.subject.conversation_id;
+    let roster_key = personal_selection_key(run);
+    let mut b = a.clone();
+    b.subject.device_id = "other-device".into();
+    b.client_request_id = "select-other".into();
+    let FileScopeMutation::Select { proposal } = &mut b.mutation else {
+        panic!()
+    };
+    proposal.request_id.clone_from(&b.client_request_id);
+    for device in [&a.subject.device_id, &b.subject.device_id] {
+        crate::device_code_store::get_or_create(&db, device)
+            .await
+            .unwrap();
+    }
+    assert!(store.update_file_scope(&a, now()).await.is_err());
+    replace(
+        &db,
+        "7",
+        &roster_key,
+        0,
+        vec![a.subject.device_id.clone(), b.subject.device_id.clone()],
+    )
+    .await
+    .unwrap();
+    let receipt = store.update_file_scope(&a, now()).await.unwrap();
+    b.expected_revision = receipt.scope_revision;
+    let receipt_b = store.update_file_scope(&b, now()).await.unwrap();
+    replace(&db, "7", &roster_key, 1, vec![b.subject.device_id.clone()])
+        .await
+        .unwrap();
+    let revocation = FileScopeUpdate {
+        client_request_id: "revoke-first".into(),
+        expected_revision: receipt_b.scope_revision,
+        mutation: FileScopeMutation::Revoke {
+            directory_request_id: "select".into(),
+        },
+        ..a.clone()
+    };
+    let wrong_device = FileScopeUpdate {
+        subject: b.subject.clone(),
+        ..revocation.clone()
+    };
+    assert!(store.update_file_scope(&wrong_device, now()).await.is_err());
+    store.update_file_scope(&revocation, now()).await.unwrap();
+    let reopened = scoped(db);
+    let snapshot = reopened
+        .read_assistant_snapshot_for_subject(run, "7", "")
+        .await
+        .unwrap()
+        .unwrap();
+    let records = snapshot.session.file_scope.records();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].device_id, b.subject.device_id);
+    assert_eq!(
+        reopened.update_file_scope(&a, now()).await.unwrap(),
+        receipt
+    );
+}
+
+#[tokio::test]
 async fn stale_directory_decisions_leave_no_receipt_or_partial_state() {
     for path in [r"C:\用户资料\季度 报告", "/Users/owner/季度 报告"] {
         let store = setup().await;

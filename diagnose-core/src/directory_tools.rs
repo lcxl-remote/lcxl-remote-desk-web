@@ -11,6 +11,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 pub const REQUEST_DIRECTORY: &str = "request_directory";
+pub(crate) const DIRECTORY_PROMPT_MAX_BYTES: usize = 8192;
 
 /// Durable pause payload shared by the loop and interrupted-turn recovery.
 pub fn pending_result(request_id: &str) -> serde_json::Value {
@@ -21,7 +22,9 @@ pub fn pending_result(request_id: &str) -> serde_json::Value {
 /// Bounded current scope metadata, rebuilt each step rather than appended to
 /// durable messages. Paths are labels/data, never instructions or tool grants.
 pub fn scope_prompt(session: &crate::session::PersistedAgentSession, now_unix_ms: u64) -> String {
-    if session.surface != crate::session::AgentSessionSurface::AiAssistant {
+    if session.surface != crate::session::AgentSessionSurface::AiAssistant
+        || session.device_id.is_empty()
+    {
         return String::new();
     }
     let mut entries = Vec::new();
@@ -41,7 +44,7 @@ pub fn scope_prompt(session: &crate::session::PersistedAgentSession, now_unix_ms
             "path":record.proposal.canonical_path,"reference_ready":usable,
             "directory":usable.then_some(&record.proposal.directory)});
         let len = entry.to_string().len();
-        if bytes + len > 8192 {
+        if bytes + len > DIRECTORY_PROMPT_MAX_BYTES {
             break;
         }
         bytes += len;

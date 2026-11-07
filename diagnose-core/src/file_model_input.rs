@@ -211,12 +211,17 @@ pub(crate) fn directory_id(
     reference: &ObjectRef,
     now: u64,
 ) -> Result<String, AgentError> {
+    device_directory_id(session, &session.device_id, reference, now)
+}
+
+pub(crate) fn device_directory_id(
+    session: &PersistedAgentSession,
+    device_id: &str,
+    reference: &ObjectRef,
+    now: u64,
+) -> Result<String, AgentError> {
     let subject = session
-        .file_scope_subject(
-            &session.actor_id,
-            &session.device_id,
-            &session.conversation_id,
-        )
+        .file_scope_subject(&session.actor_id, device_id, &session.conversation_id)
         .map_err(|_| invalid("The conversation directory is unavailable."))?;
     let mut ids = session.file_scope.records().iter().filter_map(|record| {
         session
@@ -301,6 +306,14 @@ pub(crate) fn complete_session_input(
     now: u64,
 ) -> Result<(), AgentError> {
     if session.surface != crate::session::AgentSessionSurface::AiAssistant {
+        return Ok(());
+    }
+    // The selected-device planner validates these selectors after resolving
+    // target_ref. The account root itself has no directory authority.
+    if session.device_id.is_empty()
+        && value.get("target_ref").is_some()
+        && (tool == "request_permissions" || is_read(tool))
+    {
         return Ok(());
     }
     if tool == "request_permissions" {

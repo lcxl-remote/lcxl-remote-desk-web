@@ -1503,17 +1503,20 @@ export function useAiAssistantChat({
         return true;
     }, [attachments, deskId, ensureConversation, loadSnapshot, remoteActive, sendMessage, rehearsal]);
 
-    const updateDirectory = useCallback((operation: AssistantDirectoryOperation, timeoutMessage: string) => {
+    const updateDirectory = useCallback((operation: AssistantDirectoryOperation, timeoutMessage: string, deviceRef?: string) => {
         if (rehearsal && (rehearsal.status === 'completed' || rehearsal.status === 'cancelled' || rehearsal.status === 'failed' || (!rehearsalSent.current && rehearsal.status !== 'running'))) return false;
         if (contextRequest.current || !connected || hydrating) return false;
+        const device = deskId || (operation.kind === 'select_directory' ? deviceRef
+            : fileScope.directories.find(item => item.requestId === operation.directory_request_id)?.deviceRef);
+        if (!device) return false;
         const currentConversationId = ensureConversation();
         const clientRequestId = v4();
         directorySelectors.current = { conversationId: currentConversationId, clientRequestId };
         setContextUpdating(true);
         setError(null);
         contextRequest.current = sendMessage(SIGNALING_TYPE_CODE_UPDATE_AI_ASSISTANT_OBJECT_CONTEXT, {
-            conversation_id: currentConversationId, conversation_target: 'fixed_device', client_request_id: clientRequestId, operation,
-        }, deskId);
+            conversation_id: currentConversationId, conversation_target: deskId ? 'fixed_device' : 'selectable_devices', client_request_id: clientRequestId, operation,
+        }, device);
         contextTimer.current = window.setTimeout(() => {
             directorySelectors.current = null;
             contextTimer.current = null;
@@ -1523,7 +1526,7 @@ export function useAiAssistantChat({
             if (conversationId.current) void loadSnapshot(conversationId.current);
         }, 35_000);
         return true;
-    }, [connected, deskId, ensureConversation, hydrating, loadSnapshot, sendMessage, rehearsal]);
+    }, [connected, deskId, ensureConversation, fileScope.directories, hydrating, loadSnapshot, sendMessage, rehearsal]);
 
     const attachWindow = useCallback((objectRef: AiAssistantWindowRef, displaySummary: string) => {
         if (rehearsal && (rehearsal.status === 'completed' || rehearsal.status === 'cancelled' || rehearsal.status === 'failed' || (!rehearsalSent.current && rehearsal.status !== 'running'))) return false;

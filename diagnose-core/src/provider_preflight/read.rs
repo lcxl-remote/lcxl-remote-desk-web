@@ -43,13 +43,16 @@ impl ReadCallPreflight {
         ) || !capability.wire.surfaces.contains(&surface)
             || call.id.is_empty()
             || call.id.len() > 512
-            || !binding.original.tool_names.contains(&call.name)
+            || !(binding.original.tool_names.contains(&call.name)
+                || (session.device_id.is_empty()
+                    && crate::request_devices::selected_read_descriptor(capability)))
             || call.arguments_json.len() > capability.wire.limits.max_input_bytes as usize
         {
             return Err(unavailable());
         }
-        let result = super::text_file::ResultFileRead::build(
+        let result = super::text_file::ResultFileRead::build_for_device(
             session,
+            binding.device_id,
             call,
             binding.destination,
             binding.now_unix_ms,
