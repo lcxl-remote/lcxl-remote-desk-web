@@ -4485,6 +4485,9 @@ async fn prepare_iteration_inner<'a, 'd: 'a, M: FnMut() -> String + 'a>(
                                                     crate::request_devices::plan_device_permission(
                                                         deps.tools,
                                                         deps.provider_registry,
+                                                        authority
+                                                            .as_ref()
+                                                            .map(|snapshot| snapshot.surface),
                                                         session,
                                                         &request_devices,
                                                         &selected_reads,

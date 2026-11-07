@@ -151,6 +151,24 @@ pub fn resolve_presentation_read(
     target: &ObjectRef,
     now: u64,
 ) -> Result<PresentationReadBinding, AgentError> {
+    resolve_presentation_read_on_device(
+        session,
+        &session.device_id,
+        selected_file,
+        worker_incarnation,
+        target,
+        now,
+    )
+}
+
+pub fn resolve_presentation_read_on_device(
+    session: &crate::session::PersistedAgentSession,
+    device_id: &str,
+    selected_file: &ObjectRef,
+    worker_incarnation: &str,
+    target: &ObjectRef,
+    now: u64,
+) -> Result<PresentationReadBinding, AgentError> {
     use crate::chat::ChatRole;
     use sha2::{Digest, Sha256};
     let registry = crate::ai_assistant::ai_assistant_provider_registry();
@@ -187,7 +205,10 @@ pub fn resolve_presentation_read(
         let Some(envelope) = &message.trusted_tool_result().data_envelope else {
             continue;
         };
-        if envelope.validate().is_err()
+        if (session.device_id.is_empty()
+            && envelope.provenance.source_object_id.as_deref()
+                != Some(format!("{device_id}:{call_id}").as_str()))
+            || envelope.validate().is_err()
             || crate::model_egress::envelope_expires_by(envelope, now)
             || envelope.provenance.source_tool_name != call.name
             || envelope.provenance.source_provider_id != provider.wire.provider_id

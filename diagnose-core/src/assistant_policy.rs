@@ -130,20 +130,23 @@ pub fn permits_permission_request(
     }
     let registry = crate::ai_assistant::ai_assistant_provider_registry_ref();
     if let Some(target) = request.selected_device_target() {
-        let item = &request.items[0];
         return crate::request_devices::accepts_device_reads(session)
             && session.admits_assistant_device(&target.device_id)
             && request.validate().is_ok()
-            && registry
-                .capability_for_tool(&item.tool_name)
-                .is_some_and(|capability| {
-                    (crate::request_devices::selected_read_descriptor(capability)
-                        || crate::request_devices::permits_selected_action(session, capability))
-                        && capability.wire.effect == item.expected_effect
-                        && registry
-                            .provider_for_capability(&capability.wire.capability_id)
-                            .is_some_and(|provider| provider.wire.provider_id == item.provider_id)
-                });
+            && request.items.iter().all(|item| {
+                registry
+                    .capability_for_tool(&item.tool_name)
+                    .is_some_and(|capability| {
+                        (crate::request_devices::selected_read_descriptor(capability)
+                            || crate::request_devices::permits_selected_action(session, capability))
+                            && capability.wire.effect == item.expected_effect
+                            && registry
+                                .provider_for_capability(&capability.wire.capability_id)
+                                .is_some_and(|provider| {
+                                    provider.wire.provider_id == item.provider_id
+                                })
+                    })
+            });
     }
     session.has_admitted_personal_input()
         && (request.exact_command().is_some_and(|command| {

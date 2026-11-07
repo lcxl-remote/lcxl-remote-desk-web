@@ -21,7 +21,7 @@ use desk_diagnose_core::approval_review::{
     APPROVAL_REVIEW_STATUS_REVIEWING, APPROVAL_REVIEW_STATUS_UNAVAILABLE, ApprovalAuthorityFact,
     ApprovalAuthorityStatus, ApprovalInputKind, ApprovalReviewCandidate, ApprovalReviewDecision,
     ApprovalSource, ApprovalVerdict, SourceReviewInput, candidate_context_hmac_sha256,
-    concrete_call_review_identity, source_review_candidate,
+    concrete_call_review_identity, source_review_candidate_for_device,
 };
 use desk_diagnose_core::chat::ToolCall;
 use desk_diagnose_core::provider_registry::ProviderRegistry;
@@ -109,7 +109,7 @@ async fn prepare_on_inner(
         agent_session::Entity::find()
             .filter(agent_session::Column::ConversationId.eq(subject.conversation_id))
             .filter(agent_session::Column::ActorId.eq(subject.actor_id))
-            .filter(agent_session::Column::DeviceId.eq(subject.device_id))
+            .filter(agent_session::Column::DeviceId.is_in(["", subject.device_id]))
             .one(txn)
             .await
     })
@@ -117,13 +117,18 @@ async fn prepare_on_inner(
     .ok_or_else(invalid)?;
     let mut session = PersistedAgentSession::decode_json(&row.state_json).map_err(|_| invalid())?;
     session.version = row.version;
-    if session.surface != AgentSessionSurface::AiAssistant
+    if session.device_id != row.device_id
+        || session.surface != AgentSessionSurface::AiAssistant
         || !session.turn_state.is_active()
         || !session.allows_delegated_review()
         || session.current_turn_id.as_deref() != Some(subject.turn_id)
         || session.conversation_id != subject.conversation_id
         || session.actor_id != subject.actor_id
-        || session.device_id != subject.device_id
+        || (if session.device_id.is_empty() {
+            !session.admits_assistant_device(subject.device_id)
+        } else {
+            session.device_id != subject.device_id
+        })
     {
         return Err(invalid());
     }
@@ -200,7 +205,6 @@ async fn prepare_on_inner(
         delegation_row::Entity::find()
             .filter(delegation_row::Column::DelegationId.eq(&parent.delegation_id))
             .filter(delegation_row::Column::ActorId.eq(subject.actor_id))
-            .filter(delegation_row::Column::DeviceId.eq(subject.device_id))
             .one(txn)
             .await
     })
@@ -221,7 +225,7 @@ async fn prepare_on_inner(
         agent_goal_run::Entity::find()
             .filter(agent_goal_run::Column::ConversationId.eq(subject.conversation_id))
             .filter(agent_goal_run::Column::ActorId.eq(subject.actor_id))
-            .filter(agent_goal_run::Column::DeviceId.eq(subject.device_id))
+            .filter(agent_goal_run::Column::DeviceId.eq(&session.device_id))
             .filter(agent_goal_run::Column::Status.is_not_in(["completed", "failed", "cancelled"]))
             .one(txn)
             .await
@@ -275,26 +279,29 @@ async fn prepare_on_inner(
     let mut candidate = if let Some(frozen) = frozen {
         frozen.clone()
     } else {
-        source_review_candidate(SourceReviewInput {
-            session: &session,
-            delegation: &delegation,
-            goal: goal.as_ref(),
-            source: source.clone(),
-            tool_name: &subject.call.name,
-            descriptor_json: &descriptor_json,
-            risk,
-            input_kind: ApprovalInputKind::ConcreteCall,
-            action_json: &prepared.canonical_input_json,
-            expires_at_unix_ms: expiry,
-            current_authority: vec![ApprovalAuthorityFact {
+        source_review_candidate_for_device(
+            SourceReviewInput {
+                session: &session,
+                delegation: &delegation,
+                goal: goal.as_ref(),
                 source: source.clone(),
-                status: ApprovalAuthorityStatus::ActiveGrant,
-                decision_event_id: Some(parent.decision_event_id.clone()),
-                active_grant_ids: vec![grant.grant_id.clone()],
-                dispatch_ids: vec![],
-            }],
-            now_unix_ms,
-        })
+                tool_name: &subject.call.name,
+                descriptor_json: &descriptor_json,
+                risk,
+                input_kind: ApprovalInputKind::ConcreteCall,
+                action_json: &prepared.canonical_input_json,
+                expires_at_unix_ms: expiry,
+                current_authority: vec![ApprovalAuthorityFact {
+                    source: source.clone(),
+                    status: ApprovalAuthorityStatus::ActiveGrant,
+                    decision_event_id: Some(parent.decision_event_id.clone()),
+                    active_grant_ids: vec![grant.grant_id.clone()],
+                    dispatch_ids: vec![],
+                }],
+                now_unix_ms,
+            },
+            subject.device_id,
+        )
         .map_err(|_| invalid())?
     };
     if candidate.candidate_id != expected.candidate_id
@@ -315,6 +322,7 @@ async fn prepare_on_inner(
         desk_diagnose_core::approval_egress::validate_source_review_current(
             &candidate,
             &SourceReviewBinding {
+                device_id: subject.device_id,
                 source: &source,
                 tool_call_id: &subject.call.id,
                 turn_id: subject.turn_id,
@@ -339,6 +347,7 @@ async fn prepare_on_inner(
             authorize_source_review_egress(
                 &candidate,
                 &SourceReviewBinding {
+                    device_id: subject.device_id,
                     source: &source,
                     tool_call_id: &subject.call.id,
                     turn_id: subject.turn_id,
@@ -470,7 +479,6 @@ async fn claim_inner(
         delegation_row::Entity::find()
             .filter(delegation_row::Column::DelegationId.eq(&candidate.delegation_id))
             .filter(delegation_row::Column::ActorId.eq(&candidate.owner_id))
-            .filter(delegation_row::Column::DeviceId.eq(&candidate.device_id))
             .one(&txn)
             .await
     })
@@ -640,7 +648,6 @@ async fn settle_inner(
         delegation_row::Entity::find()
             .filter(delegation_row::Column::DelegationId.eq(&candidate.delegation_id))
             .filter(delegation_row::Column::ActorId.eq(subject.actor_id))
-            .filter(delegation_row::Column::DeviceId.eq(subject.device_id))
             .one(&txn)
             .await
     })

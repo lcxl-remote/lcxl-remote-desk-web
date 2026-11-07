@@ -271,6 +271,7 @@ pub fn validate_permission_review_current(
 /// caller must derive every field from the persisted work/call and held turn,
 /// then compare it here before any prompt leaves the process.
 pub struct SourceReviewBinding<'a> {
+    pub device_id: &'a str,
     pub source: &'a ApprovalSource,
     pub tool_call_id: &'a str,
     pub turn_id: &'a str,
@@ -392,7 +393,11 @@ pub fn validate_source_review_current(
         || candidate.expires_at_unix_ms != binding.expires_at_unix_ms
         || candidate.conversation_id != session.conversation_id
         || candidate.owner_id != session.actor_id
-        || candidate.device_id != session.device_id
+        || candidate.device_id != binding.device_id
+        || (binding.device_id != session.device_id
+            && (!matches!(binding.source, ApprovalSource::ConcreteCall { .. })
+                || !session.has_admitted_personal_input()
+                || !session.admits_assistant_device(binding.device_id)))
         || candidate.delegation_id != delegation.delegation_id
         || candidate.delegation_revision != delegation.revision
         || candidate.expires_at_unix_ms <= now_unix_ms
@@ -762,11 +767,23 @@ mod tests {
         session: &PersistedAgentSession,
         source: ApprovalSource,
     ) -> Result<AuthorizedApprovalReview, ApprovalReviewError> {
+        authorize_projected_source_on_device(session, source, &session.device_id)
+    }
+
+    fn authorize_projected_source_on_device(
+        session: &PersistedAgentSession,
+        source: ApprovalSource,
+        device_id: &str,
+    ) -> Result<AuthorizedApprovalReview, ApprovalReviewError> {
         let delegation = ApprovalDelegation::new(
             "delegation".into(),
             "conversation".into(),
             "owner".into(),
-            "device".into(),
+            if session.has_admitted_personal_input() {
+                String::new()
+            } else {
+                "device".into()
+            },
             "owner-open".into(),
             1,
         )
@@ -785,35 +802,39 @@ mod tests {
         } else {
             ApprovalInputKind::ExactCall
         };
-        let candidate = source_review_candidate(SourceReviewInput {
-            session,
-            delegation: &delegation,
-            goal: None,
-            source: source.clone(),
-            tool_name: "exec_command",
-            descriptor_json,
-            risk: CapabilityRiskTier::R3,
-            input_kind,
-            action_json,
-            expires_at_unix_ms: 60_000,
-            current_authority: vec![ApprovalAuthorityFact {
+        let candidate = crate::approval_review::source_review_candidate_for_device(
+            SourceReviewInput {
+                session,
+                delegation: &delegation,
+                goal: None,
                 source: source.clone(),
-                status: if concrete {
-                    ApprovalAuthorityStatus::ActiveGrant
-                } else {
-                    ApprovalAuthorityStatus::Pending
-                },
-                decision_event_id: concrete.then(|| "approval-event".into()),
-                active_grant_ids: if concrete {
-                    vec!["grant".into()]
-                } else {
-                    vec![]
-                },
-                dispatch_ids: vec![],
-            }],
-            now_unix_ms: 10,
-        })?;
+                tool_name: "exec_command",
+                descriptor_json,
+                risk: CapabilityRiskTier::R3,
+                input_kind,
+                action_json,
+                expires_at_unix_ms: 60_000,
+                current_authority: vec![ApprovalAuthorityFact {
+                    source: source.clone(),
+                    status: if concrete {
+                        ApprovalAuthorityStatus::ActiveGrant
+                    } else {
+                        ApprovalAuthorityStatus::Pending
+                    },
+                    decision_event_id: concrete.then(|| "approval-event".into()),
+                    active_grant_ids: if concrete {
+                        vec!["grant".into()]
+                    } else {
+                        vec![]
+                    },
+                    dispatch_ids: vec![],
+                }],
+                now_unix_ms: 10,
+            },
+            device_id,
+        )?;
         let binding = SourceReviewBinding {
+            device_id,
             source: &source,
             tool_call_id: "command-call",
             turn_id: "turn",
@@ -835,6 +856,22 @@ mod tests {
             &destination,
             10,
         )
+    }
+
+    #[test]
+    fn selected_concrete_review_uses_the_session_delegation_and_exact_action_device() {
+        let mut session = source_review_session();
+        session.device_id.clear();
+        session
+            .bind_assistant_request_targets(vec!["device-a".into(), "device-b".into()])
+            .unwrap();
+        let source = ApprovalSource::ConcreteCall {
+            call_id: "native-call".into(),
+            grant_id: "grant".into(),
+        };
+        assert!(authorize_projected_source_on_device(&session, source.clone(), "device-a").is_ok());
+        assert!(authorize_projected_source_on_device(&session, source.clone(), "device-b").is_ok());
+        assert!(authorize_projected_source_on_device(&session, source, "outside-request").is_err());
     }
 
     #[test]
@@ -1496,6 +1533,7 @@ mod tests {
         })
         .unwrap();
         let binding = SourceReviewBinding {
+            device_id: &session.device_id,
             source: &source,
             tool_call_id: "command-call",
             turn_id: "turn",

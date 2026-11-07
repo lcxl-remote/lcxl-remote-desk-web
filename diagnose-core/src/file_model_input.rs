@@ -206,14 +206,6 @@ pub(crate) fn project_tool(tool: &mut ToolSpec) {
     }
 }
 
-pub(crate) fn directory_id(
-    session: &PersistedAgentSession,
-    reference: &ObjectRef,
-    now: u64,
-) -> Result<String, AgentError> {
-    device_directory_id(session, &session.device_id, reference, now)
-}
-
 pub(crate) fn device_directory_id(
     session: &PersistedAgentSession,
     device_id: &str,
@@ -305,6 +297,17 @@ pub(crate) fn complete_session_input(
     original: Option<&crate::input_read_context::ReadContextSelection>,
     now: u64,
 ) -> Result<(), AgentError> {
+    complete_device_input(tool, value, session, original, &session.device_id, now)
+}
+
+pub(crate) fn complete_device_input(
+    tool: &str,
+    value: &mut Value,
+    session: &PersistedAgentSession,
+    original: Option<&crate::input_read_context::ReadContextSelection>,
+    device_id: &str,
+    now: u64,
+) -> Result<(), AgentError> {
     if session.surface != crate::session::AgentSessionSurface::AiAssistant {
         return Ok(());
     }
@@ -328,7 +331,7 @@ pub(crate) fn complete_session_input(
                     ));
                 }
                 if let Some(exact) = item.get_mut("exact_input") {
-                    complete_session_input(&tool, exact, session, original, now)?;
+                    complete_device_input(&tool, exact, session, original, device_id, now)?;
                 }
             }
         }
@@ -351,7 +354,8 @@ pub(crate) fn complete_session_input(
         && original.is_some_and(|selection| {
             selection.tool_names.iter().any(|name| name == tool)
                 && selection.object_attachments.iter().any(|object| {
-                    matches!(
+                    object.device_id == device_id
+                        && matches!(
                         object.kind,
                         crate::context_attachment::ContextAttachmentKind::File
                             | crate::context_attachment::ContextAttachmentKind::DirectorySelection
@@ -367,12 +371,12 @@ pub(crate) fn complete_session_input(
         arguments_json: value.to_string(),
     };
     let root = if value.get("directory_request_id").is_none() {
-        source_directory(session, value, now)?.map(Ok).unwrap_or_else(|| crate::file_scope::select_output_directory(session, &call, now).map_err(|_| invalid("directory_request_id is required when no single approved conversation directory is bound. Select an approved directory; no request was created.")))?
+        source_directory(session, value, now)?.map(Ok).unwrap_or_else(|| crate::file_scope::select_device_directory(session, device_id, &call, now).map_err(|_| invalid("directory_request_id is required when no single approved conversation directory is bound. Select an approved directory; no request was created.")))?
     } else {
-        crate::file_scope::select_output_directory(session, &call, now).map_err(|_| invalid("The explicit directory_request_id is unavailable, expired or revoked. Obtain a current directory approval; no request was created."))?
+        crate::file_scope::select_device_directory(session, device_id, &call, now).map_err(|_| invalid("The explicit directory_request_id is unavailable, expired or revoked. Obtain a current directory approval; no request was created."))?
     };
     if value.get("directory_request_id").is_none() {
-        value["directory_request_id"] = json!(directory_id(session, &root, now)?);
+        value["directory_request_id"] = json!(device_directory_id(session, device_id, &root, now)?);
     }
     Ok(())
 }

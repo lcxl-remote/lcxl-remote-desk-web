@@ -50,7 +50,7 @@ pub(super) fn provider() -> ProviderDescriptor {
         inspect_tool(),
     );
     let write = provider_for_tool(
-        TargetBinding::NativeContext,
+        TargetBinding::RequestDevice,
         crate::tool_exposure::ExposureRequirement::NoAttachment,
         PROVIDER_ID,
         PATCH_CAPABILITY_ID,

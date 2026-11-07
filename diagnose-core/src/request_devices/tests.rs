@@ -54,6 +54,7 @@ fn session() -> PersistedAgentSession {
 
 fn device(reference: &str, ready_provider_ids: Vec<String>) -> RequestDevice {
     RequestDevice {
+        native_readiness: None,
         read_target: Some(SelectedDeviceTarget {
             device_id: reference.into(),
             target_ref: reference.into(),
@@ -175,6 +176,7 @@ async fn selected_file_reads_project_and_plan_only_on_the_directory_device() {
         let request = plan_device_permission(
             &NoDeviceCommands,
             Some(registry),
+            Some(desk_agent_protocol::capability_provider::ProductSurface::OssPersonalOwner),
             &session,
             &devices,
             &reads,
@@ -336,6 +338,7 @@ async fn every_request_device_read_projects_parses_and_keeps_its_exact_target() 
         let denied = plan_device_permission(
             &seam,
             Some(registry),
+            Some(desk_agent_protocol::capability_provider::ProductSurface::OssPersonalOwner),
             &session,
             &devices,
             &reads,
@@ -351,6 +354,7 @@ async fn every_request_device_read_projects_parses_and_keeps_its_exact_target() 
         let mut approved = plan_device_permission(
             &seam,
             Some(registry),
+            Some(desk_agent_protocol::capability_provider::ProductSurface::OssPersonalOwner),
             &session,
             &devices,
             &reads,
@@ -512,6 +516,7 @@ async fn desktop_object_approval_and_dispatch_keep_the_observed_device_and_incar
     let mut request = plan_device_permission(
         &NoDeviceCommands,
         Some(registry),
+        Some(desk_agent_protocol::capability_provider::ProductSurface::OssPersonalOwner),
         &session,
         &devices,
         &reads,
@@ -526,6 +531,7 @@ async fn desktop_object_approval_and_dispatch_keep_the_observed_device_and_incar
         plan_device_permission(
             &NoDeviceCommands,
             Some(registry),
+            Some(desk_agent_protocol::capability_provider::ProductSurface::OssPersonalOwner),
             &session,
             &devices,
             &reads,
@@ -594,6 +600,7 @@ async fn desktop_object_approval_and_dispatch_keep_the_observed_device_and_incar
         let permission = plan_device_permission(
             &NoDeviceCommands,
             Some(registry),
+            Some(desk_agent_protocol::capability_provider::ProductSurface::OssPersonalOwner),
             &session,
             &devices,
             &reads,
@@ -673,6 +680,7 @@ async fn explicit_display_must_have_been_observed_on_the_selected_device() {
         let request = plan_device_permission(
             &NoDeviceCommands,
             Some(registry),
+            Some(desk_agent_protocol::capability_provider::ProductSurface::OssPersonalOwner),
             &session,
             &devices,
             &reads,
@@ -742,6 +750,47 @@ fn sole_target_uses_its_frozen_public_reference_after_reopen() {
     assert!(infer_single_target(&web, &restored).unwrap().is_none());
 }
 
+#[test]
+fn every_native_action_uses_the_registered_schema_and_original_device_projection() {
+    let session = session();
+    let registry = crate::ai_assistant::ai_assistant_provider_registry_ref();
+    let descriptors = registry
+        .providers()
+        .flat_map(|provider| &provider.capabilities)
+        .filter(|descriptor| selected_action_descriptor(descriptor))
+        .collect::<Vec<_>>();
+    let ids = descriptors
+        .iter()
+        .map(|descriptor| descriptor.wire.capability_id.clone())
+        .collect();
+    let mut device = device("a", ids);
+    device.approved_read_tools = descriptors
+        .iter()
+        .map(|descriptor| descriptor.wire.tool_name.clone())
+        .collect();
+    let projected = read_tools(&[device], &session, registry, true, None);
+    for descriptor in descriptors {
+        let (tool, callable) = projected
+            .iter()
+            .find(|(tool, _)| tool.name() == descriptor.wire.tool_name)
+            .unwrap_or_else(|| panic!("missing native action {}", descriptor.wire.tool_name));
+        assert!(*callable);
+        let mut schema = tool.spec.parameters_schema.clone();
+        schema["properties"]
+            .as_object_mut()
+            .unwrap()
+            .remove("target_ref");
+        if let Some(required) = schema["required"].as_array_mut() {
+            required.retain(|field| field != "target_ref");
+        }
+        let mut native_schema = descriptor.tool_spec.parameters_schema.clone();
+        if native_schema.get("required").is_none() && schema.get("required").is_some() {
+            native_schema["required"] = json!([]);
+        }
+        assert_eq!(schema, native_schema, "{}", tool.name());
+    }
+}
+
 #[tokio::test]
 async fn browser_open_permission_is_exact_and_bound_to_the_original_device() {
     let mut session = session();
@@ -765,6 +814,7 @@ async fn browser_open_permission_is_exact_and_bound_to_the_original_device() {
     let plan = plan_device_permission(
         &NoDeviceCommands,
         Some(registry),
+        Some(desk_agent_protocol::capability_provider::ProductSurface::OssPersonalOwner),
         &session,
         &devices,
         &reads,
@@ -788,6 +838,7 @@ async fn browser_open_permission_is_exact_and_bound_to_the_original_device() {
         plan_device_permission(
             &NoDeviceCommands,
             Some(registry),
+            Some(desk_agent_protocol::capability_provider::ProductSurface::OssPersonalOwner),
             &session,
             &devices,
             &reads,
@@ -829,4 +880,198 @@ async fn browser_open_permission_is_exact_and_bound_to_the_original_device() {
         )
         .is_err()
     );
+}
+
+#[tokio::test]
+async fn selected_ui_scope_bundles_observation_and_keeps_each_grant_on_the_same_device() {
+    use crate::chat::{ChatMessage, ChatRole};
+    use crate::dynamic_run::{PermissionDecisionItem, PermissionItemDecision};
+    use crate::model_message_labels::{ReadResultLabel, read_result_envelope};
+    use crate::permission_grant::{PermissionGrantIssuanceContext, build_permission_grants};
+    use crate::seam::ToolOutputFormat;
+    use desk_agent_protocol::capability_provider::ProductSurface;
+    let registry = crate::ai_assistant::ai_assistant_provider_registry_ref();
+    let mut session = session();
+    let app = json!({"token":"observed-app","snapshot_id":"apps","object_kind":"application","expires_at":"2026-11-06T00:10:00Z"});
+    let text = json!({"ReadContext":{"DesktopSessionInspect":{
+        "session":{"token":"session","snapshot_id":"apps","object_kind":"desktop_session","expires_at":"2026-11-06T00:10:00Z"},
+        "os":"macos","interactive_session_incarnation":"worker","active_application":app,"active_application_name":"Calendar"
+    }}}).to_string();
+    let call = tool("inspect_desktop_session", json!({}));
+    let output = ToolRunOutput {
+        format: ToolOutputFormat::Json,
+        content: text.clone(),
+        image_data_url: None,
+        document_preview: None,
+    };
+    let mut message = ChatMessage::text("observed", ChatRole::Tool, text);
+    message.tool_call_id = Some(call.id.clone());
+    message.tool_ok = Some(true);
+    message.data_envelope = Some(
+        read_result_envelope(
+            registry,
+            &call,
+            &output,
+            ReadResultLabel {
+                envelope_id: "observed-device-a".into(),
+                observation_id: "desktop-a".into(),
+                source_object_id: Some(format!("a:{}", call.id)),
+                observed_at_unix_ms: 1,
+            },
+        )
+        .unwrap(),
+    );
+    session.conversation.extend([
+        ChatMessage::assistant_tool_calls("observation", "", vec![call.to_ref()]),
+        message,
+    ]);
+    let names = [
+        "execute_ui_actions",
+        "inspect_desktop_session",
+        "inspect_desktop_ui",
+    ];
+    let capabilities = names
+        .iter()
+        .map(|name| registry.capability_for_tool(name).unwrap())
+        .collect::<Vec<_>>();
+    let mut devices = [
+        device(
+            "a",
+            capabilities
+                .iter()
+                .map(|c| c.wire.capability_id.clone())
+                .collect(),
+        ),
+        device(
+            "b",
+            capabilities
+                .iter()
+                .map(|c| c.wire.capability_id.clone())
+                .collect(),
+        ),
+    ];
+    for device in &mut devices {
+        device.ready_capabilities = capabilities.iter().map(|c| c.required_capability).collect();
+    }
+    let reads = read_tools(&devices, &session, registry, true, None);
+    for surface in [
+        ProductSurface::OssPersonalOwner,
+        ProductSurface::ManagerPersonalOwner,
+    ] {
+        let proposal = tool(
+            REQUEST_CAPABILITY_GRANTS_TOOL_NAME,
+            json!({"target_ref":"a","items":[{
+                "item_id":"ui", "tool_name":"execute_ui_actions", "reason":"Use the observed Calendar app",
+                "application_scope":{"application":app,"actions":["invoke"]}
+            }]}),
+        );
+        let mut request = plan_device_permission(
+            &NoDeviceCommands,
+            Some(registry),
+            Some(surface),
+            &session,
+            &devices,
+            &reads,
+            &proposal,
+            "ui-permission",
+            NOW,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(request.items.len(), 3);
+        assert_eq!(request.selected_device_id(), Some("a"));
+        let now = chrono::DateTime::parse_from_rfc3339(NOW)
+            .unwrap()
+            .timestamp_millis() as u64;
+        let inventory = capabilities
+            .iter()
+            .map(
+                |capability| crate::capability_availability::CapabilityAvailability {
+                    provider_id: registry
+                        .provider_for_capability(&capability.wire.capability_id)
+                        .unwrap()
+                        .wire
+                        .provider_id
+                        .clone(),
+                    capability_id: capability.wire.capability_id.clone(),
+                    tool_name: capability.wire.tool_name.clone(),
+                    compiled: true,
+                    enabled: true,
+                    connected: true,
+                    ready: true,
+                    reason: None,
+                },
+            )
+            .collect::<Vec<_>>();
+        let decisions = request
+            .items
+            .iter()
+            .map(|item| PermissionDecisionItem {
+                item_id: item.item_id.clone(),
+                decision: PermissionItemDecision::Approve {
+                    resource_scope: item.resource_scope.clone(),
+                    operation_scope: item.operation_scope.clone(),
+                    export_destinations: vec![],
+                    ttl_seconds: 60,
+                    max_uses: 1,
+                },
+            })
+            .collect::<Vec<_>>();
+        let grants = build_permission_grants(
+            &session,
+            &request,
+            &decisions,
+            &PermissionGrantIssuanceContext {
+                surface,
+                registry,
+                inventory: &inventory,
+                readiness_revision: 1,
+                now_unix_ms: now,
+                implicit_fresh_object_refs: &[],
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(grants.len(), 3);
+        assert!(grants.iter().all(|grant| grant.target_device_id == "a"));
+        request.state = PermissionRequestState::Approved;
+        let mut restored = session.clone();
+        restored.permission_requests.push(request.clone());
+        let exposed = approved_read_tools(
+            &restored,
+            devices[0].read_target.as_ref().unwrap(),
+            &grants,
+            now,
+        );
+        assert!(
+            names
+                .iter()
+                .all(|name| exposed.iter().any(|tool| tool == name))
+        );
+        request.items[1].selected_device_target = devices[1].read_target.clone();
+        assert!(request.validate().is_err());
+        let mut wrong: Value = serde_json::from_str(&proposal.arguments_json).unwrap();
+        wrong["target_ref"] = json!("b");
+        let wrong = ToolCall {
+            arguments_json: wrong.to_string(),
+            ..proposal
+        };
+        assert!(
+            plan_device_permission(
+                &NoDeviceCommands,
+                Some(registry),
+                Some(surface),
+                &session,
+                &devices,
+                &reads,
+                &wrong,
+                "wrong-device",
+                NOW
+            )
+            .await
+            .unwrap()
+            .is_err()
+        );
+    }
 }

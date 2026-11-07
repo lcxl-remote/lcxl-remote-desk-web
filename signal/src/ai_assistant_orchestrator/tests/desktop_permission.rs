@@ -58,6 +58,22 @@ async fn automatic_desktop_approval_corrects_extra_field_and_resumes_over_transp
     .await;
 }
 
+#[actix_web::test]
+async fn selectable_ui_scope_is_reviewed_and_dispatched_on_the_original_signal_device() {
+    Box::pin(run_desktop_history_case(
+        true,
+        "inspect_desktop_ui",
+        false,
+        true,
+        true,
+        true,
+        true,
+        None,
+        true,
+    ))
+    .await;
+}
+
 async fn run_desktop_case(approve: bool, read_name: &str) {
     run_desktop_case_kind(approve, read_name, false).await;
 }
@@ -93,6 +109,7 @@ async fn run_desktop_case_with_automatic(
         approve_concrete,
         verified_native,
         None,
+        false,
     ))
     .await;
 }
@@ -113,7 +130,19 @@ async fn run_desktop_history_case(
     approve_concrete: bool,
     verified_native: bool,
     retained_history: Option<HistoryRoute>,
+    selectable: bool,
 ) {
+    let scenario_timeout = if selectable {
+        Duration::from_secs(15)
+    } else {
+        SCENARIO_TIMEOUT
+    };
+    let storage_device = if selectable { "" } else { "device" };
+    let selected_targets = if selectable {
+        vec!["device".into()]
+    } else {
+        vec![]
+    };
     let goal_route = matches!(retained_history, Some(HistoryRoute::Goal));
     let db = crate::config::test_support::Database::connect("sqlite::memory:")
         .await
@@ -186,7 +215,7 @@ async fn run_desktop_history_case(
         }
         bodies
     });
-    let map = Arc::new(SharedConnectionMap::new());
+    let map = Arc::new(SharedConnectionMap::new_oss());
     let pending = crate::remote_tool_edge::global_remote_tool_pending();
     let observer = Arc::new(SignalRemoteToolObserver::new(pending.clone()));
     let computer_observer = Arc::new(crate::remote_tool_edge::SignalComputerActionObserver::new(
@@ -242,7 +271,7 @@ async fn run_desktop_history_case(
                                         ai_assistant_settings:
                                             desk_agent_protocol::ai_assistant::AiAssistantSettings {
                                                 revision: 0,
-                                                enabled: false,
+                                                enabled: true,
                                             },
                                     }
                                 }),
@@ -252,7 +281,7 @@ async fn run_desktop_history_case(
                                 lifecycle: Default::default(),
                                 client_id,
                                 model: (ConnectionModel {
-                                    device_id: None,
+                                    device_id: Some("device".into()),
                                     owner_node_id: None,
                                     ..model
                                 })
@@ -357,7 +386,16 @@ async fn run_desktop_history_case(
         .unwrap();
     let connections = web::Data::from(map.clone());
     let client_id = "desktop-permission";
-    let run_id = derive_conversation_key("1", "device", Some(client_id), "unused");
+    if selectable {
+        crate::device_code_store::get_or_create(&db, "device")
+            .await
+            .unwrap();
+    }
+    let run_id = if selectable {
+        derive_assistant_conversation_key("1", AssistantConversationScope::Personal, client_id)
+    } else {
+        derive_conversation_key("1", storage_device, Some(client_id), "unused")
+    };
     let stack_probe = retained_history.map(|_| crate::stack_probe::start(&run_id));
     let sessions = crate::agent_session_store::SignalAgentSessionStore::new(db.clone())
         .with_client_metadata(Some(client_id.into()), AgentSessionSurface::AiAssistant);
@@ -366,14 +404,19 @@ async fn run_desktop_history_case(
         db.clone(),
         "first".into(),
         "controller".into(),
-        host.clone(),
+        if selectable {
+            String::new()
+        } else {
+            host.clone()
+        },
         1,
-        "device".into(),
+        storage_device.into(),
         AiAssistantAsk {
             client_timezone: "UTC".into(),
             temporary_conversation: None,
             question: "Inspect the desktop session".into(),
             start_goal: goal_route,
+            target_refs: selected_targets.clone(),
             client_message_id: "input".into(),
             conversation_id: Some(client_id.into()),
             ..Default::default()
@@ -393,7 +436,14 @@ async fn run_desktop_history_case(
         snapshot.permission_requests.len(),
         1,
         "{:?}",
-        snapshot.terminal_error
+        (
+            snapshot.terminal_error.as_ref(),
+            snapshot
+                .messages
+                .iter()
+                .map(|m| (&m.role, &m.text))
+                .collect::<Vec<_>>()
+        )
     );
     assert!(
         tokio::time::timeout(Duration::from_millis(25), socket.next())
@@ -424,7 +474,7 @@ async fn run_desktop_history_case(
             .decide_permission_request(
                 &run_id,
                 "1",
-                "device",
+                storage_device,
                 &request.request_id,
                 vec![PermissionDecisionItem {
                     item_id: "item_1".into(),
@@ -469,13 +519,18 @@ async fn run_desktop_history_case(
                     db.clone(),
                     "followup".into(),
                     "controller".into(),
-                    host.clone(),
+                    if selectable {
+                        String::new()
+                    } else {
+                        host.clone()
+                    },
                     1,
-                    "device".into(),
+                    storage_device.into(),
                     AiAssistantAsk {
                         client_timezone: "UTC".into(),
                         temporary_conversation: None,
                         question: "Continue inspecting".into(),
+                        target_refs: selected_targets.clone(),
                         client_message_id: "followup".into(),
                         conversation_id: Some(client_id.into()),
                         ..Default::default()
@@ -488,9 +543,13 @@ async fn run_desktop_history_case(
                     connections.clone(),
                     db.clone(),
                     "resume".into(),
-                    host.clone(),
+                    if selectable {
+                        String::new()
+                    } else {
+                        host.clone()
+                    },
                     1,
-                    "device".into(),
+                    storage_device.into(),
                     run_id.clone(),
                     permission_id,
                     AiAssistantAsk {
@@ -619,7 +678,7 @@ async fn run_desktop_history_case(
         }
     };
     let completed =
-        tokio::time::timeout(SCENARIO_TIMEOUT, async { tokio::join!(resume, peer) }).await;
+        tokio::time::timeout(scenario_timeout, async { tokio::join!(resume, peer) }).await;
     assert!(
         completed.is_ok(),
         "desktop resume failed: {:?}",
@@ -671,9 +730,13 @@ async fn run_desktop_history_case(
                 resume_connections.clone(),
                 resume_db.clone(),
                 "concrete-resume".into(),
-                resume_host,
+                if selectable {
+                    String::new()
+                } else {
+                    resume_host
+                },
                 1,
-                "device".into(),
+                storage_device.into(),
                 resume_run_id.clone(),
                 ui_permission_id,
                 AiAssistantAsk {
@@ -763,7 +826,7 @@ async fn run_desktop_history_case(
                     .unwrap();
             }
         };
-        let finished = tokio::time::timeout(SCENARIO_TIMEOUT, async {
+        let finished = tokio::time::timeout(scenario_timeout, async {
             tokio::join!(
                 async {
                     ui_resume.await.unwrap();
@@ -978,7 +1041,7 @@ async fn approve_with_independent_model(
         .await
         .unwrap();
     let delegation =
-        crate::agent_approval_store::load_latest_for_subject(db, run_id, "1", "device")
+        crate::agent_approval_store::load_latest_for_subject(db, run_id, "1", &session.device_id)
             .await
             .unwrap()
             .expect("default reviewer from original pending permission");
@@ -987,7 +1050,7 @@ async fn approve_with_independent_model(
         db,
         run_id,
         "1",
-        "device",
+        &session.device_id,
         request_id,
         desk_diagnose_core::approval_review::PendingRequestKind::Permission,
         registry,
@@ -1140,7 +1203,7 @@ async fn approve_with_independent_model(
         db,
         run_id,
         "1",
-        "device",
+        &session.device_id,
         request_id,
         desk_diagnose_core::approval_review::PendingRequestKind::Permission,
         registry,
@@ -1159,7 +1222,7 @@ async fn approve_with_independent_model(
             crate::agent_session_store::PermissionDecisionSubject {
                 conversation_id: run_id,
                 actor_id: "1",
-                device_id: "device",
+                device_id: &session.device_id,
             },
             request_id,
             &candidates,
@@ -1525,6 +1588,7 @@ fn isolated_history_stack(test: &str, route: HistoryRoute, approve_concrete: boo
                     approve_concrete,
                     true,
                     Some(route),
+                    false,
                 )));
             })
             .unwrap()

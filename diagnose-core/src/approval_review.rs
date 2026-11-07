@@ -994,7 +994,8 @@ impl ApprovalReviewCandidate {
                 self.tool_name == crate::command_confirmation::COMMAND_TOOL
             };
             if !matches!(self.source, ApprovalSource::PermissionItem { .. })
-                || self.input_kind != ApprovalInputKind::ExactCall
+                || (self.input_kind != ApprovalInputKind::ExactCall
+                    && !(selected_device && self.input_kind == ApprovalInputKind::Scope))
                 || !valid_tool
             {
                 return Err(ApprovalReviewError::InvalidCandidate);
@@ -1522,6 +1523,14 @@ pub struct SourceReviewInput<'a> {
 pub fn source_review_candidate(
     input: SourceReviewInput<'_>,
 ) -> Result<ApprovalReviewCandidate, ApprovalReviewError> {
+    let device_id = input.session.device_id.as_str();
+    source_review_candidate_for_device(input, device_id)
+}
+
+pub fn source_review_candidate_for_device(
+    input: SourceReviewInput<'_>,
+    device_id: &str,
+) -> Result<ApprovalReviewCandidate, ApprovalReviewError> {
     let SourceReviewInput {
         session,
         delegation,
@@ -1537,6 +1546,10 @@ pub fn source_review_candidate(
         now_unix_ms,
     } = input;
     if session.surface != AgentSessionSurface::AiAssistant
+        || (device_id != session.device_id
+            && (!matches!(source, ApprovalSource::ConcreteCall { .. })
+                || !session.has_admitted_personal_input()
+                || !session.admits_assistant_device(device_id)))
         || matches!(source, ApprovalSource::PermissionItem { .. })
         || expires_at_unix_ms <= now_unix_ms
         || action_json.len() > MAX_APPROVAL_ACTION_BYTES
@@ -1570,7 +1583,7 @@ pub fn source_review_candidate(
         candidate_id,
         source,
         owner_id: session.actor_id.clone(),
-        device_id: session.device_id.clone(),
+        device_id: device_id.to_owned(),
         conversation_id: session.conversation_id.clone(),
         input_revision: session.input_revision,
         goal_id: goal.map(|goal| goal.goal_id.clone()),
@@ -1628,15 +1641,20 @@ pub fn permission_item_action_json(
             }
             action.to_string()
         }
-        ApprovalInputKind::Scope => serde_json::json!({
+        ApprovalInputKind::Scope => {
+            let mut action = serde_json::json!({
             "resource_scope": &item.resource_scope,
             "operation_scope": &item.operation_scope,
             "export_destinations": &item.export_destinations,
             "canonical_scope_input": &item.canonical_input_json,
             "suggested_ttl_seconds": item.suggested_ttl_seconds,
             "suggested_max_uses": item.suggested_max_uses,
-        })
-        .to_string(),
+            });
+            if let Some(target) = &item.selected_device_target {
+                action["selected_device_target"] = serde_json::json!(target);
+            }
+            action.to_string()
+        }
         ApprovalInputKind::ConcreteCall => return Err(ApprovalReviewError::InvalidCandidate),
     })
 }
@@ -2377,6 +2395,37 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn selected_scope_review_retains_the_physical_device_without_an_exact_call() {
+        let mut item = permission_request().items.remove(0);
+        item.selected_device_target = Some(crate::request_devices::SelectedDeviceTarget {
+            device_id: "device-a".into(),
+            target_ref: "a".into(),
+            connection_id: "live-a".into(),
+            readiness_revision: 1,
+        });
+        let mut candidate = candidate();
+        candidate.device_id.clear();
+        candidate.tool_name = "inspect_desktop_ui".into();
+        candidate.descriptor_json =
+            r#"{"tool_name":"inspect_desktop_ui","provider_id":"desktop.ui"}"#.into();
+        candidate.input_kind = ApprovalInputKind::Scope;
+        candidate.action_json = permission_item_action_json(&item, candidate.input_kind).unwrap();
+        candidate.action_sha256 = format!("{:x}", Sha256::digest(candidate.action_json.as_bytes()));
+        candidate.candidate_id = permission_review_candidate_id(
+            "delegation",
+            1,
+            "request",
+            "item",
+            &candidate.action_sha256,
+        )
+        .unwrap();
+        candidate.validate().unwrap();
+        let action: serde_json::Value = serde_json::from_str(&candidate.action_json).unwrap();
+        assert_eq!(action["selected_device_target"]["device_id"], "device-a");
+        assert!(action.get("exact_input").is_none());
     }
 
     #[test]

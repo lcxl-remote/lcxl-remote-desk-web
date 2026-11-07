@@ -110,6 +110,91 @@ fn original(read_tool: &str, object_ref: ObjectRef) -> ReadContextSelection {
     }
 }
 
+#[test]
+fn selected_live_mutation_uses_the_original_target_on_each_device() {
+    let a = reference(ObjectKind::Document);
+    let mut b = a.clone();
+    b.token = "other-device-document".into();
+    let mut original = original("inspect_live_document", a.clone());
+    let mut other = original.live_targets[0].clone();
+    other.device_id = "other-device".into();
+    other.object_ref = b.clone();
+    original.live_targets.push(other);
+    let mut session = crate::session::PersistedAgentSession::new(
+        "run",
+        "actor",
+        "",
+        1,
+        desk_agent_protocol::AgentScope {
+            granted: vec![],
+            mode: desk_agent_protocol::ExecutionMode::ReadOnly,
+            expires_at: None,
+            policy_name: None,
+        },
+        "2026-08-31T00:00:01Z",
+    );
+    session.surface = AgentSessionSurface::AiAssistant;
+    session.input_revision = 1;
+    session
+        .bind_assistant_request_targets(vec!["device".into(), "other-device".into()])
+        .unwrap();
+    for surface in [
+        ProductSurface::OssPersonalOwner,
+        ProductSurface::ManagerPersonalOwner,
+    ] {
+        for (device, target, wrong) in [("device", &a, &b), ("other-device", &b, &a)] {
+            let call = ToolCall {
+                id: "write-live".into(),
+                name: "replace_live_document_body".into(),
+                arguments_json: serde_json::json!({"target":target,"text":"replacement"})
+                    .to_string(),
+            };
+            let input = IworkCallPreflight::from_device_session(
+                &ai_assistant_provider_registry(),
+                surface,
+                &call,
+                &original,
+                &session,
+                device,
+                "501:worker-1:7",
+                NOW,
+            )
+            .unwrap();
+            assert_eq!(input.target(), target);
+            let frozen = IworkCallPreflight::build_for_device(
+                &ai_assistant_provider_registry(),
+                surface,
+                &call,
+                &original,
+                &[],
+                device,
+                NOW,
+            )
+            .unwrap();
+            assert_eq!(frozen.target(), target);
+
+            let wrong = ToolCall {
+                arguments_json: serde_json::json!({"target":wrong,"text":"replacement"})
+                    .to_string(),
+                ..call
+            };
+            assert!(
+                IworkCallPreflight::from_device_session(
+                    &ai_assistant_provider_registry(),
+                    surface,
+                    &wrong,
+                    &original,
+                    &session,
+                    device,
+                    "501:worker-1:7",
+                    NOW
+                )
+                .is_err()
+            );
+        }
+    }
+}
+
 fn derived_reference(kind: ObjectKind) -> ObjectRef {
     ObjectRef {
         token: "opaque-derived".into(),

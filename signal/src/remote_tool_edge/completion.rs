@@ -100,9 +100,7 @@ impl SignalAiAssistantTools {
                     image_data_url: None,
                     document_preview: None,
                 };
-                let data_envelope = if self.selected_device_fence.is_some()
-                    && matches!(plan.actions[0].action, ComputerActionKind::Browser(_))
-                {
+                let data_envelope = if self.selected_device_fence.is_some() {
                     let session = self.authoritative_session().await?;
                     let origin =
                         desk_diagnose_core::action_result::ActionResultOrigin::capture_for_device(

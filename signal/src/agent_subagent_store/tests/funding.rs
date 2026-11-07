@@ -680,6 +680,7 @@ async fn review_without_planner(
         conversation_id: "root".into(),
         actor_id: "1".into(),
         device_id: "1".into(),
+        review_device_id: "1".into(),
         input_revision: parent.input_revision,
         control_revision: parent.control_revision,
         source_epoch: Some(1),

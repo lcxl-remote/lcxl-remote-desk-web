@@ -287,6 +287,7 @@ fn current_binding<'a>(
         .as_ref()
         .ok_or(ApprovalReviewError::InvalidContext)?;
     Ok(SourceReviewBinding {
+        device_id: &session.device_id,
         source: &candidate.source,
         tool_call_id: &context.call_id,
         turn_id: &context.turn_id,

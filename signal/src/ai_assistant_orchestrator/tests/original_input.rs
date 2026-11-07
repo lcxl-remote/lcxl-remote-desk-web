@@ -4993,15 +4993,20 @@ mod schedule_input;
 
 #[actix_web::test]
 async fn selectable_browser_opens_and_observes_the_same_signal_device() {
-    selected_browser_on_signal(false).await;
+    selected_browser_on_signal(false, false).await;
 }
 
 #[actix_web::test]
 async fn selectable_browser_uses_ai_review_on_the_original_signal_device() {
-    selected_browser_on_signal(true).await;
+    selected_browser_on_signal(true, false).await;
 }
 
-async fn selected_browser_on_signal(automatic: bool) {
+#[actix_web::test]
+async fn selectable_artifact_is_created_with_ai_review_on_the_original_signal_device() {
+    selected_browser_on_signal(true, true).await;
+}
+
+async fn selected_browser_on_signal(automatic: bool, artifact: bool) {
     use super::permission_object::tool_reply;
     use crate::controller::ai_assistant_session::{PermissionDecisionBody, decide_permission_on};
     use desk_agent_protocol::{Capability, browser_control::*, computer_use::*};
@@ -5073,11 +5078,21 @@ async fn selected_browser_on_signal(automatic: bool) {
                     Capability::BrowserPageNavigateConfirmed,
                 ]
                 .into_iter()
+                .chain(artifact.then_some(Capability::FileArtifactCreateConfirmed))
                 .map(|capability| ComputerUseCapabilityReadiness {
                     capability,
                     adapter: ComputerUseAdapterRef {
-                        kind: ComputerUseAdapterKind::BrowserExtension,
-                        version: "1.7.0".into(),
+                        kind: if capability == Capability::FileArtifactCreateConfirmed {
+                            ComputerUseAdapterKind::FileSystem
+                        } else {
+                            ComputerUseAdapterKind::BrowserExtension
+                        },
+                        version: if capability == Capability::FileArtifactCreateConfirmed {
+                            desk_diagnose_core::ai_assistant::FILE_ARTIFACT_ADAPTER_VERSION
+                        } else {
+                            "1.7.0"
+                        }
+                        .into(),
                     },
                     supported: true,
                     ready: true,
@@ -5093,6 +5108,70 @@ async fn selected_browser_on_signal(automatic: bool) {
         )
         .unwrap();
 
+    let owner = crate::control_authorizer::SINGLE_ACCOUNT_USER_ID;
+    let actor = owner.to_string();
+    let client = "selected-browser-test";
+    let run =
+        derive_assistant_conversation_key(&actor, AssistantConversationScope::Personal, client);
+    if artifact {
+        use desk_assistant_data_store::device_roster::{personal_selection_key, replace};
+        use desk_diagnose_core::file_scope::{transaction::*, *};
+        replace(
+            &db,
+            &actor,
+            &personal_selection_key(&run),
+            0,
+            vec![target.into()],
+        )
+        .await
+        .unwrap();
+        crate::agent_session_store::SignalAgentSessionStore::new(db.clone())
+            .with_client_metadata(
+                Some(client.into()),
+                desk_diagnose_core::session::AgentSessionSurface::AiAssistant,
+            )
+            .update_file_scope(
+                &FileScopeUpdate {
+                    subject: FileScopeSubject {
+                        actor_id: actor.clone(),
+                        device_id: target.into(),
+                        conversation_id: run.clone(),
+                    },
+                    client_conversation_id: client.into(),
+                    client_request_id: "selected-output".into(),
+                    expected_revision: 0,
+                    mutation: FileScopeMutation::Select {
+                        proposal: DirectoryProposal {
+                            request_id: "selected-output".into(),
+                            requested_path: "/output".into(),
+                            canonical_path: "/output".into(),
+                            purpose: "Save the owner result".into(),
+                            source: DirectoryConsentSource::OwnerSelection,
+                            directory: ObjectRef {
+                                token: "selected-output".into(),
+                                snapshot_id: "output-snapshot".into(),
+                                object_kind: ObjectKind::Directory,
+                                expires_at: (chrono::Utc::now() + chrono::Duration::minutes(5))
+                                    .to_rfc3339(),
+                            },
+                        },
+                    },
+                },
+                chrono::Utc::now(),
+            )
+            .await
+            .unwrap();
+    }
+    let name = if artifact {
+        "create_text_file"
+    } else {
+        "browser_open_page"
+    };
+    let exact = if artifact {
+        json!({"file_name":"selected.txt","content_utf8":"owner content"})
+    } else {
+        json!({"target":{"url":"https://example.com/"}})
+    };
     let gateway = actix_web::rt::spawn(async move {
         capture_one_openai_request_with_reply(&listener, |body| {
             let request: Value = serde_json::from_slice(body).unwrap();
@@ -5101,14 +5180,14 @@ async fn selected_browser_on_signal(automatic: bool) {
                     .as_array()
                     .unwrap()
                     .iter()
-                    .all(|tool| tool["function"]["name"] != "browser_open_page")
+                    .all(|tool| tool["function"]["name"] != name)
             );
             tool_reply(
                 "request_permissions",
                 json!({"items":[{
-                    "tool_name":"browser_open_page",
-                    "exact_input":{"target":{"url":"https://example.com/"}},
-                    "reason":"Open the page requested by the owner"
+                    "tool_name":name,
+                    "exact_input":exact,
+                    "reason":if artifact { "Create the file requested by the owner" } else { "Open the page requested by the owner" }
                 }]}),
             )
         })
@@ -5120,46 +5199,42 @@ async fn selected_browser_on_signal(automatic: bool) {
                     .as_array()
                     .unwrap()
                     .iter()
-                    .any(|tool| tool["function"]["name"] == "browser_open_page")
+                    .any(|tool| tool["function"]["name"] == name),
+                "{request}"
             );
-            tool_reply(
-                "browser_open_page",
-                json!({"target":{"url":"https://example.com/"}}),
-            )
+            tool_reply(name, exact.clone())
         })
         .await;
-        capture_one_openai_request_with_reply(&listener, |body| {
-            let request: Value = serde_json::from_slice(body).unwrap();
-            let result = request["messages"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .rev()
-                .find(|message| {
-                    message["role"] == "tool" && message["tool_call_id"] == "call-browser_open_page"
-                })
-                .expect("the model received the selected device's browser receipt");
-            let text = result["content"].as_str().unwrap();
-            let result: Value =
-                serde_json::from_str(text).unwrap_or_else(|error| panic!("{error}: {text}"));
-            let page_id = result
-                .pointer("/page/page_id")
-                .or_else(|| result.pointer("/output/value/page/page_id"))
-                .expect("the opened browser page has a model-visible reference");
-            tool_reply(
-                "browser_take_snapshot",
-                json!({"page_id":page_id,"max_elements":8}),
-            )
-        })
-        .await;
+        if !artifact {
+            capture_one_openai_request_with_reply(&listener, |body| {
+                let request: Value = serde_json::from_slice(body).unwrap();
+                let result = request["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .rev()
+                    .find(|message| {
+                        message["role"] == "tool"
+                            && message["tool_call_id"] == "call-browser_open_page"
+                    })
+                    .expect("the model received the selected device's browser receipt");
+                let text = result["content"].as_str().unwrap();
+                let result: Value =
+                    serde_json::from_str(text).unwrap_or_else(|error| panic!("{error}: {text}"));
+                let page_id = result
+                    .pointer("/page/page_id")
+                    .or_else(|| result.pointer("/output/value/page/page_id"))
+                    .expect("the opened browser page has a model-visible reference");
+                tool_reply(
+                    "browser_take_snapshot",
+                    json!({"page_id":page_id,"max_elements":8}),
+                )
+            })
+            .await;
+        }
         let reply = memory_sse(json!({"content":"Selected browser page observed"}), "stop");
         capture_openai_answer_with_title(&listener, &reply).await
     });
-    let owner = crate::control_authorizer::SINGLE_ACCOUNT_USER_ID;
-    let actor = owner.to_string();
-    let client = "selected-browser-test";
-    let run =
-        derive_assistant_conversation_key(&actor, AssistantConversationScope::Personal, client);
     run_turn(
         connections.clone(),
         db.clone(),
@@ -5169,7 +5244,12 @@ async fn selected_browser_on_signal(automatic: bool) {
         owner,
         String::new(),
         AiAssistantAsk {
-            question: "Open example.com and inspect the page".into(),
+            question: if artifact {
+                "Create selected.txt with owner content in the approved directory"
+            } else {
+                "Open example.com and inspect the page"
+            }
+            .into(),
             client_message_id: "browser-input".into(),
             conversation_id: Some(client.into()),
             client_timezone: "UTC".into(),
@@ -5268,24 +5348,81 @@ async fn selected_browser_on_signal(automatic: bool) {
     );
 
     let mut opened = None;
-    for step in 0..2 {
-        let frame = tokio::time::timeout(MODEL_IO_TIMEOUT, receive_device_frame_from(&mut edge))
-            .await
-            .expect("selected browser dispatch");
+    for step in 0..if artifact { 1 } else { 2 } {
+        let frame = match tokio::time::timeout(
+            MODEL_IO_TIMEOUT,
+            receive_device_frame_from(&mut edge),
+        )
+        .await
+        {
+            Ok(frame) => frame,
+            Err(error) => {
+                let state = store
+                    .read_snapshot_for_subject(&run, &actor, "")
+                    .await
+                    .unwrap()
+                    .unwrap();
+                panic!(
+                    "selected native dispatch: {error}; terminal={:?}; messages={:?}",
+                    state.terminal_error,
+                    state
+                        .messages
+                        .iter()
+                        .rev()
+                        .take(5)
+                        .map(|message| (&message.role, &message.text))
+                        .collect::<Vec<_>>()
+                );
+            }
+        };
         assert_eq!(frame.signaling_type, SignalingType::DispatchComputerAction);
         let wrapper: desk_agent_protocol::authz::AuthorizedControlPayload<serde_json::Value> =
             frame.get_data().unwrap();
         let plan: SealedComputerActionPlan = serde_json::from_value(wrapper.inner).unwrap();
         assert_eq!(plan.device_id, target);
-        assert_eq!(plan.actions[0].target, surface);
-        let ComputerActionKind::Browser(action) = &plan.actions[0].action else {
-            panic!("expected browser action")
-        };
-        let now = chrono::Utc::now().timestamp_millis() as u64;
-        let (outcome, page, snapshot) = match (&action.action, step) {
-            (BrowserAction::OpenPage { target: navigation }, 0) => {
-                assert_eq!(navigation.url, "https://example.com/");
-                let page: BrowserPageRef = serde_json::from_value(json!({
+        if artifact {
+            assert_eq!(plan.actions[0].target.token, "selected-output");
+        } else {
+            assert_eq!(plan.actions[0].target, surface);
+        }
+        let output = if artifact {
+            let ComputerActionKind::File(FilePatchAction::CreateTextArtifact {
+                file_name,
+                content_utf8,
+            }) = &plan.actions[0].action
+            else {
+                panic!("expected create-new file")
+            };
+            assert_eq!(file_name, "selected.txt");
+            assert_eq!(content_utf8, "owner content");
+            let digest = format!("{:x}", Sha256::digest(content_utf8.as_bytes()));
+            ComputerActionOutput::FileArtifact(CreatedFileArtifactOutput {
+                file: ObjectRef {
+                    token: "created-on-selected-device".into(),
+                    snapshot_id: "created-snapshot".into(),
+                    object_kind: ObjectKind::File,
+                    expires_at: (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339(),
+                },
+                file_name: file_name.clone(),
+                media_type: "text/plain;charset=utf-8".into(),
+                size_bytes: content_utf8.len() as u64,
+                digest_sha256: digest.clone(),
+                content: desk_agent_protocol::data_lineage::ContentRef::Artifact {
+                    artifact_id: "created-on-selected-device".into(),
+                    sha256: digest,
+                    size_bytes: content_utf8.len() as u64,
+                    media_type: "text/plain;charset=utf-8".into(),
+                },
+            })
+        } else {
+            let ComputerActionKind::Browser(action) = &plan.actions[0].action else {
+                panic!("expected browser action")
+            };
+            let now = chrono::Utc::now().timestamp_millis() as u64;
+            let (outcome, page, snapshot) = match (&action.action, step) {
+                (BrowserAction::OpenPage { target: navigation }, 0) => {
+                    assert_eq!(navigation.url, "https://example.com/");
+                    let page: BrowserPageRef = serde_json::from_value(json!({
                     "schema_version":BROWSER_CONTROL_SCHEMA_VERSION,
                     "adapter":{"engine":"chrome_extension","device_id":target,
                         "os_session_id":"session","browser_major_version":144,"browser_version":"144.0.0.0",
@@ -5295,29 +5432,40 @@ async fn selected_browser_on_signal(automatic: bool) {
                     "url_sha256":format!("{:x}", Sha256::digest(navigation.url.as_bytes())),
                     "observed_at_unix_ms":now,"account_id":null
                 })).unwrap();
-                opened = Some(page.clone());
-                (BrowserActionOutcome::PageOpened, page, None)
-            }
-            (
-                BrowserAction::TakeSnapshot {
-                    page,
-                    max_elements: 8,
-                },
-                1,
-            ) => {
-                assert_eq!(Some(page), opened.as_ref());
-                let snapshot: BrowserSemanticSnapshot = serde_json::from_value(json!({
-                    "schema_version": BROWSER_CONTROL_SCHEMA_VERSION,
-                    "page":page,"elements":[],"truncated":false,"captured_at_unix_ms":now
-                }))
-                .unwrap();
+                    opened = Some(page.clone());
+                    (BrowserActionOutcome::PageOpened, page, None)
+                }
                 (
-                    BrowserActionOutcome::SnapshotCaptured,
-                    page.clone(),
-                    Some(snapshot),
-                )
-            }
-            _ => panic!("wrong browser step: {:?}", action.action),
+                    BrowserAction::TakeSnapshot {
+                        page,
+                        max_elements: 8,
+                    },
+                    1,
+                ) => {
+                    assert_eq!(Some(page), opened.as_ref());
+                    let snapshot: BrowserSemanticSnapshot = serde_json::from_value(json!({
+                        "schema_version": BROWSER_CONTROL_SCHEMA_VERSION,
+                        "page":page,"elements":[],"truncated":false,"captured_at_unix_ms":now
+                    }))
+                    .unwrap();
+                    (
+                        BrowserActionOutcome::SnapshotCaptured,
+                        page.clone(),
+                        Some(snapshot),
+                    )
+                }
+                _ => panic!("wrong browser step: {:?}", action.action),
+            };
+            ComputerActionOutput::Browser(BrowserActionResult {
+                schema_version: BROWSER_CONTROL_SCHEMA_VERSION,
+                call_id: action.call_id.clone(),
+                outcome,
+                page,
+                snapshot,
+                form_readback: vec![],
+                send_receipt: None,
+                completed_at_unix_ms: now,
+            })
         };
         let completed = ComputerActionCompleted {
             work_id: plan.work_id,
@@ -5331,16 +5479,7 @@ async fn selected_browser_on_signal(automatic: bool) {
                 summary: "Browser fixture".into(),
             }],
             message: None,
-            output: Some(ComputerActionOutput::Browser(BrowserActionResult {
-                schema_version: BROWSER_CONTROL_SCHEMA_VERSION,
-                call_id: action.call_id.clone(),
-                outcome,
-                page,
-                snapshot,
-                form_readback: vec![],
-                send_receipt: None,
-                completed_at_unix_ms: now,
-            })),
+            output: Some(output),
         };
         let response = SignalingModel::new(
             &plan.execution_generation,
@@ -5358,5 +5497,9 @@ async fn selected_browser_on_signal(automatic: bool) {
         .await
         .unwrap()
         .unwrap();
-    assert!(String::from_utf8_lossy(&last).contains("snapshot_captured"));
+    assert!(String::from_utf8_lossy(&last).contains(if artifact {
+        "selected.txt"
+    } else {
+        "snapshot_captured"
+    }));
 }

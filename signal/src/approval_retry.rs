@@ -87,7 +87,7 @@ async fn settle_completed(
     let stored = delegation::Entity::find()
         .filter(delegation::Column::DelegationId.eq(&row.delegation_id))
         .filter(delegation::Column::ActorId.eq(&row.actor_id))
-        .filter(delegation::Column::DeviceId.eq(&row.device_id))
+        .filter(delegation::Column::DeviceId.eq(&claim.call_authority.device_id))
         .one(&txn)
         .await?
         .ok_or_else(invalid)?;
@@ -140,7 +140,7 @@ pub(crate) async fn advance(
     let stored = delegation::Entity::find()
         .filter(delegation::Column::DelegationId.eq(&row.delegation_id))
         .filter(delegation::Column::ActorId.eq(&row.actor_id))
-        .filter(delegation::Column::DeviceId.eq(&row.device_id))
+        .filter(delegation::Column::DeviceId.eq(&claim.call_authority.device_id))
         .lock_exclusive()
         .one(&txn)
         .await?

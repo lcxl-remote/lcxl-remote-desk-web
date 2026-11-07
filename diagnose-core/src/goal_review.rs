@@ -209,6 +209,7 @@ pub fn authorize(
     validate_current(candidate, session, request, policy, goal, delegation, now)?;
     let call = proposal_call(session, request)?;
     let binding = SourceReviewBinding {
+        device_id: &session.device_id,
         source: &candidate.source,
         tool_call_id: &call.id,
         turn_id: session

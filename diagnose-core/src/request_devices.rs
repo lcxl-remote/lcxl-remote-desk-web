@@ -13,6 +13,7 @@ use crate::seam::ToolSeam;
 use crate::session::{PersistedAgentSession, TriggerOrigin};
 
 pub const SYSTEM_INFO_TOOL: &str = "read_system_info";
+mod action;
 
 pub(crate) fn accepts_device_reads(session: &crate::session::PersistedAgentSession) -> bool {
     session.has_admitted_personal_input()
@@ -161,17 +162,15 @@ pub(crate) fn infer_single_target(
     let mut value: serde_json::Value = serde_json::from_str(&call.arguments_json)
         .map_err(|_| crate::subagent::invalid("Tool arguments must be valid JSON"))?;
     if permission {
-        let Some([item]) = value
-            .get("items")
-            .and_then(|items| items.as_array())
-            .map(Vec::as_slice)
-        else {
+        let Some(items) = value.get("items").and_then(|items| items.as_array()) else {
             return Ok(None);
         };
-        if !item
-            .get("tool_name")
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(device_tool)
+        if items.is_empty()
+            || !items.iter().all(|item| {
+                item.get("tool_name")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(device_tool)
+            })
         {
             return Ok(None);
         }
@@ -259,7 +258,7 @@ pub(crate) fn device_permission_tool(
     });
     if !reads.is_empty() {
         tool.spec.description.push_str(
-            "\nFor a device read permission, supply one read item and select its target_ref when the request includes more than one device. Put the exact native arguments in exact_input, omitting target_ref from that object. Use {} when no native arguments are needed. Use inspect_desktop_session for display identifiers before capturing on a device with multiple displays.",
+            "\nFor device permissions, select one target_ref for the batch when the request includes more than one device. All items in this batch apply to that same device. Use each tool's native permission_input_mode: application_scope for application authority, exact_input for exact calls. Omit target_ref inside each native input. Use {} when no native arguments are needed. Use inspect_desktop_session for display identifiers before capturing on a device with multiple displays.",
         );
     }
     if commands {
@@ -371,6 +370,7 @@ pub fn command_input(
 pub(crate) async fn plan_device_permission(
     tools: &dyn ToolSeam,
     providers: Option<&ProviderRegistry>,
+    surface: Option<desk_agent_protocol::capability_provider::ProductSurface>,
     session: &PersistedAgentSession,
     devices: &[RequestDevice],
     reads: &[(RegisteredTool, bool)],
@@ -381,80 +381,51 @@ pub(crate) async fn plan_device_permission(
     let mut input: serde_json::Value = serde_json::from_str(&call.arguments_json).ok()?;
     let reference = input.as_object_mut()?.remove("target_ref")?;
     let invalid = || {
-        crate::subagent::invalid("A target_ref requires one exact tool item on an admitted device")
+        crate::subagent::invalid(
+            "A target_ref requires native permission items on one admitted device",
+        )
     };
     Some(
         async {
             let reference = reference.as_str().ok_or_else(invalid)?;
             desk_agent_protocol::ai_assistant::validate_target_refs([reference])
                 .map_err(|_| invalid())?;
-            let [item] = input["items"].as_array().ok_or_else(invalid)?.as_slice() else {
-                return Err(invalid());
-            };
-            if call.name != REQUEST_CAPABILITY_GRANTS_TOOL_NAME {
+            let items = input["items"].as_array().ok_or_else(invalid)?;
+            if items.is_empty() || call.name != REQUEST_CAPABILITY_GRANTS_TOOL_NAME {
                 return Err(invalid());
             }
             let registry = providers.ok_or_else(invalid)?;
-            if let Some(name) = item["tool_name"].as_str()
-                && reads.iter().any(|(tool, _)| tool.name() == name)
-            {
-                let descriptor = registry.capability_for_tool(name).ok_or_else(invalid)?;
-                let target = devices.iter().find(|device| {
-                    device.target_ref == reference
-                        && device.ready_for_read(descriptor, session, tools.original_read_context())
-                }).and_then(|device| device.read_target.clone()).ok_or_else(invalid)?;
-                let exact = item.get("exact_input").ok_or_else(invalid)?;
-                require_observed_desktop_target(session, &target.device_id, name, exact)?;
-                if descriptor.required_capability == Capability::ScreenCaptureCurrent
-                    && let Some(display) = exact.get("display").and_then(serde_json::Value::as_str)
-                    && !observed_display(session, &target.device_id, display)
-                {
-                    return Err(crate::subagent::invalid(
-                        "Read inspect_desktop_session on the same target_ref and copy a display from its result",
-                    ));
-                }
-                let native_call = ToolCall {
-                    name: name.to_string(),
-                    arguments_json: exact.to_string(),
-                    ..call.clone()
-                };
-                if selected_action_descriptor(descriptor) {
-                    let action = crate::provider_preflight::browser_action_from_call(&native_call, "permission-preflight")?;
-                    let now = chrono::DateTime::parse_from_rfc3339(created_at)
-                        .ok().and_then(|time| u64::try_from(time.timestamp_millis()).ok())
-                        .ok_or_else(invalid)?;
-                    crate::provider_preflight::require_browser_device_page(
-                        &action, session, &target.device_id, now,
-                    )?;
-                } else {
-                    crate::read_tools::build_read_operation(&native_call)?;
-                }
-                if crate::file_model_input::is_read(name) {
-                    let now = chrono::DateTime::parse_from_rfc3339(created_at)
-                        .ok().and_then(|time| u64::try_from(time.timestamp_millis()).ok())
-                        .ok_or_else(invalid)?;
-                    crate::provider_preflight::text_file::validate_read_permission_on_device(
-                        session, &target.device_id, name, Some(&native_call.arguments_json), now,
-                        tools.original_read_context(),
-                    )?;
-                }
-                let mut request = build_permission_request(
-                    &ToolCall { arguments_json: input.to_string(), ..call.clone() },
-                    registry, request_id.into(), session.input_revision, created_at.into(),
-                )?;
-                let item = &mut request.items[0];
-                let canonical = canonical_selected_read_input(name, exact.clone())
-                    .map_err(|_| invalid())?;
-                item.canonical_input_digest_sha256 =
-                    Some(format!("{:x}", Sha256::digest(canonical.as_bytes())));
-                item.canonical_input_json = Some(canonical);
-                item.selected_device_target = Some(target);
-                return if crate::assistant_policy::permits_permission_request(session, &request) {
-                    Ok(request)
-                } else {
-                    Err(invalid())
-                };
+            if items.iter().all(|item| {
+                item["tool_name"]
+                    .as_str()
+                    .is_some_and(|name| reads.iter().any(|(tool, _)| tool.name() == name))
+            }) {
+                let device = devices
+                    .iter()
+                    .find(|device| device.target_ref == reference)
+                    .ok_or_else(invalid)?;
+                let now = chrono::DateTime::parse_from_rfc3339(created_at)
+                    .ok()
+                    .and_then(|time| u64::try_from(time.timestamp_millis()).ok())
+                    .ok_or_else(invalid)?;
+                return action::permission_request(
+                    session,
+                    device,
+                    registry,
+                    surface.ok_or_else(invalid)?,
+                    tools.original_read_context(),
+                    &ToolCall {
+                        arguments_json: input.to_string(),
+                        ..call.clone()
+                    },
+                    request_id,
+                    created_at,
+                    now,
+                );
             }
+            let [item] = items.as_slice() else {
+                return Err(invalid());
+            };
             if !accepts_command_permissions(session)
                 || item["tool_name"] != crate::command_confirmation::COMMAND_TOOL
             {
@@ -568,11 +539,19 @@ pub(crate) fn selected_action_device(
             "This assistant cannot perform the selected device operation",
         ));
     }
-    let (reference, _) = split_device_call(call)?;
-    session
+    let (reference, native) = split_device_call(call)?;
+    let target = session
         .assistant_request_device(&reference)
-        .map(|target| Some(target.device_id.clone()))
-        .ok_or_else(|| crate::subagent::invalid("The device is outside the original request"))
+        .ok_or_else(|| crate::subagent::invalid("The device is outside the original request"))?;
+    if crate::application_ui::supports(&native.name)
+        || native.name == "send_raw_input"
+        || native.name == crate::ai_assistant::linux::OUTPUT_TOOL
+    {
+        let input = serde_json::from_str(&native.arguments_json)
+            .map_err(|_| crate::application_ui::invalid())?;
+        action::require_desktop_action_target(session, &target.device_id, &input)?;
+    }
+    Ok(Some(target.device_id.clone()))
 }
 
 pub fn selected_read(call: &ToolCall) -> Result<(String, ToolCall), AgentError> {
@@ -679,6 +658,8 @@ fn require_observed_desktop_target(
 #[derive(Debug, Serialize)]
 pub struct RequestDevice {
     #[serde(skip)]
+    pub native_readiness: Option<desk_agent_protocol::computer_use::ComputerUseReadiness>,
+    #[serde(skip)]
     pub read_target: Option<SelectedDeviceTarget>,
     #[serde(skip)]
     pub ready_provider_ids: Vec<String>,
@@ -761,27 +742,35 @@ pub fn approved_read_tools(
     session
         .permission_requests
         .iter()
-        .filter_map(|request| {
-            let item = request.items.first()?;
-            (request.input_revision == session.input_revision
-                && request.state == crate::dynamic_run::PermissionRequestState::Approved
-                && request.selected_device_target() == Some(target)
-                && grants.iter().any(|grant| {
-                    grant.grant_id
-                        == crate::permission_grant::permission_item_grant_id(
-                            &session.conversation_id,
-                            request,
-                            &item.item_id,
+        .flat_map(|request| {
+            request
+                .items
+                .iter()
+                .filter(move |item| {
+                    request.input_revision == session.input_revision
+                        && matches!(
+                            request.state,
+                            crate::dynamic_run::PermissionRequestState::Approved
+                                | crate::dynamic_run::PermissionRequestState::PartiallyApproved
                         )
-                        && grant.target_device_id == target.device_id
-                        && grant.policy_revision == session.policy_revision
-                        && grant.readiness_revision == target.readiness_revision
-                        && grant.issued_at_unix_ms <= now
-                        && now < grant.expires_at_unix_ms
-                        && grant.remaining_uses > 0
-                        && grant.revoked_at_unix_ms.is_none()
-                }))
-            .then(|| item.tool_name.clone())
+                        && request.selected_device_target() == Some(target)
+                        && grants.iter().any(|grant| {
+                            grant.grant_id
+                                == crate::permission_grant::permission_item_grant_id(
+                                    &session.conversation_id,
+                                    request,
+                                    &item.item_id,
+                                )
+                                && grant.target_device_id == target.device_id
+                                && grant.policy_revision == session.policy_revision
+                                && grant.readiness_revision == target.readiness_revision
+                                && grant.issued_at_unix_ms <= now
+                                && now < grant.expires_at_unix_ms
+                                && grant.remaining_uses > 0
+                                && grant.revoked_at_unix_ms.is_none()
+                        })
+                })
+                .map(|item| item.tool_name.clone())
         })
         .collect()
 }
@@ -813,10 +802,19 @@ pub fn require_current_read_target(
     let canonical = canonical_selected_read_input(&call.name, input).map_err(|_| invalid())?;
     if session.permission_requests.iter().any(|request| {
         request.input_revision == session.input_revision
-            && request.state == crate::dynamic_run::PermissionRequestState::Approved
+            && matches!(
+                request.state,
+                crate::dynamic_run::PermissionRequestState::Approved
+                    | crate::dynamic_run::PermissionRequestState::PartiallyApproved
+            )
             && request.selected_device_target() == Some(target)
-            && request.items[0].tool_name == call.name
-            && request.items[0].canonical_input_json.as_deref() == Some(canonical.as_str())
+            && request.items.iter().any(|item| {
+                item.tool_name == call.name
+                    && (item.canonical_input_json.as_deref() == Some(canonical.as_str())
+                        || item.canonical_input_json.is_none()
+                            && crate::permission_tools::permission_input_mode(descriptor)
+                                == "optional_exact_input")
+            })
     }) {
         Ok(())
     } else {

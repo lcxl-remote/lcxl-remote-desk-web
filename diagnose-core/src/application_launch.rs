@@ -205,14 +205,25 @@ pub async fn bind_permission_request(
         let input: LaunchApplicationRequest = serde_json::from_str(canonical)
             .map_err(|_| permission_error("Invalid application launch input"))?;
         input.validate().map_err(permission_error)?;
-        let receipt = tools.resolve_application_candidate(&input).await?;
+        let target = item.selected_device_target.as_ref();
+        let receipt = if let Some(target) = target {
+            tools
+                .resolve_request_device_application(session, &target.target_ref, &input)
+                .await?
+        } else {
+            tools.resolve_application_candidate(&input).await?
+        };
         let subject = LaunchApprovalSubject {
             actor_id: session.actor_id.clone(),
-            device_id: session.device_id.clone(),
+            device_id: target.map_or_else(
+                || session.device_id.clone(),
+                |target| target.device_id.clone(),
+            ),
             session_id: receipt.interactive_session_incarnation.clone(),
             input_revision: session.input_revision,
             policy_revision: session.policy_revision,
-            readiness_revision,
+            readiness_revision: target
+                .map_or(readiness_revision, |target| target.readiness_revision),
         };
         let binding = LaunchApprovalBinding::prepare(subject, input, receipt.identity)
             .and_then(|binding| binding.with_target(receipt.target))
@@ -228,6 +239,15 @@ pub async fn bind_permission_request(
 /// Recover only a persisted owner decision with unchanged arguments and authority.
 pub fn approved_binding(
     session: &crate::session::PersistedAgentSession,
+    call: &crate::chat::ToolCall,
+    readiness_revision: u64,
+) -> Result<LaunchApprovalBinding, desk_agent_protocol::AgentError> {
+    approved_binding_on_device(session, &session.device_id, call, readiness_revision)
+}
+
+pub fn approved_binding_on_device(
+    session: &crate::session::PersistedAgentSession,
+    device_id: &str,
     call: &crate::chat::ToolCall,
     readiness_revision: u64,
 ) -> Result<LaunchApprovalBinding, desk_agent_protocol::AgentError> {
@@ -257,7 +277,7 @@ pub fn approved_binding(
                 || binding.target().is_none()
                 || binding.request() != &input
                 || subject.actor_id != session.actor_id
-                || subject.device_id != session.device_id
+                || subject.device_id != device_id
                 || subject.input_revision != session.input_revision
                 || subject.policy_revision != session.policy_revision
                 || subject.readiness_revision != readiness_revision

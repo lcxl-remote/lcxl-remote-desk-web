@@ -17,11 +17,16 @@ pub fn approved_directories(
     session: &PersistedAgentSession,
     now_unix_ms: u64,
 ) -> Result<Vec<ObjectRef>, FileScopeError> {
-    let subject = session.file_scope_subject(
-        &session.actor_id,
-        &session.device_id,
-        &session.conversation_id,
-    )?;
+    approved_device_directories(session, &session.device_id, now_unix_ms)
+}
+
+pub fn approved_device_directories(
+    session: &PersistedAgentSession,
+    device_id: &str,
+    now_unix_ms: u64,
+) -> Result<Vec<ObjectRef>, FileScopeError> {
+    let subject =
+        session.file_scope_subject(&session.actor_id, device_id, &session.conversation_id)?;
     Ok(session
         .file_scope
         .records()
@@ -112,6 +117,22 @@ pub fn validate_artifact_scope(
     resources: &[String],
     now_unix_ms: u64,
 ) -> Result<(), FileScopeError> {
+    validate_device_artifact_scope(
+        session,
+        &session.device_id,
+        tool_name,
+        resources,
+        now_unix_ms,
+    )
+}
+
+pub fn validate_device_artifact_scope(
+    session: &PersistedAgentSession,
+    device_id: &str,
+    tool_name: &str,
+    resources: &[String],
+    now_unix_ms: u64,
+) -> Result<(), FileScopeError> {
     let expected_resources = if tool_name == "convert_document" {
         2
     } else if crate::provider_preflight::ArtifactCallPreflight::supports(tool_name) {
@@ -133,11 +154,8 @@ pub fn validate_artifact_scope(
     } else {
         return Ok(());
     };
-    let subject = session.file_scope_subject(
-        &session.actor_id,
-        &session.device_id,
-        &session.conversation_id,
-    )?;
+    let subject =
+        session.file_scope_subject(&session.actor_id, device_id, &session.conversation_id)?;
     if resources.len() != expected_resources {
         return Err(FileScopeError::NotApproved);
     }

@@ -164,6 +164,33 @@ impl IworkCallPreflight {
         )
     }
 
+    /// Frozen-plan consistency for the original physical device. This does not
+    /// replace current session, grant or native readiness validation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_for_device(
+        registry: &ProviderRegistry,
+        surface: ProductSurface,
+        call: &ToolCall,
+        original: &ReadContextSelection,
+        approved_directories: &[ObjectRef],
+        device_id: &str,
+        now_unix_ms: u64,
+    ) -> Result<Self, AgentError> {
+        Self::build_with_batch_bindings(
+            registry,
+            surface,
+            call,
+            original,
+            approved_directories,
+            now_unix_ms,
+            None,
+            None,
+            None,
+            None,
+            Some(device_id),
+        )
+    }
+
     /// Check frozen-plan consistency only. This never grants authority; send
     /// admission must separately call `from_session` with current device state.
     pub fn frozen_presentation_resources(
@@ -247,6 +274,29 @@ impl IworkCallPreflight {
         interactive_session_incarnation: &str,
         now_unix_ms: u64,
     ) -> Result<Self, AgentError> {
+        Self::from_device_session(
+            registry,
+            surface,
+            call,
+            original,
+            session,
+            &session.device_id,
+            interactive_session_incarnation,
+            now_unix_ms,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_device_session(
+        registry: &ProviderRegistry,
+        surface: ProductSurface,
+        call: &ToolCall,
+        original: &ReadContextSelection,
+        session: &crate::session::PersistedAgentSession,
+        device_id: &str,
+        interactive_session_incarnation: &str,
+        now_unix_ms: u64,
+    ) -> Result<Self, AgentError> {
         let binding = if matches!(
             call.name.as_str(),
             "patch_keynote_copy" | "patch_powerpoint_copy"
@@ -257,14 +307,16 @@ impl IworkCallPreflight {
             let (_, worker) = interactive_session_incarnation
                 .split_once(':')
                 .ok_or_else(unavailable)?;
-            let files = super::text_file::batch_source_files(
+            let files = super::text_file::batch_source_files_on_device(
                 session,
+                device_id,
                 &["inspect_keynote_file", "inspect_powerpoint_file"],
                 now_unix_ms,
             );
             let mut bindings = files.iter().filter_map(|file| {
-                super::batch_document::resolve_presentation_read(
+                super::batch_document::resolve_presentation_read_on_device(
                     session,
+                    device_id,
                     file,
                     worker,
                     &args.target,
@@ -287,14 +339,16 @@ impl IworkCallPreflight {
             let (_, worker) = interactive_session_incarnation
                 .split_once(':')
                 .ok_or_else(unavailable)?;
-            let files = super::text_file::batch_source_files(
+            let files = super::text_file::batch_source_files_on_device(
                 session,
+                device_id,
                 &[crate::ai_assistant::windows_word::INSPECT_TOOL],
                 now_unix_ms,
             );
             let mut bindings = files.iter().filter_map(|file| {
-                super::word_read_binding::resolve_word_read(
+                super::word_read_binding::resolve_word_read_on_device(
                     session,
+                    device_id,
                     file,
                     worker,
                     &args.target,
@@ -317,14 +371,16 @@ impl IworkCallPreflight {
             let (_, worker) = interactive_session_incarnation
                 .split_once(':')
                 .ok_or_else(unavailable)?;
-            let files = super::text_file::batch_source_files(
+            let files = super::text_file::batch_source_files_on_device(
                 session,
+                device_id,
                 &[crate::ai_assistant::windows_excel::INSPECT_TOOL],
                 now_unix_ms,
             );
             let mut bindings = files.iter().filter_map(|file| {
-                super::excel_read_binding::resolve_excel_read(
+                super::excel_read_binding::resolve_excel_read_on_device(
                     session,
+                    device_id,
                     file,
                     worker,
                     &args.target,
@@ -348,16 +404,21 @@ impl IworkCallPreflight {
                 serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?;
             let target: ObjectRef =
                 serde_json::from_value(args["target"].clone()).map_err(|_| unavailable())?;
-            Some(super::text_file::directory_file_target(
+            Some(super::text_file::directory_file_target_on_device(
                 session,
+                device_id,
                 &target,
                 now_unix_ms,
             )?)
         } else {
             None
         };
-        let directories = crate::file_scope::approved_directories(session, now_unix_ms)
-            .map_err(|_| unavailable())?;
+        let directories = if crate::file_scope::requires_directory_scope(&call.name) {
+            crate::file_scope::approved_device_directories(session, device_id, now_unix_ms)
+                .map_err(|_| unavailable())?
+        } else {
+            Vec::new()
+        };
         Self::build_with_batch_bindings(
             registry,
             surface,
@@ -369,6 +430,7 @@ impl IworkCallPreflight {
             word.as_ref(),
             excel.as_ref(),
             source_file.as_ref(),
+            Some(device_id),
         )
     }
 
@@ -394,6 +456,7 @@ impl IworkCallPreflight {
             None,
             None,
             None,
+            None,
         )
     }
 
@@ -409,6 +472,7 @@ impl IworkCallPreflight {
         word: Option<&super::word_read_binding::WordReadBinding>,
         excel: Option<&super::excel_read_binding::ExcelReadBinding>,
         source_file: Option<&ObjectRef>,
+        device_id: Option<&str>,
     ) -> Result<Self, AgentError> {
         original.validate()?;
         let capability = registry
@@ -434,6 +498,7 @@ impl IworkCallPreflight {
         let selected_refs = original
             .object_attachments
             .iter()
+            .filter(|attachment| device_id.is_none_or(|device| attachment.device_id == device))
             .map(|attachment| {
                 if !attachment.is_active_at(now_unix_ms) {
                     return Err(unavailable());
@@ -472,7 +537,11 @@ impl IworkCallPreflight {
             "patch_live_spreadsheet_cell" => {
                 let args: SpreadsheetActionArgs =
                     serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?;
-                let frozen = live_read::unique_target(original, "inspect_live_spreadsheet")?;
+                let frozen = if let Some(device) = device_id {
+                    live_read::target(original, device, "inspect_live_spreadsheet", now_unix_ms)?
+                } else {
+                    live_read::unique_target(original, "inspect_live_spreadsheet")?
+                };
                 let expiry = live_mutation_expiry(
                     original,
                     frozen,
@@ -491,7 +560,11 @@ impl IworkCallPreflight {
             "replace_live_document_body" => {
                 let args: DocumentActionArgs =
                     serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?;
-                let frozen = live_read::unique_target(original, "inspect_live_document")?;
+                let frozen = if let Some(device) = device_id {
+                    live_read::target(original, device, "inspect_live_document", now_unix_ms)?
+                } else {
+                    live_read::unique_target(original, "inspect_live_document")?
+                };
                 let expiry = live_mutation_expiry(
                     original,
                     frozen,
@@ -512,7 +585,11 @@ impl IworkCallPreflight {
             "patch_live_presentation_slide" => {
                 let args: PresentationActionArgs =
                     serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?;
-                let frozen = live_read::unique_target(original, "inspect_live_presentation")?;
+                let frozen = if let Some(device) = device_id {
+                    live_read::target(original, device, "inspect_live_presentation", now_unix_ms)?
+                } else {
+                    live_read::unique_target(original, "inspect_live_presentation")?
+                };
                 let expiry = live_mutation_expiry(
                     original,
                     frozen,

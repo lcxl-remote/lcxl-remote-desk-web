@@ -62,7 +62,7 @@ impl SignalAiAssistantTools {
         Ok((held.device_id, resolved))
     }
 
-    async fn selected_connection(
+    pub(super) async fn selected_connection(
         &self,
         session: &PersistedAgentSession,
         reference: &str,
@@ -402,6 +402,7 @@ pub(crate) async fn request_device_catalogue(
                 .map(|item| item.capability)
                 .collect();
             Some(RequestDevice {
+                native_readiness: current.as_ref().map(|record| record.readiness.clone()),
                 read_target: connection.zip(current.as_ref()).map(|(state, current)| {
                     desk_diagnose_core::request_devices::SelectedDeviceTarget {
                         device_id: id.clone(),

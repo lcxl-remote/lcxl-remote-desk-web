@@ -59,6 +59,14 @@ impl CapabilityDescriptor {
                 self.tool_spec.name.clone(),
             ));
         }
+        if self.wire.execution_locality
+            == desk_agent_protocol::capability_provider::ExecutionLocality::Edge
+            && self.target_binding != TargetBinding::RequestDevice
+        {
+            return Err(RegistryError::InvalidToolSchema(
+                self.tool_spec.name.clone(),
+            ));
+        }
         if self.target_binding == TargetBinding::RequestDevice
             && (self.wire.execution_locality
                 != desk_agent_protocol::capability_provider::ExecutionLocality::Edge
@@ -500,7 +508,7 @@ mod tests {
             surfaces: vec![ProductSurface::OssPersonalOwner],
         };
         let capability = CapabilityDescriptor {
-            target_binding: TargetBinding::NativeContext,
+            target_binding: TargetBinding::RequestDevice,
             exposure: crate::tool_exposure::ExposureRequirement::NoAttachment,
             wire: wire.clone(),
             tool_spec: ToolSpec {
@@ -521,6 +529,38 @@ mod tests {
             },
             capabilities: vec![capability],
         }
+    }
+
+    #[test]
+    fn every_edge_capability_requires_the_shared_request_device_contract() {
+        for target in [TargetBinding::Host, TargetBinding::NativeContext] {
+            let mut invalid = provider("edge", "edge.read", "edge_read");
+            invalid.capabilities[0].target_binding = target;
+            assert!(
+                ProviderRegistryBuilder::new()
+                    .register(invalid)
+                    .build()
+                    .is_err()
+            );
+        }
+        let valid = provider("edge", "edge.read", "edge_read");
+        assert!(
+            ProviderRegistryBuilder::new()
+                .register(valid)
+                .build()
+                .is_ok()
+        );
+        let mut duplicate_selector = provider("edge", "edge.read", "edge_read");
+        duplicate_selector.capabilities[0]
+            .tool_spec
+            .parameters_schema =
+            json!({"type":"object", "properties":{"target_ref":{"type":"string"}}});
+        assert!(
+            ProviderRegistryBuilder::new()
+                .register(duplicate_selector)
+                .build()
+                .is_err()
+        );
     }
 
     #[test]

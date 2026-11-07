@@ -1,5 +1,5 @@
 //! Exact native-launch authority shared by durable orchestration runtimes.
-use super::{CAPABILITY_ID, LaunchApprovalBinding, PROVIDER_ID, TOOL_NAME, approved_binding};
+use super::{CAPABILITY_ID, LaunchApprovalBinding, PROVIDER_ID, TOOL_NAME};
 use crate::capability_grant::CapabilityGrantCall;
 use crate::{
     chat::ToolCall, provider_preflight::ProviderCallSubject, session::PersistedAgentSession,
@@ -24,7 +24,24 @@ impl LaunchCallPreflight {
         readiness_revision: u64,
         surface: ProductSurface,
     ) -> Result<Self, AgentError> {
-        let binding = approved_binding(session, call, readiness_revision)?;
+        Self::build_for_device(
+            session,
+            &session.device_id,
+            call,
+            readiness_revision,
+            surface,
+        )
+    }
+
+    pub fn build_for_device(
+        session: &PersistedAgentSession,
+        device_id: &str,
+        call: &ToolCall,
+        readiness_revision: u64,
+        surface: ProductSurface,
+    ) -> Result<Self, AgentError> {
+        let binding =
+            super::approved_binding_on_device(session, device_id, call, readiness_revision)?;
         let canonical = crate::permission_tools::canonical_tool_permission_input_json(
             TOOL_NAME,
             serde_json::to_value(binding.request())

@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 
 pub const AGENT_RUN_EVENT_SCHEMA_VERSION: u16 = 1;
 pub const TASK_STATUS_PROJECTION_SCHEMA_VERSION: u16 = 1;
-pub const PERMISSION_REQUEST_SCHEMA_VERSION: u16 = 2;
+pub const PERMISSION_REQUEST_SCHEMA_VERSION: u16 = 3;
 pub const BACKGROUND_TASK_SCHEMA_VERSION: u16 = 1;
 pub const MAX_TASK_STATUS_ITEMS: usize = 128;
 /// Owner/model projections retain a bounded task window even when one
@@ -748,16 +748,21 @@ impl GrantRequestItem {
             if desk_agent_protocol::ai_assistant::validate_target_refs([target.target_ref.as_str()])
                 .is_err()
                 || target.readiness_revision == 0
-                || self.canonical_input_json.is_none()
                 || !crate::ai_assistant::ai_assistant_provider_registry_ref()
                     .capability_for_tool(&self.tool_name)
                     .is_some_and(|descriptor| {
                         descriptor.wire.effect == self.expected_effect
+                            && (self.canonical_input_json.is_some()
+                                || crate::permission_tools::permission_input_mode(descriptor)
+                                    == "optional_exact_input")
                             && (crate::request_devices::selected_read_descriptor(descriptor)
                                 || crate::request_devices::selected_action_descriptor(descriptor))
                     })
                 || self.command_confirmation.is_some()
-                || self.launch_confirmation.is_some()
+                || self
+                    .launch_confirmation
+                    .as_ref()
+                    .is_some_and(|binding| binding.subject().device_id != target.device_id)
             {
                 return Err(DynamicRunContractError::InvalidCanonicalPermissionInput);
             }
@@ -813,10 +818,11 @@ impl PermissionRequest {
     }
 
     pub fn selected_device_target(&self) -> Option<&crate::request_devices::SelectedDeviceTarget> {
-        let [item] = self.items.as_slice() else {
-            return None;
-        };
-        item.selected_device_target.as_ref()
+        let target = self.items.first()?.selected_device_target.as_ref()?;
+        self.items
+            .iter()
+            .all(|item| item.selected_device_target.as_ref() == Some(target))
+            .then_some(target)
     }
 
     pub fn selected_device_id(&self) -> Option<&str> {

@@ -348,9 +348,7 @@ impl ActionResultOrigin {
             provenance: DataProvenance {
                 source_provider_id: self.provider_id.clone(),
                 source_tool_name: self.tool_name.clone(),
-                source_object_id: artifact
-                    .map(|artifact| format!("artifact:{}", artifact.file.token))
-                    .or_else(|| Some(self.source_object_id.clone())),
+                source_object_id: Some(self.source_object_id.clone()),
                 source_envelope_ids: self.source_envelope_ids.clone(),
             },
             digest_sha256: digest,

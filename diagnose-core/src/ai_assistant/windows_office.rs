@@ -42,7 +42,7 @@ pub(super) fn provider() -> ProviderDescriptor {
     descriptor = merge_provider_capabilities(
         descriptor,
         provider_for_tool(
-            TargetBinding::NativeContext,
+            TargetBinding::RequestDevice,
             crate::tool_exposure::ExposureRequirement::NoAttachment,
             PROVIDER_ID,
             PATCH_CAPABILITY_ID,

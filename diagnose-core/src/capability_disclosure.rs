@@ -312,14 +312,7 @@ pub fn capability_name_index_prompt(
             if availability.callable() && requestable.contains(name) {
                 permission_input_modes.insert(
                     name,
-                    if permission_candidates.iter().any(|tool| {
-                        tool.name() == name
-                            && crate::request_devices::has_target_selector(&tool.spec)
-                    }) {
-                        "exact_input"
-                    } else {
-                        crate::permission_tools::permission_input_mode(capability)
-                    },
+                    crate::permission_tools::permission_input_mode(capability),
                 );
             }
             if advertised_tool_names.contains(name) {
@@ -417,7 +410,7 @@ fn detail_entries(
                     "input_schema": model_spec.parameters_schema,
                     "execution_policy": capability.wire.execution_policy,
                     "authorization_hint": capability.wire.authorization_hint,
-                    "permission_input_mode": if selected { "exact_input" } else { crate::permission_tools::permission_input_mode(capability) },
+                    "permission_input_mode": crate::permission_tools::permission_input_mode(capability),
                     "limits": capability.wire.limits,
                     "supports_progress": capability.wire.supports_progress,
                     "supports_cancel": capability.wire.supports_cancel,

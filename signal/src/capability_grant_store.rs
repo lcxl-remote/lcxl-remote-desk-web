@@ -884,8 +884,9 @@ impl SignalCapabilityGrantStore {
             .await
         })
         .await?;
-        desk_diagnose_core::file_scope::validate_artifact_scope(
+        desk_diagnose_core::file_scope::validate_device_artifact_scope(
             &session,
+            request.call.target_device_id,
             &grant.tool_name,
             &grant.resource_scope,
             request.call.now_unix_ms,
@@ -1103,7 +1104,10 @@ impl SignalCapabilityGrantStore {
                 agent_session::Entity::find()
                     .filter(agent_session::Column::ConversationId.eq(&grant.run_id))
                     .filter(agent_session::Column::ActorId.eq(&grant.actor_id))
-                    .filter(agent_session::Column::DeviceId.eq(&grant.target_device_id))
+                    .filter(
+                        agent_session::Column::DeviceId
+                            .is_in([String::new(), grant.target_device_id.clone()]),
+                    )
                     .one(&txn)
                     .await
             })
@@ -1113,14 +1117,19 @@ impl SignalCapabilityGrantStore {
                 .map_err(|_| DbErr::Custom("invalid file dispatch session".into()))?;
             if grant_row.status != GRANT_STATUS_ACTIVE
                 || session.actor_id != grant.actor_id
-                || session.device_id != grant.target_device_id
+                || (if session.device_id.is_empty() {
+                    !session.admits_assistant_device(&grant.target_device_id)
+                } else {
+                    session.device_id != grant.target_device_id
+                })
                 || session.conversation_id != grant.run_id
                 || grant.tool_name != payload.tool_name
             {
                 return Err(DbErr::Custom("file dispatch authority changed".into()));
             }
-            desk_diagnose_core::file_scope::validate_artifact_scope(
+            desk_diagnose_core::file_scope::validate_device_artifact_scope(
                 &session,
+                &grant.target_device_id,
                 &grant.tool_name,
                 &grant.resource_scope,
                 now_unix_ms,

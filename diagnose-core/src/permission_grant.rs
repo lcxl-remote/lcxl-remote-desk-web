@@ -301,7 +301,7 @@ pub fn build_permission_grants(
             let subject = binding.subject();
             if binding.target().is_none()
                 || subject.actor_id != session.actor_id
-                || subject.device_id != session.device_id
+                || subject.device_id != device_id
                 || subject.policy_revision != session.policy_revision
                 || subject.input_revision != session.input_revision
                 || subject.readiness_revision != context.readiness_revision
@@ -375,10 +375,11 @@ pub fn build_permission_grants(
         let artifact =
             if crate::provider_preflight::ArtifactCallPreflight::supports(&requested.tool_name) {
                 Some(
-                    crate::provider_preflight::ArtifactCallPreflight::from_session(
+                    crate::provider_preflight::ArtifactCallPreflight::from_device_session(
                         context.registry,
                         context.surface,
                         session,
+                        device_id,
                         &result_read_call,
                         context.now_unix_ms,
                     )?,
@@ -582,8 +583,9 @@ pub fn build_permission_grants(
                     .ok_or_else(|| internal("text mutation requires exact input"))?,
             };
             let preflight =
-                crate::provider_preflight::text_file::TextMutationPreflight::from_session(
+                crate::provider_preflight::text_file::TextMutationPreflight::from_device_session(
                     session,
+                    device_id,
                     context.surface,
                     &call,
                     context.now_unix_ms,
@@ -723,7 +725,9 @@ pub fn build_permission_grants(
         } else {
             resource_scope.clone()
         };
-        let risk_tier = if requested.selected_device_target.is_some() {
+        let risk_tier = if requested.selected_device_target.is_some()
+            && requested.canonical_input_json.is_some()
+        {
             crate::provider_preflight::classify_provider_call(
                 capability,
                 &crate::chat::ToolCall {
@@ -796,8 +800,14 @@ pub fn build_permission_grants(
         } else {
             export_destinations.clone()
         };
-        crate::file_scope::validate_artifact_scope(
+        crate::file_scope::validate_device_artifact_scope(
             session,
+            requested
+                .selected_device_target
+                .as_ref()
+                .map_or(session.device_id.as_str(), |target| {
+                    target.device_id.as_str()
+                }),
             &requested.tool_name,
             &resource_scope,
             context.now_unix_ms,

@@ -261,6 +261,66 @@ fn selectable_scope_round_trips_same_path_with_independent_device_authority() {
     }
     let json = session.encode_json_for_storage().unwrap();
     let mut session = PersistedAgentSession::decode_json(&json).unwrap();
+    session.input_revision = 1;
+    session
+        .bind_assistant_request_targets(vec!["device-a".into(), "device-b".into()])
+        .unwrap();
+    let registry = crate::ai_assistant::ai_assistant_provider_registry();
+    for (device, selected, other) in [
+        (&a, "directory-0", "directory-1"),
+        (&b, "directory-1", "directory-0"),
+    ] {
+        for surface in [
+            desk_agent_protocol::capability_provider::ProductSurface::OssPersonalOwner,
+            desk_agent_protocol::capability_provider::ProductSurface::ManagerPersonalOwner,
+        ] {
+            let call = crate::chat::ToolCall { id: "write".into(), name: "create_text_file".into(),
+                arguments_json: serde_json::json!({"directory_request_id":selected,"file_name":"notes.txt","content_utf8":"owner content"}).to_string() };
+            let input = crate::provider_preflight::ArtifactCallPreflight::from_device_session(
+                &registry,
+                surface,
+                &session,
+                &device.device_id,
+                &call,
+                1,
+            )
+            .unwrap();
+            validate_device_artifact_scope(
+                &session,
+                &device.device_id,
+                &call.name,
+                input.resource_scope(),
+                1,
+            )
+            .unwrap();
+            let model_call = crate::chat::ToolCall { id:"write-model".into(), name:"create_text_file".into(),
+                arguments_json:serde_json::json!({"target_ref":device.device_id,"file_name":"notes.txt","content_utf8":"owner content"}).to_string() };
+            let resolved = crate::ui_model_ids::resolve_session_call_with_context(
+                &model_call,
+                &session,
+                1,
+                None,
+            )
+            .unwrap();
+            let (target, native) = crate::request_devices::split_device_call(&resolved).unwrap();
+            assert_eq!(target, device.device_id);
+            let native: serde_json::Value = serde_json::from_str(&native.arguments_json).unwrap();
+            assert_eq!(native["directory_request_id"], selected);
+            assert!(native.get("target_ref").is_none());
+            let wrong = crate::chat::ToolCall { arguments_json: serde_json::json!({"directory_request_id":other,"file_name":"notes.txt","content_utf8":"owner content"}).to_string(), ..call };
+            assert!(
+                crate::provider_preflight::ArtifactCallPreflight::from_device_session(
+                    &registry,
+                    surface,
+                    &session,
+                    &device.device_id,
+                    &wrong,
+                    1,
+                )
+                .is_err()
+            );
+        }
+    }
     let scope = &mut session.file_scope;
     let revision = scope.revision();
     assert!(

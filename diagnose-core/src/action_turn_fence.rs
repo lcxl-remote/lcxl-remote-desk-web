@@ -36,7 +36,10 @@ impl AssistantTurnFence {
         session: &PersistedAgentSession,
     ) -> Result<Option<desk_agent_protocol::computer_use::ComputerActionTurnScope>, AgentError>
     {
-        let current = Self::from_session(session)?;
+        let current = match held {
+            Some(held) => Self::for_device(session, &held.device_id)?,
+            None => Self::from_session(session)?,
+        };
         if held != current.as_ref() {
             return Err(invalid());
         }

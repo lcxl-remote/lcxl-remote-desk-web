@@ -32,7 +32,7 @@ pub(crate) async fn validate_review_lease_on(
     if frozen != *authority
         || row.conversation_id != authority.conversation_id
         || row.actor_id != authority.actor_id
-        || row.device_id != authority.device_id
+        || row.device_id != authority.review_device_id
         || row.status != APPROVAL_REVIEW_STATUS_REVIEWING
         || row.lease_epoch != authority.lease_epoch as i64
         || row.lease_owner.as_deref() != Some(authority.lease_owner.as_str())
@@ -114,7 +114,9 @@ async fn validate_review_session_on(
     now_ms: i64,
 ) -> Result<(), DbErr> {
     let txn = read.txn();
-    if session.surface != AgentSessionSurface::AiAssistant
+    if (authority.review_device_id != session.device_id
+        && !session.admits_assistant_device(&authority.review_device_id))
+        || session.surface != AgentSessionSurface::AiAssistant
         || session.main_stopped
         || session.input_revision != authority.input_revision
         || session.control_revision != authority.control_revision
@@ -331,7 +333,7 @@ pub(crate) async fn reserve_review_attempt_on(
         session_row::Entity::find()
             .filter(session_row::Column::ConversationId.eq(&candidate.conversation_id))
             .filter(session_row::Column::ActorId.eq(&candidate.owner_id))
-            .filter(session_row::Column::DeviceId.eq(&candidate.device_id))
+            .filter(session_row::Column::DeviceId.is_in(["", candidate.device_id.as_str()]))
             .one(txn)
             .await
     })
@@ -339,7 +341,13 @@ pub(crate) async fn reserve_review_attempt_on(
     .ok_or_else(|| invalid())?;
     let proof = TxnValidatedSession::from_row(txn, row)?;
     let session = proof.session();
-    if session.input_revision != candidate.input_revision {
+    if session.input_revision != candidate.input_revision
+        || (session.device_id != candidate.device_id
+            && (!matches!(
+                candidate.source,
+                desk_diagnose_core::approval_review::ApprovalSource::ConcreteCall { .. }
+            ) || !session.admits_assistant_device(&candidate.device_id)))
+    {
         return Err(invalid());
     }
     let root = session
@@ -354,7 +362,7 @@ pub(crate) async fn reserve_review_attempt_on(
                 .filter(group_row::Column::GroupId.eq(group_id))
                 .filter(group_row::Column::RootConversationId.eq(root))
                 .filter(group_row::Column::ActorId.eq(&candidate.owner_id))
-                .filter(group_row::Column::DeviceId.eq(&candidate.device_id))
+                .filter(group_row::Column::DeviceId.eq(&session.device_id))
                 .one(txn)
                 .await
         })
@@ -408,6 +416,7 @@ pub(crate) async fn reserve_review_attempt_on(
         conversation_id: session.conversation_id.clone(),
         actor_id: session.actor_id.clone(),
         device_id: session.device_id.clone(),
+        review_device_id: candidate.device_id.clone(),
         input_revision: session.input_revision,
         control_revision: session.control_revision,
         source_epoch: group.as_ref().map(|group| group.source_epoch),
@@ -582,7 +591,7 @@ pub(crate) async fn settle_review_call_on(
         || dispatched != row.provider_started_at_ms.is_some()
         || row.candidate_id != authority.candidate_id
         || row.conversation_id != authority.conversation_id
-        || row.device_id != authority.device_id
+        || row.device_id != authority.review_device_id
         || row.actor_id != authority.actor_id
         || row.delegation_reservation_id.is_some() != authority.group_id.is_some()
     {
@@ -763,7 +772,7 @@ async fn validate_review_subject_on(
                 .await?
                 .ok_or_else(|| invalid())?;
             if work.status != crate::capability_grant_store::CAPABILITY_WORK_PREPARED
-                || work.target_device_id != authority.device_id
+                || work.target_device_id != authority.review_device_id
                 || session.current_turn_id.as_deref() != Some(work.turn_id.as_str())
             {
                 return Err(invalid());
@@ -786,7 +795,7 @@ async fn validate_review_subject_on(
             let grant = crate::capability_grant_store::decode_grant(&stored)?;
             if grant.actor_id != authority.actor_id
                 || grant.run_id != authority.conversation_id
-                || grant.target_device_id != authority.device_id
+                || grant.target_device_id != authority.review_device_id
                 || grant.revoked_at_unix_ms.is_some()
                 || grant.expires_at_unix_ms <= now_ms as u64
             {

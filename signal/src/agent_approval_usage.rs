@@ -180,7 +180,7 @@ async fn reconcile_one(
     let stored = delegation_row::Entity::find()
         .filter(delegation_row::Column::DelegationId.eq(&row.delegation_id))
         .filter(delegation_row::Column::ActorId.eq(&row.actor_id))
-        .filter(delegation_row::Column::DeviceId.eq(&row.device_id))
+        .filter(delegation_row::Column::DeviceId.eq(&authority.device_id))
         .lock_exclusive()
         .one(&txn)
         .await?

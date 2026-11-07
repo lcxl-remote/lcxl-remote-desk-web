@@ -255,11 +255,31 @@ impl ArtifactCallPreflight {
         call: &ToolCall,
         now_unix_ms: u64,
     ) -> Result<Self, AgentError> {
-        let destination = crate::file_scope::select_output_directory(session, call, now_unix_ms)
-            .map_err(|_| unavailable())?;
+        Self::from_device_session(
+            registry,
+            surface,
+            session,
+            &session.device_id,
+            call,
+            now_unix_ms,
+        )
+    }
+
+    pub fn from_device_session(
+        registry: &ProviderRegistry,
+        surface: ProductSurface,
+        session: &crate::session::PersistedAgentSession,
+        device_id: &str,
+        call: &ToolCall,
+        now_unix_ms: u64,
+    ) -> Result<Self, AgentError> {
+        let destination =
+            crate::file_scope::select_device_directory(session, device_id, call, now_unix_ms)
+                .map_err(|_| unavailable())?;
         if call.name == "convert_document" {
-            let source = crate::provider_preflight::text_file::document_source_evidence(
+            let source = crate::provider_preflight::text_file::document_source_evidence_on_device(
                 session,
+                device_id,
                 call,
                 now_unix_ms,
             )?;

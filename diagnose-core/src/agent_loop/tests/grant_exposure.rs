@@ -529,6 +529,7 @@ async fn workbench_coordinator_uses_reads_and_rejects_forged_writes_and_permissi
         ) -> Result<Vec<crate::request_devices::RequestDevice>, AgentError> {
             assert!(session.admits_assistant_device("device"));
             Ok(vec![crate::request_devices::RequestDevice {
+                native_readiness: None,
                 read_target: None,
                 ready_provider_ids: vec![crate::ai_assistant::SYSTEM_INFO_CAPABILITY_ID.into()],
                 approved_read_tools: Vec::new(),

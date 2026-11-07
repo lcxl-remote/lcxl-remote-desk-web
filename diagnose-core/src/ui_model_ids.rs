@@ -219,7 +219,6 @@ pub fn resolve_session_call_with_context(
     }
     let inferred = crate::request_devices::infer_single_target(call, session)?;
     let call = inferred.as_ref().unwrap_or(call);
-    crate::request_devices::selected_action_device(session, call)?;
     if call.name == crate::command_confirmation::COMMAND_TOOL
         && crate::request_devices::selected_command_turn(session)
     {
@@ -227,6 +226,22 @@ pub fn resolve_session_call_with_context(
         return Ok(call.clone());
     }
     let mut prepared = call.clone();
+    let route = if call.name != "request_permissions"
+        && session.has_admitted_personal_input()
+        && crate::ai_assistant::ai_assistant_provider_registry_ref()
+            .capability_for_tool(&call.name)
+            .is_some_and(|descriptor| {
+                descriptor.target_binding == crate::provider_registry::TargetBinding::RequestDevice
+            }) {
+        let (reference, native) = crate::request_devices::split_device_call(call)?;
+        let target = session
+            .assistant_request_device(&reference)
+            .ok_or_else(|| invalid("Select an admitted device"))?;
+        prepared = native;
+        Some((reference, target.device_id.clone()))
+    } else {
+        None
+    };
     if call.name == "request_permissions" {
         let mut value: Value = serde_json::from_str(&call.arguments_json)
             .map_err(|_| invalid("Tool arguments must be a JSON object."))?;
@@ -239,11 +254,24 @@ pub fn resolve_session_call_with_context(
     crate::ui_references::UiReferenceState::validate_resolved(&expected, &resolved)?;
     let mut value = serde_json::from_str(&resolved.arguments_json)
         .map_err(|_| invalid("Tool arguments must be a JSON object."))?;
-    crate::document_model_ids::resolve_directories(&call.name, &mut value, session, now_ms)?;
-    crate::file_model_input::complete_session_input(
-        &call.name, &mut value, session, original, now_ms,
-    )?;
+    if let Some((_, device)) = &route {
+        crate::document_model_ids::resolve_device_directories(
+            &call.name, &mut value, session, device, now_ms,
+        )?;
+        crate::file_model_input::complete_device_input(
+            &call.name, &mut value, session, original, device, now_ms,
+        )?;
+    } else {
+        crate::document_model_ids::resolve_directories(&call.name, &mut value, session, now_ms)?;
+        crate::file_model_input::complete_session_input(
+            &call.name, &mut value, session, original, now_ms,
+        )?;
+    }
+    if let Some((reference, _)) = route {
+        value["target_ref"] = json!(reference);
+    }
     resolved.arguments_json = value.to_string();
+    crate::request_devices::selected_action_device(session, &resolved)?;
     Ok(resolved)
 }
 

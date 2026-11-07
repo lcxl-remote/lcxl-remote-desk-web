@@ -667,14 +667,6 @@ fn validate_read_selector(
 }
 
 /// Metadata references permit a separately approved read, never a mutation.
-fn read_evidence(
-    session: &crate::session::PersistedAgentSession,
-    call: &ToolCall,
-    now: u64,
-) -> Result<VerifiedTextFile, AgentError> {
-    read_evidence_on_device(session, &session.device_id, call, now)
-}
-
 fn read_evidence_on_device(
     session: &crate::session::PersistedAgentSession,
     device_id: &str,
@@ -819,8 +811,9 @@ pub struct ResultFileRead {
 
 /// Recover a source identity from a completed read's original arguments while
 /// revalidating its source result and current conversation directory consent.
-pub(super) fn batch_source_file(
+pub(super) fn batch_source_file_on_device(
     session: &crate::session::PersistedAgentSession,
+    device_id: &str,
     call: &ToolCall,
     now: u64,
 ) -> Result<ObjectRef, AgentError> {
@@ -832,9 +825,11 @@ pub(super) fn batch_source_file(
     if selectors.len() != 1 {
         return Err(unavailable());
     }
-    Ok(read_evidence(session, &selectors[0], now)?
-        .reference
-        .clone())
+    Ok(
+        read_evidence_on_device(session, device_id, &selectors[0], now)?
+            .reference
+            .clone(),
+    )
 }
 
 #[derive(Clone)]
@@ -846,8 +841,9 @@ pub struct DocumentSourceEvidence {
 /// Resolve one local-only conversion source from authoritative same-conversation
 /// evidence. This does not authorize model egress and never accepts a path or
 /// opaque reference from model arguments.
-pub fn document_source_evidence(
+pub fn document_source_evidence_on_device(
     session: &crate::session::PersistedAgentSession,
+    device_id: &str,
     call: &ToolCall,
     now: u64,
 ) -> Result<DocumentSourceEvidence, AgentError> {
@@ -869,7 +865,7 @@ pub fn document_source_evidence(
         return Err(unavailable());
     }
     if source_call.name != "convert_document" {
-        let evidence = read_evidence(session, selector, now)?;
+        let evidence = read_evidence_on_device(session, device_id, selector, now)?;
         return Ok(DocumentSourceEvidence {
             reference: evidence.reference,
             sha256: (!evidence.sha256.is_empty()).then_some(evidence.sha256),
@@ -897,6 +893,9 @@ pub fn document_source_evidence(
         if envelope.validate().is_err()
             || crate::model_egress::envelope_expires_by(envelope, now)
             || envelope.provenance.source_tool_name != "convert_document"
+            || (session.device_id.is_empty()
+                && envelope.provenance.source_object_id.as_deref()
+                    != Some(format!("{device_id}:{id}").as_str()))
             || envelope.provenance.source_provider_id != provider.wire.provider_id
             || envelope.digest_sha256
                 != format!(
@@ -944,8 +943,9 @@ pub fn document_source_evidence(
     selected.ok_or_else(unavailable)
 }
 
-pub(super) fn batch_source_files(
+pub(super) fn batch_source_files_on_device(
     session: &crate::session::PersistedAgentSession,
+    device_id: &str,
     tools: &[&str],
     now: u64,
 ) -> Vec<ObjectRef> {
@@ -962,7 +962,7 @@ pub(super) fn batch_source_files(
             name: source.name.clone(),
             arguments_json: source.arguments_json.clone(),
         };
-        if let Ok(file) = batch_source_file(session, &call, now)
+        if let Ok(file) = batch_source_file_on_device(session, device_id, &call, now)
             && !files.contains(&file)
         {
             files.push(file);
@@ -973,8 +973,9 @@ pub(super) fn batch_source_files(
 
 /// Resolve a file target from authenticated directory observations, never from
 /// an owner attachment or a model-supplied native path.
-pub(super) fn directory_file_target(
+pub(super) fn directory_file_target_on_device(
     session: &crate::session::PersistedAgentSession,
+    device_id: &str,
     target: &ObjectRef,
     now: u64,
 ) -> Result<ObjectRef, AgentError> {
@@ -999,7 +1000,7 @@ pub(super) fn directory_file_target(
                     serde_json::json!({"file_result_call_id":id,"entry_name":entry.display_name})
                         .to_string(),
             };
-            if let Ok(file) = batch_source_file(session, &read, now)
+            if let Ok(file) = batch_source_file_on_device(session, device_id, &read, now)
                 && &file == target
             {
                 return Ok(file);
@@ -1337,14 +1338,29 @@ impl TextMutationPreflight {
         call: &ToolCall,
         now_unix_ms: u64,
     ) -> Result<Self, AgentError> {
+        Self::from_device_session(session, &session.device_id, surface, call, now_unix_ms)
+    }
+
+    pub fn from_device_session(
+        session: &crate::session::PersistedAgentSession,
+        device_id: &str,
+        surface: ProductSurface,
+        call: &ToolCall,
+        now_unix_ms: u64,
+    ) -> Result<Self, AgentError> {
         let args: serde_json::Value =
             serde_json::from_str(&call.arguments_json).map_err(|_| unavailable())?;
         let id = args
             .get("file_result_call_id")
-            .and_then(|v| v.as_str())
+            .and_then(serde_json::Value::as_str)
             .ok_or_else(unavailable)?;
-        let evidence = resolve_file_result(session, id, now_unix_ms)?;
-        let mut result = Self::build(session, call, &evidence, now_unix_ms)?;
+        let selector = ToolCall {
+            id: call.id.clone(),
+            name: "read_text_file".into(),
+            arguments_json: serde_json::json!({"file_result_call_id":id}).to_string(),
+        };
+        let evidence = read_evidence_on_device(session, device_id, &selector, now_unix_ms)?;
+        let mut result = Self::build_on_device(session, device_id, call, &evidence, now_unix_ms)?;
         if !matches!(
             surface,
             ProductSurface::OssPersonalOwner | ProductSurface::ManagerPersonalOwner
@@ -1428,6 +1444,16 @@ impl TextMutationPreflight {
         evidence: &VerifiedTextFile,
         now_unix_ms: u64,
     ) -> Result<Self, AgentError> {
+        Self::build_on_device(session, &session.device_id, call, evidence, now_unix_ms)
+    }
+
+    pub fn build_on_device(
+        session: &crate::session::PersistedAgentSession,
+        device_id: &str,
+        call: &ToolCall,
+        evidence: &VerifiedTextFile,
+        now_unix_ms: u64,
+    ) -> Result<Self, AgentError> {
         let registry = crate::ai_assistant::ai_assistant_provider_registry();
         let capability = registry
             .capability_for_tool(&call.name)
@@ -1440,8 +1466,9 @@ impl TextMutationPreflight {
         {
             return Err(unavailable());
         }
-        let directory = crate::file_scope::select_output_directory(session, call, now_unix_ms)
-            .map_err(|_| unavailable())?;
+        let directory =
+            crate::file_scope::select_device_directory(session, device_id, call, now_unix_ms)
+                .map_err(|_| unavailable())?;
         let (result_id, expected_sha256, selector, action) = match call.name.as_str() {
             UPDATE_TEXT_TOOL => {
                 let args: UpdateArgs =

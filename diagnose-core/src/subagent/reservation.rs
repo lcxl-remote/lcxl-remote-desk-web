@@ -259,6 +259,7 @@ pub struct ReviewCallAuthority {
     pub conversation_id: String,
     pub actor_id: String,
     pub device_id: String,
+    pub review_device_id: String,
     pub input_revision: u64,
     pub control_revision: u64,
     pub source_epoch: Option<u64>,
@@ -267,11 +268,13 @@ pub struct ReviewCallAuthority {
 impl ReviewCallAuthority {
     pub fn validate(&self) -> Result<(), &'static str> {
         self.attempt.validate()?;
-        let valid_device_audience = valid_id(&self.device_id)
+        let valid_device_audience = valid_id(&self.device_id) || self.device_id.is_empty();
+        let valid_review_device = self.review_device_id == self.device_id
             || (self.device_id.is_empty()
+                && valid_id(&self.review_device_id)
                 && matches!(
                     self.source,
-                    crate::approval_review::ApprovalSource::PermissionItem { .. }
+                    crate::approval_review::ApprovalSource::ConcreteCall { .. }
                 ));
         if [
             &self.candidate_id,
@@ -285,6 +288,7 @@ impl ReviewCallAuthority {
         .iter()
         .any(|id| !valid_id(id))
             || !valid_device_audience
+            || !valid_review_device
             || self.group_id.as_ref().is_some_and(|id| !valid_id(id))
             || self.task_id.as_ref().is_some_and(|id| !valid_id(id))
             || [
@@ -376,11 +380,31 @@ mod tests {
             conversation_id: "child".into(),
             actor_id: "1".into(),
             device_id: "1".into(),
+            review_device_id: "1".into(),
             input_revision: 1,
             control_revision: 1,
             source_epoch: Some(1),
         }
     }
+    #[test]
+    fn concrete_review_separates_the_account_session_from_the_action_device() {
+        let mut proof = authority();
+        proof.device_id.clear();
+        proof.review_device_id = "physical-a".into();
+        assert!(proof.validate().is_err());
+        proof.source = crate::approval_review::ApprovalSource::ConcreteCall {
+            call_id: "native-call".into(),
+            grant_id: "grant".into(),
+        };
+        proof.source_planning_lease_token = Some(1);
+        proof.validate().unwrap();
+        let restored: ReviewCallAuthority =
+            serde_json::from_str(&serde_json::to_string(&proof).unwrap()).unwrap();
+        assert_eq!(restored, proof);
+        proof.device_id = "physical-b".into();
+        assert!(proof.validate().is_err());
+    }
+
     #[test]
     fn rendered_request_cannot_exceed_the_original_token_reservation() {
         let mut reservation = receipt();

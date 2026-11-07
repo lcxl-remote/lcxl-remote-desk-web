@@ -1420,10 +1420,15 @@ pub fn bind_artifact_request(
                 .clone()
                 .ok_or_else(|| invalid("artifact permission requires the complete exact input"))?,
         };
-        let preflight = crate::provider_preflight::ArtifactCallPreflight::from_session(
+        let preflight = crate::provider_preflight::ArtifactCallPreflight::from_device_session(
             registry,
             surface,
             session,
+            item.selected_device_target
+                .as_ref()
+                .map_or(session.device_id.as_str(), |target| {
+                    target.device_id.as_str()
+                }),
             &call,
             now_unix_ms,
         )?;

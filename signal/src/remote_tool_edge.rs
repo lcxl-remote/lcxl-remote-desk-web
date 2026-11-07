@@ -2696,11 +2696,12 @@ impl SignalAiAssistantTools {
         let shared_launch = desk_diagnose_core::future::phase(|| async {
             let shared_launch = if call.name == desk_diagnose_core::application_launch::TOOL_NAME {
                 Some(
-                    desk_diagnose_core::application_launch::approved_binding(
+                    desk_diagnose_core::application_launch::approved_binding_on_device(
                         &desk_diagnose_core::future::boxed(|| async {
                             self.authoritative_session().await
                         })
                         .await?,
+                        &self.target_device_id,
                         call,
                         self.readiness_revision,
                     )
@@ -2728,7 +2729,7 @@ impl SignalAiAssistantTools {
                             .filter(|record| record.readiness.revision == self.readiness_revision)
                             .ok_or_else(desk_diagnose_core::directory_tools::unavailable)?;
                     Some(
-                        desk_diagnose_core::provider_preflight::IworkCallPreflight::from_session(
+                        desk_diagnose_core::provider_preflight::IworkCallPreflight::from_device_session(
                             &self.provider_registry,
                             ProductSurface::OssPersonalOwner,
                             call,
@@ -2737,6 +2738,7 @@ impl SignalAiAssistantTools {
                                 self.authoritative_session().await
                             })
                             .await?,
+                            &self.target_device_id,
                             &current.readiness.interactive_session_incarnation,
                             now_unix_ms,
                         )
@@ -2755,7 +2757,7 @@ impl SignalAiAssistantTools {
             if desk_diagnose_core::provider_preflight::text_file::TextMutationPreflight::supports(
                 &call.name,
             ) {
-                Some(desk_diagnose_core::provider_preflight::text_file::TextMutationPreflight::from_session(&desk_diagnose_core::future::boxed(|| async { self.authoritative_session().await }).await?, ProductSurface::OssPersonalOwner, call, now_unix_ms).inspect_err(|error| { self.observed(call).input_error(error); })?)
+                Some(desk_diagnose_core::provider_preflight::text_file::TextMutationPreflight::from_device_session(&desk_diagnose_core::future::boxed(|| async { self.authoritative_session().await }).await?, &self.target_device_id, ProductSurface::OssPersonalOwner, call, now_unix_ms).inspect_err(|error| { self.observed(call).input_error(error); })?)
             } else {
                 None
             };
@@ -3555,7 +3557,12 @@ impl SignalAiAssistantTools {
                 }
             }
             let dispatch_id = match desk_diagnose_core::future::boxed(|| async {
-                store.record_dispatch_intent(prepare()).await
+                store
+                    .record_dispatch_intent_for_target(
+                        prepare(),
+                        self.selected_device_fence.as_ref(),
+                    )
+                    .await
             })
             .await
             .map_err(|db_error| {
@@ -3662,7 +3669,7 @@ impl SignalAiAssistantTools {
             adapter,
             approval_id: grant_id.clone(),
             approved_actor_id: self.actor_id.clone(),
-            draft_hash: canonical_input_digest_sha256,
+            draft_hash: canonical_input_digest_sha256.clone(),
             expires_at: (chrono::Utc::now() + chrono::Duration::seconds(30)).to_rfc3339(),
             timeout_ms: 30_000,
             actions: vec![ComputerActionStep {
@@ -3846,6 +3853,23 @@ impl SignalAiAssistantTools {
                 })
                 .await?;
                 return Err(dispatch_error);
+            }
+            if self.selected_device_fence.is_some() {
+                store
+                    .validate_claimed_dispatch_for_target(
+                        &dispatch_id,
+                        prepare(),
+                        self.selected_device_fence.as_ref(),
+                    )
+                    .await
+                    .map_err(|_| {
+                        error(
+                            AgentErrorKind::PermissionDenied,
+                            "Device action authority changed before dispatch",
+                            false,
+                            true,
+                        )
+                    })?;
             }
             let sent = desk_diagnose_core::future::boxed(|| async { target.session.write().await })
                 .await
@@ -4102,15 +4126,20 @@ impl SignalAiAssistantTools {
         let now_ms = u64::try_from(chrono::Utc::now().timestamp_millis())
             .map_err(|_| desk_diagnose_core::directory_tools::unavailable())?;
         let selected_directories = vec![
-            desk_diagnose_core::file_scope::select_output_directory(&current_session, call, now_ms)
-                .map_err(|_| {
-                    error(
-                        AgentErrorKind::PermissionDenied,
-                        "Select an approved conversation directory before creating a file",
-                        false,
-                        true,
-                    )
-                })?,
+            desk_diagnose_core::file_scope::select_device_directory(
+                &current_session,
+                &self.target_device_id,
+                call,
+                now_ms,
+            )
+            .map_err(|_| {
+                error(
+                    AgentErrorKind::PermissionDenied,
+                    "Select an approved conversation directory before creating a file",
+                    false,
+                    true,
+                )
+            })?,
         ];
         if selected_directories.len() != 1 {
             return Err(error(
@@ -4122,8 +4151,9 @@ impl SignalAiAssistantTools {
         }
         let artifact_preflight = if canonical_call.name == "convert_document" {
             let source =
-                desk_diagnose_core::provider_preflight::text_file::document_source_evidence(
+                desk_diagnose_core::provider_preflight::text_file::document_source_evidence_on_device(
                     &current_session,
+                    &self.target_device_id,
                     &source_selector_call,
                     now_ms,
                 )?;
@@ -4307,7 +4337,7 @@ impl SignalAiAssistantTools {
             }
         };
         let dispatch_id = match desk_diagnose_core::future::boxed(|| async {
-            store.record_dispatch_intent(prepare()).await
+            store.record_dispatch_intent_for_target(prepare(), self.selected_device_fence.as_ref()).await
         })
         .await
         .map_err(|db_error| {
@@ -4354,7 +4384,7 @@ impl SignalAiAssistantTools {
                 return Ok(ExecOutcome::Unknown(
                     desk_diagnose_core::session::ActionIdentity::new(
                         prepared.work_id,
-                        server_call_id,
+                        &server_call_id,
                         dispatch_id,
                         desk_diagnose_core::session::WorkKind::ComputerAction,
                     ),
@@ -4500,7 +4530,7 @@ impl SignalAiAssistantTools {
             return Err(dispatch_error);
         }
         let plan = SealedComputerActionPlan {
-            turn_scope: None,
+            turn_scope: self.selected_device_fence.as_ref().map(|held| held.computer_action_scope()).transpose()?,
             schema_version: COMPUTER_USE_SCHEMA_VERSION,
             work_id: claimed.work_id.to_string(),
             action_request_id: server_call_id.clone(),
@@ -4682,6 +4712,9 @@ impl SignalAiAssistantTools {
             })
             .await?;
             return Err(dispatch_error);
+        }
+        if self.selected_device_fence.is_some() {
+            store.validate_claimed_dispatch_for_target(&dispatch_id, prepare(), self.selected_device_fence.as_ref()).await.map_err(|_| error(AgentErrorKind::PermissionDenied, "Device action authority changed before dispatch", false, true))?;
         }
         let sent = desk_diagnose_core::future::boxed(|| async { target.session.write().await })
             .await
@@ -5730,7 +5763,9 @@ impl SignalAiAssistantTools {
             }
         };
         let dispatch_id = match desk_diagnose_core::future::boxed(|| async {
-            store.record_dispatch_intent(prepare()).await
+            store
+                .record_dispatch_intent_for_target(prepare(), self.selected_device_fence.as_ref())
+                .await
         })
         .await
         .map_err(|db_error| {
@@ -5785,7 +5820,7 @@ impl SignalAiAssistantTools {
         };
         let generation = dispatch_id.clone();
         let plan = SealedComputerActionPlan {
-        turn_scope: None,
+        turn_scope: self.selected_device_fence.as_ref().map(|held| held.computer_action_scope()).transpose()?,
         schema_version: COMPUTER_USE_SCHEMA_VERSION,
         work_id: claimed.work_id.to_string(),
         action_request_id: server_call_id.clone(),
@@ -5798,9 +5833,9 @@ impl SignalAiAssistantTools {
                 desk_diagnose_core::ai_assistant::OUTLOOK_NEW_MAILTO_ADAPTER_VERSION
                     .into(),
         },
-        approval_id: grant_id,
+        approval_id: grant_id.clone(),
         approved_actor_id: self.actor_id.clone(),
-        draft_hash: canonical_input_digest_sha256,
+        draft_hash: canonical_input_digest_sha256.clone(),
         expires_at: (chrono::Utc::now() + chrono::Duration::seconds(30)).to_rfc3339(),
         timeout_ms: 30_000,
         actions: vec![ComputerActionStep {
@@ -5907,6 +5942,23 @@ impl SignalAiAssistantTools {
                 false,
                 false,
             ));
+        }
+        if self.selected_device_fence.is_some() {
+            store
+                .validate_claimed_dispatch_for_target(
+                    &dispatch_id,
+                    prepare(),
+                    self.selected_device_fence.as_ref(),
+                )
+                .await
+                .map_err(|_| {
+                    error(
+                        AgentErrorKind::PermissionDenied,
+                        "Device action authority changed before dispatch",
+                        false,
+                        true,
+                    )
+                })?;
         }
         let sent = desk_diagnose_core::future::boxed(|| async { target.session.write().await })
             .await
@@ -6698,6 +6750,22 @@ impl ToolSeam for SignalAiAssistantTools {
         )
         .await
     }
+    async fn resolve_request_device_application(
+        &self,
+        session: &desk_diagnose_core::session::PersistedAgentSession,
+        target_ref: &str,
+        request: &desk_agent_protocol::application_launch::LaunchApplicationRequest,
+    ) -> Result<desk_agent_protocol::application_launch::LaunchPreflightReceipt, AgentError> {
+        let (held, connection) = self.selected_connection(session, target_ref).await?;
+        application::resolve_candidate(
+            self.connections.as_ref(),
+            &connection,
+            &self.actor_id,
+            &held.device_id,
+            request,
+        )
+        .await
+    }
     async fn resolve_directory_candidate(
         &self,
         path: &str,
@@ -7152,10 +7220,7 @@ impl ToolSeam for SignalAiAssistantTools {
             provenance: DataProvenance {
                 source_provider_id: provider.wire.provider_id.clone(),
                 source_tool_name: call.name.clone(),
-                source_object_id: created_artifact
-                    .as_ref()
-                    .map(|artifact| format!("artifact:{}", artifact.file.token))
-                    .or_else(|| Some(format!("{}:{}", self.target_device_id, call.id))),
+                source_object_id: Some(format!("{}:{}", self.target_device_id, call.id)),
                 source_envelope_ids: Vec::new(),
             },
             digest_sha256,

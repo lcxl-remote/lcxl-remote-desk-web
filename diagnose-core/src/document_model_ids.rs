@@ -382,13 +382,39 @@ pub(crate) fn resolve_directories(
     session: &PersistedAgentSession,
     now: u64,
 ) -> Result<(), AgentError> {
+    let device = value
+        .get("target_ref")
+        .and_then(Value::as_str)
+        .map(|reference| {
+            session
+                .assistant_request_device(reference)
+                .map(|target| target.device_id.as_str())
+                .ok_or_else(|| invalid("Select an admitted device for the output directory"))
+        })
+        .transpose()?;
+    resolve_device_directories(
+        tool,
+        value,
+        session,
+        device.unwrap_or(&session.device_id),
+        now,
+    )
+}
+
+pub(crate) fn resolve_device_directories(
+    tool: &str,
+    value: &mut Value,
+    session: &PersistedAgentSession,
+    device_id: &str,
+    now: u64,
+) -> Result<(), AgentError> {
     if tool == "request_permissions" {
         if let Some(items) = value.get_mut("items").and_then(Value::as_array_mut) {
             for item in items {
                 if let Some(tool) = item["tool_name"].as_str().map(str::to_owned)
                     && let Some(exact) = item.get_mut("exact_input")
                 {
-                    resolve_directories(&tool, exact, session, now)?;
+                    resolve_device_directories(&tool, exact, session, device_id, now)?;
                 }
             }
         }
@@ -406,8 +432,9 @@ pub(crate) fn resolve_directories(
         } else {
             json!({"directory_request_id":id})
         };
-        let directory = crate::file_scope::select_output_directory(
+        let directory = crate::file_scope::select_device_directory(
             session,
+            device_id,
             &ToolCall {
                 id: "resolve-output-directory".into(),
                 name: tool.into(),

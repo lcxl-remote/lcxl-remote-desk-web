@@ -141,6 +141,17 @@ pub fn resolve_excel_read(
     target: &ObjectRef,
     now: u64,
 ) -> Result<ExcelReadBinding, AgentError> {
+    resolve_excel_read_on_device(session, &session.device_id, selected, worker, target, now)
+}
+
+pub fn resolve_excel_read_on_device(
+    session: &crate::session::PersistedAgentSession,
+    device_id: &str,
+    selected: &ObjectRef,
+    worker: &str,
+    target: &ObjectRef,
+    now: u64,
+) -> Result<ExcelReadBinding, AgentError> {
     use crate::{ai_assistant::windows_excel, chat::ChatRole};
     let mut found = None;
     for message in &session.conversation {
@@ -179,7 +190,10 @@ pub fn resolve_excel_read(
         let Some(envelope) = &message.trusted_tool_result().data_envelope else {
             continue;
         };
-        if envelope.validate().is_err()
+        if (session.device_id.is_empty()
+            && envelope.provenance.source_object_id.as_deref()
+                != Some(format!("{device_id}:{call_id}").as_str()))
+            || envelope.validate().is_err()
             || crate::model_egress::envelope_expires_by(envelope, now)
             || envelope.provenance.source_tool_name != call.name
             || envelope.provenance.source_provider_id != windows_excel::PROVIDER_ID

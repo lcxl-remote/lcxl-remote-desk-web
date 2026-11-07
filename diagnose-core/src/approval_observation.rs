@@ -197,7 +197,7 @@ impl ReviewTracking {
         };
         Self::queued(
             &authority.actor_id,
-            &authority.device_id,
+            &authority.review_device_id,
             &authority.conversation_id,
             &authority.root_conversation_id,
             &authority.delegation_id,
