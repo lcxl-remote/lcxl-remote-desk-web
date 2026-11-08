@@ -512,8 +512,7 @@ pub(crate) async fn consume_projection_on<C: ConnectionTrait>(
         .filter(projection::Column::ActorId.eq(&source.row.actor_id))
         .filter(projection::Column::Revision.eq(source.row.revision))
         .filter(projection::Column::RevokedAtMs.is_null())
-        .filter(projection::Column::ProofJson.eq(&source.row.proof_json))
-        .filter(projection::Column::PayloadSha256.eq(&source.row.payload_sha256));
+        .filter(projection::Column::ProofJson.eq(&source.row.proof_json));
     update = if let Some(body) = &source.row.result_json {
         update.filter(projection::Column::ResultJson.eq(body))
     } else {

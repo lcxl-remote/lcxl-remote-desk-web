@@ -22,7 +22,6 @@ use desk_diagnose_core::{
     native_ids::{self, Kind},
 };
 use sea_orm::{PaginatorTrait, sea_query::Expr};
-use sha2::{Digest, Sha256};
 
 // These rows store query metadata only. They do not authorize any source read.
 fn source(label: &str) -> QuerySourceVersion {
@@ -495,7 +494,6 @@ fn corrupted_denormalized_query_bindings_are_rejected_even_with_a_valid_json_dig
         kind: proof.request.kind().into(),
         request_sha256: proof.snapshot.request_sha256.clone(),
         scope_sha256: proof.binding.fingerprint().unwrap(),
-        proof_sha256: format!("{:x}", Sha256::digest(raw.as_bytes())),
         proof_json: raw,
         captured_at_ms: proof.snapshot.captured_at_unix_ms as i64,
         expires_at_ms: proof.snapshot.expires_at_unix_ms as i64,
@@ -508,11 +506,8 @@ fn corrupted_denormalized_query_bindings_are_rejected_even_with_a_valid_json_dig
     let mut changed = row.clone();
     changed.actor_id = "2".into();
     assert!(cache::decode_row(changed).is_err());
-    let mut changed = row.clone();
-    changed.expires_at_ms += 1;
-    assert!(cache::decode_row(changed).is_err());
     let mut changed = row;
-    changed.proof_sha256 = "f".repeat(64);
+    changed.expires_at_ms += 1;
     assert!(cache::decode_row(changed).is_err());
 }
 

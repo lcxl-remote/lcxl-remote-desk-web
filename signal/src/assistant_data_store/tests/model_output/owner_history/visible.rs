@@ -382,7 +382,10 @@ async fn decoded_archive_reuse_still_reselects_exact_rows() {
             1 => {
                 archived::Entity::update_many()
                     .filter(archived::Column::Id.eq(known.row.id))
-                    .col_expr(archived::Column::ProofSha256, Expr::value("a".repeat(64)))
+                    .col_expr(
+                        archived::Column::OutputEnvelopeId,
+                        Expr::value("changed-output"),
+                    )
                     .exec(&txn)
                     .await
                     .unwrap();

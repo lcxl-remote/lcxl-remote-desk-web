@@ -15,7 +15,6 @@ use sea_orm::{
 };
 #[cfg(test)]
 use sea_orm::{DatabaseBackend, QueryOrder, QuerySelect};
-use sha2::{Digest, Sha256};
 
 pub struct StoredQuery {
     pub row: query::Model,
@@ -210,16 +209,11 @@ pub async fn update_on<C: ConnectionTrait>(
             query::Column::ProofJson,
             Expr::value(row.proof_json.clone()),
         )
-        .col_expr(
-            query::Column::ProofSha256,
-            Expr::value(row.proof_sha256.clone()),
-        )
         .col_expr(query::Column::Revision, Expr::value(row.revision))
         .filter(query::Column::Id.eq(old.row.id))
         .filter(query::Column::ActorId.eq(&old.row.actor_id))
         .filter(query::Column::Revision.eq(old.row.revision))
         .filter(query::Column::ProofJson.eq(&old.row.proof_json))
-        .filter(query::Column::ProofSha256.eq(&old.row.proof_sha256))
         .exec(db)
         .await?;
     if changed.rows_affected != 1 {
@@ -261,7 +255,6 @@ pub async fn prune_expired_on<C: ConnectionTrait>(
             .filter(query::Column::ActorId.eq(actor))
             .filter(query::Column::Revision.eq(row.revision))
             .filter(query::Column::ProofJson.eq(&row.proof_json))
-            .filter(query::Column::ProofSha256.eq(&row.proof_sha256))
             .exec(db)
             .await?;
         if removed.rows_affected != 1 {
@@ -328,7 +321,6 @@ fn to_row(
             .binding
             .fingerprint()
             .map_err(AssistantStoreError::Invalid)?,
-        proof_sha256: format!("{:x}", Sha256::digest(proof_json.as_bytes())),
         proof_json,
         captured_at_ms: signed(proof.snapshot.captured_at_unix_ms)?,
         expires_at_ms: signed(proof.snapshot.expires_at_unix_ms)?,
@@ -354,7 +346,6 @@ pub fn decode_row(row: query::Model) -> Result<StoredQuery, AssistantStoreError>
                 .fingerprint()
                 .map_err(AssistantStoreError::Invalid)?
         || row.proof_json != proof.encode().map_err(AssistantStoreError::Invalid)?
-        || row.proof_sha256 != format!("{:x}", Sha256::digest(row.proof_json.as_bytes()))
         || unsigned(row.captured_at_ms)? != proof.snapshot.captured_at_unix_ms
         || unsigned(row.expires_at_ms)? != proof.snapshot.expires_at_unix_ms
     {
@@ -373,7 +364,6 @@ pub fn metadata_bytes(row: &query::Model) -> Result<i64, AssistantStoreError> {
         &row.kind,
         &row.request_sha256,
         &row.scope_sha256,
-        &row.proof_sha256,
         &row.proof_json,
     ];
     let bytes = fields

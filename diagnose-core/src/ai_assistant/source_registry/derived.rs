@@ -23,7 +23,6 @@ pub struct NativeDerivedInputPolicy {
     pub output_envelope_id: String,
     pub output_digest_sha256: String,
     pub output_label_sha256: String,
-    pub source_archive_sha256: String,
     pub actor_input_seq: u64,
     pub input_revision: u64,
     pub source_contract_revision: u64,
@@ -43,7 +42,6 @@ impl NativeDerivedInputPolicy {
             output_envelope_id: parent.output.envelope_id.clone(),
             output_digest_sha256: parent.output.digest_sha256.clone(),
             output_label_sha256: evidence.output_label_sha256.clone(),
-            source_archive_sha256: parent.fingerprint()?,
             actor_input_seq: parent.actor_input_seq,
             input_revision: parent.input_revision,
             source_contract_revision: parent.source_set.context.source_contract_revision,
@@ -59,13 +57,9 @@ impl NativeDerivedInputPolicy {
         validate_source_id(&self.conversation_id)?;
         validate_source_id(&self.physical_call_id)?;
         validate_source_id(&self.output_envelope_id)?;
-        if [
-            &self.output_digest_sha256,
-            &self.output_label_sha256,
-            &self.source_archive_sha256,
-        ]
-        .iter()
-        .any(|hash| hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()))
+        if [&self.output_digest_sha256, &self.output_label_sha256]
+            .iter()
+            .any(|hash| hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()))
             || (self.actor_input_seq == 0 && !self.conversation_id.starts_with("schedule-run-"))
             || self.actor_input_seq > i64::MAX as u64
             || self.input_revision == 0

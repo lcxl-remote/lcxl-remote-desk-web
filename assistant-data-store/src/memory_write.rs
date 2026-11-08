@@ -117,10 +117,7 @@ pub async fn replay_on<C: ConnectionTrait>(
     else {
         return Ok(None);
     };
-    if row.request_sha256 != request
-        || row.source_call_id != call
-        || row.result_sha256 != format!("{:x}", Sha256::digest(row.result_json.as_bytes()))
-    {
+    if row.request_sha256 != request || row.source_call_id != call {
         return Err(AssistantStoreError::Invalid(
             "memory write replay arguments changed",
         ));
@@ -460,7 +457,6 @@ pub async fn apply_on<C: ConnectionTrait>(
         source_call_id: write.producer_call.into(),
         request_sha256: write.request_sha256.into(),
         memory_state_generation: generation,
-        result_sha256: format!("{:x}", Sha256::digest(result_json.as_bytes())),
         result_json,
         created_at_ms: now,
         expires_at_ms: signed(

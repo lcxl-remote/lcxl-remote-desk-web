@@ -178,8 +178,8 @@ async fn scoped_projection_lookup_rejects_modified_bindings_and_cannot_read_anot
     );
     crate::entity::agent_assistant_read_projection::Entity::update_many()
         .col_expr(
-            crate::entity::agent_assistant_read_projection::Column::PayloadSha256,
-            sea_orm::sea_query::Expr::value("c".repeat(64)),
+            crate::entity::agent_assistant_read_projection::Column::SourceEnvelopeId,
+            sea_orm::sea_query::Expr::value("changed-envelope"),
         )
         .filter(
             crate::entity::agent_assistant_read_projection::Column::ProjectionId

@@ -382,7 +382,7 @@ fn normalized_references_reject_wrong_context_labels_duplicates_unrelated_parent
                 .parents
                 .push(NativeDerivedInputPolicy::from_archive(&other).unwrap()),
             4 => changed.parents[0].conversation_id = "another-root".into(),
-            5 => changed.parents[0].source_archive_sha256 = "invalid".into(),
+            5 => changed.parents[0].output_digest_sha256 = "invalid".into(),
             6 => changed.parents[0].source_contract_revision += 1,
             _ => changed.parents[0].policy_revision += 1,
         }

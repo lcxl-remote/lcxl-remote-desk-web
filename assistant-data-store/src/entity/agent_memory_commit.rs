@@ -20,7 +20,6 @@ pub struct Model {
     pub memory_state_generation: i64,
     #[sea_orm(column_type = "Text")]
     pub result_json: String,
-    pub result_sha256: String,
     pub created_at_ms: i64,
     #[sea_orm(indexed)]
     pub expires_at_ms: i64,

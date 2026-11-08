@@ -12,7 +12,6 @@ pub fn metadata_bytes(row: &receipt::Model) -> Result<i64, AssistantStoreError> 
         &row.source_call_id,
         &row.request_sha256,
         &row.result_json,
-        &row.result_sha256,
     ];
     text.iter().try_fold(5_i64 * 8, |sum, value| {
         sum.checked_add(value.len() as i64)
@@ -47,7 +46,6 @@ pub async fn collect_on<C: ConnectionTrait>(
             .filter(receipt::Column::Id.eq(row.id))
             .filter(receipt::Column::CommitId.eq(&row.commit_id))
             .filter(receipt::Column::RequestSha256.eq(&row.request_sha256))
-            .filter(receipt::Column::ResultSha256.eq(&row.result_sha256))
             .exec(db)
             .await?;
         if removed.rows_affected != 1 {

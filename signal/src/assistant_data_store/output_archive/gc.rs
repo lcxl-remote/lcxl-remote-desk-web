@@ -189,7 +189,6 @@ async fn collect_archive_on(
         .filter(archived::Column::Id.eq(stored.row.id))
         .filter(archived::Column::ActorId.eq(actor))
         .filter(archived::Column::PhysicalCallId.eq(&stored.row.physical_call_id))
-        .filter(archived::Column::ProofSha256.eq(&stored.row.proof_sha256))
         .filter(archived::Column::ProofJson.eq(&stored.row.proof_json))
         .exec(db)
         .await?;

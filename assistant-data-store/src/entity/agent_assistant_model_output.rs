@@ -25,7 +25,6 @@ pub struct Model {
     pub input_recorded_at_ms: i64,
     pub statement_timezone: String,
     pub completed_at_ms: i64,
-    pub proof_sha256: String,
     /// The proof with its growing lists replaced by item ordinal ranges.
     #[sea_orm(column_type = "Text")]
     pub proof_json: String,

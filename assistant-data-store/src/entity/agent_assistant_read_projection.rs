@@ -22,7 +22,6 @@ pub struct Model {
     pub tool_call_id: Option<String>,
     #[sea_orm(indexed)]
     pub source_envelope_id: String,
-    pub payload_sha256: String,
     pub request_sha256: String,
     pub scope_sha256: String,
     pub purpose: String,

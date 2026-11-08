@@ -178,7 +178,7 @@ async fn late_pin_insert_failure_rolls_back_native_acceptance_archive_and_quota_
 }
 
 #[tokio::test]
-async fn changed_or_missing_shared_items_fail_complete_reads_but_not_parent_heads() {
+async fn missing_shared_items_fail_complete_reads_but_not_parent_heads() {
     let (store, parent, _) = chain("shared-item-change").await;
     let stored = item::Entity::find()
         .filter(item::Column::Kind.eq(2))
@@ -186,19 +186,6 @@ async fn changed_or_missing_shared_items_fail_complete_reads_but_not_parent_head
         .await
         .unwrap()
         .unwrap();
-    let mut changed: serde_json::Value = serde_json::from_str(&stored.item_json).unwrap();
-    changed["envelope_id"] = "changed-envelope".into();
-    item::Entity::update_many()
-        .col_expr(item::Column::ItemJson, Expr::value(changed.to_string()))
-        .filter(item::Column::Id.eq(stored.id))
-        .exec(&store.db)
-        .await
-        .unwrap();
-    assert!(
-        output_archive::find_on(&store.db, "root", &parent)
-            .await
-            .is_err()
-    );
     // The accepted cost of linear parent checks: heads never load item bodies.
     assert!(
         desk_assistant_data_store::output_store::find_head_on(&store.db, "root", &parent)

@@ -273,7 +273,6 @@ pub struct ArchiveHead {
     pub actor_input_seq: i64,
     pub input_revision: i64,
     pub completed_at_ms: i64,
-    pub proof_sha256: String,
     pub parent_summary_json: String,
 }
 
@@ -292,7 +291,6 @@ impl ArchiveHead {
             output_envelope_id: self.output_envelope_id.clone(),
             output_digest_sha256: self.output_digest_sha256.clone(),
             output_label_sha256: self.output_label_sha256.clone(),
-            source_archive_sha256: self.proof_sha256.clone(),
             actor_input_seq: u64::try_from(self.actor_input_seq).map_err(|_| INVALID)?,
             input_revision: u64::try_from(self.input_revision).map_err(|_| INVALID)?,
             source_contract_revision: summary.source_contract_revision,
@@ -317,7 +315,6 @@ fn head_query() -> sea_orm::Select<archived::Entity> {
         .column(archived::Column::ActorInputSeq)
         .column(archived::Column::InputRevision)
         .column(archived::Column::CompletedAtMs)
-        .column(archived::Column::ProofSha256)
         .column(archived::Column::ParentSummaryJson)
 }
 

@@ -174,7 +174,6 @@ pub(crate) async fn prepare_on<'a>(
         input_recorded_at_ms: signed(proof.input_recorded_at_unix_ms)?,
         statement_timezone: proof.statement_timezone.clone(),
         completed_at_ms: signed(evidence.completed_at_unix_ms)?,
-        proof_sha256: proof.fingerprint().map_err(AssistantStoreError::Invalid)?,
         proof_json: encoded.proof_json.clone(),
         parent_summary_json: encoded.parent_summary_json.clone(),
     };
@@ -245,8 +244,7 @@ pub(crate) async fn decode_row_on<C: ConnectionTrait>(
         ));
     }
     let evidence = &proof.sources.evidence;
-    if row.proof_sha256 != proof.fingerprint().map_err(AssistantStoreError::Invalid)?
-        || row.actor_id != proof.source_set.actor_id
+    if row.actor_id != proof.source_set.actor_id
         || row.conversation_id != evidence.context_conversation_id
         || row.device_ref != proof.source_set.source_device_ref
         || row.physical_call_id != evidence.physical_call_id
@@ -278,7 +276,6 @@ pub(crate) fn metadata_bytes(row: &archived::Model) -> Result<i64, AssistantStor
         &row.output_label_sha256,
         &row.input_lineage_sha256,
         &row.statement_timezone,
-        &row.proof_sha256,
         &row.proof_json,
         &row.parent_summary_json,
     ];
@@ -306,12 +303,6 @@ pub(crate) async fn rewrite_for_test<C: ConnectionTrait>(
         .col_expr(
             archived::Column::ParentSummaryJson,
             sea_orm::sea_query::Expr::value(encoded.parent_summary_json),
-        )
-        .col_expr(
-            archived::Column::ProofSha256,
-            sea_orm::sea_query::Expr::value(
-                proof.fingerprint().map_err(AssistantStoreError::Invalid)?,
-            ),
         )
         .filter(archived::Column::Id.eq(id))
         .exec(db)

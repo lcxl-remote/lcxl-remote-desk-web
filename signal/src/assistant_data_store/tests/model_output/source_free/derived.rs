@@ -189,8 +189,8 @@ async fn followup_archive_preserves_original_policy_through_actual_exports_and_a
         let graph = &stored.proof.input_policy_graph;
         assert_eq!(graph.parents.len(), 1);
         assert_eq!(
-            graph.parents[0].source_archive_sha256,
-            original.row.proof_sha256
+            graph.parents[0].physical_call_id,
+            original.row.physical_call_id
         );
         graph.parents[0].validate_archive(&original.proof).unwrap();
         assert_eq!(
