@@ -8,7 +8,6 @@ use desk_agent_protocol::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 
 use crate::chat::{ChatMessage, ChatRole, ToolCall};
 
@@ -16,8 +15,6 @@ use crate::chat::{ChatMessage, ChatRole, ToolCall};
 pub struct UiReferenceState {
     counters: BTreeMap<String, u64>,
     entries: BTreeMap<String, ReferenceEntry>,
-    #[serde(skip)]
-    identity_index: BTreeMap<String, String>,
     #[serde(skip)]
     native_index: BTreeMap<(String, String), BTreeSet<String>>,
 }
@@ -48,7 +45,6 @@ impl<'de> Deserialize<'de> for UiReferenceState {
         let mut state = Self {
             counters: stored.counters,
             entries: stored.entries,
-            identity_index: BTreeMap::new(),
             native_index: BTreeMap::new(),
         };
         state.rebuild_indexes();
@@ -66,7 +62,6 @@ impl std::fmt::Debug for UiReferenceState {
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct ReferenceEntry {
-    identity: String,
     prefix: String,
     native_id: String,
     reference: Value,
@@ -165,11 +160,8 @@ fn visit_references(value: &Value, visitor: &mut impl FnMut(&Value)) {
 
 impl UiReferenceState {
     fn rebuild_indexes(&mut self) {
-        self.identity_index.clear();
         self.native_index.clear();
         for (id, entry) in &self.entries {
-            self.identity_index
-                .insert(entry.identity.clone(), id.clone());
             self.native_index
                 .entry((entry.prefix.clone(), entry.native_id.clone()))
                 .or_default()
@@ -177,14 +169,17 @@ impl UiReferenceState {
         }
     }
 
-    fn identity(prefix: &str, native: &str, value: &Value) -> String {
-        format!(
-            "{:x}",
-            Sha256::digest(
-                serde_json::to_vec(&(prefix, native, value))
-                    .expect("reference identity serialization"),
-            )
-        )
+    /// One native id may have several incarnations; only an entry with the
+    /// same complete reference is the same alias.
+    fn exact_alias(&self, prefix: &str, native: &str, value: &Value) -> Option<&String> {
+        self.native_index
+            .get(&(prefix.to_owned(), native.to_owned()))?
+            .iter()
+            .find(|id| {
+                self.entries
+                    .get(*id)
+                    .is_some_and(|entry| entry.reference == *value)
+            })
     }
 
     pub(crate) fn register(&mut self, value: &Value, source: &str) -> Result<(), AgentError> {
@@ -216,15 +211,12 @@ impl UiReferenceState {
         value: &Value,
         source: ReferenceSource,
     ) -> Result<(), AgentError> {
-        let identity = Self::identity(prefix, &native_id, value);
-        if let Some(id) = self.identity_index.get(&identity) {
-            let entry = self.entries.get_mut(id).expect("derived reference index");
-            if entry.prefix != prefix || entry.native_id != native_id || entry.reference != *value {
-                return Err(invalid(
-                    "Reference identity collision; no action was executed",
-                ));
-            }
-            entry.sources.insert(source);
+        if let Some(id) = self.exact_alias(prefix, &native_id, value).cloned() {
+            self.entries
+                .get_mut(&id)
+                .expect("derived reference index")
+                .sources
+                .insert(source);
             return Ok(());
         }
         let counter = self.counters.entry(prefix.into()).or_default();
@@ -232,7 +224,6 @@ impl UiReferenceState {
             .checked_add(1)
             .ok_or_else(|| invalid("Conversation reference sequence exhausted"))?;
         let id = format!("{prefix}{counter}");
-        self.identity_index.insert(identity.clone(), id.clone());
         self.native_index
             .entry((prefix.into(), native_id.clone()))
             .or_default()
@@ -240,7 +231,6 @@ impl UiReferenceState {
         self.entries.insert(
             id,
             ReferenceEntry {
-                identity,
                 prefix: prefix.into(),
                 native_id,
                 reference: value.clone(),
@@ -464,10 +454,7 @@ impl UiReferenceState {
 
     pub(crate) fn attachment_cursor_alias(&self, cursor: &str) -> Result<String, AgentError> {
         let value = serde_json::json!({"cursor":cursor,"tool_name":"read_conversation_attachment"});
-        if let Some(id) = self
-            .identity_index
-            .get(&Self::identity("c", cursor, &value))
-        {
+        if let Some(id) = self.exact_alias("c", cursor, &value) {
             return Ok(id.clone());
         }
         let next = self
@@ -496,8 +483,7 @@ impl UiReferenceState {
                 message: message.into(),
             },
         )?;
-        self.identity_index
-            .get(&Self::identity("c", cursor, &value))
+        self.exact_alias("c", cursor, &value)
             .cloned()
             .ok_or_else(|| invalid("Attachment cursor was not registered"))
     }
@@ -564,10 +550,7 @@ impl UiReferenceState {
                 && let Some(native) = id.as_str()
             {
                 let reference = serde_json::json!({"cursor":native,"tool_name":tool});
-                if let Some(alias) = self
-                    .identity_index
-                    .get(&Self::identity("c", native, &reference))
-                {
+                if let Some(alias) = self.exact_alias("c", native, &reference) {
                     *id = Value::String(alias.clone());
                 }
             }
@@ -812,9 +795,7 @@ impl UiReferenceState {
 
     fn projected_alias(&self, value: &Value) -> Option<&str> {
         let (prefix, native) = native_reference(value)?;
-        self.identity_index
-            .get(&Self::identity(prefix, &native, value))
-            .map(String::as_str)
+        self.exact_alias(prefix, &native, value).map(String::as_str)
     }
 
     pub(crate) fn shorten_value(&self, value: &mut Value, source: Option<&str>) {
@@ -1236,6 +1217,25 @@ mod tests {
     use super::*;
     fn reference(token: &str, snapshot: &str) -> Value {
         serde_json::json!({"token":token,"snapshot_id":snapshot,"object_kind":"application","expires_at":"2030-01-01T00:00:00Z"})
+    }
+
+    #[test]
+    fn incarnations_of_one_native_id_keep_separate_aliases() {
+        let mut state = UiReferenceState::default();
+        let first = reference("same-token", "snapshot-1");
+        let second = reference("same-token", "snapshot-2");
+        state.register(&first, "m1").unwrap();
+        state.register(&first, "m2").unwrap();
+        state.register(&second, "m3").unwrap();
+        assert_eq!(state.entries.len(), 2);
+        assert_eq!(state.projected_alias(&first), Some("a1"));
+        assert_eq!(state.projected_alias(&second), Some("a2"));
+        assert_eq!(state.alias("a", "same-token", Some("m2")), Some("a1"));
+        assert_eq!(state.alias("a", "same-token", None), None);
+        let restored: UiReferenceState =
+            serde_json::from_value(serde_json::to_value(&state).unwrap()).unwrap();
+        assert_eq!(restored, state);
+        assert_eq!(restored.projected_alias(&second), Some("a2"));
     }
     #[test]
     fn recorded_calls_restore_aliases_but_preserve_native_inputs_and_business_text() {
